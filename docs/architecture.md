@@ -1,8 +1,8 @@
 # SPUR Architecture
 
-> Grounded 2026-04-26. Covers all 13 workspace crates, ~93k lines of Rust.
+> Grounded 2026-04-26. Covers all 13 workspace crates, ~100k lines of Rust.
 >
-> **Map–territory note:** This document was re-evaluated against actual code paths (not commit messages). Where the map diverged from the territory, the territory wins. Updated 2026-04-26 to reflect bd-arch.21 (peer mailbox production wire-up; closes Risk #21).
+> **Map–territory note:** This document was re-evaluated against actual code paths (not commit messages). Where the map diverged from the territory, the territory wins. Updated 2026-04-26 to reflect bd-arch.21 (peer mailbox production wire-up; closes Risk #21), bd-arch.23 (cancellable permit acquire + heartbeat watchdog; closes Risk #23), and post-arch commits through `c75e4586` (single-attach session lock, `--session` CLI flag, picker preselect, paste-as-atom).
 
 ## 1. Component Architecture
 
@@ -76,11 +76,11 @@ graph TB
 
 | Crate | Lines | Role | Key Types |
 |---|---|---|---|
-| `spur-acp` | ~9.2k | Protocol foundation | `AgentConnection`, `SpurEvent`, `SpurEventBody`, `DelegationStatus`, `SpurConfig`, `OutcomeKey`, `OutcomeRef` |
-| `spur-core` | ~18.4k | Orchestration engine | `Orchestrator`, `BrainScheduler`, `ContinuationBridge`, `EventFunnel`, `ReviewSink`, `ExecutorLineage`, `SkillRegistry`, `PeerMailboxRouter`, `PeerMailboxLedger` |
+| `spur-acp` | ~9.7k | Protocol foundation | `AgentConnection`, `SpurEvent`, `SpurEventBody`, `DelegationStatus`, `SpurConfig`, `OutcomeKey`, `OutcomeRef`, `SessionAttachGuard` |
+| `spur-core` | ~19.5k | Orchestration engine | `Orchestrator`, `BrainScheduler`, `ContinuationBridge`, `EventFunnel`, `ReviewSink`, `ExecutorLineage`, `SkillRegistry`, `PeerMailboxRouter`, `PeerMailboxLedger` |
 | `spur-mcp` | ~18k | Brain→SPUR bridge + durable plans | MCP `Server`, `Reconciler`, `PlanProjectionStore`, `MutationExecutor`, `OutcomeMaterializer` |
-| `spur-tui` | ~32.5k | Terminal interface | `App`, `DashboardView`, `SessionDetailView`, `PlanInspectorView`, `PaletteOverlay`, `IssueBrowserView`, `LandingDecision` |
-| `spur-cli` | ~2.5k | Binary entry point | CLI args, `tui` command, `bot telegram`, `profile`, `--new`, landing dispatch |
+| `spur-tui` | ~33.7k | Terminal interface | `App`, `DashboardView`, `SessionDetailView`, `PlanInspectorView`, `PaletteOverlay`, `IssueBrowserView`, `LandingDecision`, `CollisionModal` |
+| `spur-cli` | ~2.6k | Binary entry point | CLI args, `tui` command, `bot telegram`, `profile`, `--new`, `--session`, landing dispatch |
 | `spur-pm` | ~2.9k | PM integration — **beads-primary, GitHub-satellite** | `PmService`, `BeadsAdapter` (shells to `br`), `GitHubAdapter` (shells to `gh`), `BeadsAdvanced`, `BvAdapter` |
 | `spur-cost` | ~4.6k | Cost tracking + pricing + reports | `CostTracker`, `PricingRegistry`, `IngestionPipeline`, `TokenEvent`, SQLite schema |
 | `spur-worktree` | ~1.5k | Git isolation + blob backend | `WorktreeManager`, `MergeResult`, `ArtifactResolver`, `GitBlobOutcomeStore` |
@@ -112,6 +112,8 @@ flowchart LR
         PLAN_INSP[PlanInspector]
         ISSUE_BR[IssueBrowser]
         LANDING[Landing<br/>Decision]
+        COLLIDE[Collision<br/>Modal]
+        INPUT[InputBar<br/><i>paste-as-atom</i>]
     end
 
     subgraph BOT_LAYER["spur-bot"]
@@ -163,7 +165,8 @@ flowchart LR
     end
 
     %% User → TUI → Host → Orchestrator (commands)
-    KB -->|"keypress"| APP
+    KB -->|"keypress / paste"| APP
+    APP -->|"paste atom"| INPUT
     APP -->|"mpsc(UserInput)"| HOST
     HOST -->|"mpsc(InteractiveInput)"| ORCH
     TG -->|"update"| POLL
@@ -176,6 +179,8 @@ flowchart LR
 
     %% Landing / onboarding
     LANDING --> APP
+    APP -->|"SessionAttachRejected"| COLLIDE
+    COLLIDE -->|"kill <pid>"| APP
 
     %% Orchestrator → Brain (ACP)
     ORCH -->|"ACP: prompt()"| BRAIN
@@ -257,6 +262,7 @@ flowchart LR
 | `mpsc(UserInput)` | Tokio mpsc | TUI → Host | User commands, palette dispatch |
 | `mpsc(InteractiveInput)` | Tokio mpsc | Host → Orchestrator | Unified command vocabulary (message, resume, cancel) |
 | `mpsc(SubmitReview)` | Tokio mpsc | Host → ReviewSink | Dedicated review lane (no head-of-line blocking) |
+| Session lockfile | `fs4` advisory | Orchestrator ↔ filesystem | Cross-process single-attach exclusion per ACP session id |
 | `broadcast(SpurEvent)` | Tokio broadcast | Orchestrator → All | Event fan-out (TUI, bot, sink, lineage, peer mailbox) |
 | `mpsc(PermissionRequest)` | Tokio mpsc | Orchestrator → Frontend | One-shot permission prompts |
 | ACP (JSON-RPC/stdio) | Agent Client Protocol | SPUR ↔ Agents | Session management, prompts, notifications |
@@ -265,6 +271,20 @@ flowchart LR
 | `oneshot(DelegationResult)` | Tokio oneshot | Orchestrator → MCP Server | Delegation response |
 | `broadcast(LicenseEvent)` | Tokio broadcast | License runtime → All | License state changes |
 | `mpsc(StrandedMessage)` | Tokio mpsc | PeerMailboxRouter → PeerMailboxReconciler | Orphaned peer-message recovery |
+
+### Landing Decision Flow
+
+`spur-cli` resolves the TUI landing via `LandingDecision`:
+
+| Flag | Decision | Behavior |
+|---|---|---|
+| `--new` | `ShowDashboard` | Empty dashboard; no session resume |
+| `--session <id>` | `AttachExplicit { acp_id, brain }` | Opens picker preselected on `<id>`, auto-dispatches `ResumeSession` on launch (the flag IS explicit consent) |
+| `--sessions` | `ShowPicker { preselect: None }` | Opens picker; user must press Enter to attach (no implicit attach) |
+| (none, has history) | `ShowPicker { preselect: last_acp_id }` | Picker preselects last session; user must press Enter |
+| (none, no history) | `ShowDashboard` | Empty dashboard |
+
+The axiom is **no implicit attach** — even when auto-resuming history, the picker is shown and the user must confirm with Enter. Only `--session <id>` bypasses confirmation because the flag is an explicit operator intent.
 
 ---
 
@@ -396,6 +416,7 @@ flowchart TB
 |---|---|
 | Brain lifecycle | `BrainConnectStarted`, `BrainConnected`, `BrainConnectFailed`, `BrainSpawned`, `AgentSessionReady`, `BrainError`, `BrainFailover`, `BrainReconnecting`, `BrainReconnected`, `BrainReconnectFailed`, `BrainRetired` |
 | Session lifecycle | `SessionCompleted`, `TurnComplete`, `AgentNotification`, `AgentExtNotification` |
+| Attach lifecycle | `AgentSessionReady` (carries `fs_unsafe`, `cancel_mode`), `SessionAttachRejected` (carries `HolderInfo`, `fs_unsafe`) |
 | Delegation | `DelegationRequested`, `DelegationDispatched`, `DelegationCompleted` |
 | Worker | `WorkerSpawned`, `WorkerNotification`, `WorkerProgress`, `WorkerFileTouched`, `WorkerHeartbeat` |
 | Peer mailbox | `WorkerPeerMessageAccepted`, `WorkerPeerMessageRejected`, `WorkerPeerMessageQueued`, `WorkerPeerMessageDelivered`, `WorkerPeerMessageConsumed`, `WorkerPeerMessageIgnored`, `WorkerPeerMessageDrainCappedOut`, `WorkerPeerMessageMalformed`, `WorkerPeerMessageExpired`, `WorkerPeerMessageDropped`, `WorkerPeerMessageUndeliverable`, `WorkerPeerMessageAuditFailed`, `WorkerPeerMessageReconciledStranded`, `WorkerPeerMailboxReconciled` |
@@ -452,7 +473,54 @@ flowchart LR
 
 ---
 
-## 6. Outcome Storage & Brain Continuations
+## 6. Session Attach Lock
+
+SPUR enforces a **single-attach invariant**: at most one orchestrator process may hold an active ACP attachment to a given session id. This prevents split-brain scenarios where two TUI windows send prompts to the same brain session.
+
+```mermaid
+flowchart LR
+    subgraph LOCK["spur-acp::session_lock"]
+        ACQUIRE["try_acquire()<br/>fs4 advisory lock"]
+        HOLDER["HolderInfo<br/>pid · started_at · tty · workdir"]
+    end
+
+    subgraph ORCH_LOCK["spur-core"]
+        LOAD["load_brain_session()<br/>create_brain_session()"]
+        ACTIVE["ActiveConnection<br/>attach_guard: Option<SessionAttachGuard>"]
+        RETIRE["retire_active_brain()<br/>guard → ActiveConnection cache"]
+    end
+
+    subgraph TUI_LOCK["spur-tui"]
+        COLLIDE_TUI["CollisionModal<br/>kill <pid> escape hatch"]
+    end
+
+    LOAD -->|"try_acquire"| ACQUIRE
+    ACQUIRE -->|"Acquired"| ACTIVE
+    ACQUIRE -->|"Rejected { holder }"| COLLIDE_TUI
+    ACQUIRE -->|"DegradedNoLock<br/>(NFS/sshfs)"| ACTIVE
+    ACTIVE -->|"fs_unsafe=true<br/>persistent banner"| TUI_LOCK
+    ACTIVE --> RETIRE
+```
+
+### Attach Outcomes
+
+| Outcome | Meaning | TUI Behavior |
+|---|---|---|
+| `Acquired` | Exclusive lock obtained; safe to attach | Normal session startup |
+| `Rejected` | Another process holds the lock | `CollisionModal` with `kill <pid>` command |
+| `DegradedNoLock` | Filesystem does not support advisory locks (NFS/sshfs/SMB) | Attach succeeds with `fs_unsafe=true`; persistent banner warns multi-instance unsafe |
+| `Io` | Unrecoverable IO error | Error surfaced to user |
+
+### Key Invariants
+
+- **Lock lifetime tracks transport** — `SessionAttachGuard` lives on `BrainSession` while active, moves to `ActiveConnection` on retire, and drops (releasing the kernel lock) only when the cached connection is truly discarded.
+- **No `--force-attach`** — SPUR never kills another process. The only escape hatch is a shell command surfaced in the collision modal.
+- **NFS/sshfs degradation** — `fs_unsafe=true` is stored on `AgentSessionReady` and `ActiveConnection`, propagating to the TUI as a persistent banner. The attach succeeds but multi-instance protection is OFF.
+- **Same-process replacement** — `try_acquire_or_replace` allows the same orchestrator to re-attach to a session it already holds (e.g., after failover) without releasing and re-acquiring.
+
+---
+
+## 7. Outcome Storage & Brain Continuations
 
 Delegation results are persisted before being handed back to the brain scheduler. This separates the **full result** (potentially large) from the **lean continuation envelope** (bounded by `MERGE_BUDGET`).
 
@@ -495,7 +563,7 @@ flowchart TB
 
 ---
 
-## 7. Architectural Assessment
+## 8. Architectural Assessment
 
 ### Strengths
 
@@ -510,6 +578,8 @@ flowchart TB
 - **`br` CLI boundary** — `spur-pm` shells to the external `br` binary for all database operations, creating an anti-corruption layer between SPUR's orchestration semantics and the beads schema evolution
 - **License feature gates** — wait-free `arc_swap` entitlement checks with signed policy documents and Ed25519 verification
 - **Peer mailbox** — structured worker-to-worker messaging with scope checking, ledgered state machine, and stranded-message reconciliation. Production wire-up landed in bd-arch.21 (gated on `peer_mailbox_enabled`, default off; reconciler spawn + `JoinHandle` tracking + per-emit / resolver session-id correctness).
+- **Session single-attach lock** — `fs4` advisory lockfile prevents split-brain multi-window attachment to the same ACP session. Kernel-auto-released on process exit; no stale-lock recovery needed. NFS/sshfs degrades gracefully to `fs_unsafe` with persistent banner.
+- **Paste-as-atom** — multi-line pastes in the TUI input bar become atomic placeholder tokens (`[Paste #N · M lines]`) stored in a side table (LRU-capped at 50). Placeholders expand back to full text on submit via the existing `ProtectedRange` mechanism, preserving interrupt prefixes (`!`) and draft history.
 - **Outcome materializer** — store-then-clip pattern guarantees `MERGE_BUDGET` is never exceeded, even when the full delegation result is megabytes
 - **Content-addressed blob storage** — `OutcomeStore` trait with pluggable backends (memory, FS, git) and measured instrumentation
 - **DuckDB analytics** — `spur-context` reads agent JSONL in place via SQL convert views, producing daily/weekly cost reports without ETL pipelines
@@ -524,7 +594,7 @@ flowchart TB
 | 4 | Worktree orphaning on unclean shutdown | High | **Open** | `manager.rs:437` | `cleanup_orphans()` exists but has **zero call sites** in the entire workspace. It is also unsafe to call because `WorktreeManager` is created per-delegation, so `self.active` would not see other in-flight worktrees. |
 | 5 | No backoff on delegation retry loops | ~~High~~ | **Fixed** | `orchestrator.rs:4202` | Exponential backoff `2^n` with 30 s cap. First retry delay is **2 s** (not 1 s). **No jitter.** |
 | 6 | Worker JoinHandles not tracked for shutdown abort | Medium | **Open** | `orchestrator.rs:3456` | `TaskTracker` is used in `spur-mcp` but **not in `spur-core`**. The per-delegation worker task (`:3456`) and three ext-notification pumps (`:2566,2830,4789`) are fire-and-forget `tokio::spawn` with stored `JoinHandle`. |
-| 7 | Orchestrator is a God Object | High | **Worsening** | `orchestrator.rs` | File is **7,887 lines** (was ~4,400). Delegation dispatch (`handle_delegations` 243 lines + `execute_delegation` 595 lines = **838 lines inline**) and review coordination remain inside `orchestrator.rs`. `run_interactive` is 892 lines. |
+| 7 | Orchestrator is a God Object | High | **Worsening** | `orchestrator.rs` | File is **8,646 lines** (was ~4,400). Delegation dispatch (`handle_delegations` 243 lines + `execute_delegation` 595 lines = **838 lines inline**) and review coordination remain inside `orchestrator.rs`. `run_interactive` is 892 lines. Session attach logic added ~140 lines. |
 | 8 | Single-process — no fault isolation between brain and workers | **Medium** | **Open** | Architecture-level | Workers are child OS processes, so a worker crash does not segfault the orchestrator. **However:** no outer worker timeout exists (hang = indefinite), no memory limits / cgroups, no sandbox. A rogue worker can exhaust host memory or damage the filesystem. Brain failover exists but is best-effort; no auto-respawn if brain dies idle. |
 | 9 | Broadcast `Lagged` recovery not implemented | Low | **Open** | `app.rs`, `event_sink.rs`, `notification_pump.rs` | Every subscriber logs `warn!` and continues. EventSink writes NDJSON but **no code reads it back** for replay. |
 | 10 | `delegate_async` MCP tool drops `delegation_plan` from schema | ~~Low~~ | **Fixed** | `tools.rs`, `server.rs` | Tool fully removed. Comments at `server.rs:41,312,1683` confirm retirement. |
@@ -563,14 +633,15 @@ flowchart TB
 | 38 | **Git blob mid-write orphans** — `GitBlobOutcomeStore::put()` writes the blob via `hash-object -w`, then writes the meta ref. If meta ref write fails, the blob ref is deleted but the underlying git blob object in `.git/objects/` is never reclaimed. | **Low** | **Open** | `git_blob_store.rs:246` | Orphaned git blobs accumulate until a future `git gc`. No SPUR-side tracking. |
 | 39 | **FsOutcomeStore temp file leaks** — `put()` writes to `{attempt}.bin.tmp.{pid}.{nonce}`, then renames. Crash between write and rename leaves temp files forever. | **Low** | **Open** | `fs_store.rs:147` | Crash loop could fill disk with orphaned temp files. No startup cleanup. |
 | 40 | **OutcomeMaterializer unbounded map** — `latest_attempt_by_delegation` is documented as "not pruned". A misbehaving brain creating millions of delegations exhausts memory. | **Low** | **Open** | `outcome_materializer.rs:45` | ~40 B per entry × millions = unbounded growth. |
+| 41 | **`fs_unsafe` multi-instance gap on NFS/sshfs** — When the repository lives on a network filesystem that lacks advisory-lock support (`ENOTSUP`/`ENOLCK`), SPUR attaches with `fs_unsafe=true` and proceeds without any cross-process exclusion. Two TUI windows on different hosts mounting the same NFS export can silently attach to the same session. | **Medium** | **Open** | `session_lock.rs:33`, `orchestrator.rs` | The `DegradedNoLock` path is intentional (attach is better than failing), but there is no secondary coordination mechanism (e.g., beads issue label, TCP consensus) to backfill the missing filesystem guarantee. |
 
 ### Risk Trend Summary
 
 | Category | Count | Fixed | Mitigated | Open |
 |---|---|---|---|---|
 | Previously documented | 20 | 9 | 2 | 9 |
-| New (this review) | 20 | 2 | 0 | 18 |
-| **Total** | **40** | **11** | **2** | **27** |
+| New (this review) | 21 | 2 | 0 | 19 |
+| **Total** | **41** | **11** | **2** | **28** |
 
 Risk #21 (peer mailbox reconciler / production wire-up) closed in bd-arch.21. Risk #23 (semaphore indefinite wait + cancel-during-acquire) closed in bd-arch.23 — cancellable acquire is always-on; the heartbeat watchdog is default-off until a `WorkerHeartbeat` emitter ships. Risk #22 (unbounded ledger) remains open and gates wider production rollout.
 
@@ -578,7 +649,7 @@ Risk #21 (peer mailbox reconciler / production wire-up) closed in bd-arch.21. Ri
 
 1. **Peer mailbox follow-ups (Risk #21 closed in bd-arch.21)** — flip `peer_mailbox_enabled` default to `true` after internal validation soak; add a panic-restart supervisor for the reconciler task; address Risk #22 (ledger pruning) before high-traffic deployments.
 
-2. **Orchestrator decomposition** — Split the remaining inline delegation dispatch and review coordination into actors. The file is now ~7,900 lines and growing.
+2. **Orchestrator decomposition** — Split the remaining inline delegation dispatch and review coordination into actors. The file is now ~8,650 lines and growing. Session attach logic (~140 lines) should move into a `BrainSessionManager` actor.
 
 3. **Worker timeout follow-ups (Risk #23 closed in bd-arch.23)** — Wire a `WorkerHeartbeat` emitter into the worker dispatch loop, then flip `worker_heartbeat_watchdog_enabled` to `true` after telemetry-grounded calibration of `worker_heartbeat_initial_grace_secs` and `worker_heartbeat_timeout_secs`. Add an outer `worker_timeout` around `drive_prompt_notifications` for the case where a worker emits heartbeats but makes no real progress (CPU-burn / liveness-without-progress).
 
@@ -599,6 +670,10 @@ Risk #21 (peer mailbox reconciler / production wire-up) closed in bd-arch.21. Ri
 11. **Trace source in palette** — `TraceSource` placeholder exists; wire `ReactTrace` entries into palette search.
 
 12. **Runtime state durability** — Separate ephemeral runtime state (lineage, sessions, continuations) from durable plan state. Add checkpoint/restore for orchestrator runtime state, or document the explicit ephemeral boundary.
+
+13. **Session lock `fs_unsafe` backfill (Risk #41)** — For NFS/sshfs deployments where advisory locks are unavailable, add a secondary coordination mechanism (e.g., a beads issue label or a short-lived TCP coordination socket) so that multi-instance attach is rejected even when the filesystem cannot help.
+
+14. **SIT/UAT harness hardening** — The paste-as-atom, scroll-indicator, and copy-clean-borders UAT tests use a shared harness in `tests/common/mod.rs`. Expand coverage to the remaining interactive surfaces (palette, plan inspector, collision modal) and wire the harness into CI so regressions are caught before merge.
 
 ### Decomposition Recommendation (for v1.0+)
 

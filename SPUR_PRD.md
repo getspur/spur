@@ -1,9 +1,9 @@
 # SPUR — Product Requirements Document
 
-**Version:** 1.0
-**Date:** April 12, 2026
-**Author:** Kevin
-**Status:** Draft
+**Version:** 2.0  
+**Date:** April 26, 2026  
+**Author:** Product Owner, SPUR TUI  
+**Status:** Grounded (reconciled against `bd-arch.21`, `bd-arch.23`, and `c75e4586`)
 
 ---
 
@@ -11,492 +11,401 @@
 
 ### Product Vision
 
-SPUR is a Rust-native TUI (Terminal User Interface) that orchestrates multiple AI coding agents through the Agent Client Protocol (ACP). It uses a "brain" agent (Claude Code or Kiro CLI) as a ReAct reasoning engine to intelligently route tasks across worker agents (Codex, Gemini, OpenCode, and others), while integrating with project management tools (Linear, Plane, GitHub Issues) to create a closed-loop automation pipeline.
+SPUR is a Rust-native orchestration layer for AI coding agents. It sits between project management tools and agent CLIs, providing a terminal user interface (TUI), a Telegram bot frontend, and a headless orchestration engine that manages brain–worker delegation, durable plan execution, human-in-the-loop review, and cost tracking. It does not replace Claude Code, Kiro, Codex, or Gemini. It makes them composable, recoverable, and observable.
 
-**One-liner:** *"Issue in, PR out — across every agent."*
+**One-liner:** *"One brain, many workers, zero lost context."*
 
-### Problem Statement
+### What Exists Today (Grounded)
 
-Developers in 2026 face three compounding pain points:
+The codebase is ~100 k lines of Rust across 13 crates. The following are **production-hardened** (not aspirational):
 
-1. **Rate limit fragility.** Claude Code Max users ($100–200/mo) routinely exhaust 5-hour session windows in under 90 minutes. When limits hit, all work stops.
-2. **Single-vendor lock-in.** Claude Code subagents and Agent Teams are Claude-only. No native mechanism exists to delegate work to Codex, Kiro, or Gemini based on task fit.
-3. **Manual coordination overhead.** Developers manually copy issues from Linear, paste context into agents, collect outputs, create PRs, and update issue status — a workflow that consumes 30–60 min/day of senior engineering time.
+- **Dual-channel protocol architecture**: ACP (SPUR → Agent, JSON-RPC/stdio) and MCP (Agent → SPUR, tool calls)
+- **Durable plan reconciler**: Plans survive process restarts in a local SQLite beads store; GitHub is used only for PR creation
+- **Review gate state machine**: Human approval/deny/modify/retry with timeout, auto-merge gating, and cancellation
+- **Session attach lock**: `fs4` advisory locks prevent split-brain multi-window attachment to the same brain session
+- **Continuation bridge**: Delegation outcomes are clipped to a bounded envelope and fed back to the brain scheduler as ordered turns
+- **Peer mailbox**: Structured worker-to-worker messaging with ledgered delivery and stranded-message reconciliation (Stage-1, opt-in)
+- **Tiered license gating**: Community / Pro / Team / Enterprise policy features with signed Ed25519 policy documents
+- **Event-sourced lineage**: Pure projections from an NDJSON event stream; session resume is replay
+- **Outcome materialization**: Content-addressed blob storage (memory, FS, git) with measured instrumentation
+- **Paste-as-atom**: Multi-line paste safety in the TUI composer
+
+### Problem Statement (Still Valid)
+
+1. **Rate limit fragility.** Claude Code Max users exhaust 5-hour session windows in under 90 minutes. When limits hit, context is lost.
+2. **Single-vendor lock-in.** Claude Agent Teams, Codex CLI, and Kiro do not talk to each other. Developers manually copy context between terminal tabs.
+3. **No durable execution.** If a terminal window closes mid-task, the task is gone. There is no resume, no audit trail, no review gate.
+4. **Cost opacity.** Developers see API bills days later. There is no per-session, per-task, or per-plan spend visibility at the moment of delegation.
 
 ### Solution
 
-SPUR sits between project management tools and AI coding agents as a **coordination layer**:
+SPUR is the **nervous system**, not the brain. It provides:
 
 ```
-Linear/Plane/GitHub ←→ SPUR TUI ←→ Claude Code / Kiro / Codex / Gemini
-       (work)          (brain)              (workers)
+PM Tool (beads/GitHub) ←→ SPUR Orchestrator ←→ Brain Agent (Claude/Kiro/Codex)
+                                 ↓
+                         Worker Agents (in git worktrees)
+                                 ↓
+                     Human Review Gate → Merge / Retry / Reject
 ```
-
-The tool does NOT replace any agent. It makes every agent more effective by routing the right task to the right agent at the right time.
 
 ---
 
-## 2. Target Users
+## 2. Product–Architecture Mapping
+
+This section maps **existing technical capability** (what the code does) to **product-facing value** (what the user experiences). This is the core of the v2.0 revamp: no aspirational features, no forward-dating.
+
+| Technical Capability | Product Feature | User Value | Maturity |
+|---|---|---|---|
+| ACP client + session lock (`spur-acp`) | Secure brain session attach | No split-brain when two terminal windows open the same project | Production |
+| BrainScheduler + ContinuationBridge (`spur-core`) | Ordered turn execution, session resume | Brain picks up exactly where it left off after restart or failover | Production |
+| EventFunnel + broadcast (`spur-core`) | Real-time TUI + Telegram bot sync | Every event appears in both frontends simultaneously | Production |
+| ExecutorLineage projection (`spur-core`) | Collapsible ASCII agent tree with phase spinners | Visual map of what every worker is doing, how long, how much it cost | Production |
+| ReviewSink + state machine (`spur-core`) | `[A]pprove [D]eny [M]odify [R]etry` review cards | Human gate before any code merges; timeout + retry policies | Production |
+| OutcomeStore + materializer (`spur-blob-store`, `spur-mcp`) | Diffs, PR links, and artifacts in the Detail pane | Full delegation output is persisted and browseable, not lost to scrollback | Production |
+| PeerMailboxRouter + Ledger (`spur-core`) | Worker-to-worker messaging | Workers can coordinate without round-tripping through the brain | Stage-1 (opt-in) |
+| `spur-pm` beads adapter (`br` CLI boundary) | Local-first plan persistence | Plans survive crashes; no cloud dependency for core workflow | Production |
+| `spur-pm` GitHub adapter (`gh` CLI) | PR creation from delegation outcomes | One-key "create PR" after review approval | Production |
+| `spur-cost` SQLite + PricingRegistry | Per-executor, per-session, per-project cost display | See spend as it happens, not on next month's bill | Production |
+| `spur-context` DuckDB analytics | Daily / weekly cost reports via SQL | Aggregated spend analysis without ETL | Production |
+| `spur-license` Ed25519 policy + `arc_swap` gates | Community / Pro / Team / Enterprise tiers | Free forever for individuals; pay for team features | Production |
+| `spur-bot` Telegram runtime | Mobile/tablet push notifications and review | Step away from the terminal without losing the loop | Production |
+| WorktreeManager (`spur-worktree`) | True filesystem isolation per worker | Parallel workers cannot clobber each other's files | Production |
+
+### Second-Order Insight: What This Mapping Reveals
+
+**First-order thinking:** "SPUR is a TUI that runs multiple agents."
+
+**Second-order thinking:** "SPUR is a distributed-systems kernel for agent execution disguised as a TUI." The real differentiators are not the panels or keybindings. They are:
+
+1. **Session resume as replay** — The event-sourced lineage makes SPUR the only agent tool where closing your laptop does not lose context. This matters more than any dashboard widget.
+2. **Review gate as durable state** — Most tools treat human review as a UI convenience. SPUR treats it as a first-class state machine with timeout, retry, and merge gating. This turns "human-in-the-loop" from a slogan into an execution guarantee.
+3. **Local-first plan durability** — Beads (SQLite via `br` CLI) means plans survive SPUR crashes, OS updates, and network outages. This is resilience that cloud-only competitors cannot match without offline sync.
+4. **Dual-channel autonomy** — ACP gives the brain freedom to stream; MCP gives SPUR control over delegation and PM ops. Neither channel is a workaround for the other. This architectural choice is why SPUR can support any ACP-speaking agent without per-agent hacks.
+
+---
+
+## 3. Target Users
 
 ### Primary Persona: "The Orchestrator"
 
 - **Role:** Senior/Staff Engineer or Tech Lead at a startup or mid-size company (10–200 employees)
-- **Current tooling:** Claude Code Max ($100–200/mo), plus 1–2 additional agent CLIs (Kiro, Codex, Cursor)
+- **Current tooling:** Claude Code Max ($100–200/mo), Kiro CLI, Codex CLI, Gemini CLI
 - **Monthly AI spend:** $200–600 across tools
-- **Pain frequency:** Hits rate limits 2–5x per week, manually juggles 2–3 terminal tabs with different agents
-- **Technical profile:** Comfortable with terminal workflows, uses tmux/zellij, familiar with git worktrees
-- **Decision driver:** Productivity and flow preservation, not cost alone
+- **Pain frequency:** Hits rate limits 2–5× per week, manually juggles 2–3 terminal tabs
+- **Technical profile:** tmux/zellij, git worktrees, comfortable with JSON-RPC and TOML config
+- **Decision driver:** Flow preservation and auditability, not cost alone
+- **SPUR value prop:** "I can start a session Friday, review worker output Saturday on Telegram, and merge Monday without losing context."
 
 ### Secondary Persona: "The Team Lead"
 
-- **Role:** Engineering Manager or Director overseeing 3–10 developers
-- **Pain:** No visibility into which agents the team uses, total AI spend per project, or whether agents are being used effectively
-- **Decision driver:** Cost visibility, standardization, and governance
+- **Role:** Engineering Manager overseeing 3–10 developers
+- **Pain:** No visibility into which agents the team uses, per-project spend, or review queue depth
+- **Decision driver:** Cost visibility, standardization, governance
+- **SPUR value prop:** "I can see pending reviews, per-project costs, and which agents are actually delivering code that merges."
 
-### Anti-Persona (Not For)
+### Tertiary Persona: "The Mobile Operator"
 
-- Junior developers who use a single AI assistant casually
+- **Role:** Developer who steps away from desk but needs to approve/reject worker output
+- **Pain:** Terminal-only workflows chain you to your desk
+- **SPUR value prop:** Telegram bot with inline review buttons and session status push notifications
+
+### Anti-Persona (Still Not For)
+
+- Junior developers using a single AI assistant casually
 - Non-technical users who need a GUI
 - Enterprise teams requiring SOC2/HIPAA compliance at launch
+- Users who want a "set and forget" fully autonomous system (SPUR requires human review by design)
 
 ---
 
-## 3. Product Principles
+## 4. Tier-Structured Product Definition
 
-1. **The tool is the nervous system, not the brain.** SPUR coordinates; agents think. Never compete with the reasoning capabilities of Claude, Kiro, or Codex.
-2. **Open source core, proprietary intelligence.** The TUI, ACP client, and workflow engine are MIT-licensed. Routing intelligence and team analytics are commercial.
-3. **Single binary, zero dependencies.** `cargo install spur-cli` or `curl | sh`. No Node.js, no Python, no Docker required.
-4. **Protocol-first, not vendor-first.** ACP is the integration layer. Any agent that speaks ACP works with SPUR automatically.
-5. **Visibility over automation.** Show the developer what's happening (ReAct traces, cost tracking, agent status) before automating decisions away.
+SPUR's commercial model is **feature-gated tiers** enforced by signed policy documents. The TUI renders most UI regardless of tier; runtime enforcement is progressive. This section replaces the old phase-based roadmap with what actually exists.
 
----
+### 4.1 Community (Free)
 
-## 4. Architecture
+**Policy features:** `brain_session`, `single_worker`, `worktree_isolation`, `manual_review`, `event_persistence`, `basic_lineage`, `tui_dashboard`, `basic_cost_display`, `basic_notifications`, `local_config`, `mcp_standard_tools`
 
-### System Overview
-
-```
-┌──────────────────────────────────────────────────────────┐
-│  SPUR TUI  (ratatui + crossterm)                        │
-│  ┌─────────────┬────────────┬──────────────────────────┐ │
-│  │ Issue Queue │ ReAct Log  │ Agent Sessions           │ │
-│  │ (synced)    │ (trace)    │ (live streams)           │ │
-│  └─────────────┴────────────┴──────────────────────────┘ │
-├──────────────────────────────────────────────────────────┤
-│  Workflow Engine                                        │
-│  ┌────────────────────────────────────────────────────┐  │
-│  │ TOML parser → DAG builder → Task scheduler        │  │
-│  │ Rate limit monitor → Failover router              │  │
-│  └────────────────────────────────────────────────────┘  │
-├──────────────────────────────────────────────────────────┤
-│  PM Adapter Layer          │  ACP Session Manager       │
-│  ┌──────────────────────┐  │  ┌───────────────────────┐ │
-│  │ Linear (GraphQL)     │  │  │ JSON-RPC 2.0 / stdio  │ │
-│  │ Plane  (REST + MCP)  │  │  │ Session persistence   │ │
-│  │ GitHub (REST)        │  │  │ Crash recovery        │ │
-│  └──────────────────────┘  │  │ Structured events     │ │
-│                            │  └───────────────────────┘ │
-├────────────────────────────┴────────────────────────────┤
-│  Agent Registry                                        │
-│  ┌──────────┬──────────┬──────────┬──────────┬────────┐ │
-│  │ Claude   │ Kiro CLI │ Codex    │ Gemini   │ Custom │ │
-│  │ Code     │          │ CLI      │ CLI      │        │ │
-│  └──────────┴──────────┴──────────┴──────────┴────────┘ │
-└──────────────────────────────────────────────────────────┘
-```
-
-### Core Components
-
-| Component | Responsibility | Key Crates |
+| Feature | What It Does | Technical Basis |
 |---|---|---|
-| **TUI Renderer** | Terminal UI with panels, keybindings, theming | `ratatui`, `crossterm` |
-| **ACP Client** | JSON-RPC 2.0 transport, session lifecycle, event parsing | `serde_json`, `tokio` |
-| **Workflow Engine** | TOML workflow parsing, DAG execution, task scheduling | `toml`, `petgraph` |
-| **PM Adapters** | Issue ingestion, status updates, PR linking | `reqwest`, `graphql_client` |
-| **Agent Registry** | Agent discovery, capability mapping, health checks | custom |
-| **Brain Connector** | ReAct loop with brain agent, delegation prompts | ACP Client |
-| **Cost Tracker** | Token/credit usage per agent, per task, per project | `rusqlite` |
+| Brain session | One active brain (Claude/Kiro/Codex) with ReAct trace | `spur-acp` session manager + `spur-core` scheduler |
+| Single worker | One worker delegation at a time | Semaphore count = 1 |
+| Worktree isolation | Each worker gets a git worktree | `spur-worktree` |
+| Manual review | `[A/D/M/R]` review cards in TUI | `spur-core` ReviewSink |
+| Basic lineage | Collapsible ASCII tree with phase + cost | `spur-core` ExecutorLineage projection |
+| TUI dashboard | Agents tree + activity log + input bar + status bar | `spur-tui` DashboardView |
+| Basic cost display | Total cost and elapsed time in status bar | `spur-cost` CostTracker |
+| Event persistence | NDJSON event log, 128 MB rotation | `spur-core` EventSink |
+| Session metadata | Draft persistence, input history (100 entries) | `spur-tui` SessionMetadataStore |
+| MCP standard tools | `delegate_to_worker`, `create_pr`, `get_issue`, `submit_plan` | `spur-mcp` tool catalog |
 
-### Data Flow
+**Second-order product insight:** Community tier is intentionally generous. The goal is to make SPUR the default terminal companion for any developer using Claude Code or Kiro. Revenue comes from teams that outgrow single-worker, single-brain limits.
 
-```
-1. PM tool webhook/poll → Issue arrives
-2. Workflow engine matches issue to workflow definition
-3. Brain agent receives issue context + routing hints
-4. Brain reasons (ReAct): THINK → ACT → OBSERVE → repeat
-5. Brain delegates subtasks via SPUR to worker agents (ACP)
-6. Workers execute in isolated sessions
-7. Results flow back through brain for synthesis
-8. SPUR pushes PR link + status update to PM tool
-9. Human reviews in TUI → approve/reject/redirect
-```
+### 4.2 Pro
 
----
+**Policy features (adds to Community):** `parallel_workers`, `auto_review_policies`, `session_resume`, `advanced_cost_analytics`, `custom_worktree_policies`, `custom_notifications`, `extended_retention`, `tui_session_detail`
 
-## 5. Feature Specifications
+| Feature | What It Does | Technical Basis |
+|---|---|---|
+| Parallel workers | Multiple simultaneous worker delegations | Semaphore count > 1 + workers panel |
+| Session resume | Attach to existing sessions after restart/close | Session metadata + event replay + attach lock |
+| Session picker | Searchable list with pin/archive/rename/copy ID | `spur-tui` SessionPickerView |
+| Session detail | Full-screen brain chat with Stream/Artifacts/Attempts/Task/Review tabs | `spur-tui` SessionDetailView + DetailPane |
+| Advanced cost analytics | Per-attempt cost breakdown in Attempts tab | `spur-cost` per-executor ingestion |
+| Auto-review policies | Hints for auto-approve conditions (partial) | `spur-core` review scoring placeholders |
+| Collision modal | Handle `SessionAttachRejected` with holder PID info | `spur-acp` `fs4` lock + `spur-tui` CollisionModal |
 
-### Phase 1: Foundation (Weeks 1–6)
+**Second-order product insight:** Pro tier sells **resilience and parallelism**. Session resume is the killer feature for Claude Code Max users who hit rate limits — they can switch to Kiro as brain, then resume the original Claude session later. Parallel workers turn SPUR from a sequential tool into a true orchestrator.
 
-#### F1.1 — Agent Discovery & Registry
+### 4.3 Team
 
-**Description:** Auto-detect installed ACP-compatible agents and maintain a registry of their capabilities, cost profiles, and health status.
+**Policy features (adds to Pro):** `pm_integration`, `shared_lineage`, `team_cost_dashboard`, `centralized_config`, `rbac`, `shared_review_queue`, `pm_webhooks`
 
-**Acceptance Criteria:**
-- `spur init` scans `$PATH` for known agent binaries (claude, kiro-cli, codex, gemini)
-- `spur agents` displays a table: name, version, ACP support (yes/no), status (ready/error), last used
-- `spur agents add <path>` registers a custom agent
-- Agent config stored in `~/.spur/agents.toml`
+| Feature | What It Does | Technical Basis |
+|---|---|---|
+| PM integration | Issue browser with status updates | `spur-pm` BeadsAdapter + IssueBrowserView |
+| Shared review queue | Status-bar badge for pending reviews across team | `spur-core` ReviewSink (lineage is already shared via broadcast) |
+| Team cost dashboard | *(Planned)* Aggregated team spend view | `spur-context` DuckDB analytics engine is ready; UI pending |
+| RBAC | *(Planned)* Role-based access control | Policy entitlement exists; enforcement pending |
+| PM webhooks | *(Planned)* Real-time issue sync via webhooks | Policy entitlement exists; implementation pending |
 
-**Agent Config Schema:**
-```toml
-[[agents]]
-name = "claude-code"
-command = "claude"
-args = ["--experimental-acp"]
-capabilities = ["architecture", "refactoring", "debugging", "code-review"]
-cost_tier = "high"
-rate_limit_window = "5h"
+**Second-order product insight:** Team tier is currently **entitlement-heavy, UI-light**. The DuckDB analytics engine (`spur-context`) can already produce daily/weekly reports. The product gap is visualization, not data. This is a deliberate choice: we ship data infrastructure first, then UI, so that early Team customers get SQL-level access immediately.
 
-[[agents]]
-name = "kiro"
-command = "kiro-cli"
-args = ["acp"]
-capabilities = ["spec-driven", "security", "full-stack"]
-cost_tier = "medium"
+### 4.4 Enterprise
 
-[[agents]]
-name = "codex"
-command = "codex"
-args = ["--acp"]
-capabilities = ["quick-edits", "tests", "python"]
-cost_tier = "low"
-```
+**Policy features (adds to Team):** `sso_saml`, `audit_logs`, `custom_policies`, `custom_mcp_tools`, `dedicated_support`, `sla_guarantee`
 
-#### F1.2 — ACP Session Manager
-
-**Description:** Manage ACP agent sessions with full lifecycle support: spawn, send prompts, receive streaming responses, reconnect on crash, and graceful shutdown.
-
-**Acceptance Criteria:**
-- Spawn agent process via `Command` with stdio pipes
-- Send JSON-RPC 2.0 `initialize`, `session/create`, `session/prompt` messages
-- Parse streaming `session/notification` events (text chunks, tool calls, status updates)
-- Persist session IDs to `~/.spur/sessions/` for reconnection
-- Auto-restart crashed agents with exponential backoff (max 3 retries)
-- `spur sessions` lists active sessions with agent, status, duration, token usage
-
-**ACP Message Flow:**
-```
-SPUR → Agent:  {"jsonrpc":"2.0","method":"initialize","id":1}
-Agent → SPUR:  {"jsonrpc":"2.0","result":{"capabilities":{...}},"id":1}
-SPUR → Agent:  {"jsonrpc":"2.0","method":"session/create","id":2}
-Agent → SPUR:  {"jsonrpc":"2.0","result":{"sessionId":"abc123"},"id":2}
-SPUR → Agent:  {"jsonrpc":"2.0","method":"session/prompt","id":3,
-                 "params":{"sessionId":"abc123","prompt":[{"type":"text","text":"..."}]}}
-Agent → SPUR:  {"jsonrpc":"2.0","method":"session/notification",
-                 "params":{"type":"text","text":"Working on..."}} (streaming)
-```
-
-#### F1.3 — TUI Dashboard
-
-**Description:** Multi-panel terminal interface showing agent sessions, logs, and status.
-
-**Layout:**
-```
-┌─ SPUR v0.1.0 ──────────────────────────────────────────┐
-│ Agents [1]         │ Active Session                    │
-│ ┌────────────────┐ │ ┌──────────────────────────────┐  │
-│ │ ● claude  IDLE │ │ │ 🧠 THINK: Analyzing ENG-142 │  │
-│ │ ● kiro    BUSY │ │ │ 🔧 ACT: Reading src/auth.rs │  │
-│ │ ○ codex   OFF  │ │ │ 👁 OBSERVE: Found JWT bug   │  │
-│ │ ○ gemini  OFF  │ │ │ 🔧 ACT: Delegating to kiro  │  │
-│ └────────────────┘ │ │ ...streaming...              │  │
-│                    │ └──────────────────────────────┘  │
-│ Cost Today [2]     │                                   │
-│ ┌────────────────┐ │                                   │
-│ │ claude: $4.20  │ │                                   │
-│ │ kiro:   $1.80  │ │                                   │
-│ │ total:  $6.00  │ │                                   │
-│ └────────────────┘ │                                   │
-├────────────────────┴───────────────────────────────────┤
-│ [q]uit [a]gents [s]essions [r]un [c]ost [?]help       │
-└────────────────────────────────────────────────────────┘
-```
-
-**Keybindings:**
-- `q` — quit
-- `a` — focus agent panel
-- `s` — focus session panel
-- `r` — run a workflow or ad-hoc prompt
-- `c` — toggle cost panel
-- `Tab` — cycle between panels
-- `Enter` — interact with selected agent/session
-- `Esc` — back to overview
-- `1-9` — jump to agent session by index
-
-#### F1.4 — Ad-hoc Task Execution
-
-**Description:** Run a single task through a brain agent without a predefined workflow.
-
-**Usage:**
-```bash
-# Interactive mode
-spur run "fix the authentication bypass in jwt.rs"
-
-# With explicit brain and workers
-spur run --brain kiro --workers claude,codex "implement user profile API"
-
-# With specific agent (no brain, direct execution)
-spur exec --agent codex "write tests for src/auth/"
-
-# Fire-and-forget
-spur run --background "refactor the database layer"
-```
-
-**Acceptance Criteria:**
-- Brain agent receives task description + codebase context
-- Brain can delegate to worker agents via structured tool calls
-- ReAct trace displayed in real-time in TUI
-- Final output summarized and displayed on completion
-- Exit code reflects success (0) or failure (1)
-
-### Phase 2: Workflow Engine (Weeks 7–12)
-
-#### F2.1 — TOML Workflow Definitions
-
-**Description:** Declarative workflow definitions that map triggers to agent pipelines.
-
-**Schema:**
-```toml
-[workflow]
-name = "bug-fix"
-description = "Automated bug fix pipeline"
-version = "1.0"
-
-[workflow.trigger]
-source = "linear"             # linear | plane | github | manual
-filter.label = ["bug"]
-filter.priority = ["urgent", "high"]
-filter.team = "engineering"
-
-[workflow.brain]
-agent = "kiro"
-prompt = """
-You are a bug-fix coordinator. Given the issue context:
-1. Analyze the bug scope and identify affected files
-2. Choose the best worker agent based on the bug type:
-   - Security bugs → kiro (spec-driven security review)
-   - Performance bugs → codex (fast targeted edits)
-   - Complex logic bugs → claude (deep reasoning)
-3. Delegate the fix to the chosen worker
-4. Review the worker's output
-5. If tests pass, approve. If not, iterate.
-"""
-
-[workflow.routing]
-security = { agent = "kiro", match = "auth|jwt|csrf|xss|injection" }
-performance = { agent = "codex", match = "slow|timeout|latency|memory" }
-default = { agent = "claude-code" }
-
-[workflow.pipeline]
-steps = [
-  { name = "fix", action = "delegate", timeout = "15m" },
-  { name = "test", action = "exec", agent = "codex", command = "run tests" },
-  { name = "review", action = "delegate", agent = "claude-code", prompt = "review this diff for correctness" },
-]
-
-[workflow.completion]
-create_pr = true
-update_issue_status = "in-review"
-notify = ["slack:#dev-alerts"]
-```
-
-#### F2.2 — Rate Limit Detection & Failover
-
-**Description:** Monitor agent rate limit status and automatically reroute tasks when limits are hit.
-
-**Acceptance Criteria:**
-- Detect rate limit signals from ACP session notifications (error codes, retry-after headers)
-- Detect heuristic signals: response latency > 30s, repeated errors, empty responses
-- Maintain a rate limit state machine per agent: AVAILABLE → THROTTLED → EXHAUSTED → RECOVERING
-- When brain agent is throttled, switch to backup brain (configurable)
-- When worker agent is throttled, reroute to next-best agent by capability match
-- Display rate limit status in TUI with countdown timers
-- Log all failover events for post-hoc analysis
-
-**Failover Config:**
-```toml
-[failover]
-strategy = "capability-match"    # capability-match | round-robin | cost-priority
-brain_fallback = ["claude-code", "kiro"]
-cooldown_minutes = 30
-
-[failover.overrides]
-claude-code = { fallback = "kiro", reason = "rate-limit" }
-kiro = { fallback = "codex", reason = "rate-limit" }
-```
-
-#### F2.3 — Cost Tracking
-
-**Description:** Track token/credit usage per agent, per task, per project with local SQLite storage.
-
-**Data Model:**
-```sql
-CREATE TABLE usage_events (
-  id INTEGER PRIMARY KEY,
-  timestamp TEXT NOT NULL,
-  agent TEXT NOT NULL,
-  session_id TEXT,
-  task_id TEXT,
-  project TEXT,
-  input_tokens INTEGER,
-  output_tokens INTEGER,
-  estimated_cost_usd REAL,
-  duration_seconds INTEGER,
-  status TEXT  -- success | error | timeout | rate_limited
-);
-```
-
-**CLI Commands:**
-```bash
-spur cost                    # Today's summary
-spur cost --week             # Weekly breakdown
-spur cost --by agent         # Per-agent breakdown
-spur cost --by project       # Per-project breakdown
-spur cost --export csv       # Export for spreadsheets
-```
-
-### Phase 3: PM Integration (Weeks 13–18)
-
-#### F3.1 — Linear Integration
-
-**Capabilities:**
-- OAuth2 authentication via `spur connect linear`
-- Poll or webhook for new/updated issues
-- Read issue context: title, description, labels, priority, team, linked PRs
-- Write: update issue status, add comments (agent activity log), link external PRs
-- Agent Plan API: push step-by-step progress back to Linear UI
-
-**Config:**
-```toml
-[integrations.linear]
-enabled = true
-team = "ENG"
-poll_interval = "30s"
-auto_assign_labels = ["spur-managed"]
-status_mapping.in_progress = "In Progress"
-status_mapping.in_review = "In Review"
-status_mapping.done = "Done"
-```
-
-#### F3.2 — Plane Integration
-
-**Capabilities:**
-- REST API + MCP server connection
-- Same read/write capabilities as Linear
-- Self-hosted support (custom Plane URL)
-- Webhook listener for real-time issue updates
-
-#### F3.3 — GitHub Issues Integration
-
-**Capabilities:**
-- GitHub App or PAT authentication
-- Issue ↔ PR linking
-- Label-based workflow triggers
-- Comment-based status updates
-- CI status monitoring (GitHub Actions)
-
-### Phase 4: Team & Commercial (Weeks 19–26)
-
-#### F4.1 — Team Dashboard (Commercial)
-
-- Centralized cost analytics across all team members
-- Per-developer usage breakdown
-- Agent utilization heatmaps
-- Budget alerts and caps
-
-#### F4.2 — Smart Router (Commercial)
-
-- ML-based task classification: analyze task description to predict best agent
-- Historical success rate per agent per task type
-- Cost-optimized routing: minimize spend while maintaining quality threshold
-- A/B testing: route 20% of tasks to Agent B to measure quality vs Agent A
-
-#### F4.3 — Unified Billing (Commercial)
-
-- Single invoice for all agent API usage
-- Team-wide API key management
-- Per-project budget allocation
-- BYOK (Bring Your Own Keys) with pass-through billing
-
----
-
-## 6. Technical Requirements
-
-### Performance
-
-| Metric | Target |
+| Feature | Status |
 |---|---|
-| Binary size | < 15 MB |
-| Memory usage (idle) | < 30 MB |
-| Memory usage (5 active sessions) | < 100 MB |
-| ACP message latency (SPUR overhead) | < 1 ms |
-| TUI render frame rate | 30 FPS |
-| Startup time | < 500 ms |
-| Agent spawn time | < 2 s |
+| SSO/SAML | 🚧 Planned — policy entitlement only |
+| Audit logs | 🚧 Planned — policy entitlement only |
+| Custom policies | 🚧 Partial — license badge + flag summary visible |
+| Custom MCP tools | 🚧 Partial — generic tool rendering covers most cases |
+| SLA guarantee | 🚧 Planned — policy entitlement only |
 
-### Compatibility
-
-| Requirement | Specification |
-|---|---|
-| Platforms | Linux (x86_64, aarch64), macOS (aarch64, x86_64), Windows (x86_64) |
-| Terminal emulators | iTerm2, Alacritty, Kitty, Windows Terminal, tmux, zellij |
-| Rust edition | 2021, MSRV 1.75 |
-| ACP spec version | 1.0 (as of Feb 2026) |
-
-### Dependencies (Minimal)
-
-```toml
-[dependencies]
-ratatui = "0.29"
-crossterm = "0.28"
-tokio = { version = "1", features = ["full"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-toml = "0.8"
-reqwest = { version = "0.12", features = ["json"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
-clap = { version = "4", features = ["derive"] }
-tracing = "0.1"
-tracing-subscriber = "0.3"
-directories = "5"
-```
-
-### Security
-
-- All agent communication via stdio (no network exposure)
-- API keys stored in OS keychain via `keyring` crate, never in plaintext
-- PM tool tokens encrypted at rest
-- No telemetry by default; opt-in anonymous usage stats
-- All data stored locally in `~/.spur/`
+**Second-order product insight:** Enterprise tier is currently a **sales enablement** tier. The policy system and Ed25519 signing infrastructure exist, so custom policies can be issued today. The UI for audit logs and SSO is not yet built, but the license system can gate it the moment it ships.
 
 ---
 
-## 7. CLI Reference
+## 5. Feature Specifications (Grounded)
+
+### 5.1 Views (What the User Sees)
+
+#### Dashboard (`tui_dashboard` — Community)
+
+| Element | Description |
+|---|---|
+| Agents tree | Collapsible ASCII tree of executor lineage. `j/k/↑/↓` navigate, `Enter` focuses, `c` toggles collapse, `z` toggles zoom. |
+| Activity log | Scrolling system event log (5,000-entry cap). Color-coded by kind. Follow mode with manual override. |
+| Detail pane | Tabbed detail for focused executor: Stream, Artifacts, Attempts, Task, Review. *(Pro: full tabs; Community: basic)* |
+| Input bar / Composer | Multi-line chat with Emacs/Vim modes, `@`-mentions, `/` slash commands, protected ranges, paste-as-atom. |
+| Status bar | Context hints, issue count, running count, pending review count, total cost, elapsed time, license badge, flag summary. |
+| Workers panel | *(Pro)* Collapsible inline panel showing active worker delegations. `Alt+D` toggles. |
+
+#### Session Detail (`brain_session` + `tui_session_detail` — Pro)
+
+| Element | Description |
+|---|---|
+| ReAct trace | Streaming trace: `UserMessage`, `AgentMessage`, `Think`, `Observe`, `Act`, `Delegate`, `Permission`. Coalesces consecutive entries. |
+| Markdown streaming | Live markdown with GFM tables, mermaid fence extraction, 50 ms debounced flush, 64 KB safety cap. |
+| Mermaid viewer | `Alt+V` opens full-screen mermaid overlay. `[`/`]` cycles diagrams. Requires `markdown` compile-time feature. |
+| Input integrations | `@`-mention picker (files, dirs, workers), `/` slash-command picker, `Ctrl+R` history picker. |
+| Permission prompts | Inline `[y] allow [n] deny [a] always allow` with countdown timers. |
+| Draft persistence | 500 ms debounced save to `SessionMetadataStore`. Force flush at intent boundaries. |
+
+#### Session Picker (`session_resume` — Pro)
+
+| Element | Description |
+|---|---|
+| Session list | Searchable list with pinned ⭐, archived, brain name, relative time, short ID. Virtual `[+ Start new session]` row. |
+| Preselect | `--session <id>` preselects and auto-dispatches resume. Bare `spur tui` preselects last but requires Enter. |
+| Search/filter | `/` focuses search bar. Real-time filtering. |
+| Pin / archive / rename | `p` pin/unpin, `d` archive, `R` rename. |
+| Collision modal | On `SessionAttachRejected`: holder PID, TTY, workdir, `kill <pid>` escape hatch. |
+| Draft-loss safety | Confirm-switch banner when unsent draft exists. |
+
+#### Plan Inspector (`advanced_cost_analytics` + `custom_worktree_policies` — Pro)
+
+| Element | Description |
+|---|---|
+| Plan header | Plan ID, status, progress gauge, awaiting review count, failed count, next action. |
+| Stage board | Kanban-style columns per stage. Tasks show status badge, worker link, blocked indicator, dependency hints, retry count. |
+| Task detail | Identity, execution (agent, attempt, branch), dependencies, output (summary, diff, mutation ID, superseded-by). |
+| Responsive layout | Side-by-side when width ≥ 90, stacked when narrower. |
+
+#### Issue Browser (`pm_integration` — Team)
+
+| Element | Description |
+|---|---|
+| Issues list | ID, Priority (P0–P4), Type, Status, Assignee, Title. |
+| Issue detail | Full body, metadata, labels, URL. |
+| Status updates | `o/w/b/d` — open/in_progress/blocked/closed. |
+| Work on issue | `W` constructs prompt from issue and sends to brain. |
+
+### 5.2 Composer & Input System
+
+| Feature | Description |
+|---|---|
+| Multi-line editing | Emacs (default) and Vim (Normal/Insert/Visual/Operator) modes. |
+| Protected ranges | Atomic `@mention` and paste-reference tokens. Cursor-skipped, deleted as units. |
+| Paste-as-atom | Multi-line pastes become placeholder tokens (`[Paste #N · M lines]`). Side table capped at 50 entries (LRU). Expands on submit. |
+| `@`-mentions | Fuzzy picker for files, directories, workers. `MentionRegistry` with 60 s TTL, nucleo scoring, +25 % worker score boost. |
+| `/` slash commands | Spur-local (`/clear`, `/mode`, `/sessions`, `/cost`, `/quit`, `/vim`, `/issues`) merged with agent-advertised commands. |
+| History picker | `Ctrl+R` fuzzy search over global input history (cap 100). |
+| Activity spinner | Per-frame spinner driven by `ActivityKind`. |
+| Soft wrap | Unicode-width aware word-boundary wrapping. `TAB_WIDTH = 4`. |
+
+### 5.3 Review System
+
+| Feature | Tier | Description |
+|---|---|---|
+| Review card | Community | Renders review kind, summary, diff stats, PR URL, error. Action hints: `[A]pprove [D]eny [M]odify [R]etry`. |
+| Inline executor cards | Pro | Live executor status inline in brain trace at delegate call sites. Phase-aware density. |
+| Review tab | Pro | Dedicated tab in DetailPane with full context and keyboard shortcuts. |
+| Shared review queue | Team | Queue badges in status bar for team-wide pending reviews. |
+
+### 5.4 Cost & Telemetry
+
+| Feature | Tier | Description |
+|---|---|---|
+| Basic cost badge | Community | Total cost and elapsed time in status bar. Per-executor cost in lineage tree. |
+| Per-session cost | Pro | Cost tracking per attempt in DetailPane Attempts tab. |
+| Team cost aggregates | Team | *(Planned)* Team-wide cost dashboard. |
+| Daily/weekly reports | Pro/Team | `spur-context` DuckDB analytics produces reports via SQL. |
+
+**Honest product note:** `spur-cost` is currently **observational, not enforceable**. It records start/end events and computes cost, but the orchestrator spawns sessions without any budget check. This is a known gap (Architecture Risk #17). The product positioning must be "cost visibility," not "cost governance," until enforcement lands.
+
+---
+
+## 6. Architecture at a Glance
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Frontends                                                                  │
+│  ┌─────────────────────────────┐  ┌─────────────────────────────────────┐   │
+│  │ TUI (ratatui + crossterm)   │  │ Telegram Bot (spur-bot)             │   │
+│  │ Dashboard · SessionDetail   │  │ Forum-topic sessions                │   │
+│  │ PlanInspector · Palette     │  │ Inline review buttons               │   │
+│  └─────────────────────────────┘  └─────────────────────────────────────┘   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  Shared Host (spur-interactive)                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │ Channel wiring · Review lane · Shutdown orchestration                 │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  Orchestration (spur-core)                                                  │
+│  ┌──────────────┬──────────────┬──────────────┬──────────────┬────────────┐ │
+│  │ Orchestrator │ BrainSched   │ EventFunnel  │ ExecutorLine │ PeerMailbox│ │
+│  │              │ Continuation │ ReviewSink   │ age          │ Router/Led │ │
+│  │              │ Bridge       │              │              │ ger        │ │
+│  └──────────────┴──────────────┴──────────────┴──────────────┴────────────┘ │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  MCP Server (spur-mcp)                                                      │
+│  ┌─────────────────────────────┐  ┌─────────────────────────────────────┐   │
+│  │ Tool dispatch               │  │ Reconciler · PlanProjectionStore    │   │
+│  │ OutcomeMaterializer         │  │ SignalWatcher · MutationExecutor    │   │
+│  └─────────────────────────────┘  └─────────────────────────────────────┘   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  Protocol (spur-acp)                                                        │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │ AgentConnection · SpurEvent · SessionAttachGuard · OutcomeKey         │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  Support Services                                                           │
+│  ┌──────────┬──────────┬──────────┬──────────┬──────────┬────────────────┐  │
+│  │ spur-pm  │ spur-cost│ spur-work│ spur-lic │ spur-blob│ spur-context   │  │
+│  │ beads    │ SQLite   │ tree     │ ense     │ -store   │ DuckDB         │  │
+│  │ GitHub   │ Pricing  │ GitBlob  │ Ed25519  │ Memory/  │ analytics      │  │
+│  │          │ Registry │ Outcome  │ policy   │ FS/Git   │                │  │
+│  │          │          │ Store    │          │          │                │  │
+│  └──────────┴──────────┴──────────┴──────────┴──────────┴────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Data Flow (Simplified)
+
+1. User sends message via TUI or Telegram → `InteractiveFrontendHost` → `Orchestrator`
+2. `Orchestrator` prompts brain via ACP → brain reasons and calls MCP tools
+3. MCP tools (e.g., `delegate_to_worker`) → `Orchestrator` spawns worker in git worktree
+4. Worker streams notifications → `EventFunnel` → broadcast to TUI, bot, EventSink, Lineage
+5. Worker completes → `OutcomeStore` persists full result → `OutcomeMaterializer` clips to `BrainContinuation`
+6. `BrainScheduler` feeds continuation back to brain as next ordered turn
+7. Human reviews output → approve → merge worktree → create PR (GitHub) → update beads issue
+
+---
+
+## 7. Risk-Informed Product Decisions
+
+The architecture audit identified 41 risks (11 fixed, 2 mitigated, 28 open). Product decisions must account for these, not ignore them.
+
+### 7.1 Open Risks with Product Impact
+
+| Risk # | Technical Risk | Product Impact | User-Facing Mitigation Today |
+|---|---|---|---|
+| #2 | Broadcast `Lagged` drops events when subscribers are slow | TUI may miss status updates on burst | 8-event drain cap; no replay yet. Users on very active sessions may see stale state. |
+| #4 | Worktree orphaning on unclean shutdown | Disk space leaks | None. Users may need to manually clean `../.worktrees/` occasionally. |
+| #6 | Worker JoinHandles not tracked for shutdown abort | Worker tasks may leak on cancellation | Cancellation token registry exists; visual feedback in TUI is immediate. |
+| #7 | Orchestrator is a God Object (~8,650 lines) | Slower feature delivery, higher regression risk | Aggressive testing (SIT/UAT harness) before merge. |
+| #8 | No outer worker timeout (hang = indefinite) | Worker can run forever, burning tokens | Heartbeat watchdog exists (default off until emitter ships). Users can cancel manually. |
+| #17 | Cost tracking has no budget enforcement | Users can overspend accidentally | Honest product positioning: "visibility," not "governance." Document the gap. |
+| #22 | Peer mailbox unbounded ledger growth | Memory growth in long sessions | Peer mailbox is default-off. Enable only for short, peer-heavy sessions. |
+| #24 | NDJSON rotation death spiral on disk full | Silent event loss | Monitor disk space; no in-product alert yet. |
+| #26 | TUI `LoadState` deadlock on `BrainConnectFailed` | Infinite spinner, no error surfacing | Document: if spinner persists >30 s, press `Esc` and retry attach. |
+| #29 | SQLite `SQLITE_BUSY` when querying cost during session | `spur cost` CLI returns opaque errors | Document: query cost when no session is active, or use `spur-context` DuckDB reports. |
+| #32 | License downgrade mid-session does not shrink limits | Revoked Pro license keeps Pro concurrency until restart | Acceptable edge case; policy heartbeat checks on restart. |
+| #41 | `fs_unsafe` on NFS/sshfs allows multi-instance attach | Two TUI windows on different hosts can attach to same session | Persistent banner warns user; no secondary coordination yet. |
+
+### 7.2 Second-Order Product Strategy
+
+**Decision: Position SPUR as "resilient first, smart second."**
+
+First-order temptation: Market the "smart router" (ML-based task classification) and "unified billing" from the old Phase 4.
+
+Second-order analysis:
+- ML-based routing requires training data we do not have at our scale.
+- Unified billing requires vendor partnerships that do not exist.
+- Both distract from the core value proposition: **durable execution with human review gates**.
+
+**What to market instead:**
+1. **Session immortality** — Close your laptop, restart SPUR, resume exactly where you left off. No other agent tool does this.
+2. **Worker isolation + review** — Every worker runs in a git worktree. Every output hits a human review gate before merge. This is safety that autonomous agent tools skip.
+3. **Terminal-native, zero web UI** — No browser tabs, no cloud login, no SaaS downtime. Everything is local SQLite, local git, local TUI.
+
+**Decision: Tier boundaries should reflect operational scale, not feature whims.**
+
+- **Community:** Individual developer, one worker, manual review. Enough to fall in love with the workflow.
+- **Pro:** Individual power user or small team. Parallel workers, session resume, cost analytics. Sells resilience.
+- **Team:** Engineering team with shared project state. PM integration, shared review queue, team cost aggregation. Sells coordination.
+- **Enterprise:** Compliance and custom policy. SSO, audit logs, SLA. Sells trust.
+
+**Decision: Be honest about gaps.**
+
+- Cost enforcement is not built. Say so. Do not promise "budget alerts" as a shipping feature.
+- Event loss under burst is possible. Document the drain cap.
+- Peer mailbox is experimental. Gate it behind config, not marketing.
+
+Transparency builds trust with the "Orchestrator" persona, who can read Rust and will verify claims against the repo.
+
+---
+
+## 8. CLI Reference
 
 ### Global Commands
 
 ```
 spur init                          Initialize SPUR in current directory
-spur agents                        List registered agents
-spur agents add <path>             Register a custom agent
-spur agents remove <name>          Remove an agent
-spur sessions                      List active sessions
-spur sessions kill <id>            Terminate a session
-spur run <task>                    Run an ad-hoc task
-spur exec --agent <name> <task>    Execute directly on a specific agent
 spur tui                           Open TUI dashboard
-spur cost                          Show cost summary
-spur connect <service>             Authenticate with a PM tool
+spur tui --new                     Empty dashboard; no session resume
+spur tui --session <id>            Attach to specific session (explicit consent)
+spur tui --sessions                Open session picker
+spur bot telegram                  Start Telegram bot frontend
+spur agents                        List registered agents
+spur sessions                      List active sessions
+spur cost                          Show cost summary (observational)
+spur cost --week                   Weekly breakdown
+spur cost --by agent               Per-agent breakdown
+spur cost --by project             Per-project breakdown
 spur workflow run <file>           Execute a workflow definition
 spur workflow validate <file>      Validate a TOML workflow
 spur version                       Show version info
@@ -514,95 +423,113 @@ spur version                       Show version info
 
 ---
 
-## 8. Metrics & Success Criteria
+## 9. Competitive Landscape (Updated)
 
-### Phase 1 Success (Week 6)
+| Tool | Language | Interface | Native ACP | Cross-Agent | Durable Plans | Human Review Gate | Session Resume |
+|---|---|---|---|---|---|---|---|
+| **SPUR** | **Rust** | **TUI + Bot** | **Yes** | **Yes** | **Yes (beads)** | **Yes (state machine)** | **Yes (event replay)** |
+| ACPX | Node.js | CLI only | Yes | Yes | No | No | No |
+| TUICommander | Rust+Tauri | Desktop | No (PTY) | Detection | No | No | No |
+| Ralph | TypeScript | TUI (read-only) | Partial | Yes | No | No | No |
+| Agent Orchestrator | Node.js | Web dashboard | No | Yes | YAML | No | No |
+| Claude Code | Built-in | Terminal | No | Claude only | No | No | No |
+| Kiro CLI | Rust | Terminal | Yes | No | No | No | No |
+| Codex CLI | TypeScript | Terminal | Partial | No | No | No | No |
 
-- SPUR can spawn and manage ACP sessions with ≥ 3 different agents
-- TUI renders agent sessions with streaming output
-- `spur run` completes an ad-hoc task end-to-end
-- 0 known crash bugs on Linux and macOS
+### SPUR's Unique Position (Grounded)
 
-### Phase 2 Success (Week 12)
-
-- TOML workflows execute multi-step pipelines
-- Rate limit failover triggers within 5 seconds of detection
-- Cost tracking captures ≥ 90% of token usage events
-- 500+ GitHub stars
-
-### Phase 3 Success (Week 18)
-
-- Closed-loop: Linear issue → agent fix → PR → status update
-- Plane and GitHub Issues integrations functional
-- 2,000+ GitHub stars, 200+ daily active users
-
-### Phase 4 Success (Week 26)
-
-- Team dashboard with ≥ 3 paying teams
-- Smart router shows ≥ 15% cost reduction vs manual agent selection
-- $5K MRR milestone
+1. **Rust single binary** — `cargo install spur-cli` or `curl | sh`. No Node.js, no Python, no Docker.
+2. **Native ACP + MCP dual channel** — Structured protocol support, not PTY scraping or prompt injection.
+3. **Local-first durability** — Plans in SQLite (beads), events in NDJSON, outcomes in git blobs. Survives crashes and outages.
+4. **Human review as execution gate** — Not a UI afterthought; a state machine that blocks merge until approved.
+5. **Session resume via event replay** — Close the terminal, restart SPUR, resume the exact same brain session.
+6. **Cross-vendor agent orchestration** — Claude, Kiro, Codex, Gemini, custom ACP agents.
+7. **Telegram bot sharing the TUI correctness path** — Same review lane, same event bus, same state machine.
 
 ---
 
-## 9. Competitive Landscape
+## 10. Metrics & Success Criteria (Revised)
 
-| Tool | Language | Interface | ACP Native | Cross-Agent | PM Integration | Workflow Engine |
-|---|---|---|---|---|---|---|
-| **SPUR** | **Rust** | **TUI** | **Yes** | **Yes** | **Yes** | **Yes** |
-| ACPX | Node.js | CLI only | Yes | Yes | No | No |
-| TUICommander | Rust+Tauri | Desktop | No (PTY) | Detection | No | No |
-| Ralph | TypeScript | TUI (read-only) | Partial | Yes | No | Hat system |
-| Agent Orchestrator | Node.js | Web dashboard | No | Yes | GitHub only | YAML |
-| Gas Town | TypeScript | CLI+tmux | No | Claude only | No | No |
-| Claude Agent Teams | Built-in | Terminal | No | Claude only | No | No |
+### v0.5 — Foundation (Current)
 
-### SPUR's Unique Position
+- [x] ACP session manager with attach lock and collision handling
+- [x] TUI dashboard with agents tree, activity log, composer
+- [x] Brain scheduler with continuation bridge
+- [x] Review gate state machine (approve/deny/modify/retry)
+- [x] Outcome storage and materialization
+- [x] Cost tracking (observational)
+- [x] Telegram bot frontend
+- [x] License tier system with signed policies
+- [x] Durable plan reconciler in beads
 
-SPUR is the only tool that combines:
-1. Rust single binary (no runtime dependencies)
-2. Native ACP protocol support (structured, not PTY scraping)
-3. Cross-vendor agent orchestration (any ACP agent)
-4. PM tool integration (Linear, Plane, GitHub)
-5. Declarative workflow engine (TOML-based)
-6. Interactive TUI with real-time visibility
+### v0.6 — Resilience (Next)
+
+- [ ] Broadcast `Lagged` recovery or backpressure (Risk #2)
+- [ ] Worker heartbeat emitter + enable watchdog by default (Risk #23 follow-up)
+- [ ] Cost budget enforcement: per-session caps, per-plan ceilings (Risk #17)
+- [ ] TUI state-machine closure for all terminal brain events (Risk #26)
+- [ ] Worktree orphan cleanup on startup (Risk #4)
+- [ ] Orchestrator decomposition: BrainSessionManager, DelegationDispatcher actors
+
+### v0.7 — Scale
+
+- [ ] Team cost dashboard UI (Team tier entitlement → implementation)
+- [ ] RBAC enforcement (Team tier)
+- [ ] PM webhook real-time sync (Team tier)
+- [ ] Peer mailbox default-on with ledger pruning (Risk #22)
+- [ ] `TraceSource` wired into command palette
+
+### v1.0 — Commercial Hardening
+
+- [ ] Audit log viewer (Enterprise)
+- [ ] SSO/SAML flow (Enterprise)
+- [ ] SLA monitoring and status indicators (Enterprise)
+- [ ] Zero open Critical/High risks
+- [ ] SIT/UAT harness coverage for all interactive surfaces
 
 ---
 
-## 10. Risks & Mitigations
+## 11. Roadmap vs. Reality Check
 
-| Risk | Probability | Impact | Mitigation |
+| Old PRD Phase | What Was Promised | What Exists | Honest Assessment |
 |---|---|---|---|
-| Anthropic builds native ACP into Claude Code | Low (explicitly declined) | High | SPUR is cross-vendor; native ACP would actually help by simplifying integration |
-| ACP spec changes significantly | Medium | Medium | Abstract ACP behind internal trait; version-pin spec support |
-| Agent CLI interfaces break between versions | Medium | Medium | Integration tests per agent, version detection, adapter pattern |
-| Rate limit detection heuristics produce false positives | High | Low | Configurable thresholds, manual override, learn from user corrections |
-| Low adoption due to "extra tool" fatigue | Medium | High | Zero-config `spur init` auto-detection, immediate value in first session |
-| PM tool API changes | Low | Medium | Adapter pattern, community-maintained integrations |
+| Phase 1: Foundation | Agent discovery, basic TUI, ad-hoc tasks | TUI, sessions, composer, review gate, attach lock | **Over-delivered on TUI; under-delivered on agent discovery.** Discovery is less important than session management. |
+| Phase 2: Workflow Engine | TOML workflows, rate limit failover, cost tracking | Durable plan reconciler (MCP-based, not TOML), cost tracking (observational), brain failover | **Workflow engine is MCP-native, not TOML-native.** TOML workflows are a legacy concept; real users submit plans via MCP. Cost tracking lacks enforcement. |
+| Phase 3: PM Integration | Linear, Plane, GitHub | Beads-primary, GitHub-satellite. Linear/Plane not implemented. | **Correct call.** Local-first beads is more resilient than SaaS PM APIs. GitHub PR creation is sufficient. |
+| Phase 4: Commercial | Team dashboard, smart router, unified billing | Tier system exists, feature gates exist, DuckDB analytics exists. Smart router and unified billing do not. | **Smart router was speculative.** Unified billing requires vendor partnerships. Tier gating is the real commercial foundation. |
 
 ---
 
-## 11. Open Questions
+## 12. Open Questions → Decisions
 
-1. **Brain selection default:** Should SPUR default to Kiro (native ACP, cheaper) or Claude Code (better reasoning, needs adapter) as the brain agent?
-2. **Workflow sharing:** Should workflows be shareable via a community registry (like Homebrew taps)?
-3. **MCP integration:** Should SPUR expose itself as an MCP server so that agents can call SPUR tools (e.g., "check issue status")?
-4. **Local model support:** Should SPUR support local models (via Ollama) as worker agents for cost-free fallback?
-5. **Notification channels:** Beyond TUI, should SPUR support Slack/Discord/Telegram notifications for completed tasks?
+| Question | Decision | Rationale |
+|---|---|---|
+| **Brain default:** Claude or Kiro? | **User-configured, no default.** `spur init` detects installed agents and lists them. The user picks. Kiro has native ACP; Claude has deeper reasoning. Both are valid. | Removing default avoids privileging one vendor and respects user existing habits. |
+| **Workflow sharing registry?** | **Defer.** The real workflow system is plan submission via MCP. Community plan templates can be git repos, not a registry. | Registry adds operational cost without proven demand. Git-based sharing is sufficient for v1. |
+| **MCP server exposing SPUR tools?** | **Already exists.** `spur-mcp` is the MCP server. Brain agents already call `delegate_to_worker`, `submit_plan`, etc. | This was an open question in v1.0; it is answered in v2.0. |
+| **Local model support (Ollama)?** | **Defer.** No ACP-compatible local model CLI exists at quality threshold. When one does, `spur-acp` will support it automatically via the adapter pattern. | Supporting Ollama via raw stdio would require a non-ACP adapter, violating protocol-first principle. |
+| **Notification channels beyond Telegram?** | **Telegram only for v1.** Slack/Discord can be added via the same `spur-interactive` host pattern. Telegram was chosen for its forum-topic threading, which maps cleanly to session isolation. | Adding more channels is easy; maintaining them is not. Prove Telegram usage first. |
+| **Cost tracking: visibility or governance?** | **Visibility today, governance in v0.6.** Be honest that enforcement is not built. Do not market budget caps until Risk #17 is closed. | Premature governance promises create liability. Observational tracking is still valuable. |
 
 ---
 
-## 12. Glossary
+## 13. Glossary
 
 | Term | Definition |
 |---|---|
-| **ACP** | Agent Client Protocol — open standard (by Zed Industries + JetBrains) for structured communication between clients and AI coding agents via JSON-RPC 2.0 over stdio |
-| **Brain agent** | The primary agent that performs ReAct reasoning, task decomposition, and delegation to worker agents |
-| **Worker agent** | An agent that receives delegated subtasks from the brain and executes them |
-| **ReAct** | Reasoning + Acting loop: THINK → ACT → OBSERVE → repeat until task complete |
-| **Failover** | Automatic rerouting of tasks from a rate-limited or failed agent to an alternative agent |
-| **Workflow** | A TOML-defined pipeline that maps triggers (e.g., new issue with label "bug") to agent actions |
-| **Session** | A persistent ACP connection to an agent, maintaining conversation context across multiple prompts |
-| **PM Adapter** | Module that connects SPUR to a project management tool (Linear, Plane, GitHub Issues) |
+| **ACP** | Agent Client Protocol — JSON-RPC 2.0 over stdio for SPUR → Agent communication |
+| **MCP** | Model Context Protocol — JSON-RPC 2.0 over stdio for Agent → SPUR tool calls |
+| **Brain agent** | Primary reasoning agent (Claude Code, Kiro, Codex) that decomposes tasks and delegates |
+| **Worker agent** | Agent that receives delegated subtasks and executes in an isolated git worktree |
+| **Beads** | Local-first SQLite issue store accessed via `br` CLI; SPUR's durable plan backend |
+| **Delegation** | Core unit of work: brain requests → SPUR dispatches → worker executes → review gate → merge/discard |
+| **Review gate** | Human-in-the-loop state machine: AwaitingReview → Approved / Rejected / Modified / RetryRequested |
+| **OutcomeStore** | Content-addressed storage for delegation results (memory, FS, or git blob backends) |
+| **Continuation bridge** | Mechanism that clips delegation outcomes to a bounded envelope and feeds them back to the brain scheduler |
+| **Peer mailbox** | Structured worker-to-worker messaging with ledgered delivery and reconciliation |
+| **Session attach lock** | `fs4` advisory lock preventing split-brain attachment to the same ACP session from multiple processes |
+| **EventFunnel** | Singleton guaranteeing monotonic sequence numbers for all SpurEvents |
+| **Lineage projection** | Pure function of event stream producing the executor tree shown in the TUI |
 
 ---
 
