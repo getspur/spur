@@ -4515,6 +4515,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "directories",
+ "fs4",
  "futures",
  "proptest",
  "rand 0.8.5",
