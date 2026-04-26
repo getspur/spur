@@ -736,7 +736,9 @@ Parser arms:
 
 Net 4 Free keys (was 5).
 
-Adds: conflict_detection, rate_limit_detection, permission_request_prompt, agent_notification.
+Adds: conflict_detection, rate_limit_detection, permission_request_detection, agent_notification.
+
+**Revised 2026-04-26 (Wave 4 redo gate-review):** Renamed `permission_request_prompt` → `permission_request_detection` per gemini finding (symmetric with `license_event_broadcast` removal): `_prompt` is UI wiring, `_detection` matches sibling capability nouns.
 
 - [ ] **Step 1: Write failing test**
 
@@ -746,7 +748,7 @@ Adds: conflict_detection, rate_limit_detection, permission_request_prompt, agent
         for s in &[
             "core_core_conflict_detection",
             "core_core_rate_limit_detection",
-            "core_core_permission_request_prompt",
+            "core_core_permission_request_detection",
             "core_core_agent_notification",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
@@ -761,8 +763,8 @@ Adds: conflict_detection, rate_limit_detection, permission_request_prompt, agent
     // --- spur-core: system events (4) ---
     pub const CORE_CORE_CONFLICT_DETECTION: Self = Self("core_core_conflict_detection");
     pub const CORE_CORE_RATE_LIMIT_DETECTION: Self = Self("core_core_rate_limit_detection");
-    pub const CORE_CORE_PERMISSION_REQUEST_PROMPT: Self =
-        Self("core_core_permission_request_prompt");
+    pub const CORE_CORE_PERMISSION_REQUEST_DETECTION: Self =
+        Self("core_core_permission_request_detection");
     pub const CORE_CORE_AGENT_NOTIFICATION: Self = Self("core_core_agent_notification");
 ```
 
@@ -774,8 +776,8 @@ Parser arms:
             Some(Self::CORE_CORE_CONFLICT_DETECTION)
         } else if bytes_eq(b, b"core_core_rate_limit_detection") {
             Some(Self::CORE_CORE_RATE_LIMIT_DETECTION)
-        } else if bytes_eq(b, b"core_core_permission_request_prompt") {
-            Some(Self::CORE_CORE_PERMISSION_REQUEST_PROMPT)
+        } else if bytes_eq(b, b"core_core_permission_request_detection") {
+            Some(Self::CORE_CORE_PERMISSION_REQUEST_DETECTION)
         } else if bytes_eq(b, b"core_core_agent_notification") {
             Some(Self::CORE_CORE_AGENT_NOTIFICATION)
 ```
@@ -847,6 +849,13 @@ Parser arms:
 
 Per spec §4.3: 7 Free + 7 Pro.
 
+**Revised 2026-04-26 (Wave 4 redo gate-review):** Per gemini gate-review (consistent with `delegate_basic` rename precedent), dropped 3 orphan suffixes:
+- `mcp_core_pm_basic` → `mcp_core_pm` (no `_advanced` Pro counterpart)
+- `mcp_core_pr_manual` → `mcp_core_pr` (no `_automated` Pro counterpart)
+- `mcp_pro_review_advanced` → `mcp_pro_review` (no `_basic` Free counterpart)
+
+Per claude-code consistency nit: block label simplified to `(14)` to match neighbour bare-`(N)` convention.
+
 - [ ] **Step 1: Write failing test**
 
 ```rust
@@ -856,8 +865,8 @@ Per spec §4.3: 7 Free + 7 Pro.
             "mcp_core_server_dispatch",
             "mcp_core_delegate",
             "mcp_core_outcome_fetch",
-            "mcp_core_pm_basic",
-            "mcp_core_pr_manual",
+            "mcp_core_pm",
+            "mcp_core_pr",
             "mcp_core_plan_ephemeral",
             "mcp_core_outcome_materializer",
             "mcp_pro_plan_durable",
@@ -865,7 +874,7 @@ Per spec §4.3: 7 Free + 7 Pro.
             "mcp_pro_signal_watcher_scope_drift",
             "mcp_pro_mutation_executor",
             "mcp_pro_graph_tools",
-            "mcp_pro_review_advanced",
+            "mcp_pro_review",
             "mcp_pro_custom_tools",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
@@ -877,12 +886,12 @@ Per spec §4.3: 7 Free + 7 Pro.
 - [ ] **Step 3: Add consts**
 
 ```rust
-    // --- spur-mcp (14: 7 Free + 7 Pro) ---
+    // --- spur-mcp (14) ---
     pub const MCP_CORE_SERVER_DISPATCH: Self = Self("mcp_core_server_dispatch");
     pub const MCP_CORE_DELEGATE: Self = Self("mcp_core_delegate");
     pub const MCP_CORE_OUTCOME_FETCH: Self = Self("mcp_core_outcome_fetch");
-    pub const MCP_CORE_PM_BASIC: Self = Self("mcp_core_pm_basic");
-    pub const MCP_CORE_PR_MANUAL: Self = Self("mcp_core_pr_manual");
+    pub const MCP_CORE_PM: Self = Self("mcp_core_pm");
+    pub const MCP_CORE_PR: Self = Self("mcp_core_pr");
     pub const MCP_CORE_PLAN_EPHEMERAL: Self = Self("mcp_core_plan_ephemeral");
     pub const MCP_CORE_OUTCOME_MATERIALIZER: Self = Self("mcp_core_outcome_materializer");
     pub const MCP_PRO_PLAN_DURABLE: Self = Self("mcp_pro_plan_durable");
@@ -890,7 +899,7 @@ Per spec §4.3: 7 Free + 7 Pro.
     pub const MCP_PRO_SIGNAL_WATCHER_SCOPE_DRIFT: Self = Self("mcp_pro_signal_watcher_scope_drift");
     pub const MCP_PRO_MUTATION_EXECUTOR: Self = Self("mcp_pro_mutation_executor");
     pub const MCP_PRO_GRAPH_TOOLS: Self = Self("mcp_pro_graph_tools");
-    pub const MCP_PRO_REVIEW_ADVANCED: Self = Self("mcp_pro_review_advanced");
+    pub const MCP_PRO_REVIEW: Self = Self("mcp_pro_review");
     pub const MCP_PRO_CUSTOM_TOOLS: Self = Self("mcp_pro_custom_tools");
 ```
 
@@ -904,10 +913,10 @@ Parser arms:
             Some(Self::MCP_CORE_DELEGATE)
         } else if bytes_eq(b, b"mcp_core_outcome_fetch") {
             Some(Self::MCP_CORE_OUTCOME_FETCH)
-        } else if bytes_eq(b, b"mcp_core_pm_basic") {
-            Some(Self::MCP_CORE_PM_BASIC)
-        } else if bytes_eq(b, b"mcp_core_pr_manual") {
-            Some(Self::MCP_CORE_PR_MANUAL)
+        } else if bytes_eq(b, b"mcp_core_pm") {
+            Some(Self::MCP_CORE_PM)
+        } else if bytes_eq(b, b"mcp_core_pr") {
+            Some(Self::MCP_CORE_PR)
         } else if bytes_eq(b, b"mcp_core_plan_ephemeral") {
             Some(Self::MCP_CORE_PLAN_EPHEMERAL)
         } else if bytes_eq(b, b"mcp_core_outcome_materializer") {
@@ -922,8 +931,8 @@ Parser arms:
             Some(Self::MCP_PRO_MUTATION_EXECUTOR)
         } else if bytes_eq(b, b"mcp_pro_graph_tools") {
             Some(Self::MCP_PRO_GRAPH_TOOLS)
-        } else if bytes_eq(b, b"mcp_pro_review_advanced") {
-            Some(Self::MCP_PRO_REVIEW_ADVANCED)
+        } else if bytes_eq(b, b"mcp_pro_review") {
+            Some(Self::MCP_PRO_REVIEW)
         } else if bytes_eq(b, b"mcp_pro_custom_tools") {
             Some(Self::MCP_PRO_CUSTOM_TOOLS)
 ```
@@ -1643,36 +1652,36 @@ Add this test inside `mod tests` (after `notification_keys_registered`):
             "core_core_notification_pump",
             "core_pro_broadcast_lagged_recovery",
             // spur-core: review (5)
-            "core_core_review_sink", "core_core_review_policy_manual",
-            "core_pro_review_policy_auto_approve",
-            "core_pro_review_policy_timeout_fallback",
-            "core_pro_review_policy_retry",
+            "core_core_review_sink", "core_core_review_timeout",
+            "core_core_review_retry",
+            "core_pro_review_auto_approve",
+            "core_pro_review_timeout_routing",
+            "core_pro_review_retry_config",
             // skills (5)
-            "core_core_skill_registry", "core_core_skill_atomic_installation",
+            "skills_core_registry", "skills_core_atomic_installation",
             "skills_core_render_per_vendor",
             "skills_pro_custom", "skills_pro_role_gating",
             // spur-core: peer mailbox (3)
             "core_pro_peer_mailbox_router", "core_pro_peer_mailbox_ledger",
             "core_pro_peer_mailbox_stranded_recon",
-            // spur-core: system events (5)
+            // spur-core: system events (4)
             "core_core_conflict_detection", "core_core_rate_limit_detection",
-            "core_core_license_event_broadcast",
-            "core_core_permission_request_prompt",
-            "core_core_ext_notification",
-            // spur-core: reliability (5)
-            "core_core_basic_session_resume",
+            "core_core_permission_request_detection",
+            "core_core_agent_notification",
+            // spur-core: reliability & lifecycle (5)
+            "core_core_session_resume",
             "core_pro_session_resume_event_replay",
-            "core_core_basic_plan_persistence",
-            "core_pro_plan_orphan_recovery",
-            "core_pro_background_task_tracker",
+            "core_core_plan_persistence",
+            "core_core_plan_orphan_recovery",
+            "core_core_background_task_tracker",
             // spur-mcp (14)
-            "mcp_core_server_dispatch", "mcp_core_delegate_basic",
-            "mcp_core_outcome_fetch", "mcp_core_pm_basic",
-            "mcp_core_pr_manual", "mcp_core_plan_ephemeral",
+            "mcp_core_server_dispatch", "mcp_core_delegate",
+            "mcp_core_outcome_fetch", "mcp_core_pm",
+            "mcp_core_pr", "mcp_core_plan_ephemeral",
             "mcp_core_outcome_materializer",
             "mcp_pro_plan_durable", "mcp_pro_reconciler_journal_notify",
             "mcp_pro_signal_watcher_scope_drift", "mcp_pro_mutation_executor",
-            "mcp_pro_graph_tools", "mcp_pro_review_advanced",
+            "mcp_pro_graph_tools", "mcp_pro_review",
             "mcp_pro_custom_tools",
             // spur-tui (13)
             "tui_core_view_dashboard", "tui_core_view_session_detail",
