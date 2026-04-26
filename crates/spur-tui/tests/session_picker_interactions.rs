@@ -22,6 +22,36 @@ fn session(id: &str, title: &str) -> SessionInfo {
     .title(title.to_string())
 }
 
+fn session_updated(id: &str, title: &str, updated_at: &str) -> SessionInfo {
+    let mut session = session(id, title);
+    session.updated_at = Some(updated_at.to_string());
+    session
+}
+
+fn archived_meta(id: &str) -> spur_tui::session_metadata::SessionMetadata {
+    let mut meta = spur_tui::session_metadata::SessionMetadata::default();
+    meta.sessions
+        .entry(id.to_string())
+        .or_default()
+        .archived = true;
+    meta
+}
+
+fn alpha_beta_sessions() -> Vec<SessionInfo> {
+    vec![
+        session_updated("alpha", "alpha", "2026-04-02T00:00:00Z"),
+        session_updated("beta", "beta", "2026-04-01T00:00:00Z"),
+    ]
+}
+
+fn highlighted_session_id(picker: &SessionPickerView) -> Option<&str> {
+    picker
+        .cursor()
+        .checked_sub(1)
+        .and_then(|idx| picker.visible_session_at(idx))
+        .map(|s| s.session_id.0.as_ref())
+}
+
 #[test]
 fn cursor_default_lands_on_last_active_when_present() {
     let mut picker = SessionPickerView::new();
@@ -358,6 +388,56 @@ fn a_key_toggles_show_archived() {
     picker.set_sessions("t".into(), vec![session("a1", "x")]);
     let action = picker.handle_key(key('a'), &test_ctx());
     assert!(matches!(action, Some(Action::ToggleShowArchived)));
+}
+
+#[test]
+fn toggle_show_archived_off_reprojects_cursor_off_archived_session() {
+    let mut picker = SessionPickerView::new();
+    picker.set_metadata(archived_meta("beta"));
+    picker.set_sessions("t".into(), alpha_beta_sessions());
+
+    picker.toggle_show_archived();
+    assert!(picker.is_show_archived());
+    let _ = picker.handle_key(
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        &test_ctx(),
+    );
+    assert_eq!(picker.cursor(), 2);
+    assert_eq!(highlighted_session_id(&picker), Some("beta"));
+
+    picker.toggle_show_archived();
+
+    assert!(!picker.is_show_archived());
+    assert_eq!(picker.cursor(), 1);
+    assert_eq!(highlighted_session_id(&picker), Some("alpha"));
+}
+
+#[test]
+fn toggle_show_archived_on_preserves_cursor_by_session_id() {
+    let mut picker = SessionPickerView::new();
+    picker.set_metadata(archived_meta("beta"));
+    picker.set_sessions("t".into(), alpha_beta_sessions());
+
+    assert_eq!(picker.cursor(), 1);
+    assert_eq!(highlighted_session_id(&picker), Some("alpha"));
+
+    picker.toggle_show_archived();
+
+    assert!(picker.is_show_archived());
+    assert_eq!(highlighted_session_id(&picker), Some("alpha"));
+}
+
+#[test]
+fn toggle_show_archived_preserves_cursor_on_new_row() {
+    let mut picker = SessionPickerView::new();
+    picker.set_metadata(archived_meta("beta"));
+    picker.set_sessions("t".into(), alpha_beta_sessions());
+    let _ = picker.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &test_ctx());
+    assert_eq!(picker.cursor(), 0);
+
+    picker.toggle_show_archived();
+
+    assert_eq!(picker.cursor(), 0);
 }
 
 #[test]

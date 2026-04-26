@@ -181,7 +181,35 @@ impl SessionPickerView {
     }
 
     pub fn toggle_show_archived(&mut self) {
+        let prev_highlight = self.highlighted_session_id();
+        let prev_cursor_was_new = matches!(
+            &self.state,
+            PickerState::Populated { cursor: 0, .. }
+        );
         self.show_archived = !self.show_archived;
+        if let PickerState::Populated {
+            sessions,
+            cursor,
+            filter,
+            ..
+        } = &mut self.state
+        {
+            let indices =
+                Self::filtered_indices(sessions, filter, &self.metadata, self.show_archived);
+            let new_cursor = Self::project_cursor(
+                sessions,
+                &indices,
+                &self.metadata,
+                prev_highlight.as_deref(),
+                prev_cursor_was_new,
+            );
+            *cursor = new_cursor;
+            // Only reset scroll when the cursor lands on [+ New]; preserved
+            // session cursors keep their scroll context.
+            if new_cursor == 0 {
+                self.scroll_offset.set(0);
+            }
+        }
     }
 
     pub fn is_show_archived(&self) -> bool {
@@ -223,37 +251,13 @@ impl SessionPickerView {
             self.show_archived,
         );
 
-        let cursor = if prev_cursor_was_new {
-            // P2 special case: user explicitly selected [+ New] before refresh — don't move them.
-            0
-        } else if let Some(c) = prev_highlight.as_ref().and_then(|id| {
-            indices
-                .iter()
-                .position(|&i| sessions[i].session_id.0.as_ref() == id.as_str())
-                .map(|p| p + 1)
-        }) {
-            // P2: preserve highlight by session_id when possible.
-            c
-        } else if let Some(c) = self
-            .metadata
-            .last_active_session_id
-            .as_deref()
-            .and_then(|id| {
-                indices
-                    .iter()
-                    .position(|&i| sessions[i].session_id.0.as_ref() == id)
-                    .map(|p| p + 1)
-            })
-        {
-            // P1: fall back to last-active session.
-            c
-        } else if !indices.is_empty() {
-            // P1: fall back to the first visible row.
-            1
-        } else {
-            // P1: no sessions at all — cursor on [+ New].
-            0
-        };
+        let cursor = Self::project_cursor(
+            &sessions,
+            &indices,
+            &self.metadata,
+            prev_highlight.as_deref(),
+            prev_cursor_was_new,
+        );
 
         self.state = PickerState::Populated {
             agent,
@@ -347,6 +351,39 @@ impl SessionPickerView {
             .collect();
         scored.sort_by(|a, b| b.0.cmp(&a.0));
         scored.into_iter().map(|(_, i)| i).collect()
+    }
+
+    fn project_cursor(
+        sessions: &[SessionInfo],
+        indices: &[usize],
+        metadata: &SessionMetadata,
+        prev_highlight: Option<&str>,
+        prev_cursor_was_new: bool,
+    ) -> usize {
+        if prev_cursor_was_new {
+            return 0;
+        }
+        if let Some(id) = prev_highlight {
+            if let Some(p) = indices
+                .iter()
+                .position(|&i| sessions[i].session_id.0.as_ref() == id)
+            {
+                return p + 1;
+            }
+        }
+        if let Some(id) = metadata.last_active_session_id.as_deref() {
+            if let Some(p) = indices
+                .iter()
+                .position(|&i| sessions[i].session_id.0.as_ref() == id)
+            {
+                return p + 1;
+            }
+        }
+        if !indices.is_empty() {
+            1
+        } else {
+            0
+        }
     }
 
     pub fn visible_session_count(&self) -> usize {
