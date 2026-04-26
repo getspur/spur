@@ -2,7 +2,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
 
@@ -280,6 +280,28 @@ impl ReactTrace {
             .border_style(Style::default().fg(Color::DarkGray))
     }
 
+    fn position_indicator(
+        total: usize,
+        visible: usize,
+        offset: usize,
+        width: u16,
+    ) -> Option<String> {
+        if total <= visible || width < 20 {
+            return None;
+        }
+
+        // `offset` is zero-based; `bottom` is the conventional 1-indexed
+        // bottom-of-viewport line number displayed to users.
+        let bottom = (offset + visible).min(total);
+        let percent = bottom * 100 / total;
+
+        if width < 30 {
+            Some(format!(" · {percent}% "))
+        } else {
+            Some(format!(" · {bottom}/{total} · {percent}% "))
+        }
+    }
+
     /// Render the full ReAct trace into the given frame area.
     ///
     /// Non-markdown path. For markdown-enabled sessions, callers should use
@@ -297,7 +319,7 @@ impl ReactTrace {
         };
 
         let (title_str, accent) = self.pane_title_and_color();
-        let block = Self::build_trace_block(&title_str, accent, following_indicator);
+        let mut block = Self::build_trace_block(&title_str, accent, following_indicator);
 
         let inner = block.inner(area);
         let effective_width = inner.width;
@@ -369,17 +391,17 @@ impl ReactTrace {
         let visible_end = (offset + visible_height).min(total_lines);
         let viewport: Vec<Line> = wrapped[offset..visible_end].to_vec();
 
+        if let Some(pos) = Self::position_indicator(total_lines, visible_height, offset, area.width)
+        {
+            block = block.title_bottom(
+                Line::from(pos)
+                    .right_aligned()
+                    .style(Style::default().fg(Color::DarkGray)),
+            );
+        }
+
         let paragraph = Paragraph::new(viewport).block(block);
         frame.render_widget(paragraph, area);
-
-        // Scrollbar: proportional thumb via viewport_content_length.
-        if total_lines > visible_height {
-            let mut scrollbar_state = ScrollbarState::new(total_lines)
-                .position(offset)
-                .viewport_content_length(visible_height);
-            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
-            frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
-        }
 
         self.last_surface = crate::components::react_trace::Surface::Full;
     }
@@ -405,10 +427,9 @@ impl ReactTrace {
         };
 
         let (title_str, accent) = self.pane_title_and_color();
-        let block = Self::build_trace_block(&title_str, accent, following_indicator);
+        let mut block = Self::build_trace_block(&title_str, accent, following_indicator);
 
         let inner = block.inner(area);
-        frame.render_widget(block, area);
 
         let effective_width = inner.width;
         let visible_height = inner.height as usize;
@@ -506,6 +527,15 @@ impl ReactTrace {
         let visible_end = (offset + visible_height).min(total);
         let segments = segment_visible_rows(rows, offset, visible_end);
 
+        if let Some(pos) = Self::position_indicator(total, visible_height, offset, area.width) {
+            block = block.title_bottom(
+                Line::from(pos)
+                    .right_aligned()
+                    .style(Style::default().fg(Color::DarkGray)),
+            );
+        }
+        frame.render_widget(block, area);
+
         // Walk segments and render into sub-Rects of `inner`.
         let mut y: u16 = inner.y;
         for seg in segments {
@@ -573,15 +603,6 @@ impl ReactTrace {
                     y += run_len;
                 }
             }
-        }
-
-        // Scrollbar — same math as non-markdown path.
-        if total > visible_height {
-            let mut scrollbar_state = ScrollbarState::new(total)
-                .position(offset)
-                .viewport_content_length(visible_height);
-            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
-            frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
         }
 
         self.last_surface = crate::components::react_trace::Surface::Full;
@@ -781,5 +802,151 @@ mod copy_friendly_border_tests {
             .unwrap();
 
         assert_no_vertical_border_glyphs(term.backend().buffer(), width, height);
+    }
+}
+
+#[cfg(test)]
+mod scroll_indicator_tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, buffer::Buffer, layout::Rect, Terminal};
+
+    fn buffer_text(buf: &Buffer, width: u16, height: u16) -> String {
+        let mut out = String::new();
+        for y in 0..height {
+            for x in 0..width {
+                let cell = buf.cell((x, y)).expect("cell should be inside trace area");
+                out.push_str(cell.symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn row_text(buf: &Buffer, y: u16, width: u16) -> String {
+        let mut out = String::new();
+        for x in 0..width {
+            let cell = buf.cell((x, y)).expect("cell should be inside trace area");
+            out.push_str(cell.symbol());
+        }
+        out
+    }
+
+    fn overflow_trace() -> ReactTrace {
+        let mut trace = ReactTrace::new_for_tests();
+        for i in 0..30 {
+            trace.append_think(&format!("thinking line {i}"), "12:00".into());
+            trace.append_user_message(&format!("user line {i}"), "12:00".into());
+        }
+        trace
+    }
+
+    #[test]
+    fn position_indicator_table() {
+        assert_eq!(ReactTrace::position_indicator(10, 20, 0, 70), None);
+        assert_eq!(ReactTrace::position_indicator(20, 20, 0, 70), None);
+        assert_eq!(ReactTrace::position_indicator(100, 10, 0, 19), None);
+
+        let s = ReactTrace::position_indicator(100, 10, 45, 25).unwrap();
+        assert!(s.contains('%'));
+        assert!(!s.contains('/'));
+
+        assert_eq!(
+            ReactTrace::position_indicator(27, 5, 0, 70).unwrap(),
+            " · 5/27 · 18% "
+        );
+        assert_eq!(
+            ReactTrace::position_indicator(27, 5, 7, 70).unwrap(),
+            " · 12/27 · 44% "
+        );
+        assert_eq!(
+            ReactTrace::position_indicator(27, 5, 22, 70).unwrap(),
+            " · 27/27 · 100% "
+        );
+    }
+
+    #[test]
+    fn render_overflow_has_copy_friendly_position_indicator() {
+        let width = 70;
+        let height = 8;
+        let mut trace = overflow_trace();
+
+        let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
+        term.draw(|f| trace.render(f, Rect::new(0, 0, width, height), None))
+            .unwrap();
+
+        let buf = term.backend().buffer();
+        let text = buffer_text(buf, width, height);
+        assert!(!text.contains('║'));
+        assert!(!text.contains('█'));
+        assert!(
+            row_text(buf, height - 1, width).contains('%'),
+            "bottom row should include a position indicator"
+        );
+    }
+
+    #[test]
+    fn render_without_overflow_has_no_position_indicator() {
+        let width = 70;
+        let height = 8;
+        let mut trace = ReactTrace::new_for_tests();
+        trace.append_message("copy this line\nand this line", "codex", "12:00".into());
+
+        let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
+        term.draw(|f| trace.render(f, Rect::new(0, 0, width, height), None))
+            .unwrap();
+
+        assert!(
+            !row_text(term.backend().buffer(), height - 1, width).contains('%'),
+            "bottom row should not include a position indicator when content fits"
+        );
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn render_with_ctx_overflow_has_copy_friendly_position_indicator() {
+        let width = 70;
+        let height = 8;
+        let mut trace = overflow_trace();
+        let registry = std::collections::HashMap::new();
+        let ctx = RenderContext {
+            mermaid_registry: &registry,
+            picker: None,
+        };
+
+        let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
+        term.draw(|f| trace.render_with_ctx(f, Rect::new(0, 0, width, height), &ctx, None))
+            .unwrap();
+
+        let buf = term.backend().buffer();
+        let text = buffer_text(buf, width, height);
+        assert!(!text.contains('║'));
+        assert!(!text.contains('█'));
+        assert!(
+            row_text(buf, height - 1, width).contains('%'),
+            "bottom row should include a position indicator"
+        );
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn render_with_ctx_without_overflow_has_no_position_indicator() {
+        let width = 70;
+        let height = 8;
+        let mut trace = ReactTrace::new_for_tests();
+        trace.append_message("copy this line\nand this line", "codex", "12:00".into());
+        let registry = std::collections::HashMap::new();
+        let ctx = RenderContext {
+            mermaid_registry: &registry,
+            picker: None,
+        };
+
+        let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
+        term.draw(|f| trace.render_with_ctx(f, Rect::new(0, 0, width, height), &ctx, None))
+            .unwrap();
+
+        assert!(
+            !row_text(term.backend().buffer(), height - 1, width).contains('%'),
+            "bottom row should not include a position indicator when content fits"
+        );
     }
 }
