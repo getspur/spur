@@ -103,8 +103,8 @@ fn populated_single_brain_no_filter() {
         "",
         "",
         "",
+        "",
         "j/k nav · ↵ resume · / search · y yank · Esc             ▶0 R0 $0.00 0m 00s spur",
-        "j/k nav · Enter resume · / search · n new · R rename · p pin · d archive · y yan",
     ];
     assert_render(&mut picker, expected);
 }
@@ -140,8 +140,8 @@ fn populated_empty_no_filter() {
         "",
         "",
         "",
+        "",
         "j/k nav · ↵ new · / search · Esc                         ▶0 R0 $0.00 0m 00s spur",
-        "j/k nav · Enter new session · / search · P preview · Esc back",
     ];
     assert_render(&mut picker, expected);
 }
@@ -172,8 +172,8 @@ fn loading_state() {
         "",
         "",
         "",
+        "",
         "Esc back                                                 ▶0 R0 $0.00 0m 00s spur",
-        "Esc back",
     ];
     assert_render(&mut picker, expected);
 }
@@ -183,6 +183,7 @@ fn error_state() {
     let mut picker = SessionPickerView::new();
     picker.set_error("agent connection refused".into());
     let expected: &[&str] = &[
+        "",
         "",
         "",
         "",
@@ -206,7 +207,6 @@ fn error_state() {
         "",
         "",
         "r retry · Esc back                                       ▶0 R0 $0.00 0m 00s spur",
-        "r retry · Esc back",
     ];
     assert_render(&mut picker, expected);
 }
@@ -256,8 +256,8 @@ fn populated_multi_brain_no_filter() {
         "",
         "",
         "",
+        "",
         "j/k nav · ↵ resume · / search · y yank · Esc             ▶0 R0 $0.00 0m 00s spur",
-        "j/k nav · Enter resume · / search · n new · R rename · p pin · d archive · y yan",
     ];
     assert_render(&mut picker, expected);
 }
@@ -301,8 +301,8 @@ fn populated_with_filter() {
         "",
         "",
         "",
+        "",
         "type to filter · Enter commit · Esc exit search          ▶0 R0 $0.00 0m 00s spur",
-        "type to filter · Enter commit · Esc exit search",
     ];
     assert_render(&mut picker, expected);
 }
@@ -417,6 +417,7 @@ fn populated_with_preview_visible() {
         "",
         "",
         "",
+        "",
         " Preview ───────────────────────────────────────────────────────────────────────",
         "  Session: a1xxxxxx",
         "  CWD: /tmp",
@@ -426,7 +427,6 @@ fn populated_with_preview_visible() {
         "",
         "",
         "j/k nav · ↵ resume · / search · y yank · Esc             ▶0 R0 $0.00 0m 00s spur",
-        "j/k nav · Enter resume · / search · n new · R rename · p pin · d archive · y yan",
     ];
     assert_render(&mut picker, expected);
 }
@@ -466,8 +466,8 @@ fn populated_with_archived_shown() {
         "",
         "",
         "",
+        "",
         "j/k nav · ↵ new · / search · Esc                         ▶0 R0 $0.00 0m 00s spur",
-        "j/k nav · Enter new session · / search · P preview · Esc back",
     ];
     assert_render(&mut picker, expected);
 }
