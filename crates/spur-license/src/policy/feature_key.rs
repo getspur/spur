@@ -105,6 +105,11 @@ impl FeatureKey {
     pub const ACP_CORE_SESSION_ATTACH_DEGRADED_NOLOCK: Self =
         Self("acp_core_session_attach_degraded_nolock");
 
+    // --- spur-core: workers & semaphore (3) ---
+    pub const CORE_CORE_PARALLEL_WORKERS: Self = Self("core_core_parallel_workers");
+    pub const CORE_CORE_CANCELLABLE_SEMAPHORE: Self = Self("core_core_cancellable_semaphore");
+    pub const CORE_PRO_WORKER_HEARTBEAT_WATCHDOG: Self = Self("core_pro_worker_heartbeat_watchdog");
+
     pub const fn as_str(&self) -> &'static str {
         self.0
     }
@@ -211,6 +216,13 @@ impl FeatureKey {
             Some(Self::ACP_CORE_SESSION_ATTACH_ADVISORY_LOCK)
         } else if bytes_eq(b, b"acp_core_session_attach_degraded_nolock") {
             Some(Self::ACP_CORE_SESSION_ATTACH_DEGRADED_NOLOCK)
+        // spur-core: workers & semaphore
+        } else if bytes_eq(b, b"core_core_parallel_workers") {
+            Some(Self::CORE_CORE_PARALLEL_WORKERS)
+        } else if bytes_eq(b, b"core_core_cancellable_semaphore") {
+            Some(Self::CORE_CORE_CANCELLABLE_SEMAPHORE)
+        } else if bytes_eq(b, b"core_pro_worker_heartbeat_watchdog") {
+            Some(Self::CORE_PRO_WORKER_HEARTBEAT_WATCHDOG)
         } else {
             None
         }
@@ -507,6 +519,17 @@ mod tests {
             "acp_core_adapter_kimi",
             "acp_core_session_attach_advisory_lock",
             "acp_core_session_attach_degraded_nolock",
+        ] {
+            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
+    }
+
+    #[test]
+    fn spur_core_workers_keys_registered() {
+        for s in &[
+            "core_core_parallel_workers",
+            "core_core_cancellable_semaphore",
+            "core_pro_worker_heartbeat_watchdog",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
