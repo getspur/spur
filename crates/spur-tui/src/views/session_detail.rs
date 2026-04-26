@@ -68,10 +68,8 @@ pub struct SessionDetailView {
     /// Most recent auth-required error for this session. Rendered as a red
     /// banner at the top of the view. Dismissed on the next keystroke.
     pub auth_error: Option<String>,
-    /// Stateful trigger-transition detector. Replaces the former
-    /// trigger state field (retired in Phase 4). History shells are
-    /// not managed through this detector; see dispatch_intent.
-    trigger_detector: crate::components::completion_trigger::TriggerDetector,
+    /// Shared completion popup pipeline for @mentions and slash commands.
+    completion: crate::components::input_completion::InputCompletionPort,
     /// Registry of `@`-mention sources (files, directories).
     mention_registry: std::rc::Rc<std::cell::RefCell<crate::mentions::MentionRegistry>>,
     /// Working directory used to resolve file mentions.
@@ -117,8 +115,6 @@ pub struct SessionDetailView {
     /// True when the session attached without an enforceable filesystem lock.
     fs_unsafe: bool,
 
-    /// Active picker-shell (history / mention / slash). `None` = no popup.
-    picker_shell: Option<crate::components::picker_shell::PickerShell>,
     /// Whether the inline workers panel is collapsed. Toggled by Alt+D.
     workers_panel_collapsed: bool,
     /// Maps ToolCall id -> render depth for subagent nesting.
@@ -183,7 +179,7 @@ impl SessionDetailView {
             context_used: None,
             context_size: None,
             auth_error: None,
-            trigger_detector: crate::components::completion_trigger::TriggerDetector::new(),
+            completion: crate::components::input_completion::InputCompletionPort::new(),
             mention_registry: std::rc::Rc::new(std::cell::RefCell::new(mention_registry)),
             cwd,
             #[cfg(feature = "markdown")]
@@ -199,7 +195,6 @@ impl SessionDetailView {
             cancelling_in_flight: false,
             cancel_mode: None,
             fs_unsafe: false,
-            picker_shell: None,
             workers_panel_collapsed: false,
             tool_depth: std::collections::HashMap::new(),
             known_worker_names,
@@ -243,7 +238,7 @@ impl SessionDetailView {
             context_used: None,
             context_size: None,
             auth_error: None,
-            trigger_detector: crate::components::completion_trigger::TriggerDetector::new(),
+            completion: crate::components::input_completion::InputCompletionPort::new(),
             mention_registry: std::rc::Rc::new(std::cell::RefCell::new(mention_registry)),
             cwd: std::path::PathBuf::from("."),
             #[cfg(feature = "markdown")]
@@ -259,7 +254,6 @@ impl SessionDetailView {
             cancelling_in_flight: false,
             cancel_mode: None,
             fs_unsafe: false,
-            picker_shell: None,
             workers_panel_collapsed: false,
             tool_depth: std::collections::HashMap::new(),
             known_worker_names: std::collections::HashSet::new(),
@@ -294,7 +288,7 @@ impl SessionDetailView {
             context_used: None,
             context_size: None,
             auth_error: None,
-            trigger_detector: crate::components::completion_trigger::TriggerDetector::new(),
+            completion: crate::components::input_completion::InputCompletionPort::new(),
             mention_registry: std::rc::Rc::new(std::cell::RefCell::new(mention_registry)),
             cwd: std::path::PathBuf::from("."),
             #[cfg(feature = "markdown")]
@@ -310,7 +304,6 @@ impl SessionDetailView {
             cancelling_in_flight: false,
             cancel_mode: None,
             fs_unsafe: false,
-            picker_shell: None,
             workers_panel_collapsed: false,
             tool_depth: std::collections::HashMap::new(),
             known_worker_names: std::collections::HashSet::new(),
@@ -394,7 +387,7 @@ impl SessionDetailView {
     ///   (plus `react_trace.set_mode(None)` — see §3.3 of spec), `context_used`,
     ///   `context_size`, `auth_error`.
     /// - Stream flags (Task 3): `stream_in_flight`, `cancelling_in_flight`.
-    /// - UI transient: `resume_banner`, `picker_shell`, `trigger_detector`.
+    /// - UI transient: `resume_banner`, `completion`.
     /// - Draft debounce locals (Task 4): `last_persisted_draft`,
     ///   `last_draft_change_at`.
     /// - Marks set: `cleared = true`, `ready_banner = Some(...)`.
@@ -418,8 +411,7 @@ impl SessionDetailView {
             self.mermaid_registry.clear();
             self.pending_fence_actions.clear();
         }
-        self.trigger_detector.reset();
-        self.picker_shell = None;
+        self.completion.reset();
         self.resume_banner = None;
 
         // Header / status.
@@ -933,102 +925,15 @@ impl SessionDetailView {
 
     // ── Completion popup wiring ─────────────────────────────────────────
 
-    /// Feed a classified IntentEvent into the TriggerDetector and apply the
-    /// resulting transition to `self.picker_shell`. Includes the Idle
-    /// fast-path: on `Idle` state and a non-opening event, return in O(1)
-    /// without fetching text/cursor/ranges from `input_bar`.
     fn dispatch_intent(&mut self, event: crate::components::completion_trigger::IntentEvent) {
-        use crate::components::completion_trigger::{IntentEvent, TriggerKind, TriggerTransition};
-        use crate::components::picker_shell::PickerShell;
-        use crate::components::query_source::{
-            MentionQuerySource, QueryMode, SlashQuerySource, SlashRow,
+        use crate::components::input_completion::CompletionEnv;
+        let env = CompletionEnv {
+            command_registry: &self.command_registry,
+            mention_registry: &self.mention_registry,
+            cwd: &self.cwd,
+            scope: crate::mentions::CompletionScope::Session(&self.session_id),
         };
-
-        // Fast path: Idle state + non-opening event → no text fetch, no alloc.
-        // Ordered first so the hottest path (Idle, no picker, typing/motion)
-        // skips the Option deref for the picker-shell check entirely.
-        if self.trigger_detector.is_idle()
-            && !matches!(
-                event,
-                IntentEvent::TypedChar('@') | IntentEvent::TypedChar('/')
-            )
-        {
-            return;
-        }
-
-        // History-mode shell owns the picker; detector is inert.
-        if let Some(shell) = self.picker_shell.as_ref() {
-            if shell.query_mode() == QueryMode::OwnedByShell {
-                self.trigger_detector.reset();
-                return;
-            }
-        }
-
-        let text = self.input_bar.text();
-        let cursor = self.input_bar.cursor();
-        // Clone required: step() takes &mut self on trigger_detector while ranges
-        // borrows from input_bar — two simultaneous fields of self.
-        let ranges = self.input_bar.protected_ranges().to_vec();
-
-        let transition = self.trigger_detector.step(event, &text, cursor, &ranges);
-
-        match transition {
-            TriggerTransition::None => {}
-            TriggerTransition::Update { query } => {
-                if let Some(shell) = self.picker_shell.as_mut() {
-                    shell.set_query_from_input_bar(&query);
-                }
-            }
-            TriggerTransition::Open { trigger } => {
-                let shell = match trigger.kind {
-                    TriggerKind::Slash => {
-                        let entries = self.command_registry.list();
-                        let rows: Vec<SlashRow> = entries
-                            .iter()
-                            .map(|e| SlashRow {
-                                canonical: self.command_registry.canonical_typed_form(e),
-                                description: e.description.clone(),
-                                tag: match &e.source {
-                                    crate::commands::CommandSource::Spur => "⟨spur⟩".into(),
-                                    crate::commands::CommandSource::Agent { handle } => {
-                                        format!("⟨{}⟩", handle)
-                                    }
-                                },
-                            })
-                            .collect();
-                        let src = SlashQuerySource::new(rows, trigger.prefix_start);
-                        PickerShell::open_with_query(Box::new(src), &trigger.query)
-                    }
-                    TriggerKind::Mention => {
-                        let src = MentionQuerySource::new(
-                            std::rc::Rc::clone(&self.mention_registry),
-                            self.session_id.clone(),
-                            self.cwd.clone(),
-                            trigger.prefix_start,
-                        );
-                        PickerShell::open_with_query(Box::new(src), &trigger.query)
-                    }
-                };
-                self.picker_shell = Some(shell);
-            }
-            TriggerTransition::Close => {
-                self.picker_shell = None;
-            }
-        }
-    }
-
-    /// Replace the range [prefix_start..cursor] in the InputBar with `replacement`.
-    /// Leaves the cursor at `prefix_start + replacement.len()`.
-    fn replace_trigger_token(&mut self, prefix_start: usize, replacement: &str) {
-        let current = self.input_bar.text().to_string();
-        let cursor = self.input_bar.cursor();
-        let mut new_text = String::with_capacity(current.len());
-        new_text.push_str(&current[..prefix_start]);
-        new_text.push_str(replacement);
-        new_text.push_str(&current[cursor..]);
-        let new_cursor = prefix_start + replacement.len();
-        self.input_bar.set_text(new_text, new_cursor);
-        self.dispatch_intent(crate::components::completion_trigger::IntentEvent::SetText);
+        self.completion.dispatch(event, &mut self.input_bar, &env);
     }
 
     /// Build (error_ids, pending_ids) sets from the mermaid registry for use
@@ -1142,9 +1047,9 @@ impl SessionDetailView {
                 && matches!(key.code, KeyCode::Char('y' | 'n' | 'a'))
             {
                 KeyOwner::View
-            } else if let Some(ref shell) = self.picker_shell {
+            } else if let Some(query_mode) = self.completion.query_mode() {
                 use crate::components::query_source::QueryMode;
-                let is_trigger_driven = shell.query_mode() == QueryMode::ReadFromInputBar;
+                let is_trigger_driven = query_mode == QueryMode::ReadFromInputBar;
                 let shell_consumes = if is_trigger_driven {
                     matches!(
                         key.code,
@@ -1228,57 +1133,7 @@ impl SessionDetailView {
 
         match owner {
             KeyOwner::Picker => {
-                use crate::components::picker_shell::PickerAction;
-                use crate::components::query_source::RetrievalAccept;
-                let shell = self
-                    .picker_shell
-                    .as_mut()
-                    .expect("owner=Picker implies Some");
-                let act = shell.handle_key(key);
-                match act {
-                    PickerAction::None => {}
-                    PickerAction::Cancel => {
-                        self.picker_shell = None;
-                        self.dispatch_intent(
-                            crate::components::completion_trigger::IntentEvent::Dismissed,
-                        );
-                    }
-                    PickerAction::Accept(accept) => {
-                        match accept {
-                            RetrievalAccept::ReplaceState(snap) => {
-                                let len = snap.text.len();
-                                self.input_bar.set_state(snap, len);
-                                self.dispatch_intent(
-                                    crate::components::completion_trigger::IntentEvent::Accepted,
-                                );
-                            }
-                            RetrievalAccept::InsertAtom {
-                                text,
-                                uri,
-                                name,
-                                replace_from,
-                            } => {
-                                if let Some(prefix_start) = replace_from {
-                                    self.replace_trigger_token(prefix_start, "");
-                                }
-                                self.input_bar.insert_atom(text, uri, name);
-                                self.dispatch_intent(
-                                    crate::components::completion_trigger::IntentEvent::Accepted,
-                                );
-                            }
-                            RetrievalAccept::ReplaceTriggerToken {
-                                prefix_start,
-                                replacement,
-                            } => {
-                                self.replace_trigger_token(prefix_start, &replacement);
-                                self.dispatch_intent(
-                                    crate::components::completion_trigger::IntentEvent::Accepted,
-                                );
-                            }
-                        }
-                        self.picker_shell = None;
-                    }
-                }
+                let _ = self.completion.handle_picker_key(key, &mut self.input_bar);
                 None
             }
 
@@ -1394,14 +1249,10 @@ impl SessionDetailView {
                 if matches!(key.code, KeyCode::Char('r'))
                     && (key.modifiers.contains(KeyModifiers::CONTROL)
                         || key.modifiers.contains(KeyModifiers::ALT))
-                    && self.picker_shell.is_none()
+                    && !self.completion.is_active()
                 {
-                    use crate::components::picker_shell::PickerShell;
-                    use crate::components::query_source::HistoryQuerySource;
                     let history = self.input_bar.history().to_vec();
-                    self.picker_shell = Some(PickerShell::open(Box::new(HistoryQuerySource::new(
-                        history,
-                    ))));
+                    self.completion.open_history(history);
                     return None;
                 }
 
@@ -2113,16 +1964,14 @@ impl SessionDetailView {
 
         // Render in "inert" style (dimmed border, no terminal cursor) when
         // a PickerShell has the focus — the shell owns the cursor.
-        if self.picker_shell.is_some() {
+        if self.completion.is_active() {
             self.input_bar.render_inert(frame, chunks[4]);
         } else {
             self.input_bar.render(frame, chunks[4]);
         }
 
         // ── PickerShell overlay ─────────────────────────────────────────
-        if let Some(ref mut shell) = self.picker_shell {
-            shell.render(frame, chunks[4], area);
-        }
+        self.completion.render(frame, chunks[4], area);
 
         // ── Status bar (with live worker counts) ────────────────────────
         let (running, pending_review) = lineage

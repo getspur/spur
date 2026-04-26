@@ -257,7 +257,7 @@ use std::rc::Rc;
 /// sees fresh filesystem cache contents. Cheap handle clones; no moves.
 pub struct MentionQuerySource {
     registry: Rc<RefCell<crate::mentions::MentionRegistry>>,
-    session_id: spur_acp::SessionId,
+    scope: MentionSourceScope,
     cwd: std::path::PathBuf,
     /// Byte offset in the InputBar text where the trigger's '@' lives.
     /// Captured at shell-open time, passed into `InsertAtom.replace_from`
@@ -268,16 +268,38 @@ pub struct MentionQuerySource {
     last_hits: Vec<crate::mentions::MentionEntry>,
 }
 
+enum MentionSourceScope {
+    PreSession,
+    Session(spur_acp::SessionId),
+}
+
+impl MentionSourceScope {
+    fn as_completion_scope(&self) -> crate::mentions::CompletionScope<'_> {
+        match self {
+            MentionSourceScope::PreSession => crate::mentions::CompletionScope::PreSession,
+            MentionSourceScope::Session(session) => {
+                crate::mentions::CompletionScope::Session(session)
+            }
+        }
+    }
+}
+
 impl MentionQuerySource {
     pub fn new(
         registry: Rc<RefCell<crate::mentions::MentionRegistry>>,
-        session_id: spur_acp::SessionId,
+        scope: crate::mentions::CompletionScope<'_>,
         cwd: std::path::PathBuf,
         prefix_start: usize,
     ) -> Self {
+        let scope = match scope {
+            crate::mentions::CompletionScope::PreSession => MentionSourceScope::PreSession,
+            crate::mentions::CompletionScope::Session(session) => {
+                MentionSourceScope::Session(session.clone())
+            }
+        };
         Self {
             registry,
-            session_id,
+            scope,
             cwd,
             prefix_start,
             last_hits: Vec::new(),
@@ -296,10 +318,12 @@ impl QuerySource for MentionQuerySource {
 
     fn refresh(&mut self, query: &str) -> Vec<RetrievalRow> {
         use crate::mentions::MentionKind;
-        let hits = self
-            .registry
-            .borrow_mut()
-            .query(&self.session_id, &self.cwd, query, 20);
+        let hits = self.registry.borrow_mut().query(
+            self.scope.as_completion_scope(),
+            &self.cwd,
+            query,
+            20,
+        );
         let rows: Vec<RetrievalRow> = hits
             .iter()
             .map(|m| {
@@ -639,7 +663,8 @@ mod tests {
         let mut r = MentionRegistry::new();
         // Prime the cache by running one query; cwd must actually exist so
         // FileMentionSource returns something deterministic in tests.
-        let _ = r.query(&SessionId::new(), cwd, "", 5);
+        let sid = SessionId::new();
+        let _ = r.query(crate::mentions::CompletionScope::Session(&sid), cwd, "", 5);
         Rc::new(RefCell::new(r))
     }
 
@@ -648,7 +673,7 @@ mod tests {
         let registry = make_mention_registry_with_cwd(std::path::Path::new("."));
         let src = MentionQuerySource::new(
             Rc::clone(&registry),
-            SessionId::new(),
+            crate::mentions::CompletionScope::Session(&SessionId::new()),
             std::path::PathBuf::from("."),
             1, // prefix_start — the '@' byte
         );
@@ -660,7 +685,7 @@ mod tests {
         let registry = make_mention_registry_with_cwd(std::path::Path::new("."));
         let src = MentionQuerySource::new(
             Rc::clone(&registry),
-            SessionId::new(),
+            crate::mentions::CompletionScope::Session(&SessionId::new()),
             std::path::PathBuf::from("."),
             0,
         );
@@ -679,7 +704,7 @@ mod tests {
         let registry = make_mention_registry_with_cwd(tmp.path());
         let mut src = MentionQuerySource::new(
             Rc::clone(&registry),
-            SessionId::new(),
+            crate::mentions::CompletionScope::Session(&SessionId::new()),
             tmp.path().to_path_buf(),
             1, // '@' at byte 1
         );
@@ -712,7 +737,7 @@ mod tests {
         let registry = make_mention_registry_with_cwd(tmp.path());
         let mut src = MentionQuerySource::new(
             Rc::clone(&registry),
-            SessionId::new(),
+            crate::mentions::CompletionScope::Session(&SessionId::new()),
             tmp.path().to_path_buf(),
             0,
         );

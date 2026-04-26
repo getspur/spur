@@ -219,7 +219,7 @@ impl PickerShell {
     // ── Rendering ──────────────────────────────────────────────────────
 
     /// Render above `anchor` (the InputBar's rect), clipped to `container`.
-    pub fn render(&mut self, frame: &mut Frame, anchor: Rect, container: Rect) {
+    pub fn render(&self, frame: &mut Frame, anchor: Rect, container: Rect) {
         let query_mode_owned = self.source.query_mode() == QueryMode::OwnedByShell;
         let list_rows = self.rows.len().clamp(1, 8) as u16;
         let query_rows = if query_mode_owned { 1 } else { 0 };
@@ -342,7 +342,8 @@ impl PickerShell {
                 .collect();
             let list =
                 List::new(items).highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-            frame.render_stateful_widget(list, list_area, &mut self.list_state);
+            let mut list_state = self.list_state.clone();
+            frame.render_stateful_widget(list, list_area, &mut list_state);
         }
 
         if let Some((cx, cy)) = cursor_cell {

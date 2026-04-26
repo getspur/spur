@@ -1,5 +1,5 @@
 use spur_acp::SessionId;
-use spur_tui::mentions::{MentionKind, MentionRegistry, WorkerMentionDescriptor};
+use spur_tui::mentions::{CompletionScope, MentionKind, MentionRegistry, WorkerMentionDescriptor};
 
 #[test]
 fn file_mentions_index_and_fuzzy_match() {
@@ -12,14 +12,14 @@ fn file_mentions_index_and_fuzzy_match() {
 
     let mut reg = MentionRegistry::new();
     let sid = SessionId::new();
-    let hits = reg.query(&sid, root, "foo", 10);
+    let hits = reg.query(CompletionScope::Session(&sid), root, "foo", 10);
     assert!(
         hits.iter().any(|h| h.display.contains("foo.rs")),
         "{:?}",
         hits
     );
 
-    let all = reg.query(&sid, root, "", 10);
+    let all = reg.query(CompletionScope::Session(&sid), root, "", 10);
     assert!(!all.is_empty());
 }
 
@@ -35,7 +35,7 @@ fn brain_session_includes_workers_in_empty_query() {
     // are always within the limit.
     let tmp = tempfile::tempdir().unwrap();
     let cwd = tmp.path();
-    let hits = reg.query(&sid, cwd, "", 10);
+    let hits = reg.query(CompletionScope::Session(&sid), cwd, "", 10);
     assert!(
         hits.iter()
             .any(|h| h.kind == MentionKind::Worker && h.display == "worker:claude-code"),
@@ -49,7 +49,7 @@ fn direct_session_excludes_workers() {
     let mut reg = MentionRegistry::for_direct_session();
     let sid = SessionId::new();
     let tmp = tempfile::tempdir().unwrap();
-    let hits = reg.query(&sid, tmp.path(), "", 50);
+    let hits = reg.query(CompletionScope::Session(&sid), tmp.path(), "", 50);
     assert!(
         !hits.iter().any(|h| h.kind == MentionKind::Worker),
         "direct session should not surface worker entries"
@@ -76,7 +76,7 @@ fn empty_query_pins_workers_first() {
         let mut f = std::fs::File::create(tmp.path().join(format!("{}.rs", ch))).unwrap();
         writeln!(f, "// stub").unwrap();
     }
-    let hits = reg.query(&sid, tmp.path(), "", 20);
+    let hits = reg.query(CompletionScope::Session(&sid), tmp.path(), "", 20);
     let worker_count = hits
         .iter()
         .take(6)
@@ -113,7 +113,7 @@ fn empty_query_caps_workers_at_pin_cap() {
         let mut f = std::fs::File::create(tmp.path().join(format!("file_{:02}.rs", i))).unwrap();
         writeln!(f, "// stub").unwrap();
     }
-    let hits = reg.query(&sid, tmp.path(), "", 20);
+    let hits = reg.query(CompletionScope::Session(&sid), tmp.path(), "", 20);
     let head_workers = hits
         .iter()
         .take(6)
@@ -144,7 +144,7 @@ fn typed_query_boosts_worker_in_ambiguous_match() {
     let sid = SessionId::new();
     // Use a real workspace dir so FileMentionSource has files to compete.
     let cwd = std::env::current_dir().unwrap();
-    let hits = reg.query(&sid, &cwd, "cla", 5);
+    let hits = reg.query(CompletionScope::Session(&sid), &cwd, "cla", 5);
     assert!(
         hits.first()
             .map(|h| h.kind == MentionKind::Worker)

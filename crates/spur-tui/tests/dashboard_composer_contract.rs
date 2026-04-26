@@ -4,7 +4,10 @@
 //! (empty vs non-empty input bar) rather than post-edit rescue logic.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use spur_acp::ContentBlock;
 use spur_core::ExecutorLineage;
+use spur_tui::action::Action;
+use spur_tui::views::dashboard::DashboardMode;
 use spur_tui::views::dashboard::DashboardView;
 use spur_tui::views::View;
 
@@ -12,6 +15,16 @@ fn test_ctx() -> spur_tui::views::ViewContext<'static> {
     static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
         std::sync::LazyLock::new(ExecutorLineage::new);
     spur_tui::test_support::test_view_ctx(&LINEAGE)
+}
+
+fn press(dashboard: &mut DashboardView, code: KeyCode) -> Option<Action> {
+    dashboard.handle_key(KeyEvent::new(code, KeyModifiers::NONE), &test_ctx())
+}
+
+fn type_str(dashboard: &mut DashboardView, s: &str) {
+    for c in s.chars() {
+        let _ = press(dashboard, KeyCode::Char(c));
+    }
 }
 
 #[test]
@@ -45,6 +58,44 @@ fn non_empty_dashboard_j_stays_in_input_bar() {
         action
     );
     assert_eq!(dashboard.input_bar_text_for_test(), "helloj");
+}
+
+#[test]
+fn dashboard_pre_session_mention_accept_submits_resource_link() {
+    let mut dashboard = DashboardView::new();
+
+    type_str(&mut dashboard, "please summarize @Cargo.toml");
+    let _ = press(&mut dashboard, KeyCode::Tab);
+    let action = press(&mut dashboard, KeyCode::Enter).expect("submit action");
+
+    match action {
+        Action::NewSessionWithMessage { blocks, .. } => {
+            assert!(
+                blocks
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ResourceLink(_))),
+                "expected ResourceLink in pre-session Dashboard blocks, got {blocks:?}"
+            );
+        }
+        other => panic!("expected NewSessionWithMessage, got {other:?}"),
+    }
+}
+
+#[test]
+fn dashboard_esc_closes_active_completion_before_exiting_compose() {
+    let mut dashboard = DashboardView::new();
+
+    type_str(&mut dashboard, "@");
+    assert_eq!(dashboard.mode(), DashboardMode::Compose);
+
+    let action = press(&mut dashboard, KeyCode::Esc);
+
+    assert!(
+        action.is_none(),
+        "Esc should close completion, got {action:?}"
+    );
+    assert_eq!(dashboard.mode(), DashboardMode::Compose);
+    assert_eq!(dashboard.input_bar_text_for_test(), "@");
 }
 
 #[test]
