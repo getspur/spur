@@ -1109,7 +1109,16 @@ impl View for SessionPickerView {
                                 }
                                 None
                             }
-                            KeyCode::Char('n') => Some(Action::NewSessionRequested),
+                            KeyCode::Char('n') => {
+                                if current_session_with_draft.is_some() {
+                                    post = Post::StartConfirmSwitch(
+                                        ConfirmSwitchTarget::NewSession,
+                                    );
+                                    None
+                                } else {
+                                    Some(Action::NewSessionRequested)
+                                }
+                            }
                             KeyCode::Enter => {
                                 if *cursor == 0 {
                                     // [+ New session] row: if the current session has a
