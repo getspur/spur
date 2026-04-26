@@ -538,7 +538,9 @@ impl WorktreeManager {
 
     /// Remove orphaned SPUR worktrees left on disk from previous runs.
     /// Discovers worktrees via `git worktree list --porcelain` and removes
-    /// any with a `spur/` branch prefix that aren't in `self.active`.
+    /// any backed by a v2 worker branch (`refs/heads/spur/worker/v2/...`)
+    /// that aren't in `self.active`. Pre-v2 / snapshot / user branches are
+    /// never touched by this function (per spec invariant I-7).
     pub async fn cleanup_orphans(&self) -> Result<usize> {
         let output = Command::new("git")
             .args(["worktree", "list", "--porcelain"])
@@ -562,7 +564,7 @@ impl WorktreeManager {
                 wt_path = Some(p);
             }
             if let Some(branch) = line.strip_prefix("branch ") {
-                if branch.contains("spur/") {
+                if branch.starts_with("refs/heads/spur/worker/v2/") {
                     if let Some(path) = wt_path {
                         // Skip if it's tracked in our active set
                         if self
@@ -736,6 +738,41 @@ mod tests_option_e {
             manager.active_count(),
             1,
             "in-memory entry must NOT be removed when git detach fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_orphans_only_touches_v2_worker_namespace() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _base_sha = seed_base_repo(tmp.path()).await;
+
+        // Create three branches: legacy, v2, and a non-SPUR user branch.
+        let manager = WorktreeManager::new_for_test(tmp.path().to_path_buf());
+        let _ = manager
+            .run_git(&["branch", "spur/worker-legacy-deadbeef"], None)
+            .await;
+        let _ = manager
+            .run_git(
+                &[
+                    "branch",
+                    "spur/worker/v2/codex/550e8400-e29b-41d4-a716-446655440000/deadbeef-1111-2222-3333-444455556666",
+                ],
+                None,
+            )
+            .await;
+        let _ = manager.run_git(&["branch", "feature/userwork"], None).await;
+
+        // No worktrees back any of these branches, so cleanup_orphans should
+        // not delete any worktrees AND must not touch user branches.
+        let _removed = manager.cleanup_orphans().await.unwrap_or(0);
+
+        let branches = manager
+            .run_git(&["branch", "--list"], None)
+            .await
+            .unwrap_or_default();
+        assert!(
+            branches.contains("feature/userwork"),
+            "user branches must NEVER be touched by cleanup_orphans"
         );
     }
 
