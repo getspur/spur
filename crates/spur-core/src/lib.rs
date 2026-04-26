@@ -21,6 +21,7 @@ pub mod review_sink;
 pub mod skills;
 pub mod skip_perm;
 pub mod spur_ext_interp;
+pub mod worktree_authority;
 
 pub use lineage::{
     Attempt, AttemptStatus, ExecutorId, ExecutorLineage, ExecutorNode, PeerEdge, PeerEdgeState,
@@ -36,3 +37,4 @@ pub use review_sink::{ReviewSink, ReviewSinkError};
 pub use spur_acp::{
     Artifact, DiffSummary, LifecycleState, ReviewDecision, ReviewKind, ReviewPayload, Role,
 };
+pub use worktree_authority::{AuthorityConfig, SweepReport, WorktreeAuthority};
