@@ -12,6 +12,11 @@
   event directly. (bd-cpf.5b)
 
 ### Added
+- **`WorkerPeerMailboxReconciled.inflight_already_delivered` counter.**
+  Tracks benign idempotent races during startup reconciliation where an
+  entry was already in `Delivered` state when the reconciler attempted
+  to advance it. Always 0 in Stage-1; becomes non-zero under Stage-2
+  crash-loop or concurrent-reconcile scenarios. (bd-cpf.5c)
 - **Spur Way skill bundle.** Six bundled skills harden brain-worker-beads
   collaboration: `spur-way` (beads-first invariant), `beads-lifecycle`
   (status state machine), `worker-signals` (`[[spur-signal v1]]` protocol),

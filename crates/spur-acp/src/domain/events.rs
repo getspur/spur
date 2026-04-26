@@ -480,8 +480,14 @@ pub enum SpurEventBody {
         /// `WorkerPeerMessageAuditFailed` event type (filtered by
         /// `transition_kind == "reconcile_to_delivered"`) for direct alerting
         /// rather than this counter.
+        #[serde(default)]
         audit_failed_emitted: u32,
         inflight_forced_to_delivered: u32,
+        /// Count of reconciler entries already in `Delivered` state at
+        /// transition time (benign concurrent-advance races). See
+        /// `ReconcileCounts::inflight_already_delivered`.
+        #[serde(default)]
+        inflight_already_delivered: u32,
         #[serde(default)]
         inflight_stranded: u32,
         inflight_reverted_to_queued: u32,
@@ -1198,6 +1204,7 @@ mod worker_peer_event_tests {
             brain_session_id: "bs-1".into(),
             audit_failed_emitted: 2,
             inflight_forced_to_delivered: 1,
+            inflight_already_delivered: 5,
             inflight_stranded: 4,
             inflight_reverted_to_queued: 0,
             guards_re_wrapped: 3,
@@ -1208,6 +1215,31 @@ mod worker_peer_event_tests {
             back,
             SpurEventBody::WorkerPeerMailboxReconciled { .. }
         ));
+    }
+
+    #[test]
+    fn worker_peer_mailbox_reconciled_deserializes_with_missing_new_fields() {
+        let json = r#"{
+            "WorkerPeerMailboxReconciled": {
+                "brain_session_id": "bs-1",
+                "inflight_forced_to_delivered": 2,
+                "inflight_stranded": 0,
+                "inflight_reverted_to_queued": 0,
+                "guards_re_wrapped": 1
+            }
+        }"#;
+        let body: SpurEventBody = serde_json::from_str(json).unwrap();
+        if let SpurEventBody::WorkerPeerMailboxReconciled {
+            audit_failed_emitted,
+            inflight_already_delivered,
+            ..
+        } = body
+        {
+            assert_eq!(audit_failed_emitted, 0);
+            assert_eq!(inflight_already_delivered, 0);
+        } else {
+            panic!("wrong variant");
+        }
     }
 
     #[test]
