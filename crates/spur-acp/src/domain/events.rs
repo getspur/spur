@@ -439,6 +439,14 @@ pub enum SpurEventBody {
     ///
     /// "Stranded" means the reconciler refused to infer a safe lifecycle
     /// transition; operators should inspect the ledger state and reason.
+    ///
+    /// Stage-1 alerting note: this variant is unreachable in production today
+    /// because `record_injection` always precedes the `DeliveredInflight`
+    /// transition in the orchestrator. It becomes a real signal once the
+    /// Stage-2 persistent ledger introduces failure modes (eviction, async
+    /// write loss) that can leave a `DeliveredInflight` entry without
+    /// injection records. Alerts on `inflight_stranded > 0` should be staged
+    /// for that release.
     WorkerPeerMessageReconciledStranded {
         brain_session_id: String,
         message_id: crate::domain::peer_message::PeerMessageId,
@@ -446,6 +454,14 @@ pub enum SpurEventBody {
         state: crate::domain::peer_message::LedgerState,
         reason: String,
     },
+    /// Aggregated counts emitted at the end of `run_startup_reconcile`.
+    ///
+    /// Counter migration (post-bd-cpf.3): `inflight_stranded` replaces
+    /// `inflight_reverted_to_queued` for any operational dashboard or alert
+    /// that tracked reconciler-found anomalies. The `inflight_reverted_to_queued`
+    /// field is retained for wire compatibility with older replay readers and
+    /// is always emitted as 0 going forward — consumers should switch to
+    /// `inflight_stranded`.
     WorkerPeerMailboxReconciled {
         brain_session_id: String,
         audit_failed_emitted: u32,
