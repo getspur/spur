@@ -88,6 +88,23 @@ impl FeatureKey {
     pub const ENABLE_COMPACTION_V2: Self = Self("enable_compaction_v2");
     pub const ENABLE_TELEMETRY: Self = Self("enable_telemetry");
 
+    // === Tier revamp v1 keys (post-2026-04-26) ===
+
+    // --- spur-acp (11) ---
+    pub const ACP_CORE_TRANSPORT_STDIO: Self = Self("acp_core_transport_stdio");
+    pub const ACP_CORE_TRANSPORT_SOCKET: Self = Self("acp_core_transport_socket");
+    pub const ACP_CORE_ADAPTER_CLAUDE_CODE: Self = Self("acp_core_adapter_claude_code");
+    pub const ACP_CORE_ADAPTER_CODEX: Self = Self("acp_core_adapter_codex");
+    pub const ACP_CORE_ADAPTER_GEMINI: Self = Self("acp_core_adapter_gemini");
+    pub const ACP_CORE_ADAPTER_KIRO: Self = Self("acp_core_adapter_kiro");
+    pub const ACP_CORE_ADAPTER_CURSOR: Self = Self("acp_core_adapter_cursor");
+    pub const ACP_CORE_ADAPTER_OPENCODE: Self = Self("acp_core_adapter_opencode");
+    pub const ACP_CORE_ADAPTER_KIMI: Self = Self("acp_core_adapter_kimi");
+    pub const ACP_CORE_SESSION_ATTACH_ADVISORY_LOCK: Self =
+        Self("acp_core_session_attach_advisory_lock");
+    pub const ACP_CORE_SESSION_ATTACH_DEGRADED_NOLOCK: Self =
+        Self("acp_core_session_attach_degraded_nolock");
+
     pub const fn as_str(&self) -> &'static str {
         self.0
     }
@@ -170,6 +187,30 @@ impl FeatureKey {
             Some(Self::ENABLE_COMPACTION_V2)
         } else if bytes_eq(b, b"enable_telemetry") {
             Some(Self::ENABLE_TELEMETRY)
+        // ===== Tier revamp v1 keys =====
+        // spur-acp
+        } else if bytes_eq(b, b"acp_core_transport_stdio") {
+            Some(Self::ACP_CORE_TRANSPORT_STDIO)
+        } else if bytes_eq(b, b"acp_core_transport_socket") {
+            Some(Self::ACP_CORE_TRANSPORT_SOCKET)
+        } else if bytes_eq(b, b"acp_core_adapter_claude_code") {
+            Some(Self::ACP_CORE_ADAPTER_CLAUDE_CODE)
+        } else if bytes_eq(b, b"acp_core_adapter_codex") {
+            Some(Self::ACP_CORE_ADAPTER_CODEX)
+        } else if bytes_eq(b, b"acp_core_adapter_gemini") {
+            Some(Self::ACP_CORE_ADAPTER_GEMINI)
+        } else if bytes_eq(b, b"acp_core_adapter_kiro") {
+            Some(Self::ACP_CORE_ADAPTER_KIRO)
+        } else if bytes_eq(b, b"acp_core_adapter_cursor") {
+            Some(Self::ACP_CORE_ADAPTER_CURSOR)
+        } else if bytes_eq(b, b"acp_core_adapter_opencode") {
+            Some(Self::ACP_CORE_ADAPTER_OPENCODE)
+        } else if bytes_eq(b, b"acp_core_adapter_kimi") {
+            Some(Self::ACP_CORE_ADAPTER_KIMI)
+        } else if bytes_eq(b, b"acp_core_session_attach_advisory_lock") {
+            Some(Self::ACP_CORE_SESSION_ATTACH_ADVISORY_LOCK)
+        } else if bytes_eq(b, b"acp_core_session_attach_degraded_nolock") {
+            Some(Self::ACP_CORE_SESSION_ATTACH_DEGRADED_NOLOCK)
         } else {
             None
         }
@@ -450,5 +491,24 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, EXPECTED_TOTAL_KEYS, "key count mismatch");
+    }
+
+    #[test]
+    fn spur_acp_keys_registered() {
+        for s in &[
+            "acp_core_transport_stdio",
+            "acp_core_transport_socket",
+            "acp_core_adapter_claude_code",
+            "acp_core_adapter_codex",
+            "acp_core_adapter_gemini",
+            "acp_core_adapter_kiro",
+            "acp_core_adapter_cursor",
+            "acp_core_adapter_opencode",
+            "acp_core_adapter_kimi",
+            "acp_core_session_attach_advisory_lock",
+            "acp_core_session_attach_degraded_nolock",
+        ] {
+            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
     }
 }
