@@ -162,6 +162,22 @@ impl FeatureKey {
     pub const SKILLS_PRO_CUSTOM: Self = Self("skills_pro_custom");
     pub const SKILLS_PRO_ROLE_GATING: Self = Self("skills_pro_role_gating");
 
+    // --- spur-mcp (14) ---
+    pub const MCP_CORE_SERVER_DISPATCH: Self = Self("mcp_core_server_dispatch");
+    pub const MCP_CORE_DELEGATE: Self = Self("mcp_core_delegate");
+    pub const MCP_CORE_OUTCOME_FETCH: Self = Self("mcp_core_outcome_fetch");
+    pub const MCP_CORE_PM: Self = Self("mcp_core_pm");
+    pub const MCP_CORE_PR: Self = Self("mcp_core_pr");
+    pub const MCP_CORE_PLAN_EPHEMERAL: Self = Self("mcp_core_plan_ephemeral");
+    pub const MCP_CORE_OUTCOME_MATERIALIZER: Self = Self("mcp_core_outcome_materializer");
+    pub const MCP_PRO_PLAN_DURABLE: Self = Self("mcp_pro_plan_durable");
+    pub const MCP_PRO_RECONCILER_JOURNAL_NOTIFY: Self = Self("mcp_pro_reconciler_journal_notify");
+    pub const MCP_PRO_SIGNAL_WATCHER_SCOPE_DRIFT: Self = Self("mcp_pro_signal_watcher_scope_drift");
+    pub const MCP_PRO_MUTATION_EXECUTOR: Self = Self("mcp_pro_mutation_executor");
+    pub const MCP_PRO_GRAPH_TOOLS: Self = Self("mcp_pro_graph_tools");
+    pub const MCP_PRO_REVIEW: Self = Self("mcp_pro_review");
+    pub const MCP_PRO_CUSTOM_TOOLS: Self = Self("mcp_pro_custom_tools");
+
     pub const fn as_str(&self) -> &'static str {
         self.0
     }
@@ -348,6 +364,35 @@ impl FeatureKey {
             Some(Self::SKILLS_PRO_CUSTOM)
         } else if bytes_eq(b, b"skills_pro_role_gating") {
             Some(Self::SKILLS_PRO_ROLE_GATING)
+        // spur-mcp
+        } else if bytes_eq(b, b"mcp_core_server_dispatch") {
+            Some(Self::MCP_CORE_SERVER_DISPATCH)
+        } else if bytes_eq(b, b"mcp_core_delegate") {
+            Some(Self::MCP_CORE_DELEGATE)
+        } else if bytes_eq(b, b"mcp_core_outcome_fetch") {
+            Some(Self::MCP_CORE_OUTCOME_FETCH)
+        } else if bytes_eq(b, b"mcp_core_pm") {
+            Some(Self::MCP_CORE_PM)
+        } else if bytes_eq(b, b"mcp_core_pr") {
+            Some(Self::MCP_CORE_PR)
+        } else if bytes_eq(b, b"mcp_core_plan_ephemeral") {
+            Some(Self::MCP_CORE_PLAN_EPHEMERAL)
+        } else if bytes_eq(b, b"mcp_core_outcome_materializer") {
+            Some(Self::MCP_CORE_OUTCOME_MATERIALIZER)
+        } else if bytes_eq(b, b"mcp_pro_plan_durable") {
+            Some(Self::MCP_PRO_PLAN_DURABLE)
+        } else if bytes_eq(b, b"mcp_pro_reconciler_journal_notify") {
+            Some(Self::MCP_PRO_RECONCILER_JOURNAL_NOTIFY)
+        } else if bytes_eq(b, b"mcp_pro_signal_watcher_scope_drift") {
+            Some(Self::MCP_PRO_SIGNAL_WATCHER_SCOPE_DRIFT)
+        } else if bytes_eq(b, b"mcp_pro_mutation_executor") {
+            Some(Self::MCP_PRO_MUTATION_EXECUTOR)
+        } else if bytes_eq(b, b"mcp_pro_graph_tools") {
+            Some(Self::MCP_PRO_GRAPH_TOOLS)
+        } else if bytes_eq(b, b"mcp_pro_review") {
+            Some(Self::MCP_PRO_REVIEW)
+        } else if bytes_eq(b, b"mcp_pro_custom_tools") {
+            Some(Self::MCP_PRO_CUSTOM_TOOLS)
         } else {
             None
         }
@@ -744,6 +789,28 @@ mod tests {
             "skills_core_render_per_vendor",
             "skills_pro_custom",
             "skills_pro_role_gating",
+        ] {
+            assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
+        }
+    }
+
+    #[test]
+    fn spur_mcp_keys_registered() {
+        for s in &[
+            "mcp_core_server_dispatch",
+            "mcp_core_delegate",
+            "mcp_core_outcome_fetch",
+            "mcp_core_pm",
+            "mcp_core_pr",
+            "mcp_core_plan_ephemeral",
+            "mcp_core_outcome_materializer",
+            "mcp_pro_plan_durable",
+            "mcp_pro_reconciler_journal_notify",
+            "mcp_pro_signal_watcher_scope_drift",
+            "mcp_pro_mutation_executor",
+            "mcp_pro_graph_tools",
+            "mcp_pro_review",
+            "mcp_pro_custom_tools",
         ] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
