@@ -2285,6 +2285,9 @@ impl Orchestrator {
                         if let Some(h) = dead.notification_pump_handle.take() {
                             h.abort();
                         }
+                        self.self_held.remove(&spur_acp::BrainSessionId::from(
+                            dead.spur_session_id.clone(),
+                        ));
                         retire_brain_session(
                             &self.funnel,
                             &dead.spur_session_id,
@@ -2326,6 +2329,9 @@ impl Orchestrator {
                     if let Some(h) = dead.notification_pump_handle.take() {
                         h.abort();
                     }
+                    self.self_held.remove(&spur_acp::BrainSessionId::from(
+                        dead.spur_session_id.clone(),
+                    ));
                     retire_brain_session(
                         &self.funnel,
                         &dead.spur_session_id,
@@ -2458,6 +2464,8 @@ impl Orchestrator {
             if let Some(h) = b.notification_pump_handle.take() {
                 h.abort();
             }
+            self.self_held
+                .remove(&spur_acp::BrainSessionId::from(b.spur_session_id.clone()));
             retire_brain_session(
                 &self.funnel,
                 &b.spur_session_id,
@@ -3407,6 +3415,9 @@ impl Orchestrator {
         if let Some(h) = dead_brain.notification_pump_handle.take() {
             h.abort();
         }
+        self.self_held.remove(&spur_acp::BrainSessionId::from(
+            dead_brain.spur_session_id.clone(),
+        ));
         shutdown_mcp_server(
             &self.funnel,
             &dead_brain.spur_session_id,
