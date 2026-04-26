@@ -5237,6 +5237,24 @@ async fn run_one_worker_attempt(
     })
 }
 
+async fn candidate_set_for_target(
+    bundle: &crate::peer_mailbox::PeerMailboxBundle,
+    delegation_id: &spur_acp::domain::delegation::DelegationId,
+) -> Vec<crate::peer_mailbox::LedgerEntry> {
+    let mut candidates = bundle.ledger.pending_for_target(delegation_id).await;
+    candidates.extend(
+        bundle
+            .ledger
+            .non_terminal_entries()
+            .await
+            .into_iter()
+            .filter(|entry| &entry.envelope.target_delegation_id == delegation_id),
+    );
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|entry| seen.insert(entry.envelope.message_id));
+    candidates
+}
+
 /// Forced-terminal-timeout drain. Waits up to `quiet_window` for peer-ack
 /// notifications scoped to `delegation_id`. Each ack resets the window.
 /// The drain is also bounded by `max_total`. After either deadline elapses,
@@ -5252,12 +5270,20 @@ async fn drain_peer_acks_with_timeout(
     mut ack_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
 ) {
     use spur_acp::domain::peer_message::{LedgerState, TerminalOutcome};
-    use std::collections::HashSet;
 
     let cap_deadline = tokio::time::Instant::now() + max_total;
     let drain_start = tokio::time::Instant::now();
     let mut cap_hit = false;
     let mut acks_received: u32 = 0;
+    let candidates_at_start = candidate_set_for_target(bundle, delegation_id).await.len() as u32;
+
+    funnel.emit(spur_acp::SpurEventBody::WorkerPeerMessageDrainStarted {
+        brain_session_id: brain_session_id.to_string(),
+        target_delegation_id: delegation_id.clone(),
+        candidates_at_start,
+        cap_ms: max_total.as_millis() as u64,
+        quiet_window_ms: quiet_window.as_millis() as u64,
+    });
 
     loop {
         let now = tokio::time::Instant::now();
@@ -5284,24 +5310,14 @@ async fn drain_peer_acks_with_timeout(
 
     let actual_elapsed_ms = drain_start.elapsed().as_millis() as u64;
 
-    let mut candidates = bundle.ledger.pending_for_target(delegation_id).await;
-    candidates.extend(
-        bundle
-            .ledger
-            .non_terminal_entries()
-            .await
-            .into_iter()
-            .filter(|entry| &entry.envelope.target_delegation_id == delegation_id),
-    );
-
-    let mut remaining_seen = HashSet::new();
+    let candidates = candidate_set_for_target(bundle, delegation_id).await;
     let remaining_messages = candidates
         .iter()
         .filter(|entry| {
             matches!(
                 entry.state,
                 LedgerState::Delivered | LedgerState::DeliveredInflight
-            ) && remaining_seen.insert(entry.envelope.message_id)
+            )
         })
         .count() as u32;
 
@@ -5314,6 +5330,16 @@ async fn drain_peer_acks_with_timeout(
             cap_ms: max_total.as_millis() as u64,
             actual_elapsed_ms,
         });
+    } else if remaining_messages > 0 {
+        funnel.emit(spur_acp::SpurEventBody::WorkerPeerMessageDrainTimedOut {
+            brain_session_id: brain_session_id.to_string(),
+            target_delegation_id: delegation_id.clone(),
+            acks_received,
+            remaining_messages,
+            cap_ms: max_total.as_millis() as u64,
+            quiet_window_ms: quiet_window.as_millis() as u64,
+            actual_elapsed_ms,
+        });
     }
 
     let reason = if cap_hit {
@@ -5321,12 +5347,8 @@ async fn drain_peer_acks_with_timeout(
     } else {
         "drain_timeout"
     };
-    let mut seen = HashSet::new();
     for entry in candidates {
         let message_id = entry.envelope.message_id;
-        if !seen.insert(message_id) {
-            continue;
-        }
         if !matches!(
             entry.state,
             LedgerState::Delivered | LedgerState::DeliveredInflight
@@ -6124,9 +6146,8 @@ mod peer_mailbox_drain_tests {
         funnel: crate::event_funnel::FunnelHandle,
         ack_rx: UnboundedReceiver<()>,
     ) -> tokio::task::JoinHandle<Duration> {
-        let brain_session_id = spur_acp::BrainSessionId::new(spur_acp::types::SessionId(
-            brain_session_id.into(),
-        ));
+        let brain_session_id =
+            spur_acp::BrainSessionId::new(spur_acp::types::SessionId(brain_session_id.into()));
         let start = tokio::time::Instant::now();
         let handle = tokio::spawn(async move {
             drain_peer_acks_with_timeout(
@@ -6183,6 +6204,233 @@ mod peer_mailbox_drain_tests {
                 )
             })
             .count()
+    }
+
+    fn fixed_peer_message_id(suffix: u16) -> PeerMessageId {
+        serde_json::from_str(&format!("\"00000000-0000-0000-0000-{suffix:012}\"")).unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_started_emits_with_candidates_at_start() {
+        let mut fixture = fixture(&["tgt"]);
+        let target = DelegationId("tgt".into());
+        for suffix in 800..803 {
+            accept_and_walk(
+                &fixture,
+                fixed_peer_message_id(suffix),
+                &target,
+                LedgerState::Delivered,
+            )
+            .await;
+        }
+
+        let (ack_tx, ack_rx) = unbounded_channel();
+        let _hold_open_until_timeout = ack_tx.clone();
+        drop(ack_tx);
+
+        let quiet_window = Duration::from_millis(100);
+        let handle = spawn_drain(
+            fixture.bundle.clone(),
+            target.clone(),
+            quiet_window,
+            Duration::from_secs(60),
+            "bs",
+            fixture.funnel.clone(),
+            ack_rx,
+        )
+        .await;
+        tokio::time::advance(quiet_window).await;
+        handle.await.unwrap();
+
+        let events = drain_events(&mut fixture.events);
+        let started_events: Vec<_> = events
+            .iter()
+            .filter_map(|event| {
+                if let SpurEventBody::WorkerPeerMessageDrainStarted {
+                    brain_session_id,
+                    target_delegation_id,
+                    candidates_at_start,
+                    cap_ms,
+                    quiet_window_ms,
+                } = event
+                {
+                    Some((
+                        brain_session_id,
+                        target_delegation_id,
+                        *candidates_at_start,
+                        *cap_ms,
+                        *quiet_window_ms,
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(started_events.len(), 1);
+        let (brain_session_id, event_target, candidates_at_start, cap_ms, quiet_window_ms) =
+            started_events[0];
+        assert_eq!(brain_session_id, "bs");
+        assert_eq!(event_target, &target);
+        assert_eq!(candidates_at_start, 3);
+        assert_eq!(cap_ms, 60_000);
+        assert_eq!(quiet_window_ms, 100);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_timed_out_emits_when_quiet_window_exits_with_remaining() {
+        let mut fixture = fixture(&["tgt"]);
+        let target = DelegationId("tgt".into());
+        let message_id = fixed_peer_message_id(810);
+        accept_and_walk(&fixture, message_id, &target, LedgerState::Delivered).await;
+
+        let (ack_tx, ack_rx) = unbounded_channel();
+        let _hold_open_until_timeout = ack_tx.clone();
+        drop(ack_tx);
+
+        let quiet_window = Duration::from_millis(100);
+        let handle = spawn_drain(
+            fixture.bundle.clone(),
+            target.clone(),
+            quiet_window,
+            Duration::from_secs(60),
+            "bs",
+            fixture.funnel.clone(),
+            ack_rx,
+        )
+        .await;
+        tokio::time::advance(quiet_window).await;
+        handle.await.unwrap();
+
+        let events = drain_events(&mut fixture.events);
+        let timeout_events: Vec<_> = events
+            .iter()
+            .filter_map(|event| {
+                if let SpurEventBody::WorkerPeerMessageDrainTimedOut {
+                    brain_session_id,
+                    target_delegation_id,
+                    acks_received,
+                    remaining_messages,
+                    cap_ms,
+                    quiet_window_ms,
+                    actual_elapsed_ms,
+                } = event
+                {
+                    Some((
+                        brain_session_id,
+                        target_delegation_id,
+                        *acks_received,
+                        *remaining_messages,
+                        *cap_ms,
+                        *quiet_window_ms,
+                        *actual_elapsed_ms,
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(timeout_events.len(), 1);
+        let (
+            brain_session_id,
+            event_target,
+            acks_received,
+            remaining_messages,
+            cap_ms,
+            quiet_window_ms,
+            elapsed_ms,
+        ) = timeout_events[0];
+        assert_eq!(brain_session_id, "bs");
+        assert_eq!(event_target, &target);
+        assert_eq!(acks_received, 0);
+        assert!(remaining_messages >= 1);
+        assert_eq!(cap_ms, 60_000);
+        assert_eq!(quiet_window_ms, 100);
+        assert!(
+            (100..=150).contains(&elapsed_ms),
+            "actual_elapsed_ms: {elapsed_ms}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_timed_out_not_emitted_on_clean_exit() {
+        let mut fixture = fixture(&["tgt"]);
+        let target = DelegationId("tgt".into());
+
+        let (ack_tx, ack_rx) = unbounded_channel();
+        let _hold_open_until_timeout = ack_tx.clone();
+        drop(ack_tx);
+
+        let quiet_window = Duration::from_millis(100);
+        let handle = spawn_drain(
+            fixture.bundle.clone(),
+            target,
+            quiet_window,
+            Duration::from_secs(60),
+            "bs",
+            fixture.funnel.clone(),
+            ack_rx,
+        )
+        .await;
+        tokio::time::advance(quiet_window).await;
+        handle.await.unwrap();
+
+        let events = drain_events(&mut fixture.events);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    SpurEventBody::WorkerPeerMessageDrainTimedOut { .. }
+                ))
+                .count(),
+            0
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_cap_hit_emits_only_drain_capped_out() {
+        let mut fixture = fixture(&["tgt"]);
+        let target = DelegationId("tgt".into());
+        let message_id = fixed_peer_message_id(820);
+        accept_and_walk(&fixture, message_id, &target, LedgerState::Delivered).await;
+
+        let (_ack_tx, ack_rx) = unbounded_channel();
+        let quiet_window = Duration::from_secs(10);
+        let max_total = Duration::from_millis(100);
+        let handle = spawn_drain(
+            fixture.bundle.clone(),
+            target,
+            quiet_window,
+            max_total,
+            "bs",
+            fixture.funnel.clone(),
+            ack_rx,
+        )
+        .await;
+        tokio::time::advance(max_total).await;
+        handle.await.unwrap();
+
+        let events = drain_events(&mut fixture.events);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    SpurEventBody::WorkerPeerMessageDrainCappedOut { .. }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    SpurEventBody::WorkerPeerMessageDrainTimedOut { .. }
+                ))
+                .count(),
+            0
+        );
     }
 
     #[tokio::test(start_paused = true)]
