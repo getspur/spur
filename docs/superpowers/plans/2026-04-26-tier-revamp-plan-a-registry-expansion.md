@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add 99 new `FeatureKey` constants (Wave 7 final, down from 135 across Waves 5+6+7 4-reviewer + L9-MCTS rationalization) and 1 new `QuotaKey` variant to `spur-license` (additive — old keys remain alongside new keys). No behavior change yet; this is the typed registry foundation that Plans B–E build on.
+**Goal:** Add 64 new `FeatureKey` constants (Wave 8 final, down from 135 across Waves 5+6+7+8 4-reviewer + L9-MCTS first-principles + second-order composition rationalization) and 1 new `QuotaKey` variant to `spur-license` (additive — old keys remain alongside new keys). No behavior change yet; this is the typed registry foundation that Plans B–E build on. **Wave 8 was a major restructure**: 15 over-decomposed families (compile-coupled APIs, all-or-nothing valid substates, producer/consumer chains where one half is meaningless without the other) collapsed into single umbrella keys; +4 drops + 5 vaporware deferrals — see spec §4.16 for the full Wave-8 backlog with code grounding.
 
 **Architecture:** Pure additive changes to `crates/spur-license/src/policy/feature_key.rs` and `crates/spur-license/src/quota.rs`. New keys follow the `<crate>_<tier>_<capability>` naming convention from the spec. The existing `from_known()` parser is extended; the existing `FeatureKey` newtype + `bytes_eq()` const helper are reused unchanged. After this plan ships, the codebase has a dual registry (old + new keys); Plan B will rewrite the policy doc and migrate all existing call sites; Plan B's final task will remove the old keys.
 
 **Tech Stack:** Rust 2021, `spur-license` crate, `cargo test --package spur-license`, no new dependencies.
 
-**Spec reference:** `docs/superpowers/specs/2026-04-26-individual-tier-revamp-design.md` §4 (full feature key registry, 99 keys total post-Wave-7).
+**Spec reference:** `docs/superpowers/specs/2026-04-26-individual-tier-revamp-design.md` §4 (full feature key registry, 64 keys total post-Wave-8) + §4.16 Wave-8 consolidation/drop/defer tables.
 
 ---
 
@@ -17,7 +17,7 @@
 | File | Change | Responsibility |
 |---|---|---|
 | `crates/spur-license/src/quota.rs` | Modify | Add `BrainFailoverChainDepth` variant to `QuotaKey` enum |
-| `crates/spur-license/src/policy/feature_key.rs` | Modify | Add 99 new `pub const` declarations (Wave 7 final) grouped by crate prefix; extend `from_known()` parser; add new tests |
+| `crates/spur-license/src/policy/feature_key.rs` | Modify | Net +64 new `pub const` declarations (Wave 8 final) grouped by crate prefix; extend `from_known()` parser; add new tests. Wave 8 implementation also REMOVES 38 prior-wave const+parser+test entries (15 family consolidations + 4 drops + 5 vaporware defers + 14 prior-wave consts being absorbed into umbrellas) — see spec §4.16. |
 
 No new files. No changes to `gate.rs`, `licenseseat.rs`, `community.rs`, or `default_policy.json` (those are Plan B).
 
@@ -214,7 +214,8 @@ Replace the existing banner at the top of `crates/spur-license/src/policy/featur
 //! callers migrate.
 //!
 //! See `docs/superpowers/specs/2026-04-26-individual-tier-revamp-design.md`
-//! §4 for the full 99-key registry (Wave 7 final).
+//! §4 for the full 64-key registry (Wave 8 final, post-second-order
+//! composition rationalization).
 ```
 
 - [ ] **Step 4: Build workspace**
@@ -1497,9 +1498,67 @@ Parser arm:
 
 ---
 
+## Task 23b: Wave-8 second-order composition pruning (NEW — added 2026-04-27)
+
+**Wave 8 4-reviewer (kimi mechanical truth-table + codex code-grounded coupling tracing) + L9-MCTS judge synthesis** identified 15 over-decomposed families, 4 additional drops, and 5 vaporware deferrals. Per spec §4.16 Wave-8 entries (consolidations + drops + defers), this task removes 38 prior-wave entries and adds 0 new keys. Net: 102 (post-Wave-7) → 64 (post-Wave-8) new keys; total registry 138 → 100 consts.
+
+**Files:**
+- Modify: `crates/spur-license/src/policy/feature_key.rs` (remove consts, parser arms, per-crate test arms; replace with consolidated umbrella keys)
+
+**Pruning checklist** (15 consolidations + 4 drops + 5 defers, total 38 entries removed):
+
+**Consolidations (collapse N→1):**
+
+- [ ] brain trio → `core_core_brain_session`: remove `core_core_brain_scheduler`, `core_core_continuation_bridge` (2 removed)
+- [ ] workers pair → `core_core_parallel_workers`: remove `core_core_cancellable_semaphore` (1 removed)
+- [ ] event sextet → `core_core_event_pipeline` (NEW umbrella replacing 6 keys): remove `core_core_event_funnel_broadcast`, `core_core_event_sink_ndjson_128mb`, `core_core_executor_lineage_projection`, `core_core_notification_pump`, `core_core_agent_notification`, `tui_core_notification_drain`; add `core_core_event_pipeline` (5 net removed)
+- [ ] review trio → `core_core_review` (NEW umbrella replacing 3 keys): remove `core_core_review_sink`, `core_core_review_timeout`, `core_core_review_retry`; add `core_core_review` (2 net removed)
+- [ ] review pro pair → `core_pro_review_auto_approve`: remove `core_pro_review_timeout_routing` (1 removed)
+- [ ] peer_mailbox trio → `core_pro_peer_mailbox_router`: remove `core_pro_peer_mailbox_ledger`, `core_pro_peer_mailbox_stranded_recon` (2 removed)
+- [ ] plan_persistence pair → `core_core_plan_persistence`: remove `core_core_plan_orphan_recovery` (1 removed)
+- [ ] skills quartet → `skills_core_registry`: remove `skills_core_atomic_installation`, `skills_core_render_per_vendor`, `skills_pro_role_gating` (3 removed)
+- [ ] ctx triple → `ctx_pro_duckdb_engine`: remove `ctx_pro_daily_report`, `ctx_pro_weekly_report` (2 removed)
+- [ ] mcp delegate pair → `mcp_core_delegate`: remove `mcp_core_outcome_materializer` (1 removed)
+- [ ] mcp plan_durable pair → `mcp_pro_plan_durable`: remove `mcp_pro_reconciler_journal_notify` (1 removed)
+- [ ] mcp signal_watcher pair → `mcp_pro_signal_watcher_scope_drift`: remove `mcp_pro_mutation_executor` (1 removed)
+- [ ] session_attach pair → `acp_core_session_attach_advisory_lock`: remove `acp_core_session_attach_degraded_nolock` (1 removed)
+- [ ] tui shell trio → `tui_core_view_dashboard`: remove `tui_core_view_landing_decision`, `tui_core_view_composer` (2 removed)
+- [ ] bot pair → `bot_pro_telegram_solo`: remove `bot_pro_thread_registry` (1 removed)
+
+**Drops (non-toggleable / ghost / mechanism plumbing):**
+
+- [ ] `core_core_background_task_tracker` (mechanism plumbing — JoinHandle ownership)
+- [ ] `acp_core_adapter_cursor` (ghost — no AgentKind variant)
+- [ ] `acp_core_adapter_opencode` (ghost — same)
+- [ ] `acp_core_adapter_kimi` (ghost — same; `kimi` exists as delegation worker, separate namespace)
+
+**Defers to §4.16 v1.1 backlog (vaporware):**
+
+- [ ] `core_pro_brain_failover_auto_pool`
+- [ ] `core_pro_broadcast_lagged_recovery`
+- [ ] `core_core_conflict_detection`
+- [ ] `core_core_rate_limit_detection`
+- [ ] `mcp_pro_custom_tools`
+
+**Step process:**
+
+- [ ] **Step 1:** For each consolidation, write a failing test asserting the umbrella key exists (`FeatureKey::from_known("core_core_event_pipeline").is_some()`) and the absorbed keys do NOT exist (`FeatureKey::from_known("core_core_event_funnel_broadcast").is_none()`). This converts the registry from "additive" to "consolidated" semantics.
+- [ ] **Step 2:** Remove the absorbed/dropped/deferred consts (38 lines) from the const block.
+- [ ] **Step 3:** Remove the corresponding `else if bytes_eq` arms from `from_known()`.
+- [ ] **Step 4:** Add the 2 NEW umbrella consts: `core_core_event_pipeline`, `core_core_review`.
+- [ ] **Step 5:** Add the 2 NEW umbrella parser arms.
+- [ ] **Step 6:** Update each per-crate test that referenced an absorbed/dropped key (consolidate or remove the test).
+- [ ] **Step 7:** Run `cargo test --package spur-license --lib policy::feature_key` — expect ALL PASS with the new shape.
+- [ ] **Step 8:** Run `cargo build --workspace` — expect PASS (no caller in main has migrated to new keys yet, so no compile-time references to dropped consts).
+- [ ] **Step 9:** Commit: `refactor(spur-license): Wave 8 second-order composition rationalization (102→64 new keys; 15 consolidations + 4 drops + 5 defers)`
+
+After this task completes, the registry has exactly 100 consts (36 legacy + 64 Wave-8-final new). Then proceed to Task 24 to add the comprehensive 64-key roundtrip test.
+
+---
+
 ## Task 24: Final integration test — total count + comprehensive roundtrip
 
-This task verifies the full 99-new-key registry (Wave 7 final count) and updates the count guard test from Task 2.
+This task verifies the full 64-new-key registry (Wave 8 final count after second-order composition consolidation) and updates the count guard test from Task 2. Note: this task is now executed AFTER a Wave-8 registry-pruning task that removes 38 prior-wave entries (consolidations + drops + defers).
 
 **Files:**
 - Modify: `crates/spur-license/src/policy/feature_key.rs` (extend count test, add comprehensive roundtrip)
@@ -1510,106 +1569,92 @@ Add this test inside `mod tests` (after `notification_keys_registered`):
 
 ```rust
     /// Asserts every new key from the tier revamp roundtrips correctly.
-    /// Total: 99 new v1 keys (67 Free + 27 Pro v1 + 5 Pro v1.1 + 0 Team) — Wave 7 final.
+    /// Total: 64 new v1 keys (46 Free + 17 Pro v1 + 1 Pro v1.1 + 0 Team) — Wave 8 final.
+    /// Wave 8 collapsed 15 over-decomposed families (compile-coupled / all-or-nothing
+    /// substate space) into umbrella keys, dropped 4 (mechanism plumbing + ghost ACP
+    /// adapters), and deferred 5 vaporware to §4.16 v1.1 backlog.
     #[test]
     fn tier_revamp_v1_keys_roundtrip() {
         const NEW_KEYS: &[&str] = &[
-            // spur-acp (11)
+            // spur-acp (7) — Wave 8: dropped 3 ghost adapters (cursor/opencode/kimi — no AgentKind variants); merged session_attach_degraded_nolock into advisory_lock (degraded is fallback path of failed lock attempt)
             "acp_core_transport_stdio", "acp_core_transport_socket",
             "acp_core_adapter_claude_code", "acp_core_adapter_codex",
             "acp_core_adapter_gemini", "acp_core_adapter_kiro",
-            "acp_core_adapter_cursor", "acp_core_adapter_opencode",
-            "acp_core_adapter_kimi",
             "acp_core_session_attach_advisory_lock",
-            "acp_core_session_attach_degraded_nolock",
-            // spur-core: brain & scheduling (5)
-            "core_core_brain_session", "core_core_brain_scheduler",
+            // spur-core: brain (2) — Wave 8: consolidated brain_session+brain_scheduler+continuation_bridge → brain_session (scheduler requires session, bridge enqueues to ingress); deferred brain_failover_auto_pool (vaporware, no alternate pool)
+            "core_core_brain_session",
             "core_core_brain_failover_manual_keystroke",
-            "core_pro_brain_failover_auto_pool",
-            "core_core_continuation_bridge",
-            // spur-core: workers (3)
-            "core_core_parallel_workers", "core_core_cancellable_semaphore",
+            // spur-core: workers (2) — Wave 8: merged cancellable_semaphore into parallel_workers (semaphore IS the parallelism mechanism)
+            "core_core_parallel_workers",
             "core_pro_worker_heartbeat_watchdog",
-            // spur-core: event pipeline (5)
-            "core_core_event_funnel_broadcast",
-            "core_core_event_sink_ndjson_128mb",
-            "core_core_executor_lineage_projection",
-            "core_core_notification_pump",
-            "core_pro_broadcast_lagged_recovery",
-            // spur-core: review (5)
-            "core_core_review_sink", "core_core_review_timeout",
-            "core_core_review_retry",
+            // spur-core: event pipeline (1) — Wave 8: collapsed funnel+sink+lineage+notification_pump+agent_notification+tui_notification_drain → event_pipeline (compile-coupled producer/consumer chain; sink subscribes to broadcast, lineage applied inside funnel, drain consumes from event bus); deferred broadcast_lagged_recovery (no recovery logic)
+            "core_core_event_pipeline",
+            // spur-core: review (3) — Wave 8: consolidated sink+timeout+retry → review (timeout/retry without sink = no receiver); merged auto_approve+timeout_routing → auto_approve (auto IS timeout fallback)
+            "core_core_review",
             "core_pro_review_auto_approve",
-            "core_pro_review_timeout_routing",
             "core_pro_review_retry_config",
-            // skills (5)
-            "skills_core_registry", "skills_core_atomic_installation",
-            "skills_core_render_per_vendor",
-            "skills_pro_custom", "skills_pro_role_gating",
-            // spur-core: peer mailbox (3)
-            "core_pro_peer_mailbox_router", "core_pro_peer_mailbox_ledger",
-            "core_pro_peer_mailbox_stranded_recon",
-            // spur-core: system events (4)
-            "core_core_conflict_detection", "core_core_rate_limit_detection",
+            // skills (2) — Wave 8: consolidated registry+atomic_installation+render_per_vendor+role_gating → registry (single installer code path)
+            "skills_core_registry",
+            "skills_pro_custom",
+            // spur-core: peer mailbox (1) — Wave 8: collapsed router+ledger+stranded_recon → router (router constructor REQUIRES ledger+reconciler; compile-coupled)
+            "core_pro_peer_mailbox_router",
+            // spur-core: system events (1) — Wave 8: deferred conflict_detection + rate_limit_detection (no production emitters); kept permission_request_detection (real ACP callback flow); event_funnel_broadcast/notification_pump/agent_notification absorbed by event_pipeline above
             "core_core_permission_request_detection",
-            "core_core_agent_notification",
-            // spur-core: reliability & lifecycle (5)
+            // spur-core: reliability & lifecycle (3) — Wave 8: merged plan_persistence+orphan_recovery → plan_persistence (recovery is safety baseline, OFF state = orphans); dropped background_task_tracker (mechanism plumbing)
             "core_core_session_resume",
             "core_pro_session_resume_event_replay",
             "core_core_plan_persistence",
-            "core_core_plan_orphan_recovery",
-            "core_core_background_task_tracker",
-            // spur-mcp (14)
+            // spur-mcp (10) — Wave 8: merged outcome_materializer into delegate (back-end mechanism with no separate MCP tool); merged reconciler_journal_notify into plan_durable (couples to beads+notify); merged mutation_executor into signal_watcher_scope_drift (compile-coupled apply_mutation call); deferred mcp_pro_custom_tools (no dynamic registry)
             "mcp_core_server_dispatch", "mcp_core_delegate",
             "mcp_core_outcome_fetch", "mcp_core_pm",
             "mcp_core_pr", "mcp_core_plan_ephemeral",
-            "mcp_core_outcome_materializer",
-            "mcp_pro_plan_durable", "mcp_pro_reconciler_journal_notify",
-            "mcp_pro_signal_watcher_scope_drift", "mcp_pro_mutation_executor",
+            "mcp_pro_plan_durable",
+            "mcp_pro_signal_watcher_scope_drift",
             "mcp_pro_graph_tools", "mcp_pro_review",
-            "mcp_pro_custom_tools",
-            // spur-tui (10) — revised Wave 5: removed telegram_bot_solo (moved to spur-bot), trace_source_react (v1.1), custom_keybindings (v2)
+            // spur-tui (8) — Wave 8: collapsed dashboard+landing_decision+composer → dashboard (single view state graph); merged tui_core_notification_drain into core_core_event_pipeline above
             "tui_core_view_dashboard", "tui_core_view_session_detail",
             "tui_core_view_plan_inspector", "tui_core_view_palette_overlay",
-            "tui_core_view_issue_browser", "tui_core_view_landing_decision",
-            "tui_core_view_composer", "tui_core_modal_collision_escape",
-            "tui_core_input_paste_as_atom", "tui_core_notification_drain",
-            // spur-cli (9) — revised Wave 5: dropped _command_ infix; removed version (Clap built-in), upgrade_trial/_pro (v1.1), workflow (v2)
+            "tui_core_view_issue_browser",
+            "tui_core_modal_collision_escape",
+            "tui_core_input_paste_as_atom",
+            // spur-cli (9) — KEEP_ATOMIC (each command is independent clap arm with separate handler)
             "cli_core_init", "cli_core_agents",
             "cli_core_sessions", "cli_core_run",
             "cli_core_exec", "cli_core_tui",
             "cli_core_cost", "cli_core_connect",
             "cli_core_license_activate",
-            // spur-pm (5) — revised Wave 5: renamed pm_read→browse, pr_manual→pr, bv_adapter→beads_graph_adapter; removed github_auto (mcp), linear/plane_sync (v2), signal_watcher/auto_merge (mcp dups), webhooks (v2)
+            // spur-pm (5) — KEEP_ATOMIC (advanced requires basic — DOCUMENT_PREREQ)
             "pm_core_beads_basic", "pm_core_browse",
             "pm_core_pr", "pm_core_beads_graph_adapter",
             "pm_pro_beads_advanced",
-            // spur-cost (3) — revised Wave 6: renamed basic_display→session_display; dropped ingestion_pipeline (always-coupled prereq) + sqlite_wal_mode (NOT IMPLEMENTED + would be Free safety baseline); deferred budget_caps (no enforcement)
+            // spur-cost (3) — KEEP_ATOMIC with prereqs (display + per_project_tracking both require pricing_registry)
             "cost_core_session_display", "cost_core_pricing_registry",
             "cost_pro_per_project_tracking",
-            // spur-context (3) — revised Wave 6: dropped async_engine (no production callers); deferred live_mode (no CLI surface)
-            "ctx_pro_duckdb_engine", "ctx_pro_daily_report",
-            "ctx_pro_weekly_report",
-            // spur-worktree (2) — revised Wave 6: dropped artifact_resolver (always-on prereq); deferred git_blob_store + custom_policies; renamed cleanup_orphans→orphan_cleanup AND moved Pro→Free per Wave 4 safety/liveness precedent
+            // spur-context (1) — Wave 8: consolidated duckdb_engine + daily_report + weekly_report → duckdb_engine (reports are wrappers over AnalyticsEngine)
+            "ctx_pro_duckdb_engine",
+            // spur-worktree (2) — KEEP_ATOMIC with prereq (cleanup requires isolation; cleanup OFF is valid degradation)
             "worktree_core_isolation", "worktree_core_orphan_cleanup",
-            // spur-bot (3) — revised Wave 6: dropped runtime + runtime_render + callback_validation (always-coupled mechanism / security baseline); deferred multi_chat
-            "bot_pro_telegram_solo", "bot_pro_thread_registry",
+            // spur-bot (2) — Wave 8: merged thread_registry into telegram_solo (thread_registry without telegram makes no sense; single-thread is degraded telegram_solo); kept inline_review separate (security-conscious users can disable remote approval)
+            "bot_pro_telegram_solo",
             "bot_pro_inline_review",
-            // spur-license meta (2) — revised Wave 6: dropped facade_entitlement + policy_resolver + ed25519_verify (bootstrap paradox); renamed provider_heartbeat→revocation_polling AND moved Free→Pro; deferred quota_runtime_downgrade
+            // spur-license meta (2) — KEEP_ATOMIC with prereq (offline_grace meaningful only for Pro since only Pro polls)
             "license_pro_revocation_polling", "license_pro_offline_grace",
-            // spur-blob-store (1) — revised Wave 7: dropped 3 backend keys (trait-impl variants / always-on telemetry); renamed delete_namespace→namespace_deletion (claude-code noun pattern)
+            // spur-blob-store (1) — Wave 7 final
             "blob_pro_namespace_deletion",
-            // spur-interactive (0) — revised Wave 7: dropped all 3 (shared infra / production invariant / lifecycle hygiene)
-            // Notifications (0) — revised Wave 7: dropped notif_core_in_tui (redundant with core_core_notification_pump + tui_core_notification_drain); deferred notif_pro_external_channels to §4.16 (greenfield vaporware)
+            // spur-interactive (0) — Wave 7 dropped all 3
+            // Notifications (0) — Wave 7 dropped/deferred both
         ];
 
         assert_eq!(
             NEW_KEYS.len(),
-            99,
-            "Expected exactly 99 new tier-revamp v1 keys (was 135 pre-Wave-5, \
-             123 post-Wave-5, 107 post-Wave-6; Wave 7 net -8 keys: 6 dropped as \
-             trait-impl variants/production invariants + 1 dropped as redundant \
-             with already-merged keys + 1 deferred v1.1 per spec §4.16), got {}",
+            64,
+            "Expected exactly 64 new tier-revamp v1 keys post-Wave-8 (was 135 \
+             pre-Wave-5, 123 post-Wave-5, 107 post-Wave-6, 99 post-Wave-7; \
+             Wave 8 net -35 keys: 15 family consolidations (compile-coupled / \
+             all-or-nothing substate space) + 4 drops (background_task_tracker \
+             mechanism plumbing + 3 ghost ACP adapters) + 5 vaporware deferrals \
+             per spec §4.16 Wave-8 entries; offset by net -11 from prior v1.1 \
+             keys absorbed into umbrellas), got {}",
             NEW_KEYS.len()
         );
 
@@ -1628,13 +1673,13 @@ Add this test inside `mod tests` (after `notification_keys_registered`):
 
 Run: `cargo test --package spur-license --lib policy::feature_key::tests::tier_revamp_v1_keys_roundtrip`
 
-Expected: PASS — all 99 v1 keys roundtrip correctly.
+Expected: PASS — all 64 v1 keys roundtrip correctly.
 
 - [ ] **Step 3: Run the full feature_key test suite**
 
 Run: `cargo test --package spur-license --lib policy::feature_key`
 
-Expected: ALL PASS — original 36-key tests + 19 new per-crate tests (Wave 7 dropped Tasks 22, 23 entirely; Task 21 reduced to 1 key) + comprehensive 99-key test + count guard.
+Expected: ALL PASS — original 36-key tests + per-crate tests (Wave 8 collapsed many of these; expect ~13–15 surviving per-crate tests after consolidation pruning) + comprehensive 64-key test + count guard.
 
 - [ ] **Step 4: Run the full spur-license test suite**
 
@@ -1652,16 +1697,16 @@ Expected: Both PASS — no compile errors, no clippy warnings introduced.
 
 ```bash
 git add crates/spur-license/src/policy/feature_key.rs
-git commit -m "test(spur-license): comprehensive 99-key registry roundtrip for tier revamp Plan A (Wave 7 final)"
+git commit -m "test(spur-license): comprehensive 64-key registry roundtrip for tier revamp Plan A (Wave 8 final)"
 ```
 
 ---
 
 ## Task 25: Document the registry-vs-policy mismatch (advance notice for Plan B)
 
-After this plan ships, the `FeatureKey` registry has 36 OLD keys + 99 NEW keys = 135 total typed constants (Wave 7 final). The embedded `default_policy.json` STILL references only the OLD keys, so:
+After this plan ships, the `FeatureKey` registry has 36 OLD keys + 64 NEW keys = 100 total typed constants (Wave 8 final). The embedded `default_policy.json` STILL references only the OLD keys, so:
 - Free users still get 11 Community features (per old policy)
-- The 99 new keys are typed-known but not in any tier yet
+- The 64 new keys are typed-known but not in any tier yet
 - Plan B will rewrite the policy and migrate callers
 
 This task adds an inline doc comment marking the boundary so the next contributor understands the staged migration.
@@ -1697,7 +1742,7 @@ Create `docs/superpowers/plans/2026-04-26-tier-revamp-plan-a-status.md`:
 
 ## What Plan A delivered
 
-- 99 new typed `FeatureKey` constants in `crates/spur-license/src/policy/feature_key.rs` (Wave 7 final, down from 135 across Waves 5+6+7)
+- 64 new typed `FeatureKey` constants in `crates/spur-license/src/policy/feature_key.rs` (Wave 8 final, down from 135 across Waves 5+6+7+8)
 - 1 new `QuotaKey` variant: `BrainFailoverChainDepth`
 - Roundtrip test coverage for every new key (per-crate tests + comprehensive 99-key test)
 - Count guard test for original 36-key registry (locks against accidental removal)
@@ -1716,7 +1761,7 @@ Create `docs/superpowers/plans/2026-04-26-tier-revamp-plan-a-status.md`:
 
 - Free users: identical experience to pre-Plan A (legacy 11-key Community policy still active)
 - Pro users (if any exist): identical experience (legacy 8 Pro keys still active)
-- New 99 keys: typed-known but unreachable through `FeatureGate::has()` because no policy declares them in any tier
+- New 64 keys: typed-known but unreachable through `FeatureGate::has()` because no policy declares them in any tier
 - Workspace builds clean; clippy passes; all tests green
 
 ## Plan B prerequisites (verify before starting Plan B)
@@ -1738,7 +1783,7 @@ Create `docs/superpowers/plans/2026-04-26-tier-revamp-plan-a-status.md`:
 7. Remove legacy 36 keys from `feature_key.rs` after migration completes
 8. Update `from_known()` to no longer parse legacy keys
 
-After Plan B ships, the registry has only the 99 new keys and the policy reflects the new tier structure.
+After Plan B ships, the registry has only the 64 new keys and the policy reflects the new tier structure.
 ```
 
 - [ ] **Step 3: Commit the status hand-off**
@@ -1765,8 +1810,8 @@ Run: `git status` to confirm clean working tree. If anything is unstaged, invest
 After running all 25 tasks, verify the final state:
 
 - [ ] `cargo test --package spur-license --lib feature_key 2>&1 | grep "test result"` shows ~22 passing tests (count_guard + 19 per-crate tests + comprehensive; Wave 7 dropped Tasks 22 + 23 entirely so per-crate test count fell from 21 to 19)
-- [ ] `grep -c "pub const" crates/spur-license/src/policy/feature_key.rs` returns at least 135 (36 legacy + 99 new post-Wave-7)
-- [ ] `grep -c "Some(Self::" crates/spur-license/src/policy/feature_key.rs` returns at least 135 in the `from_known` chain
+- [ ] `grep -c "pub const" crates/spur-license/src/policy/feature_key.rs` returns exactly 100 (36 legacy + 64 new post-Wave-8)
+- [ ] `grep -c "Some(Self::" crates/spur-license/src/policy/feature_key.rs` returns exactly 100 in the `from_known` chain
 - [ ] No call site in any other crate references the new keys yet (verify with `grep -r "FeatureKey::ACP_CORE_" crates/` returns ONLY hits in `feature_key.rs`)
 - [ ] Workspace builds with no warnings
 - [ ] All ~25 commits are atomic and follow the `tier revamp Plan A` naming pattern
