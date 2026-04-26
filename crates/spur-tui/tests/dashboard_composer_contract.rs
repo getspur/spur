@@ -82,6 +82,20 @@ fn dashboard_pre_session_mention_accept_submits_resource_link() {
 }
 
 #[test]
+fn dashboard_command_registry_includes_spur_local_commands() {
+    let dashboard = DashboardView::new();
+    let names: Vec<_> = dashboard
+        .command_registry_for_test()
+        .list()
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect();
+
+    assert!(names.contains(&"help".to_string()), "names={names:?}");
+    assert!(names.contains(&"quit".to_string()), "names={names:?}");
+}
+
+#[test]
 fn dashboard_esc_closes_active_completion_before_exiting_compose() {
     let mut dashboard = DashboardView::new();
 
