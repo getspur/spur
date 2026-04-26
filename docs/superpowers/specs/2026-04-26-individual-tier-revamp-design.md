@@ -356,28 +356,30 @@ Wave 7 dropped both candidate keys. `notif_core_in_tui` was redundant with alrea
 
 Note on grouping: `skills_*` prefix keys live in `spur-core` code (under `spur-core/src/skills/`) but are listed in their own row below for grep-discoverability; they're counted in the Skills row, not double-counted under spur-core.
 
-**Revised 2026-04-27 (Wave 7 L9-MCTS first-principles pass).** Total **v1 registry** keys reduced from 107 to **99** after Wave 7 rationalization (135 → 123 → 107 → 99 across Waves 5+6+7). Core principle reaffirmed: *FeatureKey registry is a runtime gate dispatch table — toggleable capabilities only.* Always-on infrastructure, trait-impl variants chosen at construction time, production correctness invariants, and greenfield vaporware all violate the schema's purpose and were dropped. See **§4.16 Deferred-keys backlog** below for explicit deferred/dropped lists. Counts below show only what's in the v1 Plan A registry.
+**Revised 2026-04-27 (Wave 8 L9-MCTS second-order composition pass).** Total **v1 registry** keys reduced from 99 to **64** after Wave 8 rationalization (135 → 123 → 107 → 99 → 64 across Waves 5+6+7+8). Wave 8 amendment to the core principle: *FeatureKey registry is a runtime gate dispatch table — toggleable capabilities AND each key's on/off must compose validly with sibling keys in its family.* Wave 8 identified 15 over-decomposed families where partial enablement breaks tier integrity (compile-coupled APIs, all-or-nothing valid substates, producer/consumer chains where one half is meaningless without the other) and consolidated each family into a single umbrella key. Plus 4 additional drops (ghost adapters, mechanism plumbing) and 5 vaporware deferrals. See **§4.16 Deferred-keys backlog** for full Wave-8 detail. Counts below show only what's in the v1 Plan A registry post-Wave-8.
 
 | Crate / Subsystem | Free keys | Pro keys (v1) | Pro keys (v1.1) | Team-deferred |
 |---|---|---|---|---|
-| `spur-acp` | 11 | 0 | 0 | 0 |
-| `spur-core` | 19 | 7 | 5 | 0 |
-| `skills_*` (in spur-core) | 3 | 2 | 0 | 0 |
-| `spur-mcp` | 7 | 7 | 0 | 0 |
-| `spur-tui` | 10 | 0 | 0 | 0 |
-| `spur-cli` | 9 | 0 | 0 | 0 |
-| `spur-pm` | 4 | 1 | 0 | 0 |
-| `spur-cost` | 2 | 1 | 0 | 0 |
-| `spur-context` | 0 | 3 | 0 | 0 |
-| `spur-worktree` | 2 | 0 | 0 | 0 |
-| `spur-bot` | 0 | 3 | 0 | 0 |
-| `spur-license` | 0 | 2 | 0 | 0 |
+| `spur-acp` (transports + 4 implemented adapters + 1 session_attach; -3 ghost adapters dropped, -1 degraded_nolock merged) | 7 | 0 | 0 | 0 |
+| `spur-core` (post-Wave-8: brain trio→1, workers pair→1, event sextet→1, review trio→1, peer_mailbox trio→1, plan_persistence pair→1) | 8 | 4 | 1 | 0 |
+| `skills_*` (in spur-core) — Wave 8 quartet→1 | 1 | 1 | 0 | 0 |
+| `spur-mcp` (post-Wave-8: delegate absorbs materializer, plan_durable absorbs notify, signal_watcher absorbs mutation_executor) | 6 | 4 | 0 | 0 |
+| `spur-tui` (post-Wave-8: dashboard absorbs landing+composer; notification_drain absorbed by core_core_event_pipeline) | 7 | 0 | 0 | 0 |
+| `spur-cli` (KEEP_ATOMIC) | 9 | 0 | 0 | 0 |
+| `spur-pm` (KEEP_ATOMIC; advanced→basic prereq) | 4 | 1 | 0 | 0 |
+| `spur-cost` (KEEP_ATOMIC; pricing_registry prereq) | 2 | 1 | 0 | 0 |
+| `spur-context` (post-Wave-8: duckdb_engine absorbs both reports) | 0 | 1 | 0 | 0 |
+| `spur-worktree` (KEEP_ATOMIC; cleanup→isolation prereq) | 2 | 0 | 0 | 0 |
+| `spur-bot` (post-Wave-8: telegram_solo absorbs thread_registry; inline_review kept separate for security opt-out) | 0 | 2 | 0 | 0 |
+| `spur-license` (KEEP_ATOMIC; offline_grace→revocation_polling prereq) | 0 | 2 | 0 | 0 |
 | `spur-blob-store` | 0 | 1 | 0 | 0 |
 | `spur-interactive` | 0 | 0 | 0 | 0 |
 | Notifications (cross-crate) | 0 | 0 | 0 | 0 |
-| **Total** | **67** | **27** | **5** | **0** |
+| **Total** | **46** | **17** | **1** | **0** |
 
-**Total v1 atomic feature keys: 99** (67 + 27 + 5 + 0) — was 107 post-Wave-6, 123 post-Wave-5, 135 before Wave 5. Wave 7 net reduction of 8 keys reflects: (a) 6 keys dropped as trait-impl variants / production invariants / always-on infrastructure (`blob_core_memory_backend`, `blob_core_fs_backend`, `blob_pro_measured_backend`, `interactive_core_frontend_host`, `interactive_core_review_lane_mpsc`, `interactive_core_shutdown_orchestrator`); (b) 1 key dropped as redundant with already-merged keys (`notif_core_in_tui` overlaps `core_core_notification_pump` + `tui_core_notification_drain`); (c) 1 key deferred to §4.16 v1.1 backlog (`notif_pro_external_channels` — greenfield, no impl); (d) 1 key kept with rename (`blob_pro_delete_namespace` → `blob_pro_namespace_deletion` per claude-code noun-pattern consistency).
+**Total v1 atomic feature keys: 64** (46 + 17 + 1 + 0) — was 99 post-Wave-7, 107 post-Wave-6, 123 post-Wave-5, 135 before Wave 5. Wave 8 net reduction of 35 keys reflects: (a) 15 family consolidations (compile-coupled / all-or-nothing substate space) — see §4.16 Wave 8 consolidations table; (b) 4 additional drops (`background_task_tracker` mechanism plumbing + 3 ghost ACP adapters with no `AgentKind` variants); (c) 5 vaporware deferrals to v1.1 backlog (`brain_failover_auto_pool`, `broadcast_lagged_recovery`, `conflict_detection`, `rate_limit_detection`, `mcp_pro_custom_tools` — all confirmed no production code by codex tracing). Pro v1.1 column shrinks from 5 to 1 because all 4 prior v1.1-tagged keys (auto_pool, lagged_recovery, peer_mailbox_ledger, peer_mailbox_stranded_recon) were either deferred to §4.16 or absorbed into umbrella consolidations.
+
+Wave 7 net reduction of 8 keys (preserved historical record): (a) 6 keys dropped as trait-impl variants / production invariants / always-on infrastructure (`blob_core_memory_backend`, `blob_core_fs_backend`, `blob_pro_measured_backend`, `interactive_core_frontend_host`, `interactive_core_review_lane_mpsc`, `interactive_core_shutdown_orchestrator`); (b) 1 key dropped as redundant with already-merged keys (`notif_core_in_tui`); (c) 1 key deferred to §4.16 v1.1 backlog (`notif_pro_external_channels`); (d) 1 key kept with rename (`blob_pro_delete_namespace` → `blob_pro_namespace_deletion`).
 
 The registry naturally lands close to but below the original ~110 target. The continued drop reflects that earlier spec drafts conflated *runtime gate dispatch* (this registry's purpose) with *system manifest documentation* (which lives in this spec body and `docs/architecture.md`).
 
@@ -442,6 +444,46 @@ These keys were considered for v1 but rejected on principle: they describe alway
 | `license_core_facade_entitlement` | **Bootstrap paradox** — IS the gating mechanism (`FeatureGate::has` at `crates/spur-license/src/gate.rs:40`); cannot meaningfully gate itself. | 6 |
 | `license_core_policy_resolver` | **Bootstrap paradox** — must run to load ANY policy (including one that disables it). | 6 |
 | `license_core_ed25519_verify` | Build-time integrity invariant (`crates/spur-license/build.rs:28`); not a runtime capability that can be toggled per license. | 6 |
+| `core_core_background_task_tracker` | Internal `JoinHandle` ownership; `Drop` aborts background tasks (`crates/spur-core/src/orchestrator.rs:918-923`, `:1048-1128`). Mechanism plumbing, not a user capability. | 8 |
+| `acp_core_adapter_cursor` | Ghost adapter — no `AgentKind::Cursor` variant exists in ACP types (`crates/spur-acp/src/types.rs:153-177`); name appears only in skills rendering adapters (`crates/spur-core/src/skills/adapters.rs:17-26`). | 8 |
+| `acp_core_adapter_opencode` | Ghost adapter — same reason as cursor. | 8 |
+| `acp_core_adapter_kimi` | Ghost adapter — same reason. (Note: `kimi` exists as a SPUR delegation worker, separate namespace from ACP agent adapters.) | 8 |
+
+#### Wave 8 — Consolidated (multiple keys collapsed into one umbrella)
+
+Per Wave 8 second-order composition analysis (kimi mechanical truth-table + codex code-grounded coupling tracing, L9-MCTS judge synthesis). Wave 8 amendment to the core principle: *FeatureKey registry is a runtime gate dispatch table — toggleable capabilities AND each key's on/off must compose validly with sibling keys in its family.* Each consolidation below has either (a) compile-coupled APIs (constructor requires sibling), (b) all-or-nothing valid substates per truth-table analysis, or (c) producer/consumer chains where one half is meaningless without the other.
+
+| Original keys (collapsed) | Umbrella key | Reason | Wave |
+|---|---|---|---|
+| `core_core_brain_session` + `core_core_brain_scheduler` + `core_core_continuation_bridge` | `core_core_brain_session` | Scheduler requires active brain session for continuations (`crates/spur-core/src/scheduler.rs:60-198`); bridge only enqueues into orchestrator ingress (`crates/spur-core/src/continuation_bridge.rs:31-94`); session spawn seeds scheduler (`orchestrator.rs:2168-2201`). 1–2 of 8 substates valid. | 8 |
+| `core_core_parallel_workers` + `core_core_cancellable_semaphore` | `core_core_parallel_workers` | Semaphore is the parallelism mechanism; cancellation is registered before spawn (`orchestrator.rs:3908-4028`). 2 of 4 substates valid. | 8 |
+| `core_core_event_funnel_broadcast` + `core_core_event_sink_ndjson_128mb` + `core_core_executor_lineage_projection` + `core_core_notification_pump` + `core_core_agent_notification` + `tui_core_notification_drain` | `core_core_event_pipeline` | Funnel stamps/broadcasts all events; sink only subscribes to broadcast (`event_sink.rs:28-76`); lineage applied inside funnel (`event_funnel.rs:115-120`); pump emits notifications to event bus; drain consumes from same bus (`app.rs:2500-2575`). All-or-nothing — 2 of 64 substates product-meaningful. | 8 |
+| `core_core_review_sink` + `core_core_review_timeout` + `core_core_review_retry` | `core_core_review` | ReviewSink ordering invariant requires register-before-emit; timeout fallback and retry routing both branch off the same review wait loop (`orchestrator.rs:4403-4777`). Timeout/retry without sink = no receiver to wait on. 2 of 8 valid. | 8 |
+| `core_pro_review_auto_approve` + `core_pro_review_timeout_routing` | `core_pro_review_auto_approve` | Auto-approve IS a timeout fallback; without timeout routing it never fires (`crates/spur-acp/src/config/mod.rs:261-267`, `orchestrator.rs:4532-4573`). Same Pro review loop config. | 8 |
+| `core_pro_peer_mailbox_router` + `core_pro_peer_mailbox_ledger` + `core_pro_peer_mailbox_stranded_recon` | `core_pro_peer_mailbox_router` | Router constructor requires ledger + reconciler — split keys are compile-incoherent (`crates/spur-core/src/peer_mailbox/router.rs:55-68`); orchestrator constructs all three as one bundle (`orchestrator.rs:1070-1100`); guard drop depends on reconciler (`peer_mailbox/guard.rs:30-105`). | 8 |
+| `core_core_plan_persistence` + `core_core_plan_orphan_recovery` | `core_core_plan_persistence` | Orphan recovery is a safety baseline — Free plans must not orphan permanently. `(persist=ON, recover=OFF)` produces orphans, only valid as bug. | 8 |
+| `skills_core_registry` + `skills_core_atomic_installation` + `skills_core_render_per_vendor` + `skills_pro_role_gating` | `skills_core_registry` | Installer run loop combines registry, per-adapter render, role gating, and install in single code path (`crates/spur-core/src/skills/installer.rs:260-287`). All-or-nothing — crippling skills cripples agent quality. | 8 |
+| `ctx_pro_duckdb_engine` + `ctx_pro_daily_report` + `ctx_pro_weekly_report` | `ctx_pro_duckdb_engine` | Reports are wrappers over `AnalyticsEngine` (`crates/spur-context/src/reporter.rs:10-12`, `lib.rs:21-29`). Reports without engine = no data source. | 8 |
+| `mcp_core_delegate` + `mcp_core_outcome_materializer` | `mcp_core_delegate` | Materializer is the single producer of persisted outcomes (`crates/spur-mcp/src/outcome_materializer.rs:1-140`); delegate handler couples to materializer in server (`crates/spur-mcp/src/server.rs:2256-2655`). Materializer is back-end mechanism without independent MCP tool surface. | 8 |
+| `mcp_pro_plan_durable` + `mcp_pro_reconciler_journal_notify` | `mcp_pro_plan_durable` | Reconciler only spawns with beads + notify enabled (`crates/spur-mcp/src/server.rs:1999-2056`); journal notify is part of durable plan mechanism. | 8 |
+| `mcp_pro_signal_watcher_scope_drift` + `mcp_pro_mutation_executor` | `mcp_pro_signal_watcher_scope_drift` | Watcher directly imports + calls `apply_mutation` (`crates/spur-mcp/src/plan/signal_watcher.rs:1-20`, `:152-172`). Compile-coupled; non-composable as separate keys. | 8 |
+| `acp_core_session_attach_advisory_lock` + `acp_core_session_attach_degraded_nolock` | `acp_core_session_attach_advisory_lock` | `DegradedNoLock` is *only* an outcome of attempting advisory_lock (`crates/spur-acp/src/session_lock.rs:28-146`). Cannot exist as separate gate — it's a fallback path. | 8 |
+| `tui_core_view_dashboard` + `tui_core_view_landing_decision` + `tui_core_view_composer` | `tui_core_view_dashboard` | App owns one view state graph (`crates/spur-tui/src/action.rs:153-160`, `app.rs:171-178`); landing_decision is first-launch UX (one-shot, not a runtime gate); composer is internal input ownership (`session_detail.rs:1038-1148`). | 8 |
+| `bot_pro_telegram_solo` + `bot_pro_thread_registry` | `bot_pro_telegram_solo` | Telegram bot requires topics/thread sessions; runtime owns thread/session/executor maps (`crates/spur-bot/src/runtime.rs:89-118`); callbacks carry thread IDs (`router.rs:40-66`). Single-thread is degraded telegram_solo, not a separate axis. | 8 |
+
+#### Wave 8 — Additional drops (non-toggleable / ghost / mechanism plumbing)
+
+(See main Dropped table above for: `core_core_background_task_tracker`, `acp_core_adapter_cursor`/`_opencode`/`_kimi`.)
+
+#### Wave 8 — Additional v1.1 backlog (vaporware confirmed by codex code-grounding)
+
+| Original key | Replacement | Reason | Wave |
+|---|---|---|---|
+| `core_pro_brain_failover_auto_pool` | (later, retains name OR umbrella) | No alternate brain pool exists; reconnect just escalates same brain (`crates/spur-core/src/orchestrator.rs:3384-3550`). Lands when auto-respawn pool is built (Risk #8 fix). | 8 |
+| `core_pro_broadcast_lagged_recovery` | (later, retains name) | Only warn/drop on lag; no recovery logic (`crates/spur-tui/src/app.rs:2500-2575`). Lands with real lag-recovery implementation (Risk #2/#9 fix). | 8 |
+| `core_core_conflict_detection` | (later, retains name) | Event variant exists (`crates/spur-acp/src/domain/events.rs:595-600`) and TUI render case (`dashboard.rs:1751`); no production emitters. Lands when conflict-emission code ships. | 8 |
+| `core_core_rate_limit_detection` | (later, retains name) | Same pattern — event variant + TUI render case but no emitters (`dashboard.rs:1777`). Lands with rate-limit detection emission. | 8 |
+| `mcp_pro_custom_tools` | (later, retains name) | No dynamic custom tool registry in `tools_list` (`crates/spur-mcp/src/tools.rs:671-699`). Lands when dynamic tool registration ships. | 8 |
 
 ---
 
