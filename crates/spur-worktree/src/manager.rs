@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use spur_acp::SessionId;
+use spur_acp::{BrainSessionId, SessionId};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,6 +24,42 @@ pub struct WorktreeInfo {
     pub base_commit: String,
     pub agent: String,
     pub created_at: Instant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct V2BranchOwner {
+    pub agent: String,
+    pub brain_session_id: BrainSessionId,
+    pub worker_session_id: SessionId,
+}
+
+/// Parse a v2 worker branch into its owner triple. Returns None for any
+/// non-v2 input. Slash-delimited so hyphenated/dotted agent names like
+/// `claude-code` and `gemini-2.5-pro` parse unambiguously.
+pub fn parse_v2_branch(branch: &str) -> Option<V2BranchOwner> {
+    let rest = branch.strip_prefix("spur/worker/v2/")?;
+    let mut parts = rest.rsplitn(3, '/');
+    let worker_session_str = parts.next()?;
+    let brain_session_str = parts.next()?;
+    let agent = parts.next()?.to_string();
+
+    fn is_uuid(s: &str) -> bool {
+        s.len() == 36
+            && s.chars().enumerate().all(|(i, c)| match i {
+                8 | 13 | 18 | 23 => c == '-',
+                _ => c.is_ascii_hexdigit(),
+            })
+    }
+
+    if !is_uuid(brain_session_str) || !is_uuid(worker_session_str) {
+        return None;
+    }
+
+    Some(V2BranchOwner {
+        agent,
+        brain_session_id: BrainSessionId::new(SessionId(brain_session_str.into())),
+        worker_session_id: SessionId(worker_session_str.into()),
+    })
 }
 
 /// Result of attempting to merge worker changes.
@@ -712,5 +748,50 @@ mod tests_option_e {
             .await
             .expect("worktree status after snapshot deletion");
         assert!(status.is_empty(), "worktree should remain usable");
+    }
+}
+
+#[cfg(test)]
+mod v2_branch_tests {
+    use super::*;
+
+    fn make(agent: &str, brain: &str, worker: &str) -> String {
+        format!("spur/worker/v2/{agent}/{brain}/{worker}")
+    }
+
+    #[test]
+    fn parse_v2_simple_agent() {
+        let b = make("claude", "550e8400-e29b-41d4-a716-446655440000",
+                     "deadbeef-1111-2222-3333-444455556666");
+        let p = parse_v2_branch(&b).expect("parses");
+        assert_eq!(p.agent, "claude");
+    }
+
+    #[test]
+    fn parse_v2_hyphenated_agent() {
+        let b = make("claude-code", "550e8400-e29b-41d4-a716-446655440000",
+                     "deadbeef-1111-2222-3333-444455556666");
+        let p = parse_v2_branch(&b).expect("parses");
+        assert_eq!(p.agent, "claude-code");
+    }
+
+    #[test]
+    fn parse_v2_dotted_agent() {
+        let b = make("gemini-2.5-pro", "550e8400-e29b-41d4-a716-446655440000",
+                     "deadbeef-1111-2222-3333-444455556666");
+        let p = parse_v2_branch(&b).expect("parses");
+        assert_eq!(p.agent, "gemini-2.5-pro");
+    }
+
+    #[test]
+    fn parse_v2_rejects_pre_v2_format() {
+        let b = "spur/worker-claude-deadbeef-1111-2222-3333-444455556666";
+        assert!(parse_v2_branch(b).is_none());
+    }
+
+    #[test]
+    fn parse_v2_rejects_when_session_not_uuid() {
+        let b = "spur/worker/v2/claude/not-a-uuid/deadbeef-1111-2222-3333-444455556666";
+        assert!(parse_v2_branch(b).is_none());
     }
 }
