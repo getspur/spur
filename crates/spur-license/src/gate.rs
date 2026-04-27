@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use ahash::AHashSet;
@@ -67,11 +67,7 @@ impl FeatureGate {
     }
 
     fn build_community_snapshot(policy: &PolicyResolver) -> EntitlementSnapshot {
-        let features: AHashSet<FeatureKey> = policy
-            .tier_features("community")
-            .into_iter()
-            .filter_map(|s| FeatureKey::from_known(&s))
-            .collect();
+        let features = Self::resolve_feature_keys(policy, "community");
 
         let quotas = Self::merge_quotas(Tier::Community, policy.document());
         let flags = Self::extract_flags(policy.document());
@@ -96,11 +92,7 @@ impl FeatureGate {
 
         let tier = Tier::from_plan(state.plan);
         let features: AHashSet<FeatureKey> = if tier == Tier::Community {
-            self.policy
-                .tier_features("community")
-                .into_iter()
-                .filter_map(|s| FeatureKey::from_known(&s))
-                .collect()
+            Self::resolve_feature_keys(&self.policy, "community")
         } else {
             state
                 .features
@@ -128,7 +120,25 @@ impl FeatureGate {
     fn merge_quotas(tier: Tier, policy_doc: Arc<PolicyDocument>) -> HashMap<QuotaKey, QuotaValue> {
         let mut quotas = HashMap::new();
 
-        // 1. Start with hardcoded tier defaults (guaranteed baseline).
+        let tier_label = tier.label().to_lowercase();
+        if let Some(tp) = policy_doc.tier_policies.get(&tier_label) {
+            for (key_str, val) in &tp.quotas {
+                if let Some(qk) = QuotaKey::from_known(key_str) {
+                    if let Some(qv) = parse_quota_value(val) {
+                        quotas.insert(qk, qv);
+                    }
+                }
+            }
+        }
+
+        if quotas.is_empty() {
+            Self::apply_compatibility_quota_defaults(tier, &mut quotas);
+        }
+
+        quotas
+    }
+
+    fn apply_compatibility_quota_defaults(tier: Tier, quotas: &mut HashMap<QuotaKey, QuotaValue>) {
         match tier {
             Tier::Community => {
                 quotas.insert(QuotaKey::MaxConcurrentWorkers, QuotaValue::Count(1));
@@ -157,20 +167,18 @@ impl FeatureGate {
                 quotas.insert(QuotaKey::EventRetentionBytes, QuotaValue::Unlimited);
             }
         }
+    }
 
-        // 2. Overlay signed-policy quotas when present (policy overrides code).
-        let tier_label = tier.label().to_lowercase();
-        if let Some(tp) = policy_doc.tier_policies.get(&tier_label) {
-            for (key_str, val) in &tp.quotas {
-                if let Some(qk) = QuotaKey::from_known(key_str) {
-                    if let Some(qv) = parse_quota_value(val) {
-                        quotas.insert(qk, qv);
-                    }
-                }
-            }
-        }
-
-        quotas
+    fn resolve_feature_keys(policy: &PolicyResolver, tier: &str) -> AHashSet<FeatureKey> {
+        policy
+            .tier_features(tier)
+            .unwrap_or_else(|err| {
+                tracing::warn!("policy tier {tier:?} malformed: {err}; using empty features");
+                BTreeSet::new()
+            })
+            .into_iter()
+            .filter_map(|s| FeatureKey::from_known(&s))
+            .collect()
     }
 
     fn extract_flags(doc: Arc<PolicyDocument>) -> HashMap<FeatureKey, FlagSpec> {

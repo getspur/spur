@@ -4664,6 +4664,7 @@ dependencies = [
  "seahash",
  "serde",
  "serde_json",
+ "spur-license",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

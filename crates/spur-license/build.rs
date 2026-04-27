@@ -23,7 +23,7 @@ struct PolicyDocumentMin {
     schema_version: u32,
 }
 
-const SUPPORTED_MAJOR: u32 = 1;
+const SUPPORTED_MAJOR: u32 = 2;
 
 fn main() {
     println!("cargo:rerun-if-changed=resources/default_policy.json");
