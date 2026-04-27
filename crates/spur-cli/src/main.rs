@@ -590,7 +590,7 @@ async fn main() -> Result<()> {
                 std::process::exit(exit);
             }
             ConfigCommands::Set { key, value, global } => {
-                commands::config_set::run(repo_root.clone(), key, value, global)?;
+                commands::config_set::run(&repo_root, &key, &value, global)?;
                 Ok(())
             }
         },

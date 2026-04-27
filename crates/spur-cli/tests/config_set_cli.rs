@@ -29,13 +29,7 @@ fallback = []
 "#,
     );
 
-    config_set::run(
-        repo.clone(),
-        "tui.edit_mode".to_string(),
-        "vim".to_string(),
-        false,
-    )
-    .expect("set must succeed");
+    config_set::run(&repo, "tui.edit_mode", "vim", false).expect("set must succeed");
 
     let path = repo.join(".spur").join("config.toml");
     let cfg: SpurConfig = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
@@ -54,13 +48,7 @@ fn config_set_tui_edit_mode_emacs_round_trips() {
 edit_mode = "vim"
 "#,
     );
-    config_set::run(
-        repo.clone(),
-        "tui.edit_mode".to_string(),
-        "emacs".to_string(),
-        false,
-    )
-    .unwrap();
+    config_set::run(&repo, "tui.edit_mode", "emacs", false).unwrap();
     let cfg: SpurConfig =
         toml::from_str(&fs::read_to_string(repo.join(".spur").join("config.toml")).unwrap())
             .unwrap();
@@ -73,13 +61,8 @@ fn config_set_invalid_value_errors_clearly() {
     let repo = dir.path().to_path_buf();
     seed_repo_config(&repo, "");
 
-    let err = config_set::run(
-        repo.clone(),
-        "tui.edit_mode".to_string(),
-        "wim".to_string(),
-        false,
-    )
-    .expect_err("invalid value must error");
+    let err = config_set::run(&repo, "tui.edit_mode", "wim", false)
+        .expect_err("invalid value must error");
     let msg = format!("{err:#}");
     assert!(
         msg.contains("vim") && msg.contains("emacs"),
@@ -93,13 +76,8 @@ fn config_set_unknown_key_errors_clearly() {
     let repo = dir.path().to_path_buf();
     seed_repo_config(&repo, "");
 
-    let err = config_set::run(
-        repo.clone(),
-        "made.up.key".to_string(),
-        "anything".to_string(),
-        false,
-    )
-    .expect_err("unknown key must error");
+    let err = config_set::run(&repo, "made.up.key", "anything", false)
+        .expect_err("unknown key must error");
     let msg = format!("{err:#}");
     assert!(
         msg.contains("tui.edit_mode"),
@@ -113,16 +91,51 @@ fn config_set_missing_local_config_without_global_errors() {
     let repo = dir.path().to_path_buf();
     // Note: no .spur/config.toml seeded.
 
-    let err = config_set::run(
-        repo.clone(),
-        "tui.edit_mode".to_string(),
-        "vim".to_string(),
-        false,
-    )
-    .expect_err("missing local config must error without --global");
+    let err = config_set::run(&repo, "tui.edit_mode", "vim", false)
+        .expect_err("missing local config must error without --global");
     let msg = format!("{err:#}");
     assert!(
         msg.contains("spur init") || msg.contains("--global"),
         "error must guide user; got: {msg}"
     );
+}
+
+/// Brain-direct downstream review of T4 found a UX bug: `--global`
+/// against a non-existent `~/.spur/config.toml` produced a raw
+/// "No such file or directory" error, contradicting the local-mode
+/// error message that promises `--global` is the recovery path.
+/// Fix: `resolve_target_path` auto-creates the global file when
+/// `--global` is passed and it doesn't exist. This regression-guards
+/// that behavior using a tempdir as a fake home.
+#[test]
+fn config_set_global_auto_creates_missing_home_config() {
+    use std::env;
+    let fake_home = tempdir().unwrap();
+    // `directories::BaseDirs` reads $HOME on Unix. Override for the test.
+    let original = env::var_os("HOME");
+    // Safety: tests run sequentially in the same binary by default; if this
+    // test ran in parallel with another that also touches HOME, results
+    // could race. Acceptable for now — there is no other home-touching test.
+    env::set_var("HOME", fake_home.path());
+
+    let repo = tempdir().unwrap();
+    // Local config does NOT exist; --global is the path under test.
+    let result = config_set::run(repo.path(), "tui.edit_mode", "vim", true);
+
+    // Restore HOME before any assertion so a panic does not leak the override.
+    match original {
+        Some(v) => env::set_var("HOME", v),
+        None => env::remove_var("HOME"),
+    }
+
+    result.expect("global set must succeed even when home config is missing");
+
+    let global_path = fake_home.path().join(".spur").join("config.toml");
+    assert!(
+        global_path.exists(),
+        "expected {} to be auto-created",
+        global_path.display()
+    );
+    let cfg: SpurConfig = toml::from_str(&fs::read_to_string(&global_path).unwrap()).unwrap();
+    assert_eq!(cfg.tui.edit_mode, EditorMode::Vim);
 }
