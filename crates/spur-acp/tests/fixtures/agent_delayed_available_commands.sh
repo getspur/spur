@@ -17,16 +17,16 @@ set -u
 
 while IFS= read -r line; do
     method=$(printf '%s' "$line" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
-    id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+    id_json=$(printf '%s' "$line" | sed -E -n 's/.*"id"[[:space:]]*:[[:space:]]*("[^"]*"|[0-9]+).*/\1/p')
 
     case "$method" in
         initialize)
             # Advertise loadSession: true so NativeAcpConnection uses load_session.
-            echo '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{}},"authMethods":[]}}'
+            echo '{"jsonrpc":"2.0","id":'"$id_json"',"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{}},"authMethods":[]}}'
             ;;
         session/load)
             # Return a minimal load response acknowledging the session.
-            echo '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test-session"}}'
+            echo '{"jsonrpc":"2.0","id":'"$id_json"',"result":{"sessionId":"test-session"}}'
             # Sleep 50 ms, then emit the delayed available_commands_update.
             # At this point NativeAcpConnection has already consumed the response
             # and (in the buggy code path) swapped notification_tx → dead_tx,
