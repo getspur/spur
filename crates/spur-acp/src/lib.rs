@@ -45,12 +45,12 @@ pub use adapter::config_options::{extract_choices, AdvertisedChoice, AdvertisedC
 pub use adapter::{extract_tool_meta, SpurToolMeta};
 pub use agent_client_protocol::schema::{
     AuthMethodId, AuthenticateRequest, AuthenticateResponse, AvailableCommand,
-    AvailableCommandInput, AvailableCommandsUpdate, ContentBlock, ContentChunk, CurrentModeUpdate,
-    ExtNotification, ExtRequest, ExtResponse, ListSessionsRequest, ListSessionsResponse,
-    LoadSessionRequest, PermissionOption, PermissionOptionId, PermissionOptionKind, Plan,
-    PlanEntry, PlanEntryPriority, PlanEntryStatus, RequestPermissionOutcome,
-    RequestPermissionRequest, ResourceLink, SelectedPermissionOutcome, SessionConfigId,
-    SessionConfigOption, SessionConfigSelectOption, SessionInfo, SessionModeId,
+    AvailableCommandInput, AvailableCommandsUpdate, ConfigOptionUpdate, ContentBlock, ContentChunk,
+    CurrentModeUpdate, ExtNotification, ExtRequest, ExtResponse, ListSessionsRequest,
+    ListSessionsResponse, LoadSessionRequest, PermissionOption, PermissionOptionId,
+    PermissionOptionKind, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
+    RequestPermissionOutcome, RequestPermissionRequest, ResourceLink, SelectedPermissionOutcome,
+    SessionConfigId, SessionConfigOption, SessionConfigSelectOption, SessionInfo, SessionModeId,
     SessionNotification, SessionUpdate, SetSessionModeRequest, SetSessionModeResponse, TextContent,
     ToolCall as AcpToolCall, ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus,
     ToolCallUpdate as AcpToolCallUpdate, ToolKind, UnstructuredCommandInput, UsageUpdate,
