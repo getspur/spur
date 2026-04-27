@@ -1,0 +1,128 @@
+//! End-to-end coverage for `spur config set tui.edit_mode <vim|emacs>`.
+//! Calls the handler directly (no spawned process) — `commands::config_set::run`
+//! is library-callable.
+
+use spur_acp::config::{EditorMode, SpurConfig};
+use spur_cli::commands::config_set;
+use std::fs;
+use tempfile::tempdir;
+
+fn seed_repo_config(repo: &std::path::Path, body: &str) -> std::path::PathBuf {
+    let path = repo.join(".spur").join("config.toml");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, body).unwrap();
+    path
+}
+
+#[test]
+fn config_set_tui_edit_mode_vim_writes_file() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path().to_path_buf();
+    seed_repo_config(
+        &repo,
+        r#"
+peer_mailbox_enabled = false
+
+[brain]
+default = "claude-code"
+fallback = []
+"#,
+    );
+
+    config_set::run(
+        repo.clone(),
+        "tui.edit_mode".to_string(),
+        "vim".to_string(),
+        false,
+    )
+    .expect("set must succeed");
+
+    let path = repo.join(".spur").join("config.toml");
+    let cfg: SpurConfig = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(cfg.tui.edit_mode, EditorMode::Vim);
+    assert_eq!(cfg.brain.default, "claude-code");
+}
+
+#[test]
+fn config_set_tui_edit_mode_emacs_round_trips() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path().to_path_buf();
+    seed_repo_config(
+        &repo,
+        r#"
+[tui]
+edit_mode = "vim"
+"#,
+    );
+    config_set::run(
+        repo.clone(),
+        "tui.edit_mode".to_string(),
+        "emacs".to_string(),
+        false,
+    )
+    .unwrap();
+    let cfg: SpurConfig =
+        toml::from_str(&fs::read_to_string(repo.join(".spur").join("config.toml")).unwrap())
+            .unwrap();
+    assert_eq!(cfg.tui.edit_mode, EditorMode::Emacs);
+}
+
+#[test]
+fn config_set_invalid_value_errors_clearly() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path().to_path_buf();
+    seed_repo_config(&repo, "");
+
+    let err = config_set::run(
+        repo.clone(),
+        "tui.edit_mode".to_string(),
+        "wim".to_string(),
+        false,
+    )
+    .expect_err("invalid value must error");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("vim") && msg.contains("emacs"),
+        "error message must hint expected values; got: {msg}"
+    );
+}
+
+#[test]
+fn config_set_unknown_key_errors_clearly() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path().to_path_buf();
+    seed_repo_config(&repo, "");
+
+    let err = config_set::run(
+        repo.clone(),
+        "made.up.key".to_string(),
+        "anything".to_string(),
+        false,
+    )
+    .expect_err("unknown key must error");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("tui.edit_mode"),
+        "error must list supported keys; got: {msg}"
+    );
+}
+
+#[test]
+fn config_set_missing_local_config_without_global_errors() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path().to_path_buf();
+    // Note: no .spur/config.toml seeded.
+
+    let err = config_set::run(
+        repo.clone(),
+        "tui.edit_mode".to_string(),
+        "vim".to_string(),
+        false,
+    )
+    .expect_err("missing local config must error without --global");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("spur init") || msg.contains("--global"),
+        "error must guide user; got: {msg}"
+    );
+}
