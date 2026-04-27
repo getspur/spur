@@ -8,6 +8,8 @@ pub mod config_option_query_source;
 pub mod detail_pane;
 pub mod diff_viewer;
 pub mod help_overlay;
+#[cfg(feature = "markdown")]
+pub mod image_cache;
 pub mod inline_executor_card;
 pub mod input_bar;
 pub mod input_bar_wrap;
