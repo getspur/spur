@@ -408,3 +408,82 @@ fn vim_normal_review_tab_decision_routes_to_view() {
     // card, not into Vim insert mode.
     assert_eq!(dashboard.input_bar_text_for_test(), "");
 }
+
+// ── Page-wise navigation contract (PR1: counted-selection actions) ─────────
+//
+// These tests lock in the post-PR1 contract that PageUp/PageDown in the
+// Agents panel emit exactly one counted action — not five inline mutations
+// followed by a misleading ScrollUp/ScrollDown. Regressing this would
+// re-introduce the latent coupling closed by commit 554e98b5.
+
+#[test]
+fn empty_dashboard_pageup_in_agents_emits_select_prev_by_5() {
+    use spur_tui::views::dashboard::Panel;
+
+    let mut dashboard = DashboardView::new();
+    dashboard.set_focused_panel(Panel::Agents);
+
+    let action = dashboard.handle_key(
+        KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+        &test_ctx(),
+    );
+    assert!(
+        matches!(action, Some(Action::SelectPrevBy(5))),
+        "PageUp in Agents panel must emit SelectPrevBy(5) exactly once, got {:?}",
+        action
+    );
+}
+
+#[test]
+fn empty_dashboard_pagedown_in_agents_emits_select_next_by_5() {
+    use spur_tui::views::dashboard::Panel;
+
+    let mut dashboard = DashboardView::new();
+    dashboard.set_focused_panel(Panel::Agents);
+
+    let action = dashboard.handle_key(
+        KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+        &test_ctx(),
+    );
+    assert!(
+        matches!(action, Some(Action::SelectNextBy(5))),
+        "PageDown in Agents panel must emit SelectNextBy(5) exactly once, got {:?}",
+        action
+    );
+}
+
+#[test]
+fn empty_dashboard_up_in_agents_emits_select_prev_by_1() {
+    use spur_tui::views::dashboard::Panel;
+
+    let mut dashboard = DashboardView::new();
+    dashboard.set_focused_panel(Panel::Agents);
+
+    let action = dashboard.handle_key(
+        KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+        &test_ctx(),
+    );
+    assert!(
+        matches!(action, Some(Action::SelectPrevBy(1))),
+        "Up in Agents panel must emit SelectPrevBy(1) exactly once, got {:?}",
+        action
+    );
+}
+
+#[test]
+fn empty_dashboard_down_in_agents_emits_select_next_by_1() {
+    use spur_tui::views::dashboard::Panel;
+
+    let mut dashboard = DashboardView::new();
+    dashboard.set_focused_panel(Panel::Agents);
+
+    let action = dashboard.handle_key(
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        &test_ctx(),
+    );
+    assert!(
+        matches!(action, Some(Action::SelectNextBy(1))),
+        "Down in Agents panel must emit SelectNextBy(1) exactly once, got {:?}",
+        action
+    );
+}
