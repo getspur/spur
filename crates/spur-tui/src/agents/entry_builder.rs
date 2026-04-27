@@ -38,6 +38,8 @@ pub fn build_entry(handle: &str, cfg: &CommandsConfig, cmd: &AvailableCommand) -
         }
     };
 
+    let arg_picker_spec = spur_acp::adapter::arg_picker_hint::parse(cmd);
+
     CommandEntry {
         name: display_name,
         description: cmd.description.clone(),
@@ -46,7 +48,7 @@ pub fn build_entry(handle: &str, cfg: &CommandsConfig, cmd: &AvailableCommand) -
             handle: handle.to_string(),
         },
         dispatch,
-        arg_picker_spec: None,
+        arg_picker_spec,
     }
 }
 
