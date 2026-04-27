@@ -5,9 +5,9 @@ use spur_license::{FeatureGate, FeatureKey, FlagKey, InstallId, QuotaKey, QuotaV
 fn community_has_core_features() {
     let policy = PolicyResolver::embedded();
     let gate = FeatureGate::new(policy);
-    assert!(gate.has(FeatureKey::BRAIN_SESSION));
-    assert!(gate.has(FeatureKey::SINGLE_WORKER));
-    assert!(!gate.has(FeatureKey::PARALLEL_WORKERS));
+    assert!(gate.has(FeatureKey::CORE_CORE_BRAIN_SESSION));
+    assert!(gate.has(FeatureKey::CORE_CORE_PARALLEL_WORKERS));
+    assert!(!gate.has(FeatureKey::PM_PRO_BEADS_ADVANCED));
     assert_eq!(gate.tier(), Tier::Community);
 }
 
@@ -17,7 +17,7 @@ fn community_quota_defaults() {
     let gate = FeatureGate::new(policy);
     assert_eq!(
         gate.quota(QuotaKey::MaxConcurrentWorkers),
-        Some(QuotaValue::Count(3))
+        Some(QuotaValue::Count(1))
     );
 }
 
@@ -25,7 +25,7 @@ fn community_quota_defaults() {
 fn unknown_feature_returns_false() {
     let policy = PolicyResolver::embedded();
     let gate = FeatureGate::new(policy);
-    assert!(!gate.has(FeatureKey::PARALLEL_WORKERS));
+    assert!(!gate.has(FeatureKey::PM_PRO_BEADS_ADVANCED));
 }
 
 #[test]
