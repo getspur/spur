@@ -2103,7 +2103,7 @@ impl App {
                 let tx = self.mermaid_tx.clone();
                 let session_cloned = session.clone();
                 tokio::task::spawn_blocking(move || {
-                    let result = crate::components::mermaid::render_mermaid(&code)
+                    let result = crate::components::mermaid::render_mermaid(&code, target_width)
                         .map(std::sync::Arc::new)
                         .map_err(|e| e.to_string());
                     let _ = tx.send(Action::MermaidRenderCompleted {
@@ -2118,12 +2118,12 @@ impl App {
             Action::MermaidRenderCompleted {
                 session,
                 ref_id,
-                target_width: _,
+                target_width,
                 result,
             } => {
                 if let Some(ref mut detail) = self.session_detail {
                     if detail.session_id().0 == session.0 {
-                        detail.handle_mermaid_completed(ref_id, result);
+                        detail.handle_mermaid_completed(ref_id, target_width, result);
                     }
                 }
                 self.dirty = true;
