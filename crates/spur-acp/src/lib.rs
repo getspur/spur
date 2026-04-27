@@ -3,6 +3,7 @@ pub mod agents;
 pub mod config;
 pub mod connection;
 pub mod domain;
+pub mod error;
 pub mod ext;
 pub mod protocol;
 pub mod registry;
