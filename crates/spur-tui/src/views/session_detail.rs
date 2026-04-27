@@ -166,6 +166,14 @@ pub struct SessionDetailView {
     /// `/effort` slash entries in `command_registry` and the `SlashArg`
     /// picker's choice list via `CompletionEnv.session_config_options`.
     session_config_options: Vec<spur_acp::SessionConfigOption>,
+
+    /// Wave B/C (M8): cached `SpurAgentCaps` for this session. Populated by
+    /// the upstream wiring once `Orchestrator::spur_agent_caps()` returns
+    /// `Some(_)` (M9 ties this to a `SpurEventBody` arm). When `None`,
+    /// caps are absent (e.g. resumed sessions before M9 wires
+    /// `LoadSessionResponse`); the registry filter and submit-router
+    /// treat `None` as permissive — full capability set assumed (F-3).
+    spur_agent_caps: Option<std::sync::Arc<spur_acp::SpurAgentCaps>>,
 }
 
 impl SessionDetailView {
@@ -230,6 +238,7 @@ impl SessionDetailView {
             ready_banner: None,
             load_state: LoadState::Ready,
             session_config_options: Vec::new(),
+            spur_agent_caps: None,
         }
     }
 
@@ -310,6 +319,7 @@ impl SessionDetailView {
             ready_banner: None,
             load_state: LoadState::Ready,
             session_config_options: Vec::new(),
+            spur_agent_caps: None,
         }
     }
 
@@ -367,6 +377,7 @@ impl SessionDetailView {
             ready_banner: None,
             load_state: LoadState::Retiring,
             session_config_options: Vec::new(),
+            spur_agent_caps: None,
         }
     }
 
@@ -1279,8 +1290,14 @@ impl SessionDetailView {
                         if let Some((text, ranges, interrupt)) =
                             self.input_bar.take_submit_capture()
                         {
-                            use crate::commands::submit_router::{route, SubmitDecision};
-                            let dec = route(&text, &ranges, &self.command_registry, interrupt);
+                            use crate::commands::submit_router::{route_with_caps, SubmitDecision};
+                            let dec = route_with_caps(
+                                &text,
+                                &ranges,
+                                &self.command_registry,
+                                interrupt,
+                                self.spur_agent_caps.as_deref(),
+                            );
                             return match dec {
                                 SubmitDecision::Empty => None,
                                 SubmitDecision::Send {
@@ -1321,6 +1338,18 @@ impl SessionDetailView {
                                         None
                                     } else {
                                         Some(Action::SetSessionConfigOption { config_id, value })
+                                    }
+                                }
+                                SubmitDecision::SetSessionModel { value } => {
+                                    // Wave B.4: see app.rs comment — Bundle 3 wires
+                                    // dedicated dispatch; for now reuse config-option path.
+                                    if self.is_cleared() {
+                                        None
+                                    } else {
+                                        Some(Action::SetSessionConfigOption {
+                                            config_id: "model".into(),
+                                            value,
+                                        })
                                     }
                                 }
                             };
