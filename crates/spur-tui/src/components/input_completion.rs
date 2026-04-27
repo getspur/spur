@@ -9,11 +9,12 @@ use crate::commands::CommandRegistry;
 use crate::components::completion_trigger::{
     IntentEvent, TriggerDetector, TriggerKind, TriggerTransition,
 };
-use crate::components::input_bar::InputBar;
+use crate::components::input_bar::{InputBar, ProtectedRange};
 use crate::components::picker_shell::{PickerAction, PickerShell};
 use crate::components::query_source::{
     MentionQuerySource, QueryMode, RetrievalAccept, SlashQuerySource, SlashRow,
 };
+use crate::input_history::InputStateSnapshot;
 use crate::mentions::{CompletionScope, MentionRegistry};
 
 pub struct InputCompletionPort {
@@ -243,7 +244,16 @@ impl InputCompletionPort {
                 replace_from,
             } => {
                 if let Some(prefix_start) = replace_from {
-                    replace_trigger_token(input_bar, prefix_start, "");
+                    // Re-anchor against the live detector state — same
+                    // contract as ReplaceTriggerToken below. Without this,
+                    // a stale `replace_from` after the user types more
+                    // characters past picker-open can carve out a span
+                    // that starts too early.
+                    let anchor = self
+                        .trigger_detector
+                        .current_prefix_start()
+                        .unwrap_or(prefix_start);
+                    replace_trigger_token(input_bar, anchor, "");
                 }
                 input_bar.insert_atom(text, uri, name);
             }
@@ -278,15 +288,74 @@ impl Default for InputCompletionPort {
 
 /// Replace the range [prefix_start..cursor] in the InputBar with `replacement`.
 /// Leaves the cursor at `prefix_start + replacement.len()`.
+///
+/// Preserves existing protected atoms outside the carved-out span so prior
+/// `@mentions` keep their range metadata when a sibling trigger is accepted.
+/// `set_text` cannot be used here: it routes through `InputStateSnapshot::from_text`
+/// which seeds `protected_ranges = []` and drops every prior atom.
 fn replace_trigger_token(input_bar: &mut InputBar, prefix_start: usize, replacement: &str) {
-    let current = input_bar.text().to_string();
+    let current = input_bar.text();
     let cursor = input_bar.cursor();
-    let mut new_text = String::with_capacity(current.len());
+
+    // Detector contract: prefix_start ≤ cursor and both sit on UTF-8 char
+    // boundaries. Violation means the detector or accept dispatcher is racy;
+    // surface it in dev/test instead of returning corrupt offsets.
+    debug_assert!(
+        prefix_start <= cursor,
+        "replace_trigger_token: prefix_start ({prefix_start}) > cursor ({cursor})"
+    );
+    debug_assert!(
+        current.is_char_boundary(prefix_start) && current.is_char_boundary(cursor),
+        "replace_trigger_token: byte offsets off a UTF-8 char boundary"
+    );
+    // Atoms can't overlap the trigger span — the detector never opens a
+    // picker inside a protected range. Catch future regressions loudly.
+    debug_assert!(
+        input_bar
+            .protected_ranges()
+            .iter()
+            .all(|r| r.end <= prefix_start || r.start >= cursor),
+        "replace_trigger_token: a protected range overlaps [{prefix_start}..{cursor}]"
+    );
+
+    let removed_len = cursor.saturating_sub(prefix_start);
+    let inserted_len = replacement.len();
+    let delta = inserted_len as isize - removed_len as isize;
+
+    let mut new_text = String::with_capacity(current.len() + inserted_len);
     new_text.push_str(&current[..prefix_start]);
     new_text.push_str(replacement);
     new_text.push_str(&current[cursor..]);
-    let new_cursor = prefix_start + replacement.len();
-    input_bar.set_text(new_text, new_cursor);
+
+    // Filter is defense-in-depth for the debug_assert above; in release builds
+    // we'd rather drop a misaligned range than panic on a stray edge case.
+    let ranges: Vec<ProtectedRange> = input_bar
+        .protected_ranges()
+        .iter()
+        .filter(|r| r.end <= prefix_start || r.start >= cursor)
+        .cloned()
+        .filter_map(|mut r| {
+            if r.start >= cursor {
+                // Surviving ranges are at or beyond `cursor`, so adding
+                // `delta = inserted_len - removed_len` lands in
+                // [prefix_start + inserted_len, _]. Use checked arithmetic
+                // to fail loudly on any future invariant break instead of
+                // silently wrapping into a huge usize address in release.
+                let new_start = r.start.checked_add_signed(delta)?;
+                let new_end = r.end.checked_add_signed(delta)?;
+                debug_assert!(
+                    new_start >= prefix_start + inserted_len,
+                    "shifted range start escaped the post-replacement region"
+                );
+                r.start = new_start;
+                r.end = new_end;
+            }
+            Some(r)
+        })
+        .collect();
+
+    let new_cursor = prefix_start + inserted_len;
+    input_bar.set_state(InputStateSnapshot::new(new_text, ranges), new_cursor);
 }
 
 #[cfg(test)]
@@ -520,6 +589,334 @@ mod tests {
             "/model gpt-5-codex",
             "the `/model ` prefix must survive; only the arg region is replaced"
         );
+    }
+
+    #[test]
+    fn replace_trigger_token_preserves_prior_protected_atoms() {
+        // Regression: a second @mention used to wipe the first atom's protected
+        // range because `replace_trigger_token` routed through `set_text`,
+        // which always seeds an empty `protected_ranges`. Both atoms must
+        // survive the carve-out of the new trigger token.
+        use super::replace_trigger_token;
+
+        let mut input_bar = InputBar::new();
+
+        // First mention is already accepted as a protected atom: `@foo`.
+        input_bar.insert_atom("@foo", "file:///foo".to_string(), "foo".to_string());
+        // Type ` @b` in plain text (single-line `insert_paste` is the public
+        // way to splice unprotected text without going through key dispatch).
+        input_bar.insert_paste(" @b");
+        assert_eq!(input_bar.text(), "@foo @b");
+        assert_eq!(input_bar.cursor(), 7);
+        assert_eq!(input_bar.protected_ranges().len(), 1);
+
+        // Picker accept of the second mention's first step: replace `@b`
+        // (prefix_start=5, cursor=7) with the empty string so `insert_atom`
+        // can place the chosen atom. The first atom's range MUST survive.
+        replace_trigger_token(&mut input_bar, 5, "");
+
+        assert_eq!(input_bar.text(), "@foo ");
+        assert_eq!(
+            input_bar.protected_ranges().len(),
+            1,
+            "first @foo atom must remain protected after sibling trigger replace"
+        );
+        let r = &input_bar.protected_ranges()[0];
+        assert_eq!((r.start, r.end), (0, 4));
+        assert_eq!(r.uri, "file:///foo");
+    }
+
+    #[test]
+    fn replace_trigger_token_shifts_ranges_after_replacement() {
+        // When the trigger sits between two existing atoms, the trailing
+        // atom's offsets must shift by `replacement.len() - removed_len`.
+        use super::replace_trigger_token;
+
+        let mut input_bar = InputBar::new();
+        input_bar.insert_atom("@foo", "file:///foo".to_string(), "foo".to_string());
+        input_bar.insert_paste(" /m ");
+        input_bar.insert_atom("@bar", "file:///bar".to_string(), "bar".to_string());
+        // Layout: `@foo /m @bar`
+        //          0123 4 5678 9012
+        assert_eq!(input_bar.text(), "@foo /m @bar");
+        assert_eq!(input_bar.protected_ranges().len(), 2);
+
+        // Replace `/m` (prefix_start=5, cursor=7) with `/model`.
+        // We must rewind the cursor so it sits at the end of `/m` (=7) before
+        // calling — that's the contract `apply_accept` honors.
+        input_bar.set_text_cursor_for_test(7);
+        replace_trigger_token(&mut input_bar, 5, "/model");
+
+        assert_eq!(input_bar.text(), "@foo /model @bar");
+        let ranges = input_bar.protected_ranges();
+        assert_eq!(ranges.len(), 2, "both atoms must survive");
+        assert_eq!((ranges[0].start, ranges[0].end), (0, 4));
+        assert_eq!(
+            (ranges[1].start, ranges[1].end),
+            (12, 16),
+            "trailing atom shifts by +4 (delta = 6 - 2)"
+        );
+    }
+
+    #[test]
+    fn replace_trigger_token_handles_multibyte_neighbors() {
+        // Byte offsets — not char positions — drive the shift arithmetic.
+        // A range sitting after the trigger across multibyte text must end up
+        // at the right *byte* coordinates after substitution.
+        use super::replace_trigger_token;
+
+        let mut input_bar = InputBar::new();
+        input_bar.insert_atom("@foo", "file:///foo".to_string(), "foo".to_string());
+        // `你好` = 6 bytes (3 + 3). Buffer becomes `@foo 你好 /m `.
+        input_bar.insert_paste(" 你好 /m ");
+        input_bar.insert_atom("@bar", "file:///bar".to_string(), "bar".to_string());
+        let original = input_bar.text();
+        assert_eq!(original, "@foo 你好 /m @bar");
+
+        // Locate `/m` by byte offset; cursor at end of `/m`.
+        let prefix_start = original.find("/m").expect("prefix");
+        let cursor = prefix_start + "/m".len();
+        let bar_byte = original.find("@bar").expect("bar atom");
+
+        input_bar.set_text_cursor_for_test(cursor);
+        replace_trigger_token(&mut input_bar, prefix_start, "/model");
+
+        assert_eq!(input_bar.text(), "@foo 你好 /model @bar");
+        let ranges = input_bar.protected_ranges();
+        assert_eq!(ranges.len(), 2);
+        assert_eq!((ranges[0].start, ranges[0].end), (0, 4));
+        // delta = 6 (`/model`) − 2 (`/m`) = +4 bytes.
+        assert_eq!(
+            (ranges[1].start, ranges[1].end),
+            (bar_byte + 4, bar_byte + 4 + "@bar".len()),
+        );
+    }
+
+    #[test]
+    fn replace_trigger_token_zero_width_carve_shifts_trailing_atom() {
+        // `prefix_start == cursor` (e.g. the user types `@`, picker opens
+        // immediately, accept fires before any query characters land).
+        // No bytes are removed; trailing atoms shift by exactly the
+        // replacement length.
+        use super::replace_trigger_token;
+
+        let mut input_bar = InputBar::new();
+        input_bar.insert_atom("@foo", "file:///foo".to_string(), "foo".to_string());
+        input_bar.insert_paste(" ");
+        input_bar.insert_atom("@bar", "file:///bar".to_string(), "bar".to_string());
+        // Insert at the boundary between ` ` and `@bar` (byte 5).
+        input_bar.set_text_cursor_for_test(5);
+        replace_trigger_token(&mut input_bar, 5, "INS");
+
+        assert_eq!(input_bar.text(), "@foo INS@bar");
+        let ranges = input_bar.protected_ranges();
+        assert_eq!(ranges.len(), 2);
+        assert_eq!((ranges[0].start, ranges[0].end), (0, 4));
+        assert_eq!((ranges[1].start, ranges[1].end), (8, 12));
+    }
+
+    #[test]
+    fn two_worker_mentions_both_survive_into_worker_hint() {
+        // End-to-end regression for the reported bug: typing two `@worker:*`
+        // atoms in the composer must surface both names in the
+        // `[UI hint] User-suggested workers ...` line. Before the fix,
+        // accepting the second mention dropped the first range, so the hint
+        // only listed the most recent worker.
+        use std::collections::HashSet;
+
+        use spur_acp::{ContentBlock, TextContent};
+
+        use crate::mentions::hint::prepend_worker_hint;
+
+        use super::replace_trigger_token;
+
+        let mut input_bar = InputBar::new();
+        // First accepted worker atom — already in the buffer.
+        input_bar.insert_atom(
+            "@worker:codex",
+            "worker://codex".to_string(),
+            "codex".to_string(),
+        );
+        // User types ` @ki` (plain text).
+        input_bar.insert_paste(" @ki");
+        assert_eq!(input_bar.text(), "@worker:codex @ki");
+
+        // Picker accept-step 1: carve out the `@ki` typed trigger.
+        replace_trigger_token(&mut input_bar, 14, "");
+        // Picker accept-step 2: insert the second worker atom.
+        input_bar.insert_atom(
+            "@worker:kimi",
+            "worker://kimi".to_string(),
+            "kimi".to_string(),
+        );
+
+        assert_eq!(input_bar.text(), "@worker:codex @worker:kimi");
+        assert_eq!(
+            input_bar.protected_ranges().len(),
+            2,
+            "both worker atoms must remain protected"
+        );
+
+        // Downstream: the worker-hint builder reads protected_ranges. Both
+        // worker names must reach the hint.
+        let known: HashSet<String> = ["codex", "kimi", "gemini"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let mut blocks: Vec<ContentBlock> =
+            vec![ContentBlock::Text(TextContent::new("user text"))];
+        let prepended = prepend_worker_hint(&mut blocks, input_bar.protected_ranges(), &known);
+        assert!(prepended);
+        let hint = match &blocks[0] {
+            ContentBlock::Text(t) => t.text.clone(),
+            _ => panic!("first block should be the hint"),
+        };
+        assert!(hint.contains("codex"), "hint missing codex: {hint}");
+        assert!(hint.contains("kimi"), "hint missing kimi: {hint}");
+    }
+
+    #[test]
+    fn apply_accept_twice_via_handle_picker_key_keeps_both_atoms() {
+        // Defends against the highest-confidence Gate 3 finding: the regression
+        // path is `handle_picker_key` → `apply_accept` → `replace_trigger_token`
+        // run twice in sequence. If anyone reverts `apply_accept` (or
+        // `replace_trigger_token`) to a `set_text` route, this test fails.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("alpha.txt"), "a").unwrap();
+        let command_registry = CommandRegistry::new();
+        let mention_registry = Rc::new(RefCell::new(MentionRegistry::new()));
+        let mut input_bar = InputBar::new();
+        let mut completion = InputCompletionPort::new();
+
+        // Round 1: type `@`, picker opens at offset 0, Tab accepts.
+        input_bar.set_text("@".to_string(), 1);
+        completion.dispatch(
+            IntentEvent::TypedChar('@'),
+            &mut input_bar,
+            &env(&command_registry, &mention_registry, tmp.path()),
+        );
+        assert!(completion.is_active());
+        let first = completion.handle_picker_key(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &mut input_bar,
+        );
+        assert!(matches!(first, Some(RetrievalAccept::InsertAtom { .. })));
+        assert_eq!(input_bar.protected_ranges().len(), 1);
+
+        // Splice ` @` as plain text (single-line `insert_paste` does not
+        // create a range and does not wipe existing ranges), then dispatch
+        // a synthetic TypedChar('@') so the detector sees the new `@` as
+        // freshly typed at the cursor's previous byte.
+        input_bar.insert_paste(" @");
+        completion.dispatch(
+            IntentEvent::TypedChar('@'),
+            &mut input_bar,
+            &env(&command_registry, &mention_registry, tmp.path()),
+        );
+        assert!(completion.is_active(), "second mention picker should open");
+
+        let second = completion.handle_picker_key(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &mut input_bar,
+        );
+        assert!(matches!(second, Some(RetrievalAccept::InsertAtom { .. })));
+        assert_eq!(
+            input_bar.protected_ranges().len(),
+            2,
+            "two completion accepts in sequence must leave two protected atoms; \
+             a regression to `set_text` in apply_accept would drop the first"
+        );
+    }
+
+    #[test]
+    fn slash_arg_accept_preserves_trailing_atom() {
+        // Gate 3 #2: prior tests cover a slash-arg accept with a clean buffer
+        // and a free-function `replace_trigger_token` call with flanking
+        // atoms. Neither covers the *combined* path: a real slash-arg accept
+        // via `handle_picker_key` while a protected atom sits past the arg
+        // region. (Atoms before a slash are impossible by design — slash
+        // commands fire only at byte offset 0.)
+        use crate::commands::entry::{CommandEntry, CommandSource, Dispatch};
+        use crate::components::input_bar::{ProtectedRange, RangeKind};
+        use crate::input_history::InputStateSnapshot;
+        use spur_acp::adapter::arg_picker_hint::{ArgPickerHint, ArgPickerSpec};
+        use spur_acp::{SessionConfigId, SessionConfigOption, SessionConfigSelectOption};
+
+        let mut command_registry = CommandRegistry::new();
+        command_registry.set_advertised_commands(
+            "codex",
+            vec![CommandEntry {
+                name: "model".into(),
+                description: "Switch model".into(),
+                hint: None,
+                source: CommandSource::Advertised {
+                    handle: "codex".into(),
+                },
+                dispatch: Dispatch::SetSessionConfigOption {
+                    config_id: "model".into(),
+                },
+                arg_picker_spec: Some(ArgPickerSpec {
+                    free_text_hint: String::new(),
+                    typed_hint: Some(ArgPickerHint::ConfigOption {
+                        config_id: "model".into(),
+                    }),
+                }),
+            }],
+        );
+        let opts = vec![SessionConfigOption::select(
+            SessionConfigId::new("model".to_string()),
+            "Model".to_string(),
+            "gpt-5".to_string(),
+            vec![SessionConfigSelectOption::new(
+                "gpt-5".to_string(),
+                "GPT-5".to_string(),
+            )],
+        )];
+        let mention_registry = Rc::new(RefCell::new(MentionRegistry::new()));
+        let mut input_bar = InputBar::new();
+        let mut completion = InputCompletionPort::new();
+
+        // Buffer: `/model  @bar` (extra space so the trailing atom doesn't
+        // butt up against the inserted arg). Cursor at byte 7 — right after
+        // the first space — so the SlashArg picker opens with empty arg.
+        let snapshot = InputStateSnapshot::new(
+            "/model  @bar".to_string(),
+            vec![ProtectedRange {
+                start: 8,
+                end: 12,
+                kind: RangeKind::Atom,
+                uri: "file:///bar".into(),
+                name: "bar".into(),
+            }],
+        );
+        input_bar.set_state(snapshot, 7);
+
+        completion.dispatch(
+            IntentEvent::Pasted,
+            &mut input_bar,
+            &env_with_options(
+                &command_registry,
+                &mention_registry,
+                std::path::Path::new("."),
+                &opts,
+            ),
+        );
+        assert!(completion.is_active(), "slash-arg picker must open");
+
+        let accepted = completion.handle_picker_key(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &mut input_bar,
+        );
+        assert!(matches!(
+            accepted,
+            Some(RetrievalAccept::ReplaceTriggerToken { .. })
+        ));
+
+        assert_eq!(input_bar.text(), "/model gpt-5 @bar");
+        let ranges = input_bar.protected_ranges();
+        assert_eq!(ranges.len(), 1, "trailing atom must survive the accept");
+        // delta = 5 (`gpt-5`) − 0 (empty arg before) = +5.
+        assert_eq!((ranges[0].start, ranges[0].end), (13, 17));
     }
 
     #[test]

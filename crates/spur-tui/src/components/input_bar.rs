@@ -1856,6 +1856,47 @@ mod paste_atom_tests {
     use super::*;
 
     #[test]
+    fn set_state_preserves_non_empty_protected_ranges() {
+        // Defends the InputBar contract independently of the completion logic.
+        // Gemini (Gate 3) verified that hacking `restore_snapshot` to wipe
+        // ranges only breaks tests in input_completion.rs — InputBar itself
+        // had no test pinning that `set_state` round-trips its `protected_ranges`.
+        let mut bar = InputBar::new();
+        let snapshot = crate::input_history::InputStateSnapshot::new(
+            "@foo @bar".to_string(),
+            vec![
+                ProtectedRange {
+                    start: 0,
+                    end: 4,
+                    kind: RangeKind::Atom,
+                    uri: "file:///foo".into(),
+                    name: "foo".into(),
+                },
+                ProtectedRange {
+                    start: 5,
+                    end: 9,
+                    kind: RangeKind::Atom,
+                    uri: "file:///bar".into(),
+                    name: "bar".into(),
+                },
+            ],
+        );
+        bar.set_state(snapshot, 9);
+
+        assert_eq!(bar.text(), "@foo @bar");
+        let ranges = bar.protected_ranges();
+        assert_eq!(
+            ranges.len(),
+            2,
+            "set_state must round-trip non-empty protected_ranges"
+        );
+        assert_eq!((ranges[0].start, ranges[0].end), (0, 4));
+        assert_eq!(ranges[0].uri, "file:///foo");
+        assert_eq!((ranges[1].start, ranges[1].end), (5, 9));
+        assert_eq!(ranges[1].uri, "file:///bar");
+    }
+
+    #[test]
     fn single_line_paste_stays_inline() {
         let mut bar = InputBar::new();
 
