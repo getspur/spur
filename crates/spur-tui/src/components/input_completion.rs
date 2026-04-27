@@ -123,19 +123,19 @@ impl InputCompletionPort {
                         PickerShell::open_with_query(Box::new(src), &trigger.query)
                     }
                     TriggerKind::SlashArg { command_name } => {
-                        // Resolve the command's arg-picker spec. v1 only
-                        // supports the typed_hint == ConfigOption path;
-                        // free-text fallback (typed_hint == None) is v2.
+                        // Resolve the command's arg-picker spec.
+                        //   typed_hint == Some(ConfigOption) → v1 select picker
+                        //   typed_hint == None             → v2 PR-3 free-text picker
+                        //   future: GitRef, FilePath, Choice, etc. (PR-4+)
                         let Some(spec) = env.command_registry.arg_picker_spec(&command_name) else {
                             return;
                         };
-                        let Some(typed) = spec.typed_hint else {
-                            return;
-                        };
-                        match typed {
-                            spur_acp::adapter::arg_picker_hint::ArgPickerHint::ConfigOption {
-                                config_id,
-                            } => {
+                        match spec.typed_hint.clone() {
+                            Some(
+                                spur_acp::adapter::arg_picker_hint::ArgPickerHint::ConfigOption {
+                                    config_id,
+                                },
+                            ) => {
                                 let choices = env
                                     .session_config_options
                                     .iter()
@@ -146,6 +146,17 @@ impl InputCompletionPort {
                                     command_name.clone(),
                                     config_id.clone(),
                                     choices,
+                                );
+                                PickerShell::open_with_query(Box::new(src), &trigger.query)
+                            }
+                            None => {
+                                // PR-3: agent advertised Unstructured input
+                                // (e.g. codex's /review, /review-branch). Free-
+                                // text picker reads the arg from the InputBar.
+                                let src = crate::components::command_input_query_source::CommandInputQuerySource::new(
+                                    command_name.clone(),
+                                    spec.free_text_hint.clone(),
+                                    trigger.prefix_start,
                                 );
                                 PickerShell::open_with_query(Box::new(src), &trigger.query)
                             }
@@ -437,6 +448,63 @@ mod tests {
         assert_eq!(input_bar.text(), "@Cargo.toml");
         assert_eq!(input_bar.protected_ranges().len(), 1);
         assert!(!completion.is_active());
+    }
+
+    #[test]
+    fn slash_arg_open_with_typed_hint_none_instantiates_command_input_query_source() {
+        // Wave B.7 regression: when an agent advertises an Unstructured input
+        // (e.g. codex's /review-branch), parse() yields ArgPickerSpec with
+        // typed_hint=None. The SlashArg arm must dispatch on that to a
+        // CommandInputQuerySource (free-text picker), not silently drop.
+        use crate::commands::entry::{CommandEntry, CommandSource, Dispatch};
+        use spur_acp::adapter::arg_picker_hint::ArgPickerSpec;
+
+        let mut command_registry = CommandRegistry::new();
+        let entry = CommandEntry {
+            name: "review-branch".into(),
+            description: "Review branch".into(),
+            hint: Some("branch name".into()),
+            source: CommandSource::Agent {
+                handle: "codex".into(),
+            },
+            dispatch: Dispatch::PromptText {
+                normalized: "/review-branch".into(),
+            },
+            arg_picker_spec: Some(ArgPickerSpec {
+                free_text_hint: "branch name".into(),
+                typed_hint: None,
+            }),
+        };
+        command_registry.set_agent_commands("codex", vec![entry]);
+
+        let mention_registry = Rc::new(RefCell::new(MentionRegistry::new()));
+        let mut input_bar = InputBar::new();
+        let mut completion = InputCompletionPort::new();
+
+        // Paste "/review-branch " (cursor at end). Trigger detector enters
+        // SlashArg{ command_name: "review-branch" } and the dispatch arm
+        // must instantiate the free-text picker.
+        input_bar.set_text("/review-branch ".to_string(), 15);
+        completion.dispatch(
+            IntentEvent::Pasted,
+            &mut input_bar,
+            &env_with_options(
+                &command_registry,
+                &mention_registry,
+                std::path::Path::new("."),
+                &[],
+            ),
+        );
+
+        assert!(
+            completion.is_active(),
+            "SlashArg dispatch with typed_hint=None must open the free-text picker"
+        );
+        assert_eq!(
+            completion.picker_title_for_test().as_deref(),
+            Some("branch name"),
+            "CommandInputQuerySource title must surface the advertised hint"
+        );
     }
 
     #[test]
