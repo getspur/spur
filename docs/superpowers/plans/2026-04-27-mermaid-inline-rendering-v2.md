@@ -80,15 +80,15 @@ The action carries the chosen raster bucket all the way from the emit site to th
     },
 ```
 
-- [ ] **Step 2: `cargo check -p spur-tui --features markdown`. Expect failures at the action emit sites (session_detail.rs:1617, :1793) and the dispatch site (app.rs:2090, 2109) — those will be wired in later tasks. The Action enum itself should compile.**
+- [ ] **Step 2: `cargo check -p spur-tui --features markdown`. Expect failures at the action emit sites (session_detail.rs:1618, :1793) and three dispatch sites in app.rs (:2090 destructure pattern, :2101 `tx.send(Action::MermaidRenderCompleted{...})` constructor inside the worker spawn closure, :2109 destructure pattern) — those will be wired in later tasks (Tasks 5/9). The Action enum itself should compile.**
 
-- [ ] **Step 3: Verify only those four call sites are broken**
+- [ ] **Step 3: Verify only those five call sites are broken**
 
 ```bash
 cargo check -p spur-tui --features markdown 2>&1 | grep -E "MermaidRender(Request|Completed)" | sort -u
 ```
 
-Expected output (4 lines, names matching the sites listed above).
+Expected output (5 lines: session_detail.rs:1618, :1793, app.rs:2090, :2101, :2109).
 
 - [ ] **Step 4: Commit**
 
