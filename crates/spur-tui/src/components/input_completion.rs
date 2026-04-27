@@ -763,8 +763,7 @@ mod tests {
             .into_iter()
             .map(String::from)
             .collect();
-        let mut blocks: Vec<ContentBlock> =
-            vec![ContentBlock::Text(TextContent::new("user text"))];
+        let mut blocks: Vec<ContentBlock> = vec![ContentBlock::Text(TextContent::new("user text"))];
         let prepended = prepend_worker_hint(&mut blocks, input_bar.protected_ranges(), &known);
         assert!(prepended);
         let hint = match &blocks[0] {

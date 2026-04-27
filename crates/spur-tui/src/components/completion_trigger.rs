@@ -495,25 +495,15 @@ mod detector_tests {
         }];
 
         // Open Mention at offset 0 (`@xxx @bar`, cursor at 1).
-        let open = det.step(
-            IntentEvent::TypedChar('@'),
-            "@xxx @bar",
-            1,
-            &ranges,
-            |_| false,
-        );
+        let open = det.step(IntentEvent::TypedChar('@'), "@xxx @bar", 1, &ranges, |_| {
+            false
+        });
         assert!(matches!(open, TriggerTransition::Open { .. }));
 
         // Atomic skip: Right arrow from byte 4 (just before the space) lands
         // past the atom at byte 9. window_end is the space at byte 4, so 9 is
         // outside (prefix_start, window_end] → detector closes.
-        let close = det.step(
-            IntentEvent::MovedCursor,
-            "@xxx @bar",
-            9,
-            &ranges,
-            |_| false,
-        );
+        let close = det.step(IntentEvent::MovedCursor, "@xxx @bar", 9, &ranges, |_| false);
         assert!(
             matches!(close, TriggerTransition::Close),
             "cursor past window_end must close the picker, got {close:?}"
