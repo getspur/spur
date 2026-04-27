@@ -4,7 +4,12 @@ use std::sync::Mutex;
 static LOCK: Mutex<()> = Mutex::new(());
 
 fn spur() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_spur"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_spur"));
+    command
+        .env_remove("SPUR_LICENSE_DEV_PLAN")
+        .env_remove("SPUR_LICENSESEAT_API_KEY")
+        .env_remove("SPUR_LICENSESEAT_PRODUCT_SLUG");
+    command
 }
 
 #[test]
@@ -23,7 +28,7 @@ fn auth_help_lists_subcommands() {
 }
 
 #[test]
-fn auth_status_reports_config_error_without_env() {
+fn auth_status_reports_community_without_env() {
     let _guard = LOCK.lock().unwrap();
     let output = spur()
         .args(["auth", "status"])
@@ -31,8 +36,8 @@ fn auth_status_reports_config_error_without_env() {
         .expect("spawn spur auth status");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("License status"));
-    assert!(stdout.contains("ConfigError") || stdout.contains("config"));
+    assert!(stdout.contains("spur Community"));
+    assert!(stdout.contains("free tier"));
 }
 
 #[test]
@@ -44,7 +49,11 @@ fn auth_login_requires_provider_configuration() {
         .expect("spawn spur auth login");
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("not configured") || stderr.contains("license provider"));
+    assert!(
+        stderr.contains("not configured")
+            || stderr.contains("license provider")
+            || stderr.contains("Community tier provider cannot activate license keys directly")
+    );
 }
 
 #[test]
