@@ -1252,6 +1252,18 @@ impl InputBar {
         if text.is_empty() {
             return;
         }
+        // Normalize line endings before the multi-line gate. Clipboards from
+        // Mac legacy apps deliver bare `\r`; Windows sources deliver `\r\n`.
+        // Rust's `str::lines()` only splits on `\n` and `\r\n`, so a bare `\r`
+        // would slip through as a single logical line and render as one
+        // garbled row with embedded control bytes.
+        let normalized;
+        let text: &str = if text.contains('\r') {
+            normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+            &normalized
+        } else {
+            text
+        };
         if self.history_cursor.is_some() {
             self.restore_draft();
         }
@@ -1974,6 +1986,38 @@ mod paste_atom_tests {
         let mut bar = InputBar::new();
 
         bar.insert_paste("hello\n");
+
+        assert_eq!(bar.text(), "hello\n");
+        assert!(bar.protected_ranges.is_empty());
+        assert!(bar.pastes.is_empty());
+    }
+
+    #[test]
+    fn carriage_return_separators_are_normalized_to_newlines() {
+        let mut bar = InputBar::new();
+
+        bar.insert_paste("a\rb\rc");
+
+        assert_eq!(bar.text(), "[Paste #1 · 3 lines]");
+        assert_eq!(bar.protected_ranges.len(), 1);
+        assert_eq!(bar.pastes.get(&1).map(String::as_str), Some("a\nb\nc"));
+    }
+
+    #[test]
+    fn crlf_separators_are_normalized_to_newlines() {
+        let mut bar = InputBar::new();
+
+        bar.insert_paste("a\r\nb\r\nc");
+
+        assert_eq!(bar.text(), "[Paste #1 · 3 lines]");
+        assert_eq!(bar.pastes.get(&1).map(String::as_str), Some("a\nb\nc"));
+    }
+
+    #[test]
+    fn single_line_with_carriage_return_only_stays_inline() {
+        let mut bar = InputBar::new();
+
+        bar.insert_paste("hello\r");
 
         assert_eq!(bar.text(), "hello\n");
         assert!(bar.protected_ranges.is_empty());
