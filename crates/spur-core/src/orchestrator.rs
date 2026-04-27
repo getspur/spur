@@ -4466,7 +4466,17 @@ impl Orchestrator {
         brain: &mut BrainSession,
         info: &agent_client_protocol::schema::SessionInfoUpdate,
     ) {
-        let _ = (brain, info);
+        let cache = brain
+            .session_info
+            .get_or_insert_with(spur_acp::SessionInfoCache::default);
+        cache.merge(info);
+        tracing::trace!(
+            brain = %brain.brain_name,
+            session_id = %brain.spur_session_id,
+            title = ?cache.title,
+            updated_at = ?cache.updated_at,
+            "session_info_update merged into orchestrator cache",
+        );
     }
 
     /// Dispatch `session/set_model` for `brain` via the trait method on
