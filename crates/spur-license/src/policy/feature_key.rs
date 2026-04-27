@@ -16,7 +16,7 @@
 //! `pm_pro_*` to find every Pro PM gate.
 //!
 //! See `docs/superpowers/specs/2026-04-26-individual-tier-revamp-design.md`
-//! §4.15 for the Wave-9-final 64-key registry.
+//! §4.15 for the Wave-9-final 63-key registry.
 
 use super::const_eq::bytes_eq;
 use std::sync::Arc;
@@ -25,14 +25,13 @@ use std::sync::Arc;
 pub struct FeatureKey(&'static str);
 
 impl FeatureKey {
-    // === Tier revamp v1 keys (post-2026-04-26, Wave-9 final shape: 64 keys) ===
+    // === Tier revamp v1 keys (post-2026-04-26, Wave-9 final shape: 63 keys) ===
 
-    // --- spur-acp (7) — Wave 8: dropped 3 ghost adapters + merged degraded_nolock into advisory_lock ---
+    // --- spur-acp (6) — Wave 8: dropped 3 ghost adapters + merged degraded_nolock into advisory_lock; Wave 8.5: dropped gemini ghost adapter ---
     pub const ACP_CORE_TRANSPORT_STDIO: Self = Self("acp_core_transport_stdio");
     pub const ACP_CORE_TRANSPORT_SOCKET: Self = Self("acp_core_transport_socket");
     pub const ACP_CORE_ADAPTER_CLAUDE_CODE: Self = Self("acp_core_adapter_claude_code");
     pub const ACP_CORE_ADAPTER_CODEX: Self = Self("acp_core_adapter_codex");
-    pub const ACP_CORE_ADAPTER_GEMINI: Self = Self("acp_core_adapter_gemini");
     pub const ACP_CORE_ADAPTER_KIRO: Self = Self("acp_core_adapter_kiro");
     pub const ACP_CORE_SESSION_ATTACH_ADVISORY_LOCK: Self =
         Self("acp_core_session_attach_advisory_lock");
@@ -153,8 +152,6 @@ impl FeatureKey {
             Some(Self::ACP_CORE_ADAPTER_CLAUDE_CODE)
         } else if bytes_eq(b, b"acp_core_adapter_codex") {
             Some(Self::ACP_CORE_ADAPTER_CODEX)
-        } else if bytes_eq(b, b"acp_core_adapter_gemini") {
-            Some(Self::ACP_CORE_ADAPTER_GEMINI)
         } else if bytes_eq(b, b"acp_core_adapter_kiro") {
             Some(Self::ACP_CORE_ADAPTER_KIRO)
         } else if bytes_eq(b, b"acp_core_session_attach_advisory_lock") {
@@ -371,24 +368,15 @@ mod tests {
         assert_eq!(format!("{}", unk), "experimental_thing");
     }
 
-    /// Guards against accidental removal of registered keys.
-    /// Bump the expected count when adding new keys via dedicated tasks.
-    #[test]
-    fn legacy_key_count_matches_expected() {
-        const EXPECTED_TOTAL_KEYS: usize = 0;
-        let count = 0usize;
-        assert_eq!(count, EXPECTED_TOTAL_KEYS, "key count mismatch");
-    }
-
     #[test]
     fn spur_acp_keys_registered() {
-        // Wave 8: dropped 3 ghost adapters (cursor/opencode/kimi); merged degraded_nolock into advisory_lock.
+        // Wave 8: dropped 3 ghost adapters (cursor/opencode/kimi); Wave 8.5 dropped gemini.
+        // Merged degraded_nolock into advisory_lock.
         for s in &[
             "acp_core_transport_stdio",
             "acp_core_transport_socket",
             "acp_core_adapter_claude_code",
             "acp_core_adapter_codex",
-            "acp_core_adapter_gemini",
             "acp_core_adapter_kiro",
             "acp_core_session_attach_advisory_lock",
         ] {
@@ -399,11 +387,12 @@ mod tests {
             "acp_core_adapter_cursor",
             "acp_core_adapter_opencode",
             "acp_core_adapter_kimi",
+            "acp_core_adapter_gemini",
             "acp_core_session_attach_degraded_nolock",
         ] {
             assert!(
                 FeatureKey::from_known(dropped).is_none(),
-                "Wave-8 dropped key {dropped} should not parse"
+                "Wave-8/8.5 dropped key {dropped} should not parse"
             );
         }
     }
@@ -708,18 +697,17 @@ mod tests {
     }
 
     /// Task 24: Comprehensive roundtrip across every Wave-9-final v1 key.
-    /// Total: 64 new v1 keys (48 Free + 15 Pro v1 + 1 Pro v1.1 + 0 Team).
+    /// Total: 63 new v1 keys (47 Free + 15 Pro v1 + 1 Pro v1.1 + 0 Team).
     /// Plan A trajectory: 135 (initial) → 123 (Wave 5) → 107 (Wave 6) → 99 (Wave 7) →
-    /// 64 (Wave 8 consolidation) → 64 (Wave 9 tier-shifts; total unchanged).
+    /// 64 (Wave 8 consolidation) → 64 (Wave 9 tier-shifts; total unchanged) → 63 (Wave 8.5 ghost adapter drop).
     #[test]
     fn tier_revamp_v1_keys_roundtrip() {
         const NEW_KEYS: &[&str] = &[
-            // spur-acp (7) — Wave 8 dropped 3 ghost adapters + merged degraded_nolock.
+            // spur-acp (6) — Wave 8 dropped 3 ghost adapters, Wave 8.5 dropped gemini.
             "acp_core_transport_stdio",
             "acp_core_transport_socket",
             "acp_core_adapter_claude_code",
             "acp_core_adapter_codex",
-            "acp_core_adapter_gemini",
             "acp_core_adapter_kiro",
             "acp_core_session_attach_advisory_lock",
             // spur-core: brain (2) — Wave 8 consolidated trio → brain_session.
@@ -801,9 +789,9 @@ mod tests {
 
         assert_eq!(
             NEW_KEYS.len(),
-            64,
-            "Expected exactly 64 new tier-revamp v1 keys post-Wave-9; got {}. \
-             Trajectory: 135 → 123 (W5) → 107 (W6) → 99 (W7) → 64 (W8 consolidation) → 64 (W9 tier-shifts).",
+            63,
+            "Expected exactly 63 new tier-revamp v1 keys post-Wave-8.5; got {}. \
+             Trajectory: 135 -> 123 (W5) -> 107 (W6) -> 99 (W7) -> 64 (W8 consolidation) -> 64 (W9 tier-shifts) -> 63 (W8.5 ghost adapter drop).",
             NEW_KEYS.len()
         );
 
