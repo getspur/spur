@@ -1993,11 +1993,15 @@ impl App {
                 self.clear_pending_permission_trace();
             }
 
-            Action::SelectNext => {
-                self.dashboard.agents_tree_mut().select_next(&self.lineage);
+            Action::SelectNextBy(n) => {
+                for _ in 0..n {
+                    self.dashboard.agents_tree_mut().select_next(&self.lineage);
+                }
             }
-            Action::SelectPrev => {
-                self.dashboard.agents_tree_mut().select_prev(&self.lineage);
+            Action::SelectPrevBy(n) => {
+                for _ in 0..n {
+                    self.dashboard.agents_tree_mut().select_prev(&self.lineage);
+                }
             }
             Action::FocusNode => {
                 let selected = self.dashboard.agents_tree_mut().selected().cloned();
