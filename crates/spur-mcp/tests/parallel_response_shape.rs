@@ -53,6 +53,7 @@ async fn test_parallel_response_length_invariant_INV_ASYNC_6() {
         None,
         empty_continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        spur_mcp::server::community_feature_gate(),
     );
     server.set_inline_wait(Duration::from_millis(INLINE_WAIT_MS));
     server.set_workers(vec![WorkerInfo {
@@ -189,6 +190,7 @@ async fn test_parallel_preserves_input_order() {
         None,
         empty_continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        spur_mcp::server::community_feature_gate(),
     );
     server.set_inline_wait(Duration::from_millis(INLINE_WAIT_MS));
     server.set_workers(vec![WorkerInfo {
@@ -286,6 +288,7 @@ async fn test_parallel_no_serial_dispatch_regression() {
         None,
         empty_continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        spur_mcp::server::community_feature_gate(),
     );
     server.set_inline_wait(Duration::from_millis(INLINE_WAIT_MS));
     server.set_workers(vec![WorkerInfo {

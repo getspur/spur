@@ -114,6 +114,7 @@ async fn get_plan_status_reprojects_persisted_plan_instead_of_trusting_corrupted
         None,
         continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        spur_mcp::server::community_feature_gate(),
     );
 
     let submit_response = server
@@ -177,6 +178,7 @@ async fn get_plan_status_preserves_in_progress_persisted_children() {
         None,
         continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        spur_mcp::server::community_feature_gate(),
     );
 
     let submit_response = server

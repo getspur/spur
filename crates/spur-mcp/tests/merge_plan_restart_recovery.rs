@@ -222,6 +222,7 @@ async fn t_v0d_3_merge_plan_works_after_restart_on_persisted_plan() {
         None,
         continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        spur_mcp::server::community_feature_gate(),
     );
     server1.set_repo_root(dir.path().to_path_buf());
     let warm_status = server1
@@ -243,6 +244,7 @@ async fn t_v0d_3_merge_plan_works_after_restart_on_persisted_plan() {
         None,
         continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        spur_mcp::server::community_feature_gate(),
     );
     server2.set_repo_root(dir.path().to_path_buf());
     assert_eq!(

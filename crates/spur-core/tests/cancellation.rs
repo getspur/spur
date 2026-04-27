@@ -226,6 +226,7 @@ async fn test_cancel_during_inline_window_fast_arm_wins() {
         None,
         ctx,
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        spur_mcp::server::community_feature_gate(),
     );
     server.set_workers(vec![WorkerInfo {
         name: "worker-x".into(),
@@ -376,6 +377,7 @@ async fn test_cancel_during_detached_path_continuation_delivers_cancelled() {
         None,
         ctx,
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        spur_mcp::server::community_feature_gate(),
     );
     server.set_workers(vec![WorkerInfo {
         name: "worker-x".into(),

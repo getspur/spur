@@ -172,6 +172,7 @@ async fn t_v0c_1_persisted_submit_path_does_not_direct_dispatch() {
         None,
         continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        spur_mcp::server::community_feature_gate(),
     );
 
     let response = server
@@ -689,6 +690,7 @@ async fn t_v0c_10_startup_reclaims_mid_plan_and_continues_dispatch() {
         None,
         continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        spur_mcp::server::community_feature_gate(),
     );
     server.set_reconciler_enabled(true, Some(Arc::new(Notify::new())));
     server.set_repo_root(dir.path().to_path_buf());
@@ -747,6 +749,7 @@ async fn t_v0c_11_startup_reclaim_clears_stale_dispatch_before_redispatch() {
         None,
         continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        spur_mcp::server::community_feature_gate(),
     );
     server.set_reconciler_enabled(true, None);
     server.set_repo_root(dir.path().to_path_buf());

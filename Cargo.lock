@@ -4710,6 +4710,7 @@ dependencies = [
  "sha2",
  "spur-acp",
  "spur-blob-store",
+ "spur-license",
  "spur-pm",
  "spur-worktree",
  "tempfile",
