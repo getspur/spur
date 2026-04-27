@@ -1,5 +1,5 @@
 use spur_license::policy::{FlagEvaluator, FlagSpec};
-use spur_license::{FeatureKey, InstallId, Tier};
+use spur_license::{InstallId, Tier, KILL_ADVANCED_PLANNER};
 
 #[test]
 fn kill_switch_disabled_flag_returns_false() {
@@ -8,7 +8,7 @@ fn kill_switch_disabled_flag_returns_false() {
         enabled: false,
         ..FlagSpec::default()
     };
-    assert!(!evaluator.evaluate(FeatureKey::KILL_ADVANCED_PLANNER, &spec, Tier::Community));
+    assert!(!evaluator.evaluate(KILL_ADVANCED_PLANNER, &spec, Tier::Community));
 }
 
 #[test]
@@ -18,8 +18,8 @@ fn tier_filter_excludes_wrong_tier() {
         tier_filter: Some(vec!["pro".into(), "team".into()]),
         ..FlagSpec::default()
     };
-    assert!(!evaluator.evaluate(FeatureKey::KILL_ADVANCED_PLANNER, &spec, Tier::Community));
-    assert!(evaluator.evaluate(FeatureKey::KILL_ADVANCED_PLANNER, &spec, Tier::Pro));
+    assert!(!evaluator.evaluate(KILL_ADVANCED_PLANNER, &spec, Tier::Community));
+    assert!(evaluator.evaluate(KILL_ADVANCED_PLANNER, &spec, Tier::Pro));
 }
 
 #[test]
@@ -30,7 +30,7 @@ fn rollout_is_deterministic() {
         rollout_percent: Some(50.0),
         ..FlagSpec::default()
     };
-    let key = FeatureKey::KILL_ADVANCED_PLANNER;
+    let key = KILL_ADVANCED_PLANNER;
     let r1 = evaluator.evaluate(key, &spec, Tier::Community);
     let r2 = evaluator.evaluate(key, &spec, Tier::Community);
     assert_eq!(r1, r2, "rollout must be deterministic");
@@ -40,7 +40,7 @@ fn rollout_is_deterministic() {
 fn default_flag_is_enabled() {
     let evaluator = FlagEvaluator::new(InstallId::from_uuid(uuid::Uuid::nil()));
     let spec = FlagSpec::default();
-    assert!(evaluator.evaluate(FeatureKey::KILL_ADVANCED_PLANNER, &spec, Tier::Community));
+    assert!(evaluator.evaluate(KILL_ADVANCED_PLANNER, &spec, Tier::Community));
 }
 
 #[test]
@@ -54,7 +54,7 @@ fn rollout_distribution_is_broad() {
             rollout_percent: Some(100.0),
             ..FlagSpec::default()
         };
-        let key = FeatureKey::KILL_ADVANCED_PLANNER;
+        let key = KILL_ADVANCED_PLANNER;
         let hash = seahash::hash(format!("{}:{}", id, key.as_str()).as_bytes());
         let bucket = (hash % 100) as u8;
         buckets.insert(bucket);

@@ -6,10 +6,14 @@
 //! resolver section below.
 
 pub mod feature_key;
+pub mod flag_key;
 pub mod flags;
 pub mod trust;
 
 pub use feature_key::FeatureKey;
+pub use flag_key::{
+    FlagKey, ENABLE_BROWSER_TOOL, ENABLE_COMPACTION_V2, ENABLE_TELEMETRY, KILL_ADVANCED_PLANNER,
+};
 pub use flags::{FlagEvaluator, FlagExplanation, FlagReason};
 
 use crate::{LicenseError, Result};
@@ -40,8 +44,8 @@ pub struct PolicyDocument {
     pub tier_policies: BTreeMap<String, TierPolicy>,
     #[serde(default)]
     pub v1_1_q3_roadmap: Option<BTreeMap<String, BTreeSet<String>>>,
-    #[serde(default)]
-    pub flags: BTreeMap<String, FlagSpec>,
+    #[serde(default, deserialize_with = "deserialize_flags")]
+    pub flags: BTreeMap<FlagKey, FlagSpec>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -102,6 +106,26 @@ fn default_true() -> bool {
 
 fn default_schema_version() -> u32 {
     CODE_SUPPORTED_MAJOR
+}
+
+fn deserialize_flags<'de, D>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<FlagKey, FlagSpec>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = BTreeMap::<String, FlagSpec>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|(key, spec)| {
+            FlagKey::from_known(&key)
+                .map(|typed| (typed, spec))
+                .or_else(|| {
+                    tracing::warn!("dropping unknown policy flag key {key:?}");
+                    None
+                })
+        })
+        .collect())
 }
 
 /// Wrapper that carries the signature. The payload is canonical JSON of
@@ -368,7 +392,7 @@ mod tests {
         let doc: PolicyDocument = serde_json::from_str(&signed.payload).unwrap();
         assert_eq!(doc.schema_version, 1);
         assert!(doc.tier_policies.contains_key("community"));
-        assert!(doc.flags.contains_key("kill_advanced_planner"));
+        assert!(doc.flags.contains_key(&KILL_ADVANCED_PLANNER));
     }
 
     #[test]
