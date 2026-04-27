@@ -197,6 +197,41 @@ mod tests {
     }
 
     #[test]
+    fn build_entry_auto_derives_arg_picker_spec_for_unstructured_input() {
+        use spur_acp::UnstructuredCommandInput;
+        let cfg = CommandsConfig {
+            dispatch: DispatchKind::PromptText,
+            ..Default::default()
+        };
+        let cmd = AvailableCommand::new("review-branch", "Review against branch").input(
+            AvailableCommandInput::Unstructured(UnstructuredCommandInput::new("branch name")),
+        );
+        let entry = build_entry("codex", &cfg, &cmd);
+        let spec = entry
+            .arg_picker_spec
+            .expect("Unstructured input must auto-derive an ArgPickerSpec");
+        assert_eq!(spec.free_text_hint, "branch name");
+        assert!(
+            spec.typed_hint.is_none(),
+            "PR-3 only reads the free-text hint"
+        );
+    }
+
+    #[test]
+    fn build_entry_no_input_yields_no_arg_picker_spec() {
+        let cfg = CommandsConfig {
+            dispatch: DispatchKind::PromptText,
+            ..Default::default()
+        };
+        let cmd = AvailableCommand::new("init", "Create AGENTS.md");
+        let entry = build_entry("codex", &cfg, &cmd);
+        assert!(
+            entry.arg_picker_spec.is_none(),
+            "no-input commands must not get an arg picker"
+        );
+    }
+
+    #[test]
     fn build_static_entry_preserves_hint() {
         use spur_acp::StaticCommandDecl;
         let cfg = CommandsConfig::default();
