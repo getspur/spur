@@ -8,6 +8,7 @@ pub mod protocol;
 pub mod registry;
 pub mod session_liveness;
 pub mod session_lock;
+pub mod spur_agent_caps;
 pub mod types;
 
 pub use config::{
