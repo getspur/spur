@@ -371,7 +371,7 @@ impl App {
             license_badge: None,
             flag_summary: None,
             metadata_store,
-            edit_mode: EditMode::default(),
+            edit_mode: EditMode::from(config.tui.edit_mode),
             config,
             palette_visible: false,
             palette_state: crate::components::palette::PaletteState::new(),
