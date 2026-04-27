@@ -37,12 +37,13 @@ pub(crate) enum Surface {
     /// No render has happened yet in this session.
     #[default]
     None,
-    /// Last painted by `render` / `render_with_ctx` (DetailPane-owned or
-    /// SessionDetailView-owned full body with block + scrollbar).
-    Full,
-    /// Last painted by `render_compact` (dashboard DetailPane stream tab,
-    /// body-only layout, one row per entry).
-    Compact,
+    /// Last painted by the full body render. The embedded `u64` is the
+    /// `ReactTrace::generation` value at paint time. Readers must verify
+    /// `g == self.generation` before trusting any cached layout — see
+    /// `layout_for_scroll`.
+    Full(u64),
+    /// Last painted by `render_compact`. Same staleness contract as `Full`.
+    Compact(u64),
 }
 
 pub struct ReactTrace {
@@ -580,11 +581,11 @@ impl ReactTrace {
     fn layout_for_scroll(&self) -> Option<(Vec<usize>, usize)> {
         match self.last_surface {
             Surface::None => None,
-            Surface::Compact => self
+            Surface::Compact(g) if g == self.generation => self
                 .compact_cache
                 .as_ref()
                 .map(|c| (c.entry_row_starts.clone(), c.lines.len())),
-            Surface::Full => {
+            Surface::Full(g) if g == self.generation => {
                 #[cfg(feature = "markdown")]
                 {
                     self.line_cache
@@ -593,11 +594,10 @@ impl ReactTrace {
                 }
                 #[cfg(not(feature = "markdown"))]
                 {
-                    // Non-markdown full path: LineCacheEntry has no
-                    // entry_row_starts; preserve pre-existing no-op behavior.
                     None
                 }
             }
+            _ => None,
         }
     }
 
@@ -1250,7 +1250,7 @@ impl ReactTrace {
         self.last_render_width = Some(width);
         // Simulate a Full-surface render so shift_anchor_by picks
         // line_cache when tests invoke scroll mutators.
-        self.last_surface = Surface::Full;
+        self.last_surface = Surface::Full(self.generation);
     }
 
     pub fn build_display_lines_for_tests(
@@ -2202,3 +2202,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, feature = "markdown"))]
+mod scroll_race_test;

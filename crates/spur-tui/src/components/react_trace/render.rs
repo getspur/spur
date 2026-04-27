@@ -403,7 +403,7 @@ impl ReactTrace {
         let paragraph = Paragraph::new(viewport).block(block);
         frame.render_widget(paragraph, area);
 
-        self.last_surface = crate::components::react_trace::Surface::Full;
+        self.last_surface = crate::components::react_trace::Surface::Full(self.generation);
     }
 
     /// Render the trace with markdown + inline mermaid support.
@@ -605,7 +605,7 @@ impl ReactTrace {
             }
         }
 
-        self.last_surface = crate::components::react_trace::Surface::Full;
+        self.last_surface = crate::components::react_trace::Surface::Full(self.generation);
     }
 }
 
