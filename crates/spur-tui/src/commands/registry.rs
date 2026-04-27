@@ -197,7 +197,7 @@ impl CommandRegistry {
     ///
     /// * `Dispatch::SetSessionConfigOption { config_id: "model" }`
     ///   ⇒ require `caps.supports_set_model()` *or*
-    ///     `caps.supports_set_config_option()`.
+    ///   `caps.supports_set_config_option()`.
     /// * `Dispatch::SetSessionConfigOption { config_id: _ }`
     ///   ⇒ require `caps.supports_set_config_option()`.
     /// * `Dispatch::SpurLocal`, `Dispatch::PromptText`, `Dispatch::VendorExec`
@@ -547,15 +547,13 @@ mod tests {
     fn available_commands_for_session_with_codex_caps_keeps_all_entries() {
         use agent_client_protocol::schema::{
             InitializeResponse, ModelId, NewSessionResponse, ProtocolVersion, SessionConfigId,
-            SessionConfigKind, SessionConfigOption, SessionConfigSelect, SessionConfigSelectOptions,
-            SessionConfigValueId, SessionId, SessionModelState,
+            SessionConfigKind, SessionConfigOption, SessionConfigSelect,
+            SessionConfigSelectOptions, SessionConfigValueId, SessionId, SessionModelState,
         };
 
         let init = InitializeResponse::new(ProtocolVersion::LATEST);
-        let mut new = NewSessionResponse::new(SessionId::new("sid")).models(SessionModelState::new(
-            ModelId::new("gpt-5-codex"),
-            vec![],
-        ));
+        let mut new = NewSessionResponse::new(SessionId::new("sid"))
+            .models(SessionModelState::new(ModelId::new("gpt-5-codex"), vec![]));
         new.config_options = Some(vec![SessionConfigOption::new(
             SessionConfigId::new("model"),
             "Model",
