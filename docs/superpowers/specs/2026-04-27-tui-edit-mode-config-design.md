@@ -24,7 +24,7 @@ Make the user's edit-mode choice persist across restarts via the configuration f
 
 - Full keybinding rebinding (every chord configurable). Tracked separately; lands under `[tui.keymap]` in the same namespace.
 - Comment-preserving TOML round-trips (would require migrating from `toml` to `toml_edit`).
-- Upgrading `init.rs:163` to use atomic writes (it currently uses plain `fs::write`; can be done in a follow-up using the helper introduced here).
+- Upgrading `init.rs:163` to use atomic writes (it currently uses plain `fs::write`). NOTE: `update_config` is read-modify-write only — it requires the file to exist. `init.rs` is a create-from-memory flow, so a follow-up cannot simply swap `fs::write` for `update_config`; either extend `update_config` with an "ensure exists" path, or introduce a sibling `write_config_atomic` helper. Tracked separately.
 - Hot-reloading config while the TUI is running.
 - Generic schema-aware `spur config set` for arbitrary keys. This spec adds one hardcoded match arm; future PRs add more arms.
 
