@@ -24,8 +24,11 @@ pub use crate::install_id::InstallId;
 pub use crate::licenseseat::{
     classify_binding_mode, classify_subject, from_env, from_env_or_disabled,
 };
-pub use crate::policy::FeatureKey;
 pub use crate::policy::FlagEvaluator;
+pub use crate::policy::{
+    FeatureKey, FlagKey, ENABLE_BROWSER_TOOL, ENABLE_COMPACTION_V2, ENABLE_TELEMETRY,
+    KILL_ADVANCED_PLANNER,
+};
 pub use crate::provider::{LicenseProvider, RefreshPolicy};
 pub use crate::quota::{QuotaKey, QuotaValue};
 pub use crate::snapshot::EntitlementSnapshot;

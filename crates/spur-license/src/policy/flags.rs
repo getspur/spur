@@ -1,5 +1,5 @@
 use crate::install_id::InstallId;
-use crate::policy::{FeatureKey, FlagSpec};
+use crate::policy::{FlagKey, FlagSpec};
 use crate::tier::Tier;
 
 /// G2 flag evaluator: kill switch, tier filter, deterministic rollout.
@@ -14,7 +14,7 @@ impl FlagEvaluator {
 
     /// Evaluate whether a flag is enabled for the given tier.
     /// Deterministic: same (install_id, flag_key) always yields same result.
-    pub fn evaluate(&self, key: FeatureKey, flag: &FlagSpec, tier: Tier) -> bool {
+    pub fn evaluate(&self, key: FlagKey, flag: &FlagSpec, tier: Tier) -> bool {
         // 1. Kill switch
         if !flag.enabled {
             return false;

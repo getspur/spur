@@ -5,10 +5,6 @@ use std::collections::HashSet;
 fn known_features_exist() {
     assert_eq!(FeatureKey::BRAIN_SESSION.as_str(), "brain_session");
     assert_eq!(FeatureKey::PARALLEL_WORKERS.as_str(), "parallel_workers");
-    assert_eq!(
-        FeatureKey::KILL_ADVANCED_PLANNER.as_str(),
-        "kill_advanced_planner"
-    );
 }
 
 #[test]
@@ -27,13 +23,9 @@ fn from_known_parses_all_keys() {
         FeatureKey::from_known("dedicated_support"),
         Some(FeatureKey::DEDICATED_SUPPORT)
     );
-    assert_eq!(
-        FeatureKey::from_known("enable_browser_tool"),
-        Some(FeatureKey::ENABLE_BROWSER_TOOL)
-    );
-
     // Unknown strings must return None
     assert_eq!(FeatureKey::from_known("nonexistent_feature"), None);
+    assert_eq!(FeatureKey::from_known("enable_browser_tool"), None);
     assert_eq!(FeatureKey::from_known(""), None);
 }
 

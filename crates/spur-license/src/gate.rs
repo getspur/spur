@@ -6,7 +6,7 @@ use arc_swap::ArcSwap;
 
 use crate::install_id::InstallId;
 use crate::policy::flags::FlagEvaluator;
-use crate::policy::{FeatureKey, FlagSpec, PolicyDocument, PolicyResolver};
+use crate::policy::{FeatureKey, FlagKey, FlagSpec, PolicyDocument, PolicyResolver};
 use crate::quota::{QuotaKey, QuotaValue};
 use crate::snapshot::{EntitlementSnapshot, SourceMetadata};
 use crate::tier::Tier;
@@ -55,7 +55,7 @@ impl FeatureGate {
         self.snapshot.load()
     }
 
-    pub fn is_flag_enabled(&self, key: FeatureKey) -> Option<bool> {
+    pub fn is_flag_enabled(&self, key: FlagKey) -> Option<bool> {
         let snap = self.snapshot.load();
         let flag = snap.flags.get(&key)?;
         Some(self.flag_evaluator.evaluate(key, flag, snap.tier))
@@ -181,10 +181,10 @@ impl FeatureGate {
             .collect()
     }
 
-    fn extract_flags(doc: Arc<PolicyDocument>) -> HashMap<FeatureKey, FlagSpec> {
+    fn extract_flags(doc: Arc<PolicyDocument>) -> HashMap<FlagKey, FlagSpec> {
         doc.flags
             .iter()
-            .filter_map(|(k, v)| FeatureKey::from_known(k).map(|key| (key, v.clone())))
+            .map(|(&key, spec)| (key, spec.clone()))
             .collect()
     }
 }

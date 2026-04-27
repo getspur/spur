@@ -55,12 +55,14 @@ fn list_flags(gate: &spur_license::FeatureGate, format: FlagsOutputFormat) -> Re
     Ok(())
 }
 
-fn known_flag_keys() -> Vec<spur_license::FeatureKey> {
-    use spur_license::FeatureKey;
+fn known_flag_keys() -> Vec<spur_license::FlagKey> {
+    use spur_license::{
+        ENABLE_BROWSER_TOOL, ENABLE_COMPACTION_V2, ENABLE_TELEMETRY, KILL_ADVANCED_PLANNER,
+    };
     vec![
-        FeatureKey::KILL_ADVANCED_PLANNER,
-        FeatureKey::ENABLE_BROWSER_TOOL,
-        FeatureKey::ENABLE_COMPACTION_V2,
-        FeatureKey::ENABLE_TELEMETRY,
+        KILL_ADVANCED_PLANNER,
+        ENABLE_BROWSER_TOOL,
+        ENABLE_COMPACTION_V2,
+        ENABLE_TELEMETRY,
     ]
 }

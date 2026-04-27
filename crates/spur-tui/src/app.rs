@@ -145,16 +145,19 @@ fn license_badge_from_state(state: &LicenseStateEvent) -> Option<LicenseBadge> {
 
 fn compute_flag_summary() -> Option<(usize, usize)> {
     use spur_license::policy::PolicyResolver;
-    use spur_license::{FeatureGate, FeatureKey};
+    use spur_license::{
+        FeatureGate, ENABLE_BROWSER_TOOL, ENABLE_COMPACTION_V2, ENABLE_TELEMETRY,
+        KILL_ADVANCED_PLANNER,
+    };
 
     let policy = PolicyResolver::embedded();
     let gate = FeatureGate::new(policy);
 
     let flags = [
-        FeatureKey::KILL_ADVANCED_PLANNER,
-        FeatureKey::ENABLE_BROWSER_TOOL,
-        FeatureKey::ENABLE_COMPACTION_V2,
-        FeatureKey::ENABLE_TELEMETRY,
+        KILL_ADVANCED_PLANNER,
+        ENABLE_BROWSER_TOOL,
+        ENABLE_COMPACTION_V2,
+        ENABLE_TELEMETRY,
     ];
 
     let total = flags.len();

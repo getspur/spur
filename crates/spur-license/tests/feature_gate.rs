@@ -1,5 +1,7 @@
 use spur_license::policy::{PolicyResolver, TierPolicy};
-use spur_license::{FeatureGate, FeatureKey, InstallId, QuotaKey, QuotaValue, Tier};
+use spur_license::{
+    FeatureGate, FeatureKey, InstallId, QuotaKey, QuotaValue, Tier, KILL_ADVANCED_PLANNER,
+};
 
 #[test]
 fn community_has_core_features() {
@@ -33,7 +35,7 @@ fn flag_evaluation_returns_some_for_known_flag() {
     let policy = PolicyResolver::embedded();
     let gate = FeatureGate::new_with_install_id(policy, InstallId::from_uuid(uuid::Uuid::nil()));
     // kill_advanced_planner is in default_policy.json flags
-    let result = gate.is_flag_enabled(FeatureKey::KILL_ADVANCED_PLANNER);
+    let result = gate.is_flag_enabled(KILL_ADVANCED_PLANNER);
     assert!(result.is_some(), "known flag should evaluate to Some(bool)");
 }
 
@@ -46,7 +48,7 @@ fn flag_evaluation_respects_kill_switch() {
         enabled: false,
         ..Default::default()
     };
-    flags.insert("kill_advanced_planner".into(), disabled);
+    flags.insert(KILL_ADVANCED_PLANNER, disabled);
     let doc = PolicyDocument {
         schema_version: 1,
         issued_at: chrono::Utc::now(),
@@ -58,10 +60,7 @@ fn flag_evaluation_respects_kill_switch() {
     };
     let resolver = PolicyResolver::from_document(doc);
     let gate = FeatureGate::new_with_install_id(resolver, InstallId::from_uuid(uuid::Uuid::nil()));
-    assert_eq!(
-        gate.is_flag_enabled(FeatureKey::KILL_ADVANCED_PLANNER),
-        Some(false)
-    );
+    assert_eq!(gate.is_flag_enabled(KILL_ADVANCED_PLANNER), Some(false));
 }
 
 fn policy_doc_with_tiers(

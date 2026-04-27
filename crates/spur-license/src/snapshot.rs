@@ -3,8 +3,7 @@ use std::collections::HashMap;
 use ahash::AHashSet;
 use chrono::{DateTime, Utc};
 
-use crate::policy::FeatureKey;
-use crate::policy::FlagSpec;
+use crate::policy::{FeatureKey, FlagKey, FlagSpec};
 use crate::quota::{QuotaKey, QuotaValue};
 use crate::tier::Tier;
 use crate::Plan;
@@ -14,7 +13,7 @@ pub struct EntitlementSnapshot {
     pub tier: Tier,
     pub features: AHashSet<FeatureKey>,
     pub quotas: HashMap<QuotaKey, QuotaValue>,
-    pub flags: HashMap<FeatureKey, FlagSpec>,
+    pub flags: HashMap<FlagKey, FlagSpec>,
     pub source: SourceMetadata,
 }
 
