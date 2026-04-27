@@ -436,6 +436,19 @@ impl App {
         )
     }
 
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn new_with_metadata_path_in_picker_for_test(metadata_path: std::path::PathBuf) -> Self {
+        Self::build_with_license_state_from_metadata_path(
+            None,
+            Some(None),
+            std::sync::Arc::new(spur_acp::SpurConfig::default()),
+            Self::default_license_state("licensing not configured"),
+            crate::landing::LandingDecision::ShowDashboard,
+            metadata_path,
+        )
+    }
+
     /// Test-only accessor: borrow the current `SessionDetailView`.
     #[doc(hidden)]
     pub fn session_detail_for_test(
@@ -568,6 +581,11 @@ impl App {
     #[cfg(any(test, debug_assertions))]
     pub fn set_metadata_store_for_test(&mut self, store: SessionMetadataStore) {
         self.metadata_store = store;
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn metadata_store_for_test(&self) -> &SessionMetadataStore {
+        &self.metadata_store
     }
 
     #[cfg(any(test, debug_assertions))]
@@ -950,7 +968,12 @@ impl App {
                 };
                 let should_dismiss_warning = matches!(key.code, KeyCode::Esc)
                     && self.user_warning.is_some()
-                    && matches!(action, Some(Action::NavigateBack));
+                    // SessionPicker treats Esc as exit-to-Dashboard, not NavigateBack.
+                    && matches!(
+                        action,
+                        Some(Action::NavigateBack)
+                            | Some(Action::NavigateTo(ViewId::Dashboard))
+                    );
 
                 if should_dismiss_warning {
                     self.dismiss_user_warning();
