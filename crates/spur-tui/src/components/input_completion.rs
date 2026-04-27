@@ -153,10 +153,11 @@ impl InputCompletionPort {
                                 // PR-3: agent advertised Unstructured input
                                 // (e.g. codex's /review, /review-branch). Free-
                                 // text picker reads the arg from the InputBar.
+                                // Anchor is re-resolved by apply_accept via
+                                // trigger_detector.current_prefix_start().
                                 let src = crate::components::command_input_query_source::CommandInputQuerySource::new(
                                     command_name.clone(),
                                     spec.free_text_hint.clone(),
-                                    trigger.prefix_start,
                                 );
                                 PickerShell::open_with_query(Box::new(src), &trigger.query)
                             }
@@ -656,6 +657,98 @@ mod tests {
             input_bar.text(),
             "/model gpt-5-codex",
             "the `/model ` prefix must survive; only the arg region is replaced"
+        );
+    }
+
+    /// Wave B gemini #1 + #3 regression: when the free-text picker accepts on
+    /// `/review-branch main`, the buffer must remain `/review-branch main`
+    /// (NOT `/review-branch /review-branch main`). This was the critical
+    /// duplication bug found by gemini — the original `accept` returned
+    /// `/<cmd> <query>` but `apply_accept` re-anchors to the arg-region byte
+    /// offset, so the picker must return only `<query>` as the replacement.
+    #[test]
+    fn slash_arg_free_text_accept_does_not_duplicate_command_prefix() {
+        use crate::commands::entry::{CommandEntry, CommandSource, Dispatch};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use spur_acp::adapter::arg_picker_hint::ArgPickerSpec;
+
+        let mut command_registry = CommandRegistry::new();
+        command_registry.set_agent_commands(
+            "codex",
+            vec![CommandEntry {
+                name: "review-branch".into(),
+                description: "Review against branch".into(),
+                hint: Some("branch name".into()),
+                source: CommandSource::Agent {
+                    handle: "codex".into(),
+                },
+                dispatch: Dispatch::PromptText {
+                    normalized: "/review-branch".into(),
+                },
+                arg_picker_spec: Some(ArgPickerSpec {
+                    free_text_hint: "branch name".into(),
+                    typed_hint: None,
+                }),
+            }],
+        );
+
+        let mention_registry = Rc::new(RefCell::new(MentionRegistry::new()));
+        let mut input_bar = InputBar::new();
+        let mut completion = InputCompletionPort::new();
+
+        // User types up to /review-branch then hits space — picker opens.
+        input_bar.set_text("/review-branch ".to_string(), 15);
+        completion.dispatch(
+            IntentEvent::Pasted,
+            &mut input_bar,
+            &env_with_options(
+                &command_registry,
+                &mention_registry,
+                std::path::Path::new("."),
+                &[],
+            ),
+        );
+        assert!(
+            completion.is_active(),
+            "free-text picker must open on `/review-branch `"
+        );
+
+        // User then types "main" — buffer becomes "/review-branch main".
+        // The picker reads the InputBar via ReadFromInputBar mode, so each
+        // typed char dispatches to the port which forwards the updated query
+        // to the picker's refresh().
+        for ch in "main".chars() {
+            input_bar.set_text(
+                format!("{}{}", input_bar.text(), ch),
+                input_bar.cursor() + ch.len_utf8(),
+            );
+            completion.dispatch(
+                IntentEvent::TypedChar(ch),
+                &mut input_bar,
+                &env_with_options(
+                    &command_registry,
+                    &mention_registry,
+                    std::path::Path::new("."),
+                    &[],
+                ),
+            );
+        }
+        assert_eq!(input_bar.text(), "/review-branch main");
+
+        // Accept (Tab). Anchor MUST be at byte 15 (start of arg region); the
+        // replacement (= "main") collapses cleanly so the buffer is unchanged.
+        let accepted = completion.handle_picker_key(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &mut input_bar,
+        );
+        assert!(matches!(
+            accepted,
+            Some(RetrievalAccept::ReplaceTriggerToken { .. })
+        ));
+        assert_eq!(
+            input_bar.text(),
+            "/review-branch main",
+            "free-text picker accept must NOT duplicate the `/review-branch` prefix",
         );
     }
 
