@@ -792,6 +792,10 @@ impl ReactTrace {
         self.entries.len()
     }
 
+    pub fn last_render_width(&self) -> Option<u16> {
+        self.last_render_width
+    }
+
     /// Build wrapped display lines for external pane consumption
     /// (DetailPane Stream tab). Uses `build_display_lines` with no lineage
     /// and wraps to `width`. Caches result keyed by `(generation, width)`.
