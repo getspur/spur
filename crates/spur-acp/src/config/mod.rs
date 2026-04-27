@@ -701,7 +701,9 @@ pub fn load_seed_template() -> AgentsConfig {
 ///
 /// Reads `path`, deserializes into `SpurConfig`, applies `mutate`, serializes
 /// via `toml::to_string_pretty`, writes to a `NamedTempFile` in the same
-/// directory, fsyncs, and atomically renames over `path`.
+/// directory, fsyncs the file, atomically renames over `path`, and (on Unix)
+/// fsyncs the parent directory so the rename's directory-entry update is
+/// durable across crashes.
 ///
 /// Errors:
 /// - `path` does not exist → returns the underlying read error.
@@ -738,7 +740,17 @@ where
         .sync_all()
         .context("fsync tempfile before rename")?;
     tmp.persist(path)
-        .map_err(|e| anyhow::anyhow!("atomic rename to {}: {}", path.display(), e.error))?;
+        .map_err(|e| e.error)
+        .with_context(|| format!("atomic rename to {}", path.display()))?;
+    // Fsync the parent directory so the rename's directory-entry update is
+    // durable. POSIX `rename(2)` is atomic for visibility, but the directory
+    // inode block reaching disk requires an explicit fsync on the dir.
+    // Unix-only: Windows rejects opening a directory for sync.
+    #[cfg(unix)]
+    std::fs::File::open(dir)
+        .with_context(|| format!("open config directory {} for fsync", dir.display()))?
+        .sync_all()
+        .with_context(|| format!("fsync config directory {}", dir.display()))?;
     Ok(())
 }
 
