@@ -48,14 +48,15 @@ use futures::Stream;
 use tokio::sync::{mpsc, oneshot};
 
 use agent_client_protocol::schema::{
-    AuthenticateRequest, AuthenticateResponse, CancelNotification, ContentBlock, ContentChunk,
-    CreateTerminalRequest, CreateTerminalResponse, ExtRequest, ExtResponse, InitializeRequest,
-    InitializeResponse, KillTerminalRequest, KillTerminalResponse, ListSessionsRequest,
-    ListSessionsResponse, LoadSessionRequest, McpServer, NewSessionRequest, NewSessionResponse,
-    PermissionOptionId, PermissionOptionKind, PromptRequest, ReadTextFileRequest,
-    ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    AuthenticateRequest, AuthenticateResponse, CancelNotification, ClientCapabilities,
+    ContentBlock, ContentChunk, CreateTerminalRequest, CreateTerminalResponse, ExtRequest,
+    ExtResponse, FileSystemCapabilities, InitializeRequest, InitializeResponse,
+    KillTerminalRequest, KillTerminalResponse, ListSessionsRequest, ListSessionsResponse,
+    LoadSessionRequest, McpServer, NewSessionRequest, NewSessionResponse, PermissionOptionId,
+    PermissionOptionKind, PromptRequest, ReadTextFileRequest, ReadTextFileResponse,
+    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse,
     TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse,
     WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
@@ -65,6 +66,29 @@ use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
 
 use crate::connection::{AgentConnection, ExtNotificationPayload};
 use crate::types::AgentHealth;
+
+/// Spur's canonical `ClientCapabilities` literal advertised at every
+/// `initialize` call. Spec §6.2.
+///
+/// Declares:
+/// - `fs.{read_text_file, write_text_file}` — spur honors `fs/*` requests.
+/// - `terminal = true` — spur honors all `terminal/*` RPCs.
+/// - `_meta.terminal_output = true` — vendor extension that unlocks
+///   codex's tool-call meta tunneling (consumed in M9).
+pub fn spur_client_capabilities() -> ClientCapabilities {
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        "terminal_output".to_string(),
+        serde_json::Value::Bool(true),
+    );
+
+    ClientCapabilities::new()
+        .fs(FileSystemCapabilities::new()
+            .read_text_file(true)
+            .write_text_file(true))
+        .terminal(true)
+        .meta(meta)
+}
 
 #[cfg(any(test, feature = "test-support"))]
 pub async fn spawn_native_worker_for_test(
@@ -268,8 +292,16 @@ impl AgentConnection for NativeAcpConnection {
 
     async fn initialize(
         &mut self,
-        request: InitializeRequest,
+        mut request: InitializeRequest,
     ) -> anyhow::Result<InitializeResponse> {
+        // Override the caller-supplied client_capabilities with spur's
+        // canonical literal so every InitializeRequest carries the
+        // explicit fs / terminal / meta.terminal_output advertisement.
+        // Callers today all pass InitializeRequest::new(ProtocolVersion::LATEST)
+        // (which yields ClientCapabilities::default()) — spec §6.2 requires
+        // we replace those defaults with the explicit gate.
+        request.client_capabilities = spur_client_capabilities();
+
         let agent_name = self.agent_name.clone();
         let command = self.command.clone();
         let extra_args = self.extra_args.clone();
