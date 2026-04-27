@@ -187,6 +187,7 @@ async fn test_no_double_delivery_on_block_timeout() {
         None,
         ctx,
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        spur_mcp::server::community_feature_gate(),
     );
     server.set_workers(vec![WorkerInfo {
         name: "worker-slow".into(),
@@ -317,6 +318,7 @@ async fn test_no_double_delivery_on_fast_path() {
         None,
         ctx,
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        spur_mcp::server::community_feature_gate(),
     );
     server.set_workers(vec![WorkerInfo {
         name: "worker-fast".into(),

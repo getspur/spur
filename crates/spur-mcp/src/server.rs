@@ -319,6 +319,8 @@ pub struct McpCallbackServer {
     pm_service: Option<Arc<PmService>>,
     /// Optional event sink for emitting MCP lifecycle events.
     event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
+    /// Feature gate snapshot shared with the orchestrator/license runtime.
+    feature_gate: Arc<spur_license::FeatureGate>,
     /// Active execution plans submitted via `submit_plan`.
     active_plans:
         Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<crate::plan::PlanState>>>>>,
@@ -388,6 +390,12 @@ pub fn validate_parallel_args(args: &Value) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+pub fn community_feature_gate() -> Arc<spur_license::FeatureGate> {
+    Arc::new(spur_license::FeatureGate::new(
+        spur_license::policy::PolicyResolver::embedded(),
+    ))
 }
 
 pub fn parse_delegation_plan(
@@ -1490,6 +1498,7 @@ impl McpCallbackServer {
         event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
         continuation_ctx: DetachedContinuationCtx,
         outcome_store: Arc<dyn spur_blob_store::OutcomeStore>,
+        feature_gate: Arc<spur_license::FeatureGate>,
     ) -> (Self, DelegationChannel) {
         let (req_tx, req_rx) = mpsc::channel::<DelegationRequest>(32);
         let materializer = OutcomeMaterializer::new(outcome_store.clone());
@@ -1503,6 +1512,7 @@ impl McpCallbackServer {
             task_tracker: TaskTracker::new(),
             pm_service,
             event_sink,
+            feature_gate,
             active_plans: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             plan_registry: Arc::new(tokio::sync::Mutex::new(crate::plan::PlanRegistry::default())),
             cancellation_control: None,
@@ -1522,6 +1532,10 @@ impl McpCallbackServer {
 
         let channel = DelegationChannel { request_rx: req_rx };
         (server, channel)
+    }
+
+    pub fn feature_gate(&self) -> &Arc<spur_license::FeatureGate> {
+        &self.feature_gate
     }
 
     /// INV-6: Wire the orchestrator's `CancellationControl` handle into this
@@ -4459,6 +4473,7 @@ mod retirement_state_tests {
             None,
             no_op_ctx(),
             Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            super::community_feature_gate(),
         );
 
         server.mark_retiring();
@@ -4483,6 +4498,7 @@ mod retirement_state_tests {
             None,
             no_op_ctx(),
             Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            super::community_feature_gate(),
         );
 
         assert!(
@@ -4507,6 +4523,7 @@ mod retirement_state_tests {
             None,
             no_op_ctx(),
             Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            super::community_feature_gate(),
         );
         let dropped = Arc::new(AtomicBool::new(false));
         let started = Arc::new(Notify::new());
@@ -4551,6 +4568,7 @@ mod retirement_state_tests {
             None,
             no_op_ctx(),
             Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            super::community_feature_gate(),
         );
         let server = Arc::new(server);
 
@@ -4929,6 +4947,7 @@ mod fetch_outcome_artifact_tests {
             None,
             no_op_continuation_ctx(),
             outcome_store,
+            super::community_feature_gate(),
         );
         server.set_repo_root(repo_root.to_path_buf());
         server
@@ -5604,6 +5623,7 @@ mod merge_plan_tests {
             None,
             continuation_ctx,
             Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            super::community_feature_gate(),
         );
         server.set_repo_root(dir.path().to_path_buf());
 
@@ -5795,6 +5815,7 @@ mod merge_plan_tests {
             None,
             continuation_ctx,
             Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            super::community_feature_gate(),
         );
         server.set_repo_root(dir.path().to_path_buf());
 
@@ -6179,6 +6200,7 @@ mod reconciler_fast_forward_tests {
             None,
             continuation_ctx,
             Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            super::community_feature_gate(),
         );
         let notify = Arc::new(Notify::new());
         server.set_reconciler_enabled(true, Some(Arc::clone(&notify)));
@@ -6208,6 +6230,7 @@ mod reconciler_fast_forward_tests {
             None,
             continuation_ctx,
             Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            super::community_feature_gate(),
         );
         server.set_reconciler_enabled(true, None);
         let notify = server
@@ -6241,6 +6264,7 @@ mod reconciler_fast_forward_tests {
             None,
             continuation_ctx,
             Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            super::community_feature_gate(),
         );
         let plan = Arc::new(tokio::sync::Mutex::new(crate::plan::PlanState {
             plan_id: "plan-1".into(),
@@ -6379,6 +6403,7 @@ mod reconciler_fast_forward_tests {
             None,
             continuation_ctx,
             Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            super::community_feature_gate(),
         );
 
         let stale = Arc::new(tokio::sync::Mutex::new(crate::plan::PlanState {
@@ -6470,6 +6495,7 @@ mod reconciler_fast_forward_tests {
             None,
             continuation_ctx,
             Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            super::community_feature_gate(),
         );
         assert!(server.active_plans.lock().await.is_empty());
 
@@ -6492,6 +6518,7 @@ mod reconciler_fast_forward_tests {
             None,
             continuation_ctx,
             Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            super::community_feature_gate(),
         );
         server.active_plans.lock().await.insert(
             "plan-1".into(),

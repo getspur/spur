@@ -76,6 +76,7 @@ async fn beads_backed_start_requires_repo_root_before_listener_boot() {
         None,
         test_continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        spur_mcp::server::community_feature_gate(),
     );
     let err = Arc::new(server)
         .start()
@@ -110,6 +111,7 @@ async fn dropping_server_handle_releases_pidfile_for_next_start() {
         None,
         test_continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        spur_mcp::server::community_feature_gate(),
     );
     server.set_repo_root(dir.path().to_path_buf());
     server.set_reconciler_enabled(true, None);
@@ -131,6 +133,7 @@ async fn dropping_server_handle_releases_pidfile_for_next_start() {
             None,
             test_continuation_ctx(),
             Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            spur_mcp::server::community_feature_gate(),
         );
         next_server.set_repo_root(dir.path().to_path_buf());
         next_server.set_reconciler_enabled(true, None);
