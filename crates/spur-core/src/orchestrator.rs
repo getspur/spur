@@ -164,6 +164,7 @@ mod session_attach_guard_transfer_tests {
             attach_guard,
             fs_unsafe: false,
             started_at: std::time::Instant::now(),
+            config_options: Vec::new(),
         });
         let mut active = None;
         let mut scheduler = crate::scheduler::BrainScheduler::new(
@@ -217,6 +218,110 @@ mod session_attach_guard_transfer_tests {
             }
             other => panic!("expected SessionAttachRejected, got {other:?}"),
         }
+    }
+
+    fn fixture_brain_session(session_id: &str) -> BrainSession {
+        BrainSession {
+            connection: Box::new(NoopConnection),
+            acp_session_id: format!("acp-{session_id}"),
+            spur_session_id: SessionId(session_id.to_string()),
+            brain_name: "test-brain".to_string(),
+            delegation_handle: tokio::spawn(async {}),
+            mcp_server: None,
+            mcp_guard: None,
+            notification_pump_handle: None,
+            attach_guard: None,
+            fs_unsafe: false,
+            started_at: std::time::Instant::now(),
+            config_options: Vec::new(),
+        }
+    }
+
+    fn fixture_select_option(
+        id: &str,
+        current: &str,
+        choices: &[(&str, &str)],
+    ) -> agent_client_protocol::schema::SessionConfigOption {
+        use agent_client_protocol::schema::{
+            SessionConfigId, SessionConfigOption, SessionConfigSelectOption, SessionConfigValueId,
+        };
+        let opts: Vec<SessionConfigSelectOption> = choices
+            .iter()
+            .map(|(v, n)| SessionConfigSelectOption::new(SessionConfigValueId::new(*v), *n))
+            .collect();
+        SessionConfigOption::select(
+            SessionConfigId::new(id),
+            id,
+            SessionConfigValueId::new(current),
+            opts,
+        )
+    }
+
+    #[tokio::test]
+    async fn replace_session_config_options_updates_cache_and_emits_event() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = SpurConfig::default();
+        config.cost.db_path = tmp.path().join("cost.db").display().to_string();
+        let orchestrator = Orchestrator::new(tmp.path().to_path_buf(), config, None).unwrap();
+        let mut event_rx = orchestrator.event_tx.subscribe();
+
+        let mut brain = fixture_brain_session("spur-session-cache");
+        let initial = vec![fixture_select_option(
+            "model",
+            "gpt-5",
+            &[("gpt-5", "GPT-5"), ("gpt-5-codex", "GPT-5 Codex")],
+        )];
+        brain.config_options = initial.clone();
+
+        // Getter returns the snapshot owned by the brain.
+        let read = orchestrator.session_config_options(&brain);
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].id.0.as_ref(), "model");
+
+        // Setter swaps in a new snapshot and emits CommandRegistryDirty.
+        let next = vec![
+            fixture_select_option("model", "gpt-5-codex", &[("gpt-5-codex", "GPT-5 Codex")]),
+            fixture_select_option(
+                "reasoning_effort",
+                "medium",
+                &[("low", "Low"), ("medium", "Medium"), ("high", "High")],
+            ),
+        ];
+        orchestrator.replace_session_config_options(&mut brain, next.clone());
+
+        let read = orchestrator.session_config_options(&brain);
+        assert_eq!(read.len(), 2);
+        assert_eq!(read[0].id.0.as_ref(), "model");
+        assert_eq!(read[1].id.0.as_ref(), "reasoning_effort");
+
+        // Drain the broadcast looking for the dirty event. The S2 funnel
+        // hops through an mpsc, so allow a brief window.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut found = false;
+        while tokio::time::Instant::now() < deadline && !found {
+            let remaining = deadline - tokio::time::Instant::now();
+            match tokio::time::timeout(remaining, event_rx.recv()).await {
+                Ok(Ok(ev)) => {
+                    if let SpurEventBody::CommandRegistryDirty {
+                        session,
+                        config_options,
+                    } = ev.body
+                    {
+                        assert_eq!(session, SessionId("spur-session-cache".to_string()));
+                        assert_eq!(config_options.len(), 2);
+                        found = true;
+                    }
+                }
+                _ => break,
+            }
+        }
+        assert!(
+            found,
+            "expected CommandRegistryDirty event after replace_session_config_options"
+        );
+
+        // Idempotent abort of the dummy delegation_handle so Drop is clean.
+        brain.delegation_handle.abort();
     }
 }
 
@@ -316,6 +421,11 @@ pub struct BrainSession {
     /// `retire_active_brain` to record session duration in the cost
     /// ledger on close-out.
     pub started_at: std::time::Instant,
+    /// Latest `config_options` advertised by the agent. Populated from
+    /// `NewSessionResponse.config_options` on session creation; refreshed
+    /// by `SetSessionConfigOption` responses (Task 2.14) and by
+    /// `session/update.ConfigOptionUpdate` notifications (v2 plan).
+    pub config_options: Vec<agent_client_protocol::schema::SessionConfigOption>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -3067,6 +3177,17 @@ impl Orchestrator {
             fs_unsafe,
         }));
 
+        let config_options = session_response.config_options.clone().unwrap_or_default();
+        if !config_options.is_empty() {
+            // Surface the initial cache so spur-tui can synthesize
+            // advertised slash commands (e.g. /model, /effort) from
+            // session creation onward.
+            self.emit(SpurEvent::now(SpurEventBody::CommandRegistryDirty {
+                session: session_id.clone(),
+                config_options: config_options.clone(),
+            }));
+        }
+
         self.self_held.insert(brain_session_id.clone());
 
         Ok(BrainSession {
@@ -3081,6 +3202,7 @@ impl Orchestrator {
             started_at: std::time::Instant::now(),
             attach_guard,
             fs_unsafe,
+            config_options,
         })
     }
 
@@ -3379,6 +3501,12 @@ impl Orchestrator {
             started_at: std::time::Instant::now(),
             attach_guard,
             fs_unsafe,
+            // The current `load_session_with_bypass` path discards the
+            // `LoadSessionResponse.config_options` payload; they will be
+            // refreshed by the next `SetSessionConfigOption` response or
+            // by a `session/update.ConfigOptionUpdate` notification. The
+            // v2 plan extends the bypass helper to plumb this through.
+            config_options: Vec::new(),
         };
 
         // Return an empty stream if we fell back to new_session.
@@ -3910,6 +4038,38 @@ impl Orchestrator {
     /// `self.emit(SpurEvent::now(body))` callers compile transparently.
     fn emit(&self, event: SpurEvent) {
         self.funnel.emit(event.body);
+    }
+
+    /// Read the cached `config_options` for the active brain session.
+    ///
+    /// `BrainSession` lives as a stack-local in `run_interactive`, so the
+    /// caller threads it in. Returns the snapshot owned by the session;
+    /// callers that hold only a `SessionId` can compare against
+    /// `brain.spur_session_id` first.
+    pub fn session_config_options(
+        &self,
+        brain: &BrainSession,
+    ) -> Vec<agent_client_protocol::schema::SessionConfigOption> {
+        brain.config_options.clone()
+    }
+
+    /// Replace the cached `config_options` on the active brain session and
+    /// emit `CommandRegistryDirty` so spur-tui rebuilds the registry on
+    /// the next ensure_cache.
+    ///
+    /// Used by the `SetSessionConfigOption` handler (Task 2.14) and by
+    /// the `session/update.ConfigOptionUpdate` notification handler
+    /// (v2 plan).
+    pub fn replace_session_config_options(
+        &self,
+        brain: &mut BrainSession,
+        opts: Vec<agent_client_protocol::schema::SessionConfigOption>,
+    ) {
+        brain.config_options = opts.clone();
+        self.emit(SpurEvent::now(SpurEventBody::CommandRegistryDirty {
+            session: brain.spur_session_id.clone(),
+            config_options: opts,
+        }));
     }
 
     /// Handle delegation requests from the MCP callback server.
