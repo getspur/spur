@@ -369,7 +369,15 @@ Confirm `anyhow` is in `spur-acp`'s `Cargo.toml`. Check:
 grep -n "^anyhow" /Volumes/Projects/spur/crates/spur-acp/Cargo.toml
 ```
 
-If missing, add `anyhow = { workspace = true }` to `[dependencies]`. (Most spur crates already have it.)
+If missing, add `anyhow = { workspace = true }` to `[dependencies]`.
+
+**Also confirm `tempfile` is in `[dependencies]` (NOT `[dev-dependencies]`)**:
+
+```bash
+grep -n "^tempfile" /Volumes/Projects/spur/crates/spur-acp/Cargo.toml
+```
+
+`tempfile::NamedTempFile` is now used in **production code** (the helper), so the `tempfile` line must live in `[dependencies]`. If it's currently only under `[dev-dependencies]`, MOVE it (don't duplicate). Worker discovery from a prior attempt: `tempfile = "3"` was originally `[dev-dependencies]`-only because tests in this crate use it; the helper changes that.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
