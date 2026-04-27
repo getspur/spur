@@ -1126,10 +1126,8 @@ impl DashboardView {
                         'j' if self.focused_panel == Panel::Agents
                             && self.focused_node.is_none() =>
                         {
-                            if let Some(lineage) = lineage {
-                                self.agents_tree.select_next(lineage);
-                            }
-                            Some(Action::SelectNext)
+                            let _ = lineage;
+                            Some(Action::SelectNextBy(1))
                         }
                         'j' => {
                             if let Some(ref id) = self.focused_node.clone() {
@@ -1143,10 +1141,8 @@ impl DashboardView {
                         'k' if self.focused_panel == Panel::Agents
                             && self.focused_node.is_none() =>
                         {
-                            if let Some(lineage) = lineage {
-                                self.agents_tree.select_prev(lineage);
-                            }
-                            Some(Action::SelectPrev)
+                            let _ = lineage;
+                            Some(Action::SelectPrevBy(1))
                         }
                         'k' => {
                             if let Some(ref id) = self.focused_node.clone() {
@@ -1241,10 +1237,8 @@ impl DashboardView {
                 }
                 match ch {
                     'j' if self.focused_panel == Panel::Agents && self.focused_node.is_none() => {
-                        if let Some(lineage) = lineage {
-                            self.agents_tree.select_next(lineage);
-                        }
-                        Some(Action::SelectNext)
+                        let _ = lineage;
+                        Some(Action::SelectNextBy(1))
                     }
                     'j' => {
                         if let Some(ref id) = self.focused_node.clone() {
@@ -1256,10 +1250,8 @@ impl DashboardView {
                         Some(Action::ScrollDown)
                     }
                     'k' if self.focused_panel == Panel::Agents && self.focused_node.is_none() => {
-                        if let Some(lineage) = lineage {
-                            self.agents_tree.select_prev(lineage);
-                        }
-                        Some(Action::SelectPrev)
+                        let _ = lineage;
+                        Some(Action::SelectPrevBy(1))
                     }
                     'k' => {
                         if let Some(ref id) = self.focused_node.clone() {
@@ -1325,10 +1317,8 @@ impl DashboardView {
                     self.detail_pane.scroll_up();
                     Some(Action::ScrollUp)
                 } else if self.focused_panel == Panel::Agents {
-                    if let Some(lineage) = lineage {
-                        self.agents_tree.select_prev(lineage);
-                    }
-                    Some(Action::SelectPrev)
+                    let _ = lineage;
+                    Some(Action::SelectPrevBy(1))
                 } else {
                     self.activity_log.scroll_up();
                     Some(Action::ScrollUp)
@@ -1340,10 +1330,8 @@ impl DashboardView {
                     self.detail_pane.scroll_down();
                     Some(Action::ScrollDown)
                 } else if self.focused_panel == Panel::Agents {
-                    if let Some(lineage) = lineage {
-                        self.agents_tree.select_next(lineage);
-                    }
-                    Some(Action::SelectNext)
+                    let _ = lineage;
+                    Some(Action::SelectNextBy(1))
                 } else {
                     self.activity_log.scroll_down(20);
                     Some(Action::ScrollDown)
@@ -1353,34 +1341,26 @@ impl DashboardView {
             KeyCode::PageUp => {
                 if self.focused_node.is_some() {
                     self.detail_pane.scroll_up_by(10);
+                    Some(Action::ScrollUp)
                 } else if self.focused_panel == Panel::Agents {
-                    if let Some(lineage) = lineage {
-                        self.agents_tree.select_prev(lineage);
-                        self.agents_tree.select_prev(lineage);
-                        self.agents_tree.select_prev(lineage);
-                        self.agents_tree.select_prev(lineage);
-                        self.agents_tree.select_prev(lineage);
-                    }
+                    let _ = lineage;
+                    Some(Action::SelectPrevBy(5))
                 } else {
                     self.activity_log.scroll_up_by(10);
+                    Some(Action::ScrollUp)
                 }
-                Some(Action::ScrollUp)
             }
             KeyCode::PageDown => {
                 if self.focused_node.is_some() {
                     self.detail_pane.scroll_down_by(10);
+                    Some(Action::ScrollDown)
                 } else if self.focused_panel == Panel::Agents {
-                    if let Some(lineage) = lineage {
-                        self.agents_tree.select_next(lineage);
-                        self.agents_tree.select_next(lineage);
-                        self.agents_tree.select_next(lineage);
-                        self.agents_tree.select_next(lineage);
-                        self.agents_tree.select_next(lineage);
-                    }
+                    let _ = lineage;
+                    Some(Action::SelectNextBy(5))
                 } else {
                     self.activity_log.scroll_down_by(10, 20);
+                    Some(Action::ScrollDown)
                 }
-                Some(Action::ScrollDown)
             }
             KeyCode::Tab => {
                 // In empty Dashboard state (no input, no focused node), Tab cycles examples.

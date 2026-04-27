@@ -121,11 +121,11 @@ impl IssueBrowserView {
             // Navigation
             KeyCode::Char('j') | KeyCode::Down if key.modifiers.is_empty() => {
                 self.issues_panel.select_next(1, self.tracked_issues.len());
-                Some(Action::SelectNext)
+                Some(Action::SelectNextBy(1))
             }
             KeyCode::Char('k') | KeyCode::Up if key.modifiers.is_empty() => {
                 self.issues_panel.select_prev(1, self.tracked_issues.len());
-                Some(Action::SelectPrev)
+                Some(Action::SelectPrevBy(1))
             }
             KeyCode::Char('g') if key.modifiers.is_empty() => {
                 self.issues_panel.select_first();

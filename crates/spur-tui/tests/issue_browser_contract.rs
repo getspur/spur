@@ -77,8 +77,8 @@ fn j_moves_selection_down() {
         &test_ctx(),
     );
     assert!(
-        matches!(action, Some(Action::SelectNext)),
-        "expected SelectNext, got {:?}",
+        matches!(action, Some(Action::SelectNextBy(1))),
+        "expected SelectNextBy(1), got {:?}",
         action
     );
 }
@@ -98,8 +98,8 @@ fn k_moves_selection_up() {
         &test_ctx(),
     );
     assert!(
-        matches!(action, Some(Action::SelectPrev)),
-        "expected SelectPrev, got {:?}",
+        matches!(action, Some(Action::SelectPrevBy(1))),
+        "expected SelectPrevBy(1), got {:?}",
         action
     );
 }
