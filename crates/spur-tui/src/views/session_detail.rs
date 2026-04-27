@@ -2042,12 +2042,13 @@ impl SessionDetailView {
         // ── React trace ─────────────────────────────────────────────────
         #[cfg(feature = "markdown")]
         {
-            let ctx = crate::components::react_trace::RenderContext {
+            let mut ctx = crate::components::react_trace::RenderContext {
                 mermaid_registry: &self.mermaid_registry,
                 picker: self.render_picker.as_ref(),
+                image_cache: &mut self.image_cache,
             };
             self.react_trace
-                .render_with_ctx(frame, chunks[1], &ctx, lineage);
+                .render_with_ctx(frame, chunks[1], &mut ctx, lineage);
         }
         #[cfg(not(feature = "markdown"))]
         self.react_trace.render(frame, chunks[1], lineage);

@@ -292,28 +292,37 @@ fn compute_fence_states(
 
 /// Render the inline image for a `Ready` diagram into `rect`. Returns true
 /// if the image widget was rendered; false if the caller should fall back
-/// to a text placeholder.
+/// to the multi-row partial card.
 #[cfg(feature = "markdown")]
 fn render_inline_image(
     frame: &mut Frame,
     rect: Rect,
     id: crate::components::mermaid::MermaidId,
-    ctx: &RenderContext<'_>,
+    ctx: &mut RenderContext<'_>,
 ) -> bool {
     use crate::components::mermaid::MermaidState;
     use ratatui_image::{Resize, StatefulImage};
 
-    let Some(MermaidState::Ready { image, .. }) = ctx.mermaid_registry.get(&id) else {
+    let Some(MermaidState::Ready {
+        image,
+        image_generation,
+        ..
+    }) = ctx.mermaid_registry.get(&id)
+    else {
         return false;
     };
     let Some(picker) = ctx.picker else {
         return false;
     };
 
-    // Protocol caching moves to ImageCache in Task 12; for now rebuild per render.
-    let mut proto = picker.new_resize_protocol((**image).clone());
+    // Snapshot generation now — protocol fetch needs &mut on image_cache,
+    // which conflicts with the &mermaid_registry borrow above.
+    let gen = *image_generation;
+    let image_arc = image.clone(); // Arc clone is cheap; satisfies borrowck
+
+    let proto = ctx.image_cache.inline_protocol_mut(id, &image_arc, gen, picker);
     let widget = StatefulImage::default().resize(Resize::Fit(None));
-    frame.render_stateful_widget(widget, rect, &mut proto);
+    frame.render_stateful_widget(widget, rect, proto);
     true
 }
 
@@ -467,7 +476,7 @@ impl ReactTrace {
         &mut self,
         frame: &mut Frame,
         area: Rect,
-        ctx: &RenderContext<'_>,
+        ctx: &mut RenderContext<'_>,
         lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
     ) {
         let following_indicator = if self.is_following() {
@@ -518,7 +527,7 @@ impl ReactTrace {
                         c.entry_row_starts.truncate(dirty_idx);
                         let base = c.rows.len();
                         // Drop the mutable borrow before calling &self method.
-                        let states = compute_fence_states(ctx, effective_width, inner.height);
+                        let states = compute_fence_states(&*ctx, effective_width, inner.height);
                         let (new_rows, new_starts, new_byte_ranges) =
                             self.build_virtual_rows(dirty_idx, effective_width, &states, lineage);
                         let c = self.line_cache.as_mut().unwrap();
@@ -531,7 +540,7 @@ impl ReactTrace {
                     }
                     _ => {
                         // Full rebuild (dirty_idx == 0 or no cache).
-                        let states = compute_fence_states(ctx, effective_width, inner.height);
+                        let states = compute_fence_states(&*ctx, effective_width, inner.height);
                         let (rows, entry_row_starts, byte_ranges) =
                             self.build_virtual_rows(0, effective_width, &states, lineage);
                         self.line_cache = Some(VirtualRowCacheEntry {
@@ -547,7 +556,7 @@ impl ReactTrace {
                 }
             } else {
                 // Width or fence state changed — full rebuild.
-                let states = compute_fence_states(ctx, effective_width, inner.height);
+                let states = compute_fence_states(&*ctx, effective_width, inner.height);
                 let (rows, entry_row_starts, byte_ranges) =
                     self.build_virtual_rows(0, effective_width, &states, lineage);
                 self.line_cache = Some(VirtualRowCacheEntry {
@@ -842,13 +851,15 @@ mod copy_friendly_border_tests {
         let mut trace = ReactTrace::new_for_tests();
         trace.append_message("copy this line\nand this line", "codex", "12:00".into());
         let registry = std::collections::HashMap::new();
-        let ctx = RenderContext {
+        let mut image_cache = crate::components::image_cache::ImageCache::new();
+        let mut ctx = RenderContext {
             mermaid_registry: &registry,
             picker: None,
+            image_cache: &mut image_cache,
         };
 
         let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
-        term.draw(|f| trace.render_with_ctx(f, Rect::new(0, 0, width, height), &ctx, None))
+        term.draw(|f| trace.render_with_ctx(f, Rect::new(0, 0, width, height), &mut ctx, None))
             .unwrap();
 
         assert_no_vertical_border_glyphs(term.backend().buffer(), width, height);
@@ -972,13 +983,15 @@ mod scroll_indicator_tests {
         let height = 8;
         let mut trace = overflow_trace();
         let registry = std::collections::HashMap::new();
-        let ctx = RenderContext {
+        let mut image_cache = crate::components::image_cache::ImageCache::new();
+        let mut ctx = RenderContext {
             mermaid_registry: &registry,
             picker: None,
+            image_cache: &mut image_cache,
         };
 
         let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
-        term.draw(|f| trace.render_with_ctx(f, Rect::new(0, 0, width, height), &ctx, None))
+        term.draw(|f| trace.render_with_ctx(f, Rect::new(0, 0, width, height), &mut ctx, None))
             .unwrap();
 
         let buf = term.backend().buffer();
@@ -999,13 +1012,15 @@ mod scroll_indicator_tests {
         let mut trace = ReactTrace::new_for_tests();
         trace.append_message("copy this line\nand this line", "codex", "12:00".into());
         let registry = std::collections::HashMap::new();
-        let ctx = RenderContext {
+        let mut image_cache = crate::components::image_cache::ImageCache::new();
+        let mut ctx = RenderContext {
             mermaid_registry: &registry,
             picker: None,
+            image_cache: &mut image_cache,
         };
 
         let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
-        term.draw(|f| trace.render_with_ctx(f, Rect::new(0, 0, width, height), &ctx, None))
+        term.draw(|f| trace.render_with_ctx(f, Rect::new(0, 0, width, height), &mut ctx, None))
             .unwrap();
 
         assert!(
