@@ -23,6 +23,7 @@ pub use connection::{
 };
 pub use registry::AgentRegistry;
 pub use session_liveness::SelfHeldSet;
+pub use spur_agent_caps::SpurAgentCaps;
 
 // Re-export domain types
 pub use crate::domain::events::{
