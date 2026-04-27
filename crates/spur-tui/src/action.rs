@@ -115,18 +115,26 @@ pub enum Action {
         decision: spur_core::ReviewDecision,
     },
     /// Request the app to render a mermaid diagram on a blocking worker.
-    /// Emitted by `SessionDetailView::tick` when a new fence closes.
+    /// Emitted by `SessionDetailView::tick` when a new fence closes, and by
+    /// `SessionDetailView::maybe_request_rerasters` when the pane crosses
+    /// a raster bucket boundary upward.
     #[cfg(feature = "markdown")]
     MermaidRenderRequest {
         session: SessionId,
         ref_id: crate::components::mermaid::MermaidId,
         code: String,
+        /// Target raster width in pixels (chosen via `raster_width_for_pane`).
+        /// The worker rasters at this width; height is aspect-preserved.
+        target_width: u32,
     },
     /// Completion of a previously-dispatched render request.
+    /// `target_width` echoes the request's bucket so `handle_mermaid_completed`
+    /// can record it in `MermaidState::Ready.rastered_at_bucket`.
     #[cfg(feature = "markdown")]
     MermaidRenderCompleted {
         session: SessionId,
         ref_id: crate::components::mermaid::MermaidId,
+        target_width: u32,
         result: Result<std::sync::Arc<image::DynamicImage>, String>,
     },
     /// Halt an in-flight agent stream via ACP cancel. Emitted by
