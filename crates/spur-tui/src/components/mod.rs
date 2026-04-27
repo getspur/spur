@@ -1,6 +1,7 @@
 pub mod activity_log;
 pub mod agents_tree;
 pub mod collision_modal;
+pub mod command_input_query_source;
 pub mod completion_popup;
 pub mod completion_trigger;
 pub mod config_option_query_source;
