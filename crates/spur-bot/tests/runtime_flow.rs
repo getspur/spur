@@ -172,7 +172,7 @@ async fn restore_pending_topic_queues_resume_then_flushes_message() {
     };
     let flushed = runtime.flush_pending(&handle, &key).await.unwrap();
 
-    assert!(!flushed.is_empty() || true); // flush_pending returns empty vec; side effect is the send
+    assert!(flushed.is_empty()); // flush_pending returns empty vec; side effect is the send
     assert!(matches!(
         user_rx.recv().await.unwrap(),
         spur_core::InteractiveInput::Message { .. }
@@ -1384,8 +1384,10 @@ async fn restore_pending_plain_text_queues_resume_then_message() {
     let handle = host.handle();
 
     // Pre-seed persisted state so the runtime starts in RestorePending.
-    let mut persisted = PersistedBotState::default();
-    persisted.operator_chat_id = Some(10_001);
+    let mut persisted = PersistedBotState {
+        operator_chat_id: Some(10_001),
+        ..PersistedBotState::default()
+    };
     persisted.threads.insert(
         77,
         PersistedThreadRecord {
