@@ -258,6 +258,41 @@ mod session_attach_guard_transfer_tests {
     }
 
     #[tokio::test]
+    async fn spur_agent_caps_getter_returns_cached_arc_or_none() {
+        use agent_client_protocol::schema::{InitializeResponse, NewSessionResponse};
+        use spur_acp::SpurAgentCaps;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = SpurConfig::default();
+        config.cost.db_path = tmp.path().join("cost.db").display().to_string();
+        let orchestrator = Orchestrator::new(tmp.path().to_path_buf(), config, None).unwrap();
+
+        let mut brain = fixture_brain_session("spur-session-caps");
+        // Default: no caps cached yet.
+        assert!(orchestrator.spur_agent_caps(&brain).is_none());
+
+        // Simulate the post-create plumbing: build caps from a (default
+        // InitializeResponse, codex fixture NewSessionResponse) pair and
+        // stash on the brain session.
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+        let json =
+            include_str!("../../spur-acp/tests/data/codex_acp_0_12_new_session_response.json");
+        let new: NewSessionResponse = serde_json::from_str(json).unwrap();
+        let caps = std::sync::Arc::new(SpurAgentCaps::new(&init, &new));
+        brain.spur_agent_caps = Some(caps.clone());
+
+        let read = orchestrator
+            .spur_agent_caps(&brain)
+            .expect("caps populated after stash");
+        assert!(read.supports_set_mode());
+        assert!(read.supports_set_model());
+        assert!(read.supports_set_config_option());
+        assert!(std::sync::Arc::ptr_eq(&read, &caps));
+
+        brain.delegation_handle.abort();
+    }
+
+    #[tokio::test]
     async fn replace_session_config_options_updates_cache_and_emits_event() {
         let tmp = tempfile::TempDir::new().unwrap();
         let mut config = SpurConfig::default();
