@@ -102,6 +102,32 @@ fn parse_license_create_with_all_args() {
 }
 
 #[test]
+fn parsed_create_command_redacts_secret_key_in_debug_output() {
+    let cli = spur_license_admin::cli::Cli::try_parse_from([
+        "spur-license-admin",
+        "license",
+        "create",
+        "--plan",
+        "pro",
+        "--secret-key",
+        "sk_test_xxx",
+        "--product",
+        "my-product",
+    ])
+    .expect("should parse");
+
+    let debug = format!("{:?}", cli);
+    assert!(
+        !debug.contains("sk_test_xxx"),
+        "Debug output must not leak secret key, but got: {debug}"
+    );
+    assert!(
+        debug.contains("REDACTED"),
+        "Debug output should mark the secret as REDACTED, got: {debug}"
+    );
+}
+
+#[test]
 fn parse_license_revoke() {
     let cli = spur_license_admin::cli::Cli::try_parse_from([
         "spur-license-admin",
