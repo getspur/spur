@@ -1740,6 +1740,71 @@ async fn terminal_reader(
 }
 
 #[cfg(test)]
+mod client_capabilities_tests {
+    use super::*;
+    use agent_client_protocol::schema::ProtocolVersion;
+
+    /// Spur must announce the explicit, non-default `ClientCapabilities`
+    /// literal at initialize: fs.read/write, terminal=true, and the
+    /// `_meta.terminal_output` extension that unlocks codex's tool-call
+    /// meta tunnelling. See design spec §6.2.
+    #[test]
+    fn spur_client_capabilities_advertises_terminal_fs_and_terminal_output_meta() {
+        let caps = spur_client_capabilities();
+
+        assert!(caps.terminal, "spur supports terminal/* methods");
+        assert!(
+            caps.fs.read_text_file,
+            "spur supports fs/read_text_file requests"
+        );
+        assert!(
+            caps.fs.write_text_file,
+            "spur supports fs/write_text_file requests"
+        );
+
+        let meta = caps
+            .meta
+            .as_ref()
+            .expect("client meta must include terminal_output gate");
+        let terminal_output = meta
+            .get("terminal_output")
+            .and_then(serde_json::Value::as_bool)
+            .expect("meta.terminal_output must be a bool");
+        assert!(
+            terminal_output,
+            "meta.terminal_output must be true to unlock codex tool-call meta tunneling"
+        );
+    }
+
+    /// The constructed `InitializeRequest` is what spur actually sends on
+    /// the wire. Serialize the full thing and confirm the negotiated
+    /// `clientCapabilities` shape includes the gate codex looks for.
+    #[test]
+    fn initialize_request_payload_contains_explicit_client_capabilities() {
+        let caps = spur_client_capabilities();
+        let req = InitializeRequest::new(ProtocolVersion::LATEST).client_capabilities(caps);
+        let json = serde_json::to_value(&req).expect("InitializeRequest must serialize");
+
+        let cc = json
+            .get("clientCapabilities")
+            .expect("clientCapabilities must serialize");
+        assert_eq!(cc.get("terminal"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(
+            cc.get("fs").and_then(|v| v.get("readTextFile")),
+            Some(&serde_json::Value::Bool(true))
+        );
+        assert_eq!(
+            cc.get("fs").and_then(|v| v.get("writeTextFile")),
+            Some(&serde_json::Value::Bool(true))
+        );
+        assert_eq!(
+            cc.get("_meta").and_then(|v| v.get("terminal_output")),
+            Some(&serde_json::Value::Bool(true))
+        );
+    }
+}
+
+#[cfg(test)]
 mod stderr_capture_tests {
     use super::*;
 
