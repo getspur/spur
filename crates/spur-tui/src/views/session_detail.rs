@@ -1410,13 +1410,11 @@ impl SessionDetailView {
                                     }
                                 }
                                 SubmitDecision::SetSessionModel { value } => {
-                                    // Wave B.4: see app.rs comment — Bundle 3 wires
-                                    // dedicated dispatch; for now reuse config-option path.
                                     if self.is_cleared() {
                                         None
                                     } else {
-                                        Some(Action::SetSessionConfigOption {
-                                            config_id: "model".into(),
+                                        Some(Action::SetSessionModel {
+                                            session_id: self.session_id.clone(),
                                             value,
                                         })
                                     }
