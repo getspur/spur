@@ -99,7 +99,7 @@ pub struct SessionDetailView {
     /// render. Set once from `App` when the view is created; `None` when no
     /// graphics protocol is available (text fallback kicks in).
     #[cfg(feature = "markdown")]
-    render_picker: Option<ratatui_image::picker::Picker>,
+    pub(crate) render_picker: Option<ratatui_image::picker::Picker>,
     /// Timestamp of the most recent InputBar text change whose contents
     /// differ from `last_persisted_draft`. `None` while the debounce is idle.
     last_draft_change_at: Option<std::time::Instant>,
