@@ -847,10 +847,15 @@ fn acp_thread_main(
                 .name(format!("spur-acp-{}", agent_name))
                 // ── session/request_permission ────────────────────────────
                 .on_receive_request(
-                    async move |req: RequestPermissionRequest, responder, _cx| {
-                        let outcome: agent_client_protocol::Result<RequestPermissionResponse> =
-                            handle_request_permission(req, perm_tx_h.clone()).await;
-                        responder.respond_with_result(outcome)
+                    async move |req: RequestPermissionRequest, responder, cx| {
+                        cx.spawn({
+                            let permission_tx = perm_tx_h.clone();
+                            async move {
+                                let outcome = handle_request_permission(req, permission_tx).await;
+                                responder.respond_with_result(outcome)
+                            }
+                        })?;
+                        Ok(())
                     },
                     agent_client_protocol::on_receive_request!(),
                 )
@@ -1034,7 +1039,7 @@ fn acp_thread_main(
                 )
                 // ── terminal/wait_for_exit ────────────────────────────────
                 .on_receive_request(
-                    async move |req: WaitForTerminalExitRequest, responder, _cx| {
+                    async move |req: WaitForTerminalExitRequest, responder, cx| {
                         let key = req.terminal_id.to_string();
                         let mut exit_rx = {
                             let map = terminals_wait.lock().unwrap();
@@ -1049,29 +1054,32 @@ fn acp_thread_main(
                                 }
                             }
                         };
-                        if let Some(status) = exit_rx.borrow().clone() {
-                            return responder
-                                .respond(WaitForTerminalExitResponse::new(status));
-                        }
-                        loop {
-                            match exit_rx.changed().await {
-                                Ok(()) => {
-                                    if let Some(status) = exit_rx.borrow().clone() {
-                                        return responder.respond(
-                                            WaitForTerminalExitResponse::new(status),
-                                        );
+                        cx.spawn(async move {
+                            if let Some(status) = exit_rx.borrow().clone() {
+                                return responder
+                                    .respond(WaitForTerminalExitResponse::new(status));
+                            }
+                            loop {
+                                match exit_rx.changed().await {
+                                    Ok(()) => {
+                                        if let Some(status) = exit_rx.borrow().clone() {
+                                            return responder.respond(
+                                                WaitForTerminalExitResponse::new(status),
+                                            );
+                                        }
+                                    }
+                                    Err(_) => {
+                                        let status = exit_rx
+                                            .borrow()
+                                            .clone()
+                                            .unwrap_or_else(TerminalExitStatus::new);
+                                        return responder
+                                            .respond(WaitForTerminalExitResponse::new(status));
                                     }
                                 }
-                                Err(_) => {
-                                    let status = exit_rx
-                                        .borrow()
-                                        .clone()
-                                        .unwrap_or_else(TerminalExitStatus::new);
-                                    return responder
-                                        .respond(WaitForTerminalExitResponse::new(status));
-                                }
                             }
-                        }
+                        })?;
+                        Ok(())
                     },
                     agent_client_protocol::on_receive_request!(),
                 )
