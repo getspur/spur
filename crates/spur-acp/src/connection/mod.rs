@@ -31,11 +31,14 @@ use futures::Stream;
 
 use agent_client_protocol::schema::{
     AuthenticateRequest, AuthenticateResponse, InitializeRequest, InitializeResponse,
-    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, McpServer, NewSessionResponse,
-    PromptRequest, SessionNotification, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse,
+    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, McpServer, ModelId,
+    NewSessionResponse, PromptRequest, SessionId, SessionNotification,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
+    SetSessionModeResponse,
 };
 
+use crate::error::AcpError;
+use crate::spur_agent_caps::SpurAgentCaps;
 use crate::types::AgentHealth;
 
 /// A transport-agnostic connection to a single ACP agent.
@@ -178,6 +181,24 @@ pub trait AgentConnection: Send + Sync {
         Err(anyhow::anyhow!(
             "set_session_config_option not supported by this transport"
         ))
+    }
+
+    /// Issue ACP `session/set_model` (capability-gated, with state-derived
+    /// fallback to `set_session_config_option`). Spec §6.3.
+    ///
+    /// `caps` is read once to choose between the dedicated `set_model`
+    /// method, the `set_config_option` fallback, or `CapabilityMissing`.
+    /// The default implementation returns `CapabilityMissing` — transports
+    /// that talk native ACP (currently `NativeAcpConnection`) override
+    /// this with the real dispatch decision.
+    async fn set_session_model(
+        &mut self,
+        sid: SessionId,
+        model_id: ModelId,
+        caps: &SpurAgentCaps,
+    ) -> Result<(), AcpError> {
+        let _ = (sid, model_id, caps);
+        Err(AcpError::CapabilityMissing("set_model"))
     }
 
     /// Authenticate with the agent using a previously-advertised auth method.
