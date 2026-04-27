@@ -8,6 +8,7 @@ pub mod protocol;
 pub mod registry;
 pub mod session_liveness;
 pub mod session_lock;
+pub mod spur_agent_caps;
 pub mod types;
 
 pub use config::{
@@ -22,6 +23,7 @@ pub use connection::{
 };
 pub use registry::AgentRegistry;
 pub use session_liveness::SelfHeldSet;
+pub use spur_agent_caps::SpurAgentCaps;
 
 // Re-export domain types
 pub use crate::domain::events::{

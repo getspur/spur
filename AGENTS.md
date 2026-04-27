@@ -12,12 +12,16 @@ SPUR is a Rust workspace with eight crates under `crates/`. Keep changes scoped 
 Source lives in each crate’s `src/`. Integration tests are primarily in `crates/spur-acp/tests`, `crates/spur-core/tests`, `crates/spur-tui/tests`, and `crates/spur-cli/tests`. Specs and implementation plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 
 ## Build, Test, and Development Commands
-- `cargo build --workspace`: build all crates
-- `cargo test --workspace`: run the full test suite
-- `cargo test -p spur-tui`: run tests for one crate while iterating
-- `cargo clippy --workspace -- -D warnings`: enforce lint-clean code
-- `cargo fmt --all`: apply workspace formatting
-- `cargo run -p spur-cli -- --help`: inspect CLI entry points locally
+
+**Use `scripts/spur-cargo` instead of `cargo` for builds.** The wrapper runs a fast pre-build hook that keeps sccache's `SCCACHE_BASEDIRS` in sync with the current set of git worktrees, enabling cross-worktree compile-cache reuse. It is a no-op when nothing changed and refuses to restart sccache while rustc is running. Plain `cargo` still works but skips the sync — agents should default to `spur-cargo` to keep cache hits high. See `docs/rca/2026-04-27-sccache-worktree-cache-miss.md`.
+
+- `scripts/spur-cargo build --workspace`: build all crates (with sccache sync)
+- `scripts/spur-cargo test --workspace`: run the full test suite
+- `scripts/spur-cargo test -p spur-tui`: run tests for one crate while iterating
+- `scripts/spur-cargo clippy --workspace -- -D warnings`: enforce lint-clean code
+- `scripts/spur-cargo fmt --all`: apply workspace formatting
+- `scripts/spur-cargo run -p spur-cli -- --help`: inspect CLI entry points locally
+- `scripts/sccache-sync-basedirs.sh`: run the sync alone (e.g. after creating/destroying worktrees)
 
 ## Coding Style & Naming Conventions
 Use Rust 2021 idioms with `cargo fmt` formatting. Follow existing naming: modules and functions in `snake_case`, types and traits in `CamelCase`, constants in `SCREAMING_SNAKE_CASE`. Prefer small, crate-local changes over broad rewrites. Avoid introducing new crate dependencies without explicit justification.
