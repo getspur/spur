@@ -100,11 +100,10 @@ mod tests {
 
     async fn drain_events(events: &mut UnboundedReceiver<SpurEventBody>) -> Vec<SpurEventBody> {
         let mut out = Vec::new();
-        loop {
-            match tokio::time::timeout(std::time::Duration::from_millis(20), events.recv()).await {
-                Ok(Some(event)) => out.push(event),
-                Ok(None) | Err(_) => break,
-            }
+        while let Ok(Some(event)) =
+            tokio::time::timeout(std::time::Duration::from_millis(20), events.recv()).await
+        {
+            out.push(event);
         }
         out
     }

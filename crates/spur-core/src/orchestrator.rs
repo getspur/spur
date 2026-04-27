@@ -3080,6 +3080,8 @@ impl Orchestrator {
     ///
     /// Similar to create_brain_session but calls load_session instead of new_session.
     /// The history stream delivers past session notifications (historical context).
+    // TODO(tech-debt): refactor when extracting orchestrator into smaller types.
+    #[allow(clippy::too_many_arguments)]
     async fn load_brain_session(
         &mut self,
         mut connection: Box<dyn spur_acp::AgentConnection>,
@@ -5538,7 +5540,7 @@ async fn run_one_worker_attempt(
             match transition_with_audit(
                 bundle.ledger.as_ref(),
                 funnel,
-                &ctx.brain_session_id,
+                ctx.brain_session_id,
                 &target_delegation_id,
                 inj.message_id,
                 LedgerState::DeliveredInflight,
@@ -5574,7 +5576,7 @@ async fn run_one_worker_attempt(
             match transition_with_audit(
                 bundle.ledger.as_ref(),
                 funnel,
-                &ctx.brain_session_id,
+                ctx.brain_session_id,
                 &target_delegation_id,
                 inj.message_id,
                 LedgerState::Delivered,
