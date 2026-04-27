@@ -9,6 +9,7 @@ members = [
     "crates/spur-worktree",
     "crates/spur-cost",
     "crates/spur-license",
+    "crates/spur-license-admin",
     "crates/spur-tui",
     "crates/spur-interactive",
     "crates/spur-bot",
@@ -37,7 +38,7 @@ serde_json = "1"
 toml = "0.8"
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # TUI
 ratatui = "0.29"
