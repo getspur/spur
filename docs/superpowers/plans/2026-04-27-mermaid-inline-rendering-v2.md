@@ -208,15 +208,13 @@ use image::DynamicImage;
     }
 ```
 
-- [ ] **Step 5: `cargo check -p spur-tui --features markdown`** — expect failures at every site that constructs `MermaidState::Ready` (session_detail.rs:929, mermaid_viewer.rs uses, tests). These will be fixed in later tasks. The mermaid.rs file itself should compile.
+- [ ] **Step 4b: Delete obsolete test in session_detail.rs**
 
-- [ ] **Step 6: Run mermaid.rs unit tests in isolation:**
+The test `invalidate_clears_inline_protocols_on_all_ready_states` at session_detail.rs:2402-2455 tests the removed `inline_protocol` field. Its conceptual replacement is `ImageCache::invalidate_all` tests in Task 7. Delete it (replace with one-line comment pointing to the replacement) so the lib test target can build once Tasks 1-9 converge.
 
-```bash
-cargo test -p spur-tui --features markdown --lib components::mermaid
-```
+- [ ] **Step 5: `cargo check -p spur-tui --features markdown`** — expect ~8 errors total: 5 missing `target_width` (carried over from Task 1: app.rs:2090, :2101, :2109; session_detail.rs:1618, :1793) plus 3 missing/unknown `inline_protocol` (this task: react_trace/render.rs:245-247; session_detail.rs:596; session_detail.rs:931). All expected; all wired up by Tasks 5 and 9.
 
-Expected: `ready_state_holds_provenance_fields` passes; existing tests (`fix_font_families_replaces_inner_quotes`, `malformed_svg_rasterization_does_not_panic`) still pass.
+- [ ] **Step 6: Lib-test verification deferred.** Tasks 1-9 form a type-migration block; the spur-tui lib does not compile cleanly between them. Lib tests (including the renamed `ready_state_holds_provenance_fields`) are verified at the end of Task 9 along with all other affected tests. For this task, acceptance is: `cargo check` produces exactly the 8 errors above and no others.
 
 - [ ] **Step 7: Commit**
 
@@ -228,6 +226,8 @@ git commit -m "feat(spur-tui): MermaidState::Ready gains code + rastered_at_buck
 ---
 
 ## Task 3: Raster bucket policy (TDD)
+
+> **Type-migration block (Tasks 1-9):** the spur-tui lib does not compile cleanly until Task 9 lands. TDD/test-run steps in Tasks 3, 6, 7 (where reachable) operate on isolated test compilations or are deferred to the Task 9 checkpoint. See Task 2 Step 6 for context.
 
 **Files:**
 - Modify: `crates/spur-tui/src/components/mermaid.rs` (add module-level constants + function near line 138)
