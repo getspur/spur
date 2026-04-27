@@ -15,6 +15,7 @@ python/dist/
 **/.spur/session_metadata.json
 **/.spur/session_metadata.json.tmp
 .spur/bot/
+.spur/keys/
 /.beads/
 /resource/superpowers/
 .superpowers/brainstorm/
