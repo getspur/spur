@@ -30,10 +30,13 @@ async fn create_license_sends_post_with_bearer_auth() {
             "expected plan_key in body"
         );
 
-        socket
-            .write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n")
-            .await
-            .unwrap();
+        let body = r#"{"license_key":"NEW-KEY-9999","plan_key":"pro","seats":1}"#;
+        let response = format!(
+            "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
     });
 
     let client = spur_license_admin::api::AdminClient::new(
@@ -45,10 +48,11 @@ async fn create_license_sends_post_with_bearer_auth() {
     let result = client.create_license("pro", None, None).await;
 
     server.await.unwrap();
-    assert!(
-        result.is_ok(),
-        "create_license should succeed: {:?}",
-        result.err()
+    let value = result.expect("create_license should succeed");
+    assert_eq!(
+        value.get("license_key").and_then(|v| v.as_str()),
+        Some("NEW-KEY-9999"),
+        "create_license must return the parsed JSON body so the operator learns the new key"
     );
 }
 
@@ -90,10 +94,11 @@ async fn list_licenses_sends_get_with_bearer_auth() {
     let result = client.list_licenses().await;
 
     server.await.unwrap();
-    assert!(
-        result.is_ok(),
-        "list_licenses should succeed: {:?}",
-        result.err()
+    let value = result.expect("list_licenses should succeed");
+    assert_eq!(
+        value.get("total").and_then(|v| v.as_u64()),
+        Some(0),
+        "list_licenses must return the parsed JSON body"
     );
 }
 
@@ -132,10 +137,10 @@ async fn revoke_license_sends_delete_with_bearer_auth() {
     let result = client.revoke_license("TEST-KEY-1234").await;
 
     server.await.unwrap();
+    let value = result.expect("revoke_license should succeed");
     assert!(
-        result.is_ok(),
-        "revoke_license should succeed: {:?}",
-        result.err()
+        value.is_null(),
+        "revoke_license must return Null on 204 No Content; got {value:?}"
     );
 }
 
@@ -177,9 +182,10 @@ async fn list_activations_sends_get_with_license_key() {
     let result = client.list_activations("TEST-KEY").await;
 
     server.await.unwrap();
-    assert!(
-        result.is_ok(),
-        "list_activations should succeed: {:?}",
-        result.err()
+    let value = result.expect("list_activations should succeed");
+    assert_eq!(
+        value.get("total").and_then(|v| v.as_u64()),
+        Some(0),
+        "list_activations must return the parsed JSON body"
     );
 }
