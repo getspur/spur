@@ -5,6 +5,7 @@
 //! routes that to the LicenseSeat path under Option A).
 
 use async_trait::async_trait;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -23,17 +24,24 @@ pub struct CommunityProvider {
 
 impl CommunityProvider {
     pub fn new(resolver: Arc<PolicyResolver>) -> Self {
+        let resolve_features = |tier: &str| -> BTreeSet<String> {
+            resolver.tier_features(tier).unwrap_or_else(|err| {
+                tracing::warn!("policy tier {tier:?} malformed: {err}; using empty features");
+                BTreeSet::new()
+            })
+        };
+
         // Dev-tier override is compile-gated to debug builds only.
         // It CANNOT leak into release/production binaries.
         #[cfg(debug_assertions)]
         let (features, plan) = match std::env::var(DEV_PLAN_ENV).ok().as_deref() {
-            Some("pro") => (resolver.tier_features("pro"), Plan::Pro),
-            Some("team") => (resolver.tier_features("team"), Plan::Team),
-            Some("enterprise") => (resolver.tier_features("enterprise"), Plan::Enterprise),
-            _ => (resolver.tier_features("community"), Plan::Community),
+            Some("pro") => (resolve_features("pro"), Plan::Pro),
+            Some("team") => (resolve_features("team"), Plan::Team),
+            Some("enterprise") => (resolve_features("enterprise"), Plan::Enterprise),
+            _ => (resolve_features("community"), Plan::Community),
         };
         #[cfg(not(debug_assertions))]
-        let (features, plan) = (resolver.tier_features("community"), Plan::Community);
+        let (features, plan) = (resolve_features("community"), Plan::Community);
 
         let state = if plan == Plan::Community {
             LicenseState::active_community(features)

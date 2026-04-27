@@ -202,6 +202,8 @@ pub enum LicenseError {
     NotConfigured(String),
     #[error("{0}")]
     Provider(String),
+    #[error("{0}")]
+    PolicyMalformed(String),
 }
 
 pub type Result<T> = std::result::Result<T, LicenseError>;
