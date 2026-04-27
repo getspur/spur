@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::TestBackend, Terminal};
+use spur_tui::action::ViewId;
 use spur_tui::session_metadata::{current_metadata_version, SessionMetadataStore};
 
 fn rendered_buffer_text(terminal: &Terminal<TestBackend>) -> String {
@@ -172,5 +173,31 @@ fn future_metadata_shows_read_only_warning_on_first_paint() {
     assert!(
         rendered.contains("Edits this session WILL NOT be persisted"),
         "first paint should render the startup warning before any persist attempt:\n{rendered}"
+    );
+}
+
+#[test]
+fn esc_dismisses_warning_from_session_picker_view() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session_metadata.json");
+    write_future_metadata(&path);
+
+    let mut app = spur_tui::app::App::new_with_metadata_path_in_picker_for_test(path);
+
+    assert_eq!(*app.current_view(), ViewId::SessionPicker);
+    assert!(
+        app.user_warning_for_test().is_some(),
+        "future metadata should surface the first-paint warning"
+    );
+
+    app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    assert!(
+        app.user_warning_for_test().is_none(),
+        "Esc in SessionPicker should dismiss the visual warning"
+    );
+    assert!(
+        app.metadata_store_for_test().is_read_only(),
+        "dismissal must not clear metadata store read-only mode"
     );
 }
