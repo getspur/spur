@@ -27,7 +27,7 @@ use crate::components::palette_sources::{
 use crate::components::quit_confirm::QuitConfirmDialog;
 use crate::components::status_bar::{LicenseBadge, LicenseBadgeTone};
 use crate::input_history::{InputHistoryEntry, HISTORY_CAP};
-use crate::session_metadata::SessionMetadataStore;
+use crate::session_metadata::{ReadOnlyFutureSchema, SessionMetadataStore};
 use crate::tui;
 use crate::views::dashboard::DashboardView;
 use crate::views::issue_browser::IssueBrowserView;
@@ -190,6 +190,8 @@ pub struct App {
     collision_modal: Option<CollisionModalState>,
     should_quit: bool,
     dirty: bool,
+    /// Top-level user-visible warning banner rendered over the active view.
+    user_warning: Option<String>,
     user_input_tx: Option<mpsc::Sender<UserInput>>,
     brain_status: BrainStatus,
     brain_name: Option<String>,
@@ -326,6 +328,7 @@ impl App {
             collision_modal: None,
             should_quit: false,
             dirty: true, // initial render
+            user_warning: None,
             user_input_tx,
             brain_status: BrainStatus::Idle,
             brain_name: None,
@@ -525,6 +528,21 @@ impl App {
     }
 
     #[cfg(any(test, debug_assertions))]
+    pub fn set_metadata_store_for_test(&mut self, store: SessionMetadataStore) {
+        self.metadata_store = store;
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn persist_metadata_for_test(&mut self, context: &'static str) -> bool {
+        self.persist_metadata(context)
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn user_warning_for_test(&self) -> Option<&str> {
+        self.user_warning.as_deref()
+    }
+
+    #[cfg(any(test, debug_assertions))]
     pub fn handle_crossterm_event_for_test(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::Event;
         self.handle_crossterm_event(Event::Key(key));
@@ -700,6 +718,32 @@ impl App {
     pub(crate) fn sync_dashboard_workers(&mut self) {
         let workers = self.build_worker_snapshot();
         self.dashboard.set_worker_snapshot(workers);
+    }
+
+    fn show_user_warning(&mut self, message: String) {
+        self.user_warning = Some(message);
+        self.dirty = true;
+    }
+
+    /// Persist metadata, surfacing read-only refusals to the user via an
+    /// App-owned top-level warning banner. This is deliberately not routed
+    /// through `InputBar::set_status`: event handling calls `sync_brain_status`
+    /// after view updates, which can overwrite InputBar status labels before
+    /// the user sees the warning.
+    fn persist_metadata(&mut self, context: &'static str) -> bool {
+        match self.metadata_store.save() {
+            Ok(()) => true,
+            Err(e) => {
+                if e.downcast_ref::<ReadOnlyFutureSchema>().is_some() {
+                    self.show_user_warning(format!(
+                        "Read-only mode: session metadata was written by a newer SPUR. {context} not saved. Upgrade SPUR to enable writes."
+                    ));
+                } else {
+                    tracing::warn!(error = %e, context, "failed to persist metadata");
+                }
+                false
+            }
+        }
     }
 
     /// Dispatch a crossterm event (keyboard, resize, mouse, etc.) to the active view.
@@ -1118,9 +1162,7 @@ impl App {
                     }
                 }
                 if changed {
-                    if let Err(e) = self.metadata_store.save() {
-                        tracing::warn!(error = %e, "failed to persist backfilled input history");
-                    }
+                    self.persist_metadata("backfilled input history");
                     self.sync_input_history();
                 }
 
@@ -1213,9 +1255,7 @@ impl App {
                         );
                         view.show_resume_banner(title, quit_ago);
                         self.metadata_store.clear_last_active();
-                        if let Err(e) = self.metadata_store.save() {
-                            tracing::warn!(error = %e, "failed to persist cleared last_active");
-                        }
+                        self.persist_metadata("cleared last_active");
                     }
                     self.session_detail = Some(view);
                 }
@@ -1240,13 +1280,7 @@ impl App {
             } => {
                 self.metadata_store
                     .set_acp_mapping(&session.0, acp_session_id, brain);
-                if let Err(e) = self.metadata_store.save() {
-                    tracing::warn!(
-                        error = %e,
-                        session = %session.0,
-                        "failed to persist AgentSessionReady metadata"
-                    );
-                }
+                self.persist_metadata("AgentSessionReady metadata");
             }
             SpurEventBody::SessionAttachRejected {
                 acp_session_id,
@@ -1269,9 +1303,7 @@ impl App {
                 self.brain_status = BrainStatus::Ready;
                 let now = chrono::Utc::now().to_rfc3339();
                 self.metadata_store.set_last_active(session.0.clone(), now);
-                if let Err(e) = self.metadata_store.save() {
-                    tracing::warn!(error = %e, "failed to persist last_active on TurnComplete");
-                }
+                self.persist_metadata("last_active");
             }
             SpurEventBody::BrainError { message, .. } => {
                 self.brain_status = BrainStatus::Error(message.clone());
@@ -1307,12 +1339,7 @@ impl App {
                 // the next launch. The next `AgentSessionReady` (on the
                 // next prompt) repopulates these via `set_acp_mapping`.
                 self.metadata_store.clear_last_active_full();
-                if let Err(e) = self.metadata_store.save() {
-                    tracing::warn!(
-                        error = %e,
-                        "failed to persist cleared last_active on BrainRetired"
-                    );
-                }
+                self.persist_metadata("cleared last_active on BrainRetired");
                 // Defensive belt-and-suspenders reset for the UserClear path.
                 // Idempotent against Action::ClearSession's eager reset.
                 // Gated on UserClear only:
@@ -1731,9 +1758,7 @@ impl App {
             Action::ToggleSessionPin { session_id } => {
                 let entry = self.metadata_store.entry_mut(&session_id);
                 entry.pinned = !entry.pinned;
-                if let Err(e) = self.metadata_store.save() {
-                    tracing::warn!(error = %e, "failed to persist pin toggle");
-                }
+                self.persist_metadata("pin toggle");
                 self.refresh_picker_metadata();
                 self.dirty = true;
             }
@@ -1741,9 +1766,7 @@ impl App {
             Action::ToggleSessionArchive { session_id } => {
                 let entry = self.metadata_store.entry_mut(&session_id);
                 entry.archived = !entry.archived;
-                if let Err(e) = self.metadata_store.save() {
-                    tracing::warn!(error = %e, "failed to persist archive toggle");
-                }
+                self.persist_metadata("archive toggle");
                 self.refresh_picker_metadata();
                 self.dirty = true;
             }
@@ -1765,9 +1788,7 @@ impl App {
                 } else {
                     Some(new_title)
                 };
-                if let Err(e) = self.metadata_store.save() {
-                    tracing::warn!(error = %e, "failed to persist rename");
-                }
+                self.persist_metadata("rename");
                 self.refresh_picker_metadata();
                 self.dirty = true;
             }
@@ -2147,9 +2168,7 @@ impl App {
         let entry = self.metadata_store.entry_mut(&session_id);
         if entry.draft != draft {
             entry.draft = draft;
-            if let Err(e) = self.metadata_store.save() {
-                tracing::warn!(error = %e, "failed to persist draft");
-            }
+            self.persist_metadata("draft");
         }
     }
 
@@ -2163,9 +2182,7 @@ impl App {
             Self::merge_input_history_entry(hist, entry)
         };
         if changed {
-            if let Err(e) = self.metadata_store.save() {
-                tracing::warn!(error = %e, "failed to persist input history");
-            }
+            self.persist_metadata("input history");
             self.sync_input_history();
         }
         changed
@@ -2476,7 +2493,42 @@ impl App {
                     .with_session_active(self.session_detail.is_some());
             frame.render_widget(overlay, frame.area());
         }
+
+        if let Some(message) = self.user_warning.as_deref() {
+            render_user_warning(frame, area, message);
+        }
     }
+}
+
+fn render_user_warning(frame: &mut Frame, area: ratatui::layout::Rect, message: &str) {
+    use ratatui::{
+        style::{Color, Modifier, Style},
+        text::Line,
+        widgets::{Clear, Paragraph},
+    };
+
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let banner = ratatui::layout::Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: 1,
+    };
+    let text = Line::styled(
+        message.to_string(),
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
+    frame.render_widget(Clear, banner);
+    frame.render_widget(
+        Paragraph::new(text).style(Style::default().bg(Color::Yellow)),
+        banner,
+    );
 }
 
 fn is_ctrl_c(key: KeyEvent) -> bool {

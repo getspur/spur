@@ -16,6 +16,27 @@ use std::path::{Path, PathBuf};
 
 use crate::input_history::InputHistoryEntry;
 
+/// Returned by [`SessionMetadataStore::save`] when the store is in
+/// read-only mode because the on-disk file was written by a future
+/// SPUR version. Callers MUST surface this to the user — the in-memory
+/// state was NOT persisted.
+#[derive(Debug, Clone)]
+pub struct ReadOnlyFutureSchema {
+    pub path: PathBuf,
+}
+
+impl std::fmt::Display for ReadOnlyFutureSchema {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "session metadata at {} was written by a newer SPUR version; store is read-only",
+            self.path.display()
+        )
+    }
+}
+
+impl std::error::Error for ReadOnlyFutureSchema {}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionEntry {
     #[serde(default)]
@@ -44,7 +65,9 @@ pub struct SessionMetadata {
     /// kept as `"version"` for on-disk backwards compatibility — older
     /// files written before this rename load unchanged. Loads with a
     /// stored version greater than [`current_metadata_version`] are
-    /// accepted tolerantly and rewritten at CURRENT on next save.
+    /// accepted tolerantly by [`SessionMetadataStore::load`], normalized
+    /// in memory, and rejected by [`SessionMetadataStore::save`] so this
+    /// binary does not strip future fields.
     #[serde(default = "current_metadata_version", rename = "version")]
     pub schema_version: u32,
     #[serde(default)]
@@ -185,6 +208,14 @@ impl SessionMetadataStore {
         &mut self.metadata
     }
 
+    /// True when [`load`](Self::load) observed a future schema and the
+    /// store therefore refuses to write. Callers that want to gate UI
+    /// affordances (disable save shortcuts, show a banner) can poll this
+    /// without attempting a [`save`](Self::save).
+    pub fn is_read_only(&self) -> bool {
+        self.loaded_from_future
+    }
+
     pub fn entry(&self, session_id: &str) -> Option<&SessionEntry> {
         self.metadata.sessions.get(session_id)
     }
@@ -317,10 +348,12 @@ impl SessionMetadataStore {
             })
     }
 
-    /// Atomic save: write to `path.tmp`, then rename to `path`. Creates parent
-    /// directory if missing. Survives process crashes and partial writes via
-    /// POSIX rename semantics (macOS/Linux). Does not guarantee durability
-    /// across power loss (no `fsync` on tmp file or parent directory).
+    /// Atomic save: write to `path.tmp`, then rename to `path`. Refuses with
+    /// [`ReadOnlyFutureSchema`] when [`load`](Self::load) observed a future
+    /// schema version. Creates parent directory if missing. Survives process
+    /// crashes and partial writes via POSIX rename semantics (macOS/Linux).
+    /// Does not guarantee durability across power loss (no `fsync` on tmp file
+    /// or parent directory).
     pub fn save(&self) -> Result<()> {
         if self.loaded_from_future {
             tracing::warn!(
@@ -328,7 +361,9 @@ impl SessionMetadataStore {
                 current = current_metadata_version(),
                 "refusing to save future session_metadata schema; update SPUR to preserve newer fields"
             );
-            return Ok(());
+            return Err(anyhow::Error::new(ReadOnlyFutureSchema {
+                path: self.path.clone(),
+            }));
         }
 
         if let Some(parent) = self.path.parent() {
