@@ -79,3 +79,41 @@ fn toggle_observe_collapsed_does_not_corrupt_anchor_via_stale_layout() {
         "scroll must no-op after toggle_observe_collapsed bumps generation"
     );
 }
+
+#[test]
+fn stale_compact_surface_rejects_scroll_input() {
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use ratatui::Terminal;
+
+    let mut t = seeded_trace(50);
+    t.last_visible_height = 12;
+
+    // Paint the compact surface via a real render. This populates
+    // compact_cache AND stamps last_surface = Compact(self.generation).
+    let backend = TestBackend::new(80, 12);
+    let mut terminal = Terminal::new(backend).expect("test backend");
+    terminal
+        .draw(|f| {
+            t.render_compact(f, Rect::new(0, 0, 80, 12));
+        })
+        .expect("render_compact draw");
+
+    // Move the anchor off Following so a follow-up scroll has something to
+    // mutate when the cache is fresh.
+    t.scroll_up_by(3);
+    let anchor_after_initial_scroll = t.anchor;
+
+    // Bump generation without re-rendering. The Compact snapshot in
+    // last_surface is now stale.
+    t.toggle_observe_collapsed();
+
+    // The match guard `Surface::Compact(g) if g == self.generation` must
+    // fail; layout_for_scroll returns None; shift_anchor_by no-ops.
+    t.scroll_up_by(3);
+
+    assert_eq!(
+        t.anchor, anchor_after_initial_scroll,
+        "stale Compact snapshot must reject scroll input"
+    );
+}
