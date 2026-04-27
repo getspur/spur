@@ -151,6 +151,7 @@ impl CommandRegistry {
             match &entry.source {
                 CommandSource::Spur => format!("/spur:{}", entry.name),
                 CommandSource::Agent { handle } => format!("/{}:{}", handle, entry.name),
+                CommandSource::Advertised { handle } => format!("/{}:{}", handle, entry.name),
             }
         } else {
             format!("/{}", entry.name)
@@ -171,6 +172,7 @@ impl CommandRegistry {
                         && match (&e.source, source) {
                             (CommandSource::Spur, "spur") => true,
                             (CommandSource::Agent { handle }, s) => handle == s,
+                            (CommandSource::Advertised { handle }, s) => handle == s,
                             _ => false,
                         }
                 })
@@ -183,6 +185,7 @@ impl CommandRegistry {
         candidates.sort_by_key(|e| match &e.source {
             CommandSource::Spur => 0,
             CommandSource::Agent { .. } => 1,
+            CommandSource::Advertised { .. } => 1,
         });
         candidates.into_iter().next().cloned()
     }
