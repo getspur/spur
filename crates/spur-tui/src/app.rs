@@ -868,6 +868,14 @@ impl App {
                 self.dirty = true;
             }
             Event::Paste(text) => {
+                if self.quit_confirm_visible
+                    || self.collision_modal.is_some()
+                    || self.help_visible
+                    || self.palette_visible
+                {
+                    return;
+                }
+
                 match self.current_view {
                     ViewId::Dashboard => self.dashboard.handle_paste(&text),
                     ViewId::SessionDetail(_) => {
@@ -3515,7 +3523,7 @@ mod brain_retired_tests {
 #[cfg(test)]
 mod quit_shortcut_tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
     fn ctrl_c() -> KeyEvent {
         KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
@@ -3581,6 +3589,40 @@ mod quit_shortcut_tests {
         assert!(
             !app.quit_confirm_visible,
             "Esc should not open quit confirm from an empty dashboard"
+        );
+    }
+
+    #[test]
+    fn paste_is_ignored_while_app_overlays_are_active() {
+        let mut app = App::new_for_tests();
+
+        app.help_visible = true;
+        app.handle_crossterm_event(Event::Paste("help".into()));
+        assert_eq!(app.dashboard_for_test().input_bar_text_for_test(), "");
+        app.help_visible = false;
+
+        app.quit_confirm_visible = true;
+        app.handle_crossterm_event(Event::Paste("quit".into()));
+        assert_eq!(app.dashboard_for_test().input_bar_text_for_test(), "");
+        app.quit_confirm_visible = false;
+
+        app.palette_visible = true;
+        app.handle_crossterm_event(Event::Paste("palette".into()));
+        assert_eq!(app.dashboard_for_test().input_bar_text_for_test(), "");
+        app.palette_visible = false;
+
+        app.collision_modal = Some(CollisionModalState {
+            acp_id: "acp-1".into(),
+            holder: spur_acp::session_lock::HolderInfo::default(),
+        });
+        app.handle_crossterm_event(Event::Paste("collision".into()));
+        assert_eq!(app.dashboard_for_test().input_bar_text_for_test(), "");
+        app.collision_modal = None;
+
+        app.handle_crossterm_event(Event::Paste("visible".into()));
+        assert_eq!(
+            app.dashboard_for_test().input_bar_text_for_test(),
+            "visible"
         );
     }
 }
