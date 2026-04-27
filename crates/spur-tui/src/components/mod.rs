@@ -3,6 +3,7 @@ pub mod agents_tree;
 pub mod collision_modal;
 pub mod completion_popup;
 pub mod completion_trigger;
+pub mod config_option_query_source;
 pub mod detail_pane;
 pub mod diff_viewer;
 pub mod help_overlay;
