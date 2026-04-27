@@ -174,56 +174,112 @@ pub(crate) fn segment_visible_rows(
     out
 }
 
+// ─── Inline height policy ────────────────────────────────────────────────────
+
+/// Floor: minimum rows for a legible diagram on any pane.
+pub(crate) const INLINE_FLOOR_ROWS: u16 = 8;
+
+/// Floor of `target_cap`. Preserves today's UX baseline (`[6, 60]` clamp
+/// in v1) — diagrams up to 60 rows render unchanged on medium panes
+/// (pane_h ≥ 64). For smaller panes, trailing-context constraint takes
+/// precedence (see `compute_inline_height_rows` doc).
+pub(crate) const INLINE_LEGACY_CAP: u16 = 60;
+
+/// Hard upper bound for inline diagrams. Caps pathological flowcharts on
+/// huge panes (250+ rows) at a sane portion of viewport.
+pub(crate) const INLINE_HARD_CAP: u16 = 100;
+
+/// Rows of trace content always preserved below an inline diagram.
+pub(crate) const INLINE_TRAILING_CONTEXT: u16 = 4;
+
 /// Row count for rendering an image inline at `pane_width_cols` with aspect
-/// ratio preserved. Clamped to `[6, 60]` rows — short enough not to swamp
-/// the pane, tall enough for realistic diagrams to render without squishing.
+/// ratio preserved.
 ///
-/// Without aspect-correct sizing, `ratatui_image::Resize::Fit` scales by
-/// the tighter of (width ratio, height ratio): a tall image in a short
-/// Rect letterboxes narrow and shrinks text below legibility.
+/// The result is `natural_rows.clamp(effective_floor, soft_cap)` where:
+/// - `natural_rows` = aspect-correct rows for the image at the pane's pixel width
+/// - `target_cap = max(2/3 pane, INLINE_LEGACY_CAP)` — preserves legacy UX on medium panes
+/// - `max_inline = pane_h - INLINE_TRAILING_CONTEXT` — keeps trace context below
+/// - `soft_cap = target_cap.min(max_inline).min(INLINE_HARD_CAP)`
+/// - `effective_floor = INLINE_FLOOR_ROWS.min(soft_cap)` — degrades on tiny panes
+///
+/// **Regression note:** for `pane_h ∈ [60, 63]` the trailing-context
+/// constraint takes precedence over the legacy-60 floor, producing a
+/// ≤4-row regression vs v1. Accepted trade — see spec §3.2.
 #[cfg(feature = "markdown")]
 pub(crate) fn compute_inline_height_rows(
     image: &image::DynamicImage,
     pane_width_cols: u16,
-    picker: Option<&ratatui_image::picker::Picker>,
+    pane_height_rows: u16,
+    cell_w_px: u32,
+    cell_h_px: u32,
 ) -> u16 {
-    let (cell_w_px, cell_h_px) = picker
-        .map(|p| {
-            let (w, h) = p.font_size();
-            (w.max(1) as u32, h.max(1) as u32)
-        })
-        .unwrap_or((8, 16));
+    let cell_w_px = cell_w_px.max(1);
+    let cell_h_px = cell_h_px.max(1);
 
     let pane_width_px = (pane_width_cols as u32).saturating_mul(cell_w_px);
-    if pane_width_px == 0 || image.width() == 0 {
-        return 6;
+    if pane_width_px == 0 || image.width() == 0 || pane_height_rows == 0 {
+        return 0;
     }
+
     // display_h_px = image_h × (pane_w_px / image_w); rows = display_h_px / cell_h.
     let scaled_h_px =
         ((image.height() as u64) * (pane_width_px as u64)).div_ceil(image.width() as u64) as u32;
-    let rows = scaled_h_px.div_ceil(cell_h_px);
-    rows.clamp(6, 60) as u16
+    let natural_rows = scaled_h_px.div_ceil(cell_h_px) as u16;
+
+    let two_thirds = (pane_height_rows as u32 * 2 / 3) as u16;
+    let target_cap = two_thirds.max(INLINE_LEGACY_CAP);
+    let max_inline = pane_height_rows.saturating_sub(INLINE_TRAILING_CONTEXT);
+    let soft_cap = target_cap.min(max_inline).min(INLINE_HARD_CAP);
+    let effective_floor = INLINE_FLOOR_ROWS.min(soft_cap);
+
+    natural_rows.clamp(effective_floor, soft_cap.max(effective_floor))
+}
+
+/// Pure helper exposed for cache keying (Task 13). Returns the soft_cap
+/// for a given `pane_height_rows` without needing an image — only
+/// `pane_height_rows` affects this value, so it stays the same for
+/// every image rendered in the same pane.
+#[cfg(feature = "markdown")]
+pub(crate) fn compute_soft_cap(pane_height_rows: u16) -> u16 {
+    if pane_height_rows == 0 {
+        return 0;
+    }
+    let two_thirds = (pane_height_rows as u32 * 2 / 3) as u16;
+    let target_cap = two_thirds.max(INLINE_LEGACY_CAP);
+    let max_inline = pane_height_rows.saturating_sub(INLINE_TRAILING_CONTEXT);
+    target_cap.min(max_inline).min(INLINE_HARD_CAP)
 }
 
 #[cfg(feature = "markdown")]
 fn compute_fence_states(
     ctx: &RenderContext<'_>,
     pane_width_cols: u16,
+    pane_height_rows: u16,
 ) -> std::collections::HashMap<
     crate::components::mermaid::MermaidId,
     crate::components::mermaid::FenceRender,
 > {
     use crate::components::mermaid::{FenceRender, MermaidState};
+    let (cell_w_px, cell_h_px) = ctx
+        .picker
+        .map(|p| {
+            let (w, h) = p.font_size();
+            (w.max(1) as u32, h.max(1) as u32)
+        })
+        .unwrap_or((8, 16));
     let mut out = std::collections::HashMap::new();
     for (id, state) in ctx.mermaid_registry.iter() {
-        let r =
-            match state {
-                MermaidState::Ready { image, .. } => FenceRender::Ready(
-                    compute_inline_height_rows(image.as_ref(), pane_width_cols, ctx.picker),
-                ),
-                MermaidState::Pending { .. } | MermaidState::Rendering => FenceRender::Pending,
-                MermaidState::Error { .. } => FenceRender::Error,
-            };
+        let r = match state {
+            MermaidState::Ready { image, .. } => FenceRender::Ready(compute_inline_height_rows(
+                image.as_ref(),
+                pane_width_cols,
+                pane_height_rows,
+                cell_w_px,
+                cell_h_px,
+            )),
+            MermaidState::Pending { .. } | MermaidState::Rendering => FenceRender::Pending,
+            MermaidState::Error { .. } => FenceRender::Error,
+        };
         out.insert(*id, r);
     }
     out
@@ -242,28 +298,17 @@ fn render_inline_image(
     use crate::components::mermaid::MermaidState;
     use ratatui_image::{Resize, StatefulImage};
 
-    let Some(MermaidState::Ready {
-        image,
-        inline_protocol,
-    }) = ctx.mermaid_registry.get(&id)
-    else {
+    let Some(MermaidState::Ready { image, .. }) = ctx.mermaid_registry.get(&id) else {
         return false;
     };
     let Some(picker) = ctx.picker else {
         return false;
     };
 
-    let mut slot = inline_protocol.borrow_mut();
-    if slot.is_none() {
-        // Unavoidable pixel copy: ratatui_image takes DynamicImage by value
-        // to build the protocol. Arc prevents repeated deep-copies elsewhere.
-        *slot = Some(picker.new_resize_protocol((**image).clone()));
-    }
-    let Some(proto) = slot.as_mut() else {
-        return false;
-    };
+    // Protocol caching moves to ImageCache in Task 12; for now rebuild per render.
+    let mut proto = picker.new_resize_protocol((**image).clone());
     let widget = StatefulImage::default().resize(Resize::Fit(None));
-    frame.render_stateful_widget(widget, rect, proto);
+    frame.render_stateful_widget(widget, rect, &mut proto);
     true
 }
 
@@ -468,7 +513,7 @@ impl ReactTrace {
                         c.entry_row_starts.truncate(dirty_idx);
                         let base = c.rows.len();
                         // Drop the mutable borrow before calling &self method.
-                        let states = compute_fence_states(ctx, effective_width);
+                        let states = compute_fence_states(ctx, effective_width, inner.height);
                         let (new_rows, new_starts, new_byte_ranges) =
                             self.build_virtual_rows(dirty_idx, effective_width, &states, lineage);
                         let c = self.line_cache.as_mut().unwrap();
@@ -481,7 +526,7 @@ impl ReactTrace {
                     }
                     _ => {
                         // Full rebuild (dirty_idx == 0 or no cache).
-                        let states = compute_fence_states(ctx, effective_width);
+                        let states = compute_fence_states(ctx, effective_width, inner.height);
                         let (rows, entry_row_starts, byte_ranges) =
                             self.build_virtual_rows(0, effective_width, &states, lineage);
                         self.line_cache = Some(VirtualRowCacheEntry {
@@ -497,7 +542,7 @@ impl ReactTrace {
                 }
             } else {
                 // Width or fence state changed — full rebuild.
-                let states = compute_fence_states(ctx, effective_width);
+                let states = compute_fence_states(ctx, effective_width, inner.height);
                 let (rows, entry_row_starts, byte_ranges) =
                     self.build_virtual_rows(0, effective_width, &states, lineage);
                 self.line_cache = Some(VirtualRowCacheEntry {
@@ -962,5 +1007,103 @@ mod scroll_indicator_tests {
             !row_text(term.backend().buffer(), height - 1, width).contains('%'),
             "bottom row should not include a position indicator when content fits"
         );
+    }
+}
+
+#[cfg(all(test, feature = "markdown"))]
+mod height_tests {
+    use super::*;
+    use image::{DynamicImage, RgbaImage};
+
+    fn img(w: u32, h: u32) -> DynamicImage {
+        DynamicImage::ImageRgba8(RgbaImage::new(w, h))
+    }
+
+    // For all tests we use cell metrics (8, 16) — typical for non-retina
+    // monospace. natural_rows = ceil(image.h × pane_w_cols × 8 / image.w / 16).
+
+    #[test]
+    fn height_no_regression_at_pane_80_natural_70() {
+        // 800x700 image, pane_w=100 cols × cell_w=8 = 800 px.
+        // scaled_h = 700 * 800 / 800 = 700; natural = ceil(700/16) = 44.
+        // Want pane_h=80, natural=70 → result 60. Use a taller image:
+        // 800x1400 → scaled_h=1400, natural=ceil(1400/16)=88. Pick image
+        // dims so natural ≈ 70: 800 * 16 * 70 / 800 = 1120 px tall.
+        let i = img(800, 1120);
+        // pane_h=80, natural≈70 → clamp(70, 8, 60) = 60.
+        assert_eq!(compute_inline_height_rows(&i, 100, 80, 8, 16), 60);
+    }
+
+    #[test]
+    fn height_grows_past_60_on_big_pane() {
+        let i = img(800, 1280); // natural ≈ 80 at pane_w=100
+        // pane_h=120: target_cap = max(80, 60)=80; max_inline=116; soft=80 → result 80.
+        assert_eq!(compute_inline_height_rows(&i, 100, 120, 8, 16), 80);
+    }
+
+    #[test]
+    fn height_caps_at_hard_100() {
+        let i = img(800, 2400); // natural ≈ 150 at pane_w=100
+        // pane_h=200: target_cap = max(133, 60)=133; min(133, 196, 100)=100.
+        assert_eq!(compute_inline_height_rows(&i, 100, 200, 8, 16), 100);
+    }
+
+    #[test]
+    fn height_floor_degrades_on_tiny_pane() {
+        let i = img(800, 480); // natural ≈ 30 at pane_w=100
+        // pane_h=12: max_inline=8; soft_cap=min(60, 8, 100)=8; floor=min(8,8)=8.
+        assert_eq!(compute_inline_height_rows(&i, 100, 12, 8, 16), 8);
+    }
+
+    #[test]
+    fn height_floor_below_4_minus_trailing() {
+        let i = img(800, 480);
+        // pane_h=8: max_inline=4; soft_cap=4; floor=min(8,4)=4.
+        assert_eq!(compute_inline_height_rows(&i, 100, 8, 8, 16), 4);
+    }
+
+    #[test]
+    fn height_zero_pane_returns_zero() {
+        let i = img(800, 600);
+        assert_eq!(compute_inline_height_rows(&i, 100, 0, 8, 16), 0);
+    }
+
+    #[test]
+    fn height_zero_image_returns_zero() {
+        let i = img(0, 600);
+        assert_eq!(compute_inline_height_rows(&i, 100, 80, 8, 16), 0);
+    }
+
+    #[test]
+    fn height_preserves_trailing_context() {
+        let i = img(800, 2000); // very tall
+        // pane_h=70: max_inline=66; target_cap=max(46, 60)=60; soft=60.
+        // Trailing context preserved: result=60 ≤ 66.
+        let result = compute_inline_height_rows(&i, 100, 70, 8, 16);
+        assert!(result <= 70 - 4, "soft_cap must respect pane_h - 4 (got {result})");
+    }
+
+    #[test]
+    fn height_preserves_legacy_60_at_medium_pane() {
+        let i = img(800, 640); // natural ≈ 40
+        // pane_h=80, natural=40 → clamp(40, 8, 60) = 40.
+        assert_eq!(compute_inline_height_rows(&i, 100, 80, 8, 16), 40);
+    }
+
+    #[test]
+    fn height_two_thirds_active_when_above_60() {
+        let i = img(800, 1600); // natural ≈ 100
+        // pane_h=100: target_cap = max(66, 60)=66; max_inline=96;
+        // soft=min(66,96,100)=66; result=clamp(100, 8, 66)=66.
+        assert_eq!(compute_inline_height_rows(&i, 100, 100, 8, 16), 66);
+    }
+
+    #[test]
+    fn height_pane_60_70_regresses_to_56() {
+        // Documents the accepted ≤4-row regression for pane_h ∈ [60, 63].
+        let i = img(800, 1120); // natural ≈ 70
+        // pane_h=60: target_cap = max(40, 60)=60; max_inline=56;
+        // soft=min(60,56,100)=56; result=clamp(70, 8, 56)=56.
+        assert_eq!(compute_inline_height_rows(&i, 100, 60, 8, 16), 56);
     }
 }
