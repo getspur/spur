@@ -21,7 +21,8 @@ Source lives in each crate’s `src/`. Integration tests are primarily in `crate
 - `scripts/spur-cargo clippy --workspace -- -D warnings`: enforce lint-clean code
 - `scripts/spur-cargo fmt --all`: apply workspace formatting
 - `scripts/spur-cargo run -p spur-cli -- --help`: inspect CLI entry points locally
-- `scripts/sccache-sync-basedirs.sh`: run the sync alone (e.g. after creating/destroying worktrees)
+- `scripts/sccache-worktree.sh`: sccache rustc-wrapper that dynamically normalizes paths per worktree
+- `scripts/sccache-sync-basedirs.sh`: legacy sync script (superseded by `sccache-worktree.sh`)
 
 ## Coding Style & Naming Conventions
 Use Rust 2021 idioms with `cargo fmt` formatting. Follow existing naming: modules and functions in `snake_case`, types and traits in `CamelCase`, constants in `SCREAMING_SNAKE_CASE`. Prefer small, crate-local changes over broad rewrites. Avoid introducing new crate dependencies without explicit justification.

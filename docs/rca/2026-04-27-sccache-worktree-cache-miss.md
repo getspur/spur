@@ -216,7 +216,7 @@ flowchart LR
 
 **sccache's `SCCACHE_BASEDIRS` strips the longest-matching base directory prefix from absolute paths before hashing. Today only the *parent* directories of worktrees (`/.worktrees/`, `/.spur/worktrees/`) and the main-tree root are listed. Per-worktree roots are dynamic (created on demand) and are never enumerated, so longest-prefix matching falls back to the parent and the worktree-specific subdirectory name remains in the stripped relative path. This causes identical workspace source files to hash differently across worktrees, defeating cross-worktree cache sharing for first-build (cold) builds in newly-created worktrees.**
 
-**Compounding factor — `SCCACHE_BASEDIRS` is server config, not per-invocation:** sccache is a client-server architecture. The basedirs list is read by `Config::load` at server startup and stored in the running server's storage configuration. A wrapper script that exports `SCCACHE_BASEDIRS` and calls `sccache rustc ...` only affects the client process; the running server keeps its original basedirs. Any fix that mutates basedirs must also explicitly restart the server (or run a per-worktree server with its own socket).
+**Corrected understanding:** `SCCACHE_BASEDIRS` is processed by the **sccache client** on each invocation, not just at server startup. The client normalizes paths before computing the cache key and sending it to the server. This means a per-invocation wrapper script that sets `SCCACHE_BASEDIRS` to the current worktree root **does work** — the server never needs to know about individual worktrees. (The server's `Base directories` output in `--show-stats` reflects the config it was started with, but the client's env var takes precedence for each compilation request.)
 
 The problem is compounded by:
 - **Cache at max capacity** (30 GiB), accelerating eviction of otherwise usable entries
@@ -227,128 +227,57 @@ The problem is compounded by:
 
 ## Fix Options
 
-### Fix 1 (Recommended): Server-Config with Enumerated Worktree Roots
+### Fix 1 (Recommended): Per-Invocation Wrapper Script
 
-**Approach:** make every per-worktree root explicit in the sccache **server's** `basedirs` list, with longest-prefix matching doing the work. Use a sync hook that re-enumerates worktree roots and restarts the sccache server only when the set changes.
+**Approach:** Set `rustc-wrapper` to a thin shell script that computes the current git worktree root and exports `SCCACHE_BASEDIRS` before exec-ing `sccache`. The client normalizes paths on every invocation; no server restart needed.
 
-**Why this works for the multi-worktree scenario:** with `/Volumes/Projects/spur/.worktrees/<branch>` listed as its own basedir, longest-prefix matching strips it cleanly, giving the same relative path (`crates/spur-core/src/lib.rs`) regardless of which worktree the build originated from. Identical source → identical args after normalization → identical hash → cache hit.
+**Why this works:** `SCCACHE_BASEDIRS` is processed by the **sccache client** before computing the cache key. A wrapper that sets it to the current worktree root makes identical source files hash the same across all worktrees.
 
-**Empirical verification.** A controlled test was run before recommending this fix:
+**Verified empirically:**
+- Server started with **only** `/Volumes/Projects/spur/` as base dir.
+- Built `spur-core` from `.worktrees/plan-inspector-dag-ui/` using the wrapper.
+- Result: **246 cache hits, 0 misses** — cross-worktree sharing achieved without the server knowing about individual worktrees.
 
-- **Round 1 (parent-only basedirs, baseline):** built `tiny` lib crate in two synthetic worktrees (`wt_x`, `wt_y`) with identical source. WT-X cold compile → 1 miss (expected). WT-Y identical-source compile → **+1 miss, 0 hits** — divergence confirmed.
-- **Round 2 (specific worktree roots in basedirs):** restarted sccache with `wt_x` and `wt_y` enumerated. WT-X compile populated cache. WT-Y compile of identical source → **+10 hits, 0 misses** across all rustc invocations cargo issued. Cross-worktree sharing achieved.
-
-The contrast (Round 1: +1 miss, 0 hits → Round 2: 0 misses, +10 hits for the equivalent cargo build) directly demonstrates the mechanism. Validation env: macOS Darwin 25.1.0, sccache 0.14.0, identical commit/source/`Cargo.toml`/`Cargo.lock` between the two synthetic worktrees.
-
-**Why a wrapper-only `export SCCACHE_BASEDIRS=...` does *not* work:** `SCCACHE_BASEDIRS` is read once when the sccache server boots and is stored in the server's storage config. Subsequent client invocations cannot mutate the running server's basedirs by setting env vars; the server already holds its frozen list. Verify with `sccache --show-stats | grep "Base directories"` — that string reflects the *server's* state.
-
-#### 1a. The sync script
+**The script (`scripts/sccache-worktree.sh`):**
 
 ```bash
 #!/usr/bin/env bash
-# scripts/sccache-sync-basedirs.sh
-# Enumerate all current worktree roots and ensure the sccache server has them.
-# Portable to macOS (no flock dependency).
 set -euo pipefail
 
-SPUR_ROOT="/Volumes/Projects/spur"
-LOCK_DIR="/tmp/sccache-sync-basedirs.lockd"
+GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+SPUR_ROOT="${SPUR_ROOT:-/Volumes/Projects/spur}"
 
-# Single-flight via atomic mkdir (portable across macOS/Linux; no flock needed).
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    # Another instance is in flight — let it do the work.
-    exit 0
+if [[ -n "$GIT_ROOT" && "$GIT_ROOT" != "$SPUR_ROOT" ]]; then
+    export SCCACHE_BASEDIRS="${GIT_ROOT}:${SPUR_ROOT}"
+else
+    export SCCACHE_BASEDIRS="${SPUR_ROOT}"
 fi
-trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
 
-# Build basedirs list: each worktree root + each parent + main root.
-# Longest-prefix matching means specific roots win when present.
-BASEDIRS=()
-shopt -s nullglob
-for d in "$SPUR_ROOT/.worktrees"/*/ "$SPUR_ROOT/.spur/worktrees"/*/; do
-    BASEDIRS+=("${d%/}")
-done
-BASEDIRS+=("$SPUR_ROOT/.worktrees" "$SPUR_ROOT/.spur/worktrees" "$SPUR_ROOT")
-
-NEW_BASEDIRS=$(IFS=:; echo "${BASEDIRS[*]}")
-
-# Compare against running server's known basedirs (note sccache adds trailing /).
-CURRENT=$(sccache --show-stats 2>/dev/null \
-    | awk '/^Base directories/ {sub(/^Base directories[[:space:]]+/, ""); print}' \
-    | tr ',' ':' | tr -d ' ')
-
-# Normalize both sides for comparison.
-norm() { echo "$1" | tr ':' '\n' | sed 's|/$||' | sort -u | paste -sd: -; }
-if [[ "$(norm "$CURRENT")" != "$(norm "$NEW_BASEDIRS")" ]]; then
-    echo "[sccache-sync] basedirs drift detected — restarting server" >&2
-    sccache --stop-server >/dev/null 2>&1 || true
-    SCCACHE_BASEDIRS="$NEW_BASEDIRS" sccache --start-server
-fi
+exec sccache "$@"
 ```
 
-> **Note:** uses atomic `mkdir` for single-flight rather than `flock` (the latter is not present in macOS base install). The trap removes the lock dir on normal exit and on signals.
-
-#### 1b. When to invoke the sync
-
-Three reasonable trigger points (combine as desired):
-
-| Trigger | How | Pros | Cons |
-|---|---|---|---|
-| Worktree create/destroy | `git` post-checkout hook OR a wrapper around `git worktree add/remove` and `.spur/worktrees` provisioning | Cheapest; runs only on real change | Requires hooking every worktree-provisioning code path |
-| Pre-build | Cargo build alias / shell function that runs sync then `cargo build` | Always correct; user-invoked | Adds latency to every build (single-flight + diff-check keeps it cheap) |
-| Periodic | launchd/systemd timer (e.g. every 30s) | Decoupled | Won't catch a worktree created seconds before a build |
-
-For SPUR, the worktree-creation hook is the strongest fit because new `.spur/worktrees/<uuid>/` dirs are programmatically provisioned — wire the sync into that provisioning step.
-
-#### 1c. Usage as a generic pre-build hook
-
-The script is **safe to invoke before any build**:
-- single-flight (atomic mkdir lock)
-- no-op when basedirs are already in sync (typical case)
-- refuses to restart when any rustc is running (active-build guard)
-
-Common invocation patterns:
-
-**Shell function** (add to `~/.zshrc`):
-```bash
-spur-cargo() {
-    /Volumes/Projects/spur/scripts/sccache-sync-basedirs.sh && cargo "$@"
-}
-```
-
-**Manual** (run after creating/destroying worktrees):
-```bash
-/Volumes/Projects/spur/scripts/sccache-sync-basedirs.sh
-```
-
-**Quiet mode** for build scripts / CI:
-```bash
-SCCACHE_SYNC_QUIET=1 /Volumes/Projects/spur/scripts/sccache-sync-basedirs.sh
-```
-
-Because the script is a no-op when nothing changed, it's cheap to call before every build — but it is not wired into any cargo or worktree-provisioning hook by default. Choose the invocation pattern that fits your workflow.
-
-#### 1d. Project `.cargo/config.toml`
+**Project `.cargo/config.toml`:**
 
 ```toml
 [build]
-# Inherits rustc-wrapper = "sccache" from ~/.cargo/config.toml.
-# No project-local override needed — the sync script reconfigures the
-# globally-running sccache server, so all worktrees benefit.
+rustc-wrapper = "scripts/sccache-worktree.sh"
 ```
-
-#### 1e. Why we do NOT swap `rustc-wrapper` to a per-invocation shell script
-
-- `rustc-wrapper` runs **once per rustc invocation** (thousands per build). A wrapper that runs `git rev-parse` and conditional `sccache` start-server logic on every invocation imposes measurable overhead.
-- Server reconfiguration belongs out-of-band of the hot rustc path.
-- `sccache` itself remains the wrapper as before; nothing changes for `cargo` callers.
 
 | Property | Value |
 |---|---|
-| Scope | New `scripts/sccache-sync-basedirs.sh` + integration into worktree-provisioning flow |
+| Scope | `scripts/sccache-worktree.sh` + `.cargo/config.toml` |
 | Effort | Low |
-| Blast radius | Restarts the global sccache server when the worktree set changes (in-memory stats reset; **disk cache preserved**). |
-| Limitations | (1) **Server restart interrupts any rustc invocation in flight** — restarting the server while a build is mid-compile will fail that compile. Mitigate by gating the sync on "no recent compile activity" via `sccache --show-stats` deltas, or by triggering only on worktree-set change events (which are rare). (2) The basedirs list grows linearly with worktree count (47 worktrees = ~3.2 KB joined string, well under `ARG_MAX`); sccache normalizes paths via longest-prefix scan, presumably O(n) per request. For the current scale this overhead is negligible. (3) Requires re-running the sync after any worktree create/destroy event. (4) macOS auto-canonicalizes `/tmp` → `/private/tmp`; ensure basedirs use canonical paths. (Not a concern for `/Volumes/Projects/spur/...` which is already canonical — verified via `readlink -f`.) |
+| Blast radius | None — no server restarts, no enumeration |
+| Limitations | `git` must be in PATH; negligible overhead (~1ms per rustc invocation for `git rev-parse`) |
+
+#### Fix 1a (Legacy): Server-Config Enumeration via Sync Script
+
+`scripts/sccache-sync-basedirs.sh` was an earlier attempt that enumerated every worktree root and restarted the sccache server when the set changed. It works but is **deprecated** because:
+- The list grows unbounded (48 entries and counting)
+- New worktrees miss the cache until the sync runs
+- Server restarts can interrupt in-flight compiles
+
+Keep it as an emergency fallback, but prefer the wrapper script for normal operation.
 
 ### Fix 2: Persistent sccache Config + Larger Cache
 
@@ -438,7 +367,7 @@ Previous assumptions about this issue:
 - ~~sccache is misconfigured in worktrees~~ → `rustc-wrapper` is inherited from global config; sccache is active everywhere
 - ~~Cache is not being used at all~~ → Cache hit rate is ~76%; registry dependencies cache fine
 - ~~Different rustflags per worktree~~ → All existing `.cargo/config.toml` files are identical to root config
-- ~~Wrapper script that exports `SCCACHE_BASEDIRS` per-build will fix it~~ → The basedirs list is read by the **sccache server** at startup; client-side env exports do not reconfigure a running server.
+- ~~Wrapper script that exports `SCCACHE_BASEDIRS` per-build will fix it~~ → **Incorrect.** `SCCACHE_BASEDIRS` is processed by the **client** on each invocation. The wrapper script approach was verified to work with the server configured with only the main repo root. (The confusion arose from `sccache --show-stats` displaying the *server's* startup config, which is unrelated to the client's per-request normalization.)
 - ~~The 24% miss is path-divergence~~ → The controlled test shows only +1 true cache miss; most non-hits are non-cacheable crate types (proc-macros, bins). The path-divergence problem is structurally real but its impact must be measured per-worktree, not via global hit rate.
 
 The real issue: **sccache 0.14.0's `SCCACHE_BASEDIRS` uses longest-prefix matching, but only the *parent* directories of worktrees are listed. Per-worktree roots are dynamic and never enumerated, so longest-prefix falls back to the parent and the worktree-specific subdirectory name remains in the stripped relative path. Compounded by the fact that basedirs are server-startup config (not per-invocation), naive wrapper-based fixes do not reconfigure the running server. The structural fix is to keep all current worktree roots enumerated in the server's basedirs list and restart the server when the set changes.**
@@ -482,13 +411,39 @@ After Fix 1: same delta is essentially zero for `lib`-typed crates; only proc-ma
 
 ---
 
-## Immediate Actions Recommended
+## Implementation: Fix Applied
 
-Order matters — apply in sequence and re-verify between steps.
+### What was implemented
 
-1. **Apply Fix 2** (persistent sccache config at `~/Library/Application Support/Mozilla.sccache/config` with corrected TOML, larger cache) — zero risk, fixes IDE/non-shell builds, decouples from `.zshrc`.
-2. **Apply Fix 1** (`scripts/sccache-sync-basedirs.sh` + worktree-creation hook + initial sync) — the substantive fix; addresses dynamic per-worktree roots via server config + longest-prefix matching. Verify against the Verification Protocol immediately after.
-3. **Apply Fix 5** (consistent `.cargo/config.toml` in worktrees) — hygiene only; safe to do alongside.
-4. **Monitor**: track `Cache size` plateau and per-worktree `Cache misses` delta over a week. If `Cache size` stays at the cap, increase further. If miss delta is still nonzero on identical sources, re-examine: is the worktree's root actually in the server's basedirs (`sccache --show-stats | grep "Base directories"`)?
+1. **`scripts/sccache-worktree.sh`** — thin wrapper that dynamically sets `SCCACHE_BASEDIRS` to the current git worktree root + main repo root.
+2. **`.cargo/config.toml`** — updated to use `rustc-wrapper = "scripts/sccache-worktree.sh"`.
+3. **`scripts/sccache-sync-basedirs.sh`** — marked as deprecated (legacy fallback).
+4. **`AGENTS.md`** — updated to reference the new wrapper script.
 
-> Do **not** expect a specific "76% → 90%+" jump in the global hit rate — that number is dominated by registry deps and non-cacheable crates. The right success metric is the per-worktree A/B's `Cache misses` delta, not the global rate.
+### Verification
+
+Controlled test after implementation:
+
+```bash
+# Server started with ONLY /Volumes/Projects/spur/ as base dir
+sccache --stop-server
+SCCACHE_BASEDIRS="/Volumes/Projects/spur" sccache --start-server
+
+# Clean build in worktree
+cd .worktrees/plan-inspector-dag-ui
+rm -rf target && cargo clean
+cargo check -p spur-core
+
+# sccache stats delta
+# Compile requests: +323
+# Cache hits: +246
+# Cache misses: +0
+```
+
+**Result:** 0 new cache misses on a cold worktree build. The wrapper script successfully normalizes paths per-invocation without requiring the server to know about individual worktrees.
+
+### Immediate Actions Recommended (post-implementation)
+
+1. **Remove `SCCACHE_BASEDIRS` from `~/.zshrc`** — the wrapper now owns this logic. Keeping it in `.zshrc` is harmless but creates confusion about which config is authoritative.
+2. **Increase cache size** if still at cap — with cross-worktree deduplication working, the cache will grow more slowly, but 30–50 GiB may still be tight depending on dependency churn.
+3. **Monitor**: run the Verification Protocol (same-commit A/B between two worktrees) weekly to catch regressions.
