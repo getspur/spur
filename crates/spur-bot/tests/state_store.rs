@@ -6,8 +6,10 @@ fn persisted_state_round_trips() {
     let path = dir.path().join("state.json");
     let store = BotStateStore::new(path.clone());
 
-    let mut expected = PersistedBotState::default();
-    expected.operator_chat_id = Some(10_001);
+    let mut expected = PersistedBotState {
+        operator_chat_id: Some(10_001),
+        ..PersistedBotState::default()
+    };
     expected.threads.insert(
         1,
         PersistedThreadRecord {
@@ -69,9 +71,11 @@ fn registry_round_trips_archived_and_live_threads() {
     let path = tmp.path().join("state.json");
     let store = BotStateStore::new(path.clone());
 
-    let mut state = PersistedBotState::default();
-    state.operator_chat_id = Some(42);
-    state.next_topic_seq = 3;
+    let mut state = PersistedBotState {
+        operator_chat_id: Some(42),
+        next_topic_seq: 3,
+        ..PersistedBotState::default()
+    };
     state.threads.insert(
         11,
         PersistedThreadRecord {
