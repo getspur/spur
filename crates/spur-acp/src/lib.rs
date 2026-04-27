@@ -15,8 +15,8 @@ pub mod types;
 pub use config::{
     load_seed_template, validate_agent_config, AgentConfig, AgentReviewPolicy, AgentsConfig,
     ArgsTemplateKind, BeadsPmConfig, CommandsConfig, ConfigError, DispatchKind, DisplayConfig,
-    IngestBinding, IngestParserKind, ItemSchemaKind, PermissionsConfig, ResponseBinding,
-    ResponseRenderKind, SpurConfig, StaticCommandDecl,
+    EditorMode, IngestBinding, IngestParserKind, ItemSchemaKind, PermissionsConfig,
+    ResponseBinding, ResponseRenderKind, SpurConfig, StaticCommandDecl, TuiConfig,
 };
 pub use connection::{
     AgentConnection, CliWrapAdapter, ExtNotificationPayload, NativeAcpConnection, StdioAdapter,
