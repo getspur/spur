@@ -75,6 +75,12 @@ pub enum UserInput {
         method: String,
         params: serde_json::Value,
     },
+    /// Set an ACP session config option (v1 codex /model and /effort).
+    /// Maps 1:1 to `spur_core::InteractiveInput::SetSessionConfigOption`.
+    SetSessionConfigOption {
+        config_id: String,
+        value: String,
+    },
     /// Halt the in-flight agent stream on the given session. Maps 1:1 to
     /// `spur_core::InteractiveInput::CancelStream` via `spur-cli`.
     CancelStream {
@@ -624,6 +630,9 @@ impl App {
                             method,
                             params,
                         })
+                    }
+                    SubmitDecision::SetSessionConfigOption { config_id, value } => {
+                        Some(Action::SetSessionConfigOption { config_id, value })
                     }
                     SubmitDecision::Empty => None,
                 }
@@ -1648,6 +1657,12 @@ impl App {
                         method,
                         params,
                     });
+                }
+            }
+
+            Action::SetSessionConfigOption { config_id, value } => {
+                if let Some(tx) = self.user_input_tx.as_ref() {
+                    let _ = tx.try_send(UserInput::SetSessionConfigOption { config_id, value });
                 }
             }
 

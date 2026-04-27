@@ -1508,6 +1508,13 @@ impl DashboardView {
                                     None
                                 }
                             }
+                            SubmitDecision::SetSessionConfigOption { config_id, value } => {
+                                if self.session_attached {
+                                    Some(Action::SetSessionConfigOption { config_id, value })
+                                } else {
+                                    None
+                                }
+                            }
                         }
                     }
                     HandleOutcome::Key(intent) => {

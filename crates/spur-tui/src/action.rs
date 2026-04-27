@@ -87,6 +87,13 @@ pub enum Action {
         method: String,
         params: serde_json::Value,
     },
+    /// Apply an ACP `session/set_config_option` for v1 codex /model and
+    /// /effort slash pickers. The orchestrator looks up the active brain
+    /// session itself; no `session` field needed.
+    SetSessionConfigOption {
+        config_id: String,
+        value: String,
+    },
     /// Move tree selection down one row.
     SelectNext,
     /// Move tree selection up one row.

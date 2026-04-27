@@ -1194,6 +1194,13 @@ impl SessionDetailView {
                                         })
                                     }
                                 }
+                                SubmitDecision::SetSessionConfigOption { config_id, value } => {
+                                    if self.is_cleared() {
+                                        None
+                                    } else {
+                                        Some(Action::SetSessionConfigOption { config_id, value })
+                                    }
+                                }
                             };
                         }
                         None
