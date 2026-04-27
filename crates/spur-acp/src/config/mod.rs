@@ -373,6 +373,11 @@ pub struct SpurConfig {
     /// opted in by production callers.
     #[serde(default)]
     pub peer_mailbox_enabled: bool,
+    /// TUI presentation preferences (edit mode today; mouse/density/keymap
+    /// in the future). Skipped on serialize when default to keep existing
+    /// configs visually unchanged.
+    #[serde(default, skip_serializing_if = "TuiConfig::is_default")]
+    pub tui: TuiConfig,
 }
 
 /// Runtime knobs for `delegate_to_worker` / `delegate_parallel` dispatch.
@@ -390,6 +395,37 @@ pub struct DelegationConfig {
     /// returning `status: "pending"` with `continuation_will_fire: true`.
     /// Default `0` — async-first.
     pub inline_wait_ms: u64,
+}
+
+/// Editing-mode preference for the TUI input bar. Stored in config so the
+/// choice survives `spur tui` restarts. Maps to runtime `spur_tui::EditMode`
+/// via `From` impl in `spur-tui`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EditorMode {
+    /// Emacs-style keybindings (default; uses tui-textarea built-ins).
+    #[default]
+    Emacs,
+    /// Vim modal editing.
+    Vim,
+}
+
+/// TUI presentation preferences. New fields land here without schema churn.
+/// Today contains only `edit_mode`; future additions (mouse, density,
+/// keymap) extend this struct.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TuiConfig {
+    pub edit_mode: EditorMode,
+}
+
+impl TuiConfig {
+    /// True when this `TuiConfig` equals its `Default`. Used by
+    /// `#[serde(skip_serializing_if = ...)]` on `SpurConfig.tui` so existing
+    /// configs do not gain a noisy `[tui]` block on round-trip.
+    pub fn is_default(&self) -> bool {
+        *self == TuiConfig::default()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
