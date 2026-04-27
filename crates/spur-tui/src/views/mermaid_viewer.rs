@@ -1,17 +1,11 @@
 #![cfg(feature = "markdown")]
 
-//! Full-screen overlay that renders a single mermaid diagram from the
-//! active session's registry via `ratatui-image`'s `StatefulImage`.
-//!
-//! Because `View::render` takes `&self` but `StatefulImage` needs
-//! `&mut StatefulProtocol`, the actual image draw happens in a helper
-//! in `app.rs` (Task 10) that has mutable access. This file owns the
-//! overlay's cursor state (which diagram is focused) and the protocol
-//! once built by the app.
+//! Full-screen overlay state for mermaid viewing. Owns only the cursor
+//! (which diagram is focused) — the actual `StatefulProtocol` lives in
+//! `SessionDetailView::image_cache.overlay` slot.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{layout::Rect, Frame};
-use ratatui_image::protocol::StatefulProtocol;
 use spur_acp::{SessionId, SpurEvent};
 
 use crate::action::Action;
@@ -21,12 +15,9 @@ use super::View;
 
 pub struct MermaidViewerView {
     session_id: SessionId,
-    /// Which diagram is currently focused. `None` until set_available
+    /// Which diagram is currently focused. `None` until `set_available`
     /// chooses a default (the most recent Ready entry).
     pub(crate) focused: Option<MermaidId>,
-    /// Lazily-built protocol, bound to the currently focused image.
-    /// Populated by `set_available` when the app layer supplies a Picker.
-    pub(crate) protocol: Option<StatefulProtocol>,
 }
 
 impl MermaidViewerView {
@@ -34,7 +25,6 @@ impl MermaidViewerView {
         Self {
             session_id,
             focused: None,
-            protocol: None,
         }
     }
 
@@ -42,14 +32,9 @@ impl MermaidViewerView {
         &self.session_id
     }
 
-    /// Called by the app layer before `render_mermaid_overlay`. Supplies
-    /// the registry entries (cloned) and the Picker. Chooses default
-    /// focus if none set, and rebuilds protocol if needed.
-    pub fn set_available(
-        &mut self,
-        entries: &[(MermaidId, &MermaidState)],
-        picker: Option<&ratatui_image::picker::Picker>,
-    ) {
+    /// Choose the default focus from the registry. Called by the app
+    /// layer before `render_mermaid_overlay`.
+    pub fn set_available(&mut self, entries: &[(MermaidId, &MermaidState)]) {
         if self.focused.is_none() {
             self.focused = entries
                 .iter()
@@ -57,20 +42,9 @@ impl MermaidViewerView {
                 .find(|(_, s)| matches!(s, MermaidState::Ready { .. }))
                 .map(|(id, _)| *id);
         }
-        if let (Some(id), Some(picker)) = (self.focused, picker) {
-            if self.protocol.is_none() {
-                if let Some(MermaidState::Ready { image, .. }) =
-                    entries.iter().find(|(i, _)| *i == id).map(|(_, s)| *s)
-                {
-                    self.protocol = Some(picker.new_resize_protocol((**image).clone()));
-                }
-            }
-        }
     }
 
-    /// Cycle focus among Ready entries. `forward=true` moves to next;
-    /// `false` moves to previous. Drops the current protocol so
-    /// `set_available` rebuilds next frame.
+    /// Cycle focus among Ready entries.
     pub fn cycle(&mut self, entries: &[(MermaidId, &MermaidState)], forward: bool) {
         let ready_ids: Vec<MermaidId> = entries
             .iter()
@@ -79,7 +53,6 @@ impl MermaidViewerView {
             .collect();
         if ready_ids.is_empty() {
             self.focused = None;
-            self.protocol = None;
             return;
         }
         let idx = self
@@ -92,11 +65,6 @@ impl MermaidViewerView {
             (idx + ready_ids.len() - 1) % ready_ids.len()
         };
         self.focused = Some(ready_ids[next]);
-        self.protocol = None;
-    }
-
-    pub(crate) fn protocol_mut(&mut self) -> Option<&mut StatefulProtocol> {
-        self.protocol.as_mut()
     }
 }
 

@@ -2545,20 +2545,19 @@ impl App {
                     .map(|d| d.session_id().0 == session.0)
                     .unwrap_or(false);
                 if session_matches {
-                    // Collect entries while holding an immutable borrow of
-                    // session_detail. The borrow ends after this block so we
-                    // can then mutably borrow mermaid_viewer.
-                    let entries: Vec<(
-                        crate::components::mermaid::MermaidId,
-                        &crate::components::mermaid::MermaidState,
-                    )> = self
-                        .session_detail
-                        .as_ref()
-                        .map(|d| d.mermaid_registry.iter().map(|(k, v)| (*k, v)).collect())
-                        .unwrap_or_default();
-                    if let Some(viewer) = self.mermaid_viewer.as_mut() {
-                        viewer.set_available(&entries, self.mermaid_picker.as_ref());
-                        render_mermaid_overlay(frame, view_area, viewer);
+                    if let Some(detail) = self.session_detail.as_mut() {
+                        let entries: Vec<(
+                            crate::components::mermaid::MermaidId,
+                            &crate::components::mermaid::MermaidState,
+                        )> = detail
+                            .mermaid_registry
+                            .iter()
+                            .map(|(k, v)| (*k, v))
+                            .collect();
+                        if let Some(viewer) = self.mermaid_viewer.as_mut() {
+                            viewer.set_available(&entries);
+                            render_mermaid_overlay(frame, view_area, viewer, detail);
+                        }
                     }
                 }
             }
@@ -2851,6 +2850,7 @@ fn render_mermaid_overlay(
     frame: &mut ratatui::Frame,
     area: ratatui::layout::Rect,
     viewer: &mut crate::views::mermaid_viewer::MermaidViewerView,
+    detail: &mut crate::views::session_detail::SessionDetailView,
 ) {
     use ratatui::{
         layout::{Constraint, Layout},
@@ -2877,10 +2877,23 @@ fn render_mermaid_overlay(
         chunks[0],
     );
 
-    if let Some(protocol) = viewer.protocol_mut() {
+    let drew = (|| {
+        let id = viewer.focused?;
+        let picker = detail.render_picker.as_ref()?;
+        let (image, image_generation) = match detail.mermaid_registry.get(&id)? {
+            crate::components::mermaid::MermaidState::Ready { image, image_generation, .. } => {
+                (image.clone(), *image_generation)
+            }
+            _ => return None,
+        };
+        let proto = detail.image_cache.overlay_protocol_mut(id, &image, image_generation, picker);
         let widget = StatefulImage::default().resize(Resize::Fit(None));
-        frame.render_stateful_widget(widget, chunks[1], protocol);
-    } else {
+        frame.render_stateful_widget(widget, chunks[1], proto);
+        Some(())
+    })()
+    .is_some();
+
+    if !drew {
         frame.render_widget(
             Paragraph::new(
                 "No diagram available yet. Wait for render to complete, or press q/Esc to return.",
