@@ -2401,60 +2401,8 @@ mod invalidate_protocols_tests {
         )
     }
 
-    #[test]
-    fn invalidate_clears_inline_protocols_on_all_ready_states() {
-        let mut view = test_view();
-        let id = MermaidId(1);
-        view.mermaid_registry.insert(
-            id,
-            MermaidState::Ready {
-                image: std::sync::Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(4, 4))),
-                inline_protocol: RefCell::new(None),
-            },
-        );
-        // Sanity: slot starts None.
-        if let Some(MermaidState::Ready {
-            inline_protocol, ..
-        }) = view.mermaid_registry.get(&id)
-        {
-            assert!(inline_protocol.borrow().is_none());
-        }
-
-        // Invalidate is a no-op on already-None slots but must not panic or
-        // mutate other variants.
-        view.mermaid_registry
-            .insert(MermaidId(2), MermaidState::Rendering);
-        view.mermaid_registry.insert(
-            MermaidId(3),
-            MermaidState::Error {
-                message: "boom".to_string(),
-            },
-        );
-        view.invalidate_inline_protocols();
-
-        assert!(matches!(
-            view.mermaid_registry.get(&MermaidId(1)),
-            Some(MermaidState::Ready { .. })
-        ));
-        assert!(matches!(
-            view.mermaid_registry.get(&MermaidId(2)),
-            Some(MermaidState::Rendering)
-        ));
-        assert!(matches!(
-            view.mermaid_registry.get(&MermaidId(3)),
-            Some(MermaidState::Error { .. })
-        ));
-
-        if let Some(MermaidState::Ready {
-            inline_protocol, ..
-        }) = view.mermaid_registry.get(&MermaidId(1))
-        {
-            assert!(
-                inline_protocol.borrow().is_none(),
-                "slot should remain None after invalidate"
-            );
-        }
-    }
+    // Obsolete: tested removed `inline_protocol` field on MermaidState::Ready.
+    // Conceptual replacement: `ImageCache::invalidate_all` tests in Task 7.
 
     #[test]
     fn alt_v_is_inert_when_render_picker_is_none() {

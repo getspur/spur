@@ -14,12 +14,10 @@
 //! `std::panic::catch_unwind` in [`render_mermaid`], so a bad diagram never
 //! unwinds the caller.
 
-use std::cell::RefCell;
 use std::panic;
 use std::sync::{Arc, OnceLock};
 
 use image::DynamicImage;
-use ratatui_image::protocol::StatefulProtocol;
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
@@ -37,9 +35,17 @@ pub enum MermaidState {
         /// Reference-counted to avoid deep-copying the pixel buffer on the
         /// hot render path — the dispatch layer already hands in an `Arc`.
         image: std::sync::Arc<DynamicImage>,
-        /// Lazily-built protocol. Populated on first visible render;
-        /// invalidated on terminal resize. `RefCell` because render takes `&self`.
-        inline_protocol: RefCell<Option<StatefulProtocol>>,
+        /// Source code retained so re-raster on bucket-up can re-dispatch
+        /// without reaching back into MarkdownStream.
+        code: String,
+        /// Raster bucket (in pixels) used to produce `image`. Compared
+        /// against `raster_width_for_pane(current_pane_w_px)` to decide
+        /// whether re-raster is needed.
+        rastered_at_bucket: u32,
+        /// Monotonic counter bumped by SessionDetailView on every accepted
+        /// Ok completion. Snapshotted by ImageCache to detect identity drift
+        /// (allocator reuse OR same-bucket Error→Ready replay).
+        image_generation: u64,
     },
     Error {
         message: String,
@@ -53,10 +59,17 @@ impl std::fmt::Debug for MermaidState {
                 f.debug_struct("Pending").field("code", code).finish()
             }
             MermaidState::Rendering => f.debug_struct("Rendering").finish(),
-            MermaidState::Ready { image, .. } => f
+            MermaidState::Ready {
+                image,
+                code,
+                rastered_at_bucket,
+                image_generation,
+            } => f
                 .debug_struct("Ready")
                 .field("image_size", &(image.width(), image.height()))
-                .field("inline_protocol", &"<cached>")
+                .field("code_len", &code.len())
+                .field("rastered_at_bucket", rastered_at_bucket)
+                .field("image_generation", image_generation)
                 .finish(),
             MermaidState::Error { message } => {
                 f.debug_struct("Error").field("message", message).finish()
@@ -325,20 +338,26 @@ mod tests {
     }
 
     #[test]
-    fn ready_state_holds_inline_protocol_slot() {
+    fn ready_state_holds_provenance_fields() {
         use image::RgbaImage;
-        use std::cell::RefCell;
 
         let img = std::sync::Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(10, 10)));
         let state = MermaidState::Ready {
             image: img,
-            inline_protocol: RefCell::new(None),
+            code: "graph TD\nA-->B".into(),
+            rastered_at_bucket: 800,
+            image_generation: 1,
         };
         match state {
             MermaidState::Ready {
-                inline_protocol, ..
+                code,
+                rastered_at_bucket,
+                image_generation,
+                ..
             } => {
-                assert!(inline_protocol.borrow().is_none());
+                assert_eq!(code, "graph TD\nA-->B");
+                assert_eq!(rastered_at_bucket, 800);
+                assert_eq!(image_generation, 1);
             }
             _ => panic!("expected Ready"),
         }
