@@ -45,7 +45,10 @@ fn codex_advertised_commands() -> Vec<AvailableCommand> {
         .input(AvailableCommandInput::Unstructured(
             UnstructuredCommandInput::new("commit sha"),
         )),
-        AvailableCommand::new("init", "create an AGENTS.md file with instructions for Codex"),
+        AvailableCommand::new(
+            "init",
+            "create an AGENTS.md file with instructions for Codex",
+        ),
         AvailableCommand::new(
             "compact",
             "summarize conversation to prevent hitting the context limit",
