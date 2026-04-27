@@ -708,6 +708,20 @@ impl App {
                     SubmitDecision::SetSessionConfigOption { config_id, value } => {
                         Some(Action::SetSessionConfigOption { config_id, value })
                     }
+                    SubmitDecision::SetSessionModel { value } => {
+                        // Wave B.4: submit-router has decided this should
+                        // route via session/set_model. Bundle 3 / M9 wires
+                        // a dedicated InteractiveInput::SetSessionModel
+                        // through the orchestrator. Until then, dispatch
+                        // through the existing config-option pipeline so
+                        // codex /model still works end-to-end (its caps
+                        // include both Some(models) AND a 'model' config
+                        // option, so the wire result is equivalent for now).
+                        Some(Action::SetSessionConfigOption {
+                            config_id: "model".into(),
+                            value,
+                        })
+                    }
                     SubmitDecision::Empty => None,
                 }
             }
@@ -2834,6 +2848,9 @@ pub(crate) fn apply_session_update(
         UsageUpdate(u) => {
             state.context_used = Some(u.used);
             state.context_size = Some(u.size);
+        }
+        SessionInfoUpdate(u) => {
+            state.apply_session_info_update(u);
         }
         _ => {
             tracing::trace!("apply_session_update: unhandled variant");

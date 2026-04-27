@@ -166,6 +166,32 @@ pub struct SessionDetailView {
     /// `/effort` slash entries in `command_registry` and the `SlashArg`
     /// picker's choice list via `CompletionEnv.session_config_options`.
     session_config_options: Vec<spur_acp::SessionConfigOption>,
+
+    /// Wave B/C (M8): cached `SpurAgentCaps` for this session. Populated by
+    /// the upstream wiring once `Orchestrator::spur_agent_caps()` returns
+    /// `Some(_)` (M9 ties this to a `SpurEventBody` arm). When `None`,
+    /// caps are absent (e.g. resumed sessions before M9 wires
+    /// `LoadSessionResponse`); the registry filter and submit-router
+    /// treat `None` as permissive — full capability set assumed (F-3).
+    spur_agent_caps: Option<std::sync::Arc<spur_acp::SpurAgentCaps>>,
+
+    /// Wave E (M8): cached `SessionInfoUpdate` payload, populated by
+    /// `app::apply_session_update`'s explicit arm. Codex 0.12 currently
+    /// emits zero `session_info_update` notifications (per the Wave 0.3
+    /// probe); this cache is forward-compat for other agents and future
+    /// codex versions. `None` means no agent has emitted one yet.
+    session_info: Option<SessionInfoCache>,
+}
+
+/// Mirror of `agent_client_protocol::schema::SessionInfoUpdate` flattened
+/// into plain `Option<String>` so the view doesn't propagate the SDK's
+/// `MaybeUndefined` distinction. Empty / null fields land as `None`.
+#[derive(Debug, Default, Clone)]
+pub struct SessionInfoCache {
+    /// Human-readable session title.
+    pub title: Option<String>,
+    /// ISO 8601 timestamp of last activity.
+    pub updated_at: Option<String>,
 }
 
 impl SessionDetailView {
@@ -230,6 +256,8 @@ impl SessionDetailView {
             ready_banner: None,
             load_state: LoadState::Ready,
             session_config_options: Vec::new(),
+            spur_agent_caps: None,
+            session_info: None,
         }
     }
 
@@ -310,6 +338,8 @@ impl SessionDetailView {
             ready_banner: None,
             load_state: LoadState::Ready,
             session_config_options: Vec::new(),
+            spur_agent_caps: None,
+            session_info: None,
         }
     }
 
@@ -367,6 +397,8 @@ impl SessionDetailView {
             ready_banner: None,
             load_state: LoadState::Retiring,
             session_config_options: Vec::new(),
+            spur_agent_caps: None,
+            session_info: None,
         }
     }
 
@@ -688,6 +720,54 @@ impl SessionDetailView {
         self.command_registry
             .set_advertised_commands(&handle, entries);
         self.session_config_options = options.to_vec();
+    }
+
+    /// Cache the agent capabilities for this session. Captured by the
+    /// orchestrator after `session/new` and plumbed through the resume
+    /// pipeline; populated `Some(_)` for fresh sessions, left `None` for
+    /// sessions resumed before M9 wires `LoadSessionResponse` into
+    /// `SpurAgentCaps`. `None` is treated as permissive on read paths.
+    pub fn set_spur_agent_caps(
+        &mut self,
+        caps: Option<std::sync::Arc<spur_acp::SpurAgentCaps>>,
+    ) {
+        self.spur_agent_caps = caps;
+    }
+
+    /// Slash-command popup view: the merged registry filtered by the
+    /// cached `SpurAgentCaps`. When caps are absent (resumed sessions
+    /// pre-M9), the unfiltered list is returned so pickers stay visible.
+    pub fn available_slash_commands(&self) -> Vec<crate::commands::CommandEntry> {
+        self.command_registry
+            .available_commands_for_session(self.spur_agent_caps.as_deref())
+    }
+
+    /// Wave E (M8): consume a `SessionInfoUpdate` notification. Codex 0.12
+    /// emits zero of these; the arm exists to remove the silent drop in
+    /// `apply_session_update` and to opportunistically cache `title` /
+    /// `updated_at` as other agents (or future codex versions) start
+    /// emitting them. Partial updates merge into the existing cache.
+    pub fn apply_session_info_update(&mut self, info: &spur_acp::SessionInfoUpdate) {
+        let cache = self
+            .session_info
+            .get_or_insert_with(SessionInfoCache::default);
+        if let Some(title) = info.title.as_opt_deref::<str>() {
+            cache.title = title.map(str::to_owned);
+        }
+        if let Some(updated_at) = info.updated_at.as_opt_deref::<str>() {
+            cache.updated_at = updated_at.map(str::to_owned);
+        }
+        tracing::trace!(
+            session = %self.session_id.0,
+            title = ?cache.title,
+            updated_at = ?cache.updated_at,
+            "session_info_update consumed",
+        );
+    }
+
+    /// Test-only getter mirroring `session_config_options_for_test`.
+    pub fn session_info_for_test(&self) -> Option<&SessionInfoCache> {
+        self.session_info.as_ref()
     }
 
     /// Test-only accessor for the cached snapshot of advertised session
@@ -1279,8 +1359,14 @@ impl SessionDetailView {
                         if let Some((text, ranges, interrupt)) =
                             self.input_bar.take_submit_capture()
                         {
-                            use crate::commands::submit_router::{route, SubmitDecision};
-                            let dec = route(&text, &ranges, &self.command_registry, interrupt);
+                            use crate::commands::submit_router::{route_with_caps, SubmitDecision};
+                            let dec = route_with_caps(
+                                &text,
+                                &ranges,
+                                &self.command_registry,
+                                interrupt,
+                                self.spur_agent_caps.as_deref(),
+                            );
                             return match dec {
                                 SubmitDecision::Empty => None,
                                 SubmitDecision::Send {
@@ -1321,6 +1407,18 @@ impl SessionDetailView {
                                         None
                                     } else {
                                         Some(Action::SetSessionConfigOption { config_id, value })
+                                    }
+                                }
+                                SubmitDecision::SetSessionModel { value } => {
+                                    // Wave B.4: see app.rs comment — Bundle 3 wires
+                                    // dedicated dispatch; for now reuse config-option path.
+                                    if self.is_cleared() {
+                                        None
+                                    } else {
+                                        Some(Action::SetSessionConfigOption {
+                                            config_id: "model".into(),
+                                            value,
+                                        })
                                     }
                                 }
                             };

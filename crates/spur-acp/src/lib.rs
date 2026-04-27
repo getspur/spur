@@ -3,6 +3,7 @@ pub mod agents;
 pub mod config;
 pub mod connection;
 pub mod domain;
+pub mod error;
 pub mod ext;
 pub mod protocol;
 pub mod registry;
@@ -21,6 +22,7 @@ pub use connection::{
     AgentConnection, CliWrapAdapter, ExtNotificationPayload, NativeAcpConnection, StdioAdapter,
     StreamJsonAdapter,
 };
+pub use error::AcpError;
 pub use registry::AgentRegistry;
 pub use session_liveness::SelfHeldSet;
 pub use spur_agent_caps::SpurAgentCaps;
@@ -52,8 +54,9 @@ pub use agent_client_protocol::schema::{
     ListSessionsResponse, LoadSessionRequest, PermissionOption, PermissionOptionId,
     PermissionOptionKind, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
     RequestPermissionOutcome, RequestPermissionRequest, ResourceLink, SelectedPermissionOutcome,
-    SessionConfigId, SessionConfigOption, SessionConfigSelectOption, SessionInfo, SessionModeId,
-    SessionNotification, SessionUpdate, SetSessionModeRequest, SetSessionModeResponse, TextContent,
-    ToolCall as AcpToolCall, ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus,
-    ToolCallUpdate as AcpToolCallUpdate, ToolKind, UnstructuredCommandInput, UsageUpdate,
+    SessionConfigId, SessionConfigOption, SessionConfigSelectOption, SessionInfo,
+    SessionInfoUpdate, SessionModeId, SessionNotification, SessionUpdate, SetSessionModeRequest,
+    SetSessionModeResponse, TextContent, ToolCall as AcpToolCall, ToolCallContent, ToolCallId,
+    ToolCallLocation, ToolCallStatus, ToolCallUpdate as AcpToolCallUpdate, ToolKind,
+    UnstructuredCommandInput, UsageUpdate,
 };
