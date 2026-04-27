@@ -1,9 +1,9 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use super::entry::{CommandEntry, CommandSource};
+use super::entry::{CommandEntry, CommandSource, Dispatch};
 use super::spur_local::SpurLocalSource;
-use spur_acp::AgentConfig;
+use spur_acp::{AgentConfig, SpurAgentCaps};
 
 /// Merges spur-local, static (config), and dynamic (runtime) slash
 /// commands.
@@ -186,6 +186,45 @@ impl CommandRegistry {
     pub fn list(&self) -> Vec<CommandEntry> {
         self.ensure_cache();
         self.cache.borrow().as_ref().unwrap().entries.clone()
+    }
+
+    /// Caps-aware filter over `list()`. Spec §6.5 / Wave C.1.
+    ///
+    /// `caps == None` is **permissive** — every entry survives (F-3
+    /// invariant: resumed sessions before M9 wires `LoadSessionResponse`
+    /// must keep all pickers visible). When `caps` are present, entries
+    /// whose `Dispatch` requires an unsupported capability are filtered:
+    ///
+    /// * `Dispatch::SetSessionConfigOption { config_id: "model" }`
+    ///   ⇒ require `caps.supports_set_model()` *or*
+    ///     `caps.supports_set_config_option()`.
+    /// * `Dispatch::SetSessionConfigOption { config_id: _ }`
+    ///   ⇒ require `caps.supports_set_config_option()`.
+    /// * `Dispatch::SpurLocal`, `Dispatch::PromptText`, `Dispatch::VendorExec`
+    ///   ⇒ always allowed.
+    pub fn available_commands_for_session(
+        &self,
+        caps: Option<&SpurAgentCaps>,
+    ) -> Vec<CommandEntry> {
+        let entries = self.list();
+        let Some(caps) = caps else {
+            return entries;
+        };
+        entries
+            .into_iter()
+            .filter(|e| match &e.dispatch {
+                Dispatch::SpurLocal(_)
+                | Dispatch::PromptText { .. }
+                | Dispatch::VendorExec { .. } => true,
+                Dispatch::SetSessionConfigOption { config_id } => {
+                    if config_id == "model" {
+                        caps.supports_set_model() || caps.supports_set_config_option()
+                    } else {
+                        caps.supports_set_config_option()
+                    }
+                }
+            })
+            .collect()
     }
 
     pub fn canonical_typed_form(&self, entry: &CommandEntry) -> String {
