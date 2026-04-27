@@ -1834,6 +1834,102 @@ mod client_capabilities_tests {
 }
 
 #[cfg(test)]
+mod set_session_model_dispatch_tests {
+    use super::{decide_set_session_model_dispatch, SetSessionModelDispatch};
+    use agent_client_protocol::schema::{
+        AgentCapabilities, InitializeResponse, ModelId, NewSessionResponse, ProtocolVersion,
+        SessionConfigId, SessionConfigOption, SessionId, SessionModelState,
+    };
+    use crate::SpurAgentCaps;
+
+    fn caps_from(modify: impl FnOnce(&mut NewSessionResponse)) -> SpurAgentCaps {
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+        let mut new = NewSessionResponse::new(SessionId::new("test"));
+        modify(&mut new);
+        SpurAgentCaps::new(&init, &new)
+    }
+
+    #[test]
+    fn caps_with_models_some_routes_direct() {
+        let caps = caps_from(|n| {
+            *n = n.clone().models(SessionModelState::new(
+                ModelId::new("gpt-5-codex"),
+                vec![],
+            ));
+        });
+        assert!(caps.supports_set_model());
+        assert!(matches!(
+            decide_set_session_model_dispatch(&caps),
+            SetSessionModelDispatch::Direct
+        ));
+    }
+
+    #[test]
+    fn caps_with_only_config_options_routes_fallback() {
+        let caps = caps_from(|n| {
+            n.config_options = Some(vec![SessionConfigOption::new(
+                SessionConfigId::new("model"),
+                "Model",
+            )]);
+        });
+        assert!(!caps.supports_set_model());
+        assert!(caps.supports_set_config_option());
+        assert!(matches!(
+            decide_set_session_model_dispatch(&caps),
+            SetSessionModelDispatch::FallbackConfigOption
+        ));
+    }
+
+    #[test]
+    fn caps_with_neither_routes_unsupported() {
+        let caps = caps_from(|_| {});
+        assert!(!caps.supports_set_model());
+        assert!(!caps.supports_set_config_option());
+        assert!(matches!(
+            decide_set_session_model_dispatch(&caps),
+            SetSessionModelDispatch::Unsupported
+        ));
+    }
+
+    #[test]
+    fn models_takes_precedence_over_config_options() {
+        // Codex case: both populated. Decision must pick Direct, not Fallback.
+        let caps = caps_from(|n| {
+            *n = n.clone().models(SessionModelState::new(
+                ModelId::new("gpt-5-codex"),
+                vec![],
+            ));
+            n.config_options = Some(vec![SessionConfigOption::new(
+                SessionConfigId::new("model"),
+                "Model",
+            )]);
+        });
+        assert!(matches!(
+            decide_set_session_model_dispatch(&caps),
+            SetSessionModelDispatch::Direct
+        ));
+    }
+
+    #[tokio::test]
+    async fn set_session_model_returns_capability_missing_when_unsupported() {
+        let caps = caps_from(|_| {});
+        let mut conn = super::NativeAcpConnection::new(
+            "test-agent".to_string(),
+            "/bin/false".to_string(),
+            vec![],
+            None,
+        );
+        let res = conn
+            .set_session_model(SessionId::new("sid"), ModelId::new("m"), &caps)
+            .await;
+        match res {
+            Err(crate::AcpError::CapabilityMissing(name)) => assert_eq!(name, "set_model"),
+            other => panic!("expected CapabilityMissing(\"set_model\"), got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
 mod stderr_capture_tests {
     use super::*;
 
