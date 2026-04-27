@@ -126,9 +126,7 @@ pub fn route_with_caps(
                     if value.is_empty() {
                         // No arg yet — picker should still be open. Treat as no-op.
                         SubmitDecision::Empty
-                    } else if config_id == "model"
-                        && caps.is_some_and(|c| c.supports_set_model())
-                    {
+                    } else if config_id == "model" && caps.is_some_and(|c| c.supports_set_model()) {
                         // Wave B.4 / spec §6.3: prefer the dedicated
                         // `session/set_model` dispatch. Fallback when
                         // `set_model` is unavailable stays via the
@@ -445,10 +443,8 @@ mod sessions_slash_tests {
 
         // Build caps that advertise `models: Some(_)` — supports_set_model() = true.
         let init = InitializeResponse::new(ProtocolVersion::LATEST);
-        let new = NewSessionResponse::new(SessionId::new("sid")).models(SessionModelState::new(
-            ModelId::new("gpt-5-codex"),
-            vec![],
-        ));
+        let new = NewSessionResponse::new(SessionId::new("sid"))
+            .models(SessionModelState::new(ModelId::new("gpt-5-codex"), vec![]));
         let caps = spur_acp::SpurAgentCaps::new(&init, &new);
 
         let decision = route_with_caps("/model gpt-5-codex", &[], &registry, false, Some(&caps));
@@ -539,7 +535,9 @@ mod sessions_slash_tests {
                 assert_eq!(config_id, "model");
                 assert_eq!(value, "gpt-4o");
             }
-            other => panic!("expected SetSessionConfigOption (None caps preserves shape), got {other:?}"),
+            other => {
+                panic!("expected SetSessionConfigOption (None caps preserves shape), got {other:?}")
+            }
         }
     }
 }

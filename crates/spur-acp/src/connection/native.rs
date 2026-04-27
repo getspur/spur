@@ -334,9 +334,7 @@ impl NativeAcpConnection {
                     .map(|_| ())
                     .map_err(AcpError::Transport)
             }
-            SetSessionModelDispatch::Unsupported => {
-                Err(AcpError::CapabilityMissing("set_model"))
-            }
+            SetSessionModelDispatch::Unsupported => Err(AcpError::CapabilityMissing("set_model")),
         }
     }
 }
@@ -1941,12 +1939,12 @@ mod client_capabilities_tests {
 #[cfg(test)]
 mod set_session_model_dispatch_tests {
     use super::{decide_set_session_model_dispatch, SetSessionModelDispatch};
+    use crate::SpurAgentCaps;
     use agent_client_protocol::schema::{
         InitializeResponse, ModelId, NewSessionResponse, ProtocolVersion, SessionConfigId,
         SessionConfigKind, SessionConfigOption, SessionConfigSelect, SessionConfigSelectOptions,
         SessionConfigValueId, SessionId, SessionModelState,
     };
-    use crate::SpurAgentCaps;
 
     fn caps_from(modify: impl FnOnce(&mut NewSessionResponse)) -> SpurAgentCaps {
         let init = InitializeResponse::new(ProtocolVersion::LATEST);
@@ -1958,10 +1956,9 @@ mod set_session_model_dispatch_tests {
     #[test]
     fn caps_with_models_some_routes_direct() {
         let caps = caps_from(|n| {
-            *n = n.clone().models(SessionModelState::new(
-                ModelId::new("gpt-5-codex"),
-                vec![],
-            ));
+            *n = n
+                .clone()
+                .models(SessionModelState::new(ModelId::new("gpt-5-codex"), vec![]));
         });
         assert!(caps.supports_set_model());
         assert!(matches!(
@@ -2005,10 +2002,9 @@ mod set_session_model_dispatch_tests {
     fn models_takes_precedence_over_config_options() {
         // Codex case: both populated. Decision must pick Direct, not Fallback.
         let caps = caps_from(|n| {
-            *n = n.clone().models(SessionModelState::new(
-                ModelId::new("gpt-5-codex"),
-                vec![],
-            ));
+            *n = n
+                .clone()
+                .models(SessionModelState::new(ModelId::new("gpt-5-codex"), vec![]));
             n.config_options = Some(vec![SessionConfigOption::new(
                 SessionConfigId::new("model"),
                 "Model",
