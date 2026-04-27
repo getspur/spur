@@ -2814,6 +2814,14 @@ pub(crate) fn apply_session_update(
         AvailableCommandsUpdate(u) => {
             state.apply_available_commands(&u.available_commands);
         }
+        ConfigOptionUpdate(u) => {
+            // Mid-session refresh: agent advertises a new snapshot of
+            // session config options (e.g. external client mutated the
+            // model/effort, or codex emits the post-load snapshot). Rebuild
+            // synthesized advertised commands and refresh the cached
+            // snapshot so any open SlashArg picker shows live choices.
+            state.apply_advertised_commands(&u.config_options);
+        }
         UsageUpdate(u) => {
             state.context_used = Some(u.used);
             state.context_size = Some(u.size);
