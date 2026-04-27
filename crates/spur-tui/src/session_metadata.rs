@@ -38,7 +38,7 @@ pub struct SessionEntry {
     pub brain_name: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMetadata {
     /// Persisted schema version for `session_metadata.json`. JSON key is
     /// kept as `"version"` for on-disk backwards compatibility — older
@@ -66,6 +66,20 @@ pub struct SessionMetadata {
     /// Persisted as exact input snapshots so recall preserves mention atoms.
     #[serde(default, deserialize_with = "deserialize_input_history")]
     pub input_history: Vec<InputHistoryEntry>,
+}
+
+impl Default for SessionMetadata {
+    fn default() -> Self {
+        Self {
+            schema_version: current_metadata_version(),
+            last_active_session_id: None,
+            last_active_at: None,
+            last_active_acp_session_id: None,
+            last_active_brain: None,
+            sessions: BTreeMap::new(),
+            input_history: Vec::new(),
+        }
+    }
 }
 
 /// Current `session_metadata.json` schema version. Bump when the on-disk
@@ -111,29 +125,47 @@ where
 pub struct SessionMetadataStore {
     path: PathBuf,
     metadata: SessionMetadata,
+    /// True when load observed a future schema and normalized only the
+    /// typed in-memory copy. While set, save refuses to write because this
+    /// binary cannot serialize unknown forward-compat fields back out.
+    loaded_from_future: bool,
 }
 
 impl SessionMetadataStore {
     /// Read the metadata file from `path`. Missing or malformed file → empty store.
     ///
-    /// Schema-version policy: if the on-disk `version` is greater than
-    /// [`current_metadata_version`], the document is loaded tolerantly
-    /// (per-entry / per-range deserialize already drops malformed
-    /// elements) and the in-memory `schema_version` is reset to CURRENT
-    /// so the next [`save`](Self::save) downgrades the file. We never
-    /// write a version we cannot fully understand.
+    /// Schema-version policy: persisted versions below or above
+    /// [`current_metadata_version`] are loaded tolerantly (per-entry /
+    /// per-range deserialize already drops malformed elements) and the
+    /// typed in-memory `schema_version` is reset to CURRENT. Future-version
+    /// files are additionally marked read-only for [`save`](Self::save) so
+    /// unknown fields this binary cannot preserve are not stripped.
     pub fn load(path: &Path) -> Self {
+        let mut loaded_from_future = false;
         let metadata = std::fs::read_to_string(path)
             .ok()
             .and_then(|s| serde_json::from_str::<SessionMetadata>(&s).ok())
             .map(|mut m| {
-                if m.schema_version > current_metadata_version() {
-                    tracing::warn!(
-                        stored = m.schema_version,
-                        current = current_metadata_version(),
-                        "session_metadata schema_version exceeds current; loaded tolerantly, will downgrade on next save"
-                    );
-                    m.schema_version = current_metadata_version();
+                let current = current_metadata_version();
+                match m.schema_version {
+                    v if v == current => {}
+                    v if v > current => {
+                        tracing::warn!(
+                            stored = v,
+                            current = current,
+                            "session_metadata schema_version exceeds current; loaded tolerantly, refusing future saves"
+                        );
+                        loaded_from_future = true;
+                        m.schema_version = current;
+                    }
+                    v => {
+                        tracing::warn!(
+                            stored = v,
+                            current = current,
+                            "session_metadata schema_version below current; normalising"
+                        );
+                        m.schema_version = current;
+                    }
                 }
                 m
             })
@@ -141,6 +173,7 @@ impl SessionMetadataStore {
         Self {
             path: path.to_path_buf(),
             metadata,
+            loaded_from_future,
         }
     }
 
@@ -289,6 +322,15 @@ impl SessionMetadataStore {
     /// POSIX rename semantics (macOS/Linux). Does not guarantee durability
     /// across power loss (no `fsync` on tmp file or parent directory).
     pub fn save(&self) -> Result<()> {
+        if self.loaded_from_future {
+            tracing::warn!(
+                path = %self.path.display(),
+                current = current_metadata_version(),
+                "refusing to save future session_metadata schema; update SPUR to preserve newer fields"
+            );
+            return Ok(());
+        }
+
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating parent directory {}", parent.display()))?;
