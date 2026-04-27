@@ -3,6 +3,31 @@
 //! for v2 advertised commands). Consumed by spur-tui without ACP-schema
 //! imports — spur-tui sees only the types defined here.
 
+use agent_client_protocol::schema::{AvailableCommand, AvailableCommandInput};
+
+/// Parse an `AvailableCommand` into an `ArgPickerSpec`.
+///
+/// Returns `None` when the command has no input region (i.e. no-arg slash
+/// command — `cmd.input.is_none()`). Returns `Some(spec)` for `Unstructured`
+/// input with the advertised hint as `free_text_hint`.
+///
+/// PR-3 implements only the free-text case: `typed_hint` is always `None`.
+/// PR-4 will extend this to read `cmd.meta._<vendor>.dev.arg_picker_hint`
+/// for typed pickers (GitRef, FilePath, etc.).
+pub fn parse(cmd: &AvailableCommand) -> Option<ArgPickerSpec> {
+    match cmd.input.as_ref()? {
+        AvailableCommandInput::Unstructured(u) => Some(ArgPickerSpec {
+            free_text_hint: u.hint.clone(),
+            typed_hint: None,
+        }),
+        // `AvailableCommandInput` is `#[non_exhaustive]`; future ACP additions
+        // (typed GitRef, FilePath, etc.) fall through to "no picker" until
+        // spur grows a matching `QuerySource`. The user can still submit the
+        // raw text — it's just routed via the existing PromptText path.
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArgPickerSpec {
     /// Hint string for picker placeholder. Empty when the source is a typed
