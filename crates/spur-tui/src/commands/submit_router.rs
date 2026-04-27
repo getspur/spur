@@ -38,6 +38,13 @@ pub enum SubmitDecision {
         method: String,
         params: Value,
     },
+    /// v1 codex `/model` and `/effort` slash pickers — typed wire dispatch
+    /// to ACP `session/set_config_option`. The consumer (app.rs → orchestrator)
+    /// maps this to `InteractiveInput::SetSessionConfigOption`.
+    SetSessionConfigOption {
+        config_id: String,
+        value: String,
+    },
     Empty,
 }
 
@@ -88,10 +95,17 @@ pub fn route(
                         interrupt,
                     }
                 }
-                // Filled in properly by Task 2.15 (route to InteractiveInput::SetSessionConfigOption).
-                // Until then, this path is unreachable: the v1 picker work in Task 2.12 dispatches
-                // SetSessionConfigOption via a separate code path before submit_router.route() runs.
-                Dispatch::SetSessionConfigOption { .. } => SubmitDecision::Empty,
+                Dispatch::SetSessionConfigOption { config_id } => {
+                    // Parse the arg from text (whatever follows `/<cmd> `).
+                    let value = rest_after_first_token(text);
+                    let value = value.trim().to_string();
+                    if value.is_empty() {
+                        // No arg yet — picker should still be open. Treat as no-op.
+                        SubmitDecision::Empty
+                    } else {
+                        SubmitDecision::SetSessionConfigOption { config_id, value }
+                    }
+                }
                 Dispatch::VendorExec {
                     method,
                     command,
@@ -268,5 +282,61 @@ mod sessions_slash_tests {
             }
             other => panic!("expected VendorExec, got {:?}", other),
         }
+    }
+
+    /// Task 2.15: a /model entry with Dispatch::SetSessionConfigOption and
+    /// a typed value routes to SubmitDecision::SetSessionConfigOption.
+    #[test]
+    fn slash_model_with_value_routes_to_set_session_config_option() {
+        use crate::commands::entry::{CommandEntry, CommandSource, Dispatch};
+
+        let mut registry = CommandRegistry::new();
+        let entry = CommandEntry {
+            name: "model".into(),
+            description: "Switch model".into(),
+            hint: None,
+            source: CommandSource::Advertised {
+                handle: "codex".into(),
+            },
+            dispatch: Dispatch::SetSessionConfigOption {
+                config_id: "model".into(),
+            },
+            arg_picker_spec: None,
+        };
+        registry.set_advertised_commands("codex", vec![entry]);
+
+        let decision = route("/model gpt-5-codex", &[], &registry, false);
+        match decision {
+            SubmitDecision::SetSessionConfigOption { config_id, value } => {
+                assert_eq!(config_id, "model");
+                assert_eq!(value, "gpt-5-codex");
+            }
+            other => panic!("expected SetSessionConfigOption, got {:?}", other),
+        }
+    }
+
+    /// Task 2.15: same entry but no value yet (`/model `) returns Empty so
+    /// the picker stays open waiting for selection.
+    #[test]
+    fn slash_model_without_value_returns_empty() {
+        use crate::commands::entry::{CommandEntry, CommandSource, Dispatch};
+
+        let mut registry = CommandRegistry::new();
+        let entry = CommandEntry {
+            name: "model".into(),
+            description: "Switch model".into(),
+            hint: None,
+            source: CommandSource::Advertised {
+                handle: "codex".into(),
+            },
+            dispatch: Dispatch::SetSessionConfigOption {
+                config_id: "model".into(),
+            },
+            arg_picker_spec: None,
+        };
+        registry.set_advertised_commands("codex", vec![entry]);
+
+        let decision = route("/model ", &[], &registry, false);
+        assert!(matches!(decision, SubmitDecision::Empty));
     }
 }
