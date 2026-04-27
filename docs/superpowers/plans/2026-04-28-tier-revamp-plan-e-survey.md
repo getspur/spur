@@ -159,8 +159,9 @@ accordingly:
   Plan D D.1 adds it. Implementation per Plan D §5.1 mints a
   7-day `Plan::Pro` JWT locally and calls existing `activate`.
 - **`LicenseEventKind::TrialStarted` / `TrialExpired` variants** —
-  Plan D D.9 telemetry. Lands in Plan E E.6 since it's a
-  registry/type addition, not a logic change.
+  used by Plan D D.9 telemetry. Lands as part of Plan D D.1 (the
+  origin E.6 wave was absorbed into Plan D per §6.2 below) since
+  the variant addition couples directly to `start_trial` emission.
 - **Trial-expiry signal** — Plan D D.7+D.8 wire this; the
   LicenseSeat provider already surfaces `expires_at` deltas via
   existing `LicenseEvent` channel.
