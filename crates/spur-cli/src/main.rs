@@ -309,6 +309,16 @@ enum WorkflowCommands {
 enum ConfigCommands {
     /// Validate that every [agents.entries] block has a coherent configuration.
     Check,
+    /// Set a configuration value (e.g., `tui.edit_mode vim`).
+    Set {
+        /// Dotted key path. Supported: tui.edit_mode
+        key: String,
+        /// Value (e.g., vim or emacs).
+        value: String,
+        /// Write to ~/.spur/config.toml instead of repo-local config.
+        #[arg(long)]
+        global: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -578,6 +588,10 @@ async fn main() -> Result<()> {
             ConfigCommands::Check => {
                 let exit = commands::config_check::run(&repo_root)?;
                 std::process::exit(exit);
+            }
+            ConfigCommands::Set { key, value, global } => {
+                commands::config_set::run(repo_root.clone(), key, value, global)?;
+                Ok(())
             }
         },
         Commands::Flags { command } => commands::flags::run(command).await,
