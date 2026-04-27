@@ -40,8 +40,13 @@ pub struct SessionEntry {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionMetadata {
-    #[serde(default = "default_version")]
-    pub version: u32,
+    /// Persisted schema version for `session_metadata.json`. JSON key is
+    /// kept as `"version"` for on-disk backwards compatibility — older
+    /// files written before this rename load unchanged. Loads with a
+    /// stored version greater than [`current_metadata_version`] are
+    /// accepted tolerantly and rewritten at CURRENT on next save.
+    #[serde(default = "current_metadata_version", rename = "version")]
+    pub schema_version: u32,
     #[serde(default)]
     pub last_active_session_id: Option<String>,
     #[serde(default)]
@@ -63,7 +68,10 @@ pub struct SessionMetadata {
     pub input_history: Vec<InputHistoryEntry>,
 }
 
-fn default_version() -> u32 {
+/// Current `session_metadata.json` schema version. Bump when the on-disk
+/// shape gains a field whose meaning a previous version cannot infer
+/// from defaults.
+pub fn current_metadata_version() -> u32 {
     1
 }
 
@@ -74,18 +82,30 @@ enum StoredInputHistoryEntry {
     Legacy(String),
 }
 
+/// Per-element tolerant deserialize for `Vec<InputHistoryEntry>`. A
+/// single malformed entry (e.g., a number where an object or string is
+/// expected, or a structurally invalid object) MUST NOT cause the
+/// surrounding `from_str::<SessionMetadata>` call to fail — that path
+/// falls back to an empty store and silently discards the rest of the
+/// history. Bad row -> 1 entry lost, never 100.
 fn deserialize_input_history<'de, D>(deserializer: D) -> Result<Vec<InputHistoryEntry>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let raw = Vec::<StoredInputHistoryEntry>::deserialize(deserializer)?;
-    Ok(raw
-        .into_iter()
-        .map(|entry| match entry {
-            StoredInputHistoryEntry::Structured(entry) => entry,
-            StoredInputHistoryEntry::Legacy(text) => InputHistoryEntry::from_text(text),
-        })
-        .collect())
+    let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    let mut out = Vec::with_capacity(raw.len());
+    for value in raw {
+        match serde_json::from_value::<StoredInputHistoryEntry>(value) {
+            Ok(StoredInputHistoryEntry::Structured(entry)) => out.push(entry),
+            Ok(StoredInputHistoryEntry::Legacy(text)) => {
+                out.push(InputHistoryEntry::from_text(text));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "skipping malformed input_history entry");
+            }
+        }
+    }
+    Ok(out)
 }
 
 pub struct SessionMetadataStore {
@@ -95,10 +115,28 @@ pub struct SessionMetadataStore {
 
 impl SessionMetadataStore {
     /// Read the metadata file from `path`. Missing or malformed file → empty store.
+    ///
+    /// Schema-version policy: if the on-disk `version` is greater than
+    /// [`current_metadata_version`], the document is loaded tolerantly
+    /// (per-entry / per-range deserialize already drops malformed
+    /// elements) and the in-memory `schema_version` is reset to CURRENT
+    /// so the next [`save`](Self::save) downgrades the file. We never
+    /// write a version we cannot fully understand.
     pub fn load(path: &Path) -> Self {
         let metadata = std::fs::read_to_string(path)
             .ok()
             .and_then(|s| serde_json::from_str::<SessionMetadata>(&s).ok())
+            .map(|mut m| {
+                if m.schema_version > current_metadata_version() {
+                    tracing::warn!(
+                        stored = m.schema_version,
+                        current = current_metadata_version(),
+                        "session_metadata schema_version exceeds current; loaded tolerantly, will downgrade on next save"
+                    );
+                    m.schema_version = current_metadata_version();
+                }
+                m
+            })
             .unwrap_or_default();
         Self {
             path: path.to_path_buf(),
