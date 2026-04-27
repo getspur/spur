@@ -1,3 +1,4 @@
+pub mod arg_picker_hint;
 pub mod claude;
 pub mod codex;
 pub mod generic;
