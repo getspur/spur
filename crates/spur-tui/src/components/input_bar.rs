@@ -9,6 +9,7 @@ use ratatui::{
     Frame,
 };
 use serde::{Deserialize, Serialize};
+use spur_acp::config::EditorMode;
 use tui_textarea::{CursorMove, Input, Key, TextArea};
 
 use crate::components::completion_trigger::IntentEvent;
@@ -63,11 +64,13 @@ pub enum VimMode {
     Operator(char),
 }
 
-impl From<spur_acp::config::EditorMode> for EditMode {
-    fn from(pref: spur_acp::config::EditorMode) -> Self {
+/// Maps the persisted TUI editor preference to the input bar's runtime mode.
+/// `Vim` always boots in `Normal` — Insert is reached via user action.
+impl From<EditorMode> for EditMode {
+    fn from(pref: EditorMode) -> Self {
         match pref {
-            spur_acp::config::EditorMode::Emacs => EditMode::Emacs,
-            spur_acp::config::EditorMode::Vim => EditMode::Vim(VimMode::Normal),
+            EditorMode::Emacs => EditMode::Emacs,
+            EditorMode::Vim => EditMode::Vim(VimMode::Normal),
         }
     }
 }
