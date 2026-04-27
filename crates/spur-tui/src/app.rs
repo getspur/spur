@@ -2849,6 +2849,9 @@ pub(crate) fn apply_session_update(
             state.context_used = Some(u.used);
             state.context_size = Some(u.size);
         }
+        SessionInfoUpdate(u) => {
+            state.apply_session_info_update(u);
+        }
         _ => {
             tracing::trace!("apply_session_update: unhandled variant");
         }
