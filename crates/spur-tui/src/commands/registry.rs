@@ -458,6 +458,250 @@ mod tests {
         assert!(matches!(clear_entries[0].source, CommandSource::Spur));
     }
 
+    /// Wave C.1: caps = None ⇒ permissive — every entry survives the
+    /// filter. This is the F-3 invariant: resumed sessions before M9
+    /// wires `LoadSessionResponse` are caps=None and must keep all
+    /// pickers visible (no regression).
+    #[test]
+    fn available_commands_for_session_with_none_caps_returns_all_entries() {
+        let mut reg = CommandRegistry::new();
+        reg.set_advertised_commands(
+            "codex",
+            vec![
+                CommandEntry {
+                    name: "model".into(),
+                    description: "Switch model".into(),
+                    hint: None,
+                    source: CommandSource::Advertised {
+                        handle: "codex".into(),
+                    },
+                    dispatch: Dispatch::SetSessionConfigOption {
+                        config_id: "model".into(),
+                    },
+                    arg_picker_spec: None,
+                },
+                CommandEntry {
+                    name: "effort".into(),
+                    description: "Switch effort".into(),
+                    hint: None,
+                    source: CommandSource::Advertised {
+                        handle: "codex".into(),
+                    },
+                    dispatch: Dispatch::SetSessionConfigOption {
+                        config_id: "effort".into(),
+                    },
+                    arg_picker_spec: None,
+                },
+            ],
+        );
+        let names: Vec<_> = reg
+            .available_commands_for_session(None)
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert!(names.contains(&"model".to_string()));
+        assert!(names.contains(&"effort".to_string()));
+    }
+
+    /// Wave C.2: codex caps (all set_* gates true) ⇒ all entries survive.
+    #[test]
+    fn available_commands_for_session_with_codex_caps_keeps_all_entries() {
+        use agent_client_protocol::schema::{
+            InitializeResponse, ModelId, NewSessionResponse, ProtocolVersion, SessionConfigId,
+            SessionConfigKind, SessionConfigOption, SessionConfigSelect, SessionConfigSelectOptions,
+            SessionConfigValueId, SessionId, SessionModelState,
+        };
+
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+        let mut new = NewSessionResponse::new(SessionId::new("sid")).models(SessionModelState::new(
+            ModelId::new("gpt-5-codex"),
+            vec![],
+        ));
+        new.config_options = Some(vec![SessionConfigOption::new(
+            SessionConfigId::new("model"),
+            "Model",
+            SessionConfigKind::Select(SessionConfigSelect::new(
+                SessionConfigValueId::new("gpt-5-codex"),
+                SessionConfigSelectOptions::Ungrouped(vec![]),
+            )),
+        )]);
+        let caps = spur_acp::SpurAgentCaps::new(&init, &new);
+        assert!(caps.supports_set_model());
+        assert!(caps.supports_set_config_option());
+
+        let mut reg = CommandRegistry::new();
+        reg.set_advertised_commands(
+            "codex",
+            vec![CommandEntry {
+                name: "model".into(),
+                description: "Switch model".into(),
+                hint: None,
+                source: CommandSource::Advertised {
+                    handle: "codex".into(),
+                },
+                dispatch: Dispatch::SetSessionConfigOption {
+                    config_id: "model".into(),
+                },
+                arg_picker_spec: None,
+            }],
+        );
+        let names: Vec<_> = reg
+            .available_commands_for_session(Some(&caps))
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert!(names.contains(&"model".to_string()));
+    }
+
+    /// Wave C.2: gemini-style caps (no set_config_option, no set_model)
+    /// ⇒ /model and /effort are filtered out of the popup.
+    #[test]
+    fn available_commands_for_session_with_gemini_style_caps_hides_config_option_pickers() {
+        use agent_client_protocol::schema::{
+            InitializeResponse, NewSessionResponse, ProtocolVersion, SessionId,
+        };
+
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+        // Gemini-style: no models, no config_options. set_model & set_config_option both false.
+        let new = NewSessionResponse::new(SessionId::new("sid"));
+        let caps = spur_acp::SpurAgentCaps::new(&init, &new);
+        assert!(!caps.supports_set_model());
+        assert!(!caps.supports_set_config_option());
+
+        let mut reg = CommandRegistry::new();
+        reg.set_advertised_commands(
+            "gemini",
+            vec![
+                CommandEntry {
+                    name: "model".into(),
+                    description: "Switch model".into(),
+                    hint: None,
+                    source: CommandSource::Advertised {
+                        handle: "gemini".into(),
+                    },
+                    dispatch: Dispatch::SetSessionConfigOption {
+                        config_id: "model".into(),
+                    },
+                    arg_picker_spec: None,
+                },
+                CommandEntry {
+                    name: "effort".into(),
+                    description: "Switch effort".into(),
+                    hint: None,
+                    source: CommandSource::Advertised {
+                        handle: "gemini".into(),
+                    },
+                    dispatch: Dispatch::SetSessionConfigOption {
+                        config_id: "effort".into(),
+                    },
+                    arg_picker_spec: None,
+                },
+            ],
+        );
+        let names: Vec<_> = reg
+            .available_commands_for_session(Some(&caps))
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert!(
+            !names.contains(&"model".to_string()),
+            "/model must be hidden when caps lack both set_model and set_config_option"
+        );
+        assert!(
+            !names.contains(&"effort".to_string()),
+            "/effort must be hidden when caps lack set_config_option"
+        );
+    }
+
+    /// Wave C.2: caps with only set_model (gemini-style + models populated)
+    /// keeps /model visible — supports_set_model() is enough.
+    #[test]
+    fn available_commands_for_session_with_models_only_keeps_model_picker() {
+        use agent_client_protocol::schema::{
+            InitializeResponse, ModelId, NewSessionResponse, ProtocolVersion, SessionId,
+            SessionModelState,
+        };
+
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+        let new = NewSessionResponse::new(SessionId::new("sid")).models(SessionModelState::new(
+            ModelId::new("gemini-1.5-pro"),
+            vec![],
+        ));
+        let caps = spur_acp::SpurAgentCaps::new(&init, &new);
+        assert!(caps.supports_set_model());
+        assert!(!caps.supports_set_config_option());
+
+        let mut reg = CommandRegistry::new();
+        reg.set_advertised_commands(
+            "gemini",
+            vec![CommandEntry {
+                name: "model".into(),
+                description: "Switch model".into(),
+                hint: None,
+                source: CommandSource::Advertised {
+                    handle: "gemini".into(),
+                },
+                dispatch: Dispatch::SetSessionConfigOption {
+                    config_id: "model".into(),
+                },
+                arg_picker_spec: None,
+            }],
+        );
+        let names: Vec<_> = reg
+            .available_commands_for_session(Some(&caps))
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert!(
+            names.contains(&"model".to_string()),
+            "/model must remain when caps support set_model (even without set_config_option)"
+        );
+    }
+
+    /// Wave C.1: spur-local + agent PromptText entries always survive
+    /// the filter regardless of caps state.
+    #[test]
+    fn available_commands_for_session_keeps_prompt_text_and_spur_local() {
+        use agent_client_protocol::schema::{
+            InitializeResponse, NewSessionResponse, ProtocolVersion, SessionId,
+        };
+
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+        let caps =
+            spur_acp::SpurAgentCaps::new(&init, &NewSessionResponse::new(SessionId::new("sid")));
+
+        let mut reg = CommandRegistry::new();
+        reg.set_agent_commands(
+            "kiro",
+            vec![CommandEntry {
+                name: "context".into(),
+                description: "show context".into(),
+                hint: None,
+                source: CommandSource::Agent {
+                    handle: "kiro".into(),
+                },
+                dispatch: Dispatch::PromptText {
+                    normalized: "/context".into(),
+                },
+                arg_picker_spec: None,
+            }],
+        );
+        let names: Vec<_> = reg
+            .available_commands_for_session(Some(&caps))
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert!(
+            names.contains(&"context".to_string()),
+            "PromptText commands must always pass through the filter"
+        );
+        // spur-local /clear is exclusive — it should always be present too.
+        assert!(
+            names.iter().any(|n| n == "clear"),
+            "spur-local meta-commands must always survive caps filtering"
+        );
+    }
+
     #[test]
     fn arg_picker_spec_returns_some_for_advertised_with_spec() {
         let mut reg = CommandRegistry::new();
