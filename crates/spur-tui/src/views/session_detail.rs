@@ -79,6 +79,20 @@ pub struct SessionDetailView {
         crate::components::mermaid::MermaidId,
         crate::components::mermaid::MermaidState,
     >,
+    /// Owns rendered protocols for diagrams in `mermaid_registry`. Sibling
+    /// of the registry so we can split-borrow during render.
+    #[cfg(feature = "markdown")]
+    pub(crate) image_cache: crate::components::image_cache::ImageCache,
+    /// Coalesces re-raster requests — at most one in flight per id.
+    #[cfg(feature = "markdown")]
+    pub(crate) in_flight_renders: std::collections::HashSet<
+        crate::components::mermaid::MermaidId,
+    >,
+    /// Source of monotonic `image_generation` values stored on
+    /// `MermaidState::Ready` and snapshotted by `image_cache` for
+    /// stale-protocol detection.
+    #[cfg(feature = "markdown")]
+    pub(crate) next_image_generation: u64,
     #[cfg(feature = "markdown")]
     pub(crate) pending_fence_actions: std::collections::VecDeque<crate::action::Action>,
     /// Graphics `Picker` used to build inline mermaid image protocols during
@@ -193,6 +207,12 @@ impl SessionDetailView {
             #[cfg(feature = "markdown")]
             mermaid_registry: std::collections::HashMap::new(),
             #[cfg(feature = "markdown")]
+            image_cache: crate::components::image_cache::ImageCache::new(),
+            #[cfg(feature = "markdown")]
+            in_flight_renders: std::collections::HashSet::new(),
+            #[cfg(feature = "markdown")]
+            next_image_generation: 0,
+            #[cfg(feature = "markdown")]
             pending_fence_actions: std::collections::VecDeque::new(),
             #[cfg(feature = "markdown")]
             render_picker: None,
@@ -253,6 +273,12 @@ impl SessionDetailView {
             #[cfg(feature = "markdown")]
             mermaid_registry: std::collections::HashMap::new(),
             #[cfg(feature = "markdown")]
+            image_cache: crate::components::image_cache::ImageCache::new(),
+            #[cfg(feature = "markdown")]
+            in_flight_renders: std::collections::HashSet::new(),
+            #[cfg(feature = "markdown")]
+            next_image_generation: 0,
+            #[cfg(feature = "markdown")]
             pending_fence_actions: std::collections::VecDeque::new(),
             #[cfg(feature = "markdown")]
             render_picker: None,
@@ -303,6 +329,12 @@ impl SessionDetailView {
             cwd: std::path::PathBuf::from("."),
             #[cfg(feature = "markdown")]
             mermaid_registry: std::collections::HashMap::new(),
+            #[cfg(feature = "markdown")]
+            image_cache: crate::components::image_cache::ImageCache::new(),
+            #[cfg(feature = "markdown")]
+            in_flight_renders: std::collections::HashSet::new(),
+            #[cfg(feature = "markdown")]
+            next_image_generation: 0,
             #[cfg(feature = "markdown")]
             pending_fence_actions: std::collections::VecDeque::new(),
             #[cfg(feature = "markdown")]
@@ -586,19 +618,12 @@ impl SessionDetailView {
         false
     }
 
-    /// Drop every cached inline `StatefulProtocol` so they are rebuilt at
-    /// the new Rect size on the next render. Called on terminal resize.
+    /// Drop every cached protocol so they are rebuilt at the new Rect size
+    /// on the next render. Called on terminal resize (app.rs:876) and on
+    /// session reset.
     #[cfg(feature = "markdown")]
     pub fn invalidate_inline_protocols(&mut self) {
-        use crate::components::mermaid::MermaidState;
-        for state in self.mermaid_registry.values() {
-            if let MermaidState::Ready {
-                inline_protocol, ..
-            } = state
-            {
-                *inline_protocol.borrow_mut() = None;
-            }
-        }
+        self.image_cache.invalidate_all();
     }
 
     /// The session ID this view tracks.
