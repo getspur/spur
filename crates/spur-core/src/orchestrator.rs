@@ -450,6 +450,8 @@ mod session_attach_guard_transfer_tests {
         config.cost.db_path = tmp.path().join("cost.db").display().to_string();
         let orchestrator = Orchestrator::new(tmp.path().to_path_buf(), config, None).unwrap();
 
+        let _ = orchestrator; // helper does not need orchestrator state
+
         let log = std::sync::Arc::new(std::sync::Mutex::new(DispatchLog::default()));
         let conn = TrackingConnection {
             log: std::sync::Arc::clone(&log),
@@ -487,8 +489,7 @@ mod session_attach_guard_transfer_tests {
             ),
         };
 
-        orchestrator
-            .dispatch_set_session_model(&mut brain, "claude-sonnet-4-7".to_string())
+        Orchestrator::dispatch_set_session_model(&mut brain, "claude-sonnet-4-7".to_string())
             .await
             .expect("dispatch must succeed when caps support set_model");
 
@@ -2390,7 +2391,7 @@ impl Orchestrator {
                     InteractiveInput::SetSessionModel { value } => {
                         if let Some(b) = brain.as_mut() {
                             if let Err(e) =
-                                self.dispatch_set_session_model(b, value.clone()).await
+                                Orchestrator::dispatch_set_session_model(b, value.clone()).await
                             {
                                 warn!(
                                     brain = %b.brain_name,
@@ -4404,9 +4405,12 @@ impl Orchestrator {
     ///
     /// `value` is the user-supplied model id (e.g. `"claude-sonnet-4-7"`).
     /// `Err(AcpError::CapabilityMissing("set_model"))` when caps absent or
-    /// neither dispatch path is advertised.
+    /// neither dispatch path is advertised. Defined as an associated
+    /// function (no `&self`) so the future stays `Send` when awaited
+    /// inside `run_interactive` — `Orchestrator` itself is `!Sync` due
+    /// to its embedded rusqlite connection, but no orchestrator state
+    /// is actually needed for this dispatch.
     pub async fn dispatch_set_session_model(
-        &self,
         brain: &mut BrainSession,
         value: String,
     ) -> Result<(), spur_acp::AcpError> {
