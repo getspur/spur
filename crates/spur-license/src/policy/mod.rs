@@ -190,8 +190,8 @@ impl PolicyResolver {
     /// ```json
     /// {
     ///   "tier_policies": {
-    ///     "community": {"features": ["brain_session"]},
-    ///     "pro": {"features": ["@inherit:community", "parallel_workers"]}
+    ///     "community": {"features": ["core_core_brain_session"]},
+    ///     "pro": {"features": ["@inherit:community", "pm_pro_beads_advanced"]}
     ///   }
     /// }
     /// ```
@@ -405,7 +405,7 @@ mod tests {
         assert_eq!(signed.key_id, "spur-policy-2026-04");
         assert!(!signed.signature.is_empty());
         let doc: PolicyDocument = serde_json::from_str(&signed.payload).unwrap();
-        assert_eq!(doc.schema_version, 1);
+        assert_eq!(doc.schema_version, 2);
         assert!(doc.tier_policies.contains_key("community"));
         assert!(doc.flags.contains_key(&FlagKey::KILL_ADVANCED_PLANNER));
     }
@@ -416,26 +416,26 @@ mod tests {
         let signed: SignedPolicy = serde_json::from_str(raw).unwrap();
         let doc = crate::policy::trust::verify_signed_policy(&signed)
             .expect("embedded signed policy must verify");
-        assert_eq!(doc.schema_version, 1);
+        assert_eq!(doc.schema_version, 2);
     }
 
     #[test]
     fn embedded_resolver_returns_community_features() {
         let r = PolicyResolver::embedded();
         let community = r.tier_features("community").unwrap();
-        assert!(community.contains("brain_session"));
-        assert!(community.contains("single_worker"));
-        assert!(community.contains("mcp_standard_tools"));
-        assert!(!community.contains("parallel_workers"));
+        assert!(community.contains("core_core_brain_session"));
+        assert!(community.contains("core_core_parallel_workers"));
+        assert!(community.contains("mcp_core_server_dispatch"));
+        assert!(!community.contains("pm_pro_beads_advanced"));
     }
 
     #[test]
     fn embedded_resolver_returns_pro_features_superset() {
         let r = PolicyResolver::embedded();
         let pro = r.tier_features("pro").unwrap();
-        assert!(pro.contains("brain_session"));
-        assert!(pro.contains("parallel_workers"));
-        assert!(pro.contains("auto_review_policies"));
+        assert!(pro.contains("core_core_brain_session"));
+        assert!(pro.contains("core_core_parallel_workers"));
+        assert!(pro.contains("core_pro_review_auto_approve"));
     }
 
     #[test]
@@ -459,7 +459,7 @@ mod tests {
         assert!(result
             .tier_features("community")
             .unwrap()
-            .contains("brain_session"));
+            .contains("core_core_brain_session"));
     }
 
     #[test]
@@ -474,7 +474,7 @@ mod tests {
         assert!(r
             .tier_features("community")
             .unwrap()
-            .contains("brain_session"));
+            .contains("core_core_brain_session"));
     }
 
     fn test_tier(features: &[&str]) -> TierPolicy {
@@ -505,24 +505,27 @@ mod tests {
         let mut tiers = BTreeMap::new();
         tiers.insert(
             "community".into(),
-            test_tier(&["brain_session", "single_worker"]),
+            test_tier(&["core_core_brain_session", "mcp_core_server_dispatch"]),
         );
         tiers.insert(
             "pro".into(),
-            test_tier(&["@inherit:community", "parallel_workers"]),
+            test_tier(&["@inherit:community", "pm_pro_beads_advanced"]),
         );
         let resolver = PolicyResolver::from_document(test_document(tiers, None));
 
         let pro = resolver.tier_features("pro").unwrap();
-        assert!(pro.contains("brain_session"));
-        assert!(pro.contains("single_worker"));
-        assert!(pro.contains("parallel_workers"));
+        assert!(pro.contains("core_core_brain_session"));
+        assert!(pro.contains("mcp_core_server_dispatch"));
+        assert!(pro.contains("pm_pro_beads_advanced"));
         assert!(!pro.contains("@inherit:community"));
 
         let community = resolver.tier_features("community").unwrap();
         assert_eq!(
             community,
-            BTreeSet::from(["brain_session".into(), "single_worker".into()])
+            BTreeSet::from([
+                "core_core_brain_session".into(),
+                "mcp_core_server_dispatch".into()
+            ])
         );
     }
 
@@ -540,14 +543,14 @@ mod tests {
     #[test]
     fn tier_features_rejects_non_community_inherit_directive() {
         let mut tiers = BTreeMap::new();
-        tiers.insert("community".into(), test_tier(&["brain_session"]));
+        tiers.insert("community".into(), test_tier(&["core_core_brain_session"]));
         tiers.insert(
             "enterprise".into(),
-            test_tier(&["@inherit:community", "sso_saml"]),
+            test_tier(&["@inherit:community", "blob_pro_namespace_deletion"]),
         );
         tiers.insert(
             "pro".into(),
-            test_tier(&["@inherit:enterprise", "parallel_workers"]),
+            test_tier(&["@inherit:enterprise", "pm_pro_beads_advanced"]),
         );
         let resolver = PolicyResolver::from_document(test_document(tiers, None));
 
@@ -569,7 +572,7 @@ mod tests {
             "schema_version": 1,
             "issued_at": "2026-04-19T00:00:00Z",
             "tier_policies": {
-                "community": {"features": ["brain_session"]}
+                "community": {"features": ["core_core_brain_session"]}
             },
             "flags": {}
         }"#;
@@ -586,10 +589,10 @@ mod tests {
     #[test]
     fn roadmap_features_are_parsed_but_not_active() {
         let mut tiers = BTreeMap::new();
-        tiers.insert("community".into(), test_tier(&["brain_session"]));
+        tiers.insert("community".into(), test_tier(&["core_core_brain_session"]));
         tiers.insert(
             "pro".into(),
-            test_tier(&["@inherit:community", "parallel_workers"]),
+            test_tier(&["@inherit:community", "pm_pro_beads_advanced"]),
         );
         let roadmap_feature = "core_pro_session_resume_event_replay".to_string();
         let roadmap =
