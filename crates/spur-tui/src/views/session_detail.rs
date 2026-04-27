@@ -947,14 +947,33 @@ impl SessionDetailView {
     pub fn handle_mermaid_completed(
         &mut self,
         ref_id: crate::components::mermaid::MermaidId,
+        target_width: u32,
         result: Result<std::sync::Arc<image::DynamicImage>, String>,
     ) {
         use crate::components::mermaid::MermaidState;
+
+        // Always release the in-flight slot, success or failure.
+        self.in_flight_renders.remove(&ref_id);
+
+        // Retain the source code from the previous state so a future
+        // re-raster on bucket-up can re-dispatch without reaching back
+        // into MarkdownStream.
+        let code = match self.mermaid_registry.get(&ref_id) {
+            Some(MermaidState::Pending { code }) => code.clone(),
+            Some(MermaidState::Ready { code, .. }) => code.clone(),
+            _ => String::new(),
+        };
+
         let state = match result {
-            Ok(image_arc) => MermaidState::Ready {
-                image: image_arc,
-                inline_protocol: std::cell::RefCell::new(None),
-            },
+            Ok(image) => {
+                self.next_image_generation = self.next_image_generation.saturating_add(1);
+                MermaidState::Ready {
+                    image,
+                    code,
+                    rastered_at_bucket: target_width,
+                    image_generation: self.next_image_generation,
+                }
+            }
             Err(message) => MermaidState::Error { message },
         };
         self.mermaid_registry.insert(ref_id, state);
@@ -1639,12 +1658,17 @@ impl View for SessionDetailView {
                                     code: fence.code.clone(),
                                 },
                             );
+                            self.in_flight_renders.insert(fence.id);
                             self.pending_fence_actions.push_back(
                                 crate::action::Action::MermaidRenderRequest {
                                     session: self.session_id.clone(),
                                     ref_id: fence.id,
                                     code: fence.code,
-                                    target_width: crate::components::mermaid::DEFAULT_WIDTH,
+                                    // Task 14 wires the live pane's bucket here.
+                                    // Use the smallest bucket as a safe default;
+                                    // a re-raster will upgrade as soon as the
+                                    // pane reports its real width.
+                                    target_width: crate::components::mermaid::RASTER_BUCKETS[0],
                                 },
                             );
                         }
@@ -1815,12 +1839,13 @@ impl View for SessionDetailView {
                         code: fence.code.clone(),
                     },
                 );
+                self.in_flight_renders.insert(fence.id);
                 self.pending_fence_actions
                     .push_back(crate::action::Action::MermaidRenderRequest {
                         session: self.session_id.clone(),
                         ref_id: fence.id,
                         code: fence.code,
-                        target_width: crate::components::mermaid::DEFAULT_WIDTH,
+                        target_width: crate::components::mermaid::RASTER_BUCKETS[0],
                     });
             }
         }

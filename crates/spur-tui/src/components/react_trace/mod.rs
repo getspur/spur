@@ -1625,7 +1625,9 @@ mod virtual_row_tests {
             fence_id,
             MermaidState::Ready {
                 image: img,
-                inline_protocol: std::cell::RefCell::new(None),
+                code: mermaid_code.clone(),
+                rastered_at_bucket: 800,
+                image_generation: 1,
             },
         );
 
