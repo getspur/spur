@@ -37,11 +37,11 @@ fn community_default_has_expected_features() {
     let gate = license.feature_gate();
 
     assert_eq!(gate.tier(), Tier::Community);
-    assert!(gate.has(FeatureKey::BRAIN_SESSION));
-    assert!(gate.has(FeatureKey::SINGLE_WORKER));
-    assert!(gate.has(FeatureKey::WORKTREE_ISOLATION));
-    assert!(!gate.has(FeatureKey::PARALLEL_WORKERS));
-    assert!(!gate.has(FeatureKey::PM_INTEGRATION));
+    assert!(gate.has(FeatureKey::CORE_CORE_BRAIN_SESSION));
+    assert!(gate.has(FeatureKey::CORE_CORE_PARALLEL_WORKERS));
+    assert!(gate.has(FeatureKey::WORKTREE_CORE_ISOLATION));
+    assert!(gate.has(FeatureKey::PM_CORE_BROWSE));
+    assert!(!gate.has(FeatureKey::PM_PRO_BEADS_ADVANCED));
 }
 
 #[test]
@@ -51,10 +51,10 @@ fn community_default_quotas() {
 
     assert_eq!(
         gate.quota(QuotaKey::MaxConcurrentWorkers),
-        Some(QuotaValue::Count(3))
+        Some(QuotaValue::Count(1))
     );
     assert_eq!(
         gate.quota(QuotaKey::EventRetentionBytes),
-        Some(QuotaValue::Bytes(128 * 1024 * 1024))
+        Some(QuotaValue::Count(128 * 1024 * 1024))
     );
 }

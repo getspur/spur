@@ -96,6 +96,8 @@ mod tests {
 
     use super::*;
     use crate::policy::PolicyResolver;
+    use crate::FeatureGate;
+    use crate::{QuotaKey, QuotaValue};
 
     // Guard env-var mutations because rust test runner is multi-threaded.
     // Use `tokio::sync::Mutex` (not `std::sync::Mutex`) so the guard can be
@@ -111,9 +113,15 @@ mod tests {
         let p = CommunityProvider::new(PolicyResolver::embedded());
         let state = p.current_state();
         assert!(matches!(state.plan, crate::Plan::Community));
-        assert!(p.has_entitlement("brain_session"));
-        assert!(p.has_entitlement("single_worker"));
-        assert!(!p.has_entitlement("parallel_workers"));
+        assert!(p.has_entitlement("core_core_brain_session"));
+        assert!(p.has_entitlement("core_core_parallel_workers"));
+        let gate = FeatureGate::new(PolicyResolver::embedded());
+        gate.update_state(&state);
+        assert_eq!(
+            gate.quota(QuotaKey::MaxConcurrentWorkers),
+            Some(QuotaValue::Count(1))
+        );
+        assert!(!p.has_entitlement("pm_pro_beads_advanced"));
     }
 
     #[tokio::test]
@@ -143,8 +151,8 @@ mod tests {
         let p = CommunityProvider::new(PolicyResolver::embedded());
         let state = p.current_state();
         assert!(matches!(state.plan, Plan::Pro));
-        assert!(p.has_entitlement("parallel_workers"));
-        assert!(p.has_entitlement("auto_review_policies"));
+        assert!(p.has_entitlement("core_core_parallel_workers"));
+        assert!(p.has_entitlement("core_pro_review_auto_approve"));
         std::env::remove_var(DEV_PLAN_ENV);
     }
 

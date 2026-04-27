@@ -3,25 +3,34 @@ use std::collections::HashSet;
 
 #[test]
 fn known_features_exist() {
-    assert_eq!(FeatureKey::BRAIN_SESSION.as_str(), "brain_session");
-    assert_eq!(FeatureKey::PARALLEL_WORKERS.as_str(), "parallel_workers");
+    assert_eq!(
+        FeatureKey::CORE_CORE_BRAIN_SESSION.as_str(),
+        "core_core_brain_session"
+    );
+    assert_eq!(
+        FeatureKey::CORE_CORE_PARALLEL_WORKERS.as_str(),
+        "core_core_parallel_workers"
+    );
 }
 
 #[test]
 fn from_known_parses_all_keys() {
     // Spot-check a few from each tier
     assert_eq!(
-        FeatureKey::from_known("brain_session"),
-        Some(FeatureKey::BRAIN_SESSION)
+        FeatureKey::from_known("core_core_brain_session"),
+        Some(FeatureKey::CORE_CORE_BRAIN_SESSION)
     );
     assert_eq!(
-        FeatureKey::from_known("auto_review_policies"),
-        Some(FeatureKey::AUTO_REVIEW_POLICIES)
+        FeatureKey::from_known("core_pro_review_auto_approve"),
+        Some(FeatureKey::CORE_PRO_REVIEW_AUTO_APPROVE)
     );
-    assert_eq!(FeatureKey::from_known("rbac"), Some(FeatureKey::RBAC));
     assert_eq!(
-        FeatureKey::from_known("dedicated_support"),
-        Some(FeatureKey::DEDICATED_SUPPORT)
+        FeatureKey::from_known("pm_core_browse"),
+        Some(FeatureKey::PM_CORE_BROWSE)
+    );
+    assert_eq!(
+        FeatureKey::from_known("blob_pro_namespace_deletion"),
+        Some(FeatureKey::BLOB_PRO_NAMESPACE_DELETION)
     );
     // Unknown strings must return None
     assert_eq!(FeatureKey::from_known("nonexistent_feature"), None);
@@ -31,8 +40,8 @@ fn from_known_parses_all_keys() {
 
 #[test]
 fn feature_key_is_copy_and_hashable() {
-    let a = FeatureKey::BRAIN_SESSION;
-    let b = FeatureKey::BRAIN_SESSION;
+    let a = FeatureKey::CORE_CORE_BRAIN_SESSION;
+    let b = FeatureKey::CORE_CORE_BRAIN_SESSION;
     assert_eq!(a, b);
 
     let mut set = HashSet::new();

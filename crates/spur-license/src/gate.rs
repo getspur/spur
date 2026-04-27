@@ -228,7 +228,7 @@ mod tests {
         let gate = FeatureGate::new(policy);
         let inactive = LicenseState::inactive("test inactive");
         gate.update_state(&inactive);
-        assert!(!gate.has(FeatureKey::BRAIN_SESSION));
+        assert!(!gate.has(FeatureKey::CORE_CORE_BRAIN_SESSION));
         assert_eq!(gate.quota(QuotaKey::MaxConcurrentWorkers), None);
     }
 
@@ -239,16 +239,16 @@ mod tests {
 
         // Start as community
         assert_eq!(gate.tier(), Tier::Community);
-        assert!(!gate.has(FeatureKey::PARALLEL_WORKERS));
+        assert!(gate.has(FeatureKey::CORE_CORE_PARALLEL_WORKERS));
 
-        // Update to Pro with parallel_workers
+        // Update to Pro with a Pro-only feature.
         let mut features = BTreeSet::new();
-        features.insert("parallel_workers".to_string());
+        features.insert("pm_pro_beads_advanced".to_string());
         let pro_state = LicenseState::active_validated(Plan::Pro, features);
         gate.update_state(&pro_state);
 
         assert_eq!(gate.tier(), Tier::Pro);
-        assert!(gate.has(FeatureKey::PARALLEL_WORKERS));
+        assert!(gate.has(FeatureKey::PM_PRO_BEADS_ADVANCED));
     }
 
     #[test]
