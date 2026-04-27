@@ -937,6 +937,10 @@ impl SessionDetailView {
             mention_registry: &self.mention_registry,
             cwd: &self.cwd,
             scope: crate::mentions::CompletionScope::Session(&self.session_id),
+            // Task 2.16 will source this from the orchestrator cache; for
+            // now an empty slice keeps Slash/Mention pickers functional and
+            // makes SlashArg a no-op until the data path lands.
+            session_config_options: &[],
         };
         self.completion.dispatch(event, &mut self.input_bar, &env);
     }

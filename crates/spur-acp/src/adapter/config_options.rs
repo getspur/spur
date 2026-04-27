@@ -49,6 +49,29 @@ const ALLOW_LIST: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// Extract the selectable choices from a `SessionConfigOption`'s payload, in
+/// advertised order. Returns an empty `Vec` for non-Select kinds and for
+/// Grouped select payloads (v1 only handles flat lists). Used by the TUI to
+/// instantiate `ConfigOptionQuerySource` from cached options.
+pub fn extract_choices(opt: &SessionConfigOption) -> Vec<AdvertisedChoice> {
+    match &opt.kind {
+        SessionConfigKind::Select(select) => match &select.options {
+            SessionConfigSelectOptions::Ungrouped(choices) => choices
+                .iter()
+                .map(|c| AdvertisedChoice {
+                    value: c.value.0.to_string(),
+                    label: c.name.clone(),
+                    description: c.description.clone(),
+                })
+                .collect(),
+            // Grouped lists are a future-spec feature — v1 does not flatten.
+            _ => Vec::new(),
+        },
+        // Future kinds (Boolean, etc.) → no select choices.
+        _ => Vec::new(),
+    }
+}
+
 pub fn synthesize(options: &[SessionConfigOption]) -> Vec<AdvertisedCommand> {
     let mut out = Vec::new();
     for (acp_config_id, slash_name, slash_desc) in ALLOW_LIST {
@@ -216,5 +239,30 @@ mod tests {
                 config_id: "model".into()
             })
         );
+    }
+
+    #[test]
+    fn extract_choices_returns_choices_in_advertised_order() {
+        let opt = make_select(
+            "model",
+            "gpt-5",
+            &[
+                ("gpt-5-codex", "GPT-5 Codex"),
+                ("gpt-5", "GPT-5"),
+                ("o4-mini", "o4-mini"),
+            ],
+        );
+        let choices = extract_choices(&opt);
+        assert_eq!(choices.len(), 3);
+        assert_eq!(choices[0].value, "gpt-5-codex");
+        assert_eq!(choices[0].label, "GPT-5 Codex");
+        assert_eq!(choices[1].value, "gpt-5");
+        assert_eq!(choices[2].value, "o4-mini");
+    }
+
+    #[test]
+    fn extract_choices_empty_for_empty_select() {
+        let opt = make_select("model", "", &[]);
+        assert!(extract_choices(&opt).is_empty());
     }
 }
