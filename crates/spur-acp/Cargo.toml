@@ -27,13 +27,13 @@ anyhow = { workspace = true }
 directories = { workspace = true }
 agent-client-protocol = { workspace = true }
 fs4 = "0.13"
+tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
 spur-acp = { path = ".", features = ["test-support"] }
-tempfile = "3"
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [[example]]
