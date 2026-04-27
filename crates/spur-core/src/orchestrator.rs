@@ -976,7 +976,7 @@ fn startup_beads_warning(
     if !(has_beads_dir
         && !pm_service_available
         && config.pm.beads.as_ref().is_none_or(|beads| beads.enabled)
-        && feature_gate.is_some_and(|gate| gate.has(spur_license::FeatureKey::PM_INTEGRATION)))
+        && feature_gate.is_some_and(|gate| gate.has(spur_license::FeatureKey::PM_CORE_BEADS_BASIC)))
     {
         return None;
     }
@@ -8837,18 +8837,37 @@ mod beads_startup_warning_tests {
         Arc::new(FeatureGate::new(PolicyResolver::embedded()))
     }
 
-    fn entitled_gate() -> Arc<FeatureGate> {
+    fn gate_without_beads_basic() -> Arc<FeatureGate> {
         let gate = Arc::new(FeatureGate::new(PolicyResolver::embedded()));
         let mut features = BTreeSet::new();
-        features.insert("pm_integration".to_string());
+        features.insert("core_core_brain_session".to_string());
+        gate.update_state(&LicenseState::active_validated(Plan::Pro, features));
+        gate
+    }
+
+    fn beads_basic_gate() -> Arc<FeatureGate> {
+        let gate = Arc::new(FeatureGate::new(PolicyResolver::embedded()));
+        let mut features = BTreeSet::new();
+        features.insert("pm_core_beads_basic".to_string());
         gate.update_state(&LicenseState::active_validated(Plan::Pro, features));
         gate
     }
 
     #[test]
-    fn beads_startup_warning_community_tier_suppresses_false_install_hint() {
+    fn beads_startup_warning_free_tier_with_missing_br_emits_install_hint() {
         let config = SpurConfig::default();
         let gate = community_gate();
+
+        assert_eq!(
+            startup_beads_warning(&config, Some(gate.as_ref()), true, false, false),
+            Some(BeadsStartupWarning::BrNotInstalled)
+        );
+    }
+
+    #[test]
+    fn beads_startup_warning_missing_beads_basic_entitlement_suppresses_warning() {
+        let config = SpurConfig::default();
+        let gate = gate_without_beads_basic();
 
         assert_eq!(
             startup_beads_warning(&config, Some(gate.as_ref()), true, false, false),
@@ -8859,7 +8878,7 @@ mod beads_startup_warning_tests {
     #[test]
     fn beads_startup_warning_entitled_tier_with_missing_br_emits_install_hint() {
         let config = SpurConfig::default();
-        let gate = entitled_gate();
+        let gate = beads_basic_gate();
 
         assert_eq!(
             startup_beads_warning(&config, Some(gate.as_ref()), true, false, false),
@@ -8874,7 +8893,7 @@ mod beads_startup_warning_tests {
     #[test]
     fn beads_startup_warning_entitled_tier_with_present_br_uses_generic_backend_copy() {
         let config = SpurConfig::default();
-        let gate = entitled_gate();
+        let gate = beads_basic_gate();
 
         assert_eq!(
             startup_beads_warning(&config, Some(gate.as_ref()), true, false, true),
@@ -8895,7 +8914,7 @@ mod beads_startup_warning_tests {
             enabled: false,
             auto_sync: false,
         });
-        let gate = entitled_gate();
+        let gate = beads_basic_gate();
 
         assert_eq!(
             startup_beads_warning(&config, Some(gate.as_ref()), true, false, false),
@@ -8916,7 +8935,7 @@ mod beads_startup_warning_tests {
     #[test]
     fn beads_startup_warning_existing_pm_service_suppresses_warning() {
         let config = SpurConfig::default();
-        let gate = entitled_gate();
+        let gate = beads_basic_gate();
 
         assert_eq!(
             startup_beads_warning(&config, Some(gate.as_ref()), true, true, false),
