@@ -3,6 +3,7 @@
 //! Uses `sk_*` secret keys to perform administrative operations
 //! such as creating, revoking, and listing licenses.
 
+use anyhow::Context;
 use serde_json::{json, Value};
 
 /// Admin client for LicenseSeat REST API.
@@ -35,7 +36,7 @@ impl AdminClient {
         response
             .json::<Value>()
             .await
-            .map_err(|e| anyhow::anyhow!("failed to parse response: {e}"))
+            .context("failed to parse response")
     }
 
     /// Create a new license. Returns the parsed JSON response body
@@ -63,7 +64,7 @@ impl AdminClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("HTTP error: {e}"))?;
+            .context("HTTP error")?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -84,7 +85,7 @@ impl AdminClient {
             .header("Authorization", self.auth_header())
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("HTTP error: {e}"))?;
+            .context("HTTP error")?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -108,7 +109,7 @@ impl AdminClient {
             .header("Authorization", self.auth_header())
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("HTTP error: {e}"))?;
+            .context("HTTP error")?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -132,7 +133,7 @@ impl AdminClient {
             .header("Authorization", self.auth_header())
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("HTTP error: {e}"))?;
+            .context("HTTP error")?;
 
         if !response.status().is_success() {
             let status = response.status();
