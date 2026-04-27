@@ -36,7 +36,7 @@ Smooth-crop (showing the actual image pixels in the visible portion) is **deferr
 | `components/image_cache.rs` | NEW | Owns `StatefulProtocol` per `(MermaidId, Slot)`. Auto-invalidates on Arc drift + cell-size drift. ~140 LOC. |
 | `components/mermaid.rs` | modify | Drop `inline_protocol` from `Ready`; add `RASTER_BUCKETS` + `raster_width_for_pane()`; `render_mermaid` takes `target_width: u32`; `Ready` gains `code: String` + `rastered_at_bucket: u32`. |
 | `components/react_trace/render.rs` | modify | `compute_inline_height_rows` accepts `(cell_w_px, cell_h_px)` directly; new soft-cap formula; new `render_partial_card` helper; partial-visibility branch rewired to call it. `RenderContext` gains `&mut ImageCache`. |
-| `components/react_trace/mod.rs` | modify | `VirtualRowCacheEntry::soft_cap: u16` (replaces implicit pane-height key). Cache-hit check extended. `seed_line_cache_for_tests` gains `soft_cap` parameter. |
+| `components/react_trace/mod.rs` | modify | `VirtualRowCacheEntry` gains `soft_cap: u16`, `cell_w_px: u32`, `cell_h_px: u32`. Cache-hit check extended (both full-cache and incremental-cache paths). `seed_line_cache_for_tests` gains the three new params. |
 | `components/react_trace/builder.rs` | modify | `build_virtual_rows` threads `soft_cap` through to `compute_inline_height_rows` callers. |
 | `views/session_detail.rs` | modify | Add `image_cache: ImageCache` + `in_flight_renders: HashSet<MermaidId>` fields. New methods: `maybe_request_rerasters`, `render_overlay`. `handle_mermaid_completed` signature gains `target_width: u32`. Existing fence-emit sites (lines 1617, 1792) populate `target_width`. `invalidate_inline_protocols` → `image_cache.invalidate_all()`. |
 | `views/mermaid_viewer.rs` | modify | Drop `protocol` field; viewer is focus-only. `set_available` no longer builds; `protocol_mut` removed. |
@@ -59,7 +59,7 @@ Per-frame:
   RenderContext { mermaid_registry: &..., image_cache: &mut..., picker: ... }
   for each Image segment:
     if fully_visible:
-      proto = image_cache.inline_protocol_mut(id, image, picker)
+      proto = image_cache.inline_protocol_mut(id, image, image_generation, picker)
       StatefulImage::Fit(None) → proto into rect
     else:
       render_partial_card(rect, id, total_rows, first_row_within, run_len)
@@ -77,7 +77,12 @@ Per-frame:
 
 ```rust
 // components/mermaid.rs
-const RASTER_BUCKETS: [u32; 5] = [800, 1200, 1600, 2000, 2400];
+// Six buckets — added 3200 to cover 4K / 5K iTerm2 panes (~3920 px wide
+// on a 5K iMac with default cell width). Cap at 3200, not 4000:
+// 4000×3000 RGBA ≈ 48 MB per diagram, and v2 has no LRU eviction, so
+// a session with 10+ Ready diagrams could exceed 480 MB at 4000.
+// 3200×2400 RGBA ≈ 30 MB caps at acceptable per-diagram budget.
+const RASTER_BUCKETS: [u32; 6] = [800, 1200, 1600, 2000, 2400, 3200];
 
 pub fn raster_width_for_pane(pane_w_px: u32) -> u32 {
     for &b in &RASTER_BUCKETS {
@@ -92,7 +97,11 @@ pub enum MermaidState {
     Ready {
         image: Arc<DynamicImage>,
         code: String,                  // retained for re-raster
-        rastered_at_bucket: u32,       // provenance for skip logic
+        rastered_at_bucket: u32,       // policy provenance for skip logic
+        image_generation: u64,         // monotonic counter; bumped on every Ok completion;
+                                       // image-identity tag for `image_cache` invalidation
+                                       // (NOT the same as rastered_at_bucket — same bucket
+                                       // can recur via Error→Ready retry / duplicate completion)
     },
     Error { message: String },
 }
@@ -129,7 +138,9 @@ fn maybe_request_rerasters(&mut self, pane_cols: u16, cell_w_px: u16) {
 }
 ```
 
-`handle_mermaid_completed` retains `code` from the previous state (Pending or prior Ready) and stores `rastered_at_bucket: target_width`. Removes `ref_id` from `in_flight_renders`. Calls `react_trace.mark_all_streams_dirty()` so placeholders rebuild.
+`handle_mermaid_completed` retains `code` from the previous state (Pending or prior Ready), stores `rastered_at_bucket: target_width`, bumps `next_image_generation` and stores it in the new `Ready`. Removes `ref_id` from `in_flight_renders`. Calls `react_trace.mark_all_streams_dirty()` so placeholders rebuild.
+
+**Stale-session safety:** `tokio::task::spawn_blocking` workers are not cancellable, so a re-raster can complete after the user has navigated away from the session. The app-level `Action::MermaidRenderCompleted` handler at `app.rs:2113-2118` already guards against this — it checks `self.session_detail` exists and that `detail.session_id().0 == session.0` matches the completion's session_id before dispatching to `handle_mermaid_completed`. **Stale completions are silently dropped.** Codex Rust-expert review confirmed this guard is already correct; no change needed.
 
 **Coalescing:** `in_flight_renders: HashSet<MermaidId>` ensures at most one re-raster in flight per id. If a second bucket-up fires before the first completes, the result lands at the older bucket, then the next frame's `maybe_request_rerasters` re-emits.
 
@@ -181,21 +192,28 @@ pub(crate) fn compute_inline_height_rows(
 }
 ```
 
-**Behaviour table** (verifying no regression):
+**Behaviour table** (no regression for `pane_h ≥ 64`; small regression for `pane_h ∈ [60, 63]`):
 
-| pane_h | natural | today | new |
-|---|---|---|---|
-| 80 | 70 | 60 | **60** (legacy floor preserved) |
-| 80 | 40 | 40 | 40 |
-| 120 | 80 | 60 | **80** (grows past 60) |
-| 200 | 150 | 60 | **100** (hard cap) |
-| 60 | 70 | 60 | 56 (trailing context) |
-| 12 | 30 | 6 | 8 (floor) |
-| 8 | 30 | 6 | 4 (floor degrades) |
-| 4 | 30 | 6 | 0 (no inline) |
-| 0 | * | 6 | 0 (early exit) |
+| pane_h | natural | today | new | note |
+|---|---|---|---|---|
+| 80 | 70 | 60 | **60** | legacy floor preserved |
+| 80 | 40 | 40 | 40 | unchanged |
+| 120 | 80 | 60 | **80** | grows past 60 |
+| 200 | 150 | 60 | **100** | hard cap |
+| 64 | 70 | 60 | **60** | last pane_h with no regression (max_inline=60) |
+| 60 | 70 | 60 | **56** | trailing context wins (4-row regression — see below) |
+| 12 | 30 | 6 | 8 | floor |
+| 8 | 30 | 6 | 4 | floor degrades |
+| 4 | 30 | 6 | 0 | no inline |
+| 0 | * | 6 | 0 | early exit |
 
-**Design rationale (codex review):** The `max(two_thirds, 60)` floor was added after a worker review pointed out that a regression of 80×70 from 60 → 53 rows is a real UX downgrade — crisper raster does not compensate for fewer cells of physical footprint.
+**Honest claim (claude-code review catch):** **No regression for `pane_h ≥ 64`.** For `pane_h ∈ [60, 63]`, the trailing-context constraint (`max_inline = pane − 4`) takes precedence over the legacy-60 floor, producing a small (≤4-row) regression — at `pane_h = 60`, today's 60-row diagram becomes 56 rows. We accept this trade because:
+
+1. Pane heights of exactly 60–63 are rare (most terminals are ≥ 24 cols × ≥ 24 rows; trace pane is typically ≥ 70 rows on a working session).
+2. The alternative (drop trailing-context when `target_cap == LEGACY_CAP`) would broadly disable the `pane − 4` context for **any pane_h < 90** because `target_cap` saturates at 60 whenever `2/3·pane < 60`. Codex called this "dangerous because it ignores `pane_h - 4` broadly, not just at `pane_h=60`."
+3. With the larger raster (Section 3.1), 56 sharp rows beat 60 soft rows.
+
+**Design rationale (codex review):** The `max(two_thirds, 60)` floor was added after the first-round worker review pointed out that 80×70 going 60 → 53 was a real UX downgrade — crisper raster does not compensate for fewer cells of physical footprint.
 
 **Signature change (`Option<&Picker>` → `(cell_w_px, cell_h_px)`):** the function becomes pure math, fully testable without a real Picker. Caller computes the tuple once at the top of the render path:
 
@@ -293,7 +311,7 @@ if !drew_image {
 }
 ```
 
-### 3.4 Cache-Key Extension (`soft_cap` not raw `pane_height`)
+### 3.4 Cache-Key Extension (`soft_cap` + cell metrics, not raw `pane_height`)
 
 ```rust
 pub struct VirtualRowCacheEntry {
@@ -301,21 +319,26 @@ pub struct VirtualRowCacheEntry {
     pub entry_row_starts: Vec<usize>,
     pub byte_ranges: Vec<Option<(usize, usize)>>,
     pub width: u16,
-    pub soft_cap: u16,                  // NEW — derived from pane_height
+    pub soft_cap: u16,                  // derived from pane_height
+    pub cell_w_px: u32,                 // gemini/kimi review catch — see below
+    pub cell_h_px: u32,
     pub generation: u64,
     pub fence_gen: u64,
 }
 ```
 
-Cache hit when `(width, soft_cap, fence_gen)` all match. `effective_soft_cap` is computed once per render from `pane_height_rows` and threaded through `build_virtual_rows`.
+Cache hit when `(width, soft_cap, cell_w_px, cell_h_px, fence_gen)` all match. `effective_soft_cap` is computed once per render from `pane_height_rows` and threaded through `build_virtual_rows`. **Both the full-cache and incremental-cache validity paths must compare all five fields.**
 
 **Why soft_cap not raw pane_height:** soft_cap is the only pane-height-derived value that affects row layout. Most pane resizes (workers panel collapse ±5 rows, terminal flicker ±1 row) don't change soft_cap because `target_cap = max(two_thirds, 60)` saturates at 60 across pane_h ∈ [12, 90]. Cache mostly hits.
 
-| pane_h transition | raw `pane_height` key | derived `soft_cap` key |
+**Why cell metrics in the key (gemini/kimi catch):** `compute_inline_height_rows` depends on `(cell_w_px, cell_h_px)` directly — `cell_w_px` scales `pane_width_px → scaled_h_px`; `cell_h_px` divides `scaled_h_px → natural_rows`. A terminal font swap that changes cell metrics without changing cols/rows leaves `width` and `soft_cap` identical but changes `natural_rows`. Without cell metrics in the key, the row layout cache would silently false-hit and retain stale row heights.
+
+| pane_h transition | raw `pane_height` key | `(soft_cap, cell_metrics)` key |
 |---|---|---|
-| 80 → 75 (panel collapse) | rebuild | hit (both = 60) |
+| 80 → 75 (panel collapse) | rebuild | hit (both = 60, cell unchanged) |
 | 80 → 95 (split) | rebuild | rebuild (60 → 63) |
 | 200 → 220 | rebuild | hit (both at hard cap 100) |
+| Terminal font swap (no SIGWINCH) | hit (false!) | rebuild (cell metrics drift) |
 
 ### 3.5 `image_cache` Module
 
@@ -323,7 +346,10 @@ Cache hit when `(width, soft_cap, fence_gen)` all match. `effective_soft_cap` is
 // components/image_cache.rs
 struct CachedProtocol {
     proto: StatefulProtocol,
-    image_addr: usize,                  // Arc::as_ptr snapshot for stale-image detection
+    image_generation: u64,              // monotonic counter snapshot — bumped by
+                                        // SessionDetailView on every accepted Ok
+                                        // completion. Robust against allocator-reuse
+                                        // ABA AND same-bucket Error→Ready replays.
 }
 
 #[derive(Default)]
@@ -337,9 +363,11 @@ impl ImageCache {
     pub fn new() -> Self { Self::default() }
 
     pub fn inline_protocol_mut(&mut self, id: MermaidId,
-        image: &Arc<DynamicImage>, picker: &Picker) -> &mut StatefulProtocol;
+        image: &Arc<DynamicImage>, image_generation: u64,
+        picker: &Picker) -> &mut StatefulProtocol;
     pub fn overlay_protocol_mut(&mut self, id: MermaidId,
-        image: &Arc<DynamicImage>, picker: &Picker) -> &mut StatefulProtocol;
+        image: &Arc<DynamicImage>, image_generation: u64,
+        picker: &Picker) -> &mut StatefulProtocol;
 
     pub fn invalidate_all(&mut self);
     pub fn invalidate_id(&mut self, id: MermaidId);
@@ -356,49 +384,59 @@ Get-or-build is 3-armed (`Entry::Occupied` hit / `Occupied` stale / `Vacant`):
 
 ```rust
 fn get_or_build<'a>(map: &'a mut HashMap<MermaidId, CachedProtocol>,
-                   id: MermaidId, image: &Arc<DynamicImage>, picker: &Picker)
+                   id: MermaidId, image: &Arc<DynamicImage>,
+                   image_generation: u64, picker: &Picker)
     -> &'a mut StatefulProtocol
 {
-    let arc_addr = Arc::as_ptr(image) as usize;
     match map.entry(id) {
-        Entry::Occupied(o) if o.get().image_addr == arc_addr => &mut o.into_mut().proto,
+        Entry::Occupied(o) if o.get().image_generation == image_generation => {
+            &mut o.into_mut().proto
+        }
         Entry::Occupied(mut o) => {
+            // Generation drift — Ready was replaced (re-raster, retry, etc).
+            // Rebuild protocol from the new image.
             *o.get_mut() = CachedProtocol {
                 proto: picker.new_resize_protocol((**image).clone()),
-                image_addr: arc_addr,
+                image_generation,
             };
             &mut o.into_mut().proto
         }
         Entry::Vacant(v) => {
             &mut v.insert(CachedProtocol {
                 proto: picker.new_resize_protocol((**image).clone()),
-                image_addr: arc_addr,
+                image_generation,
             }).proto
         }
     }
 }
 ```
 
-`usize` (not `*const`) keeps `ImageCache` auto-`Send` while preserving address comparison semantics. No `unsafe`.
+**Why `image_generation: u64` not `Arc::as_ptr` (codex Rust-expert review catch):** the original spec used `Arc::as_ptr(image) as usize` as the identity tag. That's not memory-unsafe (the `usize` is never dereferenced), but it's not a structural cache guarantee either. Two failure modes:
+
+1. **Allocator reuse (gemini ABA finding):** when the old `Arc<DynamicImage>` is dropped and the new one allocated for the same diagram, the global allocator can reuse the same heap address. `image_addr` matches → false hit → renders stale pixels.
+2. **Same-bucket replay (codex Rust-expert finding):** any path that produces a fresh `Arc<DynamicImage>` at the *same* `rastered_at_bucket` (Error→Ready retry, duplicate completion, future "retry diagram" feature) would also false-hit if the cache snapshotted bucket instead of address.
+
+`image_generation: u64` is monotonically incremented by `SessionDetailView` on every accepted `Ok` completion for any `MermaidId`. Same id + same generation = same image. Different generation = rebuild. Eliminates both failure modes structurally.
 
 **Why two slots per id, not one:** ratatui-image caches the encoded payload but switching between a small Rect (inline) and a large Rect (overlay) recomputes footprint metadata each frame. Two slots avoids re-encode on view switch. Per-id memory overhead: a few KB.
 
-**Why `Arc::as_ptr` auto-invalidation:** the natural call site for explicit invalidation is `handle_mermaid_completed` (state-transition handler), but the cache is read in `render_inline_image` (render path). Without auto-detection, a future maintainer adding a re-raster path that mutates `Ready.image` without going through `handle_mermaid_completed` would silently break. Auto-check is a structural guarantee.
+**Why generation-based auto-invalidation is structural:** the natural call site for explicit invalidation is `handle_mermaid_completed` (state-transition handler), but the cache is read in `render_inline_image` (render path). Without auto-detection, a future maintainer adding a path that mutates `Ready.image` without bumping `image_generation` would silently break. The cache compares the snapshotted generation on every fetch — a generation drift forces rebuild. Robust by construction, not by discipline.
 
 ## API / Data Shape Changes (Consolidated)
 
 | Item | Before | After |
 |---|---|---|
-| `MermaidState::Ready` | `{ image: Arc<DynamicImage>, inline_protocol: RefCell<Option<StatefulProtocol>> }` | `{ image: Arc<DynamicImage>, code: String, rastered_at_bucket: u32 }` |
+| `MermaidState::Ready` | `{ image: Arc<DynamicImage>, inline_protocol: RefCell<Option<StatefulProtocol>> }` | `{ image: Arc<DynamicImage>, code: String, rastered_at_bucket: u32, image_generation: u64 }` |
 | `render_mermaid` | `(code: &str) -> Result<DynamicImage, _>` | `(code: &str, target_width: u32) -> Result<DynamicImage, _>` |
 | `Action::MermaidRenderRequest` | `{ session, ref_id, code }` | `{ session, ref_id, code, target_width: u32 }` |
 | `Action::MermaidRenderCompleted` | `{ session, ref_id, result }` | `{ session, ref_id, target_width: u32, result }` |
 | `compute_inline_height_rows` | `(image, pane_width_cols, picker: Option<&Picker>) -> u16` | `(image, pane_width_cols, pane_height_rows, cell_w_px: u32, cell_h_px: u32) -> u16` |
 | `RenderContext` | `{ mermaid_registry, picker }` | `{ mermaid_registry, picker, image_cache: &'a mut ImageCache }` |
-| `VirtualRowCacheEntry` | `{ rows, entry_row_starts, byte_ranges, width, generation, fence_gen }` | `{ ..., soft_cap: u16 }` (added) |
+| `VirtualRowCacheEntry` | `{ rows, entry_row_starts, byte_ranges, width, generation, fence_gen }` | `{ ..., soft_cap: u16, cell_w_px: u32, cell_h_px: u32 }` (added) |
 | `MermaidViewerView` | owns `protocol: Option<StatefulProtocol>` | owns `focused: Option<MermaidId>` only; protocol comes from `ImageCache` |
-| `SessionDetailView` | (existing fields) | + `image_cache: ImageCache`, + `in_flight_renders: HashSet<MermaidId>` |
-| `SessionDetailView::handle_mermaid_completed` | `(ref_id, result)` | `(ref_id, target_width, result)` |
+| `SessionDetailView` | (existing fields) | + `image_cache: ImageCache`, + `in_flight_renders: HashSet<MermaidId>`, + `next_image_generation: u64` |
+| `SessionDetailView::handle_mermaid_completed` | `(ref_id, result)` | `(ref_id, target_width, result)` — bumps `next_image_generation` on `Ok` and stores it in new `Ready` |
+| `ImageCache::*_protocol_mut` | (would have been) `(id, image, picker)` | `(id, image, image_generation: u64, picker)` — generation drift triggers rebuild |
 | `SessionDetailView::invalidate_inline_protocols` | (method on view) | `image_cache.invalidate_all()` |
 | New: `SessionDetailView::render_overlay` | — | `(&mut self, frame, area)` — encapsulates borrow split |
 | New: `SessionDetailView::maybe_request_rerasters` | — | `(&mut self, pane_cols, cell_w_px)` — bucket-up emit |
@@ -406,18 +444,19 @@ fn get_or_build<'a>(map: &'a mut HashMap<MermaidId, CachedProtocol>,
 
 ## Testing Strategy
 
-### Automated tests (33 total)
+### Automated tests (37 total)
 
 **`components/mermaid.rs#tests` — bucket function (5):**
 - `bucket_zero_returns_smallest`
 - `bucket_below_smallest_returns_smallest`
 - `bucket_exact_match_returns_match`
 - `bucket_just_above_returns_next`
-- `bucket_above_largest_caps_at_largest`
+- `bucket_at_3200_match` *(NEW — 6th bucket)*
+- `bucket_above_largest_caps_at_3200`
 
-**`components/react_trace/render.rs#tests` — height + card (20):**
+**`components/react_trace/render.rs#tests` — height + card (21):**
 
-Height formula (10):
+Height formula (11):
 - `height_no_regression_at_pane_80_natural_70` *(80/70 → 60)*
 - `height_grows_past_60_on_big_pane` *(120/80 → 80)*
 - `height_caps_at_hard_100` *(200/150 → 100)*
@@ -428,6 +467,7 @@ Height formula (10):
 - `height_preserves_trailing_context`
 - `height_preserves_legacy_60_at_medium_pane` *(80/40 → 40)*
 - `height_two_thirds_active_when_above_60` *(100/100 → 66)*
+- `height_pane_60_70_regresses_to_56` *(NEW — pins the documented small regression at pane_h=60..63)*
 
 Partial card (10):
 - `card_top_visible_says_scroll_down`
@@ -441,77 +481,86 @@ Partial card (10):
 - `card_early_returns_when_run_len_0`
 - `card_centers_when_run_len_exceeds_card_height`
 
-**`components/image_cache.rs#tests` — cache lifecycle (6):**
+**`components/image_cache.rs#tests` — cache lifecycle (8):**
 - `empty_cache_lengths_are_zero`
 - `inline_and_overlay_are_independent`
-- `arc_identity_drift_rebuilds_in_place`
+- `bucket_drift_rebuilds_in_place` *(renamed from `arc_identity_drift_rebuilds_in_place` — covers re-raster path via image_generation drift)*
+- `same_bucket_generation_rebuilds_protocol` *(NEW — explicit Error→Ready→same-bucket Ready replay; codex Rust-expert catch)*
 - `cell_size_drift_clears_both_maps` *(uses `check_cell_size_with`)*
 - `invalidate_all_clears_both_and_resets_size`
 - `invalidate_id_only_affects_one_id`
+- `repeat_protocol_fetch_is_o1_no_rebuild`
 
-**`components/react_trace/mod.rs#tests` — cache key (4):**
+**`components/react_trace/mod.rs#tests` — cache key (5):**
 - `cache_hit_when_soft_cap_unchanged`
 - `cache_miss_when_soft_cap_changes`
 - `cache_miss_when_width_changes`
 - `cache_miss_when_fence_gen_changes`
+- `cache_miss_when_cell_metric_changes` *(NEW — cols/soft_cap/fence_gen identical, cell_w_px or cell_h_px differs → miss; gemini/kimi catch)*
 
-**`views/session_detail.rs#tests` — re-raster + retention (9):**
+**`views/session_detail.rs#tests` — re-raster + retention (11):**
 
-Re-raster trigger (5):
+Re-raster trigger (6):
 - `maybe_request_rerasters_skips_when_bucket_unchanged`
 - `maybe_request_rerasters_emits_for_lower_bucketed_ready`
 - `maybe_request_rerasters_skips_pending`
 - `maybe_request_rerasters_skips_in_flight`
 - `maybe_request_rerasters_skips_just_landed_at_new_bucket`
+- `rerasters_coalesce_during_in_flight` *(NEW — emit at 1200, fire second emit at 2000 before completion → only one request in `pending_fence_actions`; claude-code catch)*
 
-Completion handler (4):
+Completion handler + initial dispatch (5):
 - `handle_completed_clears_in_flight`
 - `handle_completed_records_target_width_on_ready`
 - `handle_completed_retains_code_on_ready_to_ready`
 - `handle_completed_retains_code_on_pending_to_ready`
+- `handle_completed_bumps_image_generation_on_ok` *(NEW — pins I-A3)*
+- `handle_completed_never_decreases_bucket` *(NEW — pins I-R1; claude-code catch)*
+- `fence_emit_uses_current_bucket` *(NEW — fresh fence emit at session_detail.rs:1617/1792 with pane_w_px > 1200 → target_width ≥ 1200; pins I-R4)*
 
 **Integration smoke (1):**
-- `bucket_up_smoke_test` — `Picker::halfblocks()`, single Ready diagram, simulate pane grow, assert request emitted, completion handler runs, registry shows new bucket.
+- `bucket_up_smoke_test` — `Picker::halfblocks()`, single Ready diagram, simulate pane grow, assert request emitted, completion handler runs, registry shows new bucket + bumped image_generation, image_cache hits with rebuilt protocol.
 
 ### Manual verification (4 items)
 
 1. **iTerm2 retina, 200-col resize after a tall mermaid.**
-   Submit a `flowchart TD` with ≥6 nodes. Wait for Ready. Resize terminal 80 → 200 cols.
-   ✓ Image stays displayed continuously (no Pending flicker).
-   ✓ Within 200 ms post-resize, edges visibly sharpen.
+   Submit a `flowchart TD` with ≥6 nodes. Wait for Ready. Resize terminal 80 → 200 cols. Watch the trace logs (`tail -f .spur/logs/spur-tui.log`).
+   ✓ Image stays displayed continuously — no Pending placeholder appears between resize and re-render.
+   ✓ Trace log shows `MermaidRenderRequest { ..., target_width: <higher bucket> }` emitted within the same frame as resize.
+   ✓ Trace log shows `MermaidRenderCompleted` arriving with the new bucket; subsequent render rebuilds protocol (`image_cache rebuild`).
 
 2. **Scroll past a tall mermaid.**
    Append ~50 lines of text after a tall diagram. Press Down until partially visible.
-   ✓ Reserved height for the image area stays constant.
-   ✓ Card appears with `▼ scroll down` (top visible) or `▲ scroll up` (bottom visible).
+   ✓ Reserved height for the image area stays constant (compare row position of subsequent text before/after scroll into partial).
+   ✓ Card displays expected direction label: `▼ scroll down` if `first_row_within == 0`, `▲ scroll up` if bottom-edge is at total_rows.
+   ✓ Card text reads `📊 mermaid #N · X% visible · <direction>` where X = `(run_len * 100) / total_rows`.
 
 3. **Workers panel collapse during render.**
    Session with 5+ Ready diagrams. Toggle workers panel.
    ✓ Trace pane height changes.
-   ✓ No perceived latency / flicker.
-   ✓ Diagrams render at correct scale post-toggle.
+   ✓ No Pending placeholder appears between toggle and post-toggle image (the structural property; "no flicker" pinned to this).
+   ✓ Diagrams render at correct scale post-toggle (visual: text inside diagram boxes is legible; no aspect-ratio distortion).
 
 4. **Alt-v overlay round-trip.**
    Open Alt-v overlay on a Ready diagram. Press q. Re-open.
-   ✓ Re-open is instant (cached protocol).
-   ✓ Diagram identical to first open.
+   ✓ `image_cache.len()` overlay slot is non-empty after first open (instrument via debug-only log).
+   ✓ Re-open shows identical pixels (visual hash check via screenshot if practical).
 
 ## Locked Invariants
 
 | ID | Invariant |
 |---|---|
-| **I-A1** | `MermaidState::Ready` owns pixels (`Arc<DynamicImage>`) + provenance (`code`, `rastered_at_bucket`); never owns rendering protocol. |
+| **I-A1** | `MermaidState::Ready` owns pixels (`Arc<DynamicImage>`) + provenance (`code`, `rastered_at_bucket`, `image_generation`); never owns rendering protocol. |
 | **I-A2** | `ImageCache` has 2 independent slots per `MermaidId` (inline, overlay). |
-| **I-A3** | `ImageCache` auto-invalidates on `Arc::as_ptr` drift and on `picker.font_size()` drift. |
+| **I-A3** | `ImageCache` auto-invalidates on `image_generation` drift (per-id) and on `picker.font_size()` drift (whole cache). Generation-based identity is robust to allocator reuse AND same-bucket Error→Ready replays. |
 | **I-R1** | `rastered_at_bucket` per Ready is monotone non-decreasing. |
 | **I-R2** | `in_flight_renders.len() ≤ mermaid_registry.len()`; insert paired with `handle_mermaid_completed` removal (success or error). |
 | **I-R3** | Stale image displayed during re-raster (no Pending flicker). |
 | **I-R4** | New fences dispatched at `raster_width_for_pane(current pane)`, never always-800. |
 | **I-H1** | `effective_floor = INLINE_FLOOR_ROWS.min(soft_cap)`. Floor degrades cleanly on tiny panes. |
-| **I-H2** | `target_cap = max(2/3 pane, INLINE_LEGACY_CAP=60)`. No medium-pane regression vs today. |
+| **I-H2** | `target_cap = max(2/3 pane, INLINE_LEGACY_CAP=60)`. No regression for `pane_h ≥ 64`; for `pane_h ∈ [60, 63]` trailing-context wins (≤4-row regression accepted, see §3.2). |
 | **I-H3** | `soft_cap ≤ INLINE_HARD_CAP = 100`. Pathological diagrams never monopolise huge panes. |
 | **I-H4** | `soft_cap ≤ pane_h − INLINE_TRAILING_CONTEXT = 4`. At least 4 rows of trace context preserved below diagram. |
-| **I-H5** | `VirtualRowCacheEntry` cache key triple: `(width, soft_cap, fence_gen)`. |
+| **I-H5** | `VirtualRowCacheEntry` cache key quintuple: `(width, soft_cap, cell_w_px, cell_h_px, fence_gen)`. Cell metrics included so font swaps without SIGWINCH still invalidate. |
 | **I-H6** | `render_partial_card` vertically centres card when `card_height < run_len`. |
 | **I-H7** | Direction labels combine arrow + word (`▼ scroll down`, not just `▼`). |
 
