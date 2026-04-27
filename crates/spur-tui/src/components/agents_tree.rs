@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::time::SystemTime;
 
 use ratatui::{
     layout::Rect,
@@ -258,17 +257,12 @@ impl AgentsTree {
             LifecycleState::Cancelled => Color::DarkGray,
         };
 
-        let elapsed_str = node
-            .current_attempt()
-            .map(|a| {
-                let now = SystemTime::now();
-                let secs = now
-                    .duration_since(a.started_at)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                format!("{}m {:02}s", secs / 60, secs % 60)
-            })
-            .unwrap_or_default();
+        let elapsed_str = if node.attempts.is_empty() {
+            String::new()
+        } else {
+            let secs = node.elapsed_secs();
+            format!("{}m {:02}s", secs / 60, secs % 60)
+        };
 
         let cost = node.current_attempt().map(|a| a.cost_usd).unwrap_or(0.0);
         let cost_str = if cost > 0.0 {
