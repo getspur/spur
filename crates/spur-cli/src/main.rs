@@ -12,6 +12,7 @@ use commands::auth::AuthCommands;
 use commands::flags::FlagsCommands;
 use spur_acp::config::SpurConfig;
 use spur_acp::{BrainSessionId, SessionId};
+use spur_cli::pm_service_gate_allows_construction;
 use spur_core::{Orchestrator, RunOpts};
 use spur_license::SpurLicense;
 
@@ -659,9 +660,7 @@ async fn main() -> Result<()> {
                 spur_core::license_runtime::to_event_state(license.current_state());
 
             // Create PmService (optional — returns None if no backend available)
-            let pm_service = if license
-                .feature_gate()
-                .has(spur_license::FeatureKey::PM_INTEGRATION)
+            let pm_service = if pm_service_gate_allows_construction(license.feature_gate().as_ref())
             {
                 spur_pm::PmService::try_new(
                     config.pm.github.as_ref().and_then(|g| g.repo.clone()),
@@ -937,10 +936,7 @@ async fn build_interactive_host(
     brain: Option<String>,
 ) -> Result<spur_interactive::InteractiveFrontendHost> {
     let license = SpurLicense::from_env_or_disabled();
-    let pm_service = if license
-        .feature_gate()
-        .has(spur_license::FeatureKey::PM_INTEGRATION)
-    {
+    let pm_service = if pm_service_gate_allows_construction(license.feature_gate().as_ref()) {
         spur_pm::PmService::try_new(
             config.pm.github.as_ref().and_then(|g| g.repo.clone()),
             config.pm.beads.as_ref().is_none_or(|b| b.enabled),
