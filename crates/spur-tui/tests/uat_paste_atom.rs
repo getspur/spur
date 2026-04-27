@@ -79,16 +79,6 @@ fn f3_u2_submit_emits_full_text_action() {
     h.send_paste(&pasted);
     h.send_key(KeyCode::Enter);
 
-    let (captured, ranges, interrupt) = h
-        .app_mut()
-        .dashboard_mut_for_test()
-        .input_bar_mut_for_test()
-        .take_submit_capture()
-        .expect("submit capture");
-    assert_eq!(captured, pasted);
-    assert!(ranges.is_empty());
-    assert!(!interrupt);
-
     let action = h.last_action().expect("outbound user input");
     let (text, interrupt) = submitted_text_and_interrupt(action);
     assert_eq!(text, pasted);
@@ -103,15 +93,6 @@ fn f3_u3_bang_prefix_paste_propagates_interrupt() {
     h.send_paste(pasted);
     h.send_key(KeyCode::Enter);
 
-    let (captured, _, interrupt) = h
-        .app_mut()
-        .dashboard_mut_for_test()
-        .input_bar_mut_for_test()
-        .take_submit_capture()
-        .expect("submit capture");
-    assert_eq!(captured, pasted);
-    assert!(interrupt, "expanded bang-prefixed paste must interrupt");
-
     let action = h.last_action().expect("outbound user input");
     let (text, interrupt) = submitted_text_and_interrupt(action);
     assert_eq!(text, pasted);
@@ -119,7 +100,7 @@ fn f3_u3_bang_prefix_paste_propagates_interrupt() {
 }
 
 #[test]
-fn f3_u4_51st_paste_evicts_oldest() {
+fn f3_u4_referenced_pastes_are_retained_over_cap() {
     let mut h = TestHarness::new(80, 24);
 
     for i in 1..=55 {
@@ -131,14 +112,8 @@ fn f3_u4_51st_paste_evicts_oldest() {
         .dashboard_mut_for_test()
         .input_bar_mut_for_test();
     let keys = bar.paste_ids_for_test();
-    assert_eq!(keys.len(), 50);
-    for evicted in 1..=5 {
-        assert!(
-            !keys.contains(&evicted),
-            "paste id {evicted} should have been evicted; keys={keys:?}"
-        );
-    }
-    for retained in 6..=55 {
+    assert_eq!(keys.len(), 55);
+    for retained in 1..=55 {
         assert!(
             keys.contains(&retained),
             "paste id {retained} should be retained; keys={keys:?}"
