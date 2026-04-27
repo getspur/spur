@@ -91,6 +91,21 @@ pub struct Attempt {
     pub error: Option<String>,
 }
 
+impl Attempt {
+    /// Elapsed time on this attempt as of `now`. If `ended_at` is set
+    /// (terminal phase observed), the result freezes at `ended_at - started_at`
+    /// regardless of `now`. If `now` is somehow earlier than `started_at`
+    /// (clock skew), returns `Duration::ZERO` rather than panicking.
+    ///
+    /// `now` is injected so callers in tests can supply a fixed clock for
+    /// deterministic snapshot output.
+    pub fn elapsed_at(&self, now: std::time::SystemTime) -> std::time::Duration {
+        let end = self.ended_at.unwrap_or(now);
+        end.duration_since(self.started_at)
+            .unwrap_or(std::time::Duration::ZERO)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutorNode {
     pub id: ExecutorId,
@@ -162,12 +177,14 @@ impl ExecutorNode {
         self.attempts.last_mut()
     }
 
-    /// Seconds since this executor was spawned. Derives from the first
-    /// attempt's started_at. Safe to call from render (not replay).
+    /// Seconds elapsed on the executor's first attempt. Freezes at
+    /// `ended_at - started_at` once the attempt is terminal; otherwise
+    /// ticks against wall-clock `now`. Safe to call from render
+    /// (not replay — this consults `SystemTime::now()`).
     pub fn elapsed_secs(&self) -> u64 {
         self.attempts
             .first()
-            .and_then(|a| a.started_at.elapsed().ok().map(|d| d.as_secs()))
+            .map(|a| a.elapsed_at(SystemTime::now()).as_secs())
             .unwrap_or(0)
     }
 
@@ -185,5 +202,93 @@ impl ExecutorNode {
             .as_ref()
             .map(|d| (d.insertions, d.deletions))
             .unwrap_or((0, 0))
+    }
+}
+
+#[cfg(test)]
+mod attempt_elapsed_tests {
+    use super::*;
+    use spur_acp::SessionId;
+    use std::time::Duration;
+
+    fn fixture(started: SystemTime, ended: Option<SystemTime>) -> Attempt {
+        Attempt {
+            session_id: SessionId("s".into()),
+            started_at: started,
+            ended_at: ended,
+            status: AttemptStatus::Running,
+            cost_usd: 0.0,
+            artifacts: vec![],
+            error: None,
+        }
+    }
+
+    #[test]
+    fn running_attempt_elapsed_uses_now() {
+        let started = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(150);
+        let a = fixture(started, None);
+        assert_eq!(a.elapsed_at(now), Duration::from_secs(50));
+    }
+
+    #[test]
+    fn finished_attempt_elapsed_uses_ended_at() {
+        let started = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        let ended = SystemTime::UNIX_EPOCH + Duration::from_secs(120);
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(999);
+        let a = fixture(started, Some(ended));
+        // elapsed should freeze at ended − started, ignoring `now`.
+        assert_eq!(a.elapsed_at(now), Duration::from_secs(20));
+    }
+
+    #[test]
+    fn negative_skew_is_zero() {
+        // If clocks skew so ended_at < started_at (rare), saturate to ZERO.
+        let started = SystemTime::UNIX_EPOCH + Duration::from_secs(200);
+        let ended = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(300);
+        let a = fixture(started, Some(ended));
+        assert_eq!(a.elapsed_at(now), Duration::ZERO);
+    }
+
+    #[test]
+    fn executor_node_elapsed_secs_freezes_when_first_attempt_ended() {
+        // ExecutorNode::elapsed_secs derives from the FIRST attempt's started_at.
+        // When that attempt has ended_at set, elapsed must freeze.
+        let started = SystemTime::now() - Duration::from_secs(60);
+        let ended = SystemTime::now() - Duration::from_secs(30);
+        let attempt = Attempt {
+            session_id: SessionId("s".into()),
+            started_at: started,
+            ended_at: Some(ended),
+            status: AttemptStatus::Succeeded,
+            cost_usd: 0.0,
+            artifacts: vec![],
+            error: None,
+        };
+        let node = ExecutorNode {
+            id: ExecutorId::new("e"),
+            parent_id: None,
+            child_ids: vec![],
+            agent: "a".into(),
+            role: spur_acp::Role::Executor,
+            task_spec: String::new(),
+            phase: LifecycleState::Succeeded,
+            attempts: vec![attempt],
+            pending_review: None,
+            last_event_at: None,
+            tool_call_count: 0,
+            latest_tool_call: None,
+            files_touched_count: 0,
+            latest_diff_summary: None,
+            latest_diff_text: None,
+            last_error: None,
+            stream_buffer: VecDeque::new(),
+            issue_id: None,
+            delegation_id: None,
+            peer_edges: vec![],
+        };
+        // ended − started = 30s. Frozen.
+        assert_eq!(node.elapsed_secs(), 30);
     }
 }
