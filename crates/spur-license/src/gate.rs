@@ -97,7 +97,7 @@ impl FeatureGate {
             state
                 .features
                 .iter()
-                .filter_map(|s| FeatureKey::from_known(s))
+                .filter_map(|s| resolve_jwt_feature_key(s))
                 .collect()
         };
 
@@ -216,6 +216,56 @@ fn parse_quota_value(val: &serde_json::Value) -> Option<QuotaValue> {
     }
 }
 
+fn resolve_jwt_feature_key(s: &str) -> Option<FeatureKey> {
+    FeatureKey::from_known(s).or_else(|| {
+        let mapped = legacy_to_wave9_mapping(s)?;
+        tracing::warn!(
+            legacy_feature = s,
+            mapped_feature = mapped.as_str(),
+            "mapped legacy license feature to Wave-9 entitlement"
+        );
+        Some(mapped)
+    })
+}
+
+fn legacy_to_wave9_mapping(s: &str) -> Option<FeatureKey> {
+    match s {
+        "brain_session" => Some(FeatureKey::CORE_CORE_BRAIN_SESSION),
+        "single_worker" => None,
+        "worktree_isolation" => Some(FeatureKey::WORKTREE_CORE_ISOLATION),
+        "manual_review" => Some(FeatureKey::CORE_CORE_REVIEW),
+        "event_persistence" => Some(FeatureKey::CORE_CORE_EVENT_PIPELINE),
+        "basic_lineage" => Some(FeatureKey::CORE_CORE_EVENT_PIPELINE),
+        "tui_dashboard" => Some(FeatureKey::TUI_CORE_VIEW_DASHBOARD),
+        "basic_cost_display" => Some(FeatureKey::COST_CORE_SESSION_DISPLAY),
+        "basic_notifications" => Some(FeatureKey::CORE_CORE_EVENT_PIPELINE),
+        "local_config" => None,
+        "mcp_standard_tools" => Some(FeatureKey::MCP_CORE_SERVER_DISPATCH),
+        "parallel_workers" => Some(FeatureKey::CORE_CORE_PARALLEL_WORKERS),
+        "auto_review_policies" => Some(FeatureKey::CORE_PRO_REVIEW_AUTO_APPROVE),
+        "session_resume" => Some(FeatureKey::CORE_CORE_SESSION_RESUME),
+        "advanced_cost_analytics" => Some(FeatureKey::COST_PRO_PER_PROJECT_TRACKING),
+        "custom_worktree_policies" => None,
+        "custom_notifications" => None,
+        "extended_retention" => None,
+        "tui_session_detail" => Some(FeatureKey::TUI_CORE_VIEW_SESSION_DETAIL),
+        "pm_integration" => Some(FeatureKey::PM_CORE_BROWSE),
+        "shared_lineage" => None,
+        "team_cost_dashboard" => None,
+        "centralized_config" => None,
+        "rbac" => None,
+        "shared_review_queue" => None,
+        "pm_webhooks" => None,
+        "sso_saml" => None,
+        "audit_logs" => None,
+        "custom_policies" => None,
+        "custom_mcp_tools" => None,
+        "dedicated_support" => None,
+        "sla_guarantee" => None,
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -249,6 +299,92 @@ mod tests {
 
         assert_eq!(gate.tier(), Tier::Pro);
         assert!(gate.has(FeatureKey::PM_PRO_BEADS_ADVANCED));
+    }
+
+    #[test]
+    fn pro_cached_jwt_legacy_features_map_to_wave9_keys_and_warns() {
+        use std::fmt::Write as _;
+        use std::sync::{Arc, Mutex};
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::layer::{Context, Layer};
+        use tracing_subscriber::prelude::*;
+
+        struct WarnCapture(Arc<Mutex<Vec<String>>>);
+
+        impl<S> Layer<S> for WarnCapture
+        where
+            S: tracing::Subscriber,
+        {
+            fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+                if *event.metadata().level() != tracing::Level::WARN {
+                    return;
+                }
+
+                let mut visitor = WarnVisitor {
+                    fields: String::new(),
+                };
+                event.record(&mut visitor);
+                self.0.lock().unwrap().push(visitor.fields);
+            }
+        }
+
+        struct WarnVisitor {
+            fields: String,
+        }
+
+        impl Visit for WarnVisitor {
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                if !self.fields.is_empty() {
+                    self.fields.push(' ');
+                }
+                let _ = write!(self.fields, "{}={value:?}", field.name());
+            }
+        }
+
+        let warnings = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(WarnCapture(Arc::clone(&warnings)));
+
+        let resolved = tracing::subscriber::with_default(subscriber, || {
+            let policy = PolicyResolver::embedded();
+            let gate = FeatureGate::new(policy);
+
+            let features = BTreeSet::from([
+                "parallel_workers".to_string(),
+                "auto_review_policies".to_string(),
+                "tui_dashboard".to_string(),
+            ]);
+            let pro_state = LicenseState::active_validated(Plan::Pro, features);
+            gate.update_state(&pro_state);
+
+            (
+                gate.has(FeatureKey::CORE_CORE_PARALLEL_WORKERS),
+                gate.has(FeatureKey::CORE_PRO_REVIEW_AUTO_APPROVE),
+                gate.has(FeatureKey::TUI_CORE_VIEW_DASHBOARD),
+            )
+        });
+        assert!(resolved.0);
+        assert!(resolved.1);
+        assert!(resolved.2);
+
+        let warnings = warnings.lock().unwrap();
+        assert!(
+            warnings.iter().any(|event| {
+                event.contains("mapped legacy license feature")
+                    && event.contains("parallel_workers")
+                    && event.contains("core_core_parallel_workers")
+            }),
+            "expected legacy feature fallback warning, got {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn legacy_mapping_skips_quota_only_and_unmapped_keys() {
+        assert_eq!(
+            legacy_to_wave9_mapping("brain_session"),
+            Some(FeatureKey::CORE_CORE_BRAIN_SESSION)
+        );
+        assert_eq!(legacy_to_wave9_mapping("single_worker"), None);
+        assert_eq!(legacy_to_wave9_mapping("local_config"), None);
     }
 
     #[test]

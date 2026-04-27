@@ -55,6 +55,6 @@ fn community_default_quotas() {
     );
     assert_eq!(
         gate.quota(QuotaKey::EventRetentionBytes),
-        Some(QuotaValue::Count(128 * 1024 * 1024))
+        Some(QuotaValue::Bytes(128 * 1024 * 1024))
     );
 }

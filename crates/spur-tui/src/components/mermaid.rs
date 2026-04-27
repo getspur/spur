@@ -136,7 +136,7 @@ impl std::error::Error for RenderError {}
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 /// Default target pixel-width for rasterised diagrams.
-const DEFAULT_WIDTH: u32 = 800;
+pub const DEFAULT_WIDTH: u32 = 800;
 
 /// Render a Mermaid diagram source string to a [`DynamicImage`].
 ///

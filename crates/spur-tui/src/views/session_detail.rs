@@ -1619,6 +1619,7 @@ impl View for SessionDetailView {
                                     session: self.session_id.clone(),
                                     ref_id: fence.id,
                                     code: fence.code,
+                                    target_width: crate::components::mermaid::DEFAULT_WIDTH,
                                 },
                             );
                         }
@@ -1794,6 +1795,7 @@ impl View for SessionDetailView {
                         session: self.session_id.clone(),
                         ref_id: fence.id,
                         code: fence.code,
+                        target_width: crate::components::mermaid::DEFAULT_WIDTH,
                     });
             }
         }
