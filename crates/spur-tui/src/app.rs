@@ -2013,11 +2013,12 @@ impl App {
                 self.dashboard.set_focused_node(None);
             }
             Action::JumpToReview => {
-                // Cycle forward through pending reviews in insertion order.
-                // Skip the currently-focused node so repeated presses advance
-                // to the next review instead of re-landing on the same one.
+                // Cycle forward through pending reviews in DISPLAY order
+                // (newest first), so `r`/`N` flows top-to-bottom on screen
+                // matching the AgentsTree visual ordering.
                 let current = self.dashboard.focused_node().cloned();
-                let reviews = self.lineage.pending_reviews();
+                let mut reviews = self.lineage.pending_reviews();
+                reviews.reverse();
                 let next = reviews
                     .iter()
                     .position(|id| Some(id) == current.as_ref())
@@ -2034,9 +2035,11 @@ impl App {
                 }
             }
             Action::JumpToPreviousReview => {
-                // Cycle backward through pending reviews in insertion order.
+                // Cycle backward through pending reviews in DISPLAY order
+                // (newest first); "previous" means visually upward on screen.
                 let current = self.dashboard.focused_node().cloned();
-                let reviews = self.lineage.pending_reviews();
+                let mut reviews = self.lineage.pending_reviews();
+                reviews.reverse();
                 let prev = reviews
                     .iter()
                     .position(|id| Some(id) == current.as_ref())
