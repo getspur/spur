@@ -121,8 +121,15 @@ impl AgentsTree {
 
     /// Pre-order traversal of visible nodes in display order
     /// (newest root first; within each node, newest child first).
-    /// Single source of truth for tree iteration — `render` and
-    /// `render_lineage_to_strings` both consume this.
+    /// Used by selection navigation (`select_next`/`select_prev`) and to
+    /// keep the selected row scrolled into view in `render`.
+    ///
+    /// NOTE: `render` and `render_lineage_to_strings` currently duplicate
+    /// this reversed traversal because they need richer per-node context
+    /// (ratatui `Line<'a>` and connector glyphs vs. flat `Vec<ExecutorId>`).
+    /// All three walkers MUST stay in sync on iteration order. A future
+    /// refactor could collapse them by emitting `(id, depth, is_last,
+    /// ancestor_states)` tuples from a single shared traversal.
     fn visible_order(&self, lineage: &ExecutorLineage) -> Vec<ExecutorId> {
         let mut out = Vec::new();
         for rid in lineage.root_ids().iter().rev() {
