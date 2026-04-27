@@ -59,3 +59,23 @@ fn streaming_chunk_does_not_corrupt_anchor_via_stale_layout() {
         "scroll must no-op while line_cache.generation != self.generation"
     );
 }
+
+#[test]
+fn toggle_observe_collapsed_does_not_corrupt_anchor_via_stale_layout() {
+    let mut t = seeded_trace(50);
+    t.last_visible_height = 10;
+    t.seed_line_cache_for_tests(80, &HashMap::new());
+
+    t.scroll_up_by(5);
+    let anchor_after_initial_scroll = t.anchor;
+
+    // Toggle bumps generation via invalidate_cache without re-seeding cache.
+    t.toggle_observe_collapsed();
+
+    t.scroll_up_by(5);
+
+    assert_eq!(
+        t.anchor, anchor_after_initial_scroll,
+        "scroll must no-op after toggle_observe_collapsed bumps generation"
+    );
+}
