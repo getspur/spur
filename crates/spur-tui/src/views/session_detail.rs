@@ -965,13 +965,14 @@ impl SessionDetailView {
         });
     }
 
-    /// Push a one-shot trace entry telling the user how to persist their
-    /// current edit-mode choice. Called when the runtime mode diverges from
-    /// the configured mode after `Alt-i` or `/vim`.
+    /// Push a trace entry telling the user how to persist their current
+    /// edit-mode choice. Called whenever the runtime mode diverges from the
+    /// configured mode after `Alt-i` or `/vim` — fires per divergent toggle,
+    /// not once per session, so repeated cycles will repeat the hint.
     pub fn push_persist_hint(&mut self, mode_label: &str) {
         let msg = format!(
             "{mode_label} mode (session). Persist: spur config set tui.edit_mode {}",
-            mode_label.to_lowercase()
+            mode_label.to_ascii_lowercase()
         );
         self.react_trace.push(TraceEntry {
             kind: TraceKind::Think,
