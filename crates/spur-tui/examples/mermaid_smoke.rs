@@ -31,7 +31,7 @@ fn main() {
 
     for (name, src) in samples {
         print!("rendering {name}… ");
-        match render_mermaid(src) {
+        match render_mermaid(src, 800) {
             Ok(img) => {
                 let (w, h) = img.dimensions();
                 let path = out_dir.join(format!("{name}.png"));
