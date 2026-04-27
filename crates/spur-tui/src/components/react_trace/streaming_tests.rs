@@ -2472,12 +2472,14 @@ fn mixed_full_then_compact_on_same_trace_uses_compact_layout() {
     );
 
     let registry = HashMap::new();
-    let ctx = crate::components::react_trace::RenderContext {
+    let mut image_cache = crate::components::image_cache::ImageCache::new();
+    let mut ctx = crate::components::react_trace::RenderContext {
         mermaid_registry: &registry,
         picker: None,
+        image_cache: &mut image_cache,
     };
     let mut term = Terminal::new(TestBackend::new(20, 6)).unwrap();
-    term.draw(|f| trace.render_with_ctx(f, Rect::new(0, 0, 20, 6), &ctx, None))
+    term.draw(|f| trace.render_with_ctx(f, Rect::new(0, 0, 20, 6), &mut ctx, None))
         .unwrap();
     term.draw(|f| trace.render_compact(f, Rect::new(0, 0, 20, 2)))
         .unwrap();
