@@ -258,6 +258,7 @@ async fn observe_ready_returns_unblocked_task_only() {
         Arc::new(Notify::new()),
         None,
         Some("P1".into()),
+        common::server_builder::pro_feature_gate(),
     );
 
     let ready_ids = reconciler
@@ -313,6 +314,7 @@ async fn observe_ready_summaries_preserve_plan_labels() {
         Arc::new(Notify::new()),
         None,
         Some("P1".into()),
+        common::server_builder::pro_feature_gate(),
     );
 
     let summaries = reconciler
@@ -415,6 +417,7 @@ async fn observe_ready_via_br_returns_ready_tasks() {
         Arc::new(Notify::new()),
         None,
         Some("P1".into()),
+        common::server_builder::pro_feature_gate(),
     );
 
     // --- Call the br fallback path directly (bypasses bv entirely) ---
@@ -525,6 +528,7 @@ async fn epic_closes_when_scoped_children_terminal() {
         Arc::new(Notify::new()),
         None,
         Some("P1".into()),
+        common::server_builder::pro_feature_gate(),
     );
 
     reconciler
@@ -633,6 +637,7 @@ async fn all_approved_epic_emits_plan_ready_to_merge() {
             materializer: test_materializer(),
         }),
         Some("P1".into()),
+        common::server_builder::pro_feature_gate(),
     );
 
     reconciler
@@ -706,6 +711,7 @@ async fn tick_once_persists_dispatch_before_queue_send() {
             materializer: test_materializer(),
         }),
         Some("plan-1".into()),
+        common::server_builder::pro_feature_gate(),
     );
 
     let did_work = reconciler.tick_once().await.expect("tick_once");
@@ -775,6 +781,7 @@ async fn tick_once_clears_dispatch_label_when_send_fails() {
             materializer: test_materializer(),
         }),
         Some("plan-1".into()),
+        common::server_builder::pro_feature_gate(),
     );
 
     let _ = reconciler.tick_once().await;
@@ -861,6 +868,7 @@ async fn tick_once_skips_broken_plan_and_dispatches_other_ready_work() {
             materializer: test_materializer(),
         }),
         None,
+        common::server_builder::pro_feature_gate(),
     );
 
     let did_work = reconciler
@@ -906,9 +914,13 @@ async fn resolve_dispatch_orphan_emits_breadcrumb_and_clears_label() {
     let pm = Arc::new(pm);
     let adv = pm.advanced().expect("advanced");
 
-    let cleared = spur_mcp::server::resolve_dispatch_orphan(Arc::clone(&pm), &task_id)
-        .await
-        .expect("resolve dispatch orphan");
+    let cleared = spur_mcp::server::resolve_dispatch_orphan(
+        Arc::clone(&pm),
+        common::server_builder::pro_feature_gate(),
+        &task_id,
+    )
+    .await
+    .expect("resolve dispatch orphan");
     assert!(cleared, "dispatch orphan should be cleared");
 
     let issue = pm.get_issue(&task_id).await.expect("get issue");
@@ -967,9 +979,13 @@ async fn resolve_dispatch_orphan_preserves_legacy_ready_for_review_marker() {
         .expect("expected Some(PmService)");
     let pm = Arc::new(pm);
 
-    let cleared = spur_mcp::server::resolve_dispatch_orphan(Arc::clone(&pm), &task_id)
-        .await
-        .expect("resolve dispatch orphan");
+    let cleared = spur_mcp::server::resolve_dispatch_orphan(
+        Arc::clone(&pm),
+        common::server_builder::pro_feature_gate(),
+        &task_id,
+    )
+    .await
+    .expect("resolve dispatch orphan");
     assert!(
         !cleared,
         "legacy ready-for-review marker should block dispatch orphan cleanup"
@@ -1047,7 +1063,7 @@ async fn execute_epic_persists_execution_scope_labels_on_epic_and_tasks() {
         None,
         test_continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        spur_mcp::server::community_feature_gate(),
+        common::server_builder::pro_feature_gate(),
     );
     server.set_workers(vec![spur_mcp::WorkerInfo {
         name: "codex".into(),
@@ -1136,7 +1152,7 @@ async fn execute_epic_reprojects_persisted_non_terminal_state_before_starting_fr
         None,
         test_continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        spur_mcp::server::community_feature_gate(),
+        common::server_builder::pro_feature_gate(),
     );
     server.set_workers(vec![spur_mcp::WorkerInfo {
         name: "codex".into(),
@@ -1238,7 +1254,7 @@ async fn execute_epic_rolls_back_epic_scope_when_task_scope_persist_fails() {
         None,
         test_continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        spur_mcp::server::community_feature_gate(),
+        common::server_builder::pro_feature_gate(),
     );
     server.set_workers(vec![spur_mcp::WorkerInfo {
         name: "bad/agent".into(),
@@ -1302,7 +1318,7 @@ async fn submit_plan_default_notify_path_dispatches_ready_task() {
         None,
         test_continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        spur_mcp::server::community_feature_gate(),
+        common::server_builder::pro_feature_gate(),
     );
     server.set_repo_root(dir.path().to_path_buf());
     server.set_reconciler_enabled(true, None);
@@ -1407,7 +1423,7 @@ async fn execute_epic_default_notify_path_dispatches_ready_task() {
         None,
         test_continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        spur_mcp::server::community_feature_gate(),
+        common::server_builder::pro_feature_gate(),
     );
     server.set_repo_root(dir.path().to_path_buf());
     server.set_reconciler_enabled(true, None);
@@ -1493,7 +1509,7 @@ async fn execute_epic_shutdown_abort_does_not_emit_plan_snapshot() {
         Some(sink_ref),
         test_continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        spur_mcp::server::community_feature_gate(),
+        common::server_builder::pro_feature_gate(),
     );
     server.set_workers(vec![spur_mcp::WorkerInfo {
         name: "codex".into(),
@@ -1575,7 +1591,14 @@ async fn reconciler_cancels_during_tick() {
         idle_ceiling: Duration::from_millis(50),
         backoff_factor: 2,
     };
-    let reconciler = Reconciler::new(cfg, pm, Arc::new(Notify::new()), None, None);
+    let reconciler = Reconciler::new(
+        cfg,
+        pm,
+        Arc::new(Notify::new()),
+        None,
+        None,
+        common::server_builder::pro_feature_gate(),
+    );
 
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
     let handle = tokio::spawn(async move { reconciler.run(cancel_rx).await });
@@ -1661,6 +1684,7 @@ async fn hybrid_fast_forward_matches_polling_projection() {
             materializer: test_materializer(),
         }),
         Some("plan-1".into()),
+        common::server_builder::pro_feature_gate(),
     );
 
     // Spawn run() with a long interval; without fast-forward it would not tick for 60s.

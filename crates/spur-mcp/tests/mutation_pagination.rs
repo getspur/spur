@@ -18,6 +18,8 @@ use serde_json::json;
 use spur_mcp::plan::mutation::{MutationBatch, PlanMutationOp, TaskDraft};
 use uuid::Uuid;
 
+mod common;
+
 const FILLER_COUNT: usize = 10_050;
 
 fn br_available() -> bool {
@@ -144,8 +146,8 @@ fn set_issue_timestamp(repo: &Path, issue_id: &str, timestamp: &str) -> Result<(
 
 mod perf_regressions {
     use super::{
-        br_available, br_id, mutation_batch, run_br, seed_filler_issues, set_issue_timestamp,
-        sqlite_available, task_draft, FILLER_COUNT,
+        br_available, br_id, common, mutation_batch, run_br, seed_filler_issues,
+        set_issue_timestamp, sqlite_available, task_draft, FILLER_COUNT,
     };
     use spur_mcp::plan::mutation::{DepRewirePolicy, PlanMutationOp};
     use spur_mcp::plan::mutation_executor::apply_mutation;
@@ -251,9 +253,13 @@ mod perf_regressions {
             }],
         );
 
-        let child_ids = apply_mutation(pm.clone(), &batch)
-            .await
-            .expect("apply_mutation should succeed");
+        let child_ids = apply_mutation(
+            pm.clone(),
+            common::server_builder::pro_feature_gate(),
+            &batch,
+        )
+        .await
+        .expect("apply_mutation should succeed");
         assert_eq!(child_ids.len(), 2, "expected two split children");
 
         for downstream_id in [&head_downstream, &boundary_downstream] {

@@ -25,6 +25,7 @@ use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 use tracing::{debug, error, info};
 
 use spur_acp::*;
+use spur_license::FeatureKey;
 use spur_pm::{pidfile::PidFileGuard, IssueFilter, IssueUpdate, PmService, PrParams};
 use spur_worktree::WorktreeManager;
 
@@ -45,6 +46,7 @@ use crate::tools::{self, DelegationChannel, DelegationRequest};
 const COMPLETED_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 #[cfg(test)]
 const PRODUCER_MAX_FIELD_BYTES: usize = 8192;
+const MCP_NOT_LICENSED_ERROR_CODE: i32 = -32041;
 
 // ─── JSON-RPC types ───────────────────────────────────────────────────
 
@@ -105,6 +107,42 @@ impl JsonRpcResponse {
     fn internal_error(id: Value, msg: impl Into<String>) -> Self {
         Self::error(id, -32603, msg)
     }
+
+    fn mcp_error(id: Value, error: McpError) -> Self {
+        Self {
+            jsonrpc: "2.0".into(),
+            id,
+            result: None,
+            error: Some(JsonRpcError {
+                code: i64::from(error.code.0),
+                message: error.message.into_owned(),
+                data: error.data,
+            }),
+        }
+    }
+}
+
+pub(crate) fn require_feature(
+    key: FeatureKey,
+    feature_gate: &spur_license::FeatureGate,
+) -> Result<(), McpError> {
+    if feature_gate.has(key) {
+        return Ok(());
+    }
+
+    Err(McpError::new(
+        rmcp::model::ErrorCode(MCP_NOT_LICENSED_ERROR_CODE),
+        format!("not licensed for feature {}", key.as_str()),
+        Some(json!({
+            "reason": "not_licensed",
+            "feature": key.as_str(),
+            "required_tier": "pro"
+        })),
+    ))
+}
+
+pub(crate) fn feature_error_message(error: McpError) -> String {
+    error.message.into_owned()
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -392,10 +430,25 @@ pub fn validate_parallel_args(args: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// Build the embedded Community-tier feature gate used by fallback and tests.
 pub fn community_feature_gate() -> Arc<spur_license::FeatureGate> {
     Arc::new(spur_license::FeatureGate::new(
         spur_license::policy::PolicyResolver::embedded(),
     ))
+}
+
+#[cfg(test)]
+fn pro_feature_gate() -> Arc<spur_license::FeatureGate> {
+    let gate = Arc::new(spur_license::FeatureGate::new(
+        spur_license::policy::PolicyResolver::embedded(),
+    ));
+    let features =
+        std::collections::BTreeSet::from([FeatureKey::PM_PRO_BEADS_ADVANCED.as_str().to_string()]);
+    gate.update_state(&spur_license::LicenseState::active_validated(
+        spur_license::Plan::Pro,
+        features,
+    ));
+    gate
 }
 
 pub fn parse_delegation_plan(
@@ -483,6 +536,7 @@ pub struct EpicSubgraph {
 /// of scope for v1 — beads CLI doesn't expose txn primitives.
 pub async fn build_epic_subgraph(
     pm: &spur_pm::PmService,
+    feature_gate: &spur_license::FeatureGate,
     plan_id: &str,
     epic_title: &str,
     epic_body: Option<&str>,
@@ -490,6 +544,8 @@ pub async fn build_epic_subgraph(
 ) -> Result<EpicSubgraph, String> {
     let (epic_create, child_specs) =
         plan_epic_issue_creates(plan_id, epic_title, epic_body, tasks)?;
+    require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED, feature_gate)
+        .map_err(feature_error_message)?;
     let advanced = pm.advanced();
 
     let epic_id = pm
@@ -608,9 +664,12 @@ impl PersistedPlanBootstrap {
 
 async fn read_persisted_plan_bootstrap(
     pm: &spur_pm::PmService,
+    feature_gate: &spur_license::FeatureGate,
     plan_id: &str,
     epic_id: &str,
 ) -> Result<PersistedPlanBootstrap, String> {
+    require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED, feature_gate)
+        .map_err(feature_error_message)?;
     let adv = pm
         .advanced()
         .ok_or_else(|| "persisted bootstrap recovery requires beads backend".to_string())?;
@@ -647,8 +706,11 @@ struct PersistedTaskCompletion {
 
 async fn read_latest_task_completion(
     pm: &spur_pm::PmService,
+    feature_gate: &spur_license::FeatureGate,
     issue_id: &str,
 ) -> Result<Option<PersistedTaskCompletion>, String> {
+    require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED, feature_gate)
+        .map_err(feature_error_message)?;
     let adv = pm
         .advanced()
         .ok_or_else(|| "persisted task completion recovery requires beads backend".to_string())?;
@@ -673,6 +735,7 @@ async fn read_latest_task_completion(
 
 async fn reconstruct_historical_attempts(
     pm: &spur_pm::PmService,
+    feature_gate: &spur_license::FeatureGate,
     issue_id: &str,
     current_attempt: u32,
 ) -> Result<Vec<crate::plan::AttemptRecord>, String> {
@@ -684,6 +747,8 @@ async fn reconstruct_historical_attempts(
         feedback: String,
     }
 
+    require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED, feature_gate)
+        .map_err(feature_error_message)?;
     let adv = pm
         .advanced()
         .ok_or_else(|| "persisted attempt recovery requires beads backend".to_string())?;
@@ -888,7 +953,10 @@ fn legacy_reclaim_needed(has_rev1_merge_base_metadata: bool) -> bool {
     !has_rev1_merge_base_metadata
 }
 
-async fn any_open_epic_lacks_rev1_metadata(pm: &spur_pm::PmService) -> anyhow::Result<bool> {
+async fn any_open_epic_lacks_rev1_metadata(
+    pm: &spur_pm::PmService,
+    feature_gate: &spur_license::FeatureGate,
+) -> anyhow::Result<bool> {
     let epics = pm
         .list_issues(spur_pm::IssueFilter {
             status: Some("open".to_string()),
@@ -898,6 +966,8 @@ async fn any_open_epic_lacks_rev1_metadata(pm: &spur_pm::PmService) -> anyhow::R
         })
         .await?;
 
+    require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED, feature_gate)
+        .map_err(|error| anyhow::anyhow!(feature_error_message(error)))?;
     let Some(adv) = pm.advanced() else {
         return Ok(false);
     };
@@ -932,8 +1002,11 @@ async fn any_open_epic_lacks_rev1_metadata(pm: &spur_pm::PmService) -> anyhow::R
 #[doc(hidden)]
 pub async fn compensate_mutation_orphans(
     pm: Arc<spur_pm::PmService>,
+    feature_gate: Arc<spur_license::FeatureGate>,
     task_id: &str,
 ) -> anyhow::Result<()> {
+    require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED, feature_gate.as_ref())
+        .map_err(|error| anyhow::anyhow!(feature_error_message(error)))?;
     let adv = pm
         .advanced()
         .ok_or_else(|| anyhow::anyhow!("mutation recovery requires beads backend"))?;
@@ -992,6 +1065,7 @@ pub async fn compensate_mutation_orphans(
 #[doc(hidden)]
 pub async fn resolve_dispatch_orphan(
     pm: Arc<spur_pm::PmService>,
+    feature_gate: Arc<spur_license::FeatureGate>,
     task_id: &str,
 ) -> anyhow::Result<bool> {
     let issue = pm.get_issue(task_id).await?;
@@ -1008,6 +1082,8 @@ pub async fn resolve_dispatch_orphan(
         return Ok(false);
     }
 
+    require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED, feature_gate.as_ref())
+        .map_err(|error| anyhow::anyhow!(feature_error_message(error)))?;
     let adv = pm
         .advanced()
         .ok_or_else(|| anyhow::anyhow!("dispatch recovery requires beads backend"))?;
@@ -1037,6 +1113,7 @@ pub async fn resolve_dispatch_orphan(
 #[doc(hidden)]
 pub async fn handle_report_signal(
     pm: Arc<PmService>,
+    feature_gate: Arc<spur_license::FeatureGate>,
     args: serde_json::Value,
 ) -> anyhow::Result<serde_json::Value> {
     use crate::plan::audit_sentinel::{encode_comment as audit_encode, AuditSentinelKind};
@@ -1050,6 +1127,8 @@ pub async fn handle_report_signal(
     }
 
     let args: Args = serde_json::from_value(args)?;
+    require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED, feature_gate.as_ref())
+        .map_err(|error| anyhow::anyhow!(feature_error_message(error)))?;
     let adv = pm
         .advanced()
         .ok_or_else(|| anyhow::anyhow!("report_signal requires beads backend"))?;
@@ -1534,8 +1613,19 @@ impl McpCallbackServer {
         (server, channel)
     }
 
-    pub fn feature_gate(&self) -> &Arc<spur_license::FeatureGate> {
-        &self.feature_gate
+    /// Return the feature gate snapshot shared with the license runtime.
+    pub fn feature_gate(&self) -> Arc<spur_license::FeatureGate> {
+        Arc::clone(&self.feature_gate)
+    }
+
+    pub fn require_feature(&self, key: FeatureKey) -> Result<(), McpError> {
+        require_feature(key, self.feature_gate.as_ref())
+    }
+
+    fn require_feature_response(&self, id: Value, key: FeatureKey) -> Option<JsonRpcResponse> {
+        self.require_feature(key)
+            .err()
+            .map(|error| JsonRpcResponse::mcp_error(id, error))
     }
 
     /// INV-6: Wire the orchestrator's `CancellationControl` handle into this
@@ -1632,6 +1722,7 @@ impl McpCallbackServer {
             plan_pm,
             self.reconciler_fast_forward.as_ref().cloned(),
             Arc::new(self.materializer.clone()),
+            Arc::clone(&self.feature_gate),
         ));
     }
 
@@ -1954,7 +2045,11 @@ impl McpCallbackServer {
         let has_beads_backend = self
             .pm_service
             .as_ref()
-            .map(|pm| pm.advanced().is_some())
+            .map(|pm| {
+                self.require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED)
+                    .is_ok()
+                    && pm.advanced().is_some()
+            })
             .unwrap_or(false);
 
         // I4: acquire single-brain pidfile when beads backend is present.
@@ -1979,8 +2074,13 @@ impl McpCallbackServer {
         };
 
         if let Some(pm) = self.pm_service.as_ref() {
-            if pm.advanced().is_some() {
-                let has_rev1_metadata = !any_open_epic_lacks_rev1_metadata(pm).await?;
+            if self
+                .require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED)
+                .is_ok()
+                && pm.advanced().is_some()
+            {
+                let has_rev1_metadata =
+                    !any_open_epic_lacks_rev1_metadata(pm, self.feature_gate.as_ref()).await?;
                 let mode = if legacy_reclaim_needed(has_rev1_metadata) {
                     LegacyReclaimMode::DetectAndRun
                 } else {
@@ -2019,7 +2119,11 @@ impl McpCallbackServer {
                 .expect("reconciler_enabled must retain a fast-forward notify");
             if let Some(pm) = self.pm_service.as_ref() {
                 // Only spawn if PmService has an advanced() (beads) backend.
-                if pm.advanced().is_some() {
+                if self
+                    .require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED)
+                    .is_ok()
+                    && pm.advanced().is_some()
+                {
                     let pm = Arc::clone(pm);
                     let dispatch = ReconcilerDispatchCtx {
                         delegation_tx: self.delegation_tx.clone(),
@@ -2036,6 +2140,7 @@ impl McpCallbackServer {
                         Some(Arc::clone(&self)
                             as Arc<dyn crate::plan::reconciler::ReconcilerAutomation>);
                     let repo_root = self.repo_root.clone();
+                    let feature_gate = Arc::clone(&self.feature_gate);
                     let journal_notify = Arc::new(tokio::sync::Notify::new());
                     let journal_handle = repo_root.map(|root| {
                         let path = crate::plan::reconciler::beads_journal_path(&root);
@@ -2053,6 +2158,7 @@ impl McpCallbackServer {
                             fast_forward,
                             Some(dispatch),
                             None, // plan_id: observe all plans when None
+                            feature_gate,
                         );
                         reconciler.set_auto_merge_approved_plans(auto_merge);
                         reconciler.set_journal_wake(journal_notify);
@@ -2087,14 +2193,23 @@ impl McpCallbackServer {
 
         let mut signal_watcher_cancel_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
         let signal_watcher_task = if let Some(pm) = self.pm_service.as_ref() {
-            if pm.advanced().is_some() {
+            if self
+                .require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED)
+                .is_ok()
+                && pm.advanced().is_some()
+            {
                 let pm = Arc::clone(pm);
                 let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
                 signal_watcher_cancel_tx = Some(cancel_tx);
                 info!("spawning brain-side signal watcher (beads backend detected)");
+                let feature_gate = Arc::clone(&self.feature_gate);
                 let handle = AbortOnDropHandle::new(tokio::spawn(async move {
-                    let watcher =
-                        SignalWatcher::new(pm, ScopeDriftSplitProposer::default(), TrivialScorer);
+                    let watcher = SignalWatcher::new(
+                        pm,
+                        ScopeDriftSplitProposer::default(),
+                        TrivialScorer,
+                        feature_gate,
+                    );
                     watcher.run(cancel_rx).await;
                 }));
                 Some(handle)
@@ -2213,6 +2328,11 @@ impl McpCallbackServer {
             "list_issues" => self.handle_list_issues(id, arguments).await,
             "update_issue" => self.handle_update_issue(id, arguments).await,
             "report_signal" => {
+                if let Some(response) =
+                    self.require_feature_response(id.clone(), FeatureKey::PM_PRO_BEADS_ADVANCED)
+                {
+                    return response;
+                }
                 let pm = match self.pm_service.clone() {
                     Some(pm) => pm,
                     None => {
@@ -2220,7 +2340,7 @@ impl McpCallbackServer {
                     }
                 };
 
-                match handle_report_signal(pm, arguments).await {
+                match handle_report_signal(pm, Arc::clone(&self.feature_gate), arguments).await {
                     Ok(result) => {
                         let text = serde_json::to_string_pretty(&result)
                             .unwrap_or_else(|_| result.to_string());
@@ -3180,7 +3300,14 @@ impl McpCallbackServer {
         let persisted_bootstrap = if !had_cached_entry {
             match (self.pm_service.as_deref(), epic_id.as_deref()) {
                 (Some(pm), Some(epic_id)) => {
-                    match read_persisted_plan_bootstrap(pm, plan_id, epic_id).await {
+                    match read_persisted_plan_bootstrap(
+                        pm,
+                        self.feature_gate.as_ref(),
+                        plan_id,
+                        epic_id,
+                    )
+                    .await
+                    {
                         Ok(bootstrap) => Some(bootstrap),
                         Err(error) => anyhow::bail!(error),
                     }
@@ -3471,6 +3598,11 @@ impl McpCallbackServer {
             .map(String::from);
 
         if persist_as_epic {
+            if let Some(response) =
+                self.require_feature_response(id.clone(), FeatureKey::PM_PRO_BEADS_ADVANCED)
+            {
+                return response;
+            }
             if epic_title
                 .as_deref()
                 .map(str::trim)
@@ -3504,7 +3636,16 @@ impl McpCallbackServer {
                 .as_deref()
                 .expect("gate ensures pm is beads");
             let title = epic_title.as_deref().expect("gate ensures non-empty title");
-            match build_epic_subgraph(pm, &plan_id, title, epic_body.as_deref(), &tasks).await {
+            match build_epic_subgraph(
+                pm,
+                self.feature_gate.as_ref(),
+                &plan_id,
+                title,
+                epic_body.as_deref(),
+                &tasks,
+            )
+            .await
+            {
                 Ok(sg) => {
                     info!(
                         plan_id = %plan_id,
@@ -3547,6 +3688,9 @@ impl McpCallbackServer {
         let state = Arc::new(tokio::sync::Mutex::new(state));
 
         if let Some(sg) = &epic_subgraph {
+            if let Err(error) = self.require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED) {
+                return JsonRpcResponse::mcp_error(id, error);
+            }
             if let Some(adv) = self.pm_service.as_deref().and_then(|pm| pm.advanced()) {
                 let (base_snapshot_branch, base_snapshot_oid) = {
                     let state = state.lock().await;
@@ -3641,6 +3785,11 @@ impl McpCallbackServer {
                 )
             }
         };
+        if let Some(response) =
+            self.require_feature_response(id.clone(), FeatureKey::PM_PRO_BEADS_ADVANCED)
+        {
+            return response;
+        }
 
         // Sentinel value used to reserve a registry slot while the PmService
         // fetch is in flight. Concurrent callers that see this value return an
@@ -3724,6 +3873,7 @@ impl McpCallbackServer {
 
         let derived = match crate::plan::derive_epic_plan(
             pm,
+            self.feature_gate.as_ref(),
             &epic_id,
             default_agent.as_deref(),
             &known_agents_refs,
@@ -3860,6 +4010,9 @@ impl McpCallbackServer {
             rollback_updates.push((issue_id.clone(), invert_label_update(&update)));
         }
 
+        if let Err(error) = self.require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED) {
+            return JsonRpcResponse::mcp_error(id, error);
+        }
         if let Some(adv) = pm.advanced() {
             let task_map = task_scope
                 .iter()
@@ -4054,7 +4207,13 @@ impl McpCallbackServer {
                     if let (Some(pm), Some(issue_id)) =
                         (self.pm_service.as_deref(), issue_id.as_deref())
                     {
-                        reconstruct_historical_attempts(pm, issue_id, current_attempt).await?
+                        reconstruct_historical_attempts(
+                            pm,
+                            self.feature_gate.as_ref(),
+                            issue_id,
+                            current_attempt,
+                        )
+                        .await?
                     } else {
                         Vec::new()
                     }
@@ -4126,10 +4285,12 @@ impl McpCallbackServer {
             epic_id.as_deref(),
             issue_id.as_deref(),
         ) {
-            let bootstrap = read_persisted_plan_bootstrap(pm, &plan_id, epic_id)
-                .await
-                .ok();
-            let completion = read_latest_task_completion(pm, issue_id).await?;
+            let bootstrap =
+                read_persisted_plan_bootstrap(pm, self.feature_gate.as_ref(), &plan_id, epic_id)
+                    .await
+                    .ok();
+            let completion =
+                read_latest_task_completion(pm, self.feature_gate.as_ref(), issue_id).await?;
             let recovered_worker_branch = completion
                 .as_ref()
                 .and_then(|record| record.worker_branch.clone())
@@ -4199,6 +4360,7 @@ impl McpCallbackServer {
             sink,
             Some(&self.delegation_tx),
             Some(&self.task_tracker),
+            Arc::clone(&self.feature_gate),
         )
         .await?;
 
@@ -4240,16 +4402,34 @@ impl McpCallbackServer {
             .await?;
 
         for plan_id in discover_plan_ids(&epics) {
-            let projected =
-                crate::plan::projector::project_plan_from_beads(pm.as_ref(), &plan_id).await?;
+            let projected = crate::plan::projector::project_plan_from_beads(
+                pm.as_ref(),
+                &plan_id,
+                self.feature_gate.as_ref(),
+            )
+            .await?;
             for task in &projected.tasks {
                 if let Some(issue_id) = &task.spec.issue_id {
-                    compensate_mutation_orphans(Arc::clone(&pm), issue_id).await?;
-                    let _ = resolve_dispatch_orphan(Arc::clone(&pm), issue_id).await?;
+                    compensate_mutation_orphans(
+                        Arc::clone(&pm),
+                        Arc::clone(&self.feature_gate),
+                        issue_id,
+                    )
+                    .await?;
+                    let _ = resolve_dispatch_orphan(
+                        Arc::clone(&pm),
+                        Arc::clone(&self.feature_gate),
+                        issue_id,
+                    )
+                    .await?;
                 }
             }
-            let refreshed =
-                crate::plan::projector::project_plan_from_beads(pm.as_ref(), &plan_id).await?;
+            let refreshed = crate::plan::projector::project_plan_from_beads(
+                pm.as_ref(),
+                &plan_id,
+                self.feature_gate.as_ref(),
+            )
+            .await?;
             self.install_projected_plan(refreshed, true).await;
         }
 
@@ -4283,9 +4463,13 @@ impl McpCallbackServer {
             .pm_service
             .as_deref()
             .ok_or_else(|| format!("unknown plan '{plan_id}'"))?;
-        let projected = crate::plan::projector::project_plan_from_beads(pm, plan_id)
-            .await
-            .map_err(|error| format!("unknown plan '{plan_id}': {error}"))?;
+        let projected = crate::plan::projector::project_plan_from_beads(
+            pm,
+            plan_id,
+            self.feature_gate.as_ref(),
+        )
+        .await
+        .map_err(|error| format!("unknown plan '{plan_id}': {error}"))?;
         self.install_projected_plan(projected, false).await;
         self.active_plans
             .lock()
@@ -5562,9 +5746,22 @@ mod merge_plan_tests {
             issue_id: None,
             context_files: Vec::new(),
         }];
-        let subgraph = crate::build_epic_subgraph(pm.as_ref(), plan_id, "Epic", None, &tasks)
-            .await
-            .expect("build epic subgraph");
+        let feature_gate = super::pro_feature_gate();
+        let subgraph = crate::build_epic_subgraph(
+            pm.as_ref(),
+            feature_gate.as_ref(),
+            plan_id,
+            "Epic",
+            None,
+            &tasks,
+        )
+        .await
+        .expect("build epic subgraph");
+        super::require_feature(
+            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+            feature_gate.as_ref(),
+        )
+        .expect("pro gate");
         let adv = pm.advanced().expect("advanced beads backend");
         crate::emit_plan_submit_audit(
             adv,
@@ -5623,13 +5820,17 @@ mod merge_plan_tests {
             None,
             continuation_ctx,
             Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-            super::community_feature_gate(),
+            Arc::clone(&feature_gate),
         );
         server.set_repo_root(dir.path().to_path_buf());
 
-        let projected = crate::plan::projector::project_plan_from_beads(pm.as_ref(), plan_id)
-            .await
-            .expect("project persisted plan");
+        let projected = crate::plan::projector::project_plan_from_beads(
+            pm.as_ref(),
+            plan_id,
+            feature_gate.as_ref(),
+        )
+        .await
+        .expect("project persisted plan");
         assert_eq!(
             crate::plan::build_plan_status(plan_id, &projected)["ready_to_merge"],
             Value::Bool(true)
@@ -5736,9 +5937,22 @@ mod merge_plan_tests {
             issue_id: None,
             context_files: Vec::new(),
         }];
-        let subgraph = crate::build_epic_subgraph(pm.as_ref(), plan_id, "Epic", None, &tasks)
-            .await
-            .expect("build epic subgraph");
+        let feature_gate = super::pro_feature_gate();
+        let subgraph = crate::build_epic_subgraph(
+            pm.as_ref(),
+            feature_gate.as_ref(),
+            plan_id,
+            "Epic",
+            None,
+            &tasks,
+        )
+        .await
+        .expect("build epic subgraph");
+        super::require_feature(
+            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+            feature_gate.as_ref(),
+        )
+        .expect("pro gate");
         let adv = pm.advanced().expect("advanced beads backend");
         crate::emit_plan_submit_audit(
             adv,
@@ -5815,13 +6029,17 @@ mod merge_plan_tests {
             None,
             continuation_ctx,
             Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-            super::community_feature_gate(),
+            Arc::clone(&feature_gate),
         );
         server.set_repo_root(dir.path().to_path_buf());
 
-        let projected = crate::plan::projector::project_plan_from_beads(pm.as_ref(), plan_id)
-            .await
-            .expect("project persisted plan");
+        let projected = crate::plan::projector::project_plan_from_beads(
+            pm.as_ref(),
+            plan_id,
+            feature_gate.as_ref(),
+        )
+        .await
+        .expect("project persisted plan");
         assert_eq!(
             crate::plan::build_plan_status(plan_id, &projected)["ready_to_merge"],
             Value::Bool(true)
@@ -6481,9 +6699,17 @@ mod reconciler_fast_forward_tests {
             issue_id: None,
             context_files: Vec::new(),
         }];
-        crate::build_epic_subgraph(pm.as_ref(), "plan-1", "Epic", None, &tasks)
-            .await
-            .expect("build epic subgraph");
+        let feature_gate = super::pro_feature_gate();
+        crate::build_epic_subgraph(
+            pm.as_ref(),
+            feature_gate.as_ref(),
+            "plan-1",
+            "Epic",
+            None,
+            &tasks,
+        )
+        .await
+        .expect("build epic subgraph");
 
         let session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
         let continuation_ctx = super::DetachedContinuationCtx {
@@ -6495,7 +6721,7 @@ mod reconciler_fast_forward_tests {
             None,
             continuation_ctx,
             Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-            super::community_feature_gate(),
+            feature_gate,
         );
         assert!(server.active_plans.lock().await.is_empty());
 
@@ -6636,11 +6862,24 @@ mod reconciler_fast_forward_tests {
             issue_id: None,
             context_files: Vec::new(),
         }];
-        let sg = crate::build_epic_subgraph(pm.as_ref(), "plan-1", "Epic", None, &tasks)
-            .await
-            .expect("build epic subgraph");
+        let feature_gate = super::pro_feature_gate();
+        let sg = crate::build_epic_subgraph(
+            pm.as_ref(),
+            feature_gate.as_ref(),
+            "plan-1",
+            "Epic",
+            None,
+            &tasks,
+        )
+        .await
+        .expect("build epic subgraph");
 
         // Emit PlanSubmit audit so the epic carries rev1 bootstrap metadata.
+        super::require_feature(
+            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+            feature_gate.as_ref(),
+        )
+        .expect("pro gate");
         let adv = pm.advanced().expect("advanced");
         crate::emit_plan_submit_audit(
             adv,
@@ -6654,9 +6893,10 @@ mod reconciler_fast_forward_tests {
         .await;
 
         // The detector must report that no legacy reclaim is needed.
-        let needs_reclaim = super::any_open_epic_lacks_rev1_metadata(pm.as_ref())
-            .await
-            .expect("detector query");
+        let needs_reclaim =
+            super::any_open_epic_lacks_rev1_metadata(pm.as_ref(), feature_gate.as_ref())
+                .await
+                .expect("detector query");
         assert!(
             !needs_reclaim,
             "detector must skip reclaim when all epics have rev1 metadata"
@@ -6687,18 +6927,32 @@ mod reconciler_fast_forward_tests {
             issue_id: None,
             context_files: Vec::new(),
         }];
-        let sg = crate::build_epic_subgraph(pm.as_ref(), "plan-1", "Epic", None, &tasks)
-            .await
-            .expect("build epic subgraph");
+        let feature_gate = super::pro_feature_gate();
+        let sg = crate::build_epic_subgraph(
+            pm.as_ref(),
+            feature_gate.as_ref(),
+            "plan-1",
+            "Epic",
+            None,
+            &tasks,
+        )
+        .await
+        .expect("build epic subgraph");
 
         // Emit PlanSubmit audit WITHOUT base snapshot metadata.
+        super::require_feature(
+            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+            feature_gate.as_ref(),
+        )
+        .expect("pro gate");
         let adv = pm.advanced().expect("advanced");
         crate::emit_plan_submit_audit(adv, "plan-1", &sg, None, None, None, None).await;
 
         // The detector must report that legacy reclaim is still needed.
-        let needs_reclaim = super::any_open_epic_lacks_rev1_metadata(pm.as_ref())
-            .await
-            .expect("detector query");
+        let needs_reclaim =
+            super::any_open_epic_lacks_rev1_metadata(pm.as_ref(), feature_gate.as_ref())
+                .await
+                .expect("detector query");
         assert!(
             needs_reclaim,
             "detector must reclaim when PlanSubmit lacks rev1 bootstrap metadata"

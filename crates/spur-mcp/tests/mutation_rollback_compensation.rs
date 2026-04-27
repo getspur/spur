@@ -14,6 +14,8 @@ use tempfile::TempDir;
 use tokio::time::sleep;
 use uuid::Uuid;
 
+mod common;
+
 fn br_available() -> bool {
     Command::new("br")
         .arg("--help")
@@ -246,7 +248,12 @@ async fn t_v0d_6_rollback_audit_payload_enumerates_succeeded_and_failed_compensa
         mutation_id,
     ));
 
-    let apply_result = apply_mutation(pm.clone(), &batch).await;
+    let apply_result = apply_mutation(
+        pm.clone(),
+        common::server_builder::pro_feature_gate(),
+        &batch,
+    )
+    .await;
     injector
         .await
         .expect("partial rollback injector task panicked")

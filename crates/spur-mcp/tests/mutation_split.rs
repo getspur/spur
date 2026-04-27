@@ -12,6 +12,8 @@ use spur_mcp::plan::mutation_executor::apply_mutation;
 use tempfile::TempDir;
 use uuid::Uuid;
 
+mod common;
+
 fn br_available() -> bool {
     Command::new("br")
         .arg("--help")
@@ -121,9 +123,13 @@ async fn split_task_happy_path_rewires_downstream_and_commits() {
         }],
     );
 
-    let child_ids = apply_mutation(pm.clone(), &batch)
-        .await
-        .expect("apply_mutation should succeed");
+    let child_ids = apply_mutation(
+        pm.clone(),
+        common::server_builder::pro_feature_gate(),
+        &batch,
+    )
+    .await
+    .expect("apply_mutation should succeed");
     assert_eq!(child_ids.len(), 2, "expected 2 created children");
 
     let parent_issue = pm.get_issue(&parent).await.expect("load parent");

@@ -341,6 +341,7 @@ pub fn plan_submit_brain_session_id(audits: &[AuditSentinelKind]) -> Option<Brai
 pub async fn project_plan_from_beads(
     pm: &spur_pm::PmService,
     plan_id: &str,
+    feature_gate: &spur_license::FeatureGate,
 ) -> anyhow::Result<PlanState> {
     let mut summary_by_id = HashMap::new();
     for status in [
@@ -382,6 +383,11 @@ pub async fn project_plan_from_beads(
         .filter(|issue| issue.issue_type.as_deref() == Some("task"))
         .collect();
 
+    crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        feature_gate,
+    )
+    .map_err(|error| anyhow::anyhow!(crate::server::feature_error_message(error)))?;
     let adv = pm
         .advanced()
         .ok_or_else(|| anyhow::anyhow!("persisted projector requires beads backend"))?;

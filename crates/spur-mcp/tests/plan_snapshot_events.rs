@@ -15,6 +15,8 @@ use tempfile::TempDir;
 use tokio::sync::Notify;
 use tokio_util::task::TaskTracker;
 
+mod common;
+
 fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterializer> {
     Arc::new(spur_mcp::outcome_materializer::OutcomeMaterializer::new(
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
@@ -115,7 +117,7 @@ impl PersistedFixture {
             Some(sink_ref),
             continuation_ctx(),
             Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-            spur_mcp::server::community_feature_gate(),
+            common::server_builder::pro_feature_gate(),
         );
         server.set_repo_root(dir.path().to_path_buf());
 
@@ -270,7 +272,7 @@ async fn recover_persisted_plans_emits_plan_snapshot_updated() {
         Some(sink_ref),
         continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        spur_mcp::server::community_feature_gate(),
+        common::server_builder::pro_feature_gate(),
     );
     server.set_repo_root(fixture._dir.path().to_path_buf());
     server
@@ -314,6 +316,7 @@ async fn recover_persisted_plans_uses_legacy_session_fallback_when_missing() {
     }];
     let subgraph = spur_mcp::build_epic_subgraph(
         pm.as_ref(),
+        common::server_builder::pro_feature_gate().as_ref(),
         "legacy-plan",
         "Legacy Snapshot Harness Epic",
         None,
@@ -341,7 +344,7 @@ async fn recover_persisted_plans_uses_legacy_session_fallback_when_missing() {
         Some(sink_ref),
         continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        spur_mcp::server::community_feature_gate(),
+        common::server_builder::pro_feature_gate(),
     );
     server.set_repo_root(dir.path().to_path_buf());
     server
@@ -388,6 +391,7 @@ async fn reconciler_dispatch_and_completion_emit_refreshed_snapshots() {
             materializer: test_materializer(),
         }),
         Some(plan_id.clone()),
+        common::server_builder::pro_feature_gate(),
     );
 
     let did_work = reconciler.tick_once().await.expect("tick_once");

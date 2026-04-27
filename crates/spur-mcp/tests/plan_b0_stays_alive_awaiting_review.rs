@@ -17,6 +17,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 
+mod common;
+
 fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterializer> {
     Arc::new(spur_mcp::outcome_materializer::OutcomeMaterializer::new(
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
@@ -64,6 +66,7 @@ async fn run_plan_stays_alive_while_task_awaiting_review() {
             None,
             None,
             test_materializer(),
+            common::server_builder::pro_feature_gate(),
         )
         .await;
     });
