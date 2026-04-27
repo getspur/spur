@@ -395,18 +395,17 @@ impl OutcomeMaterializer {
         // dropped so observability matches the actual on-wire state — silently
         // dropping fields would make the brain see "missing" data with no
         // operator signal that the materializer chose to drop them.
-        let emit_drop = |sink: Option<&Arc<dyn McpEventSink>>,
-                         field: &'static str,
-                         original: usize| {
-            if let Some(sink) = sink {
-                sink.emit(SpurEventBody::ContinuationFieldTruncated {
-                    delegation_id: delegation_id.clone(),
-                    field: field.into(),
-                    original_bytes: original,
-                    kept_bytes: 0,
-                });
-            }
-        };
+        let emit_drop =
+            |sink: Option<&Arc<dyn McpEventSink>>, field: &'static str, original: usize| {
+                if let Some(sink) = sink {
+                    sink.emit(SpurEventBody::ContinuationFieldTruncated {
+                        delegation_id: delegation_id.clone(),
+                        field: field.into(),
+                        original_bytes: original,
+                        kept_bytes: 0,
+                    });
+                }
+            };
 
         if envelope_bytes > budget {
             let original = cont.payload.summary.as_ref().map(|s| s.len()).unwrap_or(0);

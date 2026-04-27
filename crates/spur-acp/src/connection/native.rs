@@ -49,17 +49,17 @@ use tokio::sync::{mpsc, oneshot};
 
 use agent_client_protocol::schema::{
     AuthenticateRequest, AuthenticateResponse, CancelNotification, ContentBlock, ContentChunk,
-    CreateTerminalRequest, CreateTerminalResponse, ExtRequest, ExtResponse,
-    InitializeRequest, InitializeResponse, KillTerminalRequest, KillTerminalResponse,
-    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, McpServer, NewSessionRequest,
-    NewSessionResponse, PermissionOptionId, PermissionOptionKind, PromptRequest,
-    ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
+    CreateTerminalRequest, CreateTerminalResponse, ExtRequest, ExtResponse, InitializeRequest,
+    InitializeResponse, KillTerminalRequest, KillTerminalResponse, ListSessionsRequest,
+    ListSessionsResponse, LoadSessionRequest, McpServer, NewSessionRequest, NewSessionResponse,
+    PermissionOptionId, PermissionOptionKind, PromptRequest, ReadTextFileRequest,
+    ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse,
-    TerminalExitStatus, TerminalId, TerminalOutputRequest,
-    TerminalOutputResponse, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
-    WriteTextFileRequest, WriteTextFileResponse,
+    TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse,
+    WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
+    WriteTextFileResponse,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
 
@@ -1587,7 +1587,6 @@ struct TerminalState {
     exit_rx: tokio::sync::watch::Receiver<Option<TerminalExitStatus>>,
     pid: u32,
 }
-
 
 // ─── Diagnostic helpers (streaming probes) ──────────────────────────────────
 

@@ -275,7 +275,10 @@ impl OutcomeStore for GitBlobOutcomeStore {
             .trim()
             .to_string();
         let meta_ref = Self::meta_ref(key);
-        if let Err(e) = self.run_git(&["update-ref", &meta_ref, &meta_blob_sha]).await {
+        if let Err(e) = self
+            .run_git(&["update-ref", &meta_ref, &meta_blob_sha])
+            .await
+        {
             let _ = self.run_git(&["update-ref", "-d", &blob_ref]).await;
             return Err(e);
         }
@@ -457,7 +460,11 @@ impl OutcomeStore for GitBlobOutcomeStore {
         // and pruned unconditionally. Operators get one warning trace
         // per pruned legacy ref.
         let legacy_listing = self
-            .run_git(&["for-each-ref", "--format=%(refname)", "refs/spur/artifacts/"])
+            .run_git(&[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/spur/artifacts/",
+            ])
             .await?;
         let legacy_str = String::from_utf8_lossy(&legacy_listing);
         for line in legacy_str.lines().filter(|l| !l.is_empty()) {

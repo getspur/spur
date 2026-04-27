@@ -473,9 +473,11 @@ mod tests {
             },
             arg_picker_spec: Some(spur_acp::adapter::arg_picker_hint::ArgPickerSpec {
                 free_text_hint: String::new(),
-                typed_hint: Some(spur_acp::adapter::arg_picker_hint::ArgPickerHint::ConfigOption {
-                    config_id: "model".into(),
-                }),
+                typed_hint: Some(
+                    spur_acp::adapter::arg_picker_hint::ArgPickerHint::ConfigOption {
+                        config_id: "model".into(),
+                    },
+                ),
             }),
         };
         reg.set_advertised_commands("codex", vec![entry]);

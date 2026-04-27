@@ -646,7 +646,8 @@ impl SessionDetailView {
     pub fn apply_advertised_commands(&mut self, options: &[spur_acp::SessionConfigOption]) {
         let handle = self.agent_handle_for_commands();
         let entries = crate::commands::advertised::AdvertisedSource::entries(&handle, options);
-        self.command_registry.set_advertised_commands(&handle, entries);
+        self.command_registry
+            .set_advertised_commands(&handle, entries);
         self.session_config_options = options.to_vec();
     }
 
