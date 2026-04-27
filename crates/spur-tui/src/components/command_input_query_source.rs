@@ -6,30 +6,35 @@
 //! codex-acp 0.12.0 in `crates/spur-acp/tests/codex_0_12_wire_probe.rs`.
 //!
 //! The picker is informational: it surfaces the agent-advertised hint as a
-//! placeholder/title and confirms submit through `ReplaceTriggerToken`. The
-//! actual arg text already lives in the InputBar (the user typed it after
-//! `/<cmd> `), so `accept` re-emits the canonical `/<cmd> <query>` form.
+//! placeholder/title and confirms submit through `ReplaceTriggerToken`.
+//!
+//! ## Anchor / replacement contract (gemini #1 critical-fix)
+//!
+//! `InputCompletionPort::apply_accept` re-anchors the `ReplaceTriggerToken`
+//! to `trigger_detector.current_prefix_start()`, which for `SlashArg` is the
+//! byte offset *after* `/<cmd> ` (the start of the arg region — see
+//! `parse_slash_arg_prefix` in `completion_trigger.rs`). The picker-supplied
+//! `prefix_start` is therefore a sentinel the port ignores; the `replacement`
+//! must be the **arg text only**, not `/<cmd> <arg>`. Returning the canonical
+//! form here would cause the port to splice it onto the *arg-region anchor*,
+//! producing duplicated buffers like `/review-branch /review-branch main`.
+//! This mirrors `ConfigOptionQuerySource::accept` which returns just `value`.
 
 use super::query_source::{QueryMode, QuerySource, RetrievalAccept, RetrievalRow};
 
 pub struct CommandInputQuerySource {
     pub command: String,
     pub free_text_hint: String,
-    /// Byte offset in the `InputBar` text where the trigger's `/` lives.
-    /// Captured at shell-open time so `accept` can replace `[prefix_start..cursor]`
-    /// with the canonical `/<cmd> <query>` form.
-    prefix_start: usize,
     /// Most recent query string passed to `refresh`. Used by `accept` to
     /// build the replacement.
     last_query: String,
 }
 
 impl CommandInputQuerySource {
-    pub fn new(command: String, free_text_hint: String, prefix_start: usize) -> Self {
+    pub fn new(command: String, free_text_hint: String) -> Self {
         Self {
             command,
             free_text_hint,
-            prefix_start,
             last_query: String::new(),
         }
     }
@@ -76,18 +81,13 @@ impl QuerySource for CommandInputQuerySource {
     }
 
     fn accept(&self, _row_idx: usize) -> Option<RetrievalAccept> {
-        // ReplaceTriggerToken canonicalises the buffer to "/<cmd> <query>".
-        // Idempotent when the user typed the buffer that way; corrects spacing
-        // glitches if not. The InputBar dispatches submit on the next Enter
-        // through the existing PromptText path.
-        let replacement = if self.last_query.is_empty() {
-            format!("/{}", self.command)
-        } else {
-            format!("/{} {}", self.command, self.last_query)
-        };
+        // The InputCompletionPort re-anchors to the arg-region byte offset,
+        // so the replacement is the arg text only. The `/<cmd> ` prefix
+        // stays in the buffer untouched (it was preserved by the anchor).
+        // `prefix_start: 0` is a sentinel the port ignores.
         Some(RetrievalAccept::ReplaceTriggerToken {
-            prefix_start: self.prefix_start,
-            replacement,
+            prefix_start: 0,
+            replacement: self.last_query.clone(),
         })
     }
 }
@@ -97,7 +97,7 @@ mod tests {
     use super::*;
 
     fn fixture() -> CommandInputQuerySource {
-        CommandInputQuerySource::new("review-branch".to_string(), "branch name".to_string(), 7)
+        CommandInputQuerySource::new("review-branch".to_string(), "branch name".to_string())
     }
 
     #[test]
@@ -108,7 +108,7 @@ mod tests {
 
     #[test]
     fn title_falls_back_when_hint_empty() {
-        let src = CommandInputQuerySource::new("review".to_string(), String::new(), 0);
+        let src = CommandInputQuerySource::new("review".to_string(), String::new());
         assert_eq!(src.title(), "<arg>");
     }
 
@@ -135,34 +135,33 @@ mod tests {
         assert_eq!(rows[0].primary, "Submit /review-branch");
     }
 
+    /// Gemini #1 regression: accept must return ONLY the arg text. The
+    /// InputCompletionPort re-anchors the replacement to the arg region, so
+    /// returning `/<cmd> <query>` would duplicate the prefix.
     #[test]
-    fn accept_after_query_returns_canonical_replacement() {
+    fn accept_returns_arg_text_only_not_full_canonical_form() {
         let mut src = fixture();
         let _ = src.refresh("main");
         let accept = src.accept(0).expect("synthetic row always exists");
         match accept {
-            RetrievalAccept::ReplaceTriggerToken {
-                prefix_start,
-                replacement,
-            } => {
-                assert_eq!(prefix_start, 7);
-                assert_eq!(replacement, "/review-branch main");
+            RetrievalAccept::ReplaceTriggerToken { replacement, .. } => {
+                assert_eq!(
+                    replacement, "main",
+                    "replacement must be ONLY the arg \
+                     (port re-anchors to arg-region byte offset)"
+                );
             }
             other => panic!("expected ReplaceTriggerToken, got {other:?}"),
         }
     }
 
     #[test]
-    fn accept_with_no_refresh_yields_command_only() {
+    fn accept_with_empty_query_yields_empty_replacement() {
         let src = fixture();
         let accept = src.accept(0).expect("synthetic row always exists");
         match accept {
-            RetrievalAccept::ReplaceTriggerToken {
-                prefix_start,
-                replacement,
-            } => {
-                assert_eq!(prefix_start, 7);
-                assert_eq!(replacement, "/review-branch");
+            RetrievalAccept::ReplaceTriggerToken { replacement, .. } => {
+                assert_eq!(replacement, "");
             }
             other => panic!("expected ReplaceTriggerToken, got {other:?}"),
         }
