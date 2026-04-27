@@ -41,6 +41,7 @@ pub use domain::{
 pub use types::*;
 
 // Re-export ACP SDK types for consumer crates (TUI, orchestrator).
+pub use adapter::config_options::{extract_choices, AdvertisedChoice, AdvertisedCommand};
 pub use adapter::{extract_tool_meta, SpurToolMeta};
 pub use agent_client_protocol::schema::{
     AuthMethodId, AuthenticateRequest, AuthenticateResponse, AvailableCommand,
