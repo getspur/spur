@@ -89,7 +89,7 @@ mod tests {
 
     #[test]
     fn from_known_returns_none_for_unknown() {
-        assert_eq!(FlagKey::from_known("brain_session"), None);
+        assert_eq!(FlagKey::from_known("core_core_brain_session"), None);
         assert_eq!(FlagKey::from_known(""), None);
     }
 }
