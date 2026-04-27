@@ -13,6 +13,9 @@ pub enum AcpError {
     /// method nor a viable fallback for the named capability.
     #[error("agent capability missing: {0}")]
     CapabilityMissing(&'static str),
+    /// Transport / wire failure surfaced from the underlying SDK.
+    #[error(transparent)]
+    Transport(#[from] anyhow::Error),
 }
 
 #[cfg(test)]
@@ -39,6 +42,7 @@ mod tests {
         let e = AcpError::CapabilityMissing("set_mode");
         match e {
             AcpError::CapabilityMissing(name) => assert_eq!(name, "set_mode"),
+            other => panic!("expected CapabilityMissing variant, got {other:?}"),
         }
     }
 }
