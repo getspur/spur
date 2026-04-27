@@ -412,10 +412,15 @@ impl InputBar {
 
     fn handle_vim_normal_input(
         &mut self,
-        _key: KeyEvent,
+        key: KeyEvent,
         input: Input,
         mode: VimMode,
     ) -> HandleOutcome {
+        if matches!(key.code, KeyCode::Char('\n')) {
+            // Raw paste fallback newlines must not advance Vim command state.
+            return HandleOutcome::Key(IntentEvent::NoOp);
+        }
+
         if input.key == Key::Null {
             return HandleOutcome::Key(IntentEvent::NoOp);
         }
@@ -1254,7 +1259,7 @@ impl InputBar {
             self.delete_range(idx);
         }
         let cursor = self.cursor_to_byte();
-        if !text.contains('\n') {
+        if text.lines().count() <= 1 {
             self.textarea.insert_str(text);
             self.rebuild_line_cache();
             let new_cursor = self.cursor_to_byte();
@@ -1286,11 +1291,15 @@ impl InputBar {
         self.protected_ranges.sort_by_key(|r| r.start);
         self.pastes.insert(id, text.to_string());
         while self.pastes.len() > PASTE_STORE_CAP {
-            if let Some((&oldest_id, _)) = self.pastes.iter().next() {
-                self.pastes.remove(&oldest_id);
-            } else {
+            let Some(oldest_id) = self.pastes.keys().copied().find(|candidate| {
+                !self
+                    .protected_ranges
+                    .iter()
+                    .any(|range| matches!(range.kind, RangeKind::PasteRef(id) if id == *candidate))
+            }) else {
                 break;
-            }
+            };
+            self.pastes.remove(&oldest_id);
         }
         self.history_cursor = None;
         self.goal_vcol = None;
@@ -1944,16 +1953,51 @@ mod paste_atom_tests {
     }
 
     #[test]
-    fn paste_store_caps_oldest_entries_evicted() {
+    fn paste_store_caps_oldest_unreferenced_entries_evicted() {
         let mut bar = InputBar::new();
 
-        for i in 0..(PASTE_STORE_CAP + 5) {
+        bar.insert_paste("paste 0\nline2");
+        bar.set_text_cursor_for_test(0);
+        bar.delete_char_after_cursor();
+
+        for i in 1..=PASTE_STORE_CAP {
             bar.insert_paste(&format!("paste {i}\nline2"));
         }
 
         assert_eq!(bar.pastes.len(), PASTE_STORE_CAP);
         assert!(!bar.pastes.contains_key(&1));
-        assert!(bar.pastes.contains_key(&(PASTE_STORE_CAP + 5)));
+        assert!(bar.pastes.contains_key(&(PASTE_STORE_CAP + 1)));
+    }
+
+    #[test]
+    fn trailing_newline_single_line_paste_stays_inline() {
+        let mut bar = InputBar::new();
+
+        bar.insert_paste("hello\n");
+
+        assert_eq!(bar.text(), "hello\n");
+        assert!(bar.protected_ranges.is_empty());
+        assert!(bar.pastes.is_empty());
+    }
+
+    #[test]
+    fn paste_store_keeps_referenced_placeholder_over_cap() {
+        let mut bar = InputBar::new();
+
+        for i in 0..=PASTE_STORE_CAP {
+            bar.insert_paste(&format!("paste {i}\nline2"));
+        }
+
+        assert!(bar.pastes.contains_key(&1));
+        assert_eq!(bar.pastes.len(), PASTE_STORE_CAP + 1);
+
+        bar.submit();
+        let (captured, ranges, _) = bar.take_submit_capture().unwrap();
+        let expected = (0..=PASTE_STORE_CAP)
+            .map(|i| format!("paste {i}\nline2"))
+            .collect::<String>();
+        assert_eq!(captured, expected);
+        assert!(ranges.is_empty());
     }
 
     #[test]
@@ -2024,6 +2068,41 @@ mod paste_atom_tests {
 
         assert_eq!(bar.text(), "");
         assert!(bar.protected_ranges.is_empty());
+    }
+
+    #[test]
+    fn vim_normal_raw_newline_does_not_submit_or_consume_pending_command() {
+        let mut bar = InputBar::new();
+        bar.set_text("abc".to_string(), 0);
+        bar.set_mode(EditMode::Vim(VimMode::Normal));
+
+        let start_delete = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('d'),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        let raw_newline = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('\n'),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        let complete_delete = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('d'),
+            crossterm::event::KeyModifiers::NONE,
+        );
+
+        assert_eq!(
+            bar.handle_key(start_delete),
+            HandleOutcome::Key(IntentEvent::NoOp)
+        );
+        assert_eq!(
+            bar.handle_key(raw_newline),
+            HandleOutcome::Key(IntentEvent::NoOp)
+        );
+        assert!(bar.take_submit_capture().is_none());
+        assert_eq!(
+            bar.handle_key(complete_delete),
+            HandleOutcome::Key(IntentEvent::DeletedChar)
+        );
+        assert_eq!(bar.text(), "");
     }
 }
 

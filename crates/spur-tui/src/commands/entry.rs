@@ -14,6 +14,8 @@ pub struct CommandEntry {
     pub source: CommandSource,
     /// How to execute it on accept/submit.
     pub dispatch: Dispatch,
+    /// If Some, typing `/<name> <arg>` opens an arg picker.
+    pub arg_picker_spec: Option<spur_acp::adapter::arg_picker_hint::ArgPickerSpec>,
 }
 
 /// Where a `CommandEntry` originates.
@@ -25,6 +27,10 @@ pub enum CommandSource {
     /// `handle` is the lowercase agent identifier used for namespacing
     /// (e.g. "claude", "kiro").
     Agent { handle: String },
+    /// Synthesized by spur from an agent's advertised data (e.g.
+    /// NewSessionResponse.config_options). Vendor-neutral by allow-list;
+    /// see crates/spur-acp/src/adapter/config_options.rs.
+    Advertised { handle: String },
 }
 
 /// How a selected `CommandEntry` should be executed.
@@ -44,4 +50,9 @@ pub enum Dispatch {
         /// How to shape rest-of-line text into the RPC args payload.
         args_template: ArgsTemplateKind,
     },
+    /// v1: dispatch to ACP `session/set_config_option`. Used by the synthetic
+    /// /model and /effort slash commands. The `value` is filled in by the
+    /// arg-picker selection (or by the user's typed arg) at submit time —
+    /// see InteractiveInput::SetSessionConfigOption (Task 2.14).
+    SetSessionConfigOption { config_id: String },
 }

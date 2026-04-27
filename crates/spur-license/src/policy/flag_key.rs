@@ -5,29 +5,21 @@
 
 use serde::{Serialize, Serializer};
 
+use super::const_eq::bytes_eq;
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FlagKey(&'static str);
 
-/// Const-compatible byte-slice equality (stable Rust).
-const fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut i = 0;
-    while i < a.len() {
-        if a[i] != b[i] {
-            return false;
-        }
-        i += 1;
-    }
-    true
-}
-
 impl FlagKey {
+    /// Emergency kill switch for advanced planner rollout.
     pub const KILL_ADVANCED_PLANNER: Self = Self("kill_advanced_planner");
+    /// Controls browser tool exposure while rollout is gated.
     pub const ENABLE_BROWSER_TOOL: Self = Self("enable_browser_tool");
+    /// Gates the second-generation context compaction path.
     pub const ENABLE_COMPACTION_V2: Self = Self("enable_compaction_v2");
+    /// Enables runtime telemetry collection and reporting.
     pub const ENABLE_TELEMETRY: Self = Self("enable_telemetry");
+    /// Exposes deferred v1.1 preview behavior behind a signed policy flag.
     pub const ENABLE_V1_1_PREVIEW: Self = Self("enable_v1_1_preview");
 
     pub const fn as_str(&self) -> &'static str {
