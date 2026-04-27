@@ -96,7 +96,7 @@ impl ReactTrace {
 
         // Mark this as the surface we last painted so scroll mutators pick
         // the right cache for anchor resolution.
-        self.last_surface = crate::components::react_trace::Surface::Compact;
+        self.last_surface = crate::components::react_trace::Surface::Compact(self.generation);
     }
 
     /// Internal cache-aware line producer for `render_compact`.
