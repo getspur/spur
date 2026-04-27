@@ -7,7 +7,7 @@ use std::str::FromStr;
 /// Used for the LicenseSeat `sk_*` secret key so it never leaks via
 /// logged or panicked CLI structs.
 #[derive(Clone)]
-pub struct RedactedString(pub String);
+pub struct RedactedString(String);
 
 impl std::fmt::Debug for RedactedString {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -31,12 +31,6 @@ impl From<String> for RedactedString {
 
 impl PartialEq<&str> for RedactedString {
     fn eq(&self, other: &&str) -> bool {
-        self.0 == *other
-    }
-}
-
-impl PartialEq<str> for RedactedString {
-    fn eq(&self, other: &str) -> bool {
         self.0 == *other
     }
 }
