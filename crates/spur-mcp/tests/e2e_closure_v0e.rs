@@ -17,6 +17,8 @@ use tempfile::TempDir;
 use tokio::sync::Notify;
 use tokio_util::task::TaskTracker;
 
+mod common;
+
 fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterializer> {
     Arc::new(spur_mcp::outcome_materializer::OutcomeMaterializer::new(
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
@@ -213,6 +215,7 @@ async fn t_v0e_2_auto_merge_pr_is_opt_in() {
             Arc::new(Notify::new()),
             None,
             Some("P1".into()),
+            common::server_builder::pro_feature_gate(),
         );
         reconciler.set_auto_merge_approved_plans(false);
         reconciler.set_automation(automation.clone());
@@ -245,6 +248,7 @@ async fn t_v0e_2_auto_merge_pr_is_opt_in() {
             Arc::new(Notify::new()),
             None,
             Some("P1".into()),
+            common::server_builder::pro_feature_gate(),
         );
         reconciler.set_auto_merge_approved_plans(true);
         reconciler.set_automation(automation.clone());
@@ -297,6 +301,7 @@ async fn t_v0e_2_auto_merge_pr_is_opt_in() {
             Arc::new(Notify::new()),
             None,
             Some("P1".into()),
+            common::server_builder::pro_feature_gate(),
         );
         reconciler.set_auto_merge_approved_plans(true);
         reconciler.set_automation(automation.clone());
@@ -403,7 +408,7 @@ async fn t_v0e_1_no_persisted_direct_dispatch() {
         None,
         continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        spur_mcp::server::community_feature_gate(),
+        common::server_builder::pro_feature_gate(),
     );
     server.set_repo_root(dir.path().to_path_buf());
 
@@ -517,6 +522,7 @@ async fn t_v0e_1_no_persisted_direct_dispatch() {
         None,
         Some(&dtx),
         None,
+        common::server_builder::pro_feature_gate(),
     )
     .await
     .expect("review_task approve should succeed");
@@ -563,6 +569,7 @@ async fn t_v0e_3_fast_forward_matches_polling() {
             materializer: test_materializer(),
         }),
         Some(plan_id.into()),
+        common::server_builder::pro_feature_gate(),
     );
     let poll_did_work = poll_reconciler.tick_once().await.expect("poll tick");
     assert!(poll_did_work, "polling tick must observe ready task");
@@ -600,6 +607,7 @@ async fn t_v0e_3_fast_forward_matches_polling() {
             materializer: test_materializer(),
         }),
         Some(plan_id.into()),
+        common::server_builder::pro_feature_gate(),
     );
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
     let handle = tokio::spawn(async move { ff_reconciler.run(cancel_rx).await });
@@ -642,6 +650,7 @@ async fn t_v0e_3_fast_forward_matches_polling() {
         Arc::new(Notify::new()),
         None,
         Some(plan_id.into()),
+        common::server_builder::pro_feature_gate(),
     );
     let term_poll_did_work = term_poll_reconciler
         .tick_once()
@@ -685,6 +694,7 @@ async fn t_v0e_3_fast_forward_matches_polling() {
         Arc::clone(&term_fast_forward),
         None,
         Some(plan_id.into()),
+        common::server_builder::pro_feature_gate(),
     );
     let (cancel_tx2, cancel_rx2) = tokio::sync::oneshot::channel();
     let handle2 = tokio::spawn(async move { term_ff_reconciler.run(cancel_rx2).await });

@@ -9,6 +9,8 @@ use spur_mcp::{build_entries_with_task_map, plan_epic_issue_creates, tools_list}
 // `pub mod plan;` is declared in lib.rs, so spur_mcp::plan::PlanTask is accessible.
 use spur_mcp::plan::PlanTask;
 
+mod common;
+
 fn test_materializer() -> std::sync::Arc<spur_mcp::outcome_materializer::OutcomeMaterializer> {
     std::sync::Arc::new(spur_mcp::outcome_materializer::OutcomeMaterializer::new(
         std::sync::Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
@@ -217,6 +219,7 @@ async fn run_plan_emits_plan_completed_on_terminal_state() {
         None,
         None,
         test_materializer(),
+        common::server_builder::pro_feature_gate(),
     )
     .await;
 
@@ -309,6 +312,7 @@ async fn review_approve_releases_plan_lock_before_beads_io() {
             None,
             None,
             None,
+            common::server_builder::pro_feature_gate(),
         )
         .await
     });
@@ -395,6 +399,7 @@ async fn run_plan_marks_pending_tasks_failed_on_terminal_exit() {
         None,
         None,
         test_materializer(),
+        common::server_builder::pro_feature_gate(),
     )
     .await;
 
@@ -621,7 +626,7 @@ async fn persisted_submit_fixture() -> PersistedSubmitFixture {
         None,
         continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        spur_mcp::server::community_feature_gate(),
+        common::server_builder::pro_feature_gate(),
     );
     server.set_repo_root(dir.path().to_path_buf());
     PersistedSubmitFixture {

@@ -51,7 +51,16 @@ impl RollbackReport {
     }
 }
 
-pub async fn apply_mutation(pm: Arc<PmService>, batch: &MutationBatch) -> Result<Vec<String>> {
+pub async fn apply_mutation(
+    pm: Arc<PmService>,
+    feature_gate: Arc<spur_license::FeatureGate>,
+    batch: &MutationBatch,
+) -> Result<Vec<String>> {
+    crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        feature_gate.as_ref(),
+    )
+    .map_err(|error| anyhow!(crate::server::feature_error_message(error)))?;
     let adv = pm
         .advanced()
         .ok_or_else(|| anyhow!("mutation requires beads backend"))?;
@@ -210,7 +219,8 @@ pub async fn apply_mutation(pm: Arc<PmService>, batch: &MutationBatch) -> Result
 
     let cycles = dep_cycles_with_fallback(adv).await?;
     if !cycles.is_empty() {
-        let rollback_report = rollback_mutation(pm.clone(), &executed_splits).await;
+        let rollback_report =
+            rollback_mutation(pm.clone(), Arc::clone(&feature_gate), &executed_splits).await;
         let rollback_status = if rollback_report.failed.is_empty() {
             "completed".to_string()
         } else {
@@ -352,9 +362,24 @@ fn rewire_plan(
 
 async fn rollback_mutation(
     pm: Arc<PmService>,
+    feature_gate: Arc<spur_license::FeatureGate>,
     executed_splits: &[SplitExecution],
 ) -> RollbackReport {
     let mut report = RollbackReport::default();
+    if let Err(error) = crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        feature_gate.as_ref(),
+    ) {
+        if let Some(split) = executed_splits.last() {
+            report.record_failure(
+                "rollback_setup",
+                &split.parent_id,
+                None,
+                crate::server::feature_error_message(error),
+            );
+        }
+        return report;
+    }
     let Some(adv) = pm.advanced() else {
         if let Some(split) = executed_splits.last() {
             report.record_failure(

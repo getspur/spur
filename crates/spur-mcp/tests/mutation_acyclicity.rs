@@ -14,6 +14,8 @@ use tempfile::TempDir;
 use tokio::time::sleep;
 use uuid::Uuid;
 
+mod common;
+
 fn br_available() -> bool {
     Command::new("br")
         .arg("--help")
@@ -232,7 +234,12 @@ async fn cycle_detection_emits_violation_and_rolls_back() {
         mutation_id,
     ));
 
-    let apply_result = apply_mutation(pm.clone(), &batch).await;
+    let apply_result = apply_mutation(
+        pm.clone(),
+        common::server_builder::pro_feature_gate(),
+        &batch,
+    )
+    .await;
     let inject_result = injector
         .await
         .expect("cycle injector task panicked")

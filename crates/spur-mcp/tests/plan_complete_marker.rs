@@ -16,6 +16,8 @@ use std::process::Command;
 use spur_mcp::plan::{labels, PlanTask};
 use tempfile::TempDir;
 
+mod common;
+
 fn br_available() -> bool {
     Command::new("br")
         .arg("--help")
@@ -88,9 +90,16 @@ async fn build_epic_subgraph_emits_plan_complete_on_epic() {
     .expect("expected Some(PmService) — beads dir must exist after br init");
 
     let tasks = minimal_tasks();
-    let subgraph = spur_mcp::build_epic_subgraph(&pm, "P-test", "Test Epic", None, &tasks)
-        .await
-        .expect("build_epic_subgraph must succeed");
+    let subgraph = spur_mcp::build_epic_subgraph(
+        &pm,
+        common::server_builder::pro_feature_gate().as_ref(),
+        "P-test",
+        "Test Epic",
+        None,
+        &tasks,
+    )
+    .await
+    .expect("build_epic_subgraph must succeed");
 
     let epic_id = &subgraph.epic_id;
 

@@ -8,6 +8,8 @@ use spur_mcp::server::{DetachedContinuationCtx, McpCallbackServer};
 use spur_pm::{IssueUpdate, PmService};
 use tempfile::TempDir;
 
+mod common;
+
 fn br_available() -> bool {
     Command::new("br")
         .arg("--help")
@@ -114,7 +116,7 @@ async fn get_plan_status_reprojects_persisted_plan_instead_of_trusting_corrupted
         None,
         continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        spur_mcp::server::community_feature_gate(),
+        common::server_builder::pro_feature_gate(),
     );
 
     let submit_response = server
@@ -178,7 +180,7 @@ async fn get_plan_status_preserves_in_progress_persisted_children() {
         None,
         continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        spur_mcp::server::community_feature_gate(),
+        common::server_builder::pro_feature_gate(),
     );
 
     let submit_response = server
@@ -218,6 +220,7 @@ async fn get_plan_status_preserves_in_progress_persisted_children() {
     spur_mcp::plan::persist_dispatch_intent(
         pm.as_ref(),
         &task_issue_id,
+        common::server_builder::pro_feature_gate().as_ref(),
         &plan_id,
         "del-inflight",
         "codex",

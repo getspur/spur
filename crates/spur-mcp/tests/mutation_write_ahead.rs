@@ -12,6 +12,8 @@ use spur_mcp::plan::mutation_executor::apply_mutation;
 use tempfile::TempDir;
 use uuid::Uuid;
 
+mod common;
+
 fn br_available() -> bool {
     Command::new("br")
         .arg("--help")
@@ -120,9 +122,13 @@ async fn write_ahead_comment_persists_when_rewire_validation_fails() {
         }],
     );
 
-    let err = apply_mutation(pm.clone(), &batch)
-        .await
-        .expect_err("invalid rewire must fail");
+    let err = apply_mutation(
+        pm.clone(),
+        common::server_builder::pro_feature_gate(),
+        &batch,
+    )
+    .await
+    .expect_err("invalid rewire must fail");
     assert!(
         format!("{err:#}").contains("out of range"),
         "expected child index validation error, got: {err:#}"
@@ -233,9 +239,13 @@ async fn compensate_mutation_orphans_emits_violation_breadcrumb() {
     .await
     .expect("write mutation plan breadcrumb");
 
-    spur_mcp::server::compensate_mutation_orphans(Arc::clone(&pm), &parent)
-        .await
-        .expect("compensate orphaned mutation");
+    spur_mcp::server::compensate_mutation_orphans(
+        Arc::clone(&pm),
+        common::server_builder::pro_feature_gate(),
+        &parent,
+    )
+    .await
+    .expect("compensate orphaned mutation");
 
     let comments = adv.list_comments(&parent).await.expect("comments");
     let audits = sentinels_from_comments(&comments);

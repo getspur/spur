@@ -172,7 +172,7 @@ async fn t_v0c_1_persisted_submit_path_does_not_direct_dispatch() {
         None,
         continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        spur_mcp::server::community_feature_gate(),
+        common::server_builder::pro_feature_gate(),
     );
 
     let response = server
@@ -206,6 +206,7 @@ async fn t_v0c_2_reconciler_dispatch_writes_label_and_dispatch_audit() {
     let pm = beads_pm(dir.path()).await;
     let subgraph = spur_mcp::build_epic_subgraph(
         pm.as_ref(),
+        common::server_builder::pro_feature_gate().as_ref(),
         "plan-2",
         "Plan Two",
         None,
@@ -228,6 +229,7 @@ async fn t_v0c_2_reconciler_dispatch_writes_label_and_dispatch_audit() {
             materializer: test_materializer(),
         }),
         Some("plan-2".into()),
+        common::server_builder::pro_feature_gate(),
     );
 
     reconciler.tick_once().await.expect("tick_once");
@@ -269,6 +271,7 @@ async fn t_v0c_3_completion_success_writes_ready_for_review_and_completion() {
     spur_mcp::plan::persist_completion_result(
         pm.as_ref(),
         &task_id,
+        common::server_builder::pro_feature_gate().as_ref(),
         "plan-3",
         "del-A",
         CompletionState::AwaitingReview,
@@ -353,6 +356,7 @@ async fn t_v0c_4_reject_closes_task_and_blocks_watcher() {
         None,
         None,
         None,
+        common::server_builder::pro_feature_gate(),
     )
     .await
     .expect("reject");
@@ -375,6 +379,7 @@ async fn t_v0c_5_request_changes_stays_open_and_reconciler_redispatches() {
     let pm = beads_pm(dir.path()).await;
     let subgraph = spur_mcp::build_epic_subgraph(
         pm.as_ref(),
+        common::server_builder::pro_feature_gate().as_ref(),
         "plan-5",
         "Plan Five",
         None,
@@ -428,6 +433,7 @@ async fn t_v0c_5_request_changes_stays_open_and_reconciler_redispatches() {
         None,
         None,
         None,
+        common::server_builder::pro_feature_gate(),
     )
     .await
     .expect("request_changes");
@@ -445,6 +451,7 @@ async fn t_v0c_5_request_changes_stays_open_and_reconciler_redispatches() {
             materializer: test_materializer(),
         }),
         Some("plan-5".into()),
+        common::server_builder::pro_feature_gate(),
     );
 
     reconciler.tick_once().await.expect("tick_once");
@@ -466,6 +473,7 @@ async fn t_v0c_6_watcher_uses_projected_plan_state_not_stub_state() {
     let pm = beads_pm(dir.path()).await;
     let subgraph = spur_mcp::build_epic_subgraph(
         pm.as_ref(),
+        common::server_builder::pro_feature_gate().as_ref(),
         "plan-6",
         "Plan Six",
         None,
@@ -502,6 +510,7 @@ async fn t_v0c_6_watcher_uses_projected_plan_state_not_stub_state() {
         Arc::clone(&pm),
         ScopeDriftSplitProposer::default(),
         TrivialScorer,
+        common::server_builder::pro_feature_gate(),
     );
     watcher.tick_once().await.expect("tick_once");
 
@@ -511,9 +520,13 @@ async fn t_v0c_6_watcher_uses_projected_plan_state_not_stub_state() {
         .iter()
         .any(|label| label.starts_with("spur:signal-processed:")));
 
-    let projected = spur_mcp::plan::projector::project_plan_from_beads(pm.as_ref(), "plan-6")
-        .await
-        .expect("projected split plan");
+    let projected = spur_mcp::plan::projector::project_plan_from_beads(
+        pm.as_ref(),
+        "plan-6",
+        common::server_builder::pro_feature_gate().as_ref(),
+    )
+    .await
+    .expect("projected split plan");
     assert!(
         projected.tasks.len() > 1,
         "split children should reappear after restart projection"
@@ -547,6 +560,7 @@ async fn t_v0c_7_cache_miss_rehydrates_persisted_plan_from_beads() {
     let pm = beads_pm(dir.path()).await;
     let _subgraph = spur_mcp::build_epic_subgraph(
         pm.as_ref(),
+        common::server_builder::pro_feature_gate().as_ref(),
         "plan-7",
         "Plan Seven",
         None,
@@ -555,9 +569,13 @@ async fn t_v0c_7_cache_miss_rehydrates_persisted_plan_from_beads() {
     .await
     .expect("build epic subgraph");
 
-    let projected = spur_mcp::plan::projector::project_plan_from_beads(pm.as_ref(), "plan-7")
-        .await
-        .expect("projected plan");
+    let projected = spur_mcp::plan::projector::project_plan_from_beads(
+        pm.as_ref(),
+        "plan-7",
+        common::server_builder::pro_feature_gate().as_ref(),
+    )
+    .await
+    .expect("projected plan");
     assert_eq!(projected.plan_id, "plan-7");
     assert_eq!(projected.tasks.len(), 1);
     assert_eq!(
@@ -589,14 +607,19 @@ async fn t_v0c_8_orphaned_dispatch_requeues_and_late_completion_is_superseded() 
     )
     .await;
 
-    let cleared = resolve_dispatch_orphan(Arc::clone(&pm), &task_id)
-        .await
-        .expect("resolve orphan");
+    let cleared = resolve_dispatch_orphan(
+        Arc::clone(&pm),
+        common::server_builder::pro_feature_gate(),
+        &task_id,
+    )
+    .await
+    .expect("resolve orphan");
     assert!(cleared, "dispatch orphan should be cleared");
 
     spur_mcp::plan::persist_completion_result(
         pm.as_ref(),
         &task_id,
+        common::server_builder::pro_feature_gate().as_ref(),
         "plan-8",
         "del-stale",
         CompletionState::Superseded,
@@ -645,9 +668,13 @@ async fn t_v0c_9_orphaned_mutation_plan_is_compensated_before_new_signals() {
         .await
         .expect("mutation plan");
 
-    compensate_mutation_orphans(Arc::clone(&pm), &task_id)
-        .await
-        .expect("compensate mutation orphan");
+    compensate_mutation_orphans(
+        Arc::clone(&pm),
+        common::server_builder::pro_feature_gate(),
+        &task_id,
+    )
+    .await
+    .expect("compensate mutation orphan");
 
     let audits = collect_audits(&run_br_json(dir.path(), &["comments", "list", &task_id]).unwrap());
     assert!(audits.iter().any(|audit| matches!(
@@ -675,6 +702,7 @@ async fn t_v0c_10_startup_reclaims_mid_plan_and_continues_dispatch() {
     let pm = beads_pm(dir.path()).await;
     let subgraph = spur_mcp::build_epic_subgraph(
         pm.as_ref(),
+        common::server_builder::pro_feature_gate().as_ref(),
         "plan-10",
         "Plan Ten",
         None,
@@ -690,7 +718,7 @@ async fn t_v0c_10_startup_reclaims_mid_plan_and_continues_dispatch() {
         None,
         continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        spur_mcp::server::community_feature_gate(),
+        common::server_builder::pro_feature_gate(),
     );
     server.set_reconciler_enabled(true, Some(Arc::new(Notify::new())));
     server.set_repo_root(dir.path().to_path_buf());
@@ -726,6 +754,7 @@ async fn t_v0c_11_startup_reclaim_clears_stale_dispatch_before_redispatch() {
     let pm = beads_pm(dir.path()).await;
     let subgraph = spur_mcp::build_epic_subgraph(
         pm.as_ref(),
+        common::server_builder::pro_feature_gate().as_ref(),
         "plan-11",
         "Plan Eleven",
         None,
@@ -749,7 +778,7 @@ async fn t_v0c_11_startup_reclaim_clears_stale_dispatch_before_redispatch() {
         None,
         continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        spur_mcp::server::community_feature_gate(),
+        common::server_builder::pro_feature_gate(),
     );
     server.set_reconciler_enabled(true, None);
     server.set_repo_root(dir.path().to_path_buf());

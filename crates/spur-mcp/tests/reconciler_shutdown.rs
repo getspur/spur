@@ -9,6 +9,8 @@ use spur_mcp::plan::reconciler::{Reconciler, ReconcilerConfig};
 use tempfile::TempDir;
 use tokio::sync::Notify;
 
+mod common;
+
 fn br_available() -> bool {
     Command::new("br")
         .arg("--help")
@@ -91,7 +93,14 @@ async fn reconciler_shutdown_on_cancel() {
         idle_ceiling: Duration::from_millis(50),
         backoff_factor: 2,
     };
-    let reconciler = Reconciler::new(cfg, pm, Arc::new(Notify::new()), None, None);
+    let reconciler = Reconciler::new(
+        cfg,
+        pm,
+        Arc::new(Notify::new()),
+        None,
+        None,
+        common::server_builder::pro_feature_gate(),
+    );
 
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
     let handle = tokio::spawn(async move { reconciler.run(cancel_rx).await });

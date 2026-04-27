@@ -11,6 +11,8 @@ use spur_mcp::{build_epic_subgraph, emit_plan_submit_audit};
 use spur_pm::{IssueUpdate, PmService};
 use tempfile::TempDir;
 
+mod common;
+
 fn br_available() -> bool {
     Command::new("br")
         .arg("--help")
@@ -155,9 +157,17 @@ async fn t_v0d_3_merge_plan_works_after_restart_on_persisted_plan() {
         issue_id: None,
         context_files: Vec::new(),
     }];
-    let subgraph = build_epic_subgraph(pm.as_ref(), plan_id, "Restart Recovery Epic", None, &tasks)
-        .await
-        .expect("build epic subgraph");
+    let feature_gate = common::server_builder::pro_feature_gate();
+    let subgraph = build_epic_subgraph(
+        pm.as_ref(),
+        feature_gate.as_ref(),
+        plan_id,
+        "Restart Recovery Epic",
+        None,
+        &tasks,
+    )
+    .await
+    .expect("build epic subgraph");
     emit_plan_submit_audit(
         pm.advanced().expect("advanced beads backend"),
         plan_id,
@@ -222,7 +232,7 @@ async fn t_v0d_3_merge_plan_works_after_restart_on_persisted_plan() {
         None,
         continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        spur_mcp::server::community_feature_gate(),
+        common::server_builder::pro_feature_gate(),
     );
     server1.set_repo_root(dir.path().to_path_buf());
     let warm_status = server1
@@ -244,7 +254,7 @@ async fn t_v0d_3_merge_plan_works_after_restart_on_persisted_plan() {
         None,
         continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        spur_mcp::server::community_feature_gate(),
+        common::server_builder::pro_feature_gate(),
     );
     server2.set_repo_root(dir.path().to_path_buf());
     assert_eq!(

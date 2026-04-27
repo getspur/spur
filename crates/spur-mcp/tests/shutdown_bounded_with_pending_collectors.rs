@@ -12,6 +12,8 @@ use spur_acp::{BrainSessionId, SessionId};
 use spur_mcp::{server::DetachedContinuationCtx, McpCallbackServer};
 use tokio::sync::{oneshot, Notify};
 
+mod common;
+
 /// Observing continuation ctx: counts callback invocations and, for each
 /// `Failed` completion, tracks the error string so tests can assert that the
 /// collector finished cleanly after `shutdown()`.
@@ -76,7 +78,7 @@ async fn test_shutdown_bounded_with_pending_collectors() -> Result<(), Box<dyn s
         None,
         observing_continuation_ctx(Arc::clone(&failed_count)),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        spur_mcp::server::community_feature_gate(),
+        common::server_builder::pro_feature_gate(),
     );
     let server = Arc::new(server);
     let (client_io, server_io) = tokio::io::duplex(16 * 1024);

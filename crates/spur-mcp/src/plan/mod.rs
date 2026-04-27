@@ -688,6 +688,7 @@ pub fn derive_epic_plan_from_issues(
 /// `WorkerInfo` list on `McpCallbackServer`.
 pub async fn derive_epic_plan(
     pm: &spur_pm::PmService,
+    feature_gate: &spur_license::FeatureGate,
     epic_id: &str,
     default_agent: Option<&str>,
     known_agents: &[&str],
@@ -765,6 +766,11 @@ pub async fn derive_epic_plan(
         known_agents,
     )?;
 
+    crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        feature_gate,
+    )
+    .map_err(crate::server::feature_error_message)?;
     if let Some(adv) = pm.advanced() {
         for task in &mut derived.plan_tasks {
             let Some(issue_id) = task.issue_id.as_deref() else {
@@ -941,6 +947,7 @@ fn has_cycle(tasks: &[PlanTask]) -> bool {
 pub async fn emit_dispatch_audit(
     pm: Option<&dyn PmLike>,
     issue_id: &Option<String>,
+    feature_gate: &spur_license::FeatureGate,
     plan_id: &str,
     delegation_id: &str,
     worker: &str,
@@ -949,6 +956,20 @@ pub async fn emit_dispatch_audit(
     let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
         return;
     };
+    if let Err(error) = crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        feature_gate,
+    ) {
+        warn!(
+            target: "spur.audit.emit_failure",
+            kind = "dispatch",
+            issue_id = %issue_id,
+            plan_id = %plan_id,
+            delegation_id = %delegation_id,
+            "Dispatch audit comment emission skipped: {error:?}"
+        );
+        return;
+    }
     let Some(adv) = pm.advanced() else { return };
     let kind = crate::plan::audit_sentinel::AuditSentinelKind::Dispatch {
         delegation_id: delegation_id.to_string(),
@@ -988,9 +1009,11 @@ pub(crate) async fn emit_task_spec_audit(
 }
 
 /// Emit a `[[spur-audit v1]] Completion` sentinel comment on the task issue.
+#[allow(clippy::too_many_arguments)]
 pub async fn emit_completion_audit(
     pm: Option<&dyn PmLike>,
     issue_id: &Option<String>,
+    feature_gate: &spur_license::FeatureGate,
     plan_id: &str,
     delegation_id: &str,
     completion_state: crate::plan::audit_sentinel::CompletionState,
@@ -1000,6 +1023,20 @@ pub async fn emit_completion_audit(
     let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
         return;
     };
+    if let Err(error) = crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        feature_gate,
+    ) {
+        warn!(
+            target: "spur.audit.emit_failure",
+            kind = "completion",
+            issue_id = %issue_id,
+            plan_id = %plan_id,
+            delegation_id = %delegation_id,
+            "Completion audit comment emission skipped: {error:?}"
+        );
+        return;
+    }
     let Some(adv) = pm.advanced() else { return };
     let kind = crate::plan::audit_sentinel::AuditSentinelKind::Completion {
         delegation_id: delegation_id.to_string(),
@@ -1053,12 +1090,27 @@ pub async fn emit_epic_completion_audit(
 pub(crate) async fn emit_approval_audit(
     pm: Option<&dyn PmLike>,
     issue_id: &Option<String>,
+    feature_gate: &spur_license::FeatureGate,
     plan_id: &str,
     delegation_id: &str,
 ) {
     let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
         return;
     };
+    if let Err(error) = crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        feature_gate,
+    ) {
+        warn!(
+            target: "spur.audit.emit_failure",
+            kind = "approval",
+            issue_id = %issue_id,
+            plan_id = %plan_id,
+            delegation_id = %delegation_id,
+            "Approval audit comment emission skipped: {error:?}"
+        );
+        return;
+    }
     let Some(adv) = pm.advanced() else { return };
     let kind = crate::plan::audit_sentinel::AuditSentinelKind::Approval {
         delegation_id: delegation_id.to_string(),
@@ -1115,6 +1167,7 @@ async fn apply_issue_update(
 pub(crate) async fn emit_rejection_audit(
     pm: Option<&dyn PmLike>,
     issue_id: &Option<String>,
+    feature_gate: &spur_license::FeatureGate,
     plan_id: &str,
     delegation_id: &str,
     feedback: &str,
@@ -1122,6 +1175,20 @@ pub(crate) async fn emit_rejection_audit(
     let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
         return;
     };
+    if let Err(error) = crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        feature_gate,
+    ) {
+        warn!(
+            target: "spur.audit.emit_failure",
+            kind = "rejection",
+            issue_id = %issue_id,
+            plan_id = %plan_id,
+            delegation_id = %delegation_id,
+            "Rejection audit comment emission skipped: {error:?}"
+        );
+        return;
+    }
     let Some(adv) = pm.advanced() else { return };
     let kind = crate::plan::audit_sentinel::AuditSentinelKind::Rejection {
         delegation_id: delegation_id.to_string(),
@@ -1158,6 +1225,7 @@ pub fn dispatch_intent_update(delegation_id: &str) -> spur_pm::IssueUpdate {
 pub async fn persist_dispatch_intent(
     pm: &dyn PmLike,
     issue_id: &str,
+    feature_gate: &spur_license::FeatureGate,
     plan_id: &str,
     delegation_id: &str,
     worker: &str,
@@ -1167,6 +1235,7 @@ pub async fn persist_dispatch_intent(
     emit_dispatch_audit(
         Some(pm),
         &Some(issue_id.to_string()),
+        feature_gate,
         plan_id,
         delegation_id,
         worker,
@@ -1266,6 +1335,7 @@ pub fn completion_is_superseded(
 pub async fn persist_completion_result(
     pm: &dyn PmLike,
     issue_id: &str,
+    feature_gate: &spur_license::FeatureGate,
     plan_id: &str,
     delegation_id: &str,
     completion_state: crate::plan::audit_sentinel::CompletionState,
@@ -1286,6 +1356,7 @@ pub async fn persist_completion_result(
     emit_completion_audit(
         Some(pm),
         &Some(issue_id.to_string()),
+        feature_gate,
         plan_id,
         delegation_id,
         completion_state,
@@ -1301,6 +1372,7 @@ pub async fn persist_completion_result(
 pub(crate) async fn persist_completion_result_and_notify(
     pm: &dyn PmLike,
     issue_id: &str,
+    feature_gate: &spur_license::FeatureGate,
     plan_id: &str,
     delegation_id: &str,
     completion_state: crate::plan::audit_sentinel::CompletionState,
@@ -1316,6 +1388,7 @@ pub(crate) async fn persist_completion_result_and_notify(
         persist_completion_result(
             pm,
             issue_id,
+            feature_gate,
             plan_id,
             delegation_id,
             completion_state,
@@ -1359,6 +1432,7 @@ pub(crate) async fn persist_completion_result_and_notify(
     persist_completion_result(
         pm,
         issue_id,
+        feature_gate,
         plan_id,
         delegation_id,
         completion_state,
@@ -1402,6 +1476,7 @@ pub async fn run_plan(
     pm: Option<Arc<dyn PmLike>>,
     fast_forward: Option<Arc<tokio::sync::Notify>>,
     materializer: Arc<crate::outcome_materializer::OutcomeMaterializer>,
+    feature_gate: Arc<spur_license::FeatureGate>,
 ) {
     if plan.lock().await.epic_id.is_some() {
         tracing::warn!(
@@ -1494,6 +1569,7 @@ pub async fn run_plan(
             emit_dispatch_audit(
                 pm.as_deref(),
                 &task_spec.issue_id,
+                feature_gate.as_ref(),
                 &plan_id,
                 &delegation_id,
                 &task_spec.agent,
@@ -1507,6 +1583,7 @@ pub async fn run_plan(
             let pm_ref = pm.clone();
             let fast_forward_ref = fast_forward.clone();
             let materializer_ref = Arc::clone(&materializer);
+            let feature_gate_ref = Arc::clone(&feature_gate);
             let brain_sid_ref = brain_sid.clone();
             let issue_id_for_completion = task_spec.issue_id.clone();
             let delegation_id_for_completion = delegation_id.clone();
@@ -1522,6 +1599,7 @@ pub async fn run_plan(
                             if let Err(error) = persist_completion_result_and_notify(
                                 pm,
                                 issue_id,
+                                feature_gate_ref.as_ref(),
                                 &pid,
                                 &delegation_id_for_completion,
                                 completion_state,
@@ -2740,6 +2818,7 @@ pub async fn handle_review_task(
     sink: Option<&dyn crate::events::McpEventSink>,
     delegation_tx: Option<&tokio::sync::mpsc::Sender<crate::tools::DelegationRequest>>,
     task_tracker: Option<&tokio_util::task::TaskTracker>,
+    feature_gate: Arc<spur_license::FeatureGate>,
 ) -> Result<serde_json::Value, String> {
     let pm_closed_status = pm.as_deref().map(|p| p.closed_status().to_string());
 
@@ -2782,7 +2861,14 @@ pub async fn handle_review_task(
                     plan_id,
                     delegation_id,
                 } => {
-                    emit_approval_audit(Some(pm), &issue_id, &plan_id, &delegation_id).await;
+                    emit_approval_audit(
+                        Some(pm),
+                        &issue_id,
+                        feature_gate.as_ref(),
+                        &plan_id,
+                        &delegation_id,
+                    )
+                    .await;
                 }
                 PendingAuditEmit::Rejection {
                     issue_id,
@@ -2790,8 +2876,15 @@ pub async fn handle_review_task(
                     delegation_id,
                     feedback,
                 } => {
-                    emit_rejection_audit(Some(pm), &issue_id, &plan_id, &delegation_id, &feedback)
-                        .await;
+                    emit_rejection_audit(
+                        Some(pm),
+                        &issue_id,
+                        feature_gate.as_ref(),
+                        &plan_id,
+                        &delegation_id,
+                        &feedback,
+                    )
+                    .await;
                 }
             }
         }
@@ -2968,6 +3061,21 @@ mod tests {
         Arc::new(crate::outcome_materializer::OutcomeMaterializer::new(
             Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
         ))
+    }
+
+    fn pro_feature_gate() -> Arc<spur_license::FeatureGate> {
+        let gate = Arc::new(spur_license::FeatureGate::new(
+            spur_license::policy::PolicyResolver::embedded(),
+        ));
+        let features =
+            std::collections::BTreeSet::from([spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED
+                .as_str()
+                .to_string()]);
+        gate.update_state(&spur_license::LicenseState::active_validated(
+            spur_license::Plan::Pro,
+            features,
+        ));
+        gate
     }
 
     #[test]
@@ -3156,9 +3264,18 @@ mod tests {
     #[tokio::test]
     async fn run_plan_with_epic_id_does_not_dispatch() {
         let (plan, tx, mut rx) = build_run_plan_fixture(Some("bd-epic".into()));
-        tokio::spawn(
-            async move { run_plan(plan, tx, None, None, None, test_materializer()).await },
-        );
+        tokio::spawn(async move {
+            run_plan(
+                plan,
+                tx,
+                None,
+                None,
+                None,
+                test_materializer(),
+                pro_feature_gate(),
+            )
+            .await
+        });
         let recv = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await;
         assert!(
             matches!(recv, Ok(None) | Err(_)),
@@ -3169,9 +3286,18 @@ mod tests {
     #[tokio::test]
     async fn run_plan_without_epic_id_still_dispatches() {
         let (plan, tx, mut rx) = build_run_plan_fixture(None);
-        tokio::spawn(
-            async move { run_plan(plan, tx, None, None, None, test_materializer()).await },
-        );
+        tokio::spawn(async move {
+            run_plan(
+                plan,
+                tx,
+                None,
+                None,
+                None,
+                test_materializer(),
+                pro_feature_gate(),
+            )
+            .await
+        });
         let recv = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await;
         assert!(
             matches!(recv, Ok(Some(_))),
@@ -3868,6 +3994,7 @@ mod tests {
         super::persist_completion_result_and_notify(
             &NoopPm,
             "bd-1",
+            pro_feature_gate().as_ref(),
             "plan-1",
             "del-A",
             crate::plan::audit_sentinel::CompletionState::AwaitingReview,
@@ -3968,6 +4095,7 @@ mod tests {
         super::persist_completion_result_and_notify(
             &pm,
             "bd-1",
+            pro_feature_gate().as_ref(),
             "plan-1",
             "del-A",
             crate::plan::audit_sentinel::CompletionState::AwaitingReview,
@@ -4077,6 +4205,7 @@ mod tests {
                     Some(pm),
                     None,
                     test_materializer(),
+                    pro_feature_gate(),
                 )
                 .await
             }
@@ -4176,6 +4305,7 @@ mod tests {
                     Some(Arc::new(FailingPm)),
                     None,
                     test_materializer(),
+                    pro_feature_gate(),
                 )
                 .await
             }

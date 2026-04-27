@@ -205,6 +205,7 @@ pub struct Reconciler {
     auto_merge_approved_plans: bool,
     automation: Option<Arc<dyn ReconcilerAutomation>>,
     journal_wake: Option<Arc<Notify>>,
+    feature_gate: Arc<spur_license::FeatureGate>,
 }
 
 impl Reconciler {
@@ -214,6 +215,7 @@ impl Reconciler {
         fast_forward: Arc<Notify>,
         dispatch: Option<ReconcilerDispatchCtx>,
         plan_id: Option<String>,
+        feature_gate: Arc<spur_license::FeatureGate>,
     ) -> Self {
         Self {
             config,
@@ -224,6 +226,7 @@ impl Reconciler {
             auto_merge_approved_plans: false,
             automation: None,
             journal_wake: None,
+            feature_gate,
         }
     }
 
@@ -248,7 +251,13 @@ impl Reconciler {
             return;
         };
 
-        match crate::plan::projector::project_plan_from_beads(self.pm.as_ref(), plan_id).await {
+        match crate::plan::projector::project_plan_from_beads(
+            self.pm.as_ref(),
+            plan_id,
+            self.feature_gate.as_ref(),
+        )
+        .await
+        {
             Ok(projected) => crate::plan::snapshot::emit_plan_snapshot(Some(sink), &projected),
             Err(error) => tracing::warn!(%plan_id, "failed to project plan snapshot: {error}"),
         }
@@ -335,6 +344,7 @@ impl Reconciler {
             let projected = match crate::plan::projector::project_plan_from_beads(
                 self.pm.as_ref(),
                 plan_id,
+                self.feature_gate.as_ref(),
             )
             .await
             {
@@ -364,6 +374,7 @@ impl Reconciler {
             crate::plan::persist_dispatch_intent(
                 self.pm.as_ref(),
                 &summary.id,
+                self.feature_gate.as_ref(),
                 plan_id,
                 &delegation_id,
                 &task.spec.agent,
@@ -411,6 +422,7 @@ impl Reconciler {
             let event_sink = dispatch.event_sink.clone();
             let brain_session_id = dispatch.brain_session_id.clone();
             let materializer = Arc::clone(&dispatch.materializer);
+            let feature_gate = Arc::clone(&self.feature_gate);
             dispatch.task_tracker.spawn(async move {
                 let Ok(result) = rx.await else {
                     tracing::warn!(
@@ -427,6 +439,7 @@ impl Reconciler {
                 if let Err(error) = crate::plan::persist_completion_result_and_notify(
                     pm.as_ref(),
                     &issue_id,
+                    feature_gate.as_ref(),
                     &plan_id,
                     &delegation_id_for_completion,
                     completion_state,
@@ -448,8 +461,12 @@ impl Reconciler {
                 }
 
                 if let Some(sink) = event_sink.as_deref() {
-                    match crate::plan::projector::project_plan_from_beads(pm.as_ref(), &plan_id)
-                        .await
+                    match crate::plan::projector::project_plan_from_beads(
+                        pm.as_ref(),
+                        &plan_id,
+                        feature_gate.as_ref(),
+                    )
+                    .await
                     {
                         Ok(projected) => {
                             crate::plan::snapshot::emit_plan_snapshot(Some(sink), &projected)
@@ -470,6 +487,11 @@ impl Reconciler {
     }
 
     async fn reconcile_terminal_epics(&self) -> anyhow::Result<bool> {
+        crate::server::require_feature(
+            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+            self.feature_gate.as_ref(),
+        )
+        .map_err(|error| anyhow::anyhow!(crate::server::feature_error_message(error)))?;
         let Some(adv) = self.pm.advanced() else {
             return Ok(false);
         };
@@ -768,6 +790,11 @@ impl Reconciler {
 
     pub async fn observe_ready_summaries(&self) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
         let label_filter = self.plan_id.as_deref().map(crate::plan::labels::plan_id);
+        crate::server::require_feature(
+            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+            self.feature_gate.as_ref(),
+        )
+        .map_err(|error| anyhow::anyhow!(crate::server::feature_error_message(error)))?;
         let Some(adv) = self.pm.advanced() else {
             anyhow::bail!("reconciler: no advanced (beads) backend available");
         };
@@ -803,9 +830,12 @@ impl Reconciler {
                     else {
                         continue;
                     };
-                    let projected =
-                        crate::plan::projector::project_plan_from_beads(self.pm.as_ref(), plan_id)
-                            .await?;
+                    let projected = crate::plan::projector::project_plan_from_beads(
+                        self.pm.as_ref(),
+                        plan_id,
+                        self.feature_gate.as_ref(),
+                    )
+                    .await?;
                     for task in projected.tasks {
                         if !matches!(task.status, crate::plan::PlanTaskStatus::Ready) {
                             continue;
@@ -868,6 +898,21 @@ impl Reconciler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pro_feature_gate() -> Arc<spur_license::FeatureGate> {
+        let gate = Arc::new(spur_license::FeatureGate::new(
+            spur_license::policy::PolicyResolver::embedded(),
+        ));
+        let features =
+            std::collections::BTreeSet::from([spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED
+                .as_str()
+                .to_string()]);
+        gate.update_state(&spur_license::LicenseState::active_validated(
+            spur_license::Plan::Pro,
+            features,
+        ));
+        gate
+    }
 
     #[test]
     fn reconciler_dispatch_ctx_can_be_cloned_for_server_startup() {
@@ -1183,6 +1228,7 @@ mod tests {
             Arc::new(Notify::new()),
             None,
             Some("P1".into()),
+            pro_feature_gate(),
         );
         reconciler.set_auto_merge_approved_plans(false);
         reconciler.set_automation(automation);
@@ -1321,6 +1367,7 @@ mod tests {
             Arc::new(Notify::new()),
             None,
             Some("P1".into()),
+            pro_feature_gate(),
         );
         reconciler.set_auto_merge_approved_plans(true);
         reconciler.set_automation(automation);

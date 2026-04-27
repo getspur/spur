@@ -25,16 +25,23 @@ pub struct SignalWatcher<P: MutationProposer, S: MutationScorer> {
     scorer: S,
     seen: Mutex<HashSet<Uuid>>,
     tick: Duration,
+    feature_gate: Arc<spur_license::FeatureGate>,
 }
 
 impl<P: MutationProposer, S: MutationScorer> SignalWatcher<P, S> {
-    pub fn new(pm: Arc<PmService>, proposer: P, scorer: S) -> Self {
+    pub fn new(
+        pm: Arc<PmService>,
+        proposer: P,
+        scorer: S,
+        feature_gate: Arc<spur_license::FeatureGate>,
+    ) -> Self {
         Self {
             pm,
             proposer,
             scorer,
             seen: Mutex::new(HashSet::new()),
             tick: Duration::from_secs(3),
+            feature_gate,
         }
     }
 
@@ -66,6 +73,11 @@ impl<P: MutationProposer, S: MutationScorer> SignalWatcher<P, S> {
     }
 
     pub async fn tick_once(&self) -> anyhow::Result<()> {
+        crate::server::require_feature(
+            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+            self.feature_gate.as_ref(),
+        )
+        .map_err(|error| anyhow::anyhow!(crate::server::feature_error_message(error)))?;
         let adv = self
             .pm
             .advanced()
@@ -145,9 +157,12 @@ impl<P: MutationProposer, S: MutationScorer> SignalWatcher<P, S> {
                     .ok_or_else(|| {
                         anyhow::anyhow!("signal task {} missing spur:plan-id label", issue.id)
                     })?;
-                let state =
-                    crate::plan::projector::project_plan_from_beads(self.pm.as_ref(), plan_id)
-                        .await?;
+                let state = crate::plan::projector::project_plan_from_beads(
+                    self.pm.as_ref(),
+                    plan_id,
+                    self.feature_gate.as_ref(),
+                )
+                .await?;
                 let mut scored_batches = Vec::new();
                 for batch in self.proposer.propose(&state, &signal, &issue.id).await {
                     let score = self.scorer.score(&state, &batch).await;
@@ -165,7 +180,13 @@ impl<P: MutationProposer, S: MutationScorer> SignalWatcher<P, S> {
                 // lifetime. Pairs with the durable `spur:signal-processed:<uuid>`
                 // label written by the executor on commit for cross-tick dedup.
                 match scored_batches.into_iter().next() {
-                    Some((_score, batch)) => match apply_mutation(self.pm.clone(), &batch).await {
+                    Some((_score, batch)) => match apply_mutation(
+                        self.pm.clone(),
+                        Arc::clone(&self.feature_gate),
+                        &batch,
+                    )
+                    .await
+                    {
                         Ok(_) => {
                             self.seen.lock().insert(signal_id);
                             break;

@@ -12,6 +12,8 @@ use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
 use spur_mcp::plan::PlanTask;
 use tempfile::TempDir;
 
+mod common;
+
 fn br_available() -> bool {
     Command::new("br")
         .arg("--help")
@@ -91,9 +93,16 @@ async fn emit_plan_submit_audit_writes_sentinel_on_epic() {
     .expect("expected Some(PmService)");
 
     let tasks = minimal_tasks();
-    let subgraph = spur_mcp::build_epic_subgraph(&pm, "P1", "Audit Test Epic", None, &tasks)
-        .await
-        .expect("build_epic_subgraph must succeed");
+    let subgraph = spur_mcp::build_epic_subgraph(
+        &pm,
+        common::server_builder::pro_feature_gate().as_ref(),
+        "P1",
+        "Audit Test Epic",
+        None,
+        &tasks,
+    )
+    .await
+    .expect("build_epic_subgraph must succeed");
 
     // Emit audit sentinel via the helper — this is the same code path as
     // handle_submit_plan.
@@ -167,10 +176,16 @@ async fn plan_submit_audit_includes_brain_session_id() {
         .expect("PmService::try_new failed")
         .expect("expected Some(PmService)");
 
-    let subgraph =
-        spur_mcp::build_epic_subgraph(&pm, "P1b", "Audit Test Epic", None, &minimal_tasks())
-            .await
-            .expect("build_epic_subgraph must succeed");
+    let subgraph = spur_mcp::build_epic_subgraph(
+        &pm,
+        common::server_builder::pro_feature_gate().as_ref(),
+        "P1b",
+        "Audit Test Epic",
+        None,
+        &minimal_tasks(),
+    )
+    .await
+    .expect("build_epic_subgraph must succeed");
 
     let adv = pm
         .advanced()
@@ -225,10 +240,16 @@ async fn plan_submit_audit_includes_merge_base_and_execution_mode() {
         .expect("PmService::try_new failed")
         .expect("expected Some(PmService)");
 
-    let subgraph =
-        spur_mcp::build_epic_subgraph(&pm, "P2", "Audit Test Epic", None, &minimal_tasks())
-            .await
-            .expect("build_epic_subgraph must succeed");
+    let subgraph = spur_mcp::build_epic_subgraph(
+        &pm,
+        common::server_builder::pro_feature_gate().as_ref(),
+        "P2",
+        "Audit Test Epic",
+        None,
+        &minimal_tasks(),
+    )
+    .await
+    .expect("build_epic_subgraph must succeed");
 
     let adv = pm
         .advanced()
@@ -286,10 +307,16 @@ async fn plan_submit_sentinel_round_trips_base_snapshot_oid() {
         .expect("PmService::try_new failed")
         .expect("expected Some(PmService)");
 
-    let subgraph =
-        spur_mcp::build_epic_subgraph(&pm, "P3", "Audit Test Epic", None, &minimal_tasks())
-            .await
-            .expect("build_epic_subgraph must succeed");
+    let subgraph = spur_mcp::build_epic_subgraph(
+        &pm,
+        common::server_builder::pro_feature_gate().as_ref(),
+        "P3",
+        "Audit Test Epic",
+        None,
+        &minimal_tasks(),
+    )
+    .await
+    .expect("build_epic_subgraph must succeed");
 
     let adv = pm
         .advanced()

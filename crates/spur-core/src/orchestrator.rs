@@ -1361,7 +1361,12 @@ impl Orchestrator {
     fn mcp_feature_gate(&self) -> Arc<spur_license::FeatureGate> {
         self.feature_gate
             .clone()
-            .unwrap_or_else(spur_mcp::server::community_feature_gate)
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    "MCP server constructed without explicit FeatureGate; falling back to community-tier permissions"
+                );
+                spur_mcp::server::community_feature_gate()
+            })
     }
 
     /// Classify an error as an auth-required failure.
