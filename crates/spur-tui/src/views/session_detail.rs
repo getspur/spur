@@ -2723,6 +2723,66 @@ mod maybe_request_rerasters_tests {
             _ => panic!("expected MermaidRenderRequest"),
         }
     }
+
+    #[test]
+    fn bucket_up_smoke_test() {
+        // End-to-end: a Ready diagram at bucket 800, pane grows to 1600,
+        // re-raster request emitted, completion handler runs, bucket
+        // updated, image_generation bumped.
+        use crate::action::Action;
+        use std::sync::Arc;
+        use image::{DynamicImage, RgbaImage};
+
+        let mut view = SessionDetailView::new_for_tests();
+
+        // 1. Seed Ready at bucket 800, generation 1.
+        let img1 = Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(10, 10)));
+        view.mermaid_registry.insert(
+            MermaidId(99),
+            MermaidState::Ready {
+                image: img1,
+                code: "graph TD\nA-->B".into(),
+                rastered_at_bucket: 800,
+                image_generation: 1,
+            },
+        );
+        view.next_image_generation = 1;
+
+        // 2. Pane grows to bucket 1600.
+        view.maybe_request_rerasters(200, 8);
+        assert_eq!(view.pending_fence_actions.len(), 1);
+        assert!(view.in_flight_renders.contains(&MermaidId(99)));
+        // Confirm the request is the expected fence Action variant.
+        assert!(matches!(
+            view.pending_fence_actions.front(),
+            Some(Action::MermaidRenderRequest { .. })
+        ));
+
+        // 3. Worker completes (simulated).
+        let img2 = Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(20, 20)));
+        view.handle_mermaid_completed(MermaidId(99), 1600, Ok(img2));
+
+        // 4. Verify state.
+        assert!(!view.in_flight_renders.contains(&MermaidId(99)));
+        match view.mermaid_registry.get(&MermaidId(99)) {
+            Some(MermaidState::Ready {
+                rastered_at_bucket,
+                image_generation,
+                code,
+                ..
+            }) => {
+                assert_eq!(*rastered_at_bucket, 1600);
+                assert!(*image_generation > 1, "generation must bump");
+                assert_eq!(code, "graph TD\nA-->B", "code retained across re-raster");
+            }
+            _ => panic!("expected Ready"),
+        }
+
+        // 5. Subsequent maybe_request_rerasters at the SAME bucket emits nothing.
+        view.pending_fence_actions.clear();
+        view.maybe_request_rerasters(200, 8);
+        assert!(view.pending_fence_actions.is_empty());
+    }
 }
 
 #[cfg(all(test, feature = "markdown"))]
