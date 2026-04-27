@@ -98,6 +98,8 @@ fn session_info_update_fixture_deserializes_into_sdk_session_update_arm() {
                 "fixture must populate `updatedAt` so Wave E.1 has a timestamp to log",
             );
         }
-        other => panic!("fixture must dispatch to SessionUpdate::SessionInfoUpdate; got {other:?}",),
+        other => {
+            panic!("fixture must dispatch to SessionUpdate::SessionInfoUpdate; got {other:?}",)
+        }
     }
 }

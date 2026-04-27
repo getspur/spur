@@ -56,7 +56,7 @@ pub use agent_client_protocol::schema::{
     RequestPermissionOutcome, RequestPermissionRequest, ResourceLink, SelectedPermissionOutcome,
     SessionConfigId, SessionConfigOption, SessionConfigSelectOption, SessionInfo,
     SessionInfoUpdate, SessionModeId, SessionNotification, SessionUpdate, SetSessionModeRequest,
-    SetSessionModeResponse, TextContent,
-    ToolCall as AcpToolCall, ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus,
-    ToolCallUpdate as AcpToolCallUpdate, ToolKind, UnstructuredCommandInput, UsageUpdate,
+    SetSessionModeResponse, TextContent, ToolCall as AcpToolCall, ToolCallContent, ToolCallId,
+    ToolCallLocation, ToolCallStatus, ToolCallUpdate as AcpToolCallUpdate, ToolKind,
+    UnstructuredCommandInput, UsageUpdate,
 };
