@@ -8,7 +8,7 @@ use std::time::SystemTime;
 use crate::domain::continuation::{DeferReason, DropReason};
 use crate::domain::delegation::{DelegationId, DelegationStatus};
 use crate::types::{CancelMode, SessionId};
-use agent_client_protocol::schema::{SessionInfo, SessionNotification};
+use agent_client_protocol::schema::{SessionConfigOption, SessionInfo, SessionNotification};
 
 /// Review kind for `ExecutorReviewRequested`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -552,6 +552,19 @@ pub enum SpurEventBody {
         session: SessionId,
         method: String,
         params: serde_json::Value,
+    },
+    /// The cached `config_options` for a session changed and any consumer
+    /// rendering advertised slash commands (e.g. `/model`, `/effort`)
+    /// should rebuild from the new snapshot. Carries the options inline
+    /// so subscribers do not need a separate query path.
+    ///
+    /// Emitted after `NewSessionResponse.config_options` is captured at
+    /// session creation, after a `SetSessionConfigOption` response
+    /// refreshes the cache, and (in a future plan) after a
+    /// `session/update.ConfigOptionUpdate` notification from the agent.
+    CommandRegistryDirty {
+        session: SessionId,
+        config_options: Vec<SessionConfigOption>,
     },
     DelegationRequested {
         /// Brain session that issued the delegation. Stamped by the MCP
