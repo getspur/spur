@@ -139,7 +139,13 @@ impl TriggerDetector {
     {
         // Defensive re-check: if Composing state references a prefix_start
         // that no longer holds the trigger char (upstream path forgot to
-        // send Pasted/SetText), force Idle + Close.
+        // send Pasted/SetText), drop to Idle. We DO NOT early-return Close
+        // here — fall through so the SlashArg detection block below can
+        // open a new picker on the same tick (e.g. user replaces "/model "
+        // with "/effort " in one paste). If no new picker opens, the final
+        // emit at the end of step() converts the dropped state to Close.
+        // Per gemini review action #1.
+        let mut was_composing_dropped = false;
         if let TriggerState::Composing { kind, prefix_start } = &self.state {
             let still_valid = match kind {
                 TriggerKindInternal::Mention => {
@@ -155,7 +161,7 @@ impl TriggerDetector {
             };
             if !still_valid {
                 self.state = TriggerState::Idle;
-                return TriggerTransition::Close;
+                was_composing_dropped = true;
             }
         }
 
@@ -214,6 +220,14 @@ impl TriggerDetector {
                     };
                 }
             }
+        }
+
+        // If we dropped a Composing state above and no new picker opened,
+        // the upstream UI still needs to dismiss the now-stale picker.
+        // Override `dispatched` (which would be None for non-TypedChar Idle
+        // events) with Close. Per gemini review action #1.
+        if was_composing_dropped {
+            return TriggerTransition::Close;
         }
 
         dispatched
@@ -1062,5 +1076,34 @@ mod arg_picker_tests {
         let txn = step(&mut det, IntentEvent::Pasted, "/Model ", 7, &registry);
         assert!(matches!(txn, TriggerTransition::None));
         assert!(det.is_idle());
+    }
+
+    /// Regression for gemini review action #1: replacing `/model ` with
+    /// `/effort ` in a single tick (e.g., select-all + paste) must drop
+    /// the stale SlashArg("model") state AND open the new SlashArg("effort")
+    /// picker on the same tick — not require a follow-up keystroke.
+    #[test]
+    fn t16_replacing_slash_arg_command_in_one_tick_opens_new_picker() {
+        let mut det = TriggerDetector::new();
+        let registry = registry_with_arg_picker(&["model", "effort"]);
+        // First open SlashArg("model") via paste of "/model ".
+        let _ = step(&mut det, IntentEvent::Pasted, "/model ", 7, &registry);
+        assert!(!det.is_idle(), "expected SlashArg(model) state");
+
+        // Now replace the entire buffer with "/effort " via Pasted (or SetText).
+        let txn = step(&mut det, IntentEvent::Pasted, "/effort ", 8, &registry);
+        match txn {
+            TriggerTransition::Open { trigger } => {
+                assert_eq!(
+                    trigger.kind,
+                    TriggerKind::SlashArg {
+                        command_name: "effort".into(),
+                    },
+                    "expected new SlashArg(effort), not stale (model) or Close"
+                );
+                assert_eq!(trigger.prefix_start, 8);
+            }
+            other => panic!("expected Open SlashArg(effort), got {other:?}"),
+        }
     }
 }
