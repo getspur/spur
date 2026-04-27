@@ -36,6 +36,10 @@ use crate::views::session_detail::SessionDetailView;
 use crate::views::session_picker::SessionPickerView;
 use crate::views::View;
 
+const READ_ONLY_STARTUP_WARNING: &str =
+    "Read-only mode: session metadata was written by a newer SPUR. \
+Edits this session WILL NOT be persisted. Upgrade SPUR to enable writes. (Esc to dismiss)";
+
 // ─── Supporting types ──────────────────────────────────────────────────
 
 /// A user input message or control command sent from the TUI to the backend.
@@ -190,7 +194,7 @@ pub struct App {
     collision_modal: Option<CollisionModalState>,
     should_quit: bool,
     dirty: bool,
-    /// Top-level user-visible warning banner rendered over the active view.
+    /// Top-level user-visible warning banner rendered in a reserved top row.
     user_warning: Option<String>,
     user_input_tx: Option<mpsc::Sender<UserInput>>,
     brain_status: BrainStatus,
@@ -299,6 +303,24 @@ impl App {
         landing: crate::landing::LandingDecision,
     ) -> Self {
         let metadata_path = std::path::PathBuf::from(".spur").join("session_metadata.json");
+        Self::build_with_license_state_from_metadata_path(
+            user_input_tx,
+            start_in_picker_with_preselect,
+            config,
+            license_state,
+            landing,
+            metadata_path,
+        )
+    }
+
+    fn build_with_license_state_from_metadata_path(
+        user_input_tx: Option<mpsc::Sender<UserInput>>,
+        start_in_picker_with_preselect: Option<Option<String>>,
+        config: std::sync::Arc<spur_acp::SpurConfig>,
+        license_state: LicenseStateEvent,
+        landing: crate::landing::LandingDecision,
+        metadata_path: std::path::PathBuf,
+    ) -> Self {
         let metadata_store = SessionMetadataStore::load(&metadata_path);
         let start_in_picker = start_in_picker_with_preselect.is_some();
 
@@ -362,6 +384,9 @@ impl App {
         if let crate::landing::LandingDecision::SetupRequired = &app.landing {
             app.dashboard.set_agents_configured(false);
         }
+        if app.metadata_store.is_read_only() {
+            app.show_user_warning(READ_ONLY_STARTUP_WARNING.to_string());
+        }
         app.sync_dashboard_workers();
 
         app.license_badge = license_badge_from_state(&app.license_state);
@@ -396,6 +421,19 @@ impl App {
         app.sync_input_history();
 
         app
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn new_with_metadata_path_for_test(metadata_path: std::path::PathBuf) -> Self {
+        Self::build_with_license_state_from_metadata_path(
+            None,
+            None,
+            std::sync::Arc::new(spur_acp::SpurConfig::default()),
+            Self::default_license_state("licensing not configured"),
+            crate::landing::LandingDecision::ShowDashboard,
+            metadata_path,
+        )
     }
 
     /// Test-only accessor: borrow the current `SessionDetailView`.
@@ -725,6 +763,11 @@ impl App {
         self.dirty = true;
     }
 
+    fn dismiss_user_warning(&mut self) {
+        self.user_warning = None;
+        self.dirty = true;
+    }
+
     /// Persist metadata, surfacing read-only refusals to the user via an
     /// App-owned top-level warning banner. This is deliberately not routed
     /// through `InputBar::set_status`: event handling calls `sync_brain_status`
@@ -905,8 +948,13 @@ impl App {
                         }
                     }
                 };
+                let should_dismiss_warning = matches!(key.code, KeyCode::Esc)
+                    && self.user_warning.is_some()
+                    && matches!(action, Some(Action::NavigateBack));
 
-                if let Some(action) = action {
+                if should_dismiss_warning {
+                    self.dismiss_user_warning();
+                } else if let Some(action) = action {
                     self.process_action(action);
                 }
                 self.dirty = true;
@@ -2405,6 +2453,18 @@ impl App {
     /// Render the active view, then overlay help if visible.
     pub fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
+        let (banner_area, view_area) = if self.user_warning.is_some() {
+            let chunks = ratatui::layout::Layout::default()
+                .direction(ratatui::layout::Direction::Vertical)
+                .constraints([
+                    ratatui::layout::Constraint::Length(1),
+                    ratatui::layout::Constraint::Min(0),
+                ])
+                .split(area);
+            (Some(chunks[0]), chunks[1])
+        } else {
+            (None, area)
+        };
 
         // Construct the shared context once per frame.
         let ctx = crate::views::ViewContext {
@@ -2418,7 +2478,7 @@ impl App {
         match self.current_view.clone() {
             ViewId::Dashboard => self.dashboard.render_with_lineage(
                 frame,
-                area,
+                view_area,
                 &self.lineage,
                 self.license_badge.as_ref(),
                 &mut self.worker_streams,
@@ -2426,22 +2486,22 @@ impl App {
             ),
             ViewId::SessionDetail(_) => {
                 if let Some(ref mut detail) = self.session_detail {
-                    detail.render(frame, area, &ctx);
+                    detail.render(frame, view_area, &ctx);
                 }
             }
             ViewId::SessionPicker => {
                 if let Some(ref mut p) = self.session_picker {
-                    p.render(frame, area, &ctx);
+                    p.render(frame, view_area, &ctx);
                 }
             }
             ViewId::PlanInspector(_) => {
                 if let Some(ref mut view) = self.plan_inspector {
-                    view.render(frame, area, &ctx);
+                    view.render(frame, view_area, &ctx);
                 }
             }
             ViewId::IssueBrowser => {
                 if let Some(ref mut view) = self.issue_browser {
-                    view.render(frame, area, &ctx);
+                    view.render(frame, view_area, &ctx);
                 }
             }
             #[cfg(feature = "markdown")]
@@ -2465,7 +2525,7 @@ impl App {
                         .unwrap_or_default();
                     if let Some(viewer) = self.mermaid_viewer.as_mut() {
                         viewer.set_available(&entries, self.mermaid_picker.as_ref());
-                        render_mermaid_overlay(frame, area, viewer);
+                        render_mermaid_overlay(frame, view_area, viewer);
                     }
                 }
             }
@@ -2476,25 +2536,25 @@ impl App {
             let mermaid_enabled = self.mermaid_picker.is_some();
             #[cfg(not(feature = "markdown"))]
             let mermaid_enabled = false;
-            HelpOverlay::render(frame, area, mermaid_enabled, true);
+            HelpOverlay::render(frame, view_area, mermaid_enabled, true);
         }
 
         if self.quit_confirm_visible {
-            QuitConfirmDialog::render(frame, area, self.brain_name.as_deref());
+            QuitConfirmDialog::render(frame, view_area, self.brain_name.as_deref());
         }
 
         if let Some(state) = &self.collision_modal {
-            CollisionModal::render(frame, area, &state.acp_id, &state.holder);
+            CollisionModal::render(frame, view_area, &state.acp_id, &state.holder);
         }
 
         if self.palette_visible {
             let overlay =
                 crate::components::palette_overlay::PaletteOverlay::new(&self.palette_state)
                     .with_session_active(self.session_detail.is_some());
-            frame.render_widget(overlay, frame.area());
+            frame.render_widget(overlay, view_area);
         }
 
-        if let Some(message) = self.user_warning.as_deref() {
+        if let (Some(area), Some(message)) = (banner_area, self.user_warning.as_deref()) {
             render_user_warning(frame, area, message);
         }
     }
@@ -2511,24 +2571,33 @@ fn render_user_warning(frame: &mut Frame, area: ratatui::layout::Rect, message: 
         return;
     }
 
-    let banner = ratatui::layout::Rect {
-        x: area.x,
-        y: area.y,
-        width: area.width,
-        height: 1,
-    };
     let text = Line::styled(
-        message.to_string(),
+        ellipsize_for_width(message, area.width),
         Style::default()
             .fg(Color::Black)
             .bg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
     );
-    frame.render_widget(Clear, banner);
+    frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(text).style(Style::default().bg(Color::Yellow)),
-        banner,
+        area,
     );
+}
+
+fn ellipsize_for_width(message: &str, width: u16) -> String {
+    let width = usize::from(width);
+    let char_count = message.chars().count();
+    if char_count <= width {
+        return message.to_string();
+    }
+    if width <= 3 {
+        return ".".repeat(width);
+    }
+
+    let mut text = message.chars().take(width - 3).collect::<String>();
+    text.push_str("...");
+    text
 }
 
 fn is_ctrl_c(key: KeyEvent) -> bool {
