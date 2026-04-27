@@ -37,6 +37,8 @@ use spur_mcp::plan::{PlanState, PlanTask, PlanTaskEntry, PlanTaskStatus};
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 
+mod common;
+
 fn br_available() -> bool {
     Command::new("br")
         .arg("--help")
@@ -110,9 +112,17 @@ async fn add_labels_individually(pm: &spur_pm::PmService, issue_id: &str, labels
         &run_br(dir.path(), &["create", "Dispatch Target", "-t", "task"]).expect("create issue"),
     );
 
-    spur_mcp::plan::persist_dispatch_intent(&pm, &issue_id, "plan-1", "del-A", "codex", 1)
-        .await
-        .expect("persist dispatch intent");
+    spur_mcp::plan::persist_dispatch_intent(
+        &pm,
+        &issue_id,
+        common::server_builder::pro_feature_gate().as_ref(),
+        "plan-1",
+        "del-A",
+        "codex",
+        1,
+    )
+    .await
+    .expect("persist dispatch intent");
 
     let issue = pm.get_issue(&issue_id).await.expect("get issue");
     assert!(
@@ -155,10 +165,16 @@ async fn plan_audit_coverage_all_four_sentinels() {
     }];
 
     // Build epic subgraph — creates epic + child issue in beads.
-    let subgraph =
-        spur_mcp::build_epic_subgraph(&pm, "audit-plan-1", "Audit Coverage Epic", None, &tasks)
-            .await
-            .expect("build_epic_subgraph must succeed");
+    let subgraph = spur_mcp::build_epic_subgraph(
+        &pm,
+        common::server_builder::pro_feature_gate().as_ref(),
+        "audit-plan-1",
+        "Audit Coverage Epic",
+        None,
+        &tasks,
+    )
+    .await
+    .expect("build_epic_subgraph must succeed");
 
     let task_issue_id = subgraph
         .task_map
@@ -188,6 +204,7 @@ async fn plan_audit_coverage_all_four_sentinels() {
     spur_mcp::plan::emit_dispatch_audit(
         Some(pm_arc.as_ref()),
         &issue_id_opt,
+        common::server_builder::pro_feature_gate().as_ref(),
         "audit-plan-1",
         &delegation_id,
         "codex",
@@ -199,6 +216,7 @@ async fn plan_audit_coverage_all_four_sentinels() {
     spur_mcp::plan::emit_completion_audit(
         Some(pm_arc.as_ref()),
         &issue_id_opt,
+        common::server_builder::pro_feature_gate().as_ref(),
         "audit-plan-1",
         &delegation_id,
         CompletionState::AwaitingReview,
@@ -251,6 +269,7 @@ async fn plan_audit_coverage_all_four_sentinels() {
         None,
         None,
         None,
+        common::server_builder::pro_feature_gate(),
     )
     .await
     .expect("handle_review_task must succeed");
@@ -404,9 +423,17 @@ async fn persist_dispatch_intent_writes_label_before_send() {
         .await
         .expect("create issue");
 
-    spur_mcp::plan::persist_dispatch_intent(&pm, &issue_id, "plan-1", "del-A", "codex", 1)
-        .await
-        .expect("persist dispatch intent");
+    spur_mcp::plan::persist_dispatch_intent(
+        &pm,
+        &issue_id,
+        common::server_builder::pro_feature_gate().as_ref(),
+        "plan-1",
+        "del-A",
+        "codex",
+        1,
+    )
+    .await
+    .expect("persist dispatch intent");
 
     let issue = pm.get_issue(&issue_id).await.expect("get issue");
     assert!(issue
@@ -446,6 +473,7 @@ async fn completion_success_writes_ready_for_review_and_completion_audit() {
     spur_mcp::plan::persist_completion_result(
         &pm,
         &issue_id,
+        common::server_builder::pro_feature_gate().as_ref(),
         "plan-1",
         "del-A",
         CompletionState::AwaitingReview,
@@ -515,6 +543,7 @@ async fn completion_failed_closes_issue_and_emits_completion_audit() {
     spur_mcp::plan::persist_completion_result(
         &pm,
         &issue_id,
+        common::server_builder::pro_feature_gate().as_ref(),
         "plan-1",
         "del-fail",
         CompletionState::Failed,
@@ -590,6 +619,7 @@ async fn completion_cancelled_closes_issue_and_emits_completion_audit() {
     spur_mcp::plan::persist_completion_result(
         &pm,
         &issue_id,
+        common::server_builder::pro_feature_gate().as_ref(),
         "plan-1",
         "del-cancel",
         CompletionState::Cancelled,
@@ -662,6 +692,7 @@ async fn reject_closes_issue_and_adds_review_rejected_label() {
     // Build epic subgraph — creates epic + child issue in beads.
     let subgraph = spur_mcp::build_epic_subgraph(
         pm.as_ref(),
+        common::server_builder::pro_feature_gate().as_ref(),
         "audit-reject-1",
         "Rejection Audit Epic",
         None,
@@ -730,6 +761,7 @@ async fn reject_closes_issue_and_adds_review_rejected_label() {
         None,
         None,
         None,
+        common::server_builder::pro_feature_gate(),
     )
     .await
     .expect("handle_review_task must succeed");
@@ -838,6 +870,7 @@ async fn request_changes_leaves_issue_open_and_not_review_ready() {
         None,
         None,
         None,
+        common::server_builder::pro_feature_gate(),
     )
     .await
     .expect("handle_review_task must succeed");
@@ -926,6 +959,7 @@ async fn request_changes_does_not_emit_dispatch_audit() {
         None,
         None,
         None,
+        common::server_builder::pro_feature_gate(),
     )
     .await
     .expect("handle_review_task must succeed");
@@ -1019,6 +1053,7 @@ async fn approve_closes_issue_and_clears_ready_for_review() {
         None,
         None,
         None,
+        common::server_builder::pro_feature_gate(),
     )
     .await
     .expect("handle_review_task approve must succeed");

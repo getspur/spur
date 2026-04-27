@@ -5,6 +5,8 @@ use spur_mcp::McpEventSink;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
+mod common;
+
 fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterializer> {
     Arc::new(spur_mcp::outcome_materializer::OutcomeMaterializer::new(
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
@@ -101,6 +103,7 @@ async fn approve_does_not_enqueue_new_dispatches() {
         None,
         Some(&dtx),
         Some(&tracker),
+        common::server_builder::pro_feature_gate(),
     )
     .await
     .unwrap();
@@ -172,7 +175,16 @@ async fn test_delegation_cancelled_result_does_not_cascade() {
     let plan_clone = plan.clone();
 
     let handle = tokio::spawn(async move {
-        run_plan(plan_clone, dtx, None, None, None, test_materializer()).await;
+        run_plan(
+            plan_clone,
+            dtx,
+            None,
+            None,
+            None,
+            test_materializer(),
+            common::server_builder::pro_feature_gate(),
+        )
+        .await;
     });
 
     // t1 should be dispatched immediately since it has no deps.
@@ -292,6 +304,7 @@ async fn test_plan_ready_to_merge_blocked_by_cancelled_and_count() {
         None,
         None,
         test_materializer(),
+        common::server_builder::pro_feature_gate(),
     )
     .await;
 

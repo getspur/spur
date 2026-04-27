@@ -10,6 +10,8 @@ use spur_mcp::McpEventSink;
 use tempfile::TempDir;
 use tokio::sync::Notify;
 
+mod common;
+
 fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterializer> {
     Arc::new(spur_mcp::outcome_materializer::OutcomeMaterializer::new(
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
@@ -190,6 +192,7 @@ async fn t_v0d_1_epic_closes_when_children_terminal() {
         Arc::new(Notify::new()),
         None,
         Some("P1".into()),
+        common::server_builder::pro_feature_gate(),
     );
 
     reconciler.tick_once().await.expect("tick_once");
@@ -250,6 +253,7 @@ async fn t_v0d_2_all_approved_epic_still_yields_plan_ready_to_merge() {
             materializer: test_materializer(),
         }),
         Some("P1".into()),
+        common::server_builder::pro_feature_gate(),
     );
 
     reconciler.tick_once().await.expect("tick_once");
@@ -346,6 +350,7 @@ async fn epic_completion_backfills_missing_audit_for_closed_terminal_epic() {
         Arc::new(Notify::new()),
         None,
         Some("P1".into()),
+        common::server_builder::pro_feature_gate(),
     );
 
     reconciler.tick_once().await.expect("tick_once");
@@ -419,6 +424,7 @@ async fn closed_epic_backfill_emits_plan_completed_event() {
             materializer: test_materializer(),
         }),
         Some("P2".into()),
+        common::server_builder::pro_feature_gate(),
     );
 
     reconciler.tick_once().await.expect("tick_once");
@@ -499,6 +505,7 @@ async fn closed_epic_backfill_clears_stale_integration_pending_on_failure() {
         Arc::new(Notify::new()),
         None,
         Some("P3".into()),
+        common::server_builder::pro_feature_gate(),
     );
 
     reconciler.tick_once().await.expect("tick_once");
@@ -556,6 +563,7 @@ async fn epic_closure_ignores_non_task_plan_scoped_issues() {
         Arc::new(Notify::new()),
         None,
         Some("P4".into()),
+        common::server_builder::pro_feature_gate(),
     );
 
     reconciler.tick_once().await.expect("tick_once");

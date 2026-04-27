@@ -22,6 +22,8 @@ use tempfile::TempDir;
 use tokio::time::sleep;
 use uuid::Uuid;
 
+mod common;
+
 fn br_available() -> bool {
     Command::new("br")
         .arg("--help")
@@ -149,9 +151,16 @@ async fn build_single_task_plan(pm: &PmService, plan_id: &str) -> String {
         issue_id: None,
         context_files: vec![],
     }];
-    let subgraph = spur_mcp::build_epic_subgraph(pm, plan_id, "Signal Watcher Epic", None, &tasks)
-        .await
-        .expect("build_epic_subgraph must succeed");
+    let subgraph = spur_mcp::build_epic_subgraph(
+        pm,
+        common::server_builder::pro_feature_gate().as_ref(),
+        plan_id,
+        "Signal Watcher Epic",
+        None,
+        &tasks,
+    )
+    .await
+    .expect("build_epic_subgraph must succeed");
     subgraph
         .task_map
         .get("t1")
@@ -339,6 +348,7 @@ async fn duplicate_signal_comments_with_same_signal_id_commit_once() {
         Arc::clone(&pm),
         ScopeDriftSplitProposer::default(),
         TrivialScorer,
+        common::server_builder::pro_feature_gate(),
     );
     watcher
         .tick_once()
@@ -388,6 +398,7 @@ async fn watcher_skips_signal_task_without_ready_for_review_label() {
         Arc::clone(&pm),
         ScopeDriftSplitProposer::default(),
         TrivialScorer,
+        common::server_builder::pro_feature_gate(),
     );
     watcher.tick_once().await.expect("tick_once");
 
@@ -436,6 +447,7 @@ async fn watcher_projects_real_plan_state_for_scoring() {
             expected_plan_id: "signal-projector-1".into(),
         },
         TrivialScorer,
+        common::server_builder::pro_feature_gate(),
     );
     watcher.tick_once().await.expect("tick_once");
 
@@ -493,6 +505,7 @@ async fn watcher_processes_only_one_signal_per_task_per_tick() {
             expected_plan_id: "signal-one-per-tick-1".into(),
         },
         TrivialScorer,
+        common::server_builder::pro_feature_gate(),
     );
     watcher.tick_once().await.expect("tick_once");
 
@@ -547,6 +560,7 @@ async fn watcher_skips_review_rejected_tasks_even_if_signal_label_exists() {
         Arc::clone(&pm),
         ScopeDriftSplitProposer::default(),
         TrivialScorer,
+        common::server_builder::pro_feature_gate(),
     );
     watcher.tick_once().await.expect("tick_once");
 
@@ -608,6 +622,7 @@ async fn watcher_retries_signal_after_invariant_violation_without_marking_proces
         Arc::clone(&pm),
         FixedMutationIdProposer::new(vec![first_mutation_id, second_mutation_id]),
         TrivialScorer,
+        common::server_builder::pro_feature_gate(),
     );
 
     let first_injector = tokio::spawn(inject_cycle_when_children_exist(
@@ -723,6 +738,7 @@ async fn distinct_signal_on_task_with_prior_processed_label_is_not_skipped() {
         Arc::clone(&pm),
         ScopeDriftSplitProposer::default(),
         TrivialScorer,
+        common::server_builder::pro_feature_gate(),
     );
     watcher.tick_once().await.expect("tick_once");
 

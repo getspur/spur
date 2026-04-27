@@ -13,6 +13,8 @@ use spur_pm::{IssueCreate, PmService};
 use tempfile::TempDir;
 use uuid::Uuid;
 
+mod common;
+
 fn br_available() -> bool {
     Command::new("br")
         .arg("--help")
@@ -116,6 +118,7 @@ async fn report_signal_on_open_task_records_all_artifacts() {
 
     let result = handle_report_signal(
         Arc::clone(&pm),
+        common::server_builder::pro_feature_gate(),
         json!({
             "task_id": task_id.clone(),
             "signal": signal.clone(),
@@ -208,6 +211,7 @@ async fn report_signal_on_terminal_task_records_late_arrival() {
 
     let result = handle_report_signal(
         Arc::clone(&pm),
+        common::server_builder::pro_feature_gate(),
         json!({
             "task_id": task_id.clone(),
             "signal": signal.clone(),

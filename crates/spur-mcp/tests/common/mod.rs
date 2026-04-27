@@ -5,8 +5,12 @@
 //! container runtimes) deny loopback `bind(2)` with EPERM. Tests that touch
 //! the listener skip gracefully in that environment rather than hard-failing.
 
+#![allow(dead_code)]
+
 use tokio::net::TcpListener;
 use tokio::sync::OnceCell;
+
+pub mod server_builder;
 
 static LOOPBACK_BINDABLE: OnceCell<bool> = OnceCell::const_new();
 
