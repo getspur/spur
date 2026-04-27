@@ -52,19 +52,22 @@ use agent_client_protocol::schema::{
     ContentBlock, ContentChunk, CreateTerminalRequest, CreateTerminalResponse, ExtRequest,
     ExtResponse, FileSystemCapabilities, InitializeRequest, InitializeResponse,
     KillTerminalRequest, KillTerminalResponse, ListSessionsRequest, ListSessionsResponse,
-    LoadSessionRequest, McpServer, NewSessionRequest, NewSessionResponse, PermissionOptionId,
-    PermissionOptionKind, PromptRequest, ReadTextFileRequest, ReadTextFileResponse,
-    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    LoadSessionRequest, McpServer, ModelId, NewSessionRequest, NewSessionResponse,
+    PermissionOptionId, PermissionOptionKind, PromptRequest, ReadTextFileRequest,
+    ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome, SessionConfigId, SessionConfigValueId, SessionId,
     SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse,
-    TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse,
-    WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
-    WriteTextFileResponse,
+    SetSessionModelRequest, SetSessionModelResponse, TerminalExitStatus, TerminalId,
+    TerminalOutputRequest, TerminalOutputResponse, WaitForTerminalExitRequest,
+    WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
 
 use crate::connection::{AgentConnection, ExtNotificationPayload};
+use crate::error::AcpError;
+use crate::spur_agent_caps::SpurAgentCaps;
 use crate::types::AgentHealth;
 
 /// Spur's canonical `ClientCapabilities` literal advertised at every
@@ -137,6 +140,10 @@ enum AcpCommand {
     SetSessionMode {
         request: SetSessionModeRequest,
         reply: oneshot::Sender<anyhow::Result<SetSessionModeResponse>>,
+    },
+    SetSessionModel {
+        request: SetSessionModelRequest,
+        reply: oneshot::Sender<anyhow::Result<SetSessionModelResponse>>,
     },
     SetSessionConfigOption {
         request: SetSessionConfigOptionRequest,
@@ -212,6 +219,34 @@ fn build_acp_log_path(agent_name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(".spur/logs").join(format!("{agent_name}-{ts}-{pid}-acp.log"))
 }
 
+/// State-gated dispatch decision for `set_session_model`. Spec §6.3.
+///
+/// The decision is made *once* by reading `SpurAgentCaps` — never by
+/// probing the agent at runtime. Codex (which advertises both `models`
+/// AND a `model` config option) takes the dedicated `Direct` path; an
+/// agent that only advertises config options takes the fallback; an
+/// agent that advertises neither yields `Unsupported`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SetSessionModelDispatch {
+    /// `caps.supports_set_model()` — dispatch `SetSessionModelRequest`.
+    Direct,
+    /// `caps.supports_set_config_option()` only — fall back to
+    /// `set_session_config_option` with `config_id = "model"`.
+    FallbackConfigOption,
+    /// Neither capability is advertised → `AcpError::CapabilityMissing`.
+    Unsupported,
+}
+
+pub(crate) fn decide_set_session_model_dispatch(caps: &SpurAgentCaps) -> SetSessionModelDispatch {
+    if caps.supports_set_model() {
+        SetSessionModelDispatch::Direct
+    } else if caps.supports_set_config_option() {
+        SetSessionModelDispatch::FallbackConfigOption
+    } else {
+        SetSessionModelDispatch::Unsupported
+    }
+}
+
 impl NativeAcpConnection {
     /// Create a new native ACP connection.
     ///
@@ -241,6 +276,67 @@ impl NativeAcpConnection {
             ext_notification_tx: ext_tx,
             session_notif_tx,
             child_pgid: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Issue ACP `session/set_model` with a state-gated fallback to
+    /// `session/set_config_option`. Spec §6.3.
+    ///
+    /// The dispatch decision is read from `caps` once (see
+    /// [`decide_set_session_model_dispatch`]); there is no try-and-see
+    /// runtime probe. Both `Direct` and `FallbackConfigOption` paths
+    /// drop the wire response — the orchestrator refreshes its cached
+    /// `current_model` from the next agent-emitted notification.
+    pub async fn set_session_model(
+        &mut self,
+        sid: SessionId,
+        model_id: ModelId,
+        caps: &SpurAgentCaps,
+    ) -> Result<(), AcpError> {
+        match decide_set_session_model_dispatch(caps) {
+            SetSessionModelDispatch::Direct => {
+                let request = SetSessionModelRequest::new(sid, model_id);
+                let agent_name = self.agent_name.clone();
+                let cmd_tx = self.cmd_tx.as_ref().ok_or_else(|| {
+                    AcpError::Transport(anyhow::anyhow!(
+                        "NativeAcpConnection '{agent_name}': not initialized"
+                    ))
+                })?;
+                let (reply_tx, reply_rx) = oneshot::channel();
+                cmd_tx
+                    .send(AcpCommand::SetSessionModel {
+                        request,
+                        reply: reply_tx,
+                    })
+                    .map_err(|_| {
+                        AcpError::Transport(anyhow::anyhow!(
+                            "NativeAcpConnection '{agent_name}': ACP thread died"
+                        ))
+                    })?;
+                reply_rx
+                    .await
+                    .map_err(|_| {
+                        AcpError::Transport(anyhow::anyhow!(
+                            "NativeAcpConnection '{agent_name}': ACP thread died during set_session_model"
+                        ))
+                    })?
+                    .map_err(AcpError::Transport)?;
+                Ok(())
+            }
+            SetSessionModelDispatch::FallbackConfigOption => {
+                let request = SetSessionConfigOptionRequest::new(
+                    sid,
+                    SessionConfigId::new(Arc::<str>::from("model")),
+                    SessionConfigValueId::new(model_id.0),
+                );
+                self.set_session_config_option(request)
+                    .await
+                    .map(|_| ())
+                    .map_err(AcpError::Transport)
+            }
+            SetSessionModelDispatch::Unsupported => {
+                Err(AcpError::CapabilityMissing("set_model"))
+            }
         }
     }
 }
@@ -1414,6 +1510,15 @@ fn acp_thread_main(
                                     )
                                 }));
                             }
+                            AcpCommand::SetSessionModel { request, reply } => {
+                                let result = cx.send_request(request).block_task().await;
+                                let _ = reply.send(result.map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "NativeAcpConnection '{}': set_session_model failed: {e}",
+                                        agent_name_loop
+                                    )
+                                }));
+                            }
                             AcpCommand::SetSessionConfigOption { request, reply } => {
                                 let result = cx.send_request(request).block_task().await;
                                 let _ = reply.send(result.map_err(|e| {
@@ -1837,8 +1942,9 @@ mod client_capabilities_tests {
 mod set_session_model_dispatch_tests {
     use super::{decide_set_session_model_dispatch, SetSessionModelDispatch};
     use agent_client_protocol::schema::{
-        AgentCapabilities, InitializeResponse, ModelId, NewSessionResponse, ProtocolVersion,
-        SessionConfigId, SessionConfigOption, SessionId, SessionModelState,
+        InitializeResponse, ModelId, NewSessionResponse, ProtocolVersion, SessionConfigId,
+        SessionConfigKind, SessionConfigOption, SessionConfigSelect, SessionConfigSelectOptions,
+        SessionConfigValueId, SessionId, SessionModelState,
     };
     use crate::SpurAgentCaps;
 
@@ -1870,6 +1976,10 @@ mod set_session_model_dispatch_tests {
             n.config_options = Some(vec![SessionConfigOption::new(
                 SessionConfigId::new("model"),
                 "Model",
+                SessionConfigKind::Select(SessionConfigSelect::new(
+                    SessionConfigValueId::new("default"),
+                    SessionConfigSelectOptions::Ungrouped(vec![]),
+                )),
             )]);
         });
         assert!(!caps.supports_set_model());
@@ -1902,6 +2012,10 @@ mod set_session_model_dispatch_tests {
             n.config_options = Some(vec![SessionConfigOption::new(
                 SessionConfigId::new("model"),
                 "Model",
+                SessionConfigKind::Select(SessionConfigSelect::new(
+                    SessionConfigValueId::new("default"),
+                    SessionConfigSelectOptions::Ungrouped(vec![]),
+                )),
             )]);
         });
         assert!(matches!(
