@@ -51,7 +51,7 @@ fn community_default_quotas() {
 
     assert_eq!(
         gate.quota(QuotaKey::MaxConcurrentWorkers),
-        Some(QuotaValue::Count(1))
+        Some(QuotaValue::Count(3))
     );
     assert_eq!(
         gate.quota(QuotaKey::EventRetentionBytes),

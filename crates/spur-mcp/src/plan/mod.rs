@@ -359,7 +359,11 @@ mod scope_snapshot_integration_tests {
         }
     }
 
-    fn entry(spec: PlanTask, status: PlanTaskStatus, last_delegation: Option<&str>) -> PlanTaskEntry {
+    fn entry(
+        spec: PlanTask,
+        status: PlanTaskStatus,
+        last_delegation: Option<&str>,
+    ) -> PlanTaskEntry {
         PlanTaskEntry {
             spec,
             status,
@@ -413,18 +417,15 @@ mod scope_snapshot_integration_tests {
 
         // Delegations mapped for dispatched + approved tasks.
         assert_eq!(
-            snap.delegation_to_task
-                .get(&DelegationId("deleg-a".into())),
+            snap.delegation_to_task.get(&DelegationId("deleg-a".into())),
             Some(&"ta".to_string())
         );
         assert_eq!(
-            snap.delegation_to_task
-                .get(&DelegationId("deleg-b".into())),
+            snap.delegation_to_task.get(&DelegationId("deleg-b".into())),
             Some(&"tb".to_string())
         );
         assert_eq!(
-            snap.delegation_to_task
-                .get(&DelegationId("deleg-c".into())),
+            snap.delegation_to_task.get(&DelegationId("deleg-c".into())),
             Some(&"tc".to_string())
         );
 

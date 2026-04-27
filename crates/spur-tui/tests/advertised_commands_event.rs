@@ -13,9 +13,7 @@ use spur_tui::views::{session_detail::SessionDetailView, View};
 fn select_option(config_id: &str, current: &str, choices: &[(&str, &str)]) -> SessionConfigOption {
     let select_choices: Vec<SessionConfigSelectOption> = choices
         .iter()
-        .map(|(id, name)| {
-            SessionConfigSelectOption::new((*id).to_string(), (*name).to_string())
-        })
+        .map(|(id, name)| SessionConfigSelectOption::new((*id).to_string(), (*name).to_string()))
         .collect();
     SessionConfigOption::select(
         SessionConfigId::new(config_id.to_string()),
@@ -49,10 +47,7 @@ fn command_registry_dirty_populates_advertised_entry_and_caches_options() {
     let model_opt = select_option(
         "model",
         "gpt-5-codex",
-        &[
-            ("gpt-5-codex", "GPT-5 Codex"),
-            ("gpt-5", "GPT-5"),
-        ],
+        &[("gpt-5-codex", "GPT-5 Codex"), ("gpt-5", "GPT-5")],
     );
     let event = SpurEvent::now(SpurEventBody::CommandRegistryDirty {
         session: session.clone(),

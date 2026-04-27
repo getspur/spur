@@ -69,7 +69,10 @@ fn codex_model_picker_end_to_end() {
     assert_eq!(entries.len(), 2, "expected /model and /effort");
 
     let model = entries.iter().find(|e| e.name == "model").expect("/model");
-    let effort = entries.iter().find(|e| e.name == "effort").expect("/effort");
+    let effort = entries
+        .iter()
+        .find(|e| e.name == "effort")
+        .expect("/effort");
     assert!(model.arg_picker_spec.is_some(), "/model needs picker spec");
     assert!(
         effort.arg_picker_spec.is_some(),

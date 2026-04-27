@@ -110,19 +110,22 @@ fn arb_delegation_status() -> impl Strategy<Value = DelegationStatus> {
         arb_text(4_000).prop_map(|error| DelegationStatus::Failed { error }),
         // Conflict.files: large list of long paths to drive
         // clip_path_vec's count and per-path caps simultaneously.
-        proptest::collection::vec(arb_path_string(), 0..50)
-            .prop_map(|files| DelegationStatus::Conflict {
+        proptest::collection::vec(arb_path_string(), 0..50).prop_map(|files| {
+            DelegationStatus::Conflict {
                 files: files.into_iter().map(PathBuf::from).collect(),
-            }),
+            }
+        }),
         arb_text(2_000).prop_map(|reason| DelegationStatus::Rejected { reason }),
         arb_text(2_000).prop_map(|reviewer_note| DelegationStatus::Modified { reviewer_note }),
         arb_text(2_000).prop_map(|reason| DelegationStatus::Cancelled { reason }),
-        (any::<u64>().prop_map(Duration::from_secs), arb_timeout_fallback()).prop_map(
-            |(waited_for, fallback)| DelegationStatus::TimedOut {
+        (
+            any::<u64>().prop_map(Duration::from_secs),
+            arb_timeout_fallback()
+        )
+            .prop_map(|(waited_for, fallback)| DelegationStatus::TimedOut {
                 waited_for,
                 fallback,
-            },
-        ),
+            },),
     ]
 }
 

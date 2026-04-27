@@ -131,11 +131,13 @@ pub fn synthesize(options: &[SessionConfigOption]) -> Vec<AdvertisedCommand> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::{
-        SessionConfigOption, SessionConfigSelectOption,
-    };
+    use agent_client_protocol::schema::{SessionConfigOption, SessionConfigSelectOption};
 
-    fn make_select(config_id: &str, current: &str, choices: &[(&str, &str)]) -> SessionConfigOption {
+    fn make_select(
+        config_id: &str,
+        current: &str,
+        choices: &[(&str, &str)],
+    ) -> SessionConfigOption {
         let select_choices: Vec<SessionConfigSelectOption> = choices
             .iter()
             .map(|(id, name)| {

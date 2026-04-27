@@ -78,9 +78,11 @@ impl InputCompletionPort {
         let cursor = input_bar.cursor();
         let ranges = input_bar.protected_ranges().to_vec();
 
-        let transition = self.trigger_detector.step(event, &text, cursor, &ranges, |name| {
-            env.command_registry.arg_picker_spec(name).is_some()
-        });
+        let transition = self
+            .trigger_detector
+            .step(event, &text, cursor, &ranges, |name| {
+                env.command_registry.arg_picker_spec(name).is_some()
+            });
 
         match transition {
             TriggerTransition::None => {}
@@ -123,8 +125,7 @@ impl InputCompletionPort {
                         // Resolve the command's arg-picker spec. v1 only
                         // supports the typed_hint == ConfigOption path;
                         // free-text fallback (typed_hint == None) is v2.
-                        let Some(spec) = env.command_registry.arg_picker_spec(&command_name)
-                        else {
+                        let Some(spec) = env.command_registry.arg_picker_spec(&command_name) else {
                             return;
                         };
                         let Some(typed) = spec.typed_hint else {
