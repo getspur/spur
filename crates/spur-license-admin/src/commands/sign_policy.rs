@@ -73,7 +73,6 @@ fn load_signing_key(path: &Path) -> anyhow::Result<ed25519_dalek::SigningKey> {
         return Ok(ed25519_dalek::SigningKey::from_bytes(&key_arr));
     }
 
-    ed25519_dalek::SigningKey::read_pkcs8_pem_file(path).map_err(|e| {
-        anyhow::anyhow!("signing key must be 32 raw bytes or a PKCS#8 PEM file: {e}")
-    })
+    ed25519_dalek::SigningKey::read_pkcs8_pem_file(path)
+        .map_err(|e| anyhow::anyhow!("signing key must be 32 raw bytes or a PKCS#8 PEM file: {e}"))
 }
