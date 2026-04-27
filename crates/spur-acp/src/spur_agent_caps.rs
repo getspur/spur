@@ -56,10 +56,15 @@ impl SpurAgentCaps {
             .is_some_and(|m| !m.available_modes.is_empty())
     }
 
-    /// `session/set_model` is usable when the session has any model state.
+    /// `session/set_model` is usable when the session advertises a non-empty
+    /// `available_models` list. Mirrors `supports_set_mode`'s `has_choices()`
+    /// semantic — `Some(state)` with zero available models is not a usable
+    /// model-switch surface, so the picker is hidden.
     #[must_use]
     pub fn supports_set_model(&self) -> bool {
-        self.models.is_some()
+        self.models
+            .as_ref()
+            .is_some_and(|m| !m.available_models.is_empty())
     }
 
     /// `session/set_config_option` is usable when the session advertises
@@ -161,9 +166,13 @@ mod tests {
 
     #[test]
     fn gemini_style_models_some_config_options_none() {
+        use agent_client_protocol::schema::ModelInfo;
         // Synthetic gemini-style: models populated, config_options None/absent.
         let new = NewSessionResponse::new(SessionId::new("test-gemini")).models(
-            SessionModelState::new(ModelId::new("gemini-1.5-pro"), vec![]),
+            SessionModelState::new(
+                ModelId::new("gemini-1.5-pro"),
+                vec![ModelInfo::new(ModelId::new("gemini-1.5-pro"), "Gemini 1.5 Pro")],
+            ),
         );
         let init = empty_init_response();
         let caps = SpurAgentCaps::new(&init, &new);
