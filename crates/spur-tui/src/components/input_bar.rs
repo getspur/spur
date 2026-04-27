@@ -63,6 +63,15 @@ pub enum VimMode {
     Operator(char),
 }
 
+impl From<spur_acp::config::EditorMode> for EditMode {
+    fn from(pref: spur_acp::config::EditorMode) -> Self {
+        match pref {
+            spur_acp::config::EditorMode::Emacs => EditMode::Emacs,
+            spur_acp::config::EditorMode::Vim => EditMode::Vim(VimMode::Normal),
+        }
+    }
+}
+
 /// Activity state driving spinner animation in the status label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ActivityKind {
