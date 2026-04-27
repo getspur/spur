@@ -734,26 +734,37 @@ impl ReactTrace {
                     };
 
                     if !drew_image {
-                        let msg = if !fully_visible {
-                            format!(
-                                "   [📊 mermaid #{} · scroll to align · Alt-v to zoom]",
-                                id.0
-                            )
-                        } else if !matches!(
+                        if matches!(
                             ctx.mermaid_registry.get(&id),
                             Some(crate::components::mermaid::MermaidState::Ready { .. })
                         ) {
-                            format!("   [📊 mermaid #{} · not ready]", id.0)
+                            // Partial visibility OR no graphics protocol available
+                            // for a Ready image — render the multi-row card.
+                            render_partial_card(
+                                frame,
+                                rect,
+                                id,
+                                total_rows,
+                                first_row_within,
+                                run_len,
+                            );
                         } else {
-                            format!("   [📊 mermaid #{} · no graphics protocol]", id.0)
-                        };
-                        let line = Line::from(Span::styled(
-                            msg,
-                            Style::default()
-                                .fg(Color::Magenta)
-                                .add_modifier(Modifier::BOLD),
-                        ));
-                        frame.render_widget(Paragraph::new(vec![line]), rect);
+                            // Pending / Rendering / Error — single-line dim
+                            // placeholder. Layout still preserved (run_len rows).
+                            let msg = match ctx.mermaid_registry.get(&id) {
+                                Some(crate::components::mermaid::MermaidState::Error { .. }) => {
+                                    format!("   [⚠ mermaid #{} error · Alt-v to view]", id.0)
+                                }
+                                _ => format!("   [⏳ mermaid #{} rendering…]", id.0),
+                            };
+                            let line = Line::from(Span::styled(
+                                msg,
+                                Style::default()
+                                    .fg(Color::DarkGray)
+                                    .add_modifier(Modifier::DIM),
+                            ));
+                            frame.render_widget(Paragraph::new(vec![line]), rect);
+                        }
                     }
                     y += run_len;
                 }
