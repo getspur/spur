@@ -55,8 +55,9 @@ use agent_client_protocol::schema::{
     NewSessionResponse, PermissionOptionId, PermissionOptionKind, PromptRequest,
     ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionNotification, SessionUpdate, SetSessionModeRequest,
-    SetSessionModeResponse, TerminalExitStatus, TerminalId, TerminalOutputRequest,
+    SelectedPermissionOutcome, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse,
+    TerminalExitStatus, TerminalId, TerminalOutputRequest,
     TerminalOutputResponse, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
     WriteTextFileRequest, WriteTextFileResponse,
 };
@@ -115,6 +116,10 @@ enum AcpCommand {
     SetSessionMode {
         request: SetSessionModeRequest,
         reply: oneshot::Sender<anyhow::Result<SetSessionModeResponse>>,
+    },
+    SetSessionConfigOption {
+        request: SetSessionConfigOptionRequest,
+        reply: oneshot::Sender<anyhow::Result<SetSessionConfigOptionResponse>>,
     },
     Authenticate {
         request: AuthenticateRequest,
@@ -565,6 +570,34 @@ impl AgentConnection for NativeAcpConnection {
         reply_rx.await.map_err(|_| {
             anyhow::anyhow!(
                 "NativeAcpConnection '{}': ACP thread died during set_session_mode",
+                self.agent_name
+            )
+        })?
+    }
+
+    // ─── set_session_config_option ───────────────────────────────────────
+
+    async fn set_session_config_option(
+        &mut self,
+        request: SetSessionConfigOptionRequest,
+    ) -> anyhow::Result<SetSessionConfigOptionResponse> {
+        let cmd_tx = self.cmd_tx.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("NativeAcpConnection '{}': not initialized", self.agent_name)
+        })?;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        cmd_tx
+            .send(AcpCommand::SetSessionConfigOption {
+                request,
+                reply: reply_tx,
+            })
+            .map_err(|_| {
+                anyhow::anyhow!("NativeAcpConnection '{}': ACP thread died", self.agent_name)
+            })?;
+
+        reply_rx.await.map_err(|_| {
+            anyhow::anyhow!(
+                "NativeAcpConnection '{}': ACP thread died during set_session_config_option",
                 self.agent_name
             )
         })?
@@ -1348,6 +1381,15 @@ fn acp_thread_main(
                                 let _ = reply.send(result.map_err(|e| {
                                     anyhow::anyhow!(
                                         "NativeAcpConnection '{}': set_session_mode failed: {e}",
+                                        agent_name_loop
+                                    )
+                                }));
+                            }
+                            AcpCommand::SetSessionConfigOption { request, reply } => {
+                                let result = cx.send_request(request).block_task().await;
+                                let _ = reply.send(result.map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "NativeAcpConnection '{}': set_session_config_option failed: {e}",
                                         agent_name_loop
                                     )
                                 }));
