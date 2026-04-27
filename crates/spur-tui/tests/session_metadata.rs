@@ -1,6 +1,8 @@
 use spur_tui::components::input_bar::{ProtectedRange, RangeKind};
 use spur_tui::input_history::{InputHistoryEntry, InputStateSnapshot};
-use spur_tui::session_metadata::{SessionEntry, SessionMetadataStore};
+use spur_tui::session_metadata::{
+    current_metadata_version, SessionEntry, SessionMetadataStore,
+};
 use tempfile::tempdir;
 
 #[test]
@@ -138,6 +140,150 @@ fn gc_clears_last_active_when_that_session_is_orphaned() {
     store.set_last_active("gone".into(), "2026-04-13T00:00:00Z".into());
     store.gc_orphans(&[]);
     assert!(store.metadata().last_active_session_id.is_none());
+}
+
+#[test]
+fn one_bad_input_history_entry_drops_only_that_entry() {
+    // Catastrophic-data-loss regression guard: a single non-conforming entry
+    // in the persisted JSON array must NOT void the rest of the history.
+    // Prior to per-entry tolerant deserialize, one bad entry returned an
+    // error from the field-level deserializer, the whole `from_str` call
+    // failed, and `load()` fell back to an empty store -> 100 entries -> 0.
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("metadata.json");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"sessions":{},"input_history":["good 1", 42, "good 2"]}"#,
+    )
+    .unwrap();
+
+    let store = SessionMetadataStore::load(&path);
+    let history = &store.metadata().input_history;
+    assert_eq!(history.len(), 2, "two valid entries must survive");
+    assert_eq!(history[0].snapshot.text, "good 1");
+    assert_eq!(history[1].snapshot.text, "good 2");
+}
+
+#[test]
+fn one_bad_protected_range_drops_only_that_range() {
+    // A single malformed `protected_range` inside an entry's snapshot must
+    // not void the entry. The bad range is dropped, the entry survives,
+    // and `sanitized()` sees the surviving valid ranges.
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("metadata.json");
+    std::fs::write(
+        &path,
+        r#"{
+            "version": 1,
+            "sessions": {},
+            "input_history": [
+                {
+                    "text": "@a tail",
+                    "protected_ranges": [
+                        {"start": 0, "end": 2, "uri": "u1", "name": "a"},
+                        {"uri": "missing-fields-only"}
+                    ]
+                }
+            ]
+        }"#,
+    )
+    .unwrap();
+
+    let store = SessionMetadataStore::load(&path);
+    let history = &store.metadata().input_history;
+    assert_eq!(history.len(), 1, "entry must survive a bad range");
+    let snapshot = &history[0].snapshot;
+    assert_eq!(snapshot.text, "@a tail");
+    assert_eq!(
+        snapshot.protected_ranges.len(),
+        1,
+        "the valid range survives, the malformed range is dropped"
+    );
+    assert_eq!(snapshot.protected_ranges[0].uri, "u1");
+}
+
+#[test]
+fn all_bad_input_history_entries_yield_empty_vec() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("metadata.json");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"sessions":{},"input_history":[42, true, null]}"#,
+    )
+    .unwrap();
+
+    let store = SessionMetadataStore::load(&path);
+    assert!(
+        store.metadata().input_history.is_empty(),
+        "all-bad list yields empty Vec, not a load failure"
+    );
+    // The rest of the document still loads.
+    assert_eq!(store.metadata().schema_version, current_metadata_version());
+}
+
+#[test]
+fn unknown_future_schema_version_loads_tolerantly_and_resets_on_save() {
+    // A future version (> CURRENT) must not drop the document. The data is
+    // loaded tolerantly, the in-memory `schema_version` is reset to CURRENT,
+    // and the next `save()` persists at CURRENT.
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("metadata.json");
+    let future = current_metadata_version() + 99;
+    let written = format!(
+        r#"{{"version":{future},"sessions":{{}},"input_history":["hello"]}}"#,
+    );
+    std::fs::write(&path, written).unwrap();
+
+    let store = SessionMetadataStore::load(&path);
+    assert_eq!(store.metadata().input_history.len(), 1);
+    assert_eq!(store.metadata().input_history[0].snapshot.text, "hello");
+    assert_eq!(
+        store.metadata().schema_version,
+        current_metadata_version(),
+        "in-memory schema_version is reset to CURRENT after a future-version load"
+    );
+
+    store.save().unwrap();
+    let raw = std::fs::read_to_string(&path).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        value["version"].as_u64().unwrap(),
+        u64::from(current_metadata_version()),
+        "next save persists at CURRENT, not the future version"
+    );
+}
+
+#[test]
+fn valid_data_roundtrip_unchanged_by_tolerant_deserialize() {
+    // Behaviour-preservation guard: when nothing is malformed, the
+    // tolerant per-entry / per-range path must produce identical results
+    // to the prior strict path.
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("metadata.json");
+
+    let original = vec![
+        InputHistoryEntry::new(InputStateSnapshot::new(
+            "plain text".into(),
+            Vec::new(),
+        )),
+        InputHistoryEntry::new(InputStateSnapshot::new(
+            "@x tail".into(),
+            vec![ProtectedRange {
+                start: 0,
+                end: 2,
+                kind: RangeKind::Atom,
+                uri: "uri-x".into(),
+                name: "x".into(),
+            }],
+        )),
+    ];
+
+    let mut store = SessionMetadataStore::load(&path);
+    store.metadata_mut().input_history = original.clone();
+    store.save().unwrap();
+
+    let store2 = SessionMetadataStore::load(&path);
+    assert_eq!(store2.metadata().input_history, original);
 }
 
 #[test]
