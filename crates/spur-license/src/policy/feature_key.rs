@@ -1,5 +1,4 @@
-//! Typed const registry of feature keys. Unifies G1 (entitlement) and G2
-//! (flag) namespaces into a single grep-discoverable list.
+//! Typed const registry of G1 entitlement feature keys.
 //!
 //! Adding a feature = adding a `pub const` here. Underlying string is what
 //! the policy file and LicenseSeat catalog speak; this newtype exists to
@@ -82,12 +81,6 @@ impl FeatureKey {
     pub const DEDICATED_SUPPORT: Self = Self("dedicated_support");
     pub const SLA_GUARANTEE: Self = Self("sla_guarantee");
 
-    // --- G2 flag keys (4) ---
-    pub const KILL_ADVANCED_PLANNER: Self = Self("kill_advanced_planner");
-    pub const ENABLE_BROWSER_TOOL: Self = Self("enable_browser_tool");
-    pub const ENABLE_COMPACTION_V2: Self = Self("enable_compaction_v2");
-    pub const ENABLE_TELEMETRY: Self = Self("enable_telemetry");
-
     // ============================================================
     // === BOUNDARY: keys above this line are pre-tier-revamp ====
     // === (legacy v0 policy still references them); keys below ==
@@ -109,7 +102,8 @@ impl FeatureKey {
 
     // --- spur-core: brain (2) — Wave 8: consolidated trio → brain_session; deferred auto_pool to v1.1 ---
     pub const CORE_CORE_BRAIN_SESSION: Self = Self("core_core_brain_session");
-    pub const CORE_CORE_BRAIN_FAILOVER_MANUAL_KEYSTROKE: Self = Self("core_core_brain_failover_manual_keystroke");
+    pub const CORE_CORE_BRAIN_FAILOVER_MANUAL_KEYSTROKE: Self =
+        Self("core_core_brain_failover_manual_keystroke");
 
     // --- spur-core: workers (2) — Wave 8: merged cancellable_semaphore into parallel_workers ---
     pub const CORE_CORE_PARALLEL_WORKERS: Self = Self("core_core_parallel_workers");
@@ -278,14 +272,6 @@ impl FeatureKey {
             Some(Self::DEDICATED_SUPPORT)
         } else if bytes_eq(b, b"sla_guarantee") {
             Some(Self::SLA_GUARANTEE)
-        } else if bytes_eq(b, b"kill_advanced_planner") {
-            Some(Self::KILL_ADVANCED_PLANNER)
-        } else if bytes_eq(b, b"enable_browser_tool") {
-            Some(Self::ENABLE_BROWSER_TOOL)
-        } else if bytes_eq(b, b"enable_compaction_v2") {
-            Some(Self::ENABLE_COMPACTION_V2)
-        } else if bytes_eq(b, b"enable_telemetry") {
-            Some(Self::ENABLE_TELEMETRY)
         // ===== Tier revamp v1 keys (Wave 8 final) =====
         // spur-acp
         } else if bytes_eq(b, b"acp_core_transport_stdio") {
@@ -478,10 +464,6 @@ mod tests {
         assert_eq!(FeatureKey::PARALLEL_WORKERS.as_str(), "parallel_workers");
         assert_eq!(FeatureKey::PM_INTEGRATION.as_str(), "pm_integration");
         assert_eq!(FeatureKey::SSO_SAML.as_str(), "sso_saml");
-        assert_eq!(
-            FeatureKey::KILL_ADVANCED_PLANNER.as_str(),
-            "kill_advanced_planner"
-        );
     }
 
     #[test]
@@ -495,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn from_known_hits_all_36_keys() {
+    fn from_known_hits_all_32_legacy_feature_keys() {
         // Community (11)
         assert_eq!(
             FeatureKey::from_known("brain_session"),
@@ -625,28 +607,12 @@ mod tests {
             FeatureKey::from_known("sla_guarantee"),
             Some(FeatureKey::SLA_GUARANTEE)
         );
-        // G2 flags (4)
-        assert_eq!(
-            FeatureKey::from_known("kill_advanced_planner"),
-            Some(FeatureKey::KILL_ADVANCED_PLANNER)
-        );
-        assert_eq!(
-            FeatureKey::from_known("enable_browser_tool"),
-            Some(FeatureKey::ENABLE_BROWSER_TOOL)
-        );
-        assert_eq!(
-            FeatureKey::from_known("enable_compaction_v2"),
-            Some(FeatureKey::ENABLE_COMPACTION_V2)
-        );
-        assert_eq!(
-            FeatureKey::from_known("enable_telemetry"),
-            Some(FeatureKey::ENABLE_TELEMETRY)
-        );
     }
 
     #[test]
     fn from_known_returns_none_for_unknown() {
         assert_eq!(FeatureKey::from_known("not_a_feature"), None);
+        assert_eq!(FeatureKey::from_known("kill_advanced_planner"), None);
         assert_eq!(FeatureKey::from_known(""), None);
         assert_eq!(FeatureKey::from_known("Brain_Session"), None); // case-sensitive
     }
@@ -662,7 +628,7 @@ mod tests {
     /// Bump the expected count when adding new keys via dedicated tasks.
     #[test]
     fn registered_key_count_matches_expected() {
-        const EXPECTED_TOTAL_KEYS: usize = 36;
+        const EXPECTED_TOTAL_KEYS: usize = 32;
         let mut count = 0usize;
         for s in &[
             // Community (11)
@@ -701,11 +667,6 @@ mod tests {
             "custom_mcp_tools",
             "dedicated_support",
             "sla_guarantee",
-            // G2 flags (4)
-            "kill_advanced_planner",
-            "enable_browser_tool",
-            "enable_compaction_v2",
-            "enable_telemetry",
         ] {
             assert!(
                 FeatureKey::from_known(s).is_some(),
@@ -1011,10 +972,7 @@ mod tests {
 
     #[test]
     fn spur_worktree_keys_registered() {
-        for s in &[
-            "worktree_core_isolation",
-            "worktree_core_orphan_cleanup",
-        ] {
+        for s in &["worktree_core_isolation", "worktree_core_orphan_cleanup"] {
             assert!(FeatureKey::from_known(s).is_some(), "missing {s}");
         }
     }
