@@ -6,6 +6,15 @@
 //! `CapabilityMissing` variant fires when a session's `SpurAgentCaps`
 //! advertises *neither* the dedicated method *nor* a viable fallback.
 
+/// Errors emitted by the typed capability-aware ACP-call surface.
+#[derive(Debug, thiserror::Error)]
+pub enum AcpError {
+    /// The session's `SpurAgentCaps` advertise neither the dedicated
+    /// method nor a viable fallback for the named capability.
+    #[error("agent capability missing: {0}")]
+    CapabilityMissing(&'static str),
+}
+
 #[cfg(test)]
 mod tests {
     use super::AcpError;
