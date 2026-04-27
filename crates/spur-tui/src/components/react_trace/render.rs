@@ -395,21 +395,24 @@ pub(crate) fn render_partial_card(
                     .add_modifier(Modifier::DIM),
             )),
         ],
-        _ /* run_len ≥ PARTIAL_CARD_MIN_ROWS = 3 */ => vec![
-            Line::from(Span::styled(
-                format!("📊 mermaid #{} · {}% visible · {}", id.0, visible_pct, direction),
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Alt-v · open in full viewer",
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::DIM),
-            )),
-        ],
+        _ => {
+            debug_assert!(run_len >= PARTIAL_CARD_MIN_ROWS);
+            vec![
+                Line::from(Span::styled(
+                    format!("📊 mermaid #{} · {}% visible · {}", id.0, visible_pct, direction),
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Alt-v · open in full viewer",
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM),
+                )),
+            ]
+        }
     };
 
     let card_height = lines.len() as u16;

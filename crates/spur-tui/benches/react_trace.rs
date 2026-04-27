@@ -57,6 +57,8 @@ struct RenderHarness {
         spur_tui::components::mermaid::MermaidId,
         spur_tui::components::mermaid::MermaidState,
     >,
+    #[cfg(feature = "markdown")]
+    image_cache: spur_tui::components::image_cache::ImageCache,
 }
 
 impl RenderHarness {
@@ -67,6 +69,8 @@ impl RenderHarness {
             terminal,
             #[cfg(feature = "markdown")]
             mermaid_registry: std::collections::HashMap::new(),
+            #[cfg(feature = "markdown")]
+            image_cache: spur_tui::components::image_cache::ImageCache::new(),
         }
     }
 
@@ -74,13 +78,15 @@ impl RenderHarness {
         #[cfg(feature = "markdown")]
         {
             let registry = &self.mermaid_registry;
+            let image_cache = &mut self.image_cache;
             self.terminal
                 .draw(|frame| {
-                    let ctx = RenderContext {
+                    let mut ctx = RenderContext {
                         mermaid_registry: registry,
                         picker: None,
+                        image_cache,
                     };
-                    trace.render_with_ctx(frame, frame.area(), &ctx, None);
+                    trace.render_with_ctx(frame, frame.area(), &mut ctx, None);
                 })
                 .expect("draw must succeed");
         }
