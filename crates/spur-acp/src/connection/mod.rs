@@ -272,6 +272,46 @@ pub struct ExtNotificationPayload {
     pub params: serde_json::Value,
 }
 
+/// Test-only `AgentConnection` impl that panics on all I/O. Useful for
+/// constructing a `BrainSession` in integration tests that exercise
+/// orchestrator-side cache plumbing without spawning any subprocess.
+///
+/// Hidden from rustdoc; not part of the stable API.
+#[doc(hidden)]
+pub struct TestStubConnection;
+
+#[async_trait]
+impl AgentConnection for TestStubConnection {
+    async fn initialize(
+        &mut self,
+        _request: InitializeRequest,
+    ) -> anyhow::Result<InitializeResponse> {
+        unimplemented!("TestStubConnection: initialize")
+    }
+    async fn new_session(
+        &mut self,
+        _cwd: PathBuf,
+        _mcp: Vec<McpServer>,
+    ) -> anyhow::Result<NewSessionResponse> {
+        unimplemented!("TestStubConnection: new_session")
+    }
+    async fn prompt(
+        &mut self,
+        _request: PromptRequest,
+    ) -> anyhow::Result<Pin<Box<dyn Stream<Item = SessionNotification> + Send>>> {
+        Ok(Box::pin(futures::stream::empty()))
+    }
+    async fn cancel(&mut self, _session_id: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn shutdown(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn health(&self) -> AgentHealth {
+        AgentHealth::Ready
+    }
+}
+
 #[cfg(test)]
 mod agent_connection_defaults {
     use super::*;
