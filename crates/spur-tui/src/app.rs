@@ -1953,6 +1953,15 @@ impl App {
                 self.dashboard.set_edit_mode(self.edit_mode);
                 if let Some(ref mut detail) = self.session_detail {
                     detail.set_edit_mode(self.edit_mode);
+
+                    let configured = EditMode::from(self.config.tui.edit_mode);
+                    if self.edit_mode != configured {
+                        let label = match self.edit_mode {
+                            EditMode::Emacs => "Emacs",
+                            EditMode::Vim(_) => "Vim",
+                        };
+                        detail.push_persist_hint(label);
+                    }
                 }
                 self.dirty = true;
             }
