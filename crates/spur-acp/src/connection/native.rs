@@ -1602,6 +1602,7 @@ fn session_update_variant_name(u: &SessionUpdate) -> &'static str {
         ToolCallUpdate(_) => "tool_call_update",
         Plan(_) => "plan",
         AvailableCommandsUpdate(_) => "available_commands_update",
+        ConfigOptionUpdate(_) => "config_option_update",
         CurrentModeUpdate(_) => "current_mode_update",
         _ => "other",
     }
