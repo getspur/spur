@@ -77,10 +77,7 @@ use crate::types::AgentHealth;
 ///   codex's tool-call meta tunneling (consumed in M9).
 pub fn spur_client_capabilities() -> ClientCapabilities {
     let mut meta = serde_json::Map::new();
-    meta.insert(
-        "terminal_output".to_string(),
-        serde_json::Value::Bool(true),
-    );
+    meta.insert("terminal_output".to_string(), serde_json::Value::Bool(true));
 
     ClientCapabilities::new()
         .fs(FileSystemCapabilities::new()

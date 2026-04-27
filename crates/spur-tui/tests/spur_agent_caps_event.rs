@@ -17,9 +17,7 @@ use spur_acp::SpurAgentCaps;
 #[test]
 fn spur_agent_caps_constructed_from_codex_fixture_round_trips_via_arc() {
     let init = InitializeResponse::new(ProtocolVersion::LATEST);
-    let json = include_str!(
-        "../../spur-acp/tests/data/codex_acp_0_12_new_session_response.json"
-    );
+    let json = include_str!("../../spur-acp/tests/data/codex_acp_0_12_new_session_response.json");
     let new: NewSessionResponse =
         serde_json::from_str(json).expect("codex fixture must deserialize");
 
