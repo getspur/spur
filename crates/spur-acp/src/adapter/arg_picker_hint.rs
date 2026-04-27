@@ -23,6 +23,39 @@ pub enum ArgPickerHint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_client_protocol::schema::{
+        AvailableCommand, AvailableCommandInput, UnstructuredCommandInput,
+    };
+
+    #[test]
+    fn parse_returns_none_for_no_input() {
+        let cmd = AvailableCommand::new("init", "create AGENTS.md");
+        assert_eq!(parse(&cmd), None);
+    }
+
+    #[test]
+    fn parse_unstructured_input_yields_free_text_spec() {
+        let cmd = AvailableCommand::new("review-branch", "Review branch")
+            .input(AvailableCommandInput::Unstructured(
+                UnstructuredCommandInput::new("branch name"),
+            ));
+        let spec = parse(&cmd).expect("Unstructured input must yield a spec");
+        assert_eq!(spec.free_text_hint, "branch name");
+        assert!(
+            spec.typed_hint.is_none(),
+            "PR-3 reads only Unstructured.hint; PR-4 will add _meta typed_hint"
+        );
+    }
+
+    #[test]
+    fn parse_unstructured_with_empty_hint() {
+        let cmd = AvailableCommand::new("review", "Review changes").input(
+            AvailableCommandInput::Unstructured(UnstructuredCommandInput::new("")),
+        );
+        let spec = parse(&cmd).expect("empty hint still yields a spec — picker shows placeholder");
+        assert_eq!(spec.free_text_hint, "");
+        assert!(spec.typed_hint.is_none());
+    }
 
     #[test]
     fn config_option_spec_has_no_free_text_fallback() {
