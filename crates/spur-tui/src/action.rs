@@ -94,10 +94,10 @@ pub enum Action {
         config_id: String,
         value: String,
     },
-    /// Move tree selection down one row.
-    SelectNext,
-    /// Move tree selection up one row.
-    SelectPrev,
+    /// Move tree selection down by N rows.
+    SelectNextBy(usize),
+    /// Move tree selection up by N rows.
+    SelectPrevBy(usize),
     /// Focus the currently-selected executor node (right pane → detail mode).
     FocusNode,
     /// Unfocus (right pane → chronological log).
