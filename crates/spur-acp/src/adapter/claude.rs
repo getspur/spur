@@ -1,4 +1,4 @@
-use agent_client_protocol::ToolCall;
+use agent_client_protocol::schema::ToolCall;
 use serde_json::Value;
 
 use super::{BadgeColor, ModeBadge, ObservePayload, ToolFamily, ToolInputDisplay};
