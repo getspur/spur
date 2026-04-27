@@ -1,7 +1,7 @@
 use spur_tui::components::input_bar::{ProtectedRange, RangeKind};
 use spur_tui::input_history::{InputHistoryEntry, InputStateSnapshot};
 use spur_tui::session_metadata::{
-    current_metadata_version, SessionEntry, SessionMetadataStore,
+    current_metadata_version, SessionEntry, SessionMetadata, SessionMetadataStore,
 };
 use tempfile::tempdir;
 
@@ -10,8 +10,22 @@ fn load_missing_file_returns_empty_store() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("metadata.json");
     let store = SessionMetadataStore::load(&path);
+    assert_eq!(
+        store.metadata().schema_version,
+        current_metadata_version(),
+        "fresh-install store must use the current schema version"
+    );
     assert!(store.metadata().sessions.is_empty());
     assert!(store.metadata().last_active_session_id.is_none());
+}
+
+#[test]
+fn default_metadata_uses_current_schema_version() {
+    assert_eq!(
+        SessionMetadata::default().schema_version,
+        current_metadata_version(),
+        "in-memory defaults must match serde's on-disk default"
+    );
 }
 
 #[test]
@@ -222,15 +236,35 @@ fn all_bad_input_history_entries_yield_empty_vec() {
 }
 
 #[test]
-fn unknown_future_schema_version_loads_tolerantly_and_resets_on_save() {
-    // A future version (> CURRENT) must not drop the document. The data is
-    // loaded tolerantly, the in-memory `schema_version` is reset to CURRENT,
-    // and the next `save()` persists at CURRENT.
+fn old_schema_version_loads_tolerantly_and_normalizes_to_current() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("metadata.json");
+    std::fs::write(
+        &path,
+        r#"{"version":0,"sessions":{},"input_history":["hello"]}"#,
+    )
+    .unwrap();
+
+    let store = SessionMetadataStore::load(&path);
+    assert_eq!(store.metadata().input_history.len(), 1);
+    assert_eq!(store.metadata().input_history[0].snapshot.text, "hello");
+    assert_eq!(
+        store.metadata().schema_version,
+        current_metadata_version(),
+        "old schema versions must be normalized to CURRENT in memory"
+    );
+}
+
+#[test]
+fn unknown_future_schema_version_refuses_save_and_preserves_unknown_fields() {
+    // A future version (> CURRENT) must not drop the document, but this
+    // binary cannot preserve unknown fields when serializing typed structs.
+    // Saving therefore no-ops so forward-compat data remains on disk.
     let dir = tempdir().unwrap();
     let path = dir.path().join("metadata.json");
     let future = current_metadata_version() + 99;
     let written = format!(
-        r#"{{"version":{future},"sessions":{{}},"input_history":["hello"]}}"#,
+        r#"{{"version":{future},"extra_field":"preserved_data","sessions":{{}},"input_history":["hello"]}}"#,
     );
     std::fs::write(&path, written).unwrap();
 
@@ -248,8 +282,13 @@ fn unknown_future_schema_version_loads_tolerantly_and_resets_on_save() {
     let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(
         value["version"].as_u64().unwrap(),
-        u64::from(current_metadata_version()),
-        "next save persists at CURRENT, not the future version"
+        u64::from(future),
+        "future-version files must not be downgraded on disk"
+    );
+    assert_eq!(
+        value["extra_field"].as_str(),
+        Some("preserved_data"),
+        "unknown fields must survive a refused save"
     );
 }
 
@@ -262,10 +301,7 @@ fn valid_data_roundtrip_unchanged_by_tolerant_deserialize() {
     let path = dir.path().join("metadata.json");
 
     let original = vec![
-        InputHistoryEntry::new(InputStateSnapshot::new(
-            "plain text".into(),
-            Vec::new(),
-        )),
+        InputHistoryEntry::new(InputStateSnapshot::new("plain text".into(), Vec::new())),
         InputHistoryEntry::new(InputStateSnapshot::new(
             "@x tail".into(),
             vec![ProtectedRange {
