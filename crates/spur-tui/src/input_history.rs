@@ -19,8 +19,34 @@ pub struct InputStateSnapshot {
 struct RawInputStateSnapshot {
     #[serde(default)]
     text: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_protected_ranges_lossy")]
     protected_ranges: Vec<ProtectedRange>,
+}
+
+/// Per-element tolerant deserialize for `Vec<ProtectedRange>`. A single
+/// malformed range (missing required field, type mismatch) must not void
+/// the surrounding history entry — drop the bad range, keep the rest, and
+/// let `sanitized()` see what survives. Without this, a field-level
+/// deserialize error here propagates up through `RawInputStateSnapshot`
+/// -> `InputHistoryEntry` -> the `from_str` call in
+/// `SessionMetadataStore::load`, which falls back to an empty store.
+fn deserialize_protected_ranges_lossy<'de, D>(
+    deserializer: D,
+) -> Result<Vec<ProtectedRange>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    let mut out = Vec::with_capacity(raw.len());
+    for value in raw {
+        match serde_json::from_value::<ProtectedRange>(value) {
+            Ok(range) => out.push(range),
+            Err(e) => {
+                tracing::warn!(error = %e, "skipping malformed protected_range entry");
+            }
+        }
+    }
+    Ok(out)
 }
 
 impl<'de> Deserialize<'de> for InputStateSnapshot {
