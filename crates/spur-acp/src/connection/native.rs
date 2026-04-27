@@ -1737,6 +1737,7 @@ fn session_update_variant_name(u: &SessionUpdate) -> &'static str {
         ConfigOptionUpdate(_) => "config_option_update",
         CurrentModeUpdate(_) => "current_mode_update",
         SessionInfoUpdate(_) => "session_info_update",
+        UsageUpdate(_) => "usage_update",
         _ => "other",
     }
 }
