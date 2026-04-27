@@ -1,0 +1,15 @@
+{
+  "_provenance": "Synthetic fixture mirroring agent-client-protocol-schema 0.11.4 SessionInfoUpdate (client.rs:195-212). Captured via scripts/probe-codex-acp.mjs --prompts on 2026-04-27 against @zed-industries/codex-acp@0.12.0; codex 0.12 emitted ZERO session_info_update notifications across a 2-turn session (only agent_message_chunk, available_commands_update, tool_call, tool_call_update, usage_update). Per the M8 plan's R6 risk register this is the 'worst case'; Wave E still adds the explicit arm to remove the silent drop and caches fields opportunistically when other agents (or future codex versions) start emitting them.",
+  "_codex_observed_update_kinds": [
+    "agent_message_chunk",
+    "available_commands_update",
+    "tool_call",
+    "tool_call_update",
+    "usage_update"
+  ],
+  "_sample_kind": "synthetic_sdk_shape",
+  "sessionUpdate": "session_info_update",
+  "title": "Quick math: 2+2 and 3+3",
+  "updatedAt": "2026-04-27T14:00:00Z",
+  "_meta": null
+}
