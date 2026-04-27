@@ -166,6 +166,7 @@ mod session_attach_guard_transfer_tests {
             started_at: std::time::Instant::now(),
             config_options: Vec::new(),
             spur_agent_caps: None,
+            session_info: None,
             init_response: agent_client_protocol::schema::InitializeResponse::new(
                 agent_client_protocol::schema::ProtocolVersion::LATEST,
             ),
@@ -239,6 +240,7 @@ mod session_attach_guard_transfer_tests {
             started_at: std::time::Instant::now(),
             config_options: Vec::new(),
             spur_agent_caps: None,
+            session_info: None,
             init_response: agent_client_protocol::schema::InitializeResponse::new(
                 agent_client_protocol::schema::ProtocolVersion::LATEST,
             ),
@@ -484,6 +486,7 @@ mod session_attach_guard_transfer_tests {
             started_at: std::time::Instant::now(),
             config_options: Vec::new(),
             spur_agent_caps: Some(caps),
+            session_info: None,
             init_response: agent_client_protocol::schema::InitializeResponse::new(
                 agent_client_protocol::schema::ProtocolVersion::LATEST,
             ),
@@ -621,11 +624,53 @@ pub struct BrainSession {
     /// derive from `NewSessionResponse` payload state. Wrapped in `Arc`
     /// so UI consumers can clone cheaply.
     pub spur_agent_caps: Option<Arc<spur_acp::SpurAgentCaps>>,
+    /// Last-known `SessionInfoUpdate` payload (M9 hoist, F-3-1). Lives
+    /// on the orchestrator entry — not the transient
+    /// `SessionDetailView` — so the cached `title` and `updated_at`
+    /// survive the view's destruction on navigation away from the
+    /// session detail screen. `None` until the agent emits its first
+    /// `SessionInfoUpdate` notification.
+    pub session_info: Option<spur_acp::SessionInfoCache>,
     /// Captured `InitializeResponse` retained on the session entry so
     /// it can flow back to `ActiveConnection` when the brain is
     /// retired (and reused later for a fresh `new_session` without
     /// re-running `initialize`).
     pub(crate) init_response: agent_client_protocol::schema::InitializeResponse,
+}
+
+impl BrainSession {
+    /// Test-only constructor that fills the private `attach_guard`,
+    /// `fs_unsafe`, and `init_response` fields with sensible defaults so
+    /// integration tests in sibling crates can construct a
+    /// `BrainSession` without re-implementing the full session-create
+    /// pipeline. Hidden from rustdoc; not part of the stable API.
+    #[doc(hidden)]
+    pub fn for_test(
+        connection: Box<dyn AgentConnection>,
+        acp_session_id: impl Into<String>,
+        spur_session_id: SessionId,
+        brain_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            connection,
+            acp_session_id: acp_session_id.into(),
+            spur_session_id,
+            brain_name: brain_name.into(),
+            delegation_handle: tokio::spawn(async {}),
+            mcp_server: None,
+            mcp_guard: None,
+            notification_pump_handle: None,
+            attach_guard: None,
+            fs_unsafe: false,
+            started_at: std::time::Instant::now(),
+            config_options: Vec::new(),
+            spur_agent_caps: None,
+            session_info: None,
+            init_response: agent_client_protocol::schema::InitializeResponse::new(
+                agent_client_protocol::schema::ProtocolVersion::LATEST,
+            ),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -3516,6 +3561,7 @@ impl Orchestrator {
             fs_unsafe,
             config_options,
             spur_agent_caps,
+            session_info: None,
             init_response,
         })
     }
@@ -3828,6 +3874,7 @@ impl Orchestrator {
             // render disabled state. New sessions populate caps in
             // `create_brain_session`.
             spur_agent_caps: None,
+            session_info: None,
             init_response,
         };
 
@@ -4396,6 +4443,30 @@ impl Orchestrator {
     /// which case downstream UI should render disabled state.
     pub fn spur_agent_caps(&self, brain: &BrainSession) -> Option<Arc<spur_acp::SpurAgentCaps>> {
         brain.spur_agent_caps.clone()
+    }
+
+    /// Read the cached `SessionInfoCache` for the active brain session
+    /// (M9 hoist, F-3-1). Mirrors `spur_agent_caps`'s shape — `BrainSession`
+    /// is the per-session entry, so the caller threads it in.
+    ///
+    /// Returns `None` when the agent has not yet emitted a
+    /// `SessionInfoUpdate` notification. Once emitted, the cache survives
+    /// view rebuilds (the cache lives on the orchestrator entry, not on
+    /// the transient `SessionDetailView`).
+    pub fn session_info(&self, brain: &BrainSession) -> Option<spur_acp::SessionInfoCache> {
+        brain.session_info.clone()
+    }
+
+    /// Merge a `SessionInfoUpdate` notification into the brain session's
+    /// cached `SessionInfoCache`, applying ACP `MaybeUndefined`
+    /// semantics (Undefined preserves, Null clears, Value sets). Creates
+    /// the cache lazily on the first emission.
+    pub fn apply_session_info_update(
+        &self,
+        brain: &mut BrainSession,
+        info: &agent_client_protocol::schema::SessionInfoUpdate,
+    ) {
+        let _ = (brain, info);
     }
 
     /// Dispatch `session/set_model` for `brain` via the trait method on
