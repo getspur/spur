@@ -877,16 +877,27 @@ impl App {
                     return;
                 }
 
+                // Normalize line endings once at the event boundary so every
+                // view (dashboard, session_detail, session_picker) sees `\n`
+                // separators regardless of clipboard origin.
+                let normalized;
+                let text: &str = if text.contains('\r') {
+                    normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+                    &normalized
+                } else {
+                    &text
+                };
+
                 match self.current_view {
-                    ViewId::Dashboard => self.dashboard.handle_paste(&text),
+                    ViewId::Dashboard => self.dashboard.handle_paste(text),
                     ViewId::SessionDetail(_) => {
                         if let Some(ref mut detail) = self.session_detail {
-                            detail.handle_paste(&text);
+                            detail.handle_paste(text);
                         }
                     }
                     ViewId::SessionPicker => {
                         if let Some(ref mut picker) = self.session_picker {
-                            picker.handle_paste(&text);
+                            picker.handle_paste(text);
                         }
                     }
                     ViewId::PlanInspector(_) => {}
