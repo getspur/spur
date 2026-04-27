@@ -1943,9 +1943,9 @@ mod set_session_model_dispatch_tests {
     use super::{decide_set_session_model_dispatch, SetSessionModelDispatch};
     use crate::SpurAgentCaps;
     use agent_client_protocol::schema::{
-        InitializeResponse, ModelId, NewSessionResponse, ProtocolVersion, SessionConfigId,
-        SessionConfigKind, SessionConfigOption, SessionConfigSelect, SessionConfigSelectOptions,
-        SessionConfigValueId, SessionId, SessionModelState,
+        InitializeResponse, ModelId, ModelInfo, NewSessionResponse, ProtocolVersion,
+        SessionConfigId, SessionConfigKind, SessionConfigOption, SessionConfigSelect,
+        SessionConfigSelectOptions, SessionConfigValueId, SessionId, SessionModelState,
     };
 
     fn caps_from(modify: impl FnOnce(&mut NewSessionResponse)) -> SpurAgentCaps {
@@ -1955,12 +1955,17 @@ mod set_session_model_dispatch_tests {
         SpurAgentCaps::new(&init, &new)
     }
 
+    fn codex_model_state() -> SessionModelState {
+        SessionModelState::new(
+            ModelId::new("gpt-5-codex"),
+            vec![ModelInfo::new(ModelId::new("gpt-5-codex"), "GPT-5 Codex")],
+        )
+    }
+
     #[test]
     fn caps_with_models_some_routes_direct() {
         let caps = caps_from(|n| {
-            *n = n
-                .clone()
-                .models(SessionModelState::new(ModelId::new("gpt-5-codex"), vec![]));
+            *n = n.clone().models(codex_model_state());
         });
         assert!(caps.supports_set_model());
         assert!(matches!(
@@ -2004,9 +2009,7 @@ mod set_session_model_dispatch_tests {
     fn models_takes_precedence_over_config_options() {
         // Codex case: both populated. Decision must pick Direct, not Fallback.
         let caps = caps_from(|n| {
-            *n = n
-                .clone()
-                .models(SessionModelState::new(ModelId::new("gpt-5-codex"), vec![]));
+            *n = n.clone().models(codex_model_state());
             n.config_options = Some(vec![SessionConfigOption::new(
                 SessionConfigId::new("model"),
                 "Model",
