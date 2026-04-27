@@ -890,6 +890,9 @@ fn tui_input_to_interactive(input: spur_tui::UserInput) -> spur_core::Interactiv
             method,
             params,
         },
+        spur_tui::UserInput::SetSessionConfigOption { config_id, value } => {
+            spur_core::InteractiveInput::SetSessionConfigOption { config_id, value }
+        }
         spur_tui::UserInput::CancelStream { session } => {
             spur_core::InteractiveInput::CancelStream { session }
         }
