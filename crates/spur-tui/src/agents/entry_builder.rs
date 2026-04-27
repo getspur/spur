@@ -46,6 +46,7 @@ pub fn build_entry(handle: &str, cfg: &CommandsConfig, cmd: &AvailableCommand) -
             handle: handle.to_string(),
         },
         dispatch,
+        arg_picker_spec: None,
     }
 }
 
@@ -83,6 +84,7 @@ pub fn build_static_entry(
             handle: handle.to_string(),
         },
         dispatch,
+        arg_picker_spec: None,
     }
 }
 

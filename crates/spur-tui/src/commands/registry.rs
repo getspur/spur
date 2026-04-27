@@ -17,6 +17,10 @@ pub struct CommandRegistry {
     static_commands: Vec<(String, Vec<CommandEntry>)>,
     /// Per-agent commands received via ingest at runtime.
     dynamic_commands: Vec<(String, Vec<CommandEntry>)>,
+    /// Per-agent commands synthesized by spur from advertised data
+    /// (e.g. NewSessionResponse.config_options). Shadowed by spur-local
+    /// exclusive meta-commands; otherwise visible alongside dynamic.
+    advertised_commands: Vec<(String, Vec<CommandEntry>)>,
     /// Lazy merged view. Rebuilt on any mutation.
     cache: RefCell<Option<CacheSnapshot>>,
 }
@@ -31,6 +35,7 @@ impl CommandRegistry {
         Self {
             static_commands: Vec::new(),
             dynamic_commands: Vec::new(),
+            advertised_commands: Vec::new(),
             cache: RefCell::new(None),
         }
     }
@@ -57,6 +62,7 @@ impl CommandRegistry {
         Self {
             static_commands,
             dynamic_commands: Vec::new(),
+            advertised_commands: Vec::new(),
             cache: RefCell::new(None),
         }
     }
@@ -70,6 +76,38 @@ impl CommandRegistry {
             self.dynamic_commands.push((handle.to_string(), entries));
         }
         *self.cache.borrow_mut() = None;
+    }
+
+    /// Replace the full advertised (synthesized) command set for an agent
+    /// handle. Entries are pre-built by the synthesizer in spur-acp from
+    /// advertised session data such as `NewSessionResponse.config_options`.
+    pub fn set_advertised_commands(&mut self, handle: &str, entries: Vec<CommandEntry>) {
+        if let Some(slot) = self
+            .advertised_commands
+            .iter_mut()
+            .find(|(h, _)| h == handle)
+        {
+            slot.1 = entries;
+        } else {
+            self.advertised_commands.push((handle.to_string(), entries));
+        }
+        *self.cache.borrow_mut() = None;
+    }
+
+    /// Returns the parsed ArgPickerSpec for the named command, if it requires
+    /// an arg picker. Used by TriggerDetector and InputCompletionPort.
+    pub fn arg_picker_spec(
+        &self,
+        command_name: &str,
+    ) -> Option<spur_acp::adapter::arg_picker_hint::ArgPickerSpec> {
+        self.ensure_cache();
+        let cache = self.cache.borrow();
+        cache
+            .as_ref()?
+            .entries
+            .iter()
+            .find(|e| e.name == command_name)
+            .and_then(|e| e.arg_picker_spec.clone())
     }
 
     fn ensure_cache(&self) {
@@ -123,6 +161,18 @@ impl CommandRegistry {
             }
         }
 
+        // Advertised entries (synthesized by spur from agent-advertised data
+        // such as config_options). Same shadowing rule as dynamic: spur-local
+        // exclusive meta-commands win.
+        for (_handle, adv_entries) in &self.advertised_commands {
+            for e in adv_entries {
+                if exclusive_names.contains(e.name.as_str()) {
+                    continue;
+                }
+                entries.push(e.clone());
+            }
+        }
+
         let mut seen: HashSet<String> = HashSet::new();
         let mut colliding: HashSet<String> = HashSet::new();
         for e in &entries {
@@ -151,6 +201,7 @@ impl CommandRegistry {
             match &entry.source {
                 CommandSource::Spur => format!("/spur:{}", entry.name),
                 CommandSource::Agent { handle } => format!("/{}:{}", handle, entry.name),
+                CommandSource::Advertised { handle } => format!("/{}:{}", handle, entry.name),
             }
         } else {
             format!("/{}", entry.name)
@@ -171,6 +222,7 @@ impl CommandRegistry {
                         && match (&e.source, source) {
                             (CommandSource::Spur, "spur") => true,
                             (CommandSource::Agent { handle }, s) => handle == s,
+                            (CommandSource::Advertised { handle }, s) => handle == s,
                             _ => false,
                         }
                 })
@@ -183,6 +235,7 @@ impl CommandRegistry {
         candidates.sort_by_key(|e| match &e.source {
             CommandSource::Spur => 0,
             CommandSource::Agent { .. } => 1,
+            CommandSource::Advertised { .. } => 1,
         });
         candidates.into_iter().next().cloned()
     }
@@ -252,6 +305,7 @@ mod tests {
             dispatch: Dispatch::PromptText {
                 normalized: "/compact".into(),
             },
+            arg_picker_spec: None,
         };
         registry.set_agent_commands("codex", vec![dynamic]);
         let compacts: Vec<_> = registry
@@ -281,6 +335,7 @@ mod tests {
             dispatch: Dispatch::PromptText {
                 normalized: "/compact".into(),
             },
+            arg_picker_spec: None,
         };
         registry.set_agent_commands("codex", vec![dynamic]);
         registry.set_agent_commands("codex", vec![]);
@@ -335,6 +390,7 @@ mod tests {
             dispatch: Dispatch::PromptText {
                 normalized: "/clear".into(),
             },
+            arg_picker_spec: None,
         };
         registry.set_agent_commands("kiro", vec![agent_clear]);
 
@@ -349,5 +405,81 @@ mod tests {
             matches!(clear_entries[0].source, CommandSource::Spur),
             "the surviving /clear must be spur-local"
         );
+    }
+
+    #[test]
+    fn advertised_commands_appear_in_cache() {
+        let mut reg = CommandRegistry::new();
+        let entry = CommandEntry {
+            name: "model".into(),
+            description: "Switch model".into(),
+            hint: None,
+            source: CommandSource::Advertised {
+                handle: "codex".into(),
+            },
+            dispatch: Dispatch::SetSessionConfigOption {
+                config_id: "model".into(),
+            },
+            arg_picker_spec: None,
+        };
+        reg.set_advertised_commands("codex", vec![entry]);
+        let names: Vec<_> = reg.list().iter().map(|e| e.name.clone()).collect();
+        assert!(names.contains(&"model".to_string()));
+    }
+
+    #[test]
+    fn spur_local_shadows_advertised_with_same_name() {
+        // spur-local /clear is an exclusive meta-command (per SpurLocalSource).
+        // Verify an advertised /clear from an agent is shadowed.
+        let mut reg = CommandRegistry::new();
+        let advertised_clear = CommandEntry {
+            name: "clear".into(),
+            description: "agent's clear".into(),
+            hint: None,
+            source: CommandSource::Advertised {
+                handle: "codex".into(),
+            },
+            dispatch: Dispatch::SetSessionConfigOption {
+                config_id: "clear".into(),
+            },
+            arg_picker_spec: None,
+        };
+        reg.set_advertised_commands("codex", vec![advertised_clear]);
+        let clear_entries: Vec<_> = reg
+            .list()
+            .into_iter()
+            .filter(|e| e.name == "clear")
+            .collect();
+        assert_eq!(
+            clear_entries.len(),
+            1,
+            "advertised /clear must be shadowed by spur-local /clear"
+        );
+        assert!(matches!(clear_entries[0].source, CommandSource::Spur));
+    }
+
+    #[test]
+    fn arg_picker_spec_returns_some_for_advertised_with_spec() {
+        let mut reg = CommandRegistry::new();
+        let entry = CommandEntry {
+            name: "model".into(),
+            description: "Switch".into(),
+            hint: None,
+            source: CommandSource::Advertised {
+                handle: "codex".into(),
+            },
+            dispatch: Dispatch::SetSessionConfigOption {
+                config_id: "model".into(),
+            },
+            arg_picker_spec: Some(spur_acp::adapter::arg_picker_hint::ArgPickerSpec {
+                free_text_hint: String::new(),
+                typed_hint: Some(spur_acp::adapter::arg_picker_hint::ArgPickerHint::ConfigOption {
+                    config_id: "model".into(),
+                }),
+            }),
+        };
+        reg.set_advertised_commands("codex", vec![entry]);
+        assert!(reg.arg_picker_spec("model").is_some());
+        assert!(reg.arg_picker_spec("nonexistent").is_none());
     }
 }

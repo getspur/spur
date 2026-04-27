@@ -32,7 +32,8 @@ use futures::Stream;
 use agent_client_protocol::schema::{
     AuthenticateRequest, AuthenticateResponse, InitializeRequest, InitializeResponse,
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, McpServer, NewSessionResponse,
-    PromptRequest, SessionNotification, SetSessionModeRequest, SetSessionModeResponse,
+    PromptRequest, SessionNotification, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse,
 };
 
 use crate::types::AgentHealth;
@@ -162,6 +163,20 @@ pub trait AgentConnection: Send + Sync {
         let _ = request;
         Err(anyhow::anyhow!(
             "set_session_mode not supported by this transport"
+        ))
+    }
+
+    /// Issue ACP `session/set_config_option`. Returns the agent's updated
+    /// `Vec<SessionConfigOption>` so callers can refresh their cache.
+    ///
+    /// Not all transports support this; the default implementation returns an error.
+    async fn set_session_config_option(
+        &mut self,
+        request: SetSessionConfigOptionRequest,
+    ) -> anyhow::Result<SetSessionConfigOptionResponse> {
+        let _ = request;
+        Err(anyhow::anyhow!(
+            "set_session_config_option not supported by this transport"
         ))
     }
 

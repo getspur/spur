@@ -8,6 +8,7 @@ fn command_entry_constructs() {
         hint: None,
         source: CommandSource::Spur,
         dispatch: Dispatch::SpurLocal(spur_tui::action::Action::ShowHelp),
+        arg_picker_spec: None,
     };
     assert_eq!(e.name, "help");
     assert!(matches!(e.source, CommandSource::Spur));
