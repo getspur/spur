@@ -1244,6 +1244,9 @@ impl ReactTrace {
             entry_row_starts,
             byte_ranges,
             width,
+            soft_cap: 60,        // sensible default for tests
+            cell_w_px: 8,        // typical non-retina monospace
+            cell_h_px: 16,
             generation: self.generation,
             fence_gen: 0,
         });
