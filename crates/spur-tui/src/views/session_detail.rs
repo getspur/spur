@@ -144,6 +144,14 @@ pub struct SessionDetailView {
     /// milestone events arrive. Set to `Failed` on `BrainError`.
     /// Drives the pre-ready render path (Tranche 2 Task 5).
     pub load_state: LoadState,
+
+    /// Most recent snapshot of advertised session config options for this
+    /// session. Populated from `SpurEventBody::CommandRegistryDirty` (which
+    /// the orchestrator emits at session creation and after each successful
+    /// `set_session_config_option`). Drives both the synthesized `/model` and
+    /// `/effort` slash entries in `command_registry` and the `SlashArg`
+    /// picker's choice list via `CompletionEnv.session_config_options`.
+    session_config_options: Vec<spur_acp::SessionConfigOption>,
 }
 
 impl SessionDetailView {
@@ -201,6 +209,7 @@ impl SessionDetailView {
             cleared: false,
             ready_banner: None,
             load_state: LoadState::Ready,
+            session_config_options: Vec::new(),
         }
     }
 
@@ -260,6 +269,7 @@ impl SessionDetailView {
             cleared: false,
             ready_banner: None,
             load_state: LoadState::Ready,
+            session_config_options: Vec::new(),
         }
     }
 
@@ -310,6 +320,7 @@ impl SessionDetailView {
             cleared: false,
             ready_banner: None,
             load_state: LoadState::Retiring,
+            session_config_options: Vec::new(),
         }
     }
 
@@ -628,6 +639,24 @@ impl SessionDetailView {
         self.command_registry.set_agent_commands(&handle, entries);
     }
 
+    /// Handle a `SpurEventBody::CommandRegistryDirty` payload. Synthesizes
+    /// advertised slash entries from the cached `config_options` and stores
+    /// the snapshot so the popup's slash-arg picker can fetch live choices
+    /// via `CompletionEnv.session_config_options`.
+    pub fn apply_advertised_commands(&mut self, options: &[spur_acp::SessionConfigOption]) {
+        let handle = self.agent_handle_for_commands();
+        let entries = crate::commands::advertised::AdvertisedSource::entries(&handle, options);
+        self.command_registry.set_advertised_commands(&handle, entries);
+        self.session_config_options = options.to_vec();
+    }
+
+    /// Test-only accessor for the cached snapshot of advertised session
+    /// config options.
+    #[cfg(any(test, debug_assertions))]
+    pub fn session_config_options_for_test(&self) -> &[spur_acp::SessionConfigOption] {
+        &self.session_config_options
+    }
+
     /// Test-only accessor: flattened trace text for each entry,
     /// oldest→newest. Used by integration tests in
     /// `tests/session_update_handling.rs`.
@@ -937,10 +966,7 @@ impl SessionDetailView {
             mention_registry: &self.mention_registry,
             cwd: &self.cwd,
             scope: crate::mentions::CompletionScope::Session(&self.session_id),
-            // Task 2.16 will source this from the orchestrator cache; for
-            // now an empty slice keeps Slash/Mention pickers functional and
-            // makes SlashArg a no-op until the data path lands.
-            session_config_options: &[],
+            session_config_options: &self.session_config_options,
         };
         self.completion.dispatch(event, &mut self.input_bar, &env);
     }
@@ -1722,6 +1748,16 @@ impl View for SessionDetailView {
                 if *resumed {
                     self.push_system_note("Resumed from prior conversation".to_string());
                 }
+            }
+
+            SpurEventBody::CommandRegistryDirty {
+                session,
+                config_options,
+            } => {
+                if session.0 != self.session_id.0 {
+                    return;
+                }
+                self.apply_advertised_commands(config_options);
             }
 
             // All other event types are not relevant to this session view.
