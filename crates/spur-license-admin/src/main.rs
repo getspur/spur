@@ -30,14 +30,14 @@ async fn main() -> anyhow::Result<()> {
                 product,
             } => {
                 let client = spur_license_admin::api::AdminClient::new(
-                    &secret_key,
+                    secret_key.expose(),
                     &product,
                     "https://licenseseat.com/api/v1",
                 );
-                client
+                let value = client
                     .create_license(&plan, email.as_deref(), seats)
                     .await?;
-                println!("License created successfully.");
+                println!("{}", serde_json::to_string_pretty(&value)?);
             }
             spur_license_admin::cli::LicenseAction::Revoke {
                 key,
@@ -45,12 +45,12 @@ async fn main() -> anyhow::Result<()> {
                 product,
             } => {
                 let client = spur_license_admin::api::AdminClient::new(
-                    &secret_key,
+                    secret_key.expose(),
                     &product,
                     "https://licenseseat.com/api/v1",
                 );
-                client.revoke_license(&key).await?;
-                println!("License revoked successfully.");
+                let value = client.revoke_license(&key).await?;
+                println!("{}", serde_json::to_string_pretty(&value)?);
             }
             spur_license_admin::cli::LicenseAction::Activations {
                 key,
@@ -58,12 +58,12 @@ async fn main() -> anyhow::Result<()> {
                 product,
             } => {
                 let client = spur_license_admin::api::AdminClient::new(
-                    &secret_key,
+                    secret_key.expose(),
                     &product,
                     "https://licenseseat.com/api/v1",
                 );
-                client.list_activations(&key).await?;
-                println!("Activations listed successfully.");
+                let value = client.list_activations(&key).await?;
+                println!("{}", serde_json::to_string_pretty(&value)?);
             }
         },
     }

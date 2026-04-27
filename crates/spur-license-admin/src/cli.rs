@@ -1,5 +1,51 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::str::FromStr;
+
+/// String wrapper that redacts its contents in `Debug` output.
+///
+/// Used for the LicenseSeat `sk_*` secret key so it never leaks via
+/// logged or panicked CLI structs.
+#[derive(Clone)]
+pub struct RedactedString(pub String);
+
+impl std::fmt::Debug for RedactedString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RedactedString(\"REDACTED\")")
+    }
+}
+
+impl FromStr for RedactedString {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(s.to_string()))
+    }
+}
+
+impl From<String> for RedactedString {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl PartialEq<&str> for RedactedString {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<str> for RedactedString {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl RedactedString {
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "spur-license-admin")]
@@ -24,7 +70,7 @@ pub enum Commands {
         #[arg(short, long, default_value = "spur-policy-2026-04")]
         key_id: String,
 
-        /// Path to the Ed25519 signing key (32 raw bytes or PEM)
+        /// Path to the Ed25519 signing key (32 raw bytes or PKCS#8 PEM)
         #[arg(short, long, env = "SPUR_POLICY_SIGNING_KEY")]
         signing_key: PathBuf,
     },
@@ -54,7 +100,7 @@ pub enum LicenseAction {
 
         /// LicenseSeat secret key (sk_*)
         #[arg(short, long, env = "SPUR_LICENSESEAT_SECRET_KEY")]
-        secret_key: String,
+        secret_key: RedactedString,
 
         /// Product slug
         #[arg(long, env = "SPUR_LICENSESEAT_PRODUCT_SLUG")]
@@ -69,7 +115,7 @@ pub enum LicenseAction {
 
         /// LicenseSeat secret key (sk_*)
         #[arg(short, long, env = "SPUR_LICENSESEAT_SECRET_KEY")]
-        secret_key: String,
+        secret_key: RedactedString,
 
         /// Product slug
         #[arg(long, env = "SPUR_LICENSESEAT_PRODUCT_SLUG")]
@@ -84,7 +130,7 @@ pub enum LicenseAction {
 
         /// LicenseSeat secret key (sk_*)
         #[arg(short, long, env = "SPUR_LICENSESEAT_SECRET_KEY")]
-        secret_key: String,
+        secret_key: RedactedString,
 
         /// Product slug
         #[arg(long, env = "SPUR_LICENSESEAT_PRODUCT_SLUG")]
