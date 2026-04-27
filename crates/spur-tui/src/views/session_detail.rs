@@ -701,6 +701,26 @@ impl SessionDetailView {
         self.session_config_options = options.to_vec();
     }
 
+    /// Cache the agent capabilities for this session. Captured by the
+    /// orchestrator after `session/new` and plumbed through the resume
+    /// pipeline; populated `Some(_)` for fresh sessions, left `None` for
+    /// sessions resumed before M9 wires `LoadSessionResponse` into
+    /// `SpurAgentCaps`. `None` is treated as permissive on read paths.
+    pub fn set_spur_agent_caps(
+        &mut self,
+        caps: Option<std::sync::Arc<spur_acp::SpurAgentCaps>>,
+    ) {
+        self.spur_agent_caps = caps;
+    }
+
+    /// Slash-command popup view: the merged registry filtered by the
+    /// cached `SpurAgentCaps`. When caps are absent (resumed sessions
+    /// pre-M9), the unfiltered list is returned so pickers stay visible.
+    pub fn available_slash_commands(&self) -> Vec<crate::commands::CommandEntry> {
+        self.command_registry
+            .available_commands_for_session(self.spur_agent_caps.as_deref())
+    }
+
     /// Test-only accessor for the cached snapshot of advertised session
     /// config options.
     #[cfg(any(test, debug_assertions))]
