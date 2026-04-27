@@ -88,6 +88,10 @@ pub fn route(
                         interrupt,
                     }
                 }
+                // Filled in properly by Task 2.15 (route to InteractiveInput::SetSessionConfigOption).
+                // Until then, this path is unreachable: the v1 picker work in Task 2.12 dispatches
+                // SetSessionConfigOption via a separate code path before submit_router.route() runs.
+                Dispatch::SetSessionConfigOption { .. } => SubmitDecision::Empty,
                 Dispatch::VendorExec {
                     method,
                     command,

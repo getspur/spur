@@ -86,7 +86,8 @@ impl InputCompletionPort {
                                 description: e.description.clone(),
                                 tag: match &e.source {
                                     crate::commands::CommandSource::Spur => "⟨spur⟩".into(),
-                                    crate::commands::CommandSource::Agent { handle } => {
+                                    crate::commands::CommandSource::Agent { handle }
+                                    | crate::commands::CommandSource::Advertised { handle } => {
                                         format!("⟨{}⟩", handle)
                                     }
                                 },
