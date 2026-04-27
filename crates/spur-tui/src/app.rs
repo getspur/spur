@@ -380,6 +380,13 @@ impl App {
             last_action: None,
         };
 
+        // Propagate the config-derived edit_mode to the dashboard's input bar.
+        // `InputBar::new()` hardcodes EditMode::Emacs; without this sync, a
+        // user with `tui.edit_mode = "vim"` would see Emacs on the dashboard
+        // composer until they toggled. SessionDetail is None at boot and
+        // receives the mode on instantiation, so it does not need syncing here.
+        app.dashboard.set_edit_mode(app.edit_mode);
+
         // Apply landing-specific setup
         if let crate::landing::LandingDecision::SetupRequired = &app.landing {
             app.dashboard.set_agents_configured(false);
