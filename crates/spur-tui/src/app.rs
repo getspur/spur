@@ -2853,8 +2853,16 @@ pub(crate) fn apply_session_update(
             state.context_used = Some(u.used);
             state.context_size = Some(u.size);
         }
-        SessionInfoUpdate(u) => {
-            state.apply_session_info_update(u);
+        SessionInfoUpdate(_) => {
+            // M9 hoist: the cached title / updated_at moved to
+            // BrainSession in spur-core. Wire-side ingestion of this
+            // notification onto the orchestrator entry is tracked as
+            // a follow-up; the explicit arm stays here so the variant
+            // is still tagged in trace logs (vs. the catch-all silent
+            // drop in `apply_session_update: unhandled variant`).
+            tracing::trace!(
+                "SessionInfoUpdate received in spur-tui — orchestrator-side ingestion is the canonical path post-M9"
+            );
         }
         _ => {
             tracing::trace!("apply_session_update: unhandled variant");
