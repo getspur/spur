@@ -46,7 +46,7 @@ Create `crates/spur-acp/tests/tui_config_section.rs`:
 ```rust
 //! Backward-compat and round-trip coverage for the `[tui]` config section.
 
-use spur_acp::config::{EditorMode, SpurConfig, TuiConfig};
+use spur_acp::config::{EditorMode, SpurConfig};
 
 #[test]
 fn parse_config_without_tui_section_uses_emacs_default() {
