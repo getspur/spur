@@ -58,9 +58,7 @@ impl MockFailingOutcomeStore {
 
     fn err(&self, key: &OutcomeKey) -> StoreError {
         match &self.mode {
-            FailureMode::Io => {
-                StoreError::Io(std::io::Error::new(std::io::ErrorKind::Other, "mock io"))
-            }
+            FailureMode::Io => StoreError::Io(std::io::Error::other("mock io")),
             FailureMode::TooLarge => StoreError::TooLarge {
                 actual: 1_000_000,
                 limit: 1024,
@@ -99,10 +97,7 @@ impl OutcomeStore for MockFailingOutcomeStore {
         _brain_session_id: &BrainSessionId,
     ) -> Result<DeleteNamespaceReport, StoreError> {
         match &self.mode {
-            FailureMode::Io => Err(StoreError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "mock io",
-            ))),
+            FailureMode::Io => Err(StoreError::Io(std::io::Error::other("mock io"))),
             _ => Err(StoreError::Backend("mock delete_namespace failure".into())),
         }
     }

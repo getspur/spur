@@ -758,7 +758,7 @@ mod tests {
         let names: Vec<_> = seeds.entries.iter().map(|a| a.name.as_str()).collect();
         for expected in EXPECTED_SEED_AGENTS {
             assert!(
-                names.contains(&expected),
+                names.contains(expected),
                 "missing seed agent: {expected} (got {names:?})"
             );
         }

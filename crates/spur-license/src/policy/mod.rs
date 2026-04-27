@@ -5,6 +5,7 @@
 //! actual evaluators live in `policy::feature_key`, `policy::flags`, and the
 //! resolver section below.
 
+mod const_eq;
 pub mod feature_key;
 pub mod flag_key;
 pub mod flags;
@@ -106,6 +107,11 @@ fn default_schema_version() -> u32 {
     CODE_SUPPORTED_MAJOR
 }
 
+/// Lenient deserialization: unknown flag string keys are dropped with a
+/// `tracing::warn`. This keeps backward compatibility with policies that ship
+/// new flags before client knowledge of them. The strict path (no longer
+/// present in `flag_key.rs`) errored on unknown keys; this lenient shim
+/// replaces it.
 fn deserialize_flags<'de, D>(
     deserializer: D,
 ) -> std::result::Result<BTreeMap<FlagKey, FlagSpec>, D::Error>

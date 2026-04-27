@@ -20,25 +20,11 @@
 //! See `docs/superpowers/specs/2026-04-26-individual-tier-revamp-design.md`
 //! §4 for the full 135-key registry.
 
+use super::const_eq::bytes_eq;
 use std::sync::Arc;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FeatureKey(&'static str);
-
-/// Const-compatible byte-slice equality (stable Rust).
-const fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut i = 0;
-    while i < a.len() {
-        if a[i] != b[i] {
-            return false;
-        }
-        i += 1;
-    }
-    true
-}
 
 impl FeatureKey {
     // --- Community tier (11) ---
