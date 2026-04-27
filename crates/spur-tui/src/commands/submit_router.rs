@@ -378,4 +378,133 @@ mod sessions_slash_tests {
         let decision = route("/model ", &[], &registry, false);
         assert!(matches!(decision, SubmitDecision::Empty));
     }
+
+    /// Wave B.4: caps that advertise the dedicated `set_model` method
+    /// route `/model <value>` to `SubmitDecision::SetSessionModel` so
+    /// the orchestrator can dispatch through `set_session_model` instead
+    /// of unconditionally through `set_session_config_option`.
+    #[test]
+    fn slash_model_with_caps_supporting_set_model_routes_to_set_session_model() {
+        use crate::commands::entry::{CommandEntry, CommandSource, Dispatch};
+        use agent_client_protocol::schema::{
+            InitializeResponse, ModelId, NewSessionResponse, ProtocolVersion, SessionId,
+            SessionModelState,
+        };
+
+        let mut registry = CommandRegistry::new();
+        registry.set_advertised_commands(
+            "codex",
+            vec![CommandEntry {
+                name: "model".into(),
+                description: "Switch model".into(),
+                hint: None,
+                source: CommandSource::Advertised {
+                    handle: "codex".into(),
+                },
+                dispatch: Dispatch::SetSessionConfigOption {
+                    config_id: "model".into(),
+                },
+                arg_picker_spec: None,
+            }],
+        );
+
+        // Build caps that advertise `models: Some(_)` — supports_set_model() = true.
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+        let new = NewSessionResponse::new(SessionId::new("sid")).models(SessionModelState::new(
+            ModelId::new("gpt-5-codex"),
+            vec![],
+        ));
+        let caps = spur_acp::SpurAgentCaps::new(&init, &new);
+
+        let decision = route_with_caps("/model gpt-5-codex", &[], &registry, false, Some(&caps));
+        match decision {
+            SubmitDecision::SetSessionModel { value } => assert_eq!(value, "gpt-5-codex"),
+            other => panic!("expected SetSessionModel, got {other:?}"),
+        }
+    }
+
+    /// Wave B.4: caps WITHOUT the dedicated method (only set_config_option)
+    /// preserve the existing SetSessionConfigOption decision.
+    #[test]
+    fn slash_model_with_caps_only_supporting_config_option_routes_to_existing() {
+        use crate::commands::entry::{CommandEntry, CommandSource, Dispatch};
+        use agent_client_protocol::schema::{
+            InitializeResponse, NewSessionResponse, ProtocolVersion, SessionConfigId,
+            SessionConfigKind, SessionConfigOption, SessionConfigSelect,
+            SessionConfigSelectOptions, SessionConfigValueId, SessionId,
+        };
+
+        let mut registry = CommandRegistry::new();
+        registry.set_advertised_commands(
+            "codex",
+            vec![CommandEntry {
+                name: "model".into(),
+                description: "Switch model".into(),
+                hint: None,
+                source: CommandSource::Advertised {
+                    handle: "codex".into(),
+                },
+                dispatch: Dispatch::SetSessionConfigOption {
+                    config_id: "model".into(),
+                },
+                arg_picker_spec: None,
+            }],
+        );
+
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+        let mut new = NewSessionResponse::new(SessionId::new("sid"));
+        new.config_options = Some(vec![SessionConfigOption::new(
+            SessionConfigId::new("model"),
+            "Model",
+            SessionConfigKind::Select(SessionConfigSelect::new(
+                SessionConfigValueId::new("default"),
+                SessionConfigSelectOptions::Ungrouped(vec![]),
+            )),
+        )]);
+        let caps = spur_acp::SpurAgentCaps::new(&init, &new);
+        assert!(!caps.supports_set_model());
+        assert!(caps.supports_set_config_option());
+
+        let decision = route_with_caps("/model gpt-4o", &[], &registry, false, Some(&caps));
+        match decision {
+            SubmitDecision::SetSessionConfigOption { config_id, value } => {
+                assert_eq!(config_id, "model");
+                assert_eq!(value, "gpt-4o");
+            }
+            other => panic!("expected SetSessionConfigOption fallback, got {other:?}"),
+        }
+    }
+
+    /// Wave B.4: caps = None (resumed sessions before M9 wires
+    /// LoadSessionResponse) preserve the existing decision shape.
+    #[test]
+    fn slash_model_with_no_caps_routes_through_existing_path() {
+        use crate::commands::entry::{CommandEntry, CommandSource, Dispatch};
+
+        let mut registry = CommandRegistry::new();
+        registry.set_advertised_commands(
+            "codex",
+            vec![CommandEntry {
+                name: "model".into(),
+                description: "Switch model".into(),
+                hint: None,
+                source: CommandSource::Advertised {
+                    handle: "codex".into(),
+                },
+                dispatch: Dispatch::SetSessionConfigOption {
+                    config_id: "model".into(),
+                },
+                arg_picker_spec: None,
+            }],
+        );
+
+        let decision = route_with_caps("/model gpt-4o", &[], &registry, false, None);
+        match decision {
+            SubmitDecision::SetSessionConfigOption { config_id, value } => {
+                assert_eq!(config_id, "model");
+                assert_eq!(value, "gpt-4o");
+            }
+            other => panic!("expected SetSessionConfigOption (None caps preserves shape), got {other:?}"),
+        }
+    }
 }
