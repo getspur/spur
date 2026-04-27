@@ -6,6 +6,9 @@
 // Usage:
 //   node scripts/probe-codex-acp.mjs            # full handshake + new_session
 //   node scripts/probe-codex-acp.mjs --load     # also exercise session/load
+//   node scripts/probe-codex-acp.mjs --prompts  # multi-turn session/prompt to
+//                                                 capture SessionInfoUpdate
+//                                                 (M8 Wave 0.3)
 //
 // All frames are logged to stderr with a TX/RX prefix and a wallclock stamp.
 // stdout is reserved for a final JSON summary.
@@ -15,8 +18,9 @@ import { stderr, stdout, exit } from "node:process";
 
 const args = process.argv.slice(2);
 const wantLoad = args.includes("--load");
+const wantPrompts = args.includes("--prompts");
 
-const DEADLINE_MS = 30_000;
+const DEADLINE_MS = wantPrompts ? 90_000 : 30_000;
 const startedAt = Date.now();
 let nextId = 1;
 const pending = new Map();
@@ -26,6 +30,7 @@ const captured = {
     notifications: [], // every server-initiated frame
     wantedConfigOptions: null,
     wantedAvailableCommands: null,
+    sessionInfoUpdates: [], // M8 Wave 0.3
 };
 
 const child = spawn("npx", ["--yes", "@zed-industries/codex-acp@0.12.0"], {
@@ -112,6 +117,13 @@ function onLine(line) {
             ) {
                 captured.wantedAvailableCommands = upd;
             }
+            if (
+                upd &&
+                (upd.sessionUpdate === "session_info_update" ||
+                 upd.session_info_update || upd.sessionInfoUpdate)
+            ) {
+                captured.sessionInfoUpdates.push(upd);
+            }
         }
         return;
     }
@@ -146,12 +158,14 @@ async function main() {
     }
 
     // 3. session/new
+    let sessionId = null;
     try {
         const newRes = await send("session/new", {
             cwd: process.cwd(),
             mcpServers: [],
         });
         captured.new_session = newRes;
+        sessionId = newRes?.sessionId || newRes?.session_id || null;
         stderr.write(`[probe] new_session keys: ${Object.keys(newRes || {}).join(", ")}\n`);
     } catch (e) {
         stderr.write(`[probe] session/new failed: ${e.message}\n`);
@@ -159,6 +173,29 @@ async function main() {
 
     // Give the agent a moment to push delayed notifications.
     await new Promise((r) => setTimeout(r, 1500));
+
+    // 3a. (M8 Wave 0.3) Multi-turn prompts to elicit SessionInfoUpdate.
+    // Codex auto-generates a session title after the first prompt; the title
+    // is delivered via session/update with sessionUpdate="session_info_update".
+    if (wantPrompts && sessionId) {
+        const prompts = ["what's 2+2", "and 3+3"];
+        for (const text of prompts) {
+            try {
+                stderr.write(`[probe] prompt: "${text}"\n`);
+                await send("session/prompt", {
+                    sessionId,
+                    prompt: [{ type: "text", text }],
+                });
+                // Wait for stream to settle + any post-turn notifications.
+                await new Promise((r) => setTimeout(r, 2000));
+            } catch (e) {
+                stderr.write(`[probe] session/prompt failed: ${e.message}\n`);
+                break;
+            }
+        }
+        // Grace period for codex to push delayed SessionInfoUpdate.
+        await new Promise((r) => setTimeout(r, 2000));
+    }
 
     // 4. Print summary to stdout.
     stdout.write(JSON.stringify({
@@ -172,6 +209,7 @@ async function main() {
         })),
         wantedConfigOptions: captured.wantedConfigOptions,
         wantedAvailableCommands: captured.wantedAvailableCommands,
+        sessionInfoUpdates: captured.sessionInfoUpdates,
         all_notifications: captured.notifications,
     }, null, 2) + "\n");
 
