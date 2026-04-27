@@ -1,18 +1,12 @@
 #!/usr/bin/env bash
 # spur-cargo — project-standard cargo wrapper.
 #
-# Runs scripts/sccache-sync-basedirs.sh first (no-op when worktree set is
-# already in sync, refuses to restart sccache while rustc is running), then
-# forwards all arguments to `cargo`.
-#
-# Use this instead of plain `cargo` for SPUR builds so cross-worktree
-# sccache hits work consistently for any agent or human invoking it.
+# Previously ran sccache-sync-basedirs.sh to enumerate worktrees in the
+# server's SCCACHE_BASEDIRS. This is now handled dynamically by
+# scripts/sccache-worktree.sh (set as rustc-wrapper in .cargo/config.toml),
+# so this wrapper is a thin pass-through kept for backward compatibility.
 #
 # See: docs/rca/2026-04-27-sccache-worktree-cache-miss.md
 set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCCACHE_SYNC_QUIET="${SCCACHE_SYNC_QUIET:-1}" \
-    "$SCRIPT_DIR/sccache-sync-basedirs.sh" || true
 
 exec cargo "$@"
