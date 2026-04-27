@@ -22,6 +22,7 @@ pub use connection::{
     AgentConnection, CliWrapAdapter, ExtNotificationPayload, NativeAcpConnection, StdioAdapter,
     StreamJsonAdapter,
 };
+pub use error::AcpError;
 pub use registry::AgentRegistry;
 pub use session_liveness::SelfHeldSet;
 pub use spur_agent_caps::SpurAgentCaps;
