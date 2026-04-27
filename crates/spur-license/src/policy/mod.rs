@@ -12,6 +12,7 @@ pub mod trust;
 pub use feature_key::FeatureKey;
 pub use flags::{FlagEvaluator, FlagExplanation, FlagReason};
 
+use crate::{LicenseError, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,7 +21,7 @@ use std::sync::{Arc, OnceLock};
 /// Major schema version this binary understands. Code REFUSES to load any
 /// policy where `schema_version > CODE_SUPPORTED_MAJOR` and falls back to
 /// the embedded baseline.
-pub const CODE_SUPPORTED_MAJOR: u32 = 1;
+pub const CODE_SUPPORTED_MAJOR: u32 = 2;
 
 /// The wire format. Always wrapped in `SignedPolicy` on disk and over the wire.
 ///
@@ -29,11 +30,16 @@ pub const CODE_SUPPORTED_MAJOR: u32 = 1;
 /// the signing/distribution flow, NOT because they are the same concept.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PolicyDocument {
+    #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     pub issued_at: DateTime<Utc>,
     #[serde(default)]
+    pub policy_version: Option<String>,
+    #[serde(default)]
     pub expires_at: Option<DateTime<Utc>>,
     pub tier_policies: BTreeMap<String, TierPolicy>,
+    #[serde(default)]
+    pub v1_1_q3_roadmap: Option<BTreeMap<String, BTreeSet<String>>>,
     #[serde(default)]
     pub flags: BTreeMap<String, FlagSpec>,
 }
@@ -94,6 +100,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_schema_version() -> u32 {
+    CODE_SUPPORTED_MAJOR
+}
+
 /// Wrapper that carries the signature. The payload is canonical JSON of
 /// `PolicyDocument` so signature verification is independent of serde
 /// formatting choices on the verification side.
@@ -146,22 +156,69 @@ impl PolicyResolver {
 
     /// Returns the canonical entitlement set for the given tier name.
     /// Unknown tier → empty set (fail-closed at lookup).
-    pub fn tier_features(&self, tier: &str) -> BTreeSet<String> {
-        self.document
-            .tier_policies
-            .get(tier)
-            .map(|tp| tp.features.clone())
-            .unwrap_or_default()
+    pub fn tier_features(&self, tier: &str) -> Result<BTreeSet<String>> {
+        let mut stack = Vec::new();
+        self.resolve_tier_features(tier, &mut stack)
     }
 
     /// Returns true iff the named tier's `features` set contains `feature`.
     /// Unknown tier OR unknown feature → false (fail-closed).
     pub fn tier_has_feature(&self, tier: &str, feature: &str) -> bool {
-        self.document
-            .tier_policies
-            .get(tier)
-            .map(|tp| tp.features.contains(feature))
+        self.tier_features(tier)
+            .map(|features| features.contains(feature))
             .unwrap_or(false)
+    }
+
+    /// Returns inactive v1.1 roadmap features for `tier`.
+    ///
+    /// Roadmap entries are parsed for display/planning purposes only and are
+    /// deliberately excluded from `tier_features` / `tier_has_feature`.
+    pub fn roadmap_features(&self, tier: &str) -> BTreeSet<String> {
+        self.document
+            .v1_1_q3_roadmap
+            .as_ref()
+            .and_then(|roadmap| roadmap.get(tier))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn resolve_tier_features(
+        &self,
+        tier: &str,
+        stack: &mut Vec<String>,
+    ) -> Result<BTreeSet<String>> {
+        if stack.iter().any(|seen| seen == tier) {
+            let mut cycle = stack.join(" -> ");
+            if !cycle.is_empty() {
+                cycle.push_str(" -> ");
+            }
+            cycle.push_str(tier);
+            return Err(LicenseError::PolicyMalformed(format!(
+                "policy inherit cycle: {cycle}"
+            )));
+        }
+
+        let Some(policy) = self.document.tier_policies.get(tier) else {
+            return Ok(BTreeSet::new());
+        };
+
+        stack.push(tier.to_string());
+        let mut features = BTreeSet::new();
+        for feature in &policy.features {
+            if let Some(inherit_tier) = feature.strip_prefix("@inherit:") {
+                if inherit_tier != "community" {
+                    return Err(LicenseError::PolicyMalformed(format!(
+                        "unsupported policy inherit directive {feature:?} in tier {tier:?}"
+                    )));
+                }
+                features.extend(self.resolve_tier_features(inherit_tier, stack)?);
+            } else {
+                features.insert(feature.clone());
+            }
+        }
+        stack.pop();
+
+        Ok(features)
     }
 
     /// Default overlay path: `~/.spur/policy-overlay.json`.
@@ -248,17 +305,45 @@ mod tests {
     }
 
     #[test]
+    fn policy_document_defaults_new_schema_to_v2() {
+        let json = r#"{
+            "issued_at": "2026-04-27T00:00:00Z",
+            "policy_version": "2026-04-27",
+            "expires_at": "2026-07-01T00:00:00Z",
+            "tier_policies": {},
+            "v1_1_q3_roadmap": {
+                "pro": ["core_pro_session_resume_event_replay"]
+            }
+        }"#;
+        let doc: PolicyDocument = serde_json::from_str(json).unwrap();
+        assert_eq!(doc.schema_version, 2);
+        assert_eq!(doc.policy_version.as_deref(), Some("2026-04-27"));
+        assert!(doc.expires_at.is_some());
+        assert_eq!(
+            doc.v1_1_q3_roadmap
+                .as_ref()
+                .and_then(|roadmap| roadmap.get("pro"))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn policy_document_round_trips() {
         let doc = PolicyDocument {
-            schema_version: 1,
+            schema_version: 2,
             issued_at: chrono::Utc::now(),
+            policy_version: Some("2026-04-27".into()),
             expires_at: None,
             tier_policies: BTreeMap::new(),
+            v1_1_q3_roadmap: None,
             flags: BTreeMap::new(),
         };
         let json = serde_json::to_string(&doc).unwrap();
         let back: PolicyDocument = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.schema_version, 1);
+        assert_eq!(back.schema_version, 2);
+        assert_eq!(back.policy_version.as_deref(), Some("2026-04-27"));
     }
 
     #[test]
@@ -298,7 +383,7 @@ mod tests {
     #[test]
     fn embedded_resolver_returns_community_features() {
         let r = PolicyResolver::embedded();
-        let community = r.tier_features("community");
+        let community = r.tier_features("community").unwrap();
         assert!(community.contains("brain_session"));
         assert!(community.contains("single_worker"));
         assert!(community.contains("mcp_standard_tools"));
@@ -308,7 +393,7 @@ mod tests {
     #[test]
     fn embedded_resolver_returns_pro_features_superset() {
         let r = PolicyResolver::embedded();
-        let pro = r.tier_features("pro");
+        let pro = r.tier_features("pro").unwrap();
         assert!(pro.contains("brain_session"));
         assert!(pro.contains("parallel_workers"));
         assert!(pro.contains("auto_review_policies"));
@@ -317,7 +402,7 @@ mod tests {
     #[test]
     fn unknown_tier_returns_empty_set() {
         let r = PolicyResolver::embedded();
-        assert!(r.tier_features("nonexistent").is_empty());
+        assert!(r.tier_features("nonexistent").unwrap().is_empty());
     }
 
     #[test]
@@ -332,7 +417,10 @@ mod tests {
     fn overlay_supersedes_when_newer_and_signed() {
         let result =
             PolicyResolver::with_overlay_path(std::path::Path::new("/nonexistent/overlay.json"));
-        assert!(result.tier_features("community").contains("brain_session"));
+        assert!(result
+            .tier_features("community")
+            .unwrap()
+            .contains("brain_session"));
     }
 
     #[test]
@@ -344,6 +432,93 @@ mod tests {
         )
         .unwrap();
         let r = PolicyResolver::with_overlay_path(tmp.path());
-        assert!(r.tier_features("community").contains("brain_session"));
+        assert!(r
+            .tier_features("community")
+            .unwrap()
+            .contains("brain_session"));
+    }
+
+    fn test_tier(features: &[&str]) -> TierPolicy {
+        TierPolicy {
+            features: features.iter().map(|feature| (*feature).into()).collect(),
+            quotas: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    fn test_document(
+        tier_policies: BTreeMap<String, TierPolicy>,
+        roadmap: Option<BTreeMap<String, BTreeSet<String>>>,
+    ) -> PolicyDocument {
+        PolicyDocument {
+            schema_version: 2,
+            issued_at: chrono::Utc::now(),
+            policy_version: Some("2026-04-27".into()),
+            expires_at: None,
+            tier_policies,
+            v1_1_q3_roadmap: roadmap,
+            flags: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn tier_features_inherits_community_without_exposing_directive() {
+        let mut tiers = BTreeMap::new();
+        tiers.insert(
+            "community".into(),
+            test_tier(&["brain_session", "single_worker"]),
+        );
+        tiers.insert(
+            "pro".into(),
+            test_tier(&["@inherit:community", "parallel_workers"]),
+        );
+        let resolver = PolicyResolver::from_document(test_document(tiers, None));
+
+        let pro = resolver.tier_features("pro").unwrap();
+        assert!(pro.contains("brain_session"));
+        assert!(pro.contains("single_worker"));
+        assert!(pro.contains("parallel_workers"));
+        assert!(!pro.contains("@inherit:community"));
+
+        let community = resolver.tier_features("community").unwrap();
+        assert_eq!(
+            community,
+            BTreeSet::from(["brain_session".into(), "single_worker".into()])
+        );
+    }
+
+    #[test]
+    fn tier_features_detects_inherit_cycle() {
+        let mut tiers = BTreeMap::new();
+        tiers.insert("community".into(), test_tier(&["@inherit:community"]));
+        let resolver = PolicyResolver::from_document(test_document(tiers, None));
+
+        let err = resolver.tier_features("community").unwrap_err();
+        assert!(matches!(err, crate::LicenseError::PolicyMalformed(_)));
+        assert!(err.to_string().contains("inherit cycle"));
+    }
+
+    #[test]
+    fn roadmap_features_are_parsed_but_not_active() {
+        let mut tiers = BTreeMap::new();
+        tiers.insert("community".into(), test_tier(&["brain_session"]));
+        tiers.insert(
+            "pro".into(),
+            test_tier(&["@inherit:community", "parallel_workers"]),
+        );
+        let roadmap_feature = "core_pro_session_resume_event_replay".to_string();
+        let roadmap =
+            BTreeMap::from([("pro".to_string(), BTreeSet::from([roadmap_feature.clone()]))]);
+        let resolver = PolicyResolver::from_document(test_document(tiers, Some(roadmap)));
+
+        assert_eq!(
+            resolver.roadmap_features("pro"),
+            BTreeSet::from([roadmap_feature.clone()])
+        );
+        assert!(resolver.roadmap_features("community").is_empty());
+
+        let pro = resolver.tier_features("pro").unwrap();
+        assert!(!pro.contains(&roadmap_feature));
+        assert!(!resolver.tier_has_feature("pro", &roadmap_feature));
     }
 }
