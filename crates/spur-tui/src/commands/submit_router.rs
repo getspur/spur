@@ -330,10 +330,9 @@ mod sessions_slash_tests {
             dispatch: DispatchKind::PromptText,
             ..Default::default()
         };
-        let cmd = AvailableCommand::new("review-branch", "Review against branch")
-            .input(AvailableCommandInput::Unstructured(
-                UnstructuredCommandInput::new("branch name"),
-            ));
+        let cmd = AvailableCommand::new("review-branch", "Review against branch").input(
+            AvailableCommandInput::Unstructured(UnstructuredCommandInput::new("branch name")),
+        );
         let entry = crate::agents::build_entry("codex", &cfg, &cmd);
         // Sanity-check the auto-derived spec from Wave B.4 wired through.
         assert!(entry.arg_picker_spec.is_some());

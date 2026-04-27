@@ -60,10 +60,9 @@ mod tests {
 
     #[test]
     fn parse_unstructured_input_yields_free_text_spec() {
-        let cmd = AvailableCommand::new("review-branch", "Review branch")
-            .input(AvailableCommandInput::Unstructured(
-                UnstructuredCommandInput::new("branch name"),
-            ));
+        let cmd = AvailableCommand::new("review-branch", "Review branch").input(
+            AvailableCommandInput::Unstructured(UnstructuredCommandInput::new("branch name")),
+        );
         let spec = parse(&cmd).expect("Unstructured input must yield a spec");
         assert_eq!(spec.free_text_hint, "branch name");
         assert!(
