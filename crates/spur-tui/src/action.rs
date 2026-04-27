@@ -115,21 +115,20 @@ pub enum Action {
         decision: spur_core::ReviewDecision,
     },
     /// Request the app to render a mermaid diagram on a blocking worker.
-    /// Emitted by `SessionDetailView::tick` when a new fence closes, and by
-    /// `SessionDetailView::maybe_request_rerasters` when the pane crosses
-    /// a raster bucket boundary upward.
+    /// Emitted when a new fence closes in `SessionDetailView`.
     #[cfg(feature = "markdown")]
     MermaidRenderRequest {
         session: SessionId,
         ref_id: crate::components::mermaid::MermaidId,
         code: String,
-        /// Target raster width in pixels (chosen via `raster_width_for_pane`).
-        /// The worker rasters at this width; height is aspect-preserved.
+        /// Target raster width in pixels. Currently the renderer always uses
+        /// `mermaid::DEFAULT_WIDTH`; the field is plumbed through so a future
+        /// resize-aware re-raster path can vary the bucket without churning
+        /// the action shape again.
         target_width: u32,
     },
-    /// Completion of a previously-dispatched render request.
-    /// `target_width` echoes the request's bucket so `handle_mermaid_completed`
-    /// can record it in `MermaidState::Ready.rastered_at_bucket`.
+    /// Completion of a previously-dispatched render request. `target_width`
+    /// echoes the request bucket; consumers may ignore it today.
     #[cfg(feature = "markdown")]
     MermaidRenderCompleted {
         session: SessionId,
