@@ -49,6 +49,7 @@ impl SpurLocalSource {
                 hint: None,
                 source: CommandSource::Spur,
                 dispatch: Dispatch::SpurLocal(Action::ShowHelp),
+                arg_picker_spec: None,
             },
             CommandEntry {
                 name: "clear".into(),
@@ -56,6 +57,7 @@ impl SpurLocalSource {
                 hint: None,
                 source: CommandSource::Spur,
                 dispatch: Dispatch::SpurLocal(Action::ClearSession),
+                arg_picker_spec: None,
             },
             CommandEntry {
                 name: "mode".into(),
@@ -63,6 +65,7 @@ impl SpurLocalSource {
                 hint: Some("[plan|default]".into()),
                 source: CommandSource::Spur,
                 dispatch: Dispatch::SpurLocal(Action::TogglePlanMode),
+                arg_picker_spec: None,
             },
             CommandEntry {
                 name: "sessions".into(),
@@ -70,6 +73,7 @@ impl SpurLocalSource {
                 hint: None,
                 source: CommandSource::Spur,
                 dispatch: Dispatch::SpurLocal(Action::RequestSessions),
+                arg_picker_spec: None,
             },
             CommandEntry {
                 name: "cost".into(),
@@ -77,6 +81,7 @@ impl SpurLocalSource {
                 hint: None,
                 source: CommandSource::Spur,
                 dispatch: Dispatch::SpurLocal(Action::ShowSessionCost),
+                arg_picker_spec: None,
             },
             CommandEntry {
                 name: "quit".into(),
@@ -84,6 +89,7 @@ impl SpurLocalSource {
                 hint: None,
                 source: CommandSource::Spur,
                 dispatch: Dispatch::SpurLocal(Action::Quit),
+                arg_picker_spec: None,
             },
             CommandEntry {
                 name: "vim".into(),
@@ -91,6 +97,7 @@ impl SpurLocalSource {
                 hint: Some("[Alt+I]".into()),
                 source: CommandSource::Spur,
                 dispatch: Dispatch::SpurLocal(Action::ToggleVimMode),
+                arg_picker_spec: None,
             },
             CommandEntry {
                 name: "issues".into(),
@@ -98,6 +105,7 @@ impl SpurLocalSource {
                 hint: None,
                 source: CommandSource::Spur,
                 dispatch: Dispatch::SpurLocal(Action::RefreshIssues),
+                arg_picker_spec: None,
             },
         ]
     }
