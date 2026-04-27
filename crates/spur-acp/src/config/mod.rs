@@ -697,6 +697,51 @@ pub fn load_seed_template() -> AgentsConfig {
     parsed.agents
 }
 
+/// Atomically read-modify-write a `SpurConfig` on disk.
+///
+/// Reads `path`, deserializes into `SpurConfig`, applies `mutate`, serializes
+/// via `toml::to_string_pretty`, writes to a `NamedTempFile` in the same
+/// directory, fsyncs, and atomically renames over `path`.
+///
+/// Errors:
+/// - `path` does not exist → returns the underlying read error.
+/// - `path` contains invalid TOML → returns the parse error; original file
+///   is left untouched.
+/// - tempfile/write/fsync/rename failures are propagated with context.
+///
+/// Concurrency: two concurrent callers will produce a last-rename-wins
+/// outcome. This is acceptable for preference-class fields; do NOT use this
+/// helper for fields requiring CAS semantics.
+pub fn update_config<F>(path: &std::path::Path, mutate: F) -> anyhow::Result<()>
+where
+    F: FnOnce(&mut SpurConfig),
+{
+    use anyhow::Context;
+    use std::io::Write;
+
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("read config at {}", path.display()))?;
+    let mut cfg: SpurConfig = toml::from_str(&raw)
+        .with_context(|| format!("parse config at {}", path.display()))?;
+    mutate(&mut cfg);
+    let serialized =
+        toml::to_string_pretty(&cfg).context("serialize SpurConfig to TOML")?;
+
+    let dir = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("config path has no parent: {}", path.display()))?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)
+        .with_context(|| format!("create tempfile in {}", dir.display()))?;
+    tmp.write_all(serialized.as_bytes())
+        .context("write serialized config to tempfile")?;
+    tmp.as_file()
+        .sync_all()
+        .context("fsync tempfile before rename")?;
+    tmp.persist(path)
+        .map_err(|e| anyhow::anyhow!("atomic rename to {}: {}", path.display(), e.error))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod delegation_descriptor_tests {
     use super::*;
