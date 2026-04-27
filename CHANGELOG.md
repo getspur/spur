@@ -1,6 +1,12 @@
 ## Unreleased
 
 ### Changed
+- **Read-only future metadata saves now fail visibly.** When
+  `.spur/session_metadata.json` was written by a future SPUR version,
+  `SessionMetadataStore::save()` now returns `Err(ReadOnlyFutureSchema)`
+  instead of silently accepting and discarding in-session edits. App
+  save paths route through `App::persist_metadata`, which surfaces the
+  refusal as a dismissible warning banner.
 - **Peer mailbox reconciler now emits `WorkerPeerMessageAuditFailed`** on
   non-terminal transition errors during startup reconciliation. The
   `WorkerPeerMailboxReconciled.audit_failed_emitted` counter, which was
@@ -12,6 +18,19 @@
   event directly. (bd-cpf.5b)
 
 ### Added
+- **Tolerant input-history deserialize.** A malformed `ProtectedRange` or
+  `InputHistoryEntry` in `.spur/session_metadata.json` no longer aborts
+  the entire load: bad rows are skipped with `tracing::warn!`, while
+  remaining valid history is preserved.
+- **`schema_version` field on `SessionMetadata`.** Persisted as the
+  on-disk JSON key `"version"` for backward compatibility. Files written
+  by a future SPUR version are loaded read-only; in-memory mutations are
+  not persisted until SPUR understands that schema.
+- **Read-only mode banner.** Future-version metadata now shows a top-row
+  warning at first paint and after every refused save attempt. `Esc`
+  dismisses the current banner without clearing read-only mode.
+- **`SessionMetadataStore::is_read_only()` getter.** Callers can poll
+  whether metadata is in read-only mode before enabling write-oriented UI.
 - **Worker heartbeat watchdog configuration.** New `[worktree]` config keys:
   `worker_heartbeat_watchdog_enabled` (bool, default `false`),
   `worker_heartbeat_timeout_secs` (u64, default `90`),
