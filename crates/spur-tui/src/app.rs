@@ -2095,6 +2095,7 @@ impl App {
                 session,
                 ref_id,
                 code,
+                target_width,
             } => {
                 let tx = self.mermaid_tx.clone();
                 let session_cloned = session.clone();
@@ -2105,6 +2106,7 @@ impl App {
                     let _ = tx.send(Action::MermaidRenderCompleted {
                         session: session_cloned,
                         ref_id,
+                        target_width,
                         result,
                     });
                 });
@@ -2113,6 +2115,7 @@ impl App {
             Action::MermaidRenderCompleted {
                 session,
                 ref_id,
+                target_width: _,
                 result,
             } => {
                 if let Some(ref mut detail) = self.session_detail {

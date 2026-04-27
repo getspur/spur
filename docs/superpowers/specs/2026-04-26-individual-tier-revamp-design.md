@@ -356,11 +356,11 @@ Wave 7 dropped both candidate keys. `notif_core_in_tui` was redundant with alrea
 
 Note on grouping: `skills_*` prefix keys live in `spur-core` code (under `spur-core/src/skills/`) but are listed in their own row below for grep-discoverability; they're counted in the Skills row, not double-counted under spur-core.
 
-**Revised 2026-04-27 (Wave 9 Iceberg framework + dual-reviewer tier shifts).** Total **v1 registry** keys remain at **64** post-Wave-9 — Wave 9 was 2 surgical Pro→Free tier-shifts (with const renames), not consolidations or drops. Tier composition shifted: Free 46→48, Pro v1 17→15, Pro v1.1 1→1. Trajectory across all waves: 135 → 123 → 107 → 99 → 64 (Wave 8) → 64 (Wave 9 tier composition only). Wave 8 amendment to the core principle: *FeatureKey registry is a runtime gate dispatch table — toggleable capabilities AND each key's on/off must compose validly with sibling keys in its family.* Wave 8 identified 15 over-decomposed families where partial enablement breaks tier integrity (compile-coupled APIs, all-or-nothing valid substates, producer/consumer chains where one half is meaningless without the other) and consolidated each family into a single umbrella key. Plus 4 additional drops (ghost adapters, mechanism plumbing) and 5 vaporware deferrals. See **§4.16 Deferred-keys backlog** for full Wave-8 detail. Counts below show only what's in the v1 Plan A registry post-Wave-8.
+**Revised 2026-04-27 (Wave 8.5 finalization).** Total **v1 registry** keys are **63** post-Wave-8.5. Wave 9 was 2 surgical Pro→Free tier-shifts (with const renames), not consolidations or drops; Wave 8.5 then dropped `acp_core_adapter_gemini` because ACP has no dedicated `AgentKind::Gemini` adapter. Tier composition is now Free 47, Pro v1 15, Pro v1.1 1. Trajectory across all waves: 135 → 123 → 107 → 99 → 64 (Wave 8) → 64 (Wave 9 tier composition only) → 63 (Wave 8.5 ghost adapter drop). Wave 8 amendment to the core principle: *FeatureKey registry is a runtime gate dispatch table — toggleable capabilities AND each key's on/off must compose validly with sibling keys in its family.* Wave 8 identified 15 over-decomposed families where partial enablement breaks tier integrity (compile-coupled APIs, all-or-nothing valid substates, producer/consumer chains where one half is meaningless without the other) and consolidated each family into a single umbrella key. Plus 5 additional drops (ghost adapters, mechanism plumbing) and 5 vaporware deferrals. See **§4.16 Deferred-keys backlog** for full Wave-8/8.5 detail. Counts below show only what's in the v1 Plan A registry post-Wave-8.5.
 
 | Crate / Subsystem | Free keys | Pro keys (v1) | Pro keys (v1.1) | Team-deferred |
 |---|---|---|---|---|
-| `spur-acp` (transports + 4 implemented adapters + 1 session_attach; -3 ghost adapters dropped, -1 degraded_nolock merged) | 7 | 0 | 0 | 0 |
+| `spur-acp` (transports + 3 implemented adapters + 1 session_attach; -4 ghost adapters dropped, -1 degraded_nolock merged) | 6 | 0 | 0 | 0 |
 | `spur-core` (post-Wave-8 consolidations; Wave 9 tier-shifted review_retry_config Pro→Free) | 9 | 3 | 1 | 0 |
 | `skills_*` (in spur-core) — Wave 8 quartet→1 | 1 | 1 | 0 | 0 |
 | `spur-mcp` (post-Wave-8: delegate absorbs materializer, plan_durable absorbs notify, signal_watcher absorbs mutation_executor; Wave 9 tier-shifted graph_tools Pro→Free) | 7 | 3 | 0 | 0 |
@@ -375,9 +375,9 @@ Note on grouping: `skills_*` prefix keys live in `spur-core` code (under `spur-c
 | `spur-blob-store` | 0 | 1 | 0 | 0 |
 | `spur-interactive` | 0 | 0 | 0 | 0 |
 | Notifications (cross-crate) | 0 | 0 | 0 | 0 |
-| **Total** | **48** | **15** | **1** | **0** |
+| **Total** | **47** | **15** | **1** | **0** |
 
-**Total v1 atomic feature keys: 64** (48 + 15 + 1 + 0) post-Wave-9 — was 99 post-Wave-7, 107 post-Wave-6, 123 post-Wave-5, 135 before Wave 5. Wave 8 net reduction of 35 keys reflects: (a) 15 family consolidations (compile-coupled / all-or-nothing substate space) — see §4.16 Wave 8 consolidations table; (b) 4 additional drops (`background_task_tracker` mechanism plumbing + 3 ghost ACP adapters with no `AgentKind` variants); (c) 5 vaporware deferrals to v1.1 backlog (`brain_failover_auto_pool`, `broadcast_lagged_recovery`, `conflict_detection`, `rate_limit_detection`, `mcp_pro_custom_tools` — all confirmed no production code by codex tracing). Pro v1.1 column shrinks from 5 to 1 because all 4 prior v1.1-tagged keys (auto_pool, lagged_recovery, peer_mailbox_ledger, peer_mailbox_stranded_recon) were either deferred to §4.16 or absorbed into umbrella consolidations.
+**Total v1 atomic feature keys: 63** (47 + 15 + 1 + 0) post-Wave-8.5 — was 64 post-Wave-9, 99 post-Wave-7, 107 post-Wave-6, 123 post-Wave-5, 135 before Wave 5. Wave 8 net reduction of 35 keys reflects: (a) 15 family consolidations (compile-coupled / all-or-nothing substate space) — see §4.16 Wave 8 consolidations table; (b) 4 additional drops (`background_task_tracker` mechanism plumbing + 3 ghost ACP adapters with no `AgentKind` variants); (c) 5 vaporware deferrals to v1.1 backlog (`brain_failover_auto_pool`, `broadcast_lagged_recovery`, `conflict_detection`, `rate_limit_detection`, `mcp_pro_custom_tools` — all confirmed no production code by codex tracing). Wave 8.5 adds one final ghost-adapter drop: `acp_core_adapter_gemini`, because Gemini currently falls under `AgentKind::Generic` and has no dedicated ACP adapter. Pro v1.1 column shrinks from 5 to 1 because all 4 prior v1.1-tagged keys (auto_pool, lagged_recovery, peer_mailbox_ledger, peer_mailbox_stranded_recon) were either deferred to §4.16 or absorbed into umbrella consolidations.
 
 Wave 7 net reduction of 8 keys (preserved historical record): (a) 6 keys dropped as trait-impl variants / production invariants / always-on infrastructure (`blob_core_memory_backend`, `blob_core_fs_backend`, `blob_pro_measured_backend`, `interactive_core_frontend_host`, `interactive_core_review_lane_mpsc`, `interactive_core_shutdown_orchestrator`); (b) 1 key dropped as redundant with already-merged keys (`notif_core_in_tui`); (c) 1 key deferred to §4.16 v1.1 backlog (`notif_pro_external_channels`); (d) 1 key kept with rename (`blob_pro_delete_namespace` → `blob_pro_namespace_deletion`).
 
@@ -457,6 +457,7 @@ These keys were considered for v1 but rejected on principle: they describe alway
 | `acp_core_adapter_cursor` | Ghost adapter — no `AgentKind::Cursor` variant exists in ACP types (`crates/spur-acp/src/types.rs:153-177`); name appears only in skills rendering adapters (`crates/spur-core/src/skills/adapters.rs:17-26`). | 8 |
 | `acp_core_adapter_opencode` | Ghost adapter — same reason as cursor. | 8 |
 | `acp_core_adapter_kimi` | Ghost adapter — same reason. (Note: `kimi` exists as a SPUR delegation worker, separate namespace from ACP agent adapters.) | 8 |
+| `acp_core_adapter_gemini` | Ghost adapter — no dedicated `AgentKind::Gemini` variant exists in ACP types; Gemini is documented as falling under `Generic` until a real adapter is introduced (`docs/spur/acp-meta-conventions.md`). | 8.5 |
 
 #### Wave 8 — Consolidated (multiple keys collapsed into one umbrella)
 
@@ -480,9 +481,9 @@ Per Wave 8 second-order composition analysis (kimi mechanical truth-table + code
 | `tui_core_view_dashboard` + `tui_core_view_landing_decision` + `tui_core_view_composer` | `tui_core_view_dashboard` | App owns one view state graph (`crates/spur-tui/src/action.rs:153-160`, `app.rs:171-178`); landing_decision is first-launch UX (one-shot, not a runtime gate); composer is internal input ownership (`session_detail.rs:1038-1148`). | 8 |
 | `bot_pro_telegram_solo` + `bot_pro_thread_registry` | `bot_pro_telegram_solo` | Telegram bot requires topics/thread sessions; runtime owns thread/session/executor maps (`crates/spur-bot/src/runtime.rs:89-118`); callbacks carry thread IDs (`router.rs:40-66`). Single-thread is degraded telegram_solo, not a separate axis. | 8 |
 
-#### Wave 8 — Additional drops (non-toggleable / ghost / mechanism plumbing)
+#### Wave 8 / 8.5 — Additional drops (non-toggleable / ghost / mechanism plumbing)
 
-(See main Dropped table above for: `core_core_background_task_tracker`, `acp_core_adapter_cursor`/`_opencode`/`_kimi`.)
+(See main Dropped table above for: `core_core_background_task_tracker`, `acp_core_adapter_cursor`/`_opencode`/`_kimi`, and Wave 8.5 `acp_core_adapter_gemini`.)
 
 #### Wave 8 — Additional v1.1 backlog (vaporware confirmed by codex code-grounding)
 

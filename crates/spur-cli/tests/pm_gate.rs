@@ -1,5 +1,6 @@
 use spur_license::policy::PolicyResolver;
 use spur_license::{FeatureGate, FeatureKey};
+use std::collections::BTreeSet;
 
 #[test]
 fn pm_service_construction_gate_allows_embedded_free_tier() {
@@ -11,8 +12,13 @@ fn pm_service_construction_gate_allows_embedded_free_tier() {
 }
 
 #[test]
-fn pm_service_construction_gate_blocks_nonexistent_tier() {
+fn pm_service_construction_gate_blocks_state_without_pm_browse() {
     let policy = PolicyResolver::embedded();
+    let gate = FeatureGate::new(policy);
+    let state =
+        spur_license::LicenseState::active_validated(spur_license::Plan::Pro, BTreeSet::new());
+    gate.update_state(&state);
 
-    assert!(!policy.tier_has_feature("nonexistent", FeatureKey::PM_CORE_BROWSE.as_str()));
+    assert!(!gate.has(FeatureKey::PM_CORE_BROWSE));
+    assert!(!spur_cli::pm_service_gate_allows_construction(&gate));
 }
