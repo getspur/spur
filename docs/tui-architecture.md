@@ -1,485 +1,210 @@
-# SPUR TUI Architecture
+# `spur-tui` — Architecture Review
 
-> Reviewed 2026-04-16. Covers `spur-tui` (15.7k LOC) and its interface with `spur-acp` (6.4k LOC).
-
-## 1. System Context
-
-The TUI is the user-facing presentation layer. It consumes events from the orchestrator, renders them as a terminal interface, and sends user commands back.
-
-```mermaid
-flowchart TB
-    USER((User))
-
-    subgraph SPUR["SPUR Process"]
-        subgraph TUI["spur-tui (15.7k LOC)"]
-            APP["App\n(event loop)"]
-        end
-        subgraph CORE["spur-core"]
-            ORCH["Orchestrator"]
-            LINEAGE["ExecutorLineage\n(event-sourced)"]
-        end
-        subgraph ACP["spur-acp"]
-            ADAPTER["Adapter Layer\n(presentation contract)"]
-            CONN["Connection Layer\n(ACP transports)"]
-        end
-    end
-
-    AGENTS["External Agents\n(Claude, Codex, Kiro)"]
-
-    USER -->|"keyboard"| APP
-    APP -->|"mpsc(UserInput)"| ORCH
-    ORCH -->|"broadcast(SpurEvent)"| APP
-    ORCH -->|"broadcast(SpurEvent)"| LINEAGE
-    APP -.->|"reads &ExecutorLineage\nvia ViewContext"| LINEAGE
-    ORCH <-->|"ACP JSON-RPC"| CONN
-    CONN <-->|"stdio"| AGENTS
-    CONN -->|"notifications"| ADAPTER
-    ADAPTER -->|"ToolFamily\nToolInputDisplay\nObservePayload"| APP
-
-    style TUI fill:#1a1a2e,stroke:#e94560,color:#fff
-    style CORE fill:#1a1a2e,stroke:#0f3460,color:#fff
-    style ACP fill:#1a1a2e,stroke:#533483,color:#fff
-```
+> **Reviewed 2026-04-27** — supersedes the 2026-04-16 revision.
+> **Reviewer panel:** Claude Opus 4.7 (synthesis + risk grounding), kimi (event/state plumbing), gemini (view layer + rendering pipeline).
+> **Scope:** `crates/spur-tui/src/` ≈ 14k LoC. **Anchor:** `docs/architecture.md` (grounded 2026-04-26).
 
 ---
 
-## 2. Internal Layer Architecture
+## 1. Executive Summary
 
-Four layers with strict downward dependencies. No upward calls — only `Action` values bubble up via return.
+`spur-tui` is the ratatui frontend for the SPUR orchestrator. It is **architecturally sound at the seams** — `ViewContext` cleanly separates event-sourced read models (`ExecutorLineage`, `PlanProjectionStore`) from rendering, and the broadcast / mpsc channel topology matches the canonical `docs/architecture.md` design. It is **architecturally fragile in the middle** — `app.rs` is a 3,655-line god object whose single-threaded event loop, monolithic `process_action` match, and silent backpressure on the upstream `mpsc(UserInput)` channel can soft-lock or silently drop user intent.
 
-```mermaid
-flowchart TB
-    subgraph L1["Layer 1 — App Coordinator (1702 LOC)"]
-        APP_LOOP["Event Loop\n(tokio select!)"]
-        APP_DISPATCH["View Dispatch\n(match current_view)"]
-        APP_ACTION["Action Executor\n(match action)"]
-        APP_STATE["Owned State\n• lineage: ExecutorLineage\n• brain_status: BrainStatus\n• metadata_store\n• config: Arc·SpurConfig·"]
-    end
-
-    subgraph L2["Layer 2 — Views (4345 LOC)"]
-        DASH["DashboardView\n1098 LOC\n─────────\nagents tree\nactivity log\ndetail pane\ninput bar"]
-        DETAIL["SessionDetailView\n2136 LOC\n─────────\nreact trace\ninput bar\nworkers panel\nstatus bar"]
-        PICKER["SessionPickerView\n1111 LOC\n─────────\nsession list\nsearch / filter\nrename / archive\nconfirm-switch"]
-        MERMAID["MermaidViewer\n(overlay)"]
-    end
-
-    subgraph L3["Layer 3 — Components (8000+ LOC)"]
-        RT["ReactTrace\n3452 LOC\n(mod/builder/\nrender/types)"]
-        IB["InputBar\n1038 LOC\n(vim/history/\ncomplete/paste)"]
-        MS["MarkdownStream\n741 LOC"]
-        TF["TraceFormat\n445 LOC"]
-        LW["LineWrap\n402 LOC"]
-        DP["DetailPane\n350 LOC"]
-        MM["Mermaid\n346 LOC"]
-        IEC["InlineExecutor\nCard 313 LOC"]
-        AT["AgentsTree\n289 LOC"]
-        WP["WorkersPanel"]
-        AL["ActivityLog"]
-        SB["StatusBar"]
-        RC["ReviewCard"]
-        DV["DiffViewer"]
-        HO["HelpOverlay"]
-    end
-
-    subgraph L4["Layer 4 — Support Modules"]
-        INGEST["agents/ingest\n+ entry_builder\n(ACP→TraceEntry)"]
-        CMD["commands/\nregistry\nsubmit_router"]
-        MENTION["mentions/\nregistry\nfile_source"]
-        META["session_metadata\n(drafts, history)"]
-    end
-
-    APP_LOOP --> APP_DISPATCH
-    APP_DISPATCH --> DASH & DETAIL & PICKER & MERMAID
-    DASH --> AT & AL & DP & IB & RC
-    DETAIL --> RT & IB & WP & SB & IEC & MM
-    PICKER --> IB
-    RT --> TF & LW & MS
-    DETAIL --> INGEST
-    DASH --> INGEST
-    DETAIL --> CMD & MENTION
-    APP_LOOP --> META
-
-    style L1 fill:#0d1117,stroke:#e94560,color:#fff
-    style L2 fill:#0d1117,stroke:#0f3460,color:#fff
-    style L3 fill:#0d1117,stroke:#533483,color:#fff
-    style L4 fill:#0d1117,stroke:#16213e,color:#fff
-```
+Two **HIGH-severity** new defects surfaced (besides the four canonical risks already tracked in `docs/architecture.md` §9): a modal/z-index input-stealing race (gemini), and an O(N) markdown re-parse at streaming framerate (gemini). Two new **HIGH** event-plumbing defects surfaced from kimi: silent `try_send` drop on `mpsc(UserInput)` and the missing `BrainConnectFailed` arm in `LoadState` (this last one re-confirms canonical Risk #26). Refactor urgency: **moderate-to-high** — fix the modal soft-lock and `try_send` drop before next release; the `app.rs` decomposition can wait for v1.0.
 
 ---
 
-## 3. Event & Data Flow
+## 2. Crate Anatomy
 
-### 3a. Inbound: SpurEvent → Screen
+| Layer | Modules | Lines | Role |
+|---|---|---|---|
+| **Entry / harness** | `lib.rs`, `tui.rs`, `landing.rs`, `app.rs` | 3,808 | Crate exports, terminal harness, landing decision, App event loop |
+| **Action vocabulary** | `action.rs` | 170 | 32 `Action` variants + `IssueAction` + `PermissionChoice` + `ViewId` |
+| **Top-level views** | `views/` (7 files) | 8,060 | dashboard, session_detail, session_picker, plan_inspector, issue_browser, mermaid_viewer + `ViewContext` |
+| **Reusable components** | `components/` (~37 files) | ~1.5k each (top files) | InputBar, ReactTrace subsystem, palette, modals, status bar, markdown_stream, completion_popup, picker_shell |
+| **Read-model glue** | `worker_streams.rs`, `session_metadata.rs` | 582 | Per-executor `ReactTrace` + per-session metadata cache |
+| **Slash + completion** | `commands/` (7 files), `mentions/` (5 files) | 1,604 | 3-tier command merge (spur-local / static / dynamic), pluggable `MentionSource` trait |
+| **Agent ingest** | `agents/` (3 files) | – | Config-driven hook system: `prompt_text`, `vendor_exec`, `raw_rest`, `json_path_list`, `acp_available_command`, `system_note` |
+| **Misc** | `input_history.rs` | 149 | Input history persistence |
 
-```mermaid
-sequenceDiagram
-    participant O as Orchestrator
-    participant BC as broadcast channel
-    participant A as App (event loop)
-    participant V as Active View
-    participant RT as ReactTrace
-    participant B as Builder
-    participant R as Renderer
-
-    O->>BC: emit(SpurEventBody::AgentNotification)
-    BC->>A: recv() (≤64 events/frame)
-    A->>A: update lineage projection
-    A->>A: construct ViewContext { &lineage, &brain_status }
-    A->>V: handle_spur_event(&event, &ctx)
-    V->>V: ingest → TraceEntry (via agents/ingest)
-    V->>RT: push(TraceEntry)
-    RT->>RT: mark_dirty_from(idx), bump generation
-
-    Note over A: next render frame (30fps)
-    A->>A: construct ViewContext
-    A->>V: render(frame, area, &ctx)
-    V->>RT: render(&mut self, frame, area, lineage)
-    RT->>B: build_display_lines() or build_virtual_rows()
-    RT->>R: viewport slice → Paragraph → frame
-```
-
-### 3b. Outbound: Keypress → Orchestrator
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant A as App
-    participant V as Active View
-    participant IB as InputBar
-    participant O as Orchestrator
-
-    U->>A: KeyEvent
-    A->>A: construct ViewContext
-    A->>V: handle_key(key, &ctx)
-    V->>IB: route key (vim mode, completion, etc.)
-    IB-->>V: Option·Action·
-    V-->>A: Some(Action::SendMessage { text })
-    A->>A: match action
-    A->>O: user_input_tx.send(UserInput::Message(text))
-```
-
-### 3c. Review Loop
-
-```mermaid
-sequenceDiagram
-    participant O as Orchestrator
-    participant A as App
-    participant D as DashboardView
-    participant RC as ReviewCard
-    participant U as User
-
-    O->>A: SpurEvent(ExecutorReviewRequested)
-    A->>A: lineage.apply(event) → node.phase = AwaitingReview
-    A->>D: handle_spur_event → activity_log.push(review entry)
-
-    Note over D: render frame
-    D->>D: render detail_pane with ReviewCard
-    RC->>RC: show [a]pprove [d]eny [m]odify [R]etry
-
-    U->>A: KeyEvent('a')
-    A->>D: handle_key('a', &ctx)
-    D->>D: read attempt_n from ctx.lineage
-    D-->>A: Some(Action::SubmitReview { decision: Approve, attempt_n })
-    A->>O: user_input_tx.send(UserInput::ReviewDecision(...))
-```
+**File-size hot spots** (god-object territory): `app.rs` 3,655 / `views/session_detail.rs` 3,518 / `views/dashboard.rs` 2,185 / `views/session_picker.rs` 1,530.
 
 ---
 
-## 4. View Trait & ViewContext
+## 3. View Tree & Overlay Stack (gemini)
 
 ```mermaid
-classDiagram
-    class View {
-        <<trait>>
-        +handle_key(key, ctx) Option~Action~
-        +handle_spur_event(event, ctx)
-        +render(frame, area, ctx)
-        +tick()
-    }
+graph TD
+    classDef view fill:#141414,stroke:#363,stroke-width:2px;
+    classDef comp fill:#112,stroke:#446;
+    classDef overlay fill:#223,stroke:#66a,stroke-width:2px;
 
-    class ViewContext {
-        +lineage: &ExecutorLineage
-        +brain_status: &BrainStatus
-    }
+    APP[App<br/>app.rs:3655 lines]
 
-    class App {
-        -current_view: ViewId
-        -dashboard: DashboardView
-        -session_detail: Option~SessionDetailView~
-        -session_picker: Option~SessionPickerView~
-        -lineage: ExecutorLineage
-        -brain_status: BrainStatus
-        -metadata_store: SessionMetadataStore
-        -config: Arc~SpurConfig~
-        -user_input_tx: mpsc Sender
-    }
+    APP -->|Z-1| HO[HelpOverlay]:::overlay
+    APP -->|Z-2| QC[QuitConfirmDialog]:::overlay
+    APP -->|Z-3| CM[CollisionModal]:::overlay
+    APP -->|Z-4| PO[PaletteOverlay]:::overlay
 
-    class DashboardView {
-        -agents_tree: AgentsTree
-        -activity_log: ActivityLog
-        -detail_pane: DetailPane
-        -input_bar: InputBar
-    }
+    APP -->|current_view| DASH[DashboardView]:::view
+    APP -->|current_view| DETAIL[SessionDetailView]:::view
+    APP -->|current_view| PICKER[SessionPickerView]:::view
+    APP -->|current_view| PLAN[PlanInspectorView]:::view
+    APP -->|current_view| ISSUE[IssueBrowserView]:::view
+    APP -->|current_view| MERMAID[MermaidOverlay]:::view
 
-    class SessionDetailView {
-        -react_trace: ReactTrace
-        -input_bar: InputBar
-        -mermaid_registry: HashMap
-        -stream_in_flight: bool
-        -cancel_mode: Option~CancelMode~
-    }
+    DASH --> AGT[AgentsTree]:::comp
+    DASH --> DP[DetailPane]:::comp
+    DASH --> WP[WorkersPanel]:::comp
+    DP --> RC[ReviewCard]:::comp
+    DP --> RT1[ReactTrace]:::comp
 
-    class SessionPickerView {
-        -sessions: Vec~SessionInfo~
-        -cursor: usize
-        -filter: String
-        -rename_state: Option
-    }
+    DETAIL --> RT2[ReactTrace]:::comp
+    DETAIL --> IB[InputBar paste-as-atom]:::comp
+    DETAIL --> SB[StatusBar]:::comp
+    DETAIL --> RB[ResumeBanner]:::comp
+    DETAIL --> ICP[InputCompletionPort]:::comp
+    ICP --> PS[PickerShell]:::comp
+    PS --> CP[CompletionPopup]:::comp
+    PS -.->|queries| QS[Slash / Mention / ConfigOption sources]:::comp
 
-    App --> View : dispatches to
-    App --> ViewContext : constructs per-frame
-    View <|.. DashboardView
-    View <|.. SessionDetailView
-    View <|.. SessionPickerView
-    DashboardView --> AgentsTree
-    DashboardView --> ActivityLog
-    DashboardView --> DetailPane
-    DashboardView --> InputBar
-    SessionDetailView --> ReactTrace
-    SessionDetailView --> InputBar
-    SessionDetailView --> WorkersPanel
+    PICKER -.->|owns its own picker state| MD[SessionMetadata store]:::comp
 ```
+
+**Landing dispatch** (`landing.rs` + `spur-cli`): `LandingDecision::ShowDashboard | ShowPicker { preselect } | AttachExplicit { acp_id, brain }`. CLI injects the initial `UserInput` (e.g., `ResumeSession`) into the upstream mpsc *before* `terminal.draw` — so the first frame already reflects the resolved session.
 
 ---
 
-## 5. ACP Adapter → TUI Rendering Pipeline
-
-The adapter layer in `spur-acp` creates a presentation contract that the TUI consumes without knowing which agent produced the data.
+## 4. App Event Loop (kimi)
 
 ```mermaid
 flowchart LR
-    subgraph ACP_CONN["spur-acp / connection"]
-        NATIVE["native.rs\n(ACP JSON-RPC)"]
-        STDIO["stdio_adapter"]
-        STREAM["stream_json"]
-        CLIWRAP["cli_wrap"]
+    subgraph Sources
+        K1["Crossterm EventStream<br/>key/mouse/paste"]
+        K2["broadcast(SpurEvent)<br/>cap 4096"]
+        K3["Tick interval 33 ms"]
+        K4["perm_rx mpsc"]
     end
 
-    subgraph ACP_ADAPT["spur-acp / adapter"]
-        CLAUDE["claude.rs"]
-        CODEX["codex.rs"]
-        KIRO["kiro.rs"]
-        GENERIC["generic.rs"]
-        CONTRACT["Presentation Contract\n─────────\nToolFamily (12 variants)\nToolInputDisplay (7 variants)\nObservePayload (6 variants)\nAgentKind (4 variants)"]
-    end
+    Loop["App::run<br/>app.rs:2528"]
+    K1 --> Loop
+    K2 --> Loop
+    K3 --> Loop
+    K4 --> Loop
 
-    subgraph TUI_INGEST["spur-tui / agents"]
-        INGEST["ingest.rs\n+ entry_builder.rs"]
-        TRACE_ENTRY["TraceEntry\n{ kind: TraceKind,\n  text, timestamp,\n  markdown? }"]
-    end
+    Loop -->|Phase 1: tokio::select!| H1["handle_crossterm_event<br/>app.rs:706"]
+    Loop -->|Phase 2: drain crossterm<br/>timeout=ZERO| H1
+    Loop -->|Phase 3: drain SpurEvent<br/>DRAIN_CAP_PER_FRAME=8| H2["handle_spur_event<br/>app.rs:1000"]
+    Loop -->|tick| H3["App::tick<br/>app.rs:2289"]
+    Loop -->|perm| H4["handle_permission_request<br/>app.rs:2112"]
 
-    subgraph TUI_RENDER["spur-tui / components"]
-        TRACE_FMT["trace_format.rs\n(glyph, color, summary)"]
-        BUILDER["builder.rs\n(display lines,\nvirtual rows)"]
-        RENDER["render.rs\n(viewport, cache,\nscrollbar)"]
-    end
+    H1 -->|Action| PA["process_action<br/>app.rs:1413<br/>~700 lines"]
+    H2 -->|lineage.apply<br/>plan_projection.apply<br/>worker_streams.route| RM["Read models"]
+    H3 -->|mermaid_rx.try_recv| PA
 
-    NATIVE --> CLAUDE & CODEX & KIRO & GENERIC
-    STDIO --> GENERIC
-    STREAM --> GENERIC
-    CLIWRAP --> GENERIC
-    CLAUDE & CODEX & KIRO & GENERIC --> CONTRACT
-    CONTRACT --> INGEST
-    INGEST --> TRACE_ENTRY
-    TRACE_ENTRY --> BUILDER
-    BUILDER --> TRACE_FMT
-    BUILDER --> RENDER
+    PA -->|try_send UserInput| UP["mpsc(UserInput)<br/>cap 32 main.rs:717"]
+    PA -->|mutates state| FIELDS["App fields"]
+    Loop -->|Phase 4: if dirty| RD["terminal.draw<br/>app.rs:2623"]
+    RM --> RD
+    FIELDS --> RD
 
-    style CONTRACT fill:#e94560,stroke:#e94560,color:#fff
-    style TRACE_ENTRY fill:#0f3460,stroke:#0f3460,color:#fff
+    style PA fill:#e94560,stroke:#e94560,color:#fff
+    style UP fill:#0f3460,stroke:#0f3460,color:#fff
 ```
-
-### Adding a New Agent
-
-| Step | File | Change |
-|---|---|---|
-| 1 | `spur-acp/src/adapter/gemini.rs` | New adapter: parse notifications → ToolFamily + ToolInputDisplay + ObservePayload |
-| 2 | `spur-acp/src/types.rs` | Add `AgentKind::Gemini` variant |
-| 3 | `spur-acp/src/connection/` | Transport support (if non-stdio) |
-| 4 | `spur-tui/src/components/react_trace/mod.rs` | 1 line: accent color in `pane_title_and_color()` |
-| — | All other TUI files | **Zero changes** |
 
 ---
 
-## 6. ReactTrace Render Pipeline
-
-The largest component (3452 LOC), decomposed into 4 submodules after P3.3a.
+## 5. Per-Frame Draw Cycle (gemini)
 
 ```mermaid
-flowchart TB
-    subgraph TYPES["types.rs (85 LOC)"]
-        TK["TraceKind\n(7 variants)"]
-        TE["TraceEntry\n{ kind, text,\ntimestamp, markdown? }"]
-        VR["VirtualRow\n(Text | ImageRow)"]
-        SEG["Segment\n(Text | Image)"]
-    end
+sequenceDiagram
+    participant Loop as App::run loop
+    participant App as App::render
+    participant Proj as ExecutorLineage / PlanProjectionStore
+    participant Ctx as ViewContext
+    participant View as Active view (e.g. SessionDetailView)
+    participant Comp as Child components (ReactTrace, InputBar, ...)
 
-    subgraph MOD["mod.rs (1086 LOC)"]
-        RT_STRUCT["ReactTrace struct\n• entries: Vec·TraceEntry·\n• scroll_offset, is_following\n• generation, dirty_from\n• line_cache"]
-        RT_DATA["Data methods\nappend_think, append_message\npush, scroll_*, tick\ninvalidate_cache, mark_dirty_from"]
-    end
-
-    subgraph BUILDER["builder.rs (811 LOC)"]
-        BDL["build_display_lines()\n→ Vec·Line· (pre-wrap)"]
-        BVR["build_virtual_rows()\n→ (Vec·VirtualRow·, starts)"]
-    end
-
-    subgraph RENDER["render.rs (507 LOC)"]
-        CACHE["Cache management\n• LineCacheEntry (non-md)\n• VirtualRowCacheEntry (md)\n• incremental rebuild"]
-        REND["render(&mut self)\n• viewport slice\n• Paragraph widget\n• Scrollbar"]
-        RCTX["render_with_ctx(&mut self)\n• segment_visible_rows()\n• Text → Paragraph\n• Image → StatefulImage"]
-    end
-
-    TE --> RT_STRUCT
-    RT_DATA --> BDL & BVR
-    BDL --> CACHE
-    BVR --> CACHE
-    CACHE --> REND & RCTX
-
-    style TYPES fill:#16213e,stroke:#e94560,color:#fff
-    style MOD fill:#16213e,stroke:#0f3460,color:#fff
-    style BUILDER fill:#16213e,stroke:#533483,color:#fff
-    style RENDER fill:#16213e,stroke:#e94560,color:#fff
+    Loop->>App: drained events applied → dirty=true
+    Loop->>App: terminal.draw(|frame| app.render(frame))
+    App->>Proj: borrow &Lineage, &PlanProjection
+    App->>Ctx: ViewContext { lineage, plan_projection, brain_status, license_badge, flag_summary }
+    App->>View: view.render(frame, area, &ctx)
+    View->>Comp: pass narrowed context / local state
+    Comp->>Comp: render to frame buffer
+    App->>App: paint overlays (Help → QuitConfirm → Collision → Palette)
 ```
 
-### Cache Invalidation Strategy
-
-```mermaid
-stateDiagram-v2
-    [*] --> Clean: render completes
-
-    Clean --> DirtyTail: mark_dirty_from(idx)\n(append, tick, stream chunk)
-    Clean --> DirtyFull: invalidate_cache()\n(toggle collapse, resize, mode change)
-
-    DirtyTail --> IncrementalRebuild: next render\n(truncate rows[idx..],\nrebuild tail only)
-    DirtyFull --> FullRebuild: next render\n(rebuild all rows)
-
-    IncrementalRebuild --> Clean: cache.generation = self.generation
-    FullRebuild --> Clean: cache.generation = self.generation
-
-    Clean --> FullRebuild: width changed\nor fence_gen changed
-```
+`ExecutorLineage` and `PlanProjectionStore` are owned directly by `App` — no `Arc<RwLock<…>>`. Concurrency is serialized by the single-task event loop. **Consequence:** any slow operation in `handle_spur_event` or `process_action` blocks the whole frame budget (33 ms).
 
 ---
 
-## 7. State Ownership
+## 6. Architectural Narrative
 
-```mermaid
-flowchart TB
-    subgraph APP["App (owns)"]
-        LINEAGE["ExecutorLineage\n(event-sourced projection)"]
-        BRAIN_ST["BrainStatus\n(Idle | Thinking | Error)"]
-        META["SessionMetadataStore\n(drafts, history, pins)"]
-        CONFIG["Arc·SpurConfig·"]
-        EDIT_MODE["EditMode\n(Insert | Vim)"]
-    end
+`spur-tui` is structured around three boundaries that fit `docs/architecture.md` §2 cleanly:
 
-    subgraph VCTX["ViewContext (borrows per-frame)"]
-        VLIN["&lineage"]
-        VBS["&brain_status"]
-    end
+**(a) The ingestion boundary.** `App` subscribes to a `broadcast(SpurEvent)` channel from `spur-core` (capacity 4,096, per architecture.md:268) and drains it in `Phase 3` of each frame, capped at `DRAIN_CAP_PER_FRAME = 8` (`app.rs:2587`). Events are first folded into the read-model projections (`self.lineage.apply`, `self.plan_projection.apply` at `app.rs:1003-1004`), then routed into per-executor `ReactTrace`s (`worker_streams.rs:21`, with an orphan-drop policy at `app.rs:1022`), then forwarded to every active view via `View::handle_spur_event`. There is **no replay-from-NDJSON** on `Lagged` — `Lagged(n)` counts toward the drain cap and the events are gone forever, exactly as canonical Risk #2 / #9 describe.
 
-    subgraph DASH_STATE["DashboardView (owns)"]
-        D_TREE["AgentsTree state"]
-        D_LOG["ActivityLog entries"]
-        D_PANE["DetailPane tab + scroll"]
-        D_INPUT["InputBar state"]
-        D_FOCUS["focused_panel, focused_node"]
-    end
+**(b) The read-model boundary.** Views consume an immutable `ViewContext` constructed each frame (`lib.rs:34-41` shows the test seam: `lineage`, `plan_projection`, `brain_status`, `license_badge`, `flag_summary`). This makes views effectively pure functions of projection state. `DashboardView` is a deliberate exception — `app.rs:2402` calls `dashboard.render_with_lineage(...)` with six disparate arguments instead of a `ViewContext`, leaking the boundary (gemini Risk G5). The `ReactTrace` subsystem (`components/react_trace/`) is the most polished piece of the view layer: it owns its own dispatcher (`dispatch.rs`), ingest builder (`builder.rs`), and a streaming markdown renderer (`markdown_stream.rs`) with a split-state strategy that caches finalized blocks while keeping the tail in an uncommitted buffer for fence detection.
 
-    subgraph DETAIL_STATE["SessionDetailView (owns)"]
-        S_TRACE["ReactTrace\n(entries, cache, scroll)"]
-        S_INPUT["InputBar state"]
-        S_MERMAID["mermaid_registry"]
-        S_STREAM["stream_in_flight\ncancelling_in_flight\ncancel_mode"]
-        S_COST["cost, context_used"]
-    end
+**(c) The action boundary.** User keypresses funnel through `handle_crossterm_event` (`app.rs:706`) with strict modal precedence: quit-confirm → collision modal → help → palette → global chords → active view. The active view returns an `Action` (32 variants in `action.rs`), which `process_action` (`app.rs:1413`, **~700 lines**) routes. For message submits, `SubmitRouter::route` (`commands/submit_router.rs:52`) consults a 3-tier `CommandRegistry` (spur-local meta-commands like `/clear`, `/vim` → static config commands → dynamic ingested commands; collisions documented at `registry.rs:9-14`) and either dispatches a slash command, a vendor-extension RPC, or assembles `Text + ResourceLink` blocks for `Action::SendMessage`. Outbound, `process_action` uses `let _ = tx.try_send(...)` at ~15 sites (e.g., `app.rs:1566, 1642, 1655`) into the upstream `mpsc(UserInput)` channel of capacity **32** (`main.rs:717`). When the orchestrator stalls, user intent is silently dropped — no warn log, no banner. This is **kimi New Risk N1** and is genuinely high-severity for production.
 
-    APP --> VCTX
-    VCTX --> DASH_STATE
-    VCTX --> DETAIL_STATE
+The two parallel state machines close differently. **`BrainStatus`** (`app.rs:104`) is centrally updated in `handle_spur_event` (lines 1135-1291) with explicit arms for `BrainConnectStarted`, `BrainConnected`, `BrainConnectFailed`, `BrainSpawned`, `PromptDispatched`, `AgentMessageChunk`, `TurnFinished`, then 37 explicit `=> {}` no-ops, then a `tracing::debug!` catch-all at `app.rs:1358`. **`LoadState`** (`session_detail.rs:28`) lives inside `SessionDetailView::apply_milestone_event` (lines 346-368) and matches `BrainConnecting`, `SessionLoading`, `SessionLoaded`, `BrainError` — but **not** `BrainConnectFailed`. The result: a failed auto-resume leaves the global status bar at `Error` while the session view spins forever in `Retiring`. This is canonical Risk #26 — confirmed in territory by both kimi and gemini.
 
-    LINEAGE -.->|"push: handle_spur_event"| DASH_STATE
-    LINEAGE -.->|"pull: render reads &lineage"| DASH_STATE
-    LINEAGE -.->|"push: handle_spur_event"| DETAIL_STATE
-    LINEAGE -.->|"pull: render reads &lineage"| DETAIL_STATE
-
-    style APP fill:#1a1a2e,stroke:#e94560,color:#fff
-    style VCTX fill:#1a1a2e,stroke:#0f3460,color:#fff
-```
-
-**Push vs Pull:**
-- **Push**: App calls `view.handle_spur_event()` — views update their own state (activity log entries, trace entries, stream flags)
-- **Pull**: Views read `ctx.lineage` during `render()` — for live worker counts, review status, executor phases
+The support tier is well-factored. `agents/` provides config-driven hook dispatch (`prompt_text` → submit_router; `vendor_exec` → `VendorExec` action; `raw_rest` → REST template; `json_path_list` / `acp_available_command` → ingest; `system_note` → response render). `mentions/` exposes a pluggable `MentionSource` trait with `WorkerMentionSource` and `FileSource`. `commands/` documents collision rules explicitly (`registry.rs:11-14`): same `(handle, name)` → dynamic wins; cross-handle name collisions surface both with prefix disambiguation. These three subsystems are the closest the crate gets to clean architecture; they should be the model for decomposing `app.rs`.
 
 ---
 
-## 8. File Map & LOC
+## 7. Risk Register
 
-| Layer | File | LOC | Responsibility |
-|---|---|---|---|
-| **App** | `app.rs` | 1702 | Event loop, view dispatch, action execution, state ownership |
-| **Views** | `views/session_detail.rs` | 2136 | Agent conversation: trace + input + workers + status |
-| | `views/session_picker.rs` | 1111 | Session list: search, rename, archive, confirm-switch |
-| | `views/dashboard.rs` | 1098 | Multi-panel overview: tree, log, detail, input |
-| | `views/mermaid_viewer.rs` | ~100 | Diagram overlay (delegates to app for rendering) |
-| | `views/mod.rs` | ~120 | View trait, ViewContext, ViewId, macOS key normalization |
-| **Components** | `react_trace/mod.rs` | 1086 | ReactTrace struct, data methods, tests |
-| | `react_trace/builder.rs` | 811 | Display line / virtual row construction |
-| | `react_trace/render.rs` | 517 | Viewport rendering, cache, scrollbar |
-| | `react_trace/types.rs` | 85 | TraceKind, TraceEntry, VirtualRow, Segment |
-| | `input_bar.rs` | 1038 | Vim mode, history, completion, bracketed paste |
-| | `markdown_stream.rs` | 741 | Streaming markdown parser, mermaid fence detection |
-| | `trace_format.rs` | 445 | Glyph, color, summary for tool calls |
-| | `line_wrap.rs` | 402 | Unicode-aware line wrapping |
-| | `detail_pane.rs` | 350 | Worker stream tabs (Thought/Message/Tool) |
-| | `mermaid.rs` | 346 | Mermaid state machine (Pending→Rendering→Ready) |
-| | `inline_executor_card.rs` | 313 | Embedded worker status cards |
-| | `agents_tree.rs` | 289 | Tree widget for agent hierarchy |
-| | Others (9 files) | ~600 | ActivityLog, StatusBar, HelpOverlay, ReviewCard, DiffViewer, CompletionPopup, etc. |
-| **Support** | `agents/ingest.rs` | ~150 | ACP notification → TraceEntry translation |
-| | `agents/entry_builder.rs` | 209 | Structured TraceEntry construction |
-| | `commands/registry.rs` | 297 | Slash command registration + dispatch |
-| | `commands/submit_router.rs` | 248 | Input submission routing (message vs command) |
-| | `session_metadata.rs` | 248 | Persistent session state (JSON) |
-| | `mentions/` | ~100 | @-mention file source |
+### A. Canonical risks (re-grounded against territory)
+
+| # | Risk | Status | Evidence |
+|---|------|--------|----------|
+| **#2** | TUI broadcast drain cap = 8/frame; bot has none; `Lagged` permanently drops events | **CONFIRMED** | `app.rs:2587` `const DRAIN_CAP_PER_FRAME: u32 = 8;`. No NDJSON replay path exists. |
+| **#3** | Silent `_ => {}` catch-alls on `SpurEventBody` matches | **CONFIRMED but doc line numbers stale** | Doc cites `app.rs:959,1035`. Actual current locations: `app.rs:919` (crossterm event swallow — `FocusGained`/`FocusLost`), `app.rs:1129` (pre-view SpurEvent fall-through), `app.rs:1358` (37-variant brain-status no-op + debug-only catch-all). |
+| **#7** | Orchestrator god-object problem mirrored in `app.rs` | **CONFIRMED, worsening** | `app.rs` is 3,655 lines. Five dominant clusters: event loop / `run` (~115 lines), crossterm dispatch (~190 lines), `handle_spur_event` (~360 lines), `process_action` monolith (~700 lines, `app.rs:1413-2110`), metadata/draft persistence (~200 lines). Test module adds another ~1k. |
+| **#26** | `LoadState` deadlock on `BrainConnectFailed` | **CONFIRMED** | `session_detail.rs:346-368`. No `BrainConnectFailed` arm. Closes #26 from territory. |
+
+### B. New risks discovered (this review)
+
+| # | Severity | Source | Risk | Location | Mitigation |
+|---|---|---|---|---|---|
+| **N1** | **HIGH** | kimi | `try_send(UserInput)` silent drop on `Full`. Upstream cap = 32; ~15 call sites use `let _ = tx.try_send(...)` | `app.rs:1566, 1642, 1655, 1980` (representative); upstream cap at `main.rs:717` | Switch to async `send().await` in a helper, or at minimum match `TrySendError::Full` and surface a transient banner |
+| **N2** | MEDIUM | kimi | Unbounded `mermaid_tx` mpsc | `app.rs:315` (`unbounded_channel`), drained at `app.rs:2292` | Replace with bounded(4); drop excess with user-visible "diagram skipped" |
+| **N3** | MEDIUM | kimi | `tokio::task::spawn_blocking` for mermaid render is fire-and-forget — no `JoinHandle` stored | `app.rs:2005` | Track handle on `App`; abort on `NavigateBack` / `ClearSession` / shutdown |
+| **N4** | MEDIUM | kimi | Orphan `WorkerNotification` permanent drop when executor not yet in lineage | `app.rs:1022` (only `tracing::trace!` logs the drop) | Per-executor LRU orphan buffer in `WorkerStreams`; drain on first `route()` after `ExecutorSpawned` |
+| **G1** | **HIGH** | gemini | **Modal/z-index input desync soft-lock**: `quit_confirm_visible` steals input first (`app.rs:710`), but `CollisionModal` paints on top during render (`app.rs:2465-2470`). If both fire simultaneously, user sees collision modal and types into an invisible quit dialog | `app.rs:710, 2465-2470` | Unify into a single `ActiveOverlay` enum on `App` |
+| **G2** | **HIGH** | gemini | `MarkdownStream::preview_items()` triggers `flush_final` → `rebuild()`, which rescans `raw_text[..flushed_byte_len]` natively on every frame. At 32k tokens × 30 fps, blocks the main loop | `markdown_stream.rs:330, 555` | Cache parsed-AST tail; restrict `scan_authoritative` from re-running on already-flushed prefixes |
+| **G3** | MEDIUM | gemini | `LoadState` has no timeout fallback (compounds Risk #26): even if `BrainConnectFailed` arm is added, `Retiring`/`Loading` can stall on lost messages | `session_detail.rs:346` | Add `last_transition_at: Instant`; on `tick()`, force `LoadState::Failed` after 10 s |
+| **G4** | MEDIUM | gemini | Leaked dashboard state across session swap. `Action::ResumeSession` reconstructs `session_detail` but ignores `dashboard.focused_node` / `agents_tree` selection → dangling `ExecutorId` to old workspace | `app.rs:1716` | `dashboard.reset()` in `ResumeSession` and `NewSessionRequested` arms |
+| **G5** | LOW | gemini | `ViewContext` boundary leak: `dashboard.render_with_lineage(...)` takes 6 disparate args instead of `&ViewContext` | `app.rs:2402` | Refactor to `dashboard.render(frame, area, &ctx, &mut self.worker_streams)` |
+| **G6** | LOW | gemini | `worker_streams.tick_all()` advances every executor's spinner every frame regardless of focus | `app.rs:2385` | Tick only visible-frame executors; or skip spinner advance when no `Pending`/`InProgress` entries are visible |
 
 ---
 
-## 9. Architectural Assessment
+## 8. Prioritized Recommendations
 
-### Strengths
+Combined and ranked by impact × ease:
 
-- **Clean 4-layer architecture** — App → Views → Components → Support with strict downward deps
-- **View trait + ViewContext** — minimal, correct for ratatui's immediate-mode model
-- **Adapter as presentation contract** — TUI is agent-agnostic (8/10 score); new agent = 1 TUI line
-- **Event-sourced lineage** — pure projection, hybrid push/pull state flow
-- **ReactTrace decomposition** — Model (mod) / ViewModel (builder) / View (render) with incremental caching
-- **Ingest layer** — proper isolation of ACP protocol details from rendering
+1. **Close the modal soft-lock (G1)** — *days* — Replace `quit_confirm_visible` / `collision_visible` / `palette_visible` boolean trio with `enum ActiveOverlay { None, Help, Quit, Collision, Palette }` on `App`. Single source of truth for both input precedence and z-index. **Highest user-visible win.**
 
-### Known Risks
+2. **Add `BrainConnectFailed` arm + `LoadState` timeout (Risk #26 + G3)** — *hours* — In `session_detail.rs:346`, transition to `LoadState::Failed { message }` on `BrainConnectFailed`. Add `last_transition_at: Instant`; in `SessionDetailView::tick`, force `Failed` after 10 s in `Retiring`/`Loading`. Closes the only confirmed "infinite spinner" deadlock.
 
-| Risk | Severity | Mitigation |
-|---|---|---|
-| `broadcast::Lagged` drops events → stale lineage | **High** | Not implemented — replay from NDJSON needed |
-| `app.rs` God Object (11 responsibilities, 1702 LOC) | Medium | Action execution extractable (~300 LOC) |
-| Fire-and-forget `tokio::spawn` — no graceful shutdown | Medium | TaskTracker needed |
-| `session_detail.rs` at 2136 LOC | Low | Cohesive — heavy components already extracted |
+3. **Harden `try_send(UserInput)` against `Full` (N1)** — *days* — Replace every `let _ = tx.try_send(...)` in `process_action` with an async helper that awaits `send()` and surfaces a transient `⚠ queued` banner. Treat the upstream `mpsc(UserInput)` as a hot path, not a fire-and-forget.
 
-### Recommendations (prioritized)
+4. **Bound `mermaid_tx` and track its `JoinHandle` (N2 + N3)** — *hours* — Bounded(4) channel; store `JoinHandle<()>` on `App`; abort on `NavigateBack` / `ClearSession` / `Drop`. Eliminates both the unbounded growth and the late-completion injection risk.
 
-1. **Implement Lagged recovery** — replay NDJSON to rebuild lineage (reliability)
-2. **Extract ActionExecutor** from app.rs — ~300 LOC, improves testability
-3. **Add TaskTracker** for JoinHandle management — graceful shutdown
-4. **Do not split** session_detail.rs — it's large but cohesive
-5. **Do not move** adapter types out of spur-acp — the presentation contract belongs there
+5. **Incrementalize `MarkdownStream::preview_items` (G2)** — *days* — Cache parsed-AST tail; do not re-scan `raw_text[..flushed_byte_len]` on every preview. This is the single largest CPU win during long agent streams.
+
+6. **Decompose `app.rs` along its five clusters (Risk #7)** — *weeks, post-1.0* — Mirror the canonical `Orchestrator` decomposition pattern (`architecture.md:752`): split `process_action` into `NavigationRouter` + `SessionCommandHandler` + `ReviewDispatcher`; lift `handle_spur_event` brain-status tracking into a `BrainStatusActor`; lift draft/metadata persistence into a `MetadataActor`. Use the `agents/` and `commands/` subsystems as the model.
+
+7. **Audit & enumerate catch-alls (Risk #3)** — *days* — Replace `app.rs:919` with explicit `Event::FocusGained | Event::FocusLost => {}` plus a `debug!` wildcard. In the brain-status match (`app.rs:1358`), use a macro or `static_assertions` so adding a new `SpurEventBody` variant forces an explicit decision.
+
+8. **Buffer orphan `WorkerNotification` (N4)**, **enforce `ViewContext` on `DashboardView` (G5)**, **scope `tick_all` to visible executors (G6)**, **clear dashboard pointers on session swap (G4)** — *each hours* — Bundle these as one cleanup PR.
+
+---
+
+## 9. Verdict
+
+The bones are good. The plumbing follows the canonical channel topology, the read-model boundary is clean (with one leak), and the support tier (`agents/`, `commands/`, `mentions/`) is exemplary. The two HIGH defects worth fixing **before next release** are the modal soft-lock (G1) and the silent `try_send` drop (N1) — both are user-visible and reversible. Risk #7 (`app.rs` god object) is the long-term gravity well; defer the actor decomposition until after v1.0 but stop adding to `app.rs` immediately. Risk #26 / G3 (LoadState deadlock) is a one-line fix that should land this week.
