@@ -326,6 +326,102 @@ fn render_inline_image(
     true
 }
 
+/// Minimum `run_len` for the multi-line card variant. Below this we fall
+/// through to a single-line message.
+#[cfg(feature = "markdown")]
+const PARTIAL_CARD_MIN_ROWS: u16 = 3;
+
+/// Render a stable card describing a partially-scrolled diagram. Reserves
+/// the full `run_len`-tall Rect (no layout shift); the card itself occupies
+/// 1, 2, or 3 lines depending on `run_len`, vertically centred when smaller.
+///
+/// Direction labels combine arrow + word (`▼ scroll down` not just `▼`)
+/// to disambiguate from focus / expansion glyphs elsewhere in the TUI.
+#[cfg(feature = "markdown")]
+pub(crate) fn render_partial_card(
+    frame: &mut Frame,
+    rect: Rect,
+    id: crate::components::mermaid::MermaidId,
+    total_rows: u16,
+    first_row_within: u16,
+    run_len: u16,
+) {
+    if run_len == 0 {
+        return;
+    }
+
+    let visible_pct = if total_rows == 0 {
+        100u16
+    } else {
+        ((run_len as u32 * 100) / (total_rows as u32)).min(100) as u16
+    };
+
+    let direction = match (
+        first_row_within == 0,
+        first_row_within.saturating_add(run_len) >= total_rows,
+    ) {
+        (true, false) => "▼ scroll down",
+        (false, true) => "▲ scroll up",
+        _ => "▲▼ scroll for more",
+    };
+
+    let lines: Vec<Line<'static>> = match run_len {
+        1 => vec![Line::from(Span::styled(
+            format!("[📊 mermaid #{} · {}% · {}]", id.0, visible_pct, direction),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ))],
+        2 => vec![
+            Line::from(Span::styled(
+                format!("📊 mermaid #{} · {}% visible · {}", id.0, visible_pct, direction),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "Alt-v · open in full viewer",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM),
+            )),
+        ],
+        _ /* run_len ≥ PARTIAL_CARD_MIN_ROWS = 3 */ => vec![
+            Line::from(Span::styled(
+                format!("📊 mermaid #{} · {}% visible · {}", id.0, visible_pct, direction),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Alt-v · open in full viewer",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM),
+            )),
+        ],
+    };
+
+    let card_height = lines.len() as u16;
+    let card_rect = if card_height < run_len {
+        let pad_top = (run_len - card_height) / 2;
+        // run_len may exceed rect.height when the diagram is partially
+        // clipped by the viewport; clamp so the card stays within `rect`.
+        let max_pad = rect.height.saturating_sub(card_height);
+        let pad_top = pad_top.min(max_pad);
+        Rect {
+            x: rect.x,
+            y: rect.y + pad_top,
+            width: rect.width,
+            height: card_height.min(rect.height),
+        }
+    } else {
+        rect
+    };
+    frame.render_widget(Paragraph::new(lines), card_rect);
+}
+
 impl ReactTrace {
     fn build_trace_block<'a>(
         title_str: &'a str,
@@ -1133,5 +1229,132 @@ mod height_tests {
         // (26_214_400) without u64-space clamp. Must cap at INLINE_HARD_CAP=100.
         let i = img(1, 32_768);
         assert_eq!(compute_inline_height_rows(&i, 100, 200, 8, 1), 100);
+    }
+}
+
+#[cfg(all(test, feature = "markdown"))]
+mod card_tests {
+    use super::*;
+    use crate::components::mermaid::MermaidId;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn render_into(rect_h: u16, body: impl FnOnce(&mut Frame, Rect)) -> Vec<String> {
+        // 80 cols × rect_h rows; render the body into a Rect at (0, 0).
+        let backend = TestBackend::new(80, rect_h);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| {
+            let r = Rect { x: 0, y: 0, width: 80, height: rect_h };
+            body(f, r);
+        }).unwrap();
+        // Pull the buffer cells into one string per row.
+        let buf = term.backend().buffer().clone();
+        (0..rect_h)
+            .map(|y| {
+                let mut s = String::new();
+                for x in 0..80 {
+                    s.push_str(buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
+                }
+                s.trim_end().to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn card_top_visible_says_scroll_down() {
+        // first_row_within=0, run_len=5, total_rows=20 → top visible, bottom cropped.
+        let lines = render_into(5, |f, r| {
+            render_partial_card(f, r, MermaidId(7), 20, 0, 5);
+        });
+        let joined = lines.join("\n");
+        assert!(joined.contains("▼ scroll down"), "expected scroll-down indicator: {joined}");
+    }
+
+    #[test]
+    fn card_bottom_visible_says_scroll_up() {
+        // first_row_within=15, run_len=5, total_rows=20 → top cropped, bottom visible.
+        let lines = render_into(5, |f, r| {
+            render_partial_card(f, r, MermaidId(3), 20, 15, 5);
+        });
+        let joined = lines.join("\n");
+        assert!(joined.contains("▲ scroll up"), "expected scroll-up indicator: {joined}");
+    }
+
+    #[test]
+    fn card_mid_window_says_scroll_for_more() {
+        // first_row_within=8, run_len=5, total_rows=20 → both edges cropped.
+        let lines = render_into(5, |f, r| {
+            render_partial_card(f, r, MermaidId(2), 20, 8, 5);
+        });
+        let joined = lines.join("\n");
+        assert!(joined.contains("▲▼ scroll for more"), "expected mid-window indicator: {joined}");
+    }
+
+    #[test]
+    fn card_visible_pct_at_50() {
+        let lines = render_into(5, |f, r| {
+            render_partial_card(f, r, MermaidId(1), 20, 0, 10);
+        });
+        let joined = lines.join("\n");
+        assert!(joined.contains("50%"), "expected 50% indicator: {joined}");
+    }
+
+    #[test]
+    fn card_visible_pct_total_zero_returns_100() {
+        let lines = render_into(3, |f, r| {
+            render_partial_card(f, r, MermaidId(1), 0, 0, 1);
+        });
+        let joined = lines.join("\n");
+        assert!(joined.contains("100%"), "total_rows=0 should display 100%: {joined}");
+    }
+
+    #[test]
+    fn card_one_line_variant_when_run_len_1() {
+        let lines = render_into(1, |f, r| {
+            render_partial_card(f, r, MermaidId(1), 20, 0, 1);
+        });
+        // Exactly one non-blank line.
+        let non_blank = lines.iter().filter(|l| !l.is_empty()).count();
+        assert_eq!(non_blank, 1, "expected 1 non-blank line, got {non_blank}: {lines:?}");
+    }
+
+    #[test]
+    fn card_two_line_variant_when_run_len_2() {
+        let lines = render_into(2, |f, r| {
+            render_partial_card(f, r, MermaidId(1), 20, 0, 2);
+        });
+        let non_blank = lines.iter().filter(|l| !l.is_empty()).count();
+        assert_eq!(non_blank, 2, "expected 2 non-blank lines, got {non_blank}: {lines:?}");
+    }
+
+    #[test]
+    fn card_three_line_variant_when_run_len_3_or_more() {
+        let lines = render_into(3, |f, r| {
+            render_partial_card(f, r, MermaidId(1), 20, 0, 3);
+        });
+        // 3-line variant: title, blank, hint → 2 non-blank.
+        let non_blank = lines.iter().filter(|l| !l.is_empty()).count();
+        assert_eq!(non_blank, 2);
+    }
+
+    #[test]
+    fn card_early_returns_when_run_len_0() {
+        let lines = render_into(1, |f, r| {
+            render_partial_card(f, r, MermaidId(1), 20, 0, 0);
+        });
+        // No content rendered.
+        assert!(lines.iter().all(|l| l.is_empty()), "expected blank: {lines:?}");
+    }
+
+    #[test]
+    fn card_centers_when_run_len_exceeds_card_height() {
+        // run_len=11, card=3 lines → top padding (11-3)/2 = 4. Card at rows 4..7.
+        let lines = render_into(11, |f, r| {
+            render_partial_card(f, r, MermaidId(1), 20, 0, 11);
+        });
+        // Rows 0..4 should be blank; row 4 has the title.
+        for (i, l) in lines.iter().take(4).enumerate() {
+            assert!(l.is_empty(), "row {i} expected blank, got: {l:?}");
+        }
+        assert!(lines[4].contains("mermaid #1"), "row 4 expected title, got: {:?}", lines[4]);
     }
 }
