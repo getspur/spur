@@ -1944,6 +1944,7 @@ mod client_capabilities_tests {
 #[cfg(test)]
 mod set_session_model_dispatch_tests {
     use super::{decide_set_session_model_dispatch, SetSessionModelDispatch};
+    use crate::connection::AgentConnection;
     use crate::SpurAgentCaps;
     use agent_client_protocol::schema::{
         InitializeResponse, ModelId, ModelInfo, NewSessionResponse, ProtocolVersion,

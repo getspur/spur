@@ -44,6 +44,7 @@ fn action_kind(action: &UserInput) -> &'static str {
         UserInput::GetIssueDetail { .. } => "GetIssueDetail",
         UserInput::UpdateIssue { .. } => "UpdateIssue",
         UserInput::SetSessionConfigOption { .. } => "SetSessionConfigOption",
+        UserInput::SetSessionModel { .. } => "SetSessionModel",
     }
 }
 
