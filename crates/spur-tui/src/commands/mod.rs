@@ -1,3 +1,4 @@
+pub mod advertised;
 pub mod entry;
 pub mod fuzzy;
 pub mod registry;
