@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
 # sccache-sync-basedirs.sh
 #
-# Sync the sccache server's `SCCACHE_BASEDIRS` to the current set of git
-# worktree roots under SPUR_ROOT. Designed as a generic pre-build hook:
-# fast no-op when nothing changed, restarts the server only when the
-# enumerated worktree set drifts.
+# DEPRECATED: Superseded by `scripts/sccache-worktree.sh`, which is now set as
+# `rustc-wrapper` in `.cargo/config.toml`. The wrapper dynamically sets
+# SCCACHE_BASEDIRS per invocation, eliminating the need to enumerate all
+# worktrees and restart the server.
 #
-# Why: sccache 0.14.0 reads `SCCACHE_BASEDIRS` once at server startup. The
-# parent directories (`.worktrees/`, `.spur/worktrees/`) leave the
-# worktree-name in the stripped relative path, so identical source files
-# hash differently across worktrees. Listing each worktree root and relying
-# on longest-prefix matching strips them cleanly.
+# Kept for reference and emergency fallback only.
+#
+# Original purpose: Sync the sccache server's `SCCACHE_BASEDIRS` to the
+# current set of git worktree roots under SPUR_ROOT.
 #
 # See: docs/rca/2026-04-27-sccache-worktree-cache-miss.md
 set -euo pipefail
