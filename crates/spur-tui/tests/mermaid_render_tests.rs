@@ -5,7 +5,7 @@ use spur_tui::components::mermaid::{render_mermaid, RenderError};
 #[test]
 fn renders_valid_flowchart_to_nonzero_image() {
     let code = "flowchart LR\n    A[Start] --> B[End]\n";
-    let img = render_mermaid(code).expect("valid flowchart should render");
+    let img = render_mermaid(code, 800).expect("valid flowchart should render");
     assert!(img.width() > 0, "rendered image has zero width");
     assert!(img.height() > 0, "rendered image has zero height");
 }
@@ -19,7 +19,7 @@ fn renders_valid_flowchart_to_nonzero_image() {
 #[test]
 fn malformed_source_does_not_panic() {
     let code = "completely not mermaid";
-    let result = render_mermaid(code);
+    let result = render_mermaid(code, 800);
     // The renderer currently returns Ok for any input, but if a future
     // version errors we also accept RenderError variants.
     match result {
@@ -42,7 +42,7 @@ fn malformed_source_does_not_panic() {
 #[test]
 fn empty_input_does_not_panic() {
     // Must not panic — outcome (Ok or Err) is both acceptable.
-    let result = render_mermaid("");
+    let result = render_mermaid("", 800);
     match result {
         Ok(img) => {
             // Got a tiny blank canvas — just ensure dimensions are non-zero.
