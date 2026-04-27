@@ -3,7 +3,8 @@
 //! Uses `sk_*` secret keys to perform administrative operations
 //! such as creating, revoking, and listing licenses.
 
-use serde_json::json;
+use anyhow::Context;
+use serde_json::{json, Value};
 
 /// Admin client for LicenseSeat REST API.
 pub struct AdminClient {
@@ -28,13 +29,24 @@ impl AdminClient {
         format!("Bearer {}", self.secret_key)
     }
 
-    /// Create a new license.
+    async fn parse_response(response: reqwest::Response) -> anyhow::Result<Value> {
+        if response.status() == reqwest::StatusCode::NO_CONTENT {
+            return Ok(Value::Null);
+        }
+        response
+            .json::<Value>()
+            .await
+            .context("failed to parse response")
+    }
+
+    /// Create a new license. Returns the parsed JSON response body
+    /// (typically the new license record, including its key).
     pub async fn create_license(
         &self,
         plan_key: &str,
         email: Option<&str>,
         seats: Option<u32>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Value> {
         let url = format!("{}/products/{}/licenses", self.base_url, self.product_slug);
 
         let mut body = json!({"plan_key": plan_key});
@@ -52,7 +64,7 @@ impl AdminClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("HTTP error: {e}"))?;
+            .context("HTTP error")?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -60,11 +72,11 @@ impl AdminClient {
             anyhow::bail!("LicenseSeat API error {status}: {text}");
         }
 
-        Ok(())
+        Self::parse_response(response).await
     }
 
     /// List all licenses for the product.
-    pub async fn list_licenses(&self) -> anyhow::Result<()> {
+    pub async fn list_licenses(&self) -> anyhow::Result<Value> {
         let url = format!("{}/products/{}/licenses", self.base_url, self.product_slug);
 
         let response = self
@@ -73,7 +85,7 @@ impl AdminClient {
             .header("Authorization", self.auth_header())
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("HTTP error: {e}"))?;
+            .context("HTTP error")?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -81,11 +93,11 @@ impl AdminClient {
             anyhow::bail!("LicenseSeat API error {status}: {text}");
         }
 
-        Ok(())
+        Self::parse_response(response).await
     }
 
     /// Revoke (delete) a license by key.
-    pub async fn revoke_license(&self, license_key: &str) -> anyhow::Result<()> {
+    pub async fn revoke_license(&self, license_key: &str) -> anyhow::Result<Value> {
         let url = format!(
             "{}/products/{}/licenses/{}",
             self.base_url, self.product_slug, license_key
@@ -97,7 +109,7 @@ impl AdminClient {
             .header("Authorization", self.auth_header())
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("HTTP error: {e}"))?;
+            .context("HTTP error")?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -105,11 +117,11 @@ impl AdminClient {
             anyhow::bail!("LicenseSeat API error {status}: {text}");
         }
 
-        Ok(())
+        Self::parse_response(response).await
     }
 
     /// List activations (seats) for a given license key.
-    pub async fn list_activations(&self, license_key: &str) -> anyhow::Result<()> {
+    pub async fn list_activations(&self, license_key: &str) -> anyhow::Result<Value> {
         let url = format!(
             "{}/products/{}/licenses/{}/activations",
             self.base_url, self.product_slug, license_key
@@ -121,7 +133,7 @@ impl AdminClient {
             .header("Authorization", self.auth_header())
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("HTTP error: {e}"))?;
+            .context("HTTP error")?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -129,6 +141,6 @@ impl AdminClient {
             anyhow::bail!("LicenseSeat API error {status}: {text}");
         }
 
-        Ok(())
+        Self::parse_response(response).await
     }
 }

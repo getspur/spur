@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish = false
 
 [[bin]]
 name = "spur-license-admin"
@@ -23,7 +24,7 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
-ed25519-dalek = { version = "2", default-features = false, features = ["std", "pkcs8", "rand_core"] }
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "pkcs8", "pem", "rand_core"] }
 base64 = "0.22"
 
 [dev-dependencies]
