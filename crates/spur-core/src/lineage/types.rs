@@ -177,15 +177,35 @@ impl ExecutorNode {
         self.attempts.last_mut()
     }
 
-    /// Seconds elapsed on the executor's first attempt. Freezes at
-    /// `ended_at - started_at` once the attempt is terminal; otherwise
-    /// ticks against wall-clock `now`. Safe to call from render
-    /// (not replay — this consults `SystemTime::now()`).
+    /// Seconds elapsed since the executor's first spawn. Freezes at
+    /// `current_attempt.ended_at - first_attempt.started_at` once the
+    /// **node** itself reaches a terminal phase; otherwise ticks against
+    /// wall-clock `now`.
+    ///
+    /// The freeze decision is made on `node.phase`, not on
+    /// `first_attempt.ended_at`. A retried-and-running executor has
+    /// `attempts[0].ended_at = Some(...)` (from the failed first attempt)
+    /// but `node.phase = Running`, and must continue to tick.
+    ///
+    /// Safe to call from render (not replay — this consults
+    /// `SystemTime::now()`).
     pub fn elapsed_secs(&self) -> u64 {
-        self.attempts
-            .first()
-            .map(|a| a.elapsed_at(SystemTime::now()).as_secs())
-            .unwrap_or(0)
+        let first = match self.attempts.first() {
+            Some(a) => a,
+            None => return 0,
+        };
+        let end = match self.phase {
+            LifecycleState::Succeeded
+            | LifecycleState::Failed
+            | LifecycleState::Cancelled => self
+                .current_attempt()
+                .and_then(|a| a.ended_at)
+                .unwrap_or_else(SystemTime::now),
+            _ => SystemTime::now(),
+        };
+        end.duration_since(first.started_at)
+            .unwrap_or(std::time::Duration::ZERO)
+            .as_secs()
     }
 
     /// Seconds since the last event updated this executor. `None` if no
@@ -290,5 +310,75 @@ mod attempt_elapsed_tests {
         };
         // ended − started = 30s. Frozen.
         assert_eq!(node.elapsed_secs(), 30);
+    }
+
+    #[test]
+    fn executor_node_elapsed_secs_ticks_for_retried_running_executor() {
+        // A retried-and-running executor has attempts[0].ended_at = Some
+        // (from the failed first attempt) but node.phase = Running. The
+        // elapsed display must keep ticking against wall-clock from the
+        // first spawn; a frozen-at-attempts[0].ended_at value would lie
+        // about a still-running worker.
+        let now = SystemTime::now();
+        let first_started = now - Duration::from_secs(60);
+        let first_ended = now - Duration::from_secs(30); // Failed at -30s.
+        let retry_started = now - Duration::from_secs(20); // Retry pushed at -20s.
+
+        let attempt0 = Attempt {
+            session_id: SessionId("s1".into()),
+            started_at: first_started,
+            ended_at: Some(first_ended),
+            status: AttemptStatus::Failed,
+            cost_usd: 0.0,
+            artifacts: vec![],
+            error: Some("transient".into()),
+        };
+        let attempt1 = Attempt {
+            session_id: SessionId("s2".into()),
+            started_at: retry_started,
+            ended_at: None,
+            status: AttemptStatus::Running,
+            cost_usd: 0.0,
+            artifacts: vec![],
+            error: None,
+        };
+        let node = ExecutorNode {
+            id: ExecutorId::new("e"),
+            parent_id: None,
+            child_ids: vec![],
+            agent: "a".into(),
+            role: spur_acp::Role::Executor,
+            task_spec: String::new(),
+            phase: LifecycleState::Running,
+            attempts: vec![attempt0, attempt1],
+            pending_review: None,
+            last_event_at: None,
+            tool_call_count: 0,
+            latest_tool_call: None,
+            files_touched_count: 0,
+            latest_diff_summary: None,
+            latest_diff_text: None,
+            last_error: None,
+            stream_buffer: VecDeque::new(),
+            issue_id: None,
+            delegation_id: None,
+            peer_edges: vec![],
+        };
+
+        // Expected: elapsed ticks from first.started_at against now.
+        // Should be ~60s (loose bounds for test jitter).
+        let elapsed = node.elapsed_secs();
+        assert!(
+            (59..=61).contains(&elapsed),
+            "retried-running executor must tick from first spawn, got {}s (expected 59..=61)",
+            elapsed
+        );
+
+        // Sanity: must NOT freeze at the first attempt's ended_at − started_at = 30s.
+        assert_ne!(
+            elapsed, 30,
+            "elapsed_secs froze at attempts[0].ended_at − attempts[0].started_at; \
+             retried-running executor regressed"
+        );
     }
 }
