@@ -117,8 +117,15 @@ impl FeatureGate {
         }
     }
 
+    /// Merge quota values for a tier.
+    ///
+    /// Compatibility defaults apply first as the baseline; policy quotas
+    /// overlay on top, overwriting only keys explicitly declared. This
+    /// guarantees baseline quotas are always present even with partial
+    /// policies.
     fn merge_quotas(tier: Tier, policy_doc: Arc<PolicyDocument>) -> HashMap<QuotaKey, QuotaValue> {
         let mut quotas = HashMap::new();
+        Self::apply_compatibility_quota_defaults(tier, &mut quotas);
 
         let tier_label = tier.label().to_lowercase();
         if let Some(tp) = policy_doc.tier_policies.get(&tier_label) {
@@ -129,10 +136,6 @@ impl FeatureGate {
                     }
                 }
             }
-        }
-
-        if quotas.is_empty() {
-            Self::apply_compatibility_quota_defaults(tier, &mut quotas);
         }
 
         quotas
@@ -146,6 +149,7 @@ impl FeatureGate {
                     QuotaKey::EventRetentionBytes,
                     QuotaValue::Bytes(128 * 1024 * 1024),
                 );
+                quotas.insert(QuotaKey::BrainFailoverChainDepth, QuotaValue::Count(1));
             }
             Tier::Pro => {
                 quotas.insert(QuotaKey::MaxConcurrentWorkers, QuotaValue::Count(5));
@@ -153,6 +157,7 @@ impl FeatureGate {
                     QuotaKey::EventRetentionBytes,
                     QuotaValue::Bytes(1024 * 1024 * 1024),
                 );
+                quotas.insert(QuotaKey::BrainFailoverChainDepth, QuotaValue::Count(3));
             }
             Tier::Team => {
                 quotas.insert(QuotaKey::MaxConcurrentWorkers, QuotaValue::Count(10));
@@ -160,11 +165,13 @@ impl FeatureGate {
                     QuotaKey::EventRetentionBytes,
                     QuotaValue::Bytes(10 * 1024 * 1024 * 1024),
                 );
+                quotas.insert(QuotaKey::BrainFailoverChainDepth, QuotaValue::Count(3));
                 quotas.insert(QuotaKey::MinSeats, QuotaValue::Count(3));
             }
             Tier::Enterprise => {
                 quotas.insert(QuotaKey::MaxConcurrentWorkers, QuotaValue::Unlimited);
                 quotas.insert(QuotaKey::EventRetentionBytes, QuotaValue::Unlimited);
+                quotas.insert(QuotaKey::BrainFailoverChainDepth, QuotaValue::Unlimited);
             }
         }
     }
@@ -242,5 +249,13 @@ mod tests {
 
         assert_eq!(gate.tier(), Tier::Pro);
         assert!(gate.has(FeatureKey::PARALLEL_WORKERS));
+    }
+
+    #[test]
+    fn parse_quota_value_accepts_unlimited_string() {
+        assert_eq!(
+            parse_quota_value(&serde_json::json!("unlimited")),
+            Some(QuotaValue::Unlimited)
+        );
     }
 }
