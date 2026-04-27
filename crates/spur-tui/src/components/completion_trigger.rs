@@ -1,10 +1,14 @@
 /// The kind of prefix that opened the popup.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TriggerKind {
     /// Slash-command: `/…`. v1 only fires at byte offset 0.
     Slash,
     /// Resource mention: `@…`. Fires anywhere after whitespace or at offset 0.
     Mention,
+    /// Cursor in the arg region of a slash command whose registry
+    /// `arg_picker_spec(command_name)` returned Some. The picker kind
+    /// (typed vs free-text) is resolved by InputCompletionPort, not here.
+    SlashArg { command_name: String },
 }
 
 /// An active popup trigger detected in the InputBar text.
@@ -46,13 +50,23 @@ pub enum IntentEvent {
     NoOp,
 }
 
+/// Internal kind discriminator for the Composing state. Mirrors `TriggerKind`
+/// but is the type stored in `TriggerState` so the field types in the public
+/// API and the internal state can evolve independently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TriggerKindInternal {
+    Mention,
+    Slash,
+    SlashArg { command_name: String },
+}
+
 /// Internal state of the trigger detector.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 enum TriggerState {
     #[default]
     Idle,
     Composing {
-        kind: TriggerKind,
+        kind: TriggerKindInternal,
         prefix_start: usize,
     },
 }
@@ -107,31 +121,47 @@ impl TriggerDetector {
 
     /// Feed an intent event plus the current text/cursor context. Returns
     /// a transition describing what should happen to the picker shell.
-    pub fn step(
+    ///
+    /// `registry_arg_picker(name)` reports whether the command `name` has a
+    /// registered arg picker; the closure isolates the detector from any
+    /// CommandRegistry import. SlashArg is only opened when this returns
+    /// `true` for the parsed command.
+    pub fn step<R>(
         &mut self,
         event: IntentEvent,
         text: &str,
         cursor: usize,
         protected_ranges: &[crate::components::input_bar::ProtectedRange],
-    ) -> TriggerTransition {
+        registry_arg_picker: R,
+    ) -> TriggerTransition
+    where
+        R: Fn(&str) -> bool,
+    {
         // Defensive re-check: if Composing state references a prefix_start
         // that no longer holds the trigger char (upstream path forgot to
         // send Pasted/SetText), force Idle + Close.
-        if let TriggerState::Composing { kind, prefix_start } = self.state {
-            let expected = match kind {
-                TriggerKind::Mention => '@',
-                TriggerKind::Slash => '/',
+        if let TriggerState::Composing { kind, prefix_start } = &self.state {
+            let still_valid = match kind {
+                TriggerKindInternal::Mention => {
+                    *prefix_start < text.len() && text[*prefix_start..].starts_with('@')
+                }
+                TriggerKindInternal::Slash => {
+                    *prefix_start < text.len() && text[*prefix_start..].starts_with('/')
+                }
+                TriggerKindInternal::SlashArg { command_name } => {
+                    matches!(parse_slash_arg_prefix(text, cursor),
+                        Some((cmd, ps)) if cmd == command_name && ps == *prefix_start)
+                }
             };
-            let still_valid =
-                prefix_start < text.len() && text[prefix_start..].starts_with(expected);
             if !still_valid {
                 self.state = TriggerState::Idle;
                 return TriggerTransition::Close;
             }
         }
 
-        match (&self.state, &event) {
-            // Fast Idle cases — just stay Idle.
+        let dispatched = match (&self.state, &event) {
+            // Fast Idle cases — stay Idle for now; SlashArg detection runs
+            // below.
             (TriggerState::Idle, IntentEvent::NoOp)
             | (TriggerState::Idle, IntentEvent::MovedCursor)
             | (TriggerState::Idle, IntentEvent::DeletedChar)
@@ -141,14 +171,52 @@ impl TriggerDetector {
             | (TriggerState::Idle, IntentEvent::Dismissed)
             | (TriggerState::Idle, IntentEvent::Submitted) => TriggerTransition::None,
 
-            // Idle + TypedChar: maybe open.
+            // Idle + TypedChar: maybe open Mention/Slash.
             (TriggerState::Idle, IntentEvent::TypedChar(c)) => {
                 self.maybe_open(*c, text, cursor, protected_ranges)
             }
 
-            // Composing + anything: delegated.
-            (TriggerState::Composing { .. }, _) => self.advance_composing(event, text, cursor),
+            // SlashArg has its own transition rules.
+            (
+                TriggerState::Composing {
+                    kind: TriggerKindInternal::SlashArg { .. },
+                    ..
+                },
+                _,
+            ) => self.advance_slash_arg(event.clone(), text, cursor),
+
+            // Mention/Slash composing — existing logic.
+            (TriggerState::Composing { .. }, _) => {
+                self.advance_composing(event.clone(), text, cursor)
+            }
+        };
+
+        // SlashArg detection: if dispatch returned us to Idle and the event
+        // is one that can mutate buffer/cursor in a way that opens a picker,
+        // try to parse `^/<cmd> ` and consult the registry.
+        if matches!(self.state, TriggerState::Idle) && event_can_trigger_slash_arg(&event) {
+            if let Some((cmd, prefix_start)) = parse_slash_arg_prefix(text, cursor) {
+                if registry_arg_picker(cmd) {
+                    let command_name = cmd.to_string();
+                    self.state = TriggerState::Composing {
+                        kind: TriggerKindInternal::SlashArg {
+                            command_name: command_name.clone(),
+                        },
+                        prefix_start,
+                    };
+                    let query = text[prefix_start..cursor.min(text.len())].to_string();
+                    return TriggerTransition::Open {
+                        trigger: Trigger {
+                            kind: TriggerKind::SlashArg { command_name },
+                            prefix_start,
+                            query,
+                        },
+                    };
+                }
+            }
         }
+
+        dispatched
     }
 
     /// Idle → Composing transition logic for TypedChar events.
@@ -177,7 +245,7 @@ impl TriggerDetector {
                     return TriggerTransition::None;
                 }
                 self.state = TriggerState::Composing {
-                    kind: TriggerKind::Slash,
+                    kind: TriggerKindInternal::Slash,
                     prefix_start: 0,
                 };
                 TriggerTransition::Open {
@@ -199,7 +267,7 @@ impl TriggerDetector {
                     return TriggerTransition::None;
                 }
                 self.state = TriggerState::Composing {
-                    kind: TriggerKind::Mention,
+                    kind: TriggerKindInternal::Mention,
                     prefix_start: typed_byte,
                 };
                 TriggerTransition::Open {
@@ -221,8 +289,8 @@ impl TriggerDetector {
         text: &str,
         cursor: usize,
     ) -> TriggerTransition {
-        let (_kind, prefix_start) = match self.state {
-            TriggerState::Composing { kind, prefix_start } => (kind, prefix_start),
+        let prefix_start = match &self.state {
+            TriggerState::Composing { prefix_start, .. } => *prefix_start,
             TriggerState::Idle => unreachable!("called with Idle state"),
         };
 
@@ -278,6 +346,96 @@ impl TriggerDetector {
 
         TriggerTransition::Update { query }
     }
+
+    /// SlashArg → SlashArg|Idle transition logic. The defensive re-check at
+    /// the top of `step` already validated `^/<cmd> ` is intact and that
+    /// `prefix_start` still aligns; this just maps events to transitions.
+    fn advance_slash_arg(
+        &mut self,
+        event: IntentEvent,
+        text: &str,
+        cursor: usize,
+    ) -> TriggerTransition {
+        let prefix_start = match &self.state {
+            TriggerState::Composing {
+                kind: TriggerKindInternal::SlashArg { .. },
+                prefix_start,
+            } => *prefix_start,
+            _ => unreachable!("advance_slash_arg called outside SlashArg state"),
+        };
+
+        match event {
+            IntentEvent::Pasted
+            | IntentEvent::SetText
+            | IntentEvent::Accepted
+            | IntentEvent::Dismissed
+            | IntentEvent::Submitted => {
+                self.state = TriggerState::Idle;
+                return TriggerTransition::Close;
+            }
+            IntentEvent::NoOp => {
+                return TriggerTransition::None;
+            }
+            _ => {}
+        }
+
+        // Cursor must remain at or past the arg-region start for the popup
+        // to stay open.
+        if cursor < prefix_start {
+            self.state = TriggerState::Idle;
+            return TriggerTransition::Close;
+        }
+
+        let clamped_end = cursor.min(text.len());
+        let query = text[prefix_start.min(clamped_end)..clamped_end].to_string();
+        TriggerTransition::Update { query }
+    }
+}
+
+/// Returns whether `event` is a category of input mutation that may newly
+/// open a SlashArg trigger when the buffer matches `^/<cmd> ` and the
+/// registry reports an arg picker. Pure cursor motion and lifecycle events
+/// (NoOp, Accepted, Dismissed, Submitted) intentionally do not open
+/// pickers — that preserves the "cursor motion never opens" invariant.
+fn event_can_trigger_slash_arg(event: &IntentEvent) -> bool {
+    matches!(
+        event,
+        IntentEvent::TypedChar(_)
+            | IntentEvent::Pasted
+            | IntentEvent::SetText
+            | IntentEvent::DeletedChar
+    )
+}
+
+/// Parse a buffer for `^/<command> ` and return `(command_name, prefix_start)`
+/// where `prefix_start` is the byte offset just past the delimiting
+/// whitespace. Returns `None` when:
+/// - `text` does not start with `/`
+/// - the command name is empty
+/// - there is no whitespace after the command name
+/// - the cursor is positioned before the arg region (caller hasn't moved
+///   into the arg yet)
+fn parse_slash_arg_prefix(text: &str, cursor: usize) -> Option<(&str, usize)> {
+    let bytes = text.as_bytes();
+    if bytes.first() != Some(&b'/') {
+        return None;
+    }
+    let mut end_of_cmd = 1;
+    while end_of_cmd < bytes.len() && !bytes[end_of_cmd].is_ascii_whitespace() {
+        end_of_cmd += 1;
+    }
+    if end_of_cmd == 1 {
+        return None;
+    }
+    if end_of_cmd >= bytes.len() {
+        return None;
+    }
+    let cmd = &text[1..end_of_cmd];
+    let prefix_start = end_of_cmd + 1;
+    if prefix_start > cursor {
+        return None;
+    }
+    Some((cmd, prefix_start))
 }
 
 #[cfg(test)]
@@ -294,7 +452,7 @@ mod detector_tests {
     #[test]
     fn idle_typed_at_at_offset_zero_opens_mention() {
         let mut det = d();
-        let t = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
+        let t = det.step(IntentEvent::TypedChar('@'), "@", 1, &[], |_| false);
         match t {
             TriggerTransition::Open { trigger } => {
                 assert_eq!(trigger.kind, TriggerKind::Mention);
@@ -308,7 +466,7 @@ mod detector_tests {
     #[test]
     fn idle_typed_slash_at_offset_zero_opens_slash() {
         let mut det = d();
-        let t = det.step(IntentEvent::TypedChar('/'), "/", 1, &[]);
+        let t = det.step(IntentEvent::TypedChar('/'), "/", 1, &[], |_| false);
         match t {
             TriggerTransition::Open { trigger } => {
                 assert_eq!(trigger.kind, TriggerKind::Slash);
@@ -321,7 +479,7 @@ mod detector_tests {
     #[test]
     fn idle_typed_slash_at_nonzero_offset_stays_idle() {
         let mut det = d();
-        let t = det.step(IntentEvent::TypedChar('/'), "a/", 2, &[]);
+        let t = det.step(IntentEvent::TypedChar('/'), "a/", 2, &[], |_| false);
         assert!(matches!(t, TriggerTransition::None));
         assert!(det.is_idle());
     }
@@ -329,7 +487,7 @@ mod detector_tests {
     #[test]
     fn idle_typed_at_after_non_whitespace_stays_idle() {
         let mut det = d();
-        let t = det.step(IntentEvent::TypedChar('@'), "foo@", 4, &[]);
+        let t = det.step(IntentEvent::TypedChar('@'), "foo@", 4, &[], |_| false);
         assert!(matches!(t, TriggerTransition::None));
         assert!(det.is_idle());
     }
@@ -337,7 +495,7 @@ mod detector_tests {
     #[test]
     fn idle_typed_at_after_whitespace_opens() {
         let mut det = d();
-        let t = det.step(IntentEvent::TypedChar('@'), "foo @", 5, &[]);
+        let t = det.step(IntentEvent::TypedChar('@'), "foo @", 5, &[], |_| false);
         match t {
             TriggerTransition::Open { trigger } => {
                 assert_eq!(trigger.prefix_start, 4);
@@ -356,7 +514,7 @@ mod detector_tests {
             uri: "u".into(),
             name: "n".into(),
         }];
-        let t = det.step(IntentEvent::TypedChar('@'), "@foo", 1, &ranges);
+        let t = det.step(IntentEvent::TypedChar('@'), "@foo", 1, &ranges, |_| false);
         assert!(matches!(t, TriggerTransition::None));
         assert!(det.is_idle());
     }
@@ -364,7 +522,7 @@ mod detector_tests {
     #[test]
     fn idle_moved_cursor_stays_idle_emits_none() {
         let mut det = d();
-        let t = det.step(IntentEvent::MovedCursor, "hello @world", 12, &[]);
+        let t = det.step(IntentEvent::MovedCursor, "hello @world", 12, &[], |_| false);
         assert!(matches!(t, TriggerTransition::None));
         assert!(det.is_idle());
     }
@@ -372,14 +530,14 @@ mod detector_tests {
     #[test]
     fn idle_deleted_char_stays_idle() {
         let mut det = d();
-        let t = det.step(IntentEvent::DeletedChar, "hello", 5, &[]);
+        let t = det.step(IntentEvent::DeletedChar, "hello", 5, &[], |_| false);
         assert!(matches!(t, TriggerTransition::None));
     }
 
     #[test]
     fn idle_pasted_stays_idle() {
         let mut det = d();
-        let t = det.step(IntentEvent::Pasted, "pasted @alice text", 18, &[]);
+        let t = det.step(IntentEvent::Pasted, "pasted @alice text", 18, &[], |_| false);
         assert!(matches!(t, TriggerTransition::None));
         assert!(det.is_idle());
     }
@@ -387,14 +545,14 @@ mod detector_tests {
     #[test]
     fn idle_set_text_stays_idle() {
         let mut det = d();
-        let t = det.step(IntentEvent::SetText, "recalled @foo", 13, &[]);
+        let t = det.step(IntentEvent::SetText, "recalled @foo", 13, &[], |_| false);
         assert!(matches!(t, TriggerTransition::None));
     }
 
     #[test]
     fn idle_noop_emits_none() {
         let mut det = d();
-        let t = det.step(IntentEvent::NoOp, "", 0, &[]);
+        let t = det.step(IntentEvent::NoOp, "", 0, &[], |_| false);
         assert!(matches!(t, TriggerTransition::None));
     }
 
@@ -403,8 +561,8 @@ mod detector_tests {
     #[test]
     fn composing_typed_char_emits_update_with_growing_query() {
         let mut det = d();
-        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
-        let t = det.step(IntentEvent::TypedChar('f'), "@f", 2, &[]);
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[], |_| false);
+        let t = det.step(IntentEvent::TypedChar('f'), "@f", 2, &[], |_| false);
         match t {
             TriggerTransition::Update { query } => assert_eq!(query, "f"),
             other => panic!("expected Update, got {other:?}"),
@@ -414,10 +572,10 @@ mod detector_tests {
     #[test]
     fn composing_deleted_char_emits_update_with_shrunken_query() {
         let mut det = d();
-        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
-        let _ = det.step(IntentEvent::TypedChar('f'), "@f", 2, &[]);
-        let _ = det.step(IntentEvent::TypedChar('o'), "@fo", 3, &[]);
-        let t = det.step(IntentEvent::DeletedChar, "@f", 2, &[]);
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[], |_| false);
+        let _ = det.step(IntentEvent::TypedChar('f'), "@f", 2, &[], |_| false);
+        let _ = det.step(IntentEvent::TypedChar('o'), "@fo", 3, &[], |_| false);
+        let t = det.step(IntentEvent::DeletedChar, "@f", 2, &[], |_| false);
         match t {
             TriggerTransition::Update { query } => assert_eq!(query, "f"),
             other => panic!("expected Update, got {other:?}"),
@@ -427,11 +585,11 @@ mod detector_tests {
     #[test]
     fn composing_moved_cursor_inside_window_emits_update() {
         let mut det = d();
-        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
-        let _ = det.step(IntentEvent::TypedChar('f'), "@f", 2, &[]);
-        let _ = det.step(IntentEvent::TypedChar('o'), "@fo", 3, &[]);
-        let _ = det.step(IntentEvent::TypedChar('o'), "@foo", 4, &[]);
-        let t = det.step(IntentEvent::MovedCursor, "@foo", 3, &[]);
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[], |_| false);
+        let _ = det.step(IntentEvent::TypedChar('f'), "@f", 2, &[], |_| false);
+        let _ = det.step(IntentEvent::TypedChar('o'), "@fo", 3, &[], |_| false);
+        let _ = det.step(IntentEvent::TypedChar('o'), "@foo", 4, &[], |_| false);
+        let t = det.step(IntentEvent::MovedCursor, "@foo", 3, &[], |_| false);
         match t {
             TriggerTransition::Update { query } => assert_eq!(query, "fo"),
             other => panic!("expected Update, got {other:?}"),
@@ -441,9 +599,9 @@ mod detector_tests {
     #[test]
     fn composing_typed_whitespace_emits_close() {
         let mut det = d();
-        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
-        let _ = det.step(IntentEvent::TypedChar('f'), "@f", 2, &[]);
-        let t = det.step(IntentEvent::TypedChar(' '), "@f ", 3, &[]);
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[], |_| false);
+        let _ = det.step(IntentEvent::TypedChar('f'), "@f", 2, &[], |_| false);
+        let t = det.step(IntentEvent::TypedChar(' '), "@f ", 3, &[], |_| false);
         assert!(matches!(t, TriggerTransition::Close));
         assert!(det.is_idle());
     }
@@ -451,9 +609,9 @@ mod detector_tests {
     #[test]
     fn composing_moved_cursor_out_of_window_emits_close() {
         let mut det = d();
-        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
-        let _ = det.step(IntentEvent::TypedChar('f'), "@f", 2, &[]);
-        let t = det.step(IntentEvent::MovedCursor, "@f", 0, &[]);
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[], |_| false);
+        let _ = det.step(IntentEvent::TypedChar('f'), "@f", 2, &[], |_| false);
+        let t = det.step(IntentEvent::MovedCursor, "@f", 0, &[], |_| false);
         assert!(matches!(t, TriggerTransition::Close));
         assert!(det.is_idle());
     }
@@ -461,10 +619,10 @@ mod detector_tests {
     #[test]
     fn composing_deleted_trigger_char_emits_close_via_defensive_check() {
         let mut det = d();
-        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
-        let _ = det.step(IntentEvent::TypedChar('f'), "@f", 2, &[]);
-        let _ = det.step(IntentEvent::DeletedChar, "@", 1, &[]);
-        let t = det.step(IntentEvent::DeletedChar, "", 0, &[]);
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[], |_| false);
+        let _ = det.step(IntentEvent::TypedChar('f'), "@f", 2, &[], |_| false);
+        let _ = det.step(IntentEvent::DeletedChar, "@", 1, &[], |_| false);
+        let t = det.step(IntentEvent::DeletedChar, "", 0, &[], |_| false);
         assert!(matches!(t, TriggerTransition::Close));
         assert!(det.is_idle());
     }
@@ -472,8 +630,8 @@ mod detector_tests {
     #[test]
     fn composing_pasted_emits_close() {
         let mut det = d();
-        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
-        let t = det.step(IntentEvent::Pasted, "@ hello world", 13, &[]);
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[], |_| false);
+        let t = det.step(IntentEvent::Pasted, "@ hello world", 13, &[], |_| false);
         assert!(matches!(t, TriggerTransition::Close));
         assert!(det.is_idle());
     }
@@ -481,40 +639,40 @@ mod detector_tests {
     #[test]
     fn composing_set_text_emits_close() {
         let mut det = d();
-        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
-        let t = det.step(IntentEvent::SetText, "recalled text", 13, &[]);
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[], |_| false);
+        let t = det.step(IntentEvent::SetText, "recalled text", 13, &[], |_| false);
         assert!(matches!(t, TriggerTransition::Close));
     }
 
     #[test]
     fn composing_accepted_emits_close() {
         let mut det = d();
-        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
-        let t = det.step(IntentEvent::Accepted, "@atom", 5, &[]);
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[], |_| false);
+        let t = det.step(IntentEvent::Accepted, "@atom", 5, &[], |_| false);
         assert!(matches!(t, TriggerTransition::Close));
     }
 
     #[test]
     fn composing_dismissed_emits_close() {
         let mut det = d();
-        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
-        let t = det.step(IntentEvent::Dismissed, "@", 1, &[]);
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[], |_| false);
+        let t = det.step(IntentEvent::Dismissed, "@", 1, &[], |_| false);
         assert!(matches!(t, TriggerTransition::Close));
     }
 
     #[test]
     fn composing_submitted_emits_close() {
         let mut det = d();
-        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
-        let t = det.step(IntentEvent::Submitted, "", 0, &[]);
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[], |_| false);
+        let t = det.step(IntentEvent::Submitted, "", 0, &[], |_| false);
         assert!(matches!(t, TriggerTransition::Close));
     }
 
     #[test]
     fn composing_noop_emits_none_and_stays_composing() {
         let mut det = d();
-        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
-        let t = det.step(IntentEvent::NoOp, "@", 1, &[]);
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[], |_| false);
+        let t = det.step(IntentEvent::NoOp, "@", 1, &[], |_| false);
         assert!(matches!(t, TriggerTransition::None));
         assert!(!det.is_idle());
     }
@@ -543,7 +701,7 @@ mod detector_tests {
         ];
         let mut opens = 0;
         for cursor in 0..=text.len() {
-            let t = det.step(IntentEvent::MovedCursor, text, cursor, &ranges);
+            let t = det.step(IntentEvent::MovedCursor, text, cursor, &ranges, |_| false);
             if matches!(t, TriggerTransition::Open { .. }) {
                 opens += 1;
             }
@@ -557,7 +715,7 @@ mod detector_tests {
         let text = "please see @foo bar";
         let mut opens = 0;
         for _ in 0..50 {
-            let t = det.step(IntentEvent::MovedCursor, text, 15, &[]);
+            let t = det.step(IntentEvent::MovedCursor, text, 15, &[], |_| false);
             if matches!(t, TriggerTransition::Open { .. }) {
                 opens += 1;
             }
@@ -571,7 +729,7 @@ mod detector_tests {
         let text = "text @alice more";
         let mut opens = 0;
         for cursor in 0..=text.len() {
-            let t = det.step(IntentEvent::MovedCursor, text, cursor, &[]);
+            let t = det.step(IntentEvent::MovedCursor, text, cursor, &[], |_| false);
             if matches!(t, TriggerTransition::Open { .. }) {
                 opens += 1;
             }
@@ -582,12 +740,12 @@ mod detector_tests {
     #[test]
     fn j2b_typo_fix_after_esc_stays_closed_on_motion() {
         let mut det = d();
-        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
-        let _ = det.step(IntentEvent::TypedChar('f'), "@f", 2, &[]);
-        let _ = det.step(IntentEvent::TypedChar('o'), "@fo", 3, &[]);
-        let close = det.step(IntentEvent::Dismissed, "@fo", 3, &[]);
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[], |_| false);
+        let _ = det.step(IntentEvent::TypedChar('f'), "@f", 2, &[], |_| false);
+        let _ = det.step(IntentEvent::TypedChar('o'), "@fo", 3, &[], |_| false);
+        let close = det.step(IntentEvent::Dismissed, "@fo", 3, &[], |_| false);
         assert!(matches!(close, TriggerTransition::Close));
-        let mot = det.step(IntentEvent::MovedCursor, "@fo", 2, &[]);
+        let mot = det.step(IntentEvent::MovedCursor, "@fo", 2, &[], |_| false);
         assert!(matches!(mot, TriggerTransition::None));
         assert!(det.is_idle());
     }
@@ -595,7 +753,7 @@ mod detector_tests {
     #[test]
     fn reset_puts_detector_in_idle() {
         let mut det = d();
-        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[]);
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[], |_| false);
         assert!(!det.is_idle());
         det.reset();
         assert!(det.is_idle());
@@ -606,12 +764,303 @@ mod detector_tests {
         // White-box: construct a Composing state with prefix_start past text.
         let mut det = TriggerDetector {
             state: TriggerState::Composing {
-                kind: TriggerKind::Mention,
+                kind: TriggerKindInternal::Mention,
                 prefix_start: 100,
             },
         };
-        let t = det.step(IntentEvent::MovedCursor, "abc", 3, &[]);
+        let t = det.step(IntentEvent::MovedCursor, "abc", 3, &[], |_| false);
         assert!(matches!(t, TriggerTransition::Close));
+        assert!(det.is_idle());
+    }
+}
+
+#[cfg(test)]
+mod arg_picker_tests {
+    use super::*;
+    use crate::commands::entry::{CommandEntry, CommandSource, Dispatch};
+    use crate::commands::CommandRegistry;
+    use spur_acp::adapter::arg_picker_hint::{ArgPickerHint, ArgPickerSpec};
+
+    fn registry_with_arg_picker(names: &[&str]) -> CommandRegistry {
+        let mut reg = CommandRegistry::new();
+        let entries: Vec<CommandEntry> = names
+            .iter()
+            .map(|n| CommandEntry {
+                name: (*n).into(),
+                description: "test".into(),
+                hint: None,
+                source: CommandSource::Advertised {
+                    handle: "codex".into(),
+                },
+                dispatch: Dispatch::SetSessionConfigOption {
+                    config_id: (*n).into(),
+                },
+                arg_picker_spec: Some(ArgPickerSpec {
+                    free_text_hint: String::new(),
+                    typed_hint: Some(ArgPickerHint::ConfigOption {
+                        config_id: (*n).into(),
+                    }),
+                }),
+            })
+            .collect();
+        reg.set_advertised_commands("codex", entries);
+        reg
+    }
+
+    fn step(
+        det: &mut TriggerDetector,
+        event: IntentEvent,
+        text: &str,
+        cursor: usize,
+        registry: &CommandRegistry,
+    ) -> TriggerTransition {
+        det.step(event, text, cursor, &[], |name| {
+            registry.arg_picker_spec(name).is_some()
+        })
+    }
+
+    // ── T1–T5: regression guards (existing Mention/Slash unchanged) ─
+
+    #[test]
+    fn t1_mention_at_offset_zero_still_opens() {
+        let mut det = TriggerDetector::new();
+        let registry = registry_with_arg_picker(&["model"]);
+        let txn = step(&mut det, IntentEvent::TypedChar('@'), "@", 1, &registry);
+        match txn {
+            TriggerTransition::Open { trigger } => {
+                assert_eq!(trigger.kind, TriggerKind::Mention);
+                assert_eq!(trigger.prefix_start, 0);
+            }
+            other => panic!("expected Mention Open, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t2_slash_at_offset_zero_still_opens() {
+        let mut det = TriggerDetector::new();
+        let registry = registry_with_arg_picker(&["model"]);
+        let txn = step(&mut det, IntentEvent::TypedChar('/'), "/", 1, &registry);
+        match txn {
+            TriggerTransition::Open { trigger } => {
+                assert_eq!(trigger.kind, TriggerKind::Slash);
+                assert_eq!(trigger.prefix_start, 0);
+            }
+            other => panic!("expected Slash Open, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t3_slash_continuation_still_emits_update() {
+        let mut det = TriggerDetector::new();
+        let registry = registry_with_arg_picker(&["model"]);
+        let _ = step(&mut det, IntentEvent::TypedChar('/'), "/", 1, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('h'), "/h", 2, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('e'), "/he", 3, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('l'), "/hel", 4, &registry);
+        let txn = step(&mut det, IntentEvent::TypedChar('p'), "/help", 5, &registry);
+        match txn {
+            TriggerTransition::Update { query } => assert_eq!(query, "help"),
+            other => panic!("expected Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t4_mention_after_whitespace_still_opens() {
+        let mut det = TriggerDetector::new();
+        let registry = registry_with_arg_picker(&["model"]);
+        let txn = step(&mut det, IntentEvent::TypedChar('@'), "foo @", 5, &registry);
+        match txn {
+            TriggerTransition::Open { trigger } => {
+                assert_eq!(trigger.kind, TriggerKind::Mention);
+                assert_eq!(trigger.prefix_start, 4);
+            }
+            other => panic!("expected Mention Open, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t5_unregistered_slash_command_with_space_closes() {
+        let mut det = TriggerDetector::new();
+        let registry = registry_with_arg_picker(&["model"]); // /help not registered
+        let _ = step(&mut det, IntentEvent::TypedChar('/'), "/", 1, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('h'), "/h", 2, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('e'), "/he", 3, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('l'), "/hel", 4, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('p'), "/help", 5, &registry);
+        let txn = step(&mut det, IntentEvent::TypedChar(' '), "/help ", 6, &registry);
+        assert!(matches!(txn, TriggerTransition::Close));
+        assert!(det.is_idle());
+    }
+
+    // ── T6–T15: SlashArg behavior ────────────────────────────────────
+
+    #[test]
+    fn t6_slash_model_space_at_end_opens_slash_arg() {
+        let mut det = TriggerDetector::new();
+        let registry = registry_with_arg_picker(&["model"]);
+        let _ = step(&mut det, IntentEvent::TypedChar('/'), "/", 1, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('m'), "/m", 2, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('o'), "/mo", 3, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('d'), "/mod", 4, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('e'), "/mode", 5, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('l'), "/model", 6, &registry);
+        let txn = step(&mut det, IntentEvent::TypedChar(' '), "/model ", 7, &registry);
+        match txn {
+            TriggerTransition::Open { trigger } => {
+                assert_eq!(
+                    trigger.kind,
+                    TriggerKind::SlashArg {
+                        command_name: "model".into(),
+                    }
+                );
+                assert_eq!(trigger.prefix_start, 7);
+                assert_eq!(trigger.query, "");
+            }
+            other => panic!("expected Open SlashArg, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t7_slash_effort_space_at_end_opens_slash_arg() {
+        let mut det = TriggerDetector::new();
+        let registry = registry_with_arg_picker(&["effort"]);
+        let _ = step(&mut det, IntentEvent::TypedChar('/'), "/", 1, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('e'), "/e", 2, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('f'), "/ef", 3, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('f'), "/eff", 4, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('o'), "/effo", 5, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('r'), "/effor", 6, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('t'), "/effort", 7, &registry);
+        let txn = step(&mut det, IntentEvent::TypedChar(' '), "/effort ", 8, &registry);
+        match txn {
+            TriggerTransition::Open { trigger } => {
+                assert_eq!(
+                    trigger.kind,
+                    TriggerKind::SlashArg {
+                        command_name: "effort".into(),
+                    }
+                );
+                assert_eq!(trigger.prefix_start, 8);
+            }
+            other => panic!("expected Open SlashArg, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t8_slash_command_without_trailing_space_does_not_open() {
+        let mut det = TriggerDetector::new();
+        let registry = registry_with_arg_picker(&["model"]);
+        // Pasted "/model" — no trailing whitespace, so parse rejects.
+        let txn = step(&mut det, IntentEvent::Pasted, "/model", 6, &registry);
+        assert!(matches!(txn, TriggerTransition::None));
+        assert!(det.is_idle());
+    }
+
+    #[test]
+    fn t9_typing_arg_after_open_emits_update() {
+        let mut det = TriggerDetector::new();
+        let registry = registry_with_arg_picker(&["model"]);
+        let _ = step(&mut det, IntentEvent::TypedChar('/'), "/", 1, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('m'), "/m", 2, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('o'), "/mo", 3, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('d'), "/mod", 4, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('e'), "/mode", 5, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('l'), "/model", 6, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar(' '), "/model ", 7, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('g'), "/model g", 8, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('p'), "/model gp", 9, &registry);
+        let txn = step(&mut det, IntentEvent::TypedChar('t'), "/model gpt", 10, &registry);
+        match txn {
+            TriggerTransition::Update { query } => assert_eq!(query, "gpt"),
+            other => panic!("expected Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t10_delete_space_closes_slash_arg() {
+        let mut det = TriggerDetector::new();
+        let registry = registry_with_arg_picker(&["model"]);
+        let _ = step(&mut det, IntentEvent::TypedChar('/'), "/", 1, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('m'), "/m", 2, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('o'), "/mo", 3, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('d'), "/mod", 4, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('e'), "/mode", 5, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar('l'), "/model", 6, &registry);
+        let _ = step(&mut det, IntentEvent::TypedChar(' '), "/model ", 7, &registry);
+        // Now in SlashArg. Delete the space.
+        let txn = step(&mut det, IntentEvent::DeletedChar, "/model", 6, &registry);
+        assert!(matches!(txn, TriggerTransition::Close));
+        assert!(det.is_idle());
+    }
+
+    #[test]
+    fn t11_cursor_outside_arg_region_does_not_open() {
+        let mut det = TriggerDetector::new();
+        let registry = registry_with_arg_picker(&["model"]);
+        // Fresh Idle: SetText to "/model gpt" with cursor at 3 (still inside
+        // "/mo", before the arg region at byte 7). parse rejects (cursor
+        // before arg region) → no SlashArg open.
+        let txn = step(&mut det, IntentEvent::SetText, "/model gpt", 3, &registry);
+        assert!(matches!(txn, TriggerTransition::None));
+        assert!(det.is_idle());
+    }
+
+    #[test]
+    fn t12_unknown_command_does_not_open() {
+        let mut det = TriggerDetector::new();
+        let registry = registry_with_arg_picker(&["model"]); // /unknown not registered
+        let txn = step(&mut det, IntentEvent::Pasted, "/unknown foo", 12, &registry);
+        assert!(matches!(txn, TriggerTransition::None));
+        assert!(det.is_idle());
+    }
+
+    #[test]
+    fn t13_slash_not_at_column_zero_does_not_open() {
+        let mut det = TriggerDetector::new();
+        let registry = registry_with_arg_picker(&["model"]);
+        let txn = step(
+            &mut det,
+            IntentEvent::Pasted,
+            "prefix /model bar",
+            17,
+            &registry,
+        );
+        assert!(matches!(txn, TriggerTransition::None));
+        assert!(det.is_idle());
+    }
+
+    #[test]
+    fn t14_pasted_full_slash_arg_string_opens() {
+        let mut det = TriggerDetector::new();
+        let registry = registry_with_arg_picker(&["model"]);
+        let txn = step(
+            &mut det,
+            IntentEvent::Pasted,
+            "/model gpt-5",
+            12,
+            &registry,
+        );
+        match txn {
+            TriggerTransition::Open { trigger } => {
+                assert_eq!(
+                    trigger.kind,
+                    TriggerKind::SlashArg {
+                        command_name: "model".into(),
+                    }
+                );
+                assert_eq!(trigger.prefix_start, 7);
+                assert_eq!(trigger.query, "gpt-5");
+            }
+            other => panic!("expected Open SlashArg, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t15_command_lookup_is_case_sensitive() {
+        let mut det = TriggerDetector::new();
+        let registry = registry_with_arg_picker(&["model"]); // lowercase only
+        let txn = step(&mut det, IntentEvent::Pasted, "/Model ", 7, &registry);
+        assert!(matches!(txn, TriggerTransition::None));
         assert!(det.is_idle());
     }
 }

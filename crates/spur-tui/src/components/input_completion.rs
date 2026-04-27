@@ -66,7 +66,9 @@ impl InputCompletionPort {
         let cursor = input_bar.cursor();
         let ranges = input_bar.protected_ranges().to_vec();
 
-        let transition = self.trigger_detector.step(event, &text, cursor, &ranges);
+        let transition = self.trigger_detector.step(event, &text, cursor, &ranges, |name| {
+            env.command_registry.arg_picker_spec(name).is_some()
+        });
 
         match transition {
             TriggerTransition::None => {}
@@ -104,6 +106,13 @@ impl InputCompletionPort {
                             trigger.prefix_start,
                         );
                         PickerShell::open_with_query(Box::new(src), &trigger.query)
+                    }
+                    TriggerKind::SlashArg { .. } => {
+                        // Task 2.10 will instantiate ConfigOptionQuerySource
+                        // here. Until then, the detector still emits
+                        // SlashArg transitions but we leave the picker_shell
+                        // alone so the current popup (if any) stays open.
+                        return;
                     }
                 };
                 self.picker_shell = Some(shell);
