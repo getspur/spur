@@ -1240,6 +1240,12 @@ impl Orchestrator {
         crate::license_runtime::spawn_license_runtime(license, self.funnel.clone())
     }
 
+    fn mcp_feature_gate(&self) -> Arc<spur_license::FeatureGate> {
+        self.feature_gate
+            .clone()
+            .unwrap_or_else(spur_mcp::server::community_feature_gate)
+    }
+
     /// Classify an error as an auth-required failure.
     ///
     /// The ACP spec reserves error code `-32000` with `authRequired`-shaped
@@ -1335,6 +1341,7 @@ impl Orchestrator {
             sink,
             adhoc_ctx,
             self.outcome_store.clone(),
+            self.mcp_feature_gate(),
         );
         let mut mcp_server = mcp_server;
 
@@ -2895,6 +2902,7 @@ impl Orchestrator {
             sink,
             cont_ctx,
             self.outcome_store.clone(),
+            self.mcp_feature_gate(),
         );
         let mut mcp_server = mcp_server;
 
@@ -3138,6 +3146,7 @@ impl Orchestrator {
             sink,
             cont_ctx,
             self.outcome_store.clone(),
+            self.mcp_feature_gate(),
         );
         let mut mcp_server = mcp_server;
 

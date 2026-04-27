@@ -203,6 +203,7 @@ async fn t_v0d_4_get_task_diff_works_after_restart_for_latest_attempt() {
         None,
         continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        spur_mcp::server::community_feature_gate(),
     );
     server1.set_repo_root(dir.path().to_path_buf());
     let warm_status = server1
@@ -224,6 +225,7 @@ async fn t_v0d_4_get_task_diff_works_after_restart_for_latest_attempt() {
         None,
         continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        spur_mcp::server::community_feature_gate(),
     );
     server2.set_repo_root(dir.path().to_path_buf());
     assert_eq!(

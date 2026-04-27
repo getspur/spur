@@ -76,6 +76,7 @@ async fn test_shutdown_bounded_with_pending_collectors() -> Result<(), Box<dyn s
         None,
         observing_continuation_ctx(Arc::clone(&failed_count)),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        spur_mcp::server::community_feature_gate(),
     );
     let server = Arc::new(server);
     let (client_io, server_io) = tokio::io::duplex(16 * 1024);

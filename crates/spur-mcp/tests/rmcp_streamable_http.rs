@@ -27,6 +27,7 @@ async fn rmcp_client_can_initialize_list_tools_and_call_tool(
         None,
         test_continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        spur_mcp::server::community_feature_gate(),
     );
     server.set_workers(vec![WorkerInfo {
         name: "worker-a".into(),

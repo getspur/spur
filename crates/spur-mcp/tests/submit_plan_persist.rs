@@ -621,6 +621,7 @@ async fn persisted_submit_fixture() -> PersistedSubmitFixture {
         None,
         continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        spur_mcp::server::community_feature_gate(),
     );
     server.set_repo_root(dir.path().to_path_buf());
     PersistedSubmitFixture {
