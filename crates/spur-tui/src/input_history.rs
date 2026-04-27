@@ -9,6 +9,14 @@ use crate::components::input_bar::{ProtectedRange, RangeKind};
 pub const HISTORY_CAP: usize = 100;
 
 /// Exact restorable input state for the composer.
+///
+/// FORWARD-COMPAT NOTE: nested fields (for example, a future `cursor: usize`)
+/// added in later schema versions are silently dropped by `serde`'s default
+/// behavior on this struct. The only protection against the resulting
+/// downgrade-strip is the top-level `SessionMetadata::schema_version` bump
+/// policy: any future PR that adds a nested field on this snapshot MUST also
+/// bump `current_metadata_version()` so `loaded_from_future` fires and
+/// `save()` refuses to overwrite. See `session_metadata.rs::load`.
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct InputStateSnapshot {
     pub text: String,

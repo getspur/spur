@@ -1,7 +1,8 @@
 use spur_tui::components::input_bar::{ProtectedRange, RangeKind};
 use spur_tui::input_history::{InputHistoryEntry, InputStateSnapshot};
 use spur_tui::session_metadata::{
-    current_metadata_version, SessionEntry, SessionMetadata, SessionMetadataStore,
+    current_metadata_version, ReadOnlyFutureSchema, SessionEntry, SessionMetadata,
+    SessionMetadataStore,
 };
 use tempfile::tempdir;
 
@@ -277,7 +278,11 @@ fn unknown_future_schema_version_refuses_save_and_preserves_unknown_fields() {
         "in-memory schema_version is reset to CURRENT after a future-version load"
     );
 
-    store.save().unwrap();
+    let err = store.save().unwrap_err();
+    assert!(
+        err.downcast_ref::<ReadOnlyFutureSchema>().is_some(),
+        "future-version saves must return the typed read-only error"
+    );
     let raw = std::fs::read_to_string(&path).unwrap();
     let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(
@@ -290,6 +295,50 @@ fn unknown_future_schema_version_refuses_save_and_preserves_unknown_fields() {
         Some("preserved_data"),
         "unknown fields must survive a refused save"
     );
+}
+
+#[test]
+fn save_on_future_schema_returns_typed_read_only_error() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("metadata.json");
+    let future = current_metadata_version() + 1;
+    std::fs::write(&path, format!(r#"{{"version":{future},"sessions":{{}}}}"#)).unwrap();
+
+    let store = SessionMetadataStore::load(&path);
+    let err = store.save().unwrap_err();
+    let read_only = err
+        .downcast_ref::<ReadOnlyFutureSchema>()
+        .expect("save refusal must downcast to ReadOnlyFutureSchema");
+    assert_eq!(read_only.path, path);
+}
+
+#[test]
+fn is_read_only_reflects_loaded_schema_version() {
+    let dir = tempdir().unwrap();
+    let current_path = dir.path().join("current.json");
+    let future_path = dir.path().join("future.json");
+    std::fs::write(
+        &current_path,
+        format!(
+            r#"{{"version":{},"sessions":{{}}}}"#,
+            current_metadata_version()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        &future_path,
+        format!(
+            r#"{{"version":{},"sessions":{{}}}}"#,
+            current_metadata_version() + 1
+        ),
+    )
+    .unwrap();
+
+    let current_store = SessionMetadataStore::load(&current_path);
+    let future_store = SessionMetadataStore::load(&future_path);
+
+    assert!(!current_store.is_read_only());
+    assert!(future_store.is_read_only());
 }
 
 #[test]
