@@ -13,7 +13,7 @@
 //! `Text` with `ResourceLink` blocks from `ranges`.
 
 use serde_json::Value;
-use spur_acp::{ContentBlock, ResourceLink, TextContent};
+use spur_acp::{ContentBlock, ResourceLink, SpurAgentCaps, TextContent};
 
 use crate::action::Action;
 use crate::components::input_bar::ProtectedRange;
@@ -45,15 +45,39 @@ pub enum SubmitDecision {
         config_id: String,
         value: String,
     },
+    /// Wave B.4: emitted when caps advertise the dedicated ACP
+    /// `session/set_model` method (`SpurAgentCaps::supports_set_model()`).
+    /// The consumer routes through `NativeAcpConnection::set_session_model`
+    /// instead of `set_session_config_option` (spec §6.3).
+    SetSessionModel {
+        value: String,
+    },
     Empty,
 }
 
-/// Route a submitted input to a `SubmitDecision`.
+/// Route a submitted input to a `SubmitDecision`. Caps-unaware overload —
+/// equivalent to `route_with_caps(.., None)`. Preserved for sites that
+/// don't yet thread `SpurAgentCaps` through (pre-M9 callers).
 pub fn route(
     text: &str,
     ranges: &[ProtectedRange],
     registry: &CommandRegistry,
     interrupt: bool,
+) -> SubmitDecision {
+    route_with_caps(text, ranges, registry, interrupt, None)
+}
+
+/// Caps-aware route. When `caps` advertise the dedicated
+/// `session/set_model` method, `/model <value>` is rewritten from
+/// `SubmitDecision::SetSessionConfigOption` to
+/// `SubmitDecision::SetSessionModel` so the orchestrator can pick the
+/// dedicated dispatch. Spec §6.3 / Wave B.4.
+pub fn route_with_caps(
+    text: &str,
+    ranges: &[ProtectedRange],
+    registry: &CommandRegistry,
+    interrupt: bool,
+    caps: Option<&SpurAgentCaps>,
 ) -> SubmitDecision {
     if text.is_empty() {
         return SubmitDecision::Empty;
@@ -102,6 +126,17 @@ pub fn route(
                     if value.is_empty() {
                         // No arg yet — picker should still be open. Treat as no-op.
                         SubmitDecision::Empty
+                    } else if config_id == "model"
+                        && caps.is_some_and(|c| c.supports_set_model())
+                    {
+                        // Wave B.4 / spec §6.3: prefer the dedicated
+                        // `session/set_model` dispatch. Fallback when
+                        // `set_model` is unavailable stays via the
+                        // existing SetSessionConfigOption path —
+                        // NativeAcpConnection::set_session_model also
+                        // applies its own state-gated fallback for
+                        // calls that flow through it directly.
+                        SubmitDecision::SetSessionModel { value }
                     } else {
                         SubmitDecision::SetSessionConfigOption { config_id, value }
                     }
