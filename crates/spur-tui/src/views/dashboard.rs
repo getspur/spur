@@ -1458,6 +1458,7 @@ impl DashboardView {
                             mention_registry: &self.mention_registry,
                             cwd: &self.cwd,
                             scope: crate::mentions::CompletionScope::PreSession,
+                            session_config_options: &[],
                         };
                         self.completion.dispatch(
                             crate::components::completion_trigger::IntentEvent::Submitted,
@@ -1515,6 +1516,7 @@ impl DashboardView {
                             mention_registry: &self.mention_registry,
                             cwd: &self.cwd,
                             scope: crate::mentions::CompletionScope::PreSession,
+                            session_config_options: &[],
                         };
                         self.completion.dispatch(intent, &mut self.input_bar, &env);
                         None

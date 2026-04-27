@@ -93,6 +93,11 @@ impl PickerShell {
         self.rows.iter().map(|r| r.primary.clone()).collect()
     }
 
+    #[cfg(test)]
+    pub fn title(&self) -> &str {
+        self.source.title()
+    }
+
     // ── Key handling ───────────────────────────────────────────────────
 
     pub fn handle_key(&mut self, key: KeyEvent) -> PickerAction {

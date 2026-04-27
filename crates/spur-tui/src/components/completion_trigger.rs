@@ -119,6 +119,19 @@ impl TriggerDetector {
         self.state = TriggerState::Idle;
     }
 
+    /// Byte offset of the live trigger's anchor in the buffer, or `None` when
+    /// the detector is Idle. For Slash/Mention this is the trigger char's
+    /// byte offset; for SlashArg it is the byte just past `/<cmd> ` (the
+    /// arg-region start). Used by `apply_accept` to re-anchor
+    /// `ReplaceTriggerToken` against the live trigger state instead of the
+    /// picker's hardcoded `prefix_start: 0`.
+    pub fn current_prefix_start(&self) -> Option<usize> {
+        match &self.state {
+            TriggerState::Composing { prefix_start, .. } => Some(*prefix_start),
+            TriggerState::Idle => None,
+        }
+    }
+
     /// Feed an intent event plus the current text/cursor context. Returns
     /// a transition describing what should happen to the picker shell.
     ///
@@ -771,6 +784,22 @@ mod detector_tests {
         assert!(!det.is_idle());
         det.reset();
         assert!(det.is_idle());
+    }
+
+    #[test]
+    fn current_prefix_start_some_when_composing_none_when_idle() {
+        let mut det = d();
+        assert_eq!(det.current_prefix_start(), None);
+        let _ = det.step(IntentEvent::TypedChar('@'), "@", 1, &[], |_| false);
+        assert_eq!(det.current_prefix_start(), Some(0));
+        let _ = det.step(IntentEvent::TypedChar('f'), "@f", 2, &[], |_| false);
+        assert_eq!(det.current_prefix_start(), Some(0));
+        det.reset();
+        assert_eq!(det.current_prefix_start(), None);
+
+        // Mention not at offset 0
+        let _ = det.step(IntentEvent::TypedChar('@'), "foo @", 5, &[], |_| false);
+        assert_eq!(det.current_prefix_start(), Some(4));
     }
 
     #[test]

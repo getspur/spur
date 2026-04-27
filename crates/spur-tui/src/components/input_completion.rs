@@ -26,6 +26,10 @@ pub struct CompletionEnv<'a> {
     pub mention_registry: &'a Rc<RefCell<MentionRegistry>>,
     pub cwd: &'a Path,
     pub scope: CompletionScope<'a>,
+    /// Cached agent-advertised session config options. Used by SlashArg
+    /// dispatch to instantiate `ConfigOptionQuerySource`. Empty pre-session.
+    /// Populated by callers from `Orchestrator::session_config_options(brain)`.
+    pub session_config_options: &'a [spur_acp::SessionConfigOption],
 }
 
 impl InputCompletionPort {
@@ -44,11 +48,19 @@ impl InputCompletionPort {
         input_bar: &mut InputBar,
         env: &CompletionEnv<'_>,
     ) {
-        // Fast path: Idle state + non-opening event -> no text fetch, no alloc.
+        // Fast path: Idle state + non-mutating event -> no text fetch, no
+        // alloc. We must keep the detector in the loop for any event that can
+        // open a SlashArg from a fresh paste/SetText/typed char (incl. typed
+        // chars other than '@'/'/', e.g. continuing to type "/model gpt"
+        // after a paste of "/model "). Pure cursor motion / lifecycle events
+        // never open a picker — short-circuit those. Per codex review #2.
         if self.trigger_detector.is_idle()
             && !matches!(
                 event,
-                IntentEvent::TypedChar('@') | IntentEvent::TypedChar('/')
+                IntentEvent::TypedChar(_)
+                    | IntentEvent::Pasted
+                    | IntentEvent::SetText
+                    | IntentEvent::DeletedChar
             )
         {
             return;
@@ -107,12 +119,35 @@ impl InputCompletionPort {
                         );
                         PickerShell::open_with_query(Box::new(src), &trigger.query)
                     }
-                    TriggerKind::SlashArg { .. } => {
-                        // Task 2.10 will instantiate ConfigOptionQuerySource
-                        // here. Until then, the detector still emits
-                        // SlashArg transitions but we leave the picker_shell
-                        // alone so the current popup (if any) stays open.
-                        return;
+                    TriggerKind::SlashArg { command_name } => {
+                        // Resolve the command's arg-picker spec. v1 only
+                        // supports the typed_hint == ConfigOption path;
+                        // free-text fallback (typed_hint == None) is v2.
+                        let Some(spec) = env.command_registry.arg_picker_spec(&command_name)
+                        else {
+                            return;
+                        };
+                        let Some(typed) = spec.typed_hint else {
+                            return;
+                        };
+                        match typed {
+                            spur_acp::adapter::arg_picker_hint::ArgPickerHint::ConfigOption {
+                                config_id,
+                            } => {
+                                let choices = env
+                                    .session_config_options
+                                    .iter()
+                                    .find(|o| o.id.0.as_ref() == config_id.as_str())
+                                    .map(spur_acp::extract_choices)
+                                    .unwrap_or_default();
+                                let src = crate::components::config_option_query_source::ConfigOptionQuerySource::new(
+                                    command_name.clone(),
+                                    config_id.clone(),
+                                    choices,
+                                );
+                                PickerShell::open_with_query(Box::new(src), &trigger.query)
+                            }
+                        }
                     }
                 };
                 self.picker_shell = Some(shell);
@@ -184,6 +219,16 @@ impl InputCompletionPort {
             .unwrap_or_default()
     }
 
+    #[cfg(test)]
+    pub fn picker_title_for_test(&self) -> Option<String> {
+        self.picker_shell.as_ref().map(|s| s.title().to_string())
+    }
+
+    #[cfg(test)]
+    pub fn picker_row_count_for_test(&self) -> Option<usize> {
+        self.picker_shell.as_ref().map(PickerShell::row_count)
+    }
+
     fn apply_accept(&mut self, accept: RetrievalAccept, input_bar: &mut InputBar) {
         match accept {
             RetrievalAccept::ReplaceState(snap) => {
@@ -205,7 +250,20 @@ impl InputCompletionPort {
                 prefix_start,
                 replacement,
             } => {
-                replace_trigger_token(input_bar, prefix_start, &replacement);
+                // Re-anchor against the live trigger state. SlashArg's
+                // ConfigOptionQuerySource hardcodes prefix_start=0 as a
+                // sentinel; the real anchor is the byte just past `/<cmd> `,
+                // tracked by the detector. For Slash/Mention the detector's
+                // prefix_start equals the trigger char's byte offset, which
+                // matches what the existing query sources pass through, so
+                // this preserves legacy behavior. Falls back to the picker-
+                // provided value only if the detector somehow Idle'd before
+                // accept landed.
+                let anchor = self
+                    .trigger_detector
+                    .current_prefix_start()
+                    .unwrap_or(prefix_start);
+                replace_trigger_token(input_bar, anchor, &replacement);
             }
         }
     }
@@ -256,6 +314,22 @@ mod tests {
             mention_registry,
             cwd,
             scope: CompletionScope::PreSession,
+            session_config_options: &[],
+        }
+    }
+
+    fn env_with_options<'a>(
+        command_registry: &'a CommandRegistry,
+        mention_registry: &'a Rc<RefCell<MentionRegistry>>,
+        cwd: &'a std::path::Path,
+        opts: &'a [spur_acp::SessionConfigOption],
+    ) -> CompletionEnv<'a> {
+        CompletionEnv {
+            command_registry,
+            mention_registry,
+            cwd,
+            scope: CompletionScope::PreSession,
+            session_config_options: opts,
         }
     }
 
@@ -293,6 +367,158 @@ mod tests {
         assert_eq!(input_bar.text(), "@Cargo.toml");
         assert_eq!(input_bar.protected_ranges().len(), 1);
         assert!(!completion.is_active());
+    }
+
+    #[test]
+    fn slash_arg_open_instantiates_config_option_query_source() {
+        use crate::commands::entry::{CommandEntry, CommandSource, Dispatch};
+        use spur_acp::adapter::arg_picker_hint::{ArgPickerHint, ArgPickerSpec};
+        use spur_acp::{SessionConfigId, SessionConfigOption, SessionConfigSelectOption};
+
+        // Registry: /model with arg_picker_spec → typed ConfigOption("model").
+        let mut command_registry = CommandRegistry::new();
+        let entry = CommandEntry {
+            name: "model".into(),
+            description: "Switch model".into(),
+            hint: None,
+            source: CommandSource::Advertised {
+                handle: "codex".into(),
+            },
+            dispatch: Dispatch::SetSessionConfigOption {
+                config_id: "model".into(),
+            },
+            arg_picker_spec: Some(ArgPickerSpec {
+                free_text_hint: String::new(),
+                typed_hint: Some(ArgPickerHint::ConfigOption {
+                    config_id: "model".into(),
+                }),
+            }),
+        };
+        command_registry.set_advertised_commands("codex", vec![entry]);
+
+        // Cached session_config_options: a Select with 3 choices.
+        let opt = SessionConfigOption::select(
+            SessionConfigId::new("model".to_string()),
+            "Model".to_string(),
+            "gpt-5-codex".to_string(),
+            vec![
+                SessionConfigSelectOption::new(
+                    "gpt-5-codex".to_string(),
+                    "GPT-5 Codex".to_string(),
+                ),
+                SessionConfigSelectOption::new("gpt-5".to_string(), "GPT-5".to_string()),
+                SessionConfigSelectOption::new("o4-mini".to_string(), "o4-mini".to_string()),
+            ],
+        );
+        let opts = vec![opt];
+
+        let mention_registry = Rc::new(RefCell::new(MentionRegistry::new()));
+        let mut input_bar = InputBar::new();
+        let mut completion = InputCompletionPort::new();
+
+        // Paste "/model " (cursor at end). Should open SlashArg picker.
+        input_bar.set_text("/model ".to_string(), 7);
+        completion.dispatch(
+            IntentEvent::Pasted,
+            &mut input_bar,
+            &env_with_options(
+                &command_registry,
+                &mention_registry,
+                std::path::Path::new("."),
+                &opts,
+            ),
+        );
+
+        assert!(
+            completion.is_active(),
+            "SlashArg dispatch must instantiate a picker"
+        );
+        assert_eq!(
+            completion.picker_title_for_test().as_deref(),
+            Some("Model"),
+            "ConfigOptionQuerySource should advertise title 'Model' for /model"
+        );
+        assert_eq!(
+            completion.picker_row_count_for_test(),
+            Some(3),
+            "all 3 advertised choices should be visible with empty query"
+        );
+        let rows = completion.row_primaries_for_test();
+        assert!(rows.iter().any(|r| r == "GPT-5 Codex"), "{rows:?}");
+        assert!(rows.iter().any(|r| r == "GPT-5"), "{rows:?}");
+        assert!(rows.iter().any(|r| r == "o4-mini"), "{rows:?}");
+    }
+
+    #[test]
+    fn slash_arg_accept_re_anchors_and_replaces_only_arg_region() {
+        use crate::commands::entry::{CommandEntry, CommandSource, Dispatch};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use spur_acp::adapter::arg_picker_hint::{ArgPickerHint, ArgPickerSpec};
+        use spur_acp::{SessionConfigId, SessionConfigOption, SessionConfigSelectOption};
+
+        let mut command_registry = CommandRegistry::new();
+        command_registry.set_advertised_commands(
+            "codex",
+            vec![CommandEntry {
+                name: "model".into(),
+                description: "Switch model".into(),
+                hint: None,
+                source: CommandSource::Advertised {
+                    handle: "codex".into(),
+                },
+                dispatch: Dispatch::SetSessionConfigOption {
+                    config_id: "model".into(),
+                },
+                arg_picker_spec: Some(ArgPickerSpec {
+                    free_text_hint: String::new(),
+                    typed_hint: Some(ArgPickerHint::ConfigOption {
+                        config_id: "model".into(),
+                    }),
+                }),
+            }],
+        );
+        let opts = vec![SessionConfigOption::select(
+            SessionConfigId::new("model".to_string()),
+            "Model".to_string(),
+            "gpt-5-codex".to_string(),
+            vec![SessionConfigSelectOption::new(
+                "gpt-5-codex".to_string(),
+                "GPT-5 Codex".to_string(),
+            )],
+        )];
+
+        let mention_registry = Rc::new(RefCell::new(MentionRegistry::new()));
+        let mut input_bar = InputBar::new();
+        let mut completion = InputCompletionPort::new();
+
+        input_bar.set_text("/model ".to_string(), 7);
+        completion.dispatch(
+            IntentEvent::Pasted,
+            &mut input_bar,
+            &env_with_options(
+                &command_registry,
+                &mention_registry,
+                std::path::Path::new("."),
+                &opts,
+            ),
+        );
+        assert!(completion.is_active());
+
+        // Accept the first row. Re-anchor MUST keep "/model " in the buffer
+        // and only replace the arg region with the chosen value.
+        let accepted = completion.handle_picker_key(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &mut input_bar,
+        );
+        assert!(matches!(
+            accepted,
+            Some(RetrievalAccept::ReplaceTriggerToken { .. })
+        ));
+        assert_eq!(
+            input_bar.text(),
+            "/model gpt-5-codex",
+            "the `/model ` prefix must survive; only the arg region is replaced"
+        );
     }
 
     #[test]
