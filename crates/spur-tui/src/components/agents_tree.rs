@@ -119,9 +119,13 @@ impl AgentsTree {
         self.scroll_offset = usize::MAX;
     }
 
+    /// Pre-order traversal of visible nodes in display order
+    /// (newest root first; within each node, newest child first).
+    /// Single source of truth for tree iteration — `render` and
+    /// `render_lineage_to_strings` both consume this.
     fn visible_order(&self, lineage: &ExecutorLineage) -> Vec<ExecutorId> {
         let mut out = Vec::new();
-        for rid in lineage.root_ids() {
+        for rid in lineage.root_ids().iter().rev() {
             self.walk(lineage, rid, &mut out);
         }
         out
@@ -131,7 +135,7 @@ impl AgentsTree {
         if let Some(n) = l.node(id) {
             out.push(id.clone());
             if !self.collapsed.contains(id) {
-                for c in &n.child_ids {
+                for c in n.child_ids.iter().rev() {
                     self.walk(l, c, out);
                 }
             }
@@ -145,7 +149,8 @@ impl AgentsTree {
             .border_style(focused_border_style(self.focused));
 
         let mut lines: Vec<Line> = Vec::new();
-        let roots = lineage.root_ids();
+        // Display order: newest root first; within each subtree, newest child first.
+        let roots: Vec<&ExecutorId> = lineage.root_ids().iter().rev().collect();
         for (i, rid) in roots.iter().enumerate() {
             let is_last = i == roots.len().saturating_sub(1);
             self.render_subtree(lineage, rid, 0, is_last, &[], &mut lines);
@@ -192,8 +197,10 @@ impl AgentsTree {
         if self.collapsed.contains(id) {
             return;
         }
-        let child_count = node.child_ids.len();
-        for (i, c) in node.child_ids.iter().enumerate() {
+        // Children walked in REVERSE so the newest child renders first.
+        let children: Vec<&ExecutorId> = node.child_ids.iter().rev().collect();
+        let child_count = children.len();
+        for (i, c) in children.iter().enumerate() {
             let child_is_last = i == child_count.saturating_sub(1);
             let mut next_ancestors = ancestor_states.to_vec();
             next_ancestors.push(is_last);
@@ -332,7 +339,8 @@ impl AgentsTree {
     }
 }
 
-/// Testing helper: render the lineage to plain strings.
+/// Testing helper: render the lineage to plain strings, in display order
+/// (newest root first; within each node, newest child first).
 pub fn render_lineage_to_strings(
     lineage: &ExecutorLineage,
     selected: Option<ExecutorId>,
@@ -340,7 +348,7 @@ pub fn render_lineage_to_strings(
     let mut tree = AgentsTree::new();
     tree.set_selected(selected);
     let mut out = Vec::new();
-    let roots = lineage.root_ids();
+    let roots: Vec<&ExecutorId> = lineage.root_ids().iter().rev().collect();
     for (i, rid) in roots.iter().enumerate() {
         let is_last = i == roots.len().saturating_sub(1);
         collect_lines(&tree, lineage, rid, 0, is_last, &[], &mut out);
@@ -397,8 +405,10 @@ fn collect_lines(
             node.phase
         ));
         if !tree.collapsed.contains(id) {
-            let child_count = node.child_ids.len();
-            for (i, c) in node.child_ids.iter().enumerate() {
+            // Children walked in REVERSE so the newest renders first.
+            let children: Vec<&ExecutorId> = node.child_ids.iter().rev().collect();
+            let child_count = children.len();
+            for (i, c) in children.iter().enumerate() {
                 let child_is_last = i == child_count.saturating_sub(1);
                 let mut next_ancestors = ancestor_states.to_vec();
                 next_ancestors.push(is_last);
