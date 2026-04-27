@@ -200,6 +200,8 @@ pub const PEER_MESSAGE_SCHEMA_V1: &str = "spur-peer-message/v1";
 /// legitimate boundary cases still reach the router for a typed reject.
 const BODY_HARD_CEILING_BYTES: usize = 64 * 1024;
 
+// TODO(tech-debt): refactor when extracting interpreter inputs into smaller types.
+#[allow(clippy::too_many_arguments)]
 pub async fn interpret_peer_message(
     router: &std::sync::Arc<crate::peer_mailbox::router::PeerMailboxRouter>,
     snapshot: &std::sync::Arc<spur_mcp::plan::scope_snapshot::PlanScopeSnapshot>,
