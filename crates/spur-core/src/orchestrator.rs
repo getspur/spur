@@ -1898,13 +1898,15 @@ impl Orchestrator {
                                     .connect_brain(brain_override.as_deref(), permission_tx.clone())
                                     .await
                                 {
-                                    Ok((transport, brain_name, init_response)) => ActiveConnection {
-                                        transport,
-                                        brain_name,
-                                        attach_guard: None,
-                                        fs_unsafe: false,
-                                        init_response,
-                                    },
+                                    Ok((transport, brain_name, init_response)) => {
+                                        ActiveConnection {
+                                            transport,
+                                            brain_name,
+                                            attach_guard: None,
+                                            fs_unsafe: false,
+                                            init_response,
+                                        }
+                                    }
                                     Err(e) => {
                                         error!(error = %e, "Failed to connect brain for list_sessions");
                                         self.emit(SpurEvent::now(
@@ -1982,13 +1984,15 @@ impl Orchestrator {
                                     .connect_brain(brain_override.as_deref(), permission_tx.clone())
                                     .await
                                 {
-                                    Ok((transport, brain_name, init_response)) => ActiveConnection {
-                                        transport,
-                                        brain_name,
-                                        attach_guard: None,
-                                        fs_unsafe: false,
-                                        init_response,
-                                    },
+                                    Ok((transport, brain_name, init_response)) => {
+                                        ActiveConnection {
+                                            transport,
+                                            brain_name,
+                                            attach_guard: None,
+                                            fs_unsafe: false,
+                                            init_response,
+                                        }
+                                    }
                                     Err(e) => {
                                         let error_message = format_error_chain(&e);
                                         error!(error = %error_message, "Failed to connect brain for resume");
@@ -4215,10 +4219,7 @@ impl Orchestrator {
     /// Returns `None` when caps haven't been populated yet (e.g.
     /// resumed-via-load_session sessions on the M8.A code path), in
     /// which case downstream UI should render disabled state.
-    pub fn spur_agent_caps(
-        &self,
-        brain: &BrainSession,
-    ) -> Option<Arc<spur_acp::SpurAgentCaps>> {
+    pub fn spur_agent_caps(&self, brain: &BrainSession) -> Option<Arc<spur_acp::SpurAgentCaps>> {
         brain.spur_agent_caps.clone()
     }
 
