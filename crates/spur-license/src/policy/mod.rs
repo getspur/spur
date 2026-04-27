@@ -11,9 +11,7 @@ pub mod flags;
 pub mod trust;
 
 pub use feature_key::FeatureKey;
-pub use flag_key::{
-    FlagKey, ENABLE_BROWSER_TOOL, ENABLE_COMPACTION_V2, ENABLE_TELEMETRY, KILL_ADVANCED_PLANNER,
-};
+pub use flag_key::FlagKey;
 pub use flags::{FlagEvaluator, FlagExplanation, FlagReason};
 
 use crate::{LicenseError, Result};
@@ -179,7 +177,18 @@ impl PolicyResolver {
     }
 
     /// Returns the canonical entitlement set for the given tier name.
-    /// Unknown tier → empty set (fail-closed at lookup).
+    ///
+    /// Unknown tier → empty set (fail-closed at lookup). Tiers may inherit the
+    /// Community baseline with the `@inherit:community` directive:
+    ///
+    /// ```json
+    /// {
+    ///   "tier_policies": {
+    ///     "community": {"features": ["brain_session"]},
+    ///     "pro": {"features": ["@inherit:community", "parallel_workers"]}
+    ///   }
+    /// }
+    /// ```
     pub fn tier_features(&self, tier: &str) -> Result<BTreeSet<String>> {
         let mut stack = Vec::new();
         self.resolve_tier_features(tier, &mut stack)
@@ -392,7 +401,7 @@ mod tests {
         let doc: PolicyDocument = serde_json::from_str(&signed.payload).unwrap();
         assert_eq!(doc.schema_version, 1);
         assert!(doc.tier_policies.contains_key("community"));
-        assert!(doc.flags.contains_key(&KILL_ADVANCED_PLANNER));
+        assert!(doc.flags.contains_key(&FlagKey::KILL_ADVANCED_PLANNER));
     }
 
     #[test]
@@ -520,6 +529,52 @@ mod tests {
         let err = resolver.tier_features("community").unwrap_err();
         assert!(matches!(err, crate::LicenseError::PolicyMalformed(_)));
         assert!(err.to_string().contains("inherit cycle"));
+    }
+
+    #[test]
+    fn tier_features_rejects_non_community_inherit_directive() {
+        let mut tiers = BTreeMap::new();
+        tiers.insert("community".into(), test_tier(&["brain_session"]));
+        tiers.insert(
+            "enterprise".into(),
+            test_tier(&["@inherit:community", "sso_saml"]),
+        );
+        tiers.insert(
+            "pro".into(),
+            test_tier(&["@inherit:enterprise", "parallel_workers"]),
+        );
+        let resolver = PolicyResolver::from_document(test_document(tiers, None));
+
+        let err = resolver.tier_features("pro").unwrap_err();
+        assert!(matches!(err, crate::LicenseError::PolicyMalformed(_)));
+        assert!(err.to_string().contains("@inherit:enterprise"));
+    }
+
+    #[test]
+    fn roadmap_features_returns_empty_set_when_roadmap_field_is_absent() {
+        let resolver = PolicyResolver::from_document(test_document(BTreeMap::new(), None));
+
+        assert!(resolver.roadmap_features("pro").is_empty());
+    }
+
+    #[test]
+    fn policy_document_without_policy_version_round_trips() {
+        let json = r#"{
+            "schema_version": 1,
+            "issued_at": "2026-04-19T00:00:00Z",
+            "tier_policies": {
+                "community": {"features": ["brain_session"]}
+            },
+            "flags": {}
+        }"#;
+        let doc: PolicyDocument = serde_json::from_str(json).unwrap();
+        assert_eq!(doc.policy_version, None);
+
+        let serialized = serde_json::to_string(&doc).unwrap();
+        let round_tripped: PolicyDocument = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(round_tripped.schema_version, 1);
+        assert_eq!(round_tripped.policy_version, None);
+        assert!(round_tripped.tier_policies.contains_key("community"));
     }
 
     #[test]

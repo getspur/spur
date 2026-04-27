@@ -3,33 +3,51 @@
 //! Flags share the signed policy document with tier entitlements, but they are
 //! a separate namespace from `FeatureKey`.
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Serialize, Serializer};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FlagKey(&'static str);
 
-pub const KILL_ADVANCED_PLANNER: FlagKey = FlagKey("kill_advanced_planner");
-pub const ENABLE_BROWSER_TOOL: FlagKey = FlagKey("enable_browser_tool");
-pub const ENABLE_COMPACTION_V2: FlagKey = FlagKey("enable_compaction_v2");
-pub const ENABLE_TELEMETRY: FlagKey = FlagKey("enable_telemetry");
+/// Const-compatible byte-slice equality (stable Rust).
+const fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
 
 impl FlagKey {
     pub const KILL_ADVANCED_PLANNER: Self = Self("kill_advanced_planner");
     pub const ENABLE_BROWSER_TOOL: Self = Self("enable_browser_tool");
     pub const ENABLE_COMPACTION_V2: Self = Self("enable_compaction_v2");
     pub const ENABLE_TELEMETRY: Self = Self("enable_telemetry");
+    pub const ENABLE_V1_1_PREVIEW: Self = Self("enable_v1_1_preview");
 
     pub const fn as_str(&self) -> &'static str {
         self.0
     }
 
-    pub fn from_known(s: &str) -> Option<Self> {
-        match s {
-            "kill_advanced_planner" => Some(Self::KILL_ADVANCED_PLANNER),
-            "enable_browser_tool" => Some(Self::ENABLE_BROWSER_TOOL),
-            "enable_compaction_v2" => Some(Self::ENABLE_COMPACTION_V2),
-            "enable_telemetry" => Some(Self::ENABLE_TELEMETRY),
-            _ => None,
+    pub const fn from_known(s: &str) -> Option<Self> {
+        let b = s.as_bytes();
+        if bytes_eq(b, b"kill_advanced_planner") {
+            Some(Self::KILL_ADVANCED_PLANNER)
+        } else if bytes_eq(b, b"enable_browser_tool") {
+            Some(Self::ENABLE_BROWSER_TOOL)
+        } else if bytes_eq(b, b"enable_compaction_v2") {
+            Some(Self::ENABLE_COMPACTION_V2)
+        } else if bytes_eq(b, b"enable_telemetry") {
+            Some(Self::ENABLE_TELEMETRY)
+        } else if bytes_eq(b, b"enable_v1_1_preview") {
+            Some(Self::ENABLE_V1_1_PREVIEW)
+        } else {
+            None
         }
     }
 }
@@ -40,17 +58,6 @@ impl Serialize for FlagKey {
         S: Serializer,
     {
         serializer.serialize_str(self.0)
-    }
-}
-
-impl<'de> Deserialize<'de> for FlagKey {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let raw = String::deserialize(deserializer)?;
-        Self::from_known(&raw)
-            .ok_or_else(|| serde::de::Error::custom(format!("unknown policy flag key {raw:?}")))
     }
 }
 
@@ -68,19 +75,23 @@ mod tests {
     fn from_known_hits_all_flags() {
         assert_eq!(
             FlagKey::from_known("kill_advanced_planner"),
-            Some(KILL_ADVANCED_PLANNER)
+            Some(FlagKey::KILL_ADVANCED_PLANNER)
         );
         assert_eq!(
             FlagKey::from_known("enable_browser_tool"),
-            Some(ENABLE_BROWSER_TOOL)
+            Some(FlagKey::ENABLE_BROWSER_TOOL)
         );
         assert_eq!(
             FlagKey::from_known("enable_compaction_v2"),
-            Some(ENABLE_COMPACTION_V2)
+            Some(FlagKey::ENABLE_COMPACTION_V2)
         );
         assert_eq!(
             FlagKey::from_known("enable_telemetry"),
-            Some(ENABLE_TELEMETRY)
+            Some(FlagKey::ENABLE_TELEMETRY)
+        );
+        assert_eq!(
+            FlagKey::from_known("enable_v1_1_preview"),
+            Some(FlagKey::ENABLE_V1_1_PREVIEW)
         );
     }
 
