@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 use std::pin::Pin;
 
-use agent_client_protocol::{
+use agent_client_protocol::schema::{
     LoadSessionRequest, McpServer, NewSessionResponse, SessionId, SessionNotification,
     SetSessionModeRequest,
 };

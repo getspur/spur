@@ -26,7 +26,7 @@ use spur_acp::{
 };
 use spur_pm::Issue;
 
-use agent_client_protocol::{
+use agent_client_protocol::schema::{
     ContentBlock, InitializeRequest, ListSessionsRequest, McpServer, McpServerHttp, PromptRequest,
     ProtocolVersion, SessionInfo, SessionUpdate, SetSessionModeRequest, TextContent,
 };
@@ -57,7 +57,7 @@ type BrainRunBootstrap = (
 type NewBrainSessionBootstrap = (
     spur_acp::config::AgentConfig,
     Option<tokio::sync::broadcast::Receiver<spur_acp::SessionNotification>>,
-    agent_client_protocol::NewSessionResponse,
+    agent_client_protocol::schema::NewSessionResponse,
 );
 type LoadedBrainSessionBootstrap = (
     spur_acp::config::AgentConfig,
@@ -103,7 +103,7 @@ mod session_attach_guard_transfer_tests {
         async fn initialize(
             &mut self,
             _request: InitializeRequest,
-        ) -> anyhow::Result<agent_client_protocol::InitializeResponse> {
+        ) -> anyhow::Result<agent_client_protocol::schema::InitializeResponse> {
             unimplemented!()
         }
 
@@ -111,7 +111,7 @@ mod session_attach_guard_transfer_tests {
             &mut self,
             _cwd: PathBuf,
             _mcp_servers: Vec<McpServer>,
-        ) -> anyhow::Result<agent_client_protocol::NewSessionResponse> {
+        ) -> anyhow::Result<agent_client_protocol::schema::NewSessionResponse> {
             unimplemented!()
         }
 
@@ -1973,8 +1973,10 @@ impl Orchestrator {
                     InteractiveInput::SetSessionMode { mode_id } => {
                         if let Some(b) = brain.as_mut() {
                             let req = SetSessionModeRequest::new(
-                                agent_client_protocol::SessionId::new(b.acp_session_id.clone()),
-                                agent_client_protocol::SessionModeId::new(
+                                agent_client_protocol::schema::SessionId::new(
+                                    b.acp_session_id.clone(),
+                                ),
+                                agent_client_protocol::schema::SessionModeId::new(
                                     std::sync::Arc::<str>::from(mode_id.as_str()),
                                 ),
                             );
@@ -5198,7 +5200,7 @@ impl FileTouchDedup {
 /// `path` / `file_path` fields first, then falls back to the first
 /// entry in `locations` if raw_input is missing the key.
 fn maybe_synthesize_file_touch(
-    notification: &agent_client_protocol::SessionNotification,
+    notification: &agent_client_protocol::schema::SessionNotification,
     brain_session_id: &spur_acp::types::SessionId,
     executor_id: &str,
     dedup: &FileTouchDedup,

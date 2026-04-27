@@ -224,7 +224,7 @@ pub enum CancelMode {
 
 /// A permission request sent from the ACP thread to the TUI.
 pub struct PermissionRequest {
-    pub args: agent_client_protocol::RequestPermissionRequest,
+    pub args: agent_client_protocol::schema::RequestPermissionRequest,
     pub reply_tx: tokio::sync::oneshot::Sender<PermissionResponse>,
 }
 

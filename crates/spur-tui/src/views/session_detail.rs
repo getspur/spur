@@ -2558,7 +2558,7 @@ mod cancel_state_tests {
     }
 
     fn tool_call_update_event(session: &spur_acp::SessionId, id: &str) -> SpurEvent {
-        let fields = agent_client_protocol::ToolCallUpdateFields::new()
+        let fields = agent_client_protocol::schema::ToolCallUpdateFields::new()
             .status(spur_acp::ToolCallStatus::InProgress);
         let tcu = spur_acp::AcpToolCallUpdate::new(spur_acp::ToolCallId::new(id), fields);
         let update = spur_acp::SessionUpdate::ToolCallUpdate(tcu);
@@ -2834,7 +2834,7 @@ mod extract_tool_call_text_tests {
 
     #[test]
     fn extract_tool_call_text_renders_diff_content() {
-        use agent_client_protocol::{Diff, ToolCallContent};
+        use agent_client_protocol::schema::{Diff, ToolCallContent};
         let diff =
             Diff::new("src/foo.rs", "fn new_name() {}\n").old_text("fn old() {}\n".to_string());
         let content = vec![ToolCallContent::Diff(diff)];
@@ -2849,7 +2849,7 @@ mod extract_tool_call_text_tests {
 
     #[test]
     fn extract_tool_call_text_renders_terminal_placeholder() {
-        use agent_client_protocol::{Terminal, TerminalId, ToolCallContent};
+        use agent_client_protocol::schema::{Terminal, TerminalId, ToolCallContent};
         let term = Terminal::new(TerminalId::new("term-abc-123"));
         let content = vec![ToolCallContent::Terminal(term)];
         let out = extract_tool_call_text(&content).expect("should return Some");
@@ -2859,7 +2859,7 @@ mod extract_tool_call_text_tests {
 
     #[test]
     fn extract_tool_call_text_truncates_long_diffs() {
-        use agent_client_protocol::{Diff, ToolCallContent};
+        use agent_client_protocol::schema::{Diff, ToolCallContent};
         let big_new = "line\n".repeat(200);
         let diff = Diff::new("big.txt", big_new).old_text(String::new());
         let content = vec![ToolCallContent::Diff(diff)];
@@ -2879,7 +2879,7 @@ mod extract_tool_call_text_tests {
 
     #[test]
     fn extract_tool_call_text_concatenates_multiple_entries() {
-        use agent_client_protocol::{Diff, Terminal, TerminalId, ToolCallContent};
+        use agent_client_protocol::schema::{Diff, Terminal, TerminalId, ToolCallContent};
         let diff_entry =
             ToolCallContent::Diff(Diff::new("a.rs", "y\n").old_text("x\n".to_string()));
         let term_entry = ToolCallContent::Terminal(Terminal::new(TerminalId::new("t-1")));

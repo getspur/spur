@@ -28,7 +28,7 @@
 
 use std::time::Duration;
 
-use agent_client_protocol::{
+use agent_client_protocol::schema::{
     ContentBlock, InitializeRequest, PromptRequest, ProtocolVersion, TextContent,
 };
 use spur_acp::connection::{native::NativeAcpConnection, AgentConnection};

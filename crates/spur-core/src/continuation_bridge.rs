@@ -103,7 +103,7 @@ impl ContinuationEventSink for crate::event_funnel::FunnelHandle {
 
 // ── Prompt builders ──────────────────────────────────────────────────────────
 
-use agent_client_protocol::{
+use agent_client_protocol::schema::{
     ContentBlock, EmbeddedResource, EmbeddedResourceResource, TextContent, TextResourceContents,
 };
 
@@ -302,7 +302,7 @@ fn block_byte_cost(b: &ContentBlock) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::{ContentBlock, TextContent};
+    use agent_client_protocol::schema::{ContentBlock, TextContent};
     use chrono::{TimeZone, Utc};
     use serde_json::{json, Value};
     use spur_acp::domain::delegation::DelegationStatus;
