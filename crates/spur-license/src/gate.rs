@@ -219,7 +219,7 @@ fn parse_quota_value(val: &serde_json::Value) -> Option<QuotaValue> {
 fn resolve_jwt_feature_key(s: &str) -> Option<FeatureKey> {
     FeatureKey::from_known(s).or_else(|| {
         let mapped = legacy_to_wave9_mapping(s)?;
-        tracing::warn!(
+        tracing::debug!(
             legacy_feature = s,
             mapped_feature = mapped.as_str(),
             "mapped legacy license feature to Wave-9 entitlement"
@@ -302,25 +302,25 @@ mod tests {
     }
 
     #[test]
-    fn pro_cached_jwt_legacy_features_map_to_wave9_keys_and_warns() {
+    fn pro_cached_jwt_legacy_features_map_to_wave9_keys_and_log() {
         use std::fmt::Write as _;
         use std::sync::{Arc, Mutex};
         use tracing::field::{Field, Visit};
         use tracing_subscriber::layer::{Context, Layer};
         use tracing_subscriber::prelude::*;
 
-        struct WarnCapture(Arc<Mutex<Vec<String>>>);
+        struct DebugCapture(Arc<Mutex<Vec<String>>>);
 
-        impl<S> Layer<S> for WarnCapture
+        impl<S> Layer<S> for DebugCapture
         where
             S: tracing::Subscriber,
         {
             fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
-                if *event.metadata().level() != tracing::Level::WARN {
+                if *event.metadata().level() != tracing::Level::DEBUG {
                     return;
                 }
 
-                let mut visitor = WarnVisitor {
+                let mut visitor = FieldVisitor {
                     fields: String::new(),
                 };
                 event.record(&mut visitor);
@@ -328,11 +328,11 @@ mod tests {
             }
         }
 
-        struct WarnVisitor {
+        struct FieldVisitor {
             fields: String,
         }
 
-        impl Visit for WarnVisitor {
+        impl Visit for FieldVisitor {
             fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
                 if !self.fields.is_empty() {
                     self.fields.push(' ');
@@ -341,8 +341,10 @@ mod tests {
             }
         }
 
-        let warnings = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::registry().with(WarnCapture(Arc::clone(&warnings)));
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::filter::LevelFilter::DEBUG)
+            .with(DebugCapture(Arc::clone(&logs)));
 
         let resolved = tracing::subscriber::with_default(subscriber, || {
             let policy = PolicyResolver::embedded();
@@ -366,14 +368,14 @@ mod tests {
         assert!(resolved.1);
         assert!(resolved.2);
 
-        let warnings = warnings.lock().unwrap();
+        let logs = logs.lock().unwrap();
         assert!(
-            warnings.iter().any(|event| {
+            logs.iter().any(|event| {
                 event.contains("mapped legacy license feature")
                     && event.contains("parallel_workers")
                     && event.contains("core_core_parallel_workers")
             }),
-            "expected legacy feature fallback warning, got {warnings:?}"
+            "expected legacy feature fallback debug log, got {logs:?}"
         );
     }
 
