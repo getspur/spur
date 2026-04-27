@@ -1,8 +1,8 @@
 //! Synthesizes CommandEntry rows from an agent's cached config_options.
 //! Vendor-neutral; calls into spur-acp's synthesize() function.
 
-use agent_client_protocol::schema::SessionConfigOption;
 use spur_acp::adapter::config_options::{synthesize, AdvertisedCommand};
+use spur_acp::SessionConfigOption;
 
 use super::entry::{CommandEntry, CommandSource, Dispatch};
 
@@ -33,9 +33,7 @@ impl AdvertisedSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::{
-        SessionConfigId, SessionConfigOption, SessionConfigSelectOption,
-    };
+    use spur_acp::{SessionConfigId, SessionConfigOption, SessionConfigSelectOption};
 
     #[test]
     fn empty_options_yield_empty_entries() {
