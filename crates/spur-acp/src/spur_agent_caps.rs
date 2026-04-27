@@ -7,6 +7,86 @@
 //! `modes` / `models` / `config_options`. Spur derives `set_*` support
 //! from session-create state because ACP 0.12 does not gate these
 //! protocol-stable methods on `AgentCapabilities` flags.
+//!
+//! Named `SpurAgentCaps` (not `SessionCapabilities`) to avoid collision
+//! with the SDK's `SessionCapabilities` struct that lives on
+//! `AgentCapabilities`.
+
+use agent_client_protocol::schema::{
+    AgentCapabilities, InitializeResponse, NewSessionResponse, SessionConfigOption,
+    SessionModeState, SessionModelState,
+};
+
+/// What the agent told spur during `initialize` + `session/new`.
+/// Captured ONCE per session at session-create and frozen for the
+/// session lifetime — ACP 0.12 has no protocol affordance for
+/// mid-session capability renegotiation.
+#[derive(Debug, Clone)]
+pub struct SpurAgentCaps {
+    /// Verbatim `AgentCapabilities` from `InitializeResponse`. Read its
+    /// fields directly; future protocol additions land here automatically.
+    pub agent: AgentCapabilities,
+    /// `NewSessionResponse.modes` (or `LoadSessionResponse.modes`). Some
+    /// state with non-empty `available_modes` ⇒ `session/set_mode` is usable.
+    pub modes: Option<SessionModeState>,
+    /// `NewSessionResponse.models`. Some(_) ⇒ `session/set_model` is usable.
+    pub models: Option<SessionModelState>,
+    /// `NewSessionResponse.config_options`. Non-empty ⇒
+    /// `session/set_config_option` is usable.
+    pub config_options: Vec<SessionConfigOption>,
+}
+
+impl SpurAgentCaps {
+    /// Build from the two relevant wire responses.
+    #[must_use]
+    pub fn new(initialize: &InitializeResponse, new_session: &NewSessionResponse) -> Self {
+        Self {
+            agent: initialize.agent_capabilities.clone(),
+            modes: new_session.modes.clone(),
+            models: new_session.models.clone(),
+            config_options: new_session.config_options.clone().unwrap_or_default(),
+        }
+    }
+
+    /// `session/set_mode` is usable when the session has modes to switch between.
+    #[must_use]
+    pub fn supports_set_mode(&self) -> bool {
+        self.modes
+            .as_ref()
+            .is_some_and(|m| !m.available_modes.is_empty())
+    }
+
+    /// `session/set_model` is usable when the session has any model state.
+    #[must_use]
+    pub fn supports_set_model(&self) -> bool {
+        self.models.is_some()
+    }
+
+    /// `session/set_config_option` is usable when the session advertises
+    /// non-empty `config_options`.
+    #[must_use]
+    pub fn supports_set_config_option(&self) -> bool {
+        !self.config_options.is_empty()
+    }
+
+    /// `session/load` is announced explicitly on `AgentCapabilities`.
+    #[must_use]
+    pub fn supports_load_session(&self) -> bool {
+        self.agent.load_session
+    }
+
+    /// Probe a vendor `_meta` extension key (e.g. `"terminal_output"`).
+    /// Returns false for missing keys, non-bool values, or absent meta.
+    #[must_use]
+    pub fn meta_capability(&self, key: &str) -> bool {
+        self.agent
+            .meta
+            .as_ref()
+            .and_then(|m| m.get(key))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    }
+}
 
 #[cfg(test)]
 mod tests {
