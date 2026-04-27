@@ -12,6 +12,8 @@ use agent_client_protocol::schema::NewSessionResponse;
 use spur_acp::adapter::config_options::synthesize;
 
 const FIXTURE: &str = include_str!("data/codex_acp_0_12_new_session_response.json");
+const SESSION_INFO_UPDATE_FIXTURE: &str =
+    include_str!("data/codex_session_info_update_sample.json");
 
 #[test]
 fn deserializes_codex_0_12_new_session_response() {
@@ -67,4 +69,35 @@ fn synthesize_produces_model_and_effort_for_codex_0_12() {
     assert_eq!(effort.choices.len(), 4); // low / medium / high / xhigh
     let effort_values: Vec<&str> = effort.choices.iter().map(|c| c.value.as_str()).collect();
     assert_eq!(effort_values, vec!["low", "medium", "high", "xhigh"]);
+}
+
+/// M8 Wave 0.3 — `SessionInfoUpdate` shape probe.
+///
+/// `scripts/probe-codex-acp.mjs --prompts` captured a 2-turn session against
+/// codex-acp 0.12.0 and recorded zero `session_info_update` notifications;
+/// only `agent_message_chunk`, `available_commands_update`, `tool_call`,
+/// `tool_call_update`, and `usage_update` were emitted. The fixture is therefore
+/// a *synthetic* SDK-shaped sample used by Wave E.1 to drive a failing test for
+/// the `apply_session_update` arm — the arm exists to remove the silent drop
+/// and to opportunistically cache fields as other agents (or future codex
+/// versions) start emitting them.
+#[test]
+fn session_info_update_fixture_deserializes_into_sdk_session_update_arm() {
+    use agent_client_protocol::schema::SessionUpdate;
+    let parsed: SessionUpdate = serde_json::from_str(SESSION_INFO_UPDATE_FIXTURE).expect(
+        "synthetic SessionInfoUpdate fixture must deserialize against SDK 0.11.x SessionUpdate",
+    );
+    match parsed {
+        SessionUpdate::SessionInfoUpdate(info) => {
+            assert!(
+                info.title.value().is_some_and(|t| !t.is_empty()),
+                "fixture must populate `title` so Wave E.1 has a non-empty cache target",
+            );
+            assert!(
+                info.updated_at.is_value(),
+                "fixture must populate `updatedAt` so Wave E.1 has a timestamp to log",
+            );
+        }
+        other => panic!("fixture must dispatch to SessionUpdate::SessionInfoUpdate; got {other:?}",),
+    }
 }
