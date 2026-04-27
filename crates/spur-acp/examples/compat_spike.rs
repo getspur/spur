@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use agent_client_protocol::{
+use agent_client_protocol::schema::{
     AuthMethodId, AuthenticateRequest, ContentBlock, InitializeRequest, ListSessionsRequest,
     LoadSessionRequest, PromptRequest, ProtocolVersion, SetSessionModeRequest, TextContent,
 };
@@ -179,24 +179,24 @@ async fn main() -> anyhow::Result<()> {
                         };
                         replayed += 1;
                         let name = match &notif.update {
-                            agent_client_protocol::SessionUpdate::UserMessageChunk(_) => {
+                            agent_client_protocol::schema::SessionUpdate::UserMessageChunk(_) => {
                                 "user_message_chunk"
                             }
-                            agent_client_protocol::SessionUpdate::AgentMessageChunk(_) => {
+                            agent_client_protocol::schema::SessionUpdate::AgentMessageChunk(_) => {
                                 "agent_message_chunk"
                             }
-                            agent_client_protocol::SessionUpdate::AgentThoughtChunk(_) => {
+                            agent_client_protocol::schema::SessionUpdate::AgentThoughtChunk(_) => {
                                 "agent_thought_chunk"
                             }
-                            agent_client_protocol::SessionUpdate::ToolCall(_) => "tool_call",
-                            agent_client_protocol::SessionUpdate::ToolCallUpdate(_) => {
+                            agent_client_protocol::schema::SessionUpdate::ToolCall(_) => "tool_call",
+                            agent_client_protocol::schema::SessionUpdate::ToolCallUpdate(_) => {
                                 "tool_call_update"
                             }
-                            agent_client_protocol::SessionUpdate::Plan(_) => "plan",
-                            agent_client_protocol::SessionUpdate::AvailableCommandsUpdate(_) => {
+                            agent_client_protocol::schema::SessionUpdate::Plan(_) => "plan",
+                            agent_client_protocol::schema::SessionUpdate::AvailableCommandsUpdate(_) => {
                                 "available_commands_update"
                             }
-                            agent_client_protocol::SessionUpdate::CurrentModeUpdate(_) => {
+                            agent_client_protocol::schema::SessionUpdate::CurrentModeUpdate(_) => {
                                 "current_mode_update"
                             }
                             _ => "other",

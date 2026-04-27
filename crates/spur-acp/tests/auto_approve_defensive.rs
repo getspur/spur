@@ -2,7 +2,7 @@
 //! even when it is not the first entry in the list. Exercised via a
 //! `#[doc(hidden)] pub` re-export from spur_acp::connection::native.
 
-use agent_client_protocol::{
+use agent_client_protocol::schema::{
     PermissionOption, PermissionOptionId, PermissionOptionKind, RequestPermissionOutcome,
     RequestPermissionRequest, SelectedPermissionOutcome, ToolCallUpdate, ToolCallUpdateFields,
 };

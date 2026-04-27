@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use agent_client_protocol::{
+use agent_client_protocol::schema::{
     InitializeRequest, InitializeResponse, LoadSessionRequest, McpServer, NewSessionResponse,
     PromptRequest, SessionId, SessionNotification, SetSessionModeRequest, SetSessionModeResponse,
 };

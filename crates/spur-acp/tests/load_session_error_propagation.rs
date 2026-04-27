@@ -3,7 +3,7 @@
 //! upstream RPC, silently swallowing `-32002 Resource not found` and
 //! causing downstream `session/prompt` calls to fire against dead ids.
 
-use agent_client_protocol::{InitializeRequest, ProtocolVersion};
+use agent_client_protocol::schema::{InitializeRequest, ProtocolVersion};
 use spur_acp::{connection::native::NativeAcpConnection, AgentConnection, LoadSessionRequest};
 
 #[tokio::test(flavor = "multi_thread")]

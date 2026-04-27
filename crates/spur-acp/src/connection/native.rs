@@ -7,35 +7,37 @@
 //   Child is owned by terminal_reader, which always reaches child.wait().await
 //   after stdout/stderr close, so these explicit kills are paired with reaping.
 // Second SIGKILL races after kill_on_drop are benign on POSIX (ESRCH/no-op).
-//! `NativeAcpConnection` — wraps the official ACP SDK's `ClientSideConnection`
-//! to talk native ACP over stdio to a real agent subprocess.
+//! `NativeAcpConnection` — drives an ACP agent subprocess over stdio using the
+//! official SDK's builder/handler API (`Client.builder()…connect_with`).
 //!
 //! # Architecture
 //!
-//! The official `agent-client-protocol` SDK uses `#[async_trait(?Send)]` for its
-//! `Client` trait and `LocalBoxFuture` for its spawn parameter.  This means the
-//! SDK's I/O loop is inherently `!Send` and cannot run on a regular Tokio task.
+//! Spur's high-level orchestrator runs on a multi-threaded Tokio runtime, so its
+//! channels and tasks are required to be `Send`. The ACP SDK builder, on the
+//! other hand, registers handler callbacks that themselves must be `Send`, but
+//! the `connect_with` "command-loop" closure is allowed to be `!Send`. We keep
+//! the dedicated-OS-thread + `LocalSet` shape from the previous SDK version —
+//! it gives us a single-threaded execution surface for the loop's bookkeeping
+//! (e.g. small `Rc<RefCell<…>>` reply slots) without needing `Send` everywhere.
 //!
-//! We solve this by running the entire SDK connection on a dedicated OS thread
-//! with its own single-threaded Tokio runtime + `LocalSet`.  The `NativeAcpConnection`
-//! communicates with that thread via `tokio::sync::mpsc` and `oneshot` channels,
-//! which *are* `Send`.
+//! Send-safe state (cwd, terminal map) is held in `Arc<Mutex<…>>` so handlers
+//! can clone it cheaply.
 //!
 //! # Lifecycle mapping
 //!
 //! | `AgentConnection` method | Behaviour |
 //! |---|---|
-//! | `initialize()` | Spawn the agent subprocess, create `ClientSideConnection`, run the ACP initialize handshake |
+//! | `initialize()` | Spawn the agent subprocess, build the SDK connection, send `initialize` |
 //! | `new_session()` | Send `NewSessionRequest` with cwd + MCP servers to the agent |
-//! | `prompt()` | Send `PromptRequest`, bridge `SessionNotification`s from `Client::session_notification()` into the returned stream |
+//! | `prompt()` | Send `PromptRequest`; `SessionNotification`s flow out via the connection-scoped broadcast |
 //! | `cancel()` | Send `CancelNotification` via the connection |
-//! | `shutdown()` | Drop the connection, kill the child process |
+//! | `shutdown()` | Close stdin (drop the SDK connection), wait for the child, then `killpg` if needed |
 //! | `health()` | Return cached `AgentHealth` |
 
-use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::io::AsyncReadExt;
@@ -47,7 +49,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use agent_client_protocol::schema::{
     AuthenticateRequest, AuthenticateResponse, CancelNotification, ContentBlock, ContentChunk,
-    CreateTerminalRequest, CreateTerminalResponse, ExtNotification, ExtRequest, ExtResponse,
+    CreateTerminalRequest, CreateTerminalResponse, ExtRequest, ExtResponse,
     InitializeRequest, InitializeResponse, KillTerminalRequest, KillTerminalResponse,
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, McpServer, NewSessionRequest,
     NewSessionResponse, PermissionOptionId, PermissionOptionKind, PromptRequest,
@@ -58,7 +60,7 @@ use agent_client_protocol::schema::{
     TerminalOutputResponse, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
     WriteTextFileRequest, WriteTextFileResponse,
 };
-use agent_client_protocol::{Agent, Client, ClientSideConnection};
+use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
 
 use crate::connection::{AgentConnection, ExtNotificationPayload};
 use crate::types::AgentHealth;
@@ -790,613 +792,752 @@ fn acp_thread_main(
             }
         };
 
-        // Wrap tokio AsyncRead/Write into futures AsyncRead/Write using compat.
+        // Wrap tokio AsyncRead/Write into futures AsyncRead/Write using compat,
+        // then hand both halves to the SDK's `ByteStreams` transport.
         let stdout_compat = tokio_util::compat::TokioAsyncReadCompatExt::compat(child_stdout);
         let stdin_compat = tokio_util::compat::TokioAsyncWriteCompatExt::compat_write(child_stdin);
+        let transport = ByteStreams::new(stdin_compat, stdout_compat);
 
-        // Session notifications are published into the connection-scoped
-        // broadcast (`session_notif_tx`). `SpurAcpClientDynamic` holds a
-        // clone; subscribers obtained via
-        // `NativeAcpConnection::subscribe_session_notifications` live for
-        // the whole connection — no per-turn channel, no grace window, no
-        // dead_tx. The broadcast sender is passed in as a parameter.
-        let spur_client = SpurAcpClientDynamic {
-            session_notif_tx: session_notif_tx.clone(),
-            cwd: std::rc::Rc::new(std::cell::RefCell::new(PathBuf::from("."))),
-            permission_tx,
-            terminals: std::rc::Rc::new(std::cell::RefCell::new(HashMap::new())),
-            ext_notification_tx: ext_notification_tx.clone(),
+        // Send-safe state shared between handler closures (which carry a
+        // `+ Send` bound in the 0.11.1 API). Builder handler closures clone
+        // these Arcs into their own captures.
+        let cwd: Arc<Mutex<PathBuf>> = Arc::new(Mutex::new(PathBuf::from(".")));
+        let terminals: Arc<Mutex<HashMap<String, TerminalState>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        // !Send slots used to ferry oneshot replies between the connect_with
+        // closure (which is allowed to be !Send) and the post-connection
+        // cleanup phase. `init_reply_slot` lets us surface a fatal error to
+        // the caller even if `connect_with` ends before initialize completes;
+        // `shutdown_reply_slot` lets us ack `AcpCommand::Shutdown` only AFTER
+        // the child has been reaped.
+        let init_reply_slot: std::rc::Rc<
+            std::cell::RefCell<Option<oneshot::Sender<anyhow::Result<InitializeResponse>>>>,
+        > = std::rc::Rc::new(std::cell::RefCell::new(Some(init_reply)));
+        let shutdown_reply_slot: std::rc::Rc<
+            std::cell::RefCell<Option<oneshot::Sender<anyhow::Result<()>>>>,
+        > = std::rc::Rc::new(std::cell::RefCell::new(None));
+
+        let connect_result: Result<(), agent_client_protocol::Error> = {
+            // Per-handler clones. Each handler closure is `async move`, so
+            // it owns its captures; we hand it a fresh clone of every Arc /
+            // sender it needs.
+            let perm_tx_h = permission_tx.clone();
+            let session_notif_tx_h = session_notif_tx.clone();
+            let ext_notification_tx_h = ext_notification_tx.clone();
+
+            let cwd_read = cwd.clone();
+            let cwd_write = cwd.clone();
+            let cwd_create_term = cwd.clone();
+
+            let terminals_create = terminals.clone();
+            let terminals_output = terminals.clone();
+            let terminals_wait = terminals.clone();
+            let terminals_kill = terminals.clone();
+            let terminals_release = terminals.clone();
+
+            // Captures for the connect_with main_fn (the command loop).
+            let cwd_loop = cwd.clone();
+            let agent_name_loop = agent_name.clone();
+            let init_reply_slot_loop = init_reply_slot.clone();
+            let shutdown_reply_slot_loop = shutdown_reply_slot.clone();
+
+            Client
+                .builder()
+                .name(format!("spur-acp-{}", agent_name))
+                // ── session/request_permission ────────────────────────────
+                .on_receive_request(
+                    async move |req: RequestPermissionRequest, responder, _cx| {
+                        let outcome: agent_client_protocol::Result<RequestPermissionResponse> =
+                            handle_request_permission(req, perm_tx_h.clone()).await;
+                        responder.respond_with_result(outcome)
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                // ── fs/read_text_file ─────────────────────────────────────
+                .on_receive_request(
+                    async move |req: ReadTextFileRequest, responder, _cx| {
+                        let cwd_now = cwd_read.lock().unwrap().clone();
+                        let path = if req.path.is_absolute() {
+                            req.path.clone()
+                        } else {
+                            cwd_now.join(&req.path)
+                        };
+                        tracing::debug!(
+                            path = %path.display(),
+                            "NativeAcpConnection: reading text file"
+                        );
+                        let outcome = std::fs::read_to_string(&path)
+                            .map_err(|e| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(format!("Failed to read {}: {e}", path.display()))
+                            })
+                            .map(|content| {
+                                let trimmed = match (req.line, req.limit) {
+                                    (Some(s), Some(l)) => content
+                                        .lines()
+                                        .skip((s.saturating_sub(1)) as usize)
+                                        .take(l as usize)
+                                        .collect::<Vec<_>>()
+                                        .join("\n"),
+                                    (Some(s), None) => content
+                                        .lines()
+                                        .skip((s.saturating_sub(1)) as usize)
+                                        .collect::<Vec<_>>()
+                                        .join("\n"),
+                                    (None, Some(l)) => content
+                                        .lines()
+                                        .take(l as usize)
+                                        .collect::<Vec<_>>()
+                                        .join("\n"),
+                                    (None, None) => content,
+                                };
+                                ReadTextFileResponse::new(trimmed)
+                            });
+                        responder.respond_with_result(outcome)
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                // ── fs/write_text_file ────────────────────────────────────
+                .on_receive_request(
+                    async move |req: WriteTextFileRequest, responder, _cx| {
+                        let cwd_now = cwd_write.lock().unwrap().clone();
+                        let path = if req.path.is_absolute() {
+                            req.path.clone()
+                        } else {
+                            cwd_now.join(&req.path)
+                        };
+                        tracing::debug!(
+                            path = %path.display(),
+                            content_len = req.content.len(),
+                            "NativeAcpConnection: writing text file"
+                        );
+                        let outcome: agent_client_protocol::Result<WriteTextFileResponse> = (|| {
+                            if let Some(parent) = path.parent() {
+                                std::fs::create_dir_all(parent).map_err(|e| {
+                                    agent_client_protocol::Error::internal_error().data(format!(
+                                        "Failed to create directories for {}: {e}",
+                                        path.display()
+                                    ))
+                                })?;
+                            }
+                            std::fs::write(&path, &req.content).map_err(|e| {
+                                agent_client_protocol::Error::internal_error()
+                                    .data(format!("Failed to write {}: {e}", path.display()))
+                            })?;
+                            Ok(WriteTextFileResponse::new())
+                        })();
+                        responder.respond_with_result(outcome)
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                // ── terminal/create ───────────────────────────────────────
+                .on_receive_request(
+                    async move |req: CreateTerminalRequest, responder, _cx| {
+                        let cwd_now = req
+                            .cwd
+                            .clone()
+                            .unwrap_or_else(|| cwd_create_term.lock().unwrap().clone());
+                        let byte_limit = req.output_byte_limit.or(Some(10 * 1024 * 1024));
+                        let mut cmd = tokio::process::Command::new(&req.command);
+                        cmd.args(&req.args)
+                            .current_dir(&cwd_now)
+                            .stdout(std::process::Stdio::piped())
+                            .stderr(std::process::Stdio::piped())
+                            .kill_on_drop(true);
+                        for env_var in &req.env {
+                            cmd.env(&env_var.name, &env_var.value);
+                        }
+                        let outcome: agent_client_protocol::Result<CreateTerminalResponse> =
+                            (|| -> agent_client_protocol::Result<CreateTerminalResponse> {
+                                let mut child = cmd.spawn().map_err(|e| {
+                                    agent_client_protocol::Error::internal_error().data(
+                                        format!("Failed to spawn '{}': {e}", req.command),
+                                    )
+                                })?;
+                                let pid = child.id().ok_or_else(|| {
+                                    agent_client_protocol::Error::internal_error()
+                                        .data("Failed to get process ID")
+                                })?;
+                                let child_stdout = child.stdout.take().ok_or_else(|| {
+                                    agent_client_protocol::Error::internal_error()
+                                        .data("Failed to capture stdout")
+                                })?;
+                                let child_stderr = child.stderr.take().ok_or_else(|| {
+                                    agent_client_protocol::Error::internal_error()
+                                        .data("Failed to capture stderr")
+                                })?;
+
+                                let output = Arc::new(Mutex::new(String::new()));
+                                let truncated = Arc::new(AtomicBool::new(false));
+                                let (exit_tx, exit_rx) = tokio::sync::watch::channel(None);
+
+                                // Reader runs on the LocalSet task — its captured
+                                // state is all `Send` so it would also satisfy
+                                // `tokio::spawn`, but we don't have a multi-threaded
+                                // runtime here.
+                                tokio::task::spawn_local(terminal_reader(
+                                    child_stdout,
+                                    child_stderr,
+                                    child,
+                                    output.clone(),
+                                    truncated.clone(),
+                                    byte_limit,
+                                    exit_tx,
+                                ));
+
+                                let terminal_id =
+                                    TerminalId::new(uuid::Uuid::new_v4().to_string());
+                                let id_string = terminal_id.to_string();
+                                tracing::debug!(
+                                    terminal = %id_string,
+                                    command = %req.command,
+                                    pid = pid,
+                                    "Terminal created"
+                                );
+                                terminals_create.lock().unwrap().insert(
+                                    id_string,
+                                    TerminalState {
+                                        output,
+                                        truncated,
+                                        exit_rx,
+                                        pid,
+                                    },
+                                );
+                                Ok(CreateTerminalResponse::new(terminal_id))
+                            })();
+                        responder.respond_with_result(outcome)
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                // ── terminal/output ───────────────────────────────────────
+                .on_receive_request(
+                    async move |req: TerminalOutputRequest, responder, _cx| {
+                        let key = req.terminal_id.to_string();
+                        let outcome: agent_client_protocol::Result<TerminalOutputResponse> = {
+                            let map = terminals_output.lock().unwrap();
+                            match map.get(&key) {
+                                Some(terminal) => {
+                                    let output = terminal.output.lock().unwrap().clone();
+                                    let truncated = terminal.truncated.load(Ordering::Relaxed);
+                                    let exit_status = terminal.exit_rx.borrow().clone();
+                                    Ok(TerminalOutputResponse::new(output, truncated)
+                                        .exit_status(exit_status))
+                                }
+                                None => Err(agent_client_protocol::Error::invalid_params()
+                                    .data(format!("Terminal '{}' not found", key))),
+                            }
+                        };
+                        responder.respond_with_result(outcome)
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                // ── terminal/wait_for_exit ────────────────────────────────
+                .on_receive_request(
+                    async move |req: WaitForTerminalExitRequest, responder, _cx| {
+                        let key = req.terminal_id.to_string();
+                        let mut exit_rx = {
+                            let map = terminals_wait.lock().unwrap();
+                            match map.get(&key) {
+                                Some(terminal) => terminal.exit_rx.clone(),
+                                None => {
+                                    return responder.respond_with_result(Err(
+                                        agent_client_protocol::Error::invalid_params().data(
+                                            format!("Terminal '{}' not found", key),
+                                        ),
+                                    ));
+                                }
+                            }
+                        };
+                        if let Some(status) = exit_rx.borrow().clone() {
+                            return responder
+                                .respond(WaitForTerminalExitResponse::new(status));
+                        }
+                        loop {
+                            match exit_rx.changed().await {
+                                Ok(()) => {
+                                    if let Some(status) = exit_rx.borrow().clone() {
+                                        return responder.respond(
+                                            WaitForTerminalExitResponse::new(status),
+                                        );
+                                    }
+                                }
+                                Err(_) => {
+                                    let status = exit_rx
+                                        .borrow()
+                                        .clone()
+                                        .unwrap_or_else(TerminalExitStatus::new);
+                                    return responder
+                                        .respond(WaitForTerminalExitResponse::new(status));
+                                }
+                            }
+                        }
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                // ── terminal/kill ─────────────────────────────────────────
+                .on_receive_request(
+                    async move |req: KillTerminalRequest, responder, _cx| {
+                        let key = req.terminal_id.to_string();
+                        let result: Option<(u32, bool)> = {
+                            let map = terminals_kill.lock().unwrap();
+                            map.get(&key)
+                                .map(|t| (t.pid, t.exit_rx.borrow().is_none()))
+                        };
+                        match result {
+                            None => responder.respond_with_result(Err(
+                                agent_client_protocol::Error::invalid_params()
+                                    .data(format!("Terminal '{}' not found", key)),
+                            )),
+                            Some((pid, is_running)) => {
+                                if is_running {
+                                    tracing::debug!(
+                                        terminal = %key,
+                                        pid = pid,
+                                        "Killing terminal"
+                                    );
+                                    let _ = std::process::Command::new("kill")
+                                        .arg("-9")
+                                        .arg(pid.to_string())
+                                        .status();
+                                }
+                                responder.respond(KillTerminalResponse::new())
+                            }
+                        }
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                // ── terminal/release ──────────────────────────────────────
+                .on_receive_request(
+                    async move |req: ReleaseTerminalRequest, responder, _cx| {
+                        let key = req.terminal_id.to_string();
+                        let pid_to_kill: Option<u32> = {
+                            let map = terminals_release.lock().unwrap();
+                            map.get(&key).and_then(|t| {
+                                if t.exit_rx.borrow().is_none() {
+                                    Some(t.pid)
+                                } else {
+                                    None
+                                }
+                            })
+                        };
+                        if let Some(pid) = pid_to_kill {
+                            tracing::debug!(
+                                terminal = %key,
+                                pid = pid,
+                                "Killing terminal on release"
+                            );
+                            let _ = std::process::Command::new("kill")
+                                .arg("-9")
+                                .arg(pid.to_string())
+                                .status();
+                        }
+                        terminals_release.lock().unwrap().remove(&key);
+                        responder.respond(ReleaseTerminalResponse::new())
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                // ── notifications: session/update + extension ────────────
+                .on_receive_notification(
+                    async move |notif: agent_client_protocol::AgentNotification, _cx| {
+                        match notif {
+                            agent_client_protocol::AgentNotification::SessionNotification(args) => {
+                                let variant = session_update_variant_name(&args.update);
+                                let text_len = match &args.update {
+                                    SessionUpdate::AgentMessageChunk(c)
+                                    | SessionUpdate::AgentThoughtChunk(c)
+                                    | SessionUpdate::UserMessageChunk(c) => {
+                                        content_chunk_text_len(c)
+                                    }
+                                    _ => 0,
+                                };
+                                let session = args.session_id.to_string();
+                                // `broadcast::Sender::send` returns `Err(SendError)` only when every
+                                // receiver has been dropped. The orchestrator pre-subscribes before
+                                // calling `new_session` / `load_session` (see `create_brain_session`
+                                // and `load_brain_session` in `spur-core/src/orchestrator.rs`) and
+                                // holds the receiver for the lifetime of the BrainSession — so
+                                // `Err` here indicates the connection is tearing down and we can
+                                // safely ignore it. If this starts producing `err` in logs under
+                                // normal operation, the pre-subscribe ordering has regressed.
+                                let send_result = session_notif_tx_h.send(args);
+                                let send_result_str =
+                                    if send_result.is_ok() { "ok" } else { "err" };
+                                tracing::debug!(
+                                    streaming_probe = true,
+                                    site = "A_session_notification",
+                                    variant = variant,
+                                    text_len = text_len,
+                                    session = %session,
+                                    send_result = send_result_str,
+                                    "ACP session_notification (broadcast)"
+                                );
+                            }
+                            agent_client_protocol::AgentNotification::ExtNotification(args) => {
+                                // The SDK already stripped the leading `_` from
+                                // the wire method, so reattach it when reporting
+                                // upward so consumers see the full
+                                // `_foo.dev/...` form.
+                                let method = format!("_{}", args.method);
+                                let params: serde_json::Value =
+                                    serde_json::from_str(args.params.get())
+                                        .unwrap_or(serde_json::Value::Null);
+                                tracing::debug!(
+                                    method = %method,
+                                    "NativeAcpConnection: ext_notification"
+                                );
+                                let _ = ext_notification_tx_h.send(ExtNotificationPayload {
+                                    method,
+                                    params,
+                                });
+                            }
+                            _ => {
+                                // `AgentNotification` is `#[non_exhaustive]`;
+                                // future variants under unstable features land
+                                // here. Drop them silently.
+                            }
+                        }
+                        Ok(())
+                    },
+                    agent_client_protocol::on_receive_notification!(),
+                )
+                // ── connect_with: drives the command loop ────────────────
+                .connect_with(transport, async move |cx: ConnectionTo<Agent>| -> agent_client_protocol::Result<()> {
+                    // 1. Run the ACP initialize handshake and forward the
+                    //    response to the caller blocked in `initialize()`.
+                    let init_outcome = cx.send_request(init_request).block_task().await;
+                    match init_outcome {
+                        Ok(response) => {
+                            if let Some(reply) =
+                                init_reply_slot_loop.borrow_mut().take()
+                            {
+                                let _ = reply.send(Ok(response));
+                            }
+                        }
+                        Err(e) => {
+                            if let Some(reply) =
+                                init_reply_slot_loop.borrow_mut().take()
+                            {
+                                let _ = reply.send(Err(anyhow::anyhow!(
+                                    "NativeAcpConnection '{}': initialize failed: {e}",
+                                    agent_name_loop
+                                )));
+                            }
+                            return Err(e);
+                        }
+                    }
+
+                    // 2. Process commands sequentially. Each `block_task().await`
+                    //    suspends here while handler callbacks continue to run
+                    //    on the dispatch loop.
+                    while let Some(cmd) = cmd_rx.recv().await {
+                        match cmd {
+                            AcpCommand::Initialize { reply, .. } => {
+                                let _ = reply.send(Err(anyhow::anyhow!(
+                                    "NativeAcpConnection '{}': already initialized",
+                                    agent_name_loop
+                                )));
+                            }
+                            AcpCommand::NewSession { request, reply } => {
+                                *cwd_loop.lock().unwrap() = request.cwd.clone();
+                                let result = cx.send_request(request).block_task().await;
+                                let _ = reply.send(result.map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "NativeAcpConnection '{}': new_session failed: {e}",
+                                        agent_name_loop
+                                    )
+                                }));
+                            }
+                            AcpCommand::Prompt { request, reply } => {
+                                // Notifications flow out-of-band via the
+                                // `session_notif_tx` broadcast. The `Stream`
+                                // returned by `prompt()` is a live but-empty
+                                // `UnboundedReceiver`; closing it (drop of
+                                // `tx_empty`) signals turn completion to the
+                                // caller.
+                                let (tx_empty, rx_empty) =
+                                    mpsc::unbounded_channel::<SessionNotification>();
+                                let _ = reply.send(Ok(rx_empty));
+                                let session_id_for_probe = request.session_id.clone();
+                                let prompt_result =
+                                    cx.send_request(request).block_task().await;
+                                match &prompt_result {
+                                    Ok(_) => tracing::debug!(
+                                        agent = %agent_name_loop,
+                                        session = %session_id_for_probe,
+                                        "NativeAcpConnection: prompt completed"
+                                    ),
+                                    Err(e) => tracing::warn!(
+                                        agent = %agent_name_loop,
+                                        session = %session_id_for_probe,
+                                        "NativeAcpConnection: prompt failed: {e}"
+                                    ),
+                                }
+                                drop(tx_empty);
+                            }
+                            AcpCommand::Cancel { session_id, reply } => {
+                                let cancel = CancelNotification::new(session_id);
+                                let result = cx.send_notification(cancel);
+                                let _ = reply.send(result.map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "NativeAcpConnection '{}': cancel failed: {e}",
+                                        agent_name_loop
+                                    )
+                                }));
+                            }
+                            AcpCommand::Shutdown { reply } => {
+                                tracing::debug!(
+                                    agent = %agent_name_loop,
+                                    "NativeAcpConnection: ACP thread received shutdown"
+                                );
+                                // Stash the reply for the post-connection
+                                // cleanup phase. Returning here closes the
+                                // SDK's writer half — which is the protocol's
+                                // graceful-exit contract: the agent sees EOF
+                                // on stdin and exits cleanly.
+                                *shutdown_reply_slot_loop.borrow_mut() = Some(reply);
+                                return Ok(());
+                            }
+                            AcpCommand::LoadSession { request, reply } => {
+                                *cwd_loop.lock().unwrap() = request.cwd.clone();
+                                let (tx_empty, rx_empty) =
+                                    mpsc::unbounded_channel::<SessionNotification>();
+                                let session_id_for_probe = request.session_id.clone();
+                                match cx.send_request(request).block_task().await {
+                                    Ok(_) => {
+                                        tracing::debug!(
+                                            agent = %agent_name_loop,
+                                            session = %session_id_for_probe,
+                                            "NativeAcpConnection: load_session completed"
+                                        );
+                                        let _ = reply.send(Ok(rx_empty));
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            agent = %agent_name_loop,
+                                            session = %session_id_for_probe,
+                                            "NativeAcpConnection: load_session failed: {e}"
+                                        );
+                                        let _ = reply.send(Err(anyhow::anyhow!(
+                                            "NativeAcpConnection '{}': load_session failed: {e}",
+                                            agent_name_loop
+                                        )));
+                                    }
+                                }
+                                drop(tx_empty);
+                            }
+                            AcpCommand::ListSessions { request, reply } => {
+                                let result = cx.send_request(request).block_task().await;
+                                let _ = reply.send(result.map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "NativeAcpConnection '{}': list_sessions failed: {e}",
+                                        agent_name_loop
+                                    )
+                                }));
+                            }
+                            AcpCommand::SetSessionMode { request, reply } => {
+                                let result = cx.send_request(request).block_task().await;
+                                let _ = reply.send(result.map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "NativeAcpConnection '{}': set_session_mode failed: {e}",
+                                        agent_name_loop
+                                    )
+                                }));
+                            }
+                            AcpCommand::Authenticate { request, reply } => {
+                                let result = cx.send_request(request).block_task().await;
+                                let _ = reply.send(result.map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "NativeAcpConnection '{}': authenticate failed: {e}",
+                                        agent_name_loop
+                                    )
+                                }));
+                            }
+                            AcpCommand::ExtMethod { request, reply } => {
+                                // The 0.11.1 SDK exposes extension calls only
+                                // via the wrapping `ClientRequest` enum (whose
+                                // `Response` is `serde_json::Value`). We
+                                // re-wrap the response payload back into an
+                                // `ExtResponse` so the caller-side translation
+                                // in `call_ext` is unchanged.
+                                let client_req =
+                                    agent_client_protocol::ClientRequest::ExtMethodRequest(
+                                        request,
+                                    );
+                                let result =
+                                    cx.send_request(client_req).block_task().await;
+                                let mapped: anyhow::Result<ExtResponse> = match result {
+                                    Ok(json) => match serde_json::value::to_raw_value(&json)
+                                    {
+                                        Ok(raw) => Ok(ExtResponse::new(std::sync::Arc::from(
+                                            raw,
+                                        ))),
+                                        Err(e) => Err(anyhow::anyhow!(
+                                            "NativeAcpConnection '{}': ext_method response not serializable: {e}",
+                                            agent_name_loop
+                                        )),
+                                    },
+                                    Err(e) => Err(anyhow::anyhow!(
+                                        "NativeAcpConnection '{}': ext_method failed: {e}",
+                                        agent_name_loop
+                                    )),
+                                };
+                                let _ = reply.send(mapped);
+                            }
+                        }
+                    }
+                    Ok(())
+                })
+                .await
         };
-        let cwd_ref = spur_client.cwd.clone();
-        let terminals_ref = spur_client.terminals.clone();
 
-        // Create the ClientSideConnection.
-        let (connection, io_future) = ClientSideConnection::new(
-            spur_client,
-            stdin_compat,
-            stdout_compat,
-            |fut| {
-                tokio::task::spawn_local(fut);
-            },
-        );
+        if let Err(e) = &connect_result {
+            tracing::warn!(
+                agent = %agent_name,
+                "NativeAcpConnection: connection ended with error: {e}"
+            );
+        }
 
-        // Spawn the I/O future on the local set.
-        let agent_name_io = agent_name.clone();
-        tokio::task::spawn_local(async move {
-            if let Err(e) = io_future.await {
-                tracing::warn!(
-                    agent = %agent_name_io,
-                    "NativeAcpConnection: I/O loop ended with error: {e}"
-                );
-            }
-        });
-
-        // Send the initialize request.
-        let init_result = connection.initialize(init_request).await;
-        match init_result {
-            Ok(response) => {
-                let _ = init_reply.send(Ok(response));
-            }
-            Err(e) => {
-                let _ = init_reply.send(Err(anyhow::anyhow!(
-                    "NativeAcpConnection '{}': initialize failed: {e}",
+        // If init never produced a response (transport died during the
+        // handshake), make sure the caller blocked in `initialize()` sees an
+        // error instead of waiting forever on the oneshot.
+        if let Some(reply) = init_reply_slot.borrow_mut().take() {
+            let err = match &connect_result {
+                Err(e) => anyhow::anyhow!(
+                    "NativeAcpConnection '{}': connection ended before initialize: {e}",
                     agent_name
-                )));
-                return;
+                ),
+                Ok(()) => anyhow::anyhow!(
+                    "NativeAcpConnection '{}': connection closed before initialize",
+                    agent_name
+                ),
+            };
+            let _ = reply.send(Err(err));
+        }
+
+        // Kill any still-running terminals — both the explicit-shutdown path
+        // and the unexpected-disconnect path share this code.
+        for (id, terminal) in terminals.lock().unwrap().iter() {
+            if terminal.exit_rx.borrow().is_none() {
+                tracing::debug!(terminal = %id, "Killing terminal on shutdown");
+                let _ = std::process::Command::new("kill")
+                    .arg("-9")
+                    .arg(terminal.pid.to_string())
+                    .status();
             }
         }
 
-        // Now process commands in a loop.
-        while let Some(cmd) = cmd_rx.recv().await {
-            match cmd {
-                AcpCommand::Initialize { reply, .. } => {
-                    let _ = reply.send(Err(anyhow::anyhow!(
-                        "NativeAcpConnection '{}': already initialized",
-                        agent_name
-                    )));
-                }
-                AcpCommand::NewSession { request, reply } => {
-                    // Update the cwd for filesystem operations.
-                    *cwd_ref.borrow_mut() = request.cwd.clone();
-                    let result = connection.new_session(request).await;
-                    let _ = reply.send(result.map_err(|e| {
-                        anyhow::anyhow!("NativeAcpConnection '{}': new_session failed: {e}", agent_name)
-                    }));
-                }
-                AcpCommand::Prompt { request, reply } => {
-                    // Notifications flow out-of-band via the
-                    // `session_notif_tx` broadcast. The `Stream` returned
-                    // here is a live but-empty `UnboundedReceiver` so the
-                    // trait contract still compiles; it closes when we
-                    // drop `tx_empty` after `prompt()` returns, which
-                    // signals turn completion to the caller.
-                    let (tx_empty, rx_empty) =
-                        mpsc::unbounded_channel::<SessionNotification>();
-                    let _ = reply.send(Ok(rx_empty));
-
-                    let agent_name_prompt = agent_name.clone();
-                    let session_id_for_probe = request.session_id.clone();
-                    let prompt_result = connection.prompt(request).await;
-                    match &prompt_result {
-                        Ok(_) => tracing::debug!(
-                            agent = %agent_name_prompt,
-                            session = %session_id_for_probe,
-                            "NativeAcpConnection: prompt completed"
-                        ),
-                        Err(e) => tracing::warn!(
-                            agent = %agent_name_prompt,
-                            session = %session_id_for_probe,
-                            "NativeAcpConnection: prompt failed: {e}"
-                        ),
-                    }
-                    // Drop the empty sender so the caller's stream terminates,
-                    // signalling turn completion.
-                    drop(tx_empty);
-                }
-                AcpCommand::Cancel { session_id, reply } => {
-                    let cancel = CancelNotification::new(session_id);
-                    let result = connection.cancel(cancel).await;
-                    let _ = reply.send(result.map_err(|e| {
-                        anyhow::anyhow!("NativeAcpConnection '{}': cancel failed: {e}", agent_name)
-                    }));
-                }
-                AcpCommand::Shutdown { reply } => {
-                    tracing::debug!(agent = %agent_name, "NativeAcpConnection: ACP thread received shutdown");
-                    // Kill all spawned terminals.
-                    for (id, terminal) in terminals_ref.borrow().iter() {
-                        if terminal.exit_rx.borrow().is_none() {
-                            tracing::debug!(terminal = %id, "Killing terminal on shutdown");
-                            let _ = std::process::Command::new("kill")
-                                .arg("-9")
-                                .arg(terminal.pid.to_string())
-                                .status();
-                        }
-                    }
-
-                    // ACP has no explicit shutdown RPC; the protocol's graceful
-                    // exit contract is "close stdin → agent sees EOF → agent
-                    // exits cleanly". Dropping `connection` closes the stdin
-                    // writer (owned by the SDK's `ClientSideConnection`).
-                    drop(connection);
-
-                    // Give the agent a short window to exit on its own. This
-                    // also lets its descendants (e.g. `node` under
-                    // `claude-agent-acp`) shut down gracefully and flush.
-                    let graceful = tokio::time::timeout(
-                        std::time::Duration::from_secs(2),
-                        child.wait(),
-                    )
-                    .await;
-
-                    let pgid = child_pgid.lock().ok().and_then(|g| *g);
-
-                    match graceful {
-                        Ok(Ok(status)) => {
-                            tracing::debug!(
-                                agent = %agent_name,
-                                ?status,
-                                "NativeAcpConnection: agent exited gracefully after stdin close"
-                            );
-                            // Belt-and-suspenders: the agent may have orphaned
-                            // descendants that don't watch stdin. Send SIGTERM
-                            // to the group; ESRCH on an already-empty group is
-                            // silenced by `killpg`.
-                            if let Some(pgid) = pgid {
-                                killpg(pgid, "TERM");
-                            }
-                        }
-                        _ => {
-                            tracing::warn!(
-                                agent = %agent_name,
-                                "NativeAcpConnection: agent did not exit within 2s of stdin close; escalating"
-                            );
-                            if let Some(pgid) = pgid {
-                                killpg(pgid, "TERM");
-                                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                                killpg(pgid, "KILL");
-                            }
-                            let _ = child.kill().await;
-                        }
-                    }
-
-                    // Mark pgid consumed so `Drop` won't re-kill a reaped or
-                    // recycled group id.
-                    if let Ok(mut guard) = child_pgid.lock() {
-                        *guard = None;
-                    }
-
-                    let _ = reply.send(Ok(()));
-                    break;
-                }
-                AcpCommand::LoadSession { request, reply } => {
-                    *cwd_ref.borrow_mut() = request.cwd.clone();
-
-                    let (tx_empty, rx_empty) =
-                        mpsc::unbounded_channel::<SessionNotification>();
-                    let agent_name_load = agent_name.clone();
-                    let session_id_for_probe = request.session_id.clone();
-                    let load_result = connection.load_session(request).await;
-                    match load_result {
-                        Ok(_) => {
-                            tracing::debug!(
-                                agent = %agent_name_load,
-                                session = %session_id_for_probe,
-                                "NativeAcpConnection: load_session completed"
-                            );
-                            let _ = reply.send(Ok(rx_empty));
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                agent = %agent_name_load,
-                                session = %session_id_for_probe,
-                                "NativeAcpConnection: load_session failed: {e}"
-                            );
-                            let _ = reply.send(Err(anyhow::anyhow!(
-                                "NativeAcpConnection '{}': load_session failed: {e}",
-                                agent_name_load
-                            )));
-                        }
-                    }
-                    drop(tx_empty);
-                }
-                AcpCommand::ListSessions { request, reply } => {
-                    let result = connection.list_sessions(request).await;
-                    let _ = reply.send(result.map_err(|e| {
-                        anyhow::anyhow!("NativeAcpConnection '{}': list_sessions failed: {e}", agent_name)
-                    }));
-                }
-                AcpCommand::SetSessionMode { request, reply } => {
-                    let result = connection
-                        .set_session_mode(request)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("NativeAcpConnection '{}': set_session_mode failed: {e}", agent_name));
-                    let _ = reply.send(result);
-                }
-                AcpCommand::Authenticate { request, reply } => {
-                    let result = connection
-                        .authenticate(request)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("NativeAcpConnection '{}': authenticate failed: {e}", agent_name));
-                    let _ = reply.send(result);
-                }
-                AcpCommand::ExtMethod { request, reply } => {
-                    let result = connection
-                        .ext_method(request)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("NativeAcpConnection '{}': ext_method failed: {e}", agent_name));
-                    let _ = reply.send(result);
+        // Give the agent a short window to exit on its own — at this point
+        // its stdin has already closed (the SDK writer was dropped when the
+        // connection torn down). Then escalate via the process group, which
+        // catches grandchildren (e.g. the `node` tree under
+        // `claude-agent-acp`) that don't watch stdin themselves.
+        let graceful = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            child.wait(),
+        )
+        .await;
+        let pgid = child_pgid.lock().ok().and_then(|g| *g);
+        match graceful {
+            Ok(Ok(status)) => {
+                tracing::debug!(
+                    agent = %agent_name,
+                    ?status,
+                    "NativeAcpConnection: agent exited gracefully after stdin close"
+                );
+                // Belt-and-suspenders: ESRCH on an already-empty group is
+                // silenced by `killpg`.
+                if let Some(pgid) = pgid {
+                    killpg(pgid, "TERM");
                 }
             }
+            _ => {
+                tracing::warn!(
+                    agent = %agent_name,
+                    "NativeAcpConnection: agent did not exit within 2s of stdin close; escalating"
+                );
+                if let Some(pgid) = pgid {
+                    killpg(pgid, "TERM");
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    killpg(pgid, "KILL");
+                }
+                let _ = child.kill().await;
+            }
+        }
+        // Mark pgid consumed so `Drop` won't re-kill a reaped or recycled
+        // group id.
+        if let Ok(mut guard) = child_pgid.lock() {
+            *guard = None;
+        }
+
+        // Send shutdown ack only after the child has been reaped — so the
+        // caller sees `Ok(())` truly mean "everything is gone".
+        if let Some(reply) = shutdown_reply_slot.borrow_mut().take() {
+            let _ = reply.send(Ok(()));
         }
 
         tracing::debug!(agent = %agent_name, "NativeAcpConnection: ACP thread exiting");
     });
 }
 
-// ─── SpurAcpClientDynamic ───────────────────────────────────────────────────
+/// Permission request handler factored out so the handler closure stays
+/// small. Keeps the original 60s timeout + auto-fallback behaviour.
+async fn handle_request_permission(
+    args: RequestPermissionRequest,
+    permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
+) -> agent_client_protocol::Result<RequestPermissionResponse> {
+    let Some(perm_tx) = permission_tx else {
+        return auto_approve(&args);
+    };
 
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let request = crate::types::PermissionRequest {
+        args: args.clone(),
+        reply_tx,
+    };
+
+    if perm_tx.send(request).is_err() {
+        tracing::warn!("NativeAcpConnection: permission channel closed, auto-approving");
+        return auto_approve(&args);
+    }
+
+    tracing::debug!(
+        session = %args.session_id,
+        "NativeAcpConnection: awaiting interactive permission response"
+    );
+
+    match tokio::time::timeout(std::time::Duration::from_secs(60), reply_rx).await {
+        Ok(Ok(response)) => {
+            let option_id = PermissionOptionId::new(response.option_id);
+            tracing::debug!(option = %option_id, "NativeAcpConnection: permission responded");
+            Ok(RequestPermissionResponse::new(
+                RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)),
+            ))
+        }
+        Ok(Err(_)) => {
+            tracing::debug!("NativeAcpConnection: permission denied (channel dropped)");
+            auto_deny(&args)
+        }
+        Err(_) => {
+            tracing::warn!("NativeAcpConnection: permission timed out (60s safety)");
+            auto_deny(&args)
+        }
+    }
+}
+
+// ─── Terminal state ─────────────────────────────────────────────────────────
+
+/// Per-terminal handle stored in the connection-scoped `terminals` map.
+///
+/// The fields are all `Send` so the entire map can sit behind an
+/// `Arc<Mutex<…>>` shared by Send-bounded handler closures.
 struct TerminalState {
-    output: std::rc::Rc<std::cell::RefCell<String>>,
-    truncated: std::rc::Rc<Cell<bool>>,
+    output: Arc<Mutex<String>>,
+    truncated: Arc<AtomicBool>,
     exit_rx: tokio::sync::watch::Receiver<Option<TerminalExitStatus>>,
     pid: u32,
 }
 
-/// A variant of `SpurAcpClient` that holds a connection-scoped broadcast
-/// sender so every session notification is published to all subscribers
-/// for the lifetime of the connection — no per-turn channel swap needed.
-struct SpurAcpClientDynamic {
-    session_notif_tx: tokio::sync::broadcast::Sender<SessionNotification>,
-    cwd: std::rc::Rc<std::cell::RefCell<PathBuf>>,
-    permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
-    terminals: std::rc::Rc<std::cell::RefCell<HashMap<String, TerminalState>>>,
-    /// Sender for vendor-extension notifications. Cloned from the
-    /// `NativeAcpConnection` so the orchestrator can pump them as
-    /// `SpurEventBody::AgentExtNotification`.
-    ext_notification_tx: mpsc::UnboundedSender<ExtNotificationPayload>,
-}
-
-#[async_trait::async_trait(?Send)]
-impl Client for SpurAcpClientDynamic {
-    async fn request_permission(
-        &self,
-        args: RequestPermissionRequest,
-    ) -> agent_client_protocol::Result<RequestPermissionResponse> {
-        let Some(ref perm_tx) = self.permission_tx else {
-            return auto_approve(&args);
-        };
-
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        let request = crate::types::PermissionRequest {
-            args: args.clone(),
-            reply_tx,
-        };
-
-        if perm_tx.send(request).is_err() {
-            tracing::warn!("NativeAcpConnection: permission channel closed, auto-approving");
-            return auto_approve(&args);
-        }
-
-        tracing::debug!(
-            session = %args.session_id,
-            "NativeAcpConnection: awaiting interactive permission response"
-        );
-
-        match tokio::time::timeout(std::time::Duration::from_secs(60), reply_rx).await {
-            Ok(Ok(response)) => {
-                let option_id = PermissionOptionId::new(response.option_id);
-                tracing::debug!(option = %option_id, "NativeAcpConnection: permission responded");
-                Ok(RequestPermissionResponse::new(
-                    RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)),
-                ))
-            }
-            Ok(Err(_)) => {
-                tracing::debug!("NativeAcpConnection: permission denied (channel dropped)");
-                auto_deny(&args)
-            }
-            Err(_) => {
-                tracing::warn!("NativeAcpConnection: permission timed out (60s safety)");
-                auto_deny(&args)
-            }
-        }
-    }
-
-    async fn session_notification(
-        &self,
-        args: SessionNotification,
-    ) -> agent_client_protocol::Result<()> {
-        let variant = session_update_variant_name(&args.update);
-        let text_len = match &args.update {
-            SessionUpdate::AgentMessageChunk(c)
-            | SessionUpdate::AgentThoughtChunk(c)
-            | SessionUpdate::UserMessageChunk(c) => content_chunk_text_len(c),
-            _ => 0,
-        };
-        let session = args.session_id.to_string();
-        // `broadcast::Sender::send` returns `Err(SendError)` only when every
-        // receiver has been dropped. The orchestrator pre-subscribes before
-        // calling `new_session` / `load_session` (see `create_brain_session`
-        // and `load_brain_session` in `spur-core/src/orchestrator.rs`) and
-        // holds the receiver for the lifetime of the BrainSession — so
-        // `Err` here indicates the connection is tearing down and we can
-        // safely ignore it. If this starts producing `err` in logs under
-        // normal operation, the pre-subscribe ordering has regressed.
-        let send_result = self.session_notif_tx.send(args);
-        let send_result_str = if send_result.is_ok() { "ok" } else { "err" };
-        tracing::debug!(
-            streaming_probe = true,
-            site = "A_session_notification",
-            variant = variant,
-            text_len = text_len,
-            session = %session,
-            send_result = send_result_str,
-            "ACP session_notification (broadcast)"
-        );
-        Ok(())
-    }
-
-    async fn ext_notification(&self, args: ExtNotification) -> agent_client_protocol::Result<()> {
-        // The SDK already stripped the leading `_` from the wire method, so
-        // reattach it when reporting upward so consumers see the full
-        // `_foo.dev/...` form.
-        let method = format!("_{}", args.method);
-        let params: serde_json::Value =
-            serde_json::from_str(args.params.get()).unwrap_or(serde_json::Value::Null);
-        tracing::debug!(
-            method = %method,
-            "NativeAcpConnection: ext_notification"
-        );
-        let _ = self
-            .ext_notification_tx
-            .send(ExtNotificationPayload { method, params });
-        Ok(())
-    }
-
-    async fn read_text_file(
-        &self,
-        args: ReadTextFileRequest,
-    ) -> agent_client_protocol::Result<ReadTextFileResponse> {
-        let cwd = self.cwd.borrow().clone();
-        let path = if args.path.is_absolute() {
-            args.path.clone()
-        } else {
-            cwd.join(&args.path)
-        };
-
-        tracing::debug!(
-            path = %path.display(),
-            "NativeAcpConnection: reading text file"
-        );
-
-        let content = std::fs::read_to_string(&path).map_err(|e| {
-            agent_client_protocol::Error::internal_error()
-                .data(format!("Failed to read {}: {e}", path.display()))
-        })?;
-
-        let content = match (args.line, args.limit) {
-            (Some(start_line), Some(limit)) => {
-                let start = (start_line.saturating_sub(1)) as usize;
-                content
-                    .lines()
-                    .skip(start)
-                    .take(limit as usize)
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            }
-            (Some(start_line), None) => {
-                let start = (start_line.saturating_sub(1)) as usize;
-                content.lines().skip(start).collect::<Vec<_>>().join("\n")
-            }
-            (None, Some(limit)) => content
-                .lines()
-                .take(limit as usize)
-                .collect::<Vec<_>>()
-                .join("\n"),
-            (None, None) => content,
-        };
-
-        Ok(ReadTextFileResponse::new(content))
-    }
-
-    async fn write_text_file(
-        &self,
-        args: WriteTextFileRequest,
-    ) -> agent_client_protocol::Result<WriteTextFileResponse> {
-        let cwd = self.cwd.borrow().clone();
-        let path = if args.path.is_absolute() {
-            args.path.clone()
-        } else {
-            cwd.join(&args.path)
-        };
-
-        tracing::debug!(
-            path = %path.display(),
-            content_len = args.content.len(),
-            "NativeAcpConnection: writing text file"
-        );
-
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                agent_client_protocol::Error::internal_error().data(format!(
-                    "Failed to create directories for {}: {e}",
-                    path.display()
-                ))
-            })?;
-        }
-
-        std::fs::write(&path, &args.content).map_err(|e| {
-            agent_client_protocol::Error::internal_error()
-                .data(format!("Failed to write {}: {e}", path.display()))
-        })?;
-
-        Ok(WriteTextFileResponse::new())
-    }
-
-    async fn create_terminal(
-        &self,
-        args: CreateTerminalRequest,
-    ) -> agent_client_protocol::Result<CreateTerminalResponse> {
-        let cwd = args
-            .cwd
-            .clone()
-            .unwrap_or_else(|| self.cwd.borrow().clone());
-        let byte_limit = args.output_byte_limit.or(Some(10 * 1024 * 1024));
-
-        let mut cmd = tokio::process::Command::new(&args.command);
-        cmd.args(&args.args)
-            .current_dir(&cwd)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        for env_var in &args.env {
-            cmd.env(&env_var.name, &env_var.value);
-        }
-
-        let mut child = cmd.spawn().map_err(|e| {
-            agent_client_protocol::Error::internal_error()
-                .data(format!("Failed to spawn '{}': {e}", args.command))
-        })?;
-        let pid = child.id().ok_or_else(|| {
-            agent_client_protocol::Error::internal_error().data("Failed to get process ID")
-        })?;
-        let child_stdout = child.stdout.take().ok_or_else(|| {
-            agent_client_protocol::Error::internal_error().data("Failed to capture stdout")
-        })?;
-        let child_stderr = child.stderr.take().ok_or_else(|| {
-            agent_client_protocol::Error::internal_error().data("Failed to capture stderr")
-        })?;
-
-        let output = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
-        let truncated = std::rc::Rc::new(std::cell::Cell::new(false));
-        let (exit_tx, exit_rx) = tokio::sync::watch::channel(None);
-
-        tokio::task::spawn_local(terminal_reader(
-            child_stdout,
-            child_stderr,
-            child,
-            output.clone(),
-            truncated.clone(),
-            byte_limit,
-            exit_tx,
-        ));
-
-        let terminal_id = TerminalId::new(uuid::Uuid::new_v4().to_string());
-        let id_string = terminal_id.to_string();
-        tracing::debug!(terminal = %id_string, command = %args.command, pid = pid, "Terminal created");
-        self.terminals.borrow_mut().insert(
-            id_string,
-            TerminalState {
-                output,
-                truncated,
-                exit_rx,
-                pid,
-            },
-        );
-        Ok(CreateTerminalResponse::new(terminal_id))
-    }
-
-    async fn terminal_output(
-        &self,
-        args: TerminalOutputRequest,
-    ) -> agent_client_protocol::Result<TerminalOutputResponse> {
-        let key = args.terminal_id.to_string();
-        let map = self.terminals.borrow();
-        let terminal = map.get(&key).ok_or_else(|| {
-            agent_client_protocol::Error::invalid_params()
-                .data(format!("Terminal '{}' not found", key))
-        })?;
-        let output = terminal.output.borrow().clone();
-        let truncated = terminal.truncated.get();
-        let exit_status = terminal.exit_rx.borrow().clone();
-        Ok(TerminalOutputResponse::new(output, truncated).exit_status(exit_status))
-    }
-
-    async fn wait_for_terminal_exit(
-        &self,
-        args: WaitForTerminalExitRequest,
-    ) -> agent_client_protocol::Result<WaitForTerminalExitResponse> {
-        let key = args.terminal_id.to_string();
-        let mut exit_rx = {
-            let map = self.terminals.borrow();
-            let terminal = map.get(&key).ok_or_else(|| {
-                agent_client_protocol::Error::invalid_params()
-                    .data(format!("Terminal '{}' not found", key))
-            })?;
-            terminal.exit_rx.clone()
-        };
-        if let Some(status) = exit_rx.borrow().clone() {
-            return Ok(WaitForTerminalExitResponse::new(status));
-        }
-        loop {
-            match exit_rx.changed().await {
-                Ok(()) => {
-                    if let Some(status) = exit_rx.borrow().clone() {
-                        return Ok(WaitForTerminalExitResponse::new(status));
-                    }
-                }
-                Err(_) => {
-                    let status = exit_rx
-                        .borrow()
-                        .clone()
-                        .unwrap_or_else(TerminalExitStatus::new);
-                    return Ok(WaitForTerminalExitResponse::new(status));
-                }
-            }
-        }
-    }
-
-    async fn kill_terminal(
-        &self,
-        args: KillTerminalRequest,
-    ) -> agent_client_protocol::Result<KillTerminalResponse> {
-        let key = args.terminal_id.to_string();
-        let (pid, is_running) = {
-            let map = self.terminals.borrow();
-            let terminal = map.get(&key).ok_or_else(|| {
-                agent_client_protocol::Error::invalid_params()
-                    .data(format!("Terminal '{}' not found", key))
-            })?;
-            let is_running = terminal.exit_rx.borrow().is_none();
-            (terminal.pid, is_running)
-        };
-        if is_running {
-            tracing::debug!(terminal = %key, pid = pid, "Killing terminal");
-            let _ = std::process::Command::new("kill")
-                .arg("-9")
-                .arg(pid.to_string())
-                .status();
-        }
-        Ok(KillTerminalResponse::new())
-    }
-
-    async fn release_terminal(
-        &self,
-        args: ReleaseTerminalRequest,
-    ) -> agent_client_protocol::Result<ReleaseTerminalResponse> {
-        let key = args.terminal_id.to_string();
-        let pid_to_kill = {
-            let map = self.terminals.borrow();
-            if let Some(terminal) = map.get(&key) {
-                if terminal.exit_rx.borrow().is_none() {
-                    Some(terminal.pid)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        };
-        if let Some(pid) = pid_to_kill {
-            tracing::debug!(terminal = %key, pid = pid, "Killing terminal on release");
-            let _ = std::process::Command::new("kill")
-                .arg("-9")
-                .arg(pid.to_string())
-                .status();
-        }
-        self.terminals.borrow_mut().remove(&key);
-        Ok(ReleaseTerminalResponse::new())
-    }
-}
 
 // ─── Diagnostic helpers (streaming probes) ──────────────────────────────────
 
@@ -1480,13 +1621,13 @@ fn auto_deny(
 // ─── Terminal helpers ────────────────────────────────────────────────────────
 
 fn append_terminal_output(
-    output: &std::rc::Rc<std::cell::RefCell<String>>,
-    truncated: &std::rc::Rc<Cell<bool>>,
+    output: &Arc<Mutex<String>>,
+    truncated: &Arc<AtomicBool>,
     byte_limit: Option<u64>,
     data: &[u8],
 ) {
     let text = String::from_utf8_lossy(data);
-    let mut buf = output.borrow_mut();
+    let mut buf = output.lock().unwrap();
     buf.push_str(&text);
     if let Some(limit) = byte_limit {
         let limit = limit as usize;
@@ -1496,7 +1637,7 @@ fn append_terminal_output(
                 start += 1;
             }
             *buf = buf[start..].to_string();
-            truncated.set(true);
+            truncated.store(true, Ordering::Relaxed);
         }
     }
 }
@@ -1505,8 +1646,8 @@ async fn terminal_reader(
     mut stdout: tokio::process::ChildStdout,
     mut stderr: tokio::process::ChildStderr,
     mut child: tokio::process::Child,
-    output: std::rc::Rc<std::cell::RefCell<String>>,
-    truncated: std::rc::Rc<Cell<bool>>,
+    output: Arc<Mutex<String>>,
+    truncated: Arc<AtomicBool>,
     byte_limit: Option<u64>,
     exit_tx: tokio::sync::watch::Sender<Option<TerminalExitStatus>>,
 ) {

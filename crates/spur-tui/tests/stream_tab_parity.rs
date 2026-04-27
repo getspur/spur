@@ -2,7 +2,7 @@
 //! ReactTrace) surfaces fidelity the old DetailPane::render_stream
 //! path dropped — specifically tool-call lifecycle.
 
-use agent_client_protocol::{
+use agent_client_protocol::schema::{
     ToolCall as AcpToolCall, ToolCallUpdate as AcpToolCallUpdate, ToolCallUpdateFields,
 };
 use spur_acp::{ContentBlock, ContentChunk, SessionUpdate, TextContent};
