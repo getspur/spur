@@ -165,6 +165,10 @@ mod session_attach_guard_transfer_tests {
             fs_unsafe: false,
             started_at: std::time::Instant::now(),
             config_options: Vec::new(),
+            spur_agent_caps: None,
+            init_response: agent_client_protocol::schema::InitializeResponse::new(
+                agent_client_protocol::schema::ProtocolVersion::LATEST,
+            ),
         });
         let mut active = None;
         let mut scheduler = crate::scheduler::BrainScheduler::new(
@@ -234,6 +238,10 @@ mod session_attach_guard_transfer_tests {
             fs_unsafe: false,
             started_at: std::time::Instant::now(),
             config_options: Vec::new(),
+            spur_agent_caps: None,
+            init_response: agent_client_protocol::schema::InitializeResponse::new(
+                agent_client_protocol::schema::ProtocolVersion::LATEST,
+            ),
         }
     }
 
@@ -423,6 +431,10 @@ pub struct ActiveConnection {
     pub(crate) attach_guard: Option<SessionAttachGuard>,
     /// True when this attachment is unprotected (multi-window unsafe).
     pub(crate) fs_unsafe: bool,
+    /// Captured at `initialize`. Held alongside the transport so the
+    /// orchestrator can build `SpurAgentCaps` once `session/new` (or
+    /// `session/load`) returns the per-session state. Spec §6.1.
+    pub(crate) init_response: agent_client_protocol::schema::InitializeResponse,
 }
 
 /// Holds the state of an active brain session.
@@ -461,6 +473,16 @@ pub struct BrainSession {
     /// by `SetSessionConfigOption` responses (Task 2.14) and by
     /// `session/update.ConfigOptionUpdate` notifications (v2 plan).
     pub config_options: Vec<agent_client_protocol::schema::SessionConfigOption>,
+    /// Frozen-per-session capability cache (M8.A). Populated AFTER both
+    /// `initialize` and `session/new` complete, since the `set_*` gates
+    /// derive from `NewSessionResponse` payload state. Wrapped in `Arc`
+    /// so UI consumers can clone cheaply.
+    pub spur_agent_caps: Option<Arc<spur_acp::SpurAgentCaps>>,
+    /// Captured `InitializeResponse` retained on the session entry so
+    /// it can flow back to `ActiveConnection` when the brain is
+    /// retired (and reused later for a fresh `new_session` without
+    /// re-running `initialize`).
+    pub(crate) init_response: agent_client_protocol::schema::InitializeResponse,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1799,12 +1821,13 @@ impl Orchestrator {
                             .connect_brain(brain_override.as_deref(), permission_tx.clone())
                             .await
                         {
-                            Ok((conn, brain_name)) => {
+                            Ok((conn, brain_name, init_response)) => {
                                 agent_connection = Some(ActiveConnection {
                                     transport: conn,
                                     brain_name: brain_name.clone(),
                                     attach_guard: None,
                                     fs_unsafe: false,
+                                    init_response,
                                 });
                                 self.emit(SpurEvent::now(SpurEventBody::BrainConnected {
                                     brain: brain_name,
@@ -1867,6 +1890,7 @@ impl Orchestrator {
                             brain_name,
                             attach_guard,
                             fs_unsafe,
+                            init_response,
                         } = match agent_connection.take() {
                             Some(existing) => existing,
                             None => {
@@ -1874,11 +1898,12 @@ impl Orchestrator {
                                     .connect_brain(brain_override.as_deref(), permission_tx.clone())
                                     .await
                                 {
-                                    Ok((transport, brain_name)) => ActiveConnection {
+                                    Ok((transport, brain_name, init_response)) => ActiveConnection {
                                         transport,
                                         brain_name,
                                         attach_guard: None,
                                         fs_unsafe: false,
+                                        init_response,
                                     },
                                     Err(e) => {
                                         error!(error = %e, "Failed to connect brain for list_sessions");
@@ -1922,6 +1947,7 @@ impl Orchestrator {
                             brain_name,
                             attach_guard,
                             fs_unsafe,
+                            init_response,
                         });
                     }
 
@@ -1942,6 +1968,7 @@ impl Orchestrator {
                             brain_name,
                             attach_guard,
                             fs_unsafe,
+                            init_response,
                         } = match agent_connection.take() {
                             Some(existing) => existing,
                             None => {
@@ -1955,11 +1982,12 @@ impl Orchestrator {
                                     .connect_brain(brain_override.as_deref(), permission_tx.clone())
                                     .await
                                 {
-                                    Ok((transport, brain_name)) => ActiveConnection {
+                                    Ok((transport, brain_name, init_response)) => ActiveConnection {
                                         transport,
                                         brain_name,
                                         attach_guard: None,
                                         fs_unsafe: false,
+                                        init_response,
                                     },
                                     Err(e) => {
                                         let error_message = format_error_chain(&e);
@@ -1990,6 +2018,7 @@ impl Orchestrator {
                                 false,
                                 attach_guard,
                                 fs_unsafe,
+                                init_response,
                             )
                             .await
                         {
@@ -2372,6 +2401,7 @@ impl Orchestrator {
                         brain_name,
                         attach_guard,
                         fs_unsafe,
+                        init_response,
                     }) => {
                         self.create_brain_session(
                             connection,
@@ -2379,6 +2409,7 @@ impl Orchestrator {
                             permission_tx.clone(),
                             attach_guard,
                             fs_unsafe,
+                            init_response,
                         )
                         .await
                     }
@@ -2937,6 +2968,7 @@ impl Orchestrator {
             brain_name: b.brain_name,
             attach_guard: b.attach_guard.take(),
             fs_unsafe: b.fs_unsafe,
+            init_response: b.init_response,
         });
 
         // 5. Emit SessionRetireComplete now that teardown is fully done.
@@ -2965,7 +2997,11 @@ impl Orchestrator {
         permission_tx: Option<
             tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>,
         >,
-    ) -> Result<(Box<dyn spur_acp::AgentConnection>, String)> {
+    ) -> Result<(
+        Box<dyn spur_acp::AgentConnection>,
+        String,
+        agent_client_protocol::schema::InitializeResponse,
+    )> {
         let brain_name = self.selected_brain_name(brain_override);
 
         let brain_config = self
@@ -2977,13 +3013,13 @@ impl Orchestrator {
         let mut connection = self.create_connection(&brain_config, permission_tx);
 
         let init_request = InitializeRequest::new(ProtocolVersion::LATEST);
-        connection
+        let init_response = connection
             .initialize(init_request)
             .await
             .context("Failed to initialize brain agent")?;
 
         debug!(brain = %brain_name, "Brain agent connected and initialized");
-        Ok((connection, brain_name))
+        Ok((connection, brain_name, init_response))
     }
 
     fn acquire_attach_guard_for_load(
@@ -3070,6 +3106,7 @@ impl Orchestrator {
     ///
     /// Emits BrainSpawned, starts MCP callback server, logs session start,
     /// calls new_session, spawns delegation handler. Returns BrainSession.
+    #[allow(clippy::too_many_arguments)]
     async fn create_brain_session(
         &mut self,
         mut connection: Box<dyn spur_acp::AgentConnection>,
@@ -3079,6 +3116,7 @@ impl Orchestrator {
         >,
         existing_attach_guard: Option<SessionAttachGuard>,
         existing_fs_unsafe: bool,
+        init_response: agent_client_protocol::schema::InitializeResponse,
     ) -> Result<BrainSession> {
         let session_id = SessionId::new();
 
@@ -3275,6 +3313,14 @@ impl Orchestrator {
             }));
         }
 
+        // M8.A: build the frozen-per-session capability cache from both
+        // the InitializeResponse (`AgentCapabilities`) and the
+        // NewSessionResponse (modes/models/config_options). Spec §6.1.
+        let spur_agent_caps = Some(Arc::new(spur_acp::SpurAgentCaps::new(
+            &init_response,
+            &session_response,
+        )));
+
         self.self_held.insert(brain_session_id.clone());
 
         Ok(BrainSession {
@@ -3290,6 +3336,8 @@ impl Orchestrator {
             attach_guard,
             fs_unsafe,
             config_options,
+            spur_agent_caps,
+            init_response,
         })
     }
 
@@ -3311,6 +3359,7 @@ impl Orchestrator {
         force_new_session: bool,
         existing_attach_guard: Option<SessionAttachGuard>,
         existing_fs_unsafe: bool,
+        init_response: agent_client_protocol::schema::InitializeResponse,
     ) -> std::result::Result<
         (
             BrainSession,
@@ -3594,6 +3643,13 @@ impl Orchestrator {
             // by a `session/update.ConfigOptionUpdate` notification. The
             // v2 plan extends the bypass helper to plumb this through.
             config_options: Vec::new(),
+            // M8.A: load_session does not yet capture LoadSessionResponse
+            // (skip_perm helper bypasses it). Caps stay None until M9 wires
+            // the response through; downstream UI will see "no caps" and
+            // render disabled state. New sessions populate caps in
+            // `create_brain_session`.
+            spur_agent_caps: None,
+            init_response,
         };
 
         // Return an empty stream if we fell back to new_session.
@@ -3655,8 +3711,12 @@ impl Orchestrator {
         .await;
         drop(dead_brain.connection);
 
-        // Fresh connection + reattach.
-        let (connection, brain_name) = self
+        // Fresh connection + reattach. init_response is plumbed into
+        // load_brain_session for retention on the BrainSession (so the
+        // retire path can move it back to ActiveConnection later); the
+        // `set_*` caps stay None for resumed sessions until M9 wires the
+        // LoadSessionResponse through.
+        let (connection, brain_name, init_response) = self
             .connect_brain(brain_override, permission_tx.clone())
             .await
             .with_context(|| format!("reconnect: connect_brain failed for '{brain_name_hint}'"))?;
@@ -3671,6 +3731,7 @@ impl Orchestrator {
                 force_new_session,
                 existing_attach_guard,
                 existing_fs_unsafe,
+                init_response,
             )
             .await
         {
@@ -3785,11 +3846,18 @@ impl Orchestrator {
             tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>,
         >,
     ) -> Result<BrainSession> {
-        let (connection, brain_name) = self
+        let (connection, brain_name, init_response) = self
             .connect_brain(brain_override, permission_tx.clone())
             .await?;
-        self.create_brain_session(connection, brain_name, permission_tx, None, false)
-            .await
+        self.create_brain_session(
+            connection,
+            brain_name,
+            permission_tx,
+            None,
+            false,
+            init_response,
+        )
+        .await
     }
 
     /// Fallback: read sessions from an agent's local storage on disk.
@@ -4138,6 +4206,20 @@ impl Orchestrator {
         brain: &BrainSession,
     ) -> Vec<agent_client_protocol::schema::SessionConfigOption> {
         brain.config_options.clone()
+    }
+
+    /// Read the cached `SpurAgentCaps` for the active brain session
+    /// (M8.A). Mirrors `session_config_options`'s shape — `BrainSession`
+    /// is the per-session entry, so the caller threads it in.
+    ///
+    /// Returns `None` when caps haven't been populated yet (e.g.
+    /// resumed-via-load_session sessions on the M8.A code path), in
+    /// which case downstream UI should render disabled state.
+    pub fn spur_agent_caps(
+        &self,
+        brain: &BrainSession,
+    ) -> Option<Arc<spur_acp::SpurAgentCaps>> {
+        brain.spur_agent_caps.clone()
     }
 
     /// Replace the cached `config_options` on the active brain session and
