@@ -700,8 +700,17 @@ async fn t_v0e_3_fast_forward_matches_polling() {
     let handle2 = tokio::spawn(async move { term_ff_reconciler.run(cancel_rx2).await });
     tokio::task::yield_now().await;
     term_fast_forward.notify_one();
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    let epic = pm_term_ff.get_issue(&epic_term_ff).await.expect("get epic");
+    let epic = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let epic = pm_term_ff.get_issue(&epic_term_ff).await.expect("get epic");
+            if epic.labels.iter().any(|l| l == labels::INTEGRATION_PENDING) {
+                break epic;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("fast-forward path must add integration-pending within timeout");
     assert_eq!(epic.status, pm_term_ff.closed_status());
     assert!(
         epic.labels.iter().any(|l| l == labels::INTEGRATION_PENDING),
