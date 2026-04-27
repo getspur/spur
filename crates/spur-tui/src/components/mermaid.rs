@@ -175,12 +175,13 @@ pub fn raster_width_for_pane(pane_w_px: u32) -> u32 {
     *RASTER_BUCKETS.last().unwrap()
 }
 
-/// Render a Mermaid diagram source string to a [`DynamicImage`].
+/// Render a Mermaid diagram source string to a [`DynamicImage`] at the
+/// requested pixel width. Height is aspect-preserved.
 ///
 /// Panics emitted by `mermaid-rs-renderer`, `usvg`, or `resvg` are caught
 /// and converted to [`RenderError::Panic`], so this function never unwinds
 /// the caller.
-pub fn render_mermaid(code: &str) -> Result<DynamicImage, RenderError> {
+pub fn render_mermaid(code: &str, target_width: u32) -> Result<DynamicImage, RenderError> {
     let code_owned = code.to_string();
 
     // Single unwind boundary covering the entire mmdr → usvg → resvg pipeline.
@@ -188,7 +189,7 @@ pub fn render_mermaid(code: &str) -> Result<DynamicImage, RenderError> {
     // wrapping both here ensures the caller is never unwound.
     let result = panic::catch_unwind(move || {
         let svg = render_to_svg_inner(&code_owned)?;
-        rasterize_svg(&svg, DEFAULT_WIDTH)
+        rasterize_svg(&svg, target_width)
     });
 
     match result {
