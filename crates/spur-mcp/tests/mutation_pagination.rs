@@ -144,8 +144,8 @@ fn set_issue_timestamp(repo: &Path, issue_id: &str, timestamp: &str) -> Result<(
 
 mod perf_regressions {
     use super::{
-        FILLER_COUNT, br_available, br_id, mutation_batch, run_br, seed_filler_issues,
-        set_issue_timestamp, sqlite_available, task_draft,
+        br_available, br_id, mutation_batch, run_br, seed_filler_issues, set_issue_timestamp,
+        sqlite_available, task_draft, FILLER_COUNT,
     };
     use spur_mcp::plan::mutation::{DepRewirePolicy, PlanMutationOp};
     use spur_mcp::plan::mutation_executor::apply_mutation;

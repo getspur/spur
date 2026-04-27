@@ -17,7 +17,7 @@ fn community_quota_defaults() {
     let gate = FeatureGate::new(policy);
     assert_eq!(
         gate.quota(QuotaKey::MaxConcurrentWorkers),
-        Some(QuotaValue::Count(1))
+        Some(QuotaValue::Count(3))
     );
 }
 
@@ -171,7 +171,7 @@ fn v1_silent_policy_uses_compatibility_quota_defaults() {
 
     assert_eq!(
         gate.quota(QuotaKey::MaxConcurrentWorkers),
-        Some(QuotaValue::Count(1))
+        Some(QuotaValue::Count(3))
     );
 
     gate.update_state(&spur_license::LicenseState::active_validated(

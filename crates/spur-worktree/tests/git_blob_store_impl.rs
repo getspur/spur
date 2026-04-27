@@ -176,7 +176,6 @@ async fn git_blob_store_per_attempt_granularity() {
     assert_eq!(g2.bytes, b"second attempt");
 }
 
-
 #[tokio::test]
 async fn git_blob_store_sweep_prunes_legacy_artifact_refs() {
     // Spec §8.4 (Round 11 MF1+MF2): sweep_older_than walks both
@@ -227,7 +226,10 @@ async fn git_blob_store_sweep_prunes_legacy_artifact_refs() {
 
     // Run sweep with a 1-day TTL — irrelevant for legacy refs (they
     // are treated as created_at = epoch, always eligible).
-    let report = store.sweep_older_than(Duration::from_secs(86_400)).await.unwrap();
+    let report = store
+        .sweep_older_than(Duration::from_secs(86_400))
+        .await
+        .unwrap();
 
     // Legacy refs should be reported as pruned.
     assert!(
@@ -243,7 +245,6 @@ async fn git_blob_store_sweep_prunes_legacy_artifact_refs() {
         .unwrap();
     assert!(!post.status.success(), "legacy ref pruned post-sweep");
 }
-
 
 #[tokio::test]
 async fn git_blob_store_returns_git_blob_sha_in_outcome_ref() {
@@ -269,7 +270,10 @@ async fn git_blob_store_returns_git_blob_sha_in_outcome_ref() {
     );
     // sha256 must be the 64-char content digest.
     assert_eq!(r.sha256.len(), 64, "content SHA-256 is 64 hex chars");
-    assert_ne!(git_sha, r.sha256, "git SHA-1 and content SHA-256 must differ");
+    assert_ne!(
+        git_sha, r.sha256,
+        "git SHA-1 and content SHA-256 must differ"
+    );
 
     // Verify git can resolve the SHA via cat-file.
     let cat = Command::new("git")
@@ -277,7 +281,10 @@ async fn git_blob_store_returns_git_blob_sha_in_outcome_ref() {
         .current_dir(td.path())
         .output()
         .unwrap();
-    assert!(cat.status.success(), "git cat-file -p git_blob_sha must succeed");
+    assert!(
+        cat.status.success(),
+        "git cat-file -p git_blob_sha must succeed"
+    );
     assert_eq!(cat.stdout, body, "git cat-file content must match input");
 }
 
@@ -297,6 +304,9 @@ async fn git_blob_store_idempotent_put_preserves_git_blob_sha() {
     let m = metadata(&body);
     let a = store.put(&k, &body, &m).await.unwrap();
     let b = store.put(&k, &body, &m).await.unwrap();
-    assert_eq!(a.git_blob_sha, b.git_blob_sha, "idempotent put recovers git SHA");
+    assert_eq!(
+        a.git_blob_sha, b.git_blob_sha,
+        "idempotent put recovers git SHA"
+    );
     assert!(a.git_blob_sha.is_some());
 }

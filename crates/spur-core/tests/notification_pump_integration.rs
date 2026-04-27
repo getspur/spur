@@ -29,7 +29,10 @@ use tokio::sync::broadcast;
 async fn collect_agent_notifications(
     rx: &mut broadcast::Receiver<SpurEvent>,
     timeout: Duration,
-) -> Vec<(SessionId, Box<agent_client_protocol::schema::SessionNotification>)> {
+) -> Vec<(
+    SessionId,
+    Box<agent_client_protocol::schema::SessionNotification>,
+)> {
     let deadline = tokio::time::Instant::now() + timeout;
     let mut results = Vec::new();
 

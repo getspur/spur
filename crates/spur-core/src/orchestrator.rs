@@ -2125,17 +2125,18 @@ impl Orchestrator {
                     // ── SetSessionConfigOption ───────────────────────────
                     InteractiveInput::SetSessionConfigOption { config_id, value } => {
                         if let Some(b) = brain.as_mut() {
-                            let req = agent_client_protocol::schema::SetSessionConfigOptionRequest::new(
-                                agent_client_protocol::schema::SessionId::new(
-                                    b.acp_session_id.clone(),
-                                ),
-                                agent_client_protocol::schema::SessionConfigId::new(
-                                    std::sync::Arc::<str>::from(config_id.as_str()),
-                                ),
-                                agent_client_protocol::schema::SessionConfigValueId::new(
-                                    std::sync::Arc::<str>::from(value.as_str()),
-                                ),
-                            );
+                            let req =
+                                agent_client_protocol::schema::SetSessionConfigOptionRequest::new(
+                                    agent_client_protocol::schema::SessionId::new(
+                                        b.acp_session_id.clone(),
+                                    ),
+                                    agent_client_protocol::schema::SessionConfigId::new(
+                                        std::sync::Arc::<str>::from(config_id.as_str()),
+                                    ),
+                                    agent_client_protocol::schema::SessionConfigValueId::new(
+                                        std::sync::Arc::<str>::from(value.as_str()),
+                                    ),
+                                );
                             match b.connection.set_session_config_option(req).await {
                                 Ok(resp) => {
                                     self.replace_session_config_options(b, resp.config_options);

@@ -139,7 +139,9 @@ mod tests {
         let src = fixture();
         let accept = src.accept(0).unwrap();
         match accept {
-            RetrievalAccept::ReplaceTriggerToken { ref replacement, .. } => {
+            RetrievalAccept::ReplaceTriggerToken {
+                ref replacement, ..
+            } => {
                 assert_eq!(replacement, "gpt-5-codex");
             }
             _ => panic!("expected ReplaceTriggerToken"),
@@ -162,7 +164,9 @@ mod tests {
         // accept(0) MUST return "o4-mini", not "gpt-5-codex" (choices[0]).
         let accept = src.accept(0).unwrap();
         match accept {
-            RetrievalAccept::ReplaceTriggerToken { ref replacement, .. } => {
+            RetrievalAccept::ReplaceTriggerToken {
+                ref replacement, ..
+            } => {
                 assert_eq!(replacement, "o4-mini");
             }
             _ => panic!("expected ReplaceTriggerToken"),
@@ -173,11 +177,8 @@ mod tests {
     fn title_renames_known_commands() {
         let src = fixture();
         assert_eq!(src.title(), "Model");
-        let src2 = ConfigOptionQuerySource::new(
-            "effort".into(),
-            "reasoning_effort".into(),
-            Vec::new(),
-        );
+        let src2 =
+            ConfigOptionQuerySource::new("effort".into(), "reasoning_effort".into(), Vec::new());
         assert_eq!(src2.title(), "Effort");
         let src3 = ConfigOptionQuerySource::new("custom".into(), "custom".into(), Vec::new());
         assert_eq!(src3.title(), "custom");

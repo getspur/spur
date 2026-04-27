@@ -564,7 +564,9 @@ mod detector_tests {
     #[test]
     fn idle_pasted_stays_idle() {
         let mut det = d();
-        let t = det.step(IntentEvent::Pasted, "pasted @alice text", 18, &[], |_| false);
+        let t = det.step(IntentEvent::Pasted, "pasted @alice text", 18, &[], |_| {
+            false
+        });
         assert!(matches!(t, TriggerTransition::None));
         assert!(det.is_idle());
     }
@@ -930,7 +932,13 @@ mod arg_picker_tests {
         let _ = step(&mut det, IntentEvent::TypedChar('e'), "/he", 3, &registry);
         let _ = step(&mut det, IntentEvent::TypedChar('l'), "/hel", 4, &registry);
         let _ = step(&mut det, IntentEvent::TypedChar('p'), "/help", 5, &registry);
-        let txn = step(&mut det, IntentEvent::TypedChar(' '), "/help ", 6, &registry);
+        let txn = step(
+            &mut det,
+            IntentEvent::TypedChar(' '),
+            "/help ",
+            6,
+            &registry,
+        );
         assert!(matches!(txn, TriggerTransition::Close));
         assert!(det.is_idle());
     }
@@ -946,8 +954,20 @@ mod arg_picker_tests {
         let _ = step(&mut det, IntentEvent::TypedChar('o'), "/mo", 3, &registry);
         let _ = step(&mut det, IntentEvent::TypedChar('d'), "/mod", 4, &registry);
         let _ = step(&mut det, IntentEvent::TypedChar('e'), "/mode", 5, &registry);
-        let _ = step(&mut det, IntentEvent::TypedChar('l'), "/model", 6, &registry);
-        let txn = step(&mut det, IntentEvent::TypedChar(' '), "/model ", 7, &registry);
+        let _ = step(
+            &mut det,
+            IntentEvent::TypedChar('l'),
+            "/model",
+            6,
+            &registry,
+        );
+        let txn = step(
+            &mut det,
+            IntentEvent::TypedChar(' '),
+            "/model ",
+            7,
+            &registry,
+        );
         match txn {
             TriggerTransition::Open { trigger } => {
                 assert_eq!(
@@ -972,9 +992,27 @@ mod arg_picker_tests {
         let _ = step(&mut det, IntentEvent::TypedChar('f'), "/ef", 3, &registry);
         let _ = step(&mut det, IntentEvent::TypedChar('f'), "/eff", 4, &registry);
         let _ = step(&mut det, IntentEvent::TypedChar('o'), "/effo", 5, &registry);
-        let _ = step(&mut det, IntentEvent::TypedChar('r'), "/effor", 6, &registry);
-        let _ = step(&mut det, IntentEvent::TypedChar('t'), "/effort", 7, &registry);
-        let txn = step(&mut det, IntentEvent::TypedChar(' '), "/effort ", 8, &registry);
+        let _ = step(
+            &mut det,
+            IntentEvent::TypedChar('r'),
+            "/effor",
+            6,
+            &registry,
+        );
+        let _ = step(
+            &mut det,
+            IntentEvent::TypedChar('t'),
+            "/effort",
+            7,
+            &registry,
+        );
+        let txn = step(
+            &mut det,
+            IntentEvent::TypedChar(' '),
+            "/effort ",
+            8,
+            &registry,
+        );
         match txn {
             TriggerTransition::Open { trigger } => {
                 assert_eq!(
@@ -1008,11 +1046,41 @@ mod arg_picker_tests {
         let _ = step(&mut det, IntentEvent::TypedChar('o'), "/mo", 3, &registry);
         let _ = step(&mut det, IntentEvent::TypedChar('d'), "/mod", 4, &registry);
         let _ = step(&mut det, IntentEvent::TypedChar('e'), "/mode", 5, &registry);
-        let _ = step(&mut det, IntentEvent::TypedChar('l'), "/model", 6, &registry);
-        let _ = step(&mut det, IntentEvent::TypedChar(' '), "/model ", 7, &registry);
-        let _ = step(&mut det, IntentEvent::TypedChar('g'), "/model g", 8, &registry);
-        let _ = step(&mut det, IntentEvent::TypedChar('p'), "/model gp", 9, &registry);
-        let txn = step(&mut det, IntentEvent::TypedChar('t'), "/model gpt", 10, &registry);
+        let _ = step(
+            &mut det,
+            IntentEvent::TypedChar('l'),
+            "/model",
+            6,
+            &registry,
+        );
+        let _ = step(
+            &mut det,
+            IntentEvent::TypedChar(' '),
+            "/model ",
+            7,
+            &registry,
+        );
+        let _ = step(
+            &mut det,
+            IntentEvent::TypedChar('g'),
+            "/model g",
+            8,
+            &registry,
+        );
+        let _ = step(
+            &mut det,
+            IntentEvent::TypedChar('p'),
+            "/model gp",
+            9,
+            &registry,
+        );
+        let txn = step(
+            &mut det,
+            IntentEvent::TypedChar('t'),
+            "/model gpt",
+            10,
+            &registry,
+        );
         match txn {
             TriggerTransition::Update { query } => assert_eq!(query, "gpt"),
             other => panic!("expected Update, got {other:?}"),
@@ -1028,8 +1096,20 @@ mod arg_picker_tests {
         let _ = step(&mut det, IntentEvent::TypedChar('o'), "/mo", 3, &registry);
         let _ = step(&mut det, IntentEvent::TypedChar('d'), "/mod", 4, &registry);
         let _ = step(&mut det, IntentEvent::TypedChar('e'), "/mode", 5, &registry);
-        let _ = step(&mut det, IntentEvent::TypedChar('l'), "/model", 6, &registry);
-        let _ = step(&mut det, IntentEvent::TypedChar(' '), "/model ", 7, &registry);
+        let _ = step(
+            &mut det,
+            IntentEvent::TypedChar('l'),
+            "/model",
+            6,
+            &registry,
+        );
+        let _ = step(
+            &mut det,
+            IntentEvent::TypedChar(' '),
+            "/model ",
+            7,
+            &registry,
+        );
         // Now in SlashArg. Delete the space.
         let txn = step(&mut det, IntentEvent::DeletedChar, "/model", 6, &registry);
         assert!(matches!(txn, TriggerTransition::Close));
@@ -1076,13 +1156,7 @@ mod arg_picker_tests {
     fn t14_pasted_full_slash_arg_string_opens() {
         let mut det = TriggerDetector::new();
         let registry = registry_with_arg_picker(&["model"]);
-        let txn = step(
-            &mut det,
-            IntentEvent::Pasted,
-            "/model gpt-5",
-            12,
-            &registry,
-        );
+        let txn = step(&mut det, IntentEvent::Pasted, "/model gpt-5", 12, &registry);
         match txn {
             TriggerTransition::Open { trigger } => {
                 assert_eq!(

@@ -260,9 +260,7 @@ impl WorktreeManager {
         let worktree_path = self.repo_root.join(".spur/worktrees").join(&worker_str);
         let branch_name = format!(
             "spur/worker/v2/{}/{}/{}",
-            agent,
-            brain_session_id,
-            worker_str,
+            agent, brain_session_id, worker_str,
         );
 
         let worktree_path_str = worktree_path
@@ -455,9 +453,12 @@ impl WorktreeManager {
         let branch = info.branch.clone();
 
         // Run git operations; if any fail, return without mutating self.active.
-        self.run_git(&["worktree", "remove", &path_str, "--force", "--force"], None)
-            .await
-            .with_context(|| format!("failed to remove worktree at {path_str}"))?;
+        self.run_git(
+            &["worktree", "remove", &path_str, "--force", "--force"],
+            None,
+        )
+        .await
+        .with_context(|| format!("failed to remove worktree at {path_str}"))?;
         self.run_git(&["branch", "-D", &branch], None)
             .await
             .with_context(|| format!("failed to delete branch '{branch}'"))?;
@@ -485,9 +486,12 @@ impl WorktreeManager {
         let branch = info.branch.clone();
 
         // Run git operations; if any fail, return without mutating self.active.
-        self.run_git(&["worktree", "remove", &path_str, "--force", "--force"], None)
-            .await
-            .with_context(|| format!("failed to detach worktree at {path_str}"))?;
+        self.run_git(
+            &["worktree", "remove", &path_str, "--force", "--force"],
+            None,
+        )
+        .await
+        .with_context(|| format!("failed to detach worktree at {path_str}"))?;
 
         // Branch intentionally NOT deleted — preserved for brain review + merge.
         self.active.remove(&session_str);
@@ -920,9 +924,8 @@ mod tests_option_e {
         let _base_sha = seed_base_repo(tmp.path()).await;
 
         let mut manager = WorktreeManager::new(tmp.path().to_path_buf());
-        let brain = spur_acp::BrainSessionId::new(SessionId(
-            "550e8400-e29b-41d4-a716-446655440000".into(),
-        ));
+        let brain =
+            spur_acp::BrainSessionId::new(SessionId("550e8400-e29b-41d4-a716-446655440000".into()));
         let worker = SessionId("deadbeef-1111-2222-3333-444455556666".into());
 
         let info = manager
@@ -946,24 +949,33 @@ mod v2_branch_tests {
 
     #[test]
     fn parse_v2_simple_agent() {
-        let b = make("claude", "550e8400-e29b-41d4-a716-446655440000",
-                     "deadbeef-1111-2222-3333-444455556666");
+        let b = make(
+            "claude",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "deadbeef-1111-2222-3333-444455556666",
+        );
         let p = parse_v2_branch(&b).expect("parses");
         assert_eq!(p.agent, "claude");
     }
 
     #[test]
     fn parse_v2_hyphenated_agent() {
-        let b = make("claude-code", "550e8400-e29b-41d4-a716-446655440000",
-                     "deadbeef-1111-2222-3333-444455556666");
+        let b = make(
+            "claude-code",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "deadbeef-1111-2222-3333-444455556666",
+        );
         let p = parse_v2_branch(&b).expect("parses");
         assert_eq!(p.agent, "claude-code");
     }
 
     #[test]
     fn parse_v2_dotted_agent() {
-        let b = make("gemini-2.5-pro", "550e8400-e29b-41d4-a716-446655440000",
-                     "deadbeef-1111-2222-3333-444455556666");
+        let b = make(
+            "gemini-2.5-pro",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "deadbeef-1111-2222-3333-444455556666",
+        );
         let p = parse_v2_branch(&b).expect("parses");
         assert_eq!(p.agent, "gemini-2.5-pro");
     }

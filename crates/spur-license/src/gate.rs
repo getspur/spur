@@ -144,7 +144,7 @@ impl FeatureGate {
     fn apply_compatibility_quota_defaults(tier: Tier, quotas: &mut HashMap<QuotaKey, QuotaValue>) {
         match tier {
             Tier::Community => {
-                quotas.insert(QuotaKey::MaxConcurrentWorkers, QuotaValue::Count(1));
+                quotas.insert(QuotaKey::MaxConcurrentWorkers, QuotaValue::Count(3));
                 quotas.insert(
                     QuotaKey::EventRetentionBytes,
                     QuotaValue::Bytes(128 * 1024 * 1024),
