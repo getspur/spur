@@ -48,14 +48,15 @@ use futures::Stream;
 use tokio::sync::{mpsc, oneshot};
 
 use agent_client_protocol::schema::{
-    AuthenticateRequest, AuthenticateResponse, CancelNotification, ContentBlock, ContentChunk,
-    CreateTerminalRequest, CreateTerminalResponse, ExtRequest, ExtResponse, InitializeRequest,
-    InitializeResponse, KillTerminalRequest, KillTerminalResponse, ListSessionsRequest,
-    ListSessionsResponse, LoadSessionRequest, McpServer, NewSessionRequest, NewSessionResponse,
-    PermissionOptionId, PermissionOptionKind, PromptRequest, ReadTextFileRequest,
-    ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    AuthenticateRequest, AuthenticateResponse, CancelNotification, ClientCapabilities,
+    ContentBlock, ContentChunk, CreateTerminalRequest, CreateTerminalResponse, ExtRequest,
+    ExtResponse, FileSystemCapabilities, InitializeRequest, InitializeResponse,
+    KillTerminalRequest, KillTerminalResponse, ListSessionsRequest, ListSessionsResponse,
+    LoadSessionRequest, McpServer, NewSessionRequest, NewSessionResponse, PermissionOptionId,
+    PermissionOptionKind, PromptRequest, ReadTextFileRequest, ReadTextFileResponse,
+    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse,
     TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse,
     WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
@@ -65,6 +66,26 @@ use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
 
 use crate::connection::{AgentConnection, ExtNotificationPayload};
 use crate::types::AgentHealth;
+
+/// Spur's canonical `ClientCapabilities` literal advertised at every
+/// `initialize` call. Spec §6.2.
+///
+/// Declares:
+/// - `fs.{read_text_file, write_text_file}` — spur honors `fs/*` requests.
+/// - `terminal = true` — spur honors all `terminal/*` RPCs.
+/// - `_meta.terminal_output = true` — vendor extension that unlocks
+///   codex's tool-call meta tunneling (consumed in M9).
+pub fn spur_client_capabilities() -> ClientCapabilities {
+    let mut meta = serde_json::Map::new();
+    meta.insert("terminal_output".to_string(), serde_json::Value::Bool(true));
+
+    ClientCapabilities::new()
+        .fs(FileSystemCapabilities::new()
+            .read_text_file(true)
+            .write_text_file(true))
+        .terminal(true)
+        .meta(meta)
+}
 
 #[cfg(any(test, feature = "test-support"))]
 pub async fn spawn_native_worker_for_test(
@@ -268,8 +289,16 @@ impl AgentConnection for NativeAcpConnection {
 
     async fn initialize(
         &mut self,
-        request: InitializeRequest,
+        mut request: InitializeRequest,
     ) -> anyhow::Result<InitializeResponse> {
+        // Override the caller-supplied client_capabilities with spur's
+        // canonical literal so every InitializeRequest carries the
+        // explicit fs / terminal / meta.terminal_output advertisement.
+        // Callers today all pass InitializeRequest::new(ProtocolVersion::LATEST)
+        // (which yields ClientCapabilities::default()) — spec §6.2 requires
+        // we replace those defaults with the explicit gate.
+        request.client_capabilities = spur_client_capabilities();
+
         let agent_name = self.agent_name.clone();
         let command = self.command.clone();
         let extra_args = self.extra_args.clone();
@@ -1737,6 +1766,71 @@ async fn terminal_reader(
         Err(_) => TerminalExitStatus::new(),
     };
     let _ = exit_tx.send(Some(exit_status));
+}
+
+#[cfg(test)]
+mod client_capabilities_tests {
+    use super::*;
+    use agent_client_protocol::schema::ProtocolVersion;
+
+    /// Spur must announce the explicit, non-default `ClientCapabilities`
+    /// literal at initialize: fs.read/write, terminal=true, and the
+    /// `_meta.terminal_output` extension that unlocks codex's tool-call
+    /// meta tunnelling. See design spec §6.2.
+    #[test]
+    fn spur_client_capabilities_advertises_terminal_fs_and_terminal_output_meta() {
+        let caps = spur_client_capabilities();
+
+        assert!(caps.terminal, "spur supports terminal/* methods");
+        assert!(
+            caps.fs.read_text_file,
+            "spur supports fs/read_text_file requests"
+        );
+        assert!(
+            caps.fs.write_text_file,
+            "spur supports fs/write_text_file requests"
+        );
+
+        let meta = caps
+            .meta
+            .as_ref()
+            .expect("client meta must include terminal_output gate");
+        let terminal_output = meta
+            .get("terminal_output")
+            .and_then(serde_json::Value::as_bool)
+            .expect("meta.terminal_output must be a bool");
+        assert!(
+            terminal_output,
+            "meta.terminal_output must be true to unlock codex tool-call meta tunneling"
+        );
+    }
+
+    /// The constructed `InitializeRequest` is what spur actually sends on
+    /// the wire. Serialize the full thing and confirm the negotiated
+    /// `clientCapabilities` shape includes the gate codex looks for.
+    #[test]
+    fn initialize_request_payload_contains_explicit_client_capabilities() {
+        let caps = spur_client_capabilities();
+        let req = InitializeRequest::new(ProtocolVersion::LATEST).client_capabilities(caps);
+        let json = serde_json::to_value(&req).expect("InitializeRequest must serialize");
+
+        let cc = json
+            .get("clientCapabilities")
+            .expect("clientCapabilities must serialize");
+        assert_eq!(cc.get("terminal"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(
+            cc.get("fs").and_then(|v| v.get("readTextFile")),
+            Some(&serde_json::Value::Bool(true))
+        );
+        assert_eq!(
+            cc.get("fs").and_then(|v| v.get("writeTextFile")),
+            Some(&serde_json::Value::Bool(true))
+        );
+        assert_eq!(
+            cc.get("_meta").and_then(|v| v.get("terminal_output")),
+            Some(&serde_json::Value::Bool(true))
+        );
+    }
 }
 
 #[cfg(test)]
