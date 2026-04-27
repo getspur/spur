@@ -223,8 +223,11 @@ pub(crate) fn compute_inline_height_rows(
 
     // display_h_px = image_h × (pane_w_px / image_w); rows = display_h_px / cell_h.
     let scaled_h_px =
-        ((image.height() as u64) * (pane_width_px as u64)).div_ceil(image.width() as u64) as u32;
-    let natural_rows = scaled_h_px.div_ceil(cell_h_px) as u16;
+        ((image.height() as u64) * (pane_width_px as u64)).div_ceil(image.width() as u64);
+    // Keep natural_rows in u64 to avoid silent truncation on pathologically
+    // tall images (e.g. 1×32768 source → natural_rows > u16::MAX). Clamp to
+    // soft_cap (always ≤ u16::MAX) BEFORE narrowing.
+    let natural_rows_u64 = scaled_h_px.div_ceil(cell_h_px as u64);
 
     let two_thirds = (pane_height_rows as u32 * 2 / 3) as u16;
     let target_cap = two_thirds.max(INLINE_LEGACY_CAP);
@@ -232,7 +235,9 @@ pub(crate) fn compute_inline_height_rows(
     let soft_cap = target_cap.min(max_inline).min(INLINE_HARD_CAP);
     let effective_floor = INLINE_FLOOR_ROWS.min(soft_cap);
 
-    natural_rows.clamp(effective_floor, soft_cap.max(effective_floor))
+    let upper = soft_cap.max(effective_floor) as u64;
+    let lower = effective_floor as u64;
+    natural_rows_u64.clamp(lower, upper) as u16
 }
 
 /// Pure helper exposed for cache keying (Task 13). Returns the soft_cap
@@ -1105,5 +1110,13 @@ mod height_tests {
         // pane_h=60: target_cap = max(40, 60)=60; max_inline=56;
         // soft=min(60,56,100)=56; result=clamp(70, 8, 56)=56.
         assert_eq!(compute_inline_height_rows(&i, 100, 60, 8, 16), 56);
+    }
+
+    #[test]
+    fn height_clamps_pathologically_tall_image_at_hard_cap() {
+        // 1×32768 source with cell_h_px=1 → natural_rows would overflow u16
+        // (26_214_400) without u64-space clamp. Must cap at INLINE_HARD_CAP=100.
+        let i = img(1, 32_768);
+        assert_eq!(compute_inline_height_rows(&i, 100, 200, 8, 1), 100);
     }
 }
