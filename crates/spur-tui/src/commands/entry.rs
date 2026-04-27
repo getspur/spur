@@ -14,6 +14,8 @@ pub struct CommandEntry {
     pub source: CommandSource,
     /// How to execute it on accept/submit.
     pub dispatch: Dispatch,
+    /// If Some, typing `/<name> <arg>` opens an arg picker.
+    pub arg_picker_spec: Option<spur_acp::adapter::arg_picker_hint::ArgPickerSpec>,
 }
 
 /// Where a `CommandEntry` originates.
