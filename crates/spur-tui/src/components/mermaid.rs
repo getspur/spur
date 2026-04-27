@@ -212,7 +212,14 @@ pub fn render_mermaid(code: &str, target_width: u32) -> Result<DynamicImage, Ren
 /// Must be called from within a `catch_unwind` closure — `mmdr` can panic on
 /// malformed input.
 fn render_to_svg_inner(code: &str) -> Result<String, RenderError> {
-    let opts = mermaid_rs_renderer::RenderOptions::default();
+    // Library defaults (50/50) produce cramped layouts for typical flowcharts.
+    // Use the author's README baseline (60/80) plus a wide-aspect hint suited
+    // to TUI panes (typically 2-3× wider than tall). See:
+    //   https://github.com/1jehuang/mermaid-rs-renderer/blob/master/README.md
+    let opts = mermaid_rs_renderer::RenderOptions::modern()
+        .with_node_spacing(60.0)
+        .with_rank_spacing(80.0)
+        .with_preferred_aspect_ratio(2.5);
     mermaid_rs_renderer::render_with_options(code, opts)
         .map(|svg| fix_svg_font_families(&svg))
         .map_err(|e| RenderError::Render(e.to_string()))
