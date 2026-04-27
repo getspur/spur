@@ -155,6 +155,7 @@ fn compute_flag_summary() -> Option<(usize, usize)> {
         FlagKey::ENABLE_BROWSER_TOOL,
         FlagKey::ENABLE_COMPACTION_V2,
         FlagKey::ENABLE_TELEMETRY,
+        FlagKey::ENABLE_V1_1_PREVIEW,
     ];
 
     let total = flags.len();
