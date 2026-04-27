@@ -168,12 +168,14 @@ mod tests {
     fn gemini_style_models_some_config_options_none() {
         use agent_client_protocol::schema::ModelInfo;
         // Synthetic gemini-style: models populated, config_options None/absent.
-        let new = NewSessionResponse::new(SessionId::new("test-gemini")).models(
-            SessionModelState::new(
+        let new =
+            NewSessionResponse::new(SessionId::new("test-gemini")).models(SessionModelState::new(
                 ModelId::new("gemini-1.5-pro"),
-                vec![ModelInfo::new(ModelId::new("gemini-1.5-pro"), "Gemini 1.5 Pro")],
-            ),
-        );
+                vec![ModelInfo::new(
+                    ModelId::new("gemini-1.5-pro"),
+                    "Gemini 1.5 Pro",
+                )],
+            ));
         let init = empty_init_response();
         let caps = SpurAgentCaps::new(&init, &new);
 
@@ -191,9 +193,8 @@ mod tests {
         // `Some(state)` with zero available models is not a usable
         // model-switch surface. The agent advertised the field but
         // exposed no choices, so `/model` should be hidden / disabled.
-        let new = NewSessionResponse::new(SessionId::new("test-empty-models")).models(
-            SessionModelState::new(ModelId::new("only-current"), vec![]),
-        );
+        let new = NewSessionResponse::new(SessionId::new("test-empty-models"))
+            .models(SessionModelState::new(ModelId::new("only-current"), vec![]));
         let init = empty_init_response();
         let caps = SpurAgentCaps::new(&init, &new);
 
