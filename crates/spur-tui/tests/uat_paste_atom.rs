@@ -153,3 +153,31 @@ fn f3_u5_paste_during_history_browse_restores_draft() {
         "paste should reset history browse state"
     );
 }
+
+#[test]
+fn f3_u6_paste_with_carriage_return_separators_normalizes_at_app_boundary() {
+    let mut h = TestHarness::new(80, 24);
+
+    // Mac-legacy clipboard: bare \r between lines.
+    h.send_paste("a\rb\rc");
+
+    let bar = h
+        .app_mut()
+        .dashboard_mut_for_test()
+        .input_bar_mut_for_test();
+    assert_eq!(bar.text(), "[Paste #1 · 3 lines]");
+}
+
+#[test]
+fn f3_u7_paste_with_crlf_separators_normalizes_at_app_boundary() {
+    let mut h = TestHarness::new(80, 24);
+
+    // Windows clipboard: \r\n between lines.
+    h.send_paste("a\r\nb\r\nc");
+
+    let bar = h
+        .app_mut()
+        .dashboard_mut_for_test()
+        .input_bar_mut_for_test();
+    assert_eq!(bar.text(), "[Paste #1 · 3 lines]");
+}
