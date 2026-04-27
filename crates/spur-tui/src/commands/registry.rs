@@ -552,12 +552,11 @@ mod tests {
         };
 
         let init = InitializeResponse::new(ProtocolVersion::LATEST);
-        let mut new = NewSessionResponse::new(SessionId::new("sid")).models(
-            SessionModelState::new(
+        let mut new =
+            NewSessionResponse::new(SessionId::new("sid")).models(SessionModelState::new(
                 ModelId::new("gpt-5-codex"),
                 vec![ModelInfo::new(ModelId::new("gpt-5-codex"), "GPT-5 Codex")],
-            ),
-        );
+            ));
         new.config_options = Some(vec![SessionConfigOption::new(
             SessionConfigId::new("model"),
             "Model",
@@ -659,8 +658,8 @@ mod tests {
     #[test]
     fn available_commands_for_session_with_models_only_keeps_model_picker() {
         use agent_client_protocol::schema::{
-            InitializeResponse, ModelId, ModelInfo, NewSessionResponse, ProtocolVersion,
-            SessionId, SessionModelState,
+            InitializeResponse, ModelId, ModelInfo, NewSessionResponse, ProtocolVersion, SessionId,
+            SessionModelState,
         };
 
         let init = InitializeResponse::new(ProtocolVersion::LATEST);

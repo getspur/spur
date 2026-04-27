@@ -420,8 +420,8 @@ mod sessions_slash_tests {
     fn slash_model_with_caps_supporting_set_model_routes_to_set_session_model() {
         use crate::commands::entry::{CommandEntry, CommandSource, Dispatch};
         use agent_client_protocol::schema::{
-            InitializeResponse, ModelId, ModelInfo, NewSessionResponse, ProtocolVersion,
-            SessionId, SessionModelState,
+            InitializeResponse, ModelId, ModelInfo, NewSessionResponse, ProtocolVersion, SessionId,
+            SessionModelState,
         };
 
         let mut registry = CommandRegistry::new();

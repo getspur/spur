@@ -278,7 +278,6 @@ impl NativeAcpConnection {
             child_pgid: Arc::new(Mutex::new(None)),
         }
     }
-
 }
 
 /// Send `signal` (e.g. `"TERM"`, `"KILL"`) to the process group `pgid` via the

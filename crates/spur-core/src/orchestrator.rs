@@ -4502,7 +4502,10 @@ impl Orchestrator {
             .ok_or(spur_acp::AcpError::CapabilityMissing("set_model"))?;
         let sid = agent_client_protocol::schema::SessionId::new(brain.acp_session_id.clone());
         let model_id = agent_client_protocol::schema::ModelId::new(value);
-        brain.connection.set_session_model(sid, model_id, &caps).await
+        brain
+            .connection
+            .set_session_model(sid, model_id, &caps)
+            .await
     }
 
     /// Replace the cached `config_options` on the active brain session and
