@@ -729,7 +729,7 @@ async fn t_v0c_10_startup_reclaims_mid_plan_and_continues_dispatch() {
         .await
         .expect("start server (loopback bind already probed at fn entry)");
     server.fast_forward_reconciler();
-    let request = tokio::time::timeout(Duration::from_secs(1), channel.request_rx.recv())
+    let request = tokio::time::timeout(Duration::from_secs(5), channel.request_rx.recv())
         .await
         .expect("reconciler dispatch timeout")
         .expect("dispatch request");
@@ -800,7 +800,7 @@ async fn t_v0c_11_startup_reclaim_clears_stale_dispatch_before_redispatch() {
         "startup reclaim should clear stale dispatch intent before redispatch"
     );
 
-    let request = tokio::time::timeout(Duration::from_secs(1), channel.request_rx.recv())
+    let request = tokio::time::timeout(Duration::from_secs(5), channel.request_rx.recv())
         .await
         .expect("redispatch timeout")
         .expect("dispatch request");

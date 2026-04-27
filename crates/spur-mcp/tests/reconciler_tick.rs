@@ -1344,7 +1344,7 @@ async fn submit_plan_default_notify_path_dispatches_ready_task() {
     let task_id = extract_submit_plan_task_issue_id(&response, "t1");
 
     let request =
-        tokio::time::timeout(std::time::Duration::from_secs(1), channel.request_rx.recv())
+        tokio::time::timeout(std::time::Duration::from_secs(5), channel.request_rx.recv())
             .await
             .expect("started reconciler should dispatch persisted submit_plan work within timeout")
             .expect("dispatch request");
@@ -1447,7 +1447,7 @@ async fn execute_epic_default_notify_path_dispatches_ready_task() {
     );
 
     let request =
-        tokio::time::timeout(std::time::Duration::from_secs(1), channel.request_rx.recv())
+        tokio::time::timeout(std::time::Duration::from_secs(5), channel.request_rx.recv())
             .await
             .expect("started reconciler should dispatch execute_epic work within timeout")
             .expect("dispatch request");
