@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use agent_client_protocol::{
+use agent_client_protocol::schema::{
     ContentBlock, InitializeRequest, PermissionOptionId, PromptRequest, ProtocolVersion,
     SetSessionModeRequest, TextContent,
 };

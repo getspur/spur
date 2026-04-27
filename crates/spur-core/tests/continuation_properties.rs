@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use agent_client_protocol::{ContentBlock, TextContent};
+use agent_client_protocol::schema::{ContentBlock, TextContent};
 use chrono::Utc;
 use proptest::prelude::*;
 use proptest::test_runner::Config as ProptestConfig;

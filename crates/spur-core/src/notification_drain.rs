@@ -14,7 +14,7 @@
 
 use std::time::Duration;
 
-use agent_client_protocol::{PromptRequest, SessionNotification};
+use agent_client_protocol::schema::{PromptRequest, SessionNotification};
 use futures::StreamExt;
 use tokio::sync::broadcast::error::RecvError;
 
