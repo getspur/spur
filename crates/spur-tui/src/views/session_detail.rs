@@ -965,6 +965,23 @@ impl SessionDetailView {
         });
     }
 
+    /// Push a one-shot trace entry telling the user how to persist their
+    /// current edit-mode choice. Called when the runtime mode diverges from
+    /// the configured mode after `Alt-i` or `/vim`.
+    pub fn push_persist_hint(&mut self, mode_label: &str) {
+        let msg = format!(
+            "{mode_label} mode (session). Persist: spur config set tui.edit_mode {}",
+            mode_label.to_lowercase()
+        );
+        self.react_trace.push(TraceEntry {
+            kind: TraceKind::Think,
+            text: msg,
+            timestamp: Self::now_stamp(),
+            #[cfg(feature = "markdown")]
+            markdown: None,
+        });
+    }
+
     /// Push a system note reflecting the active `cancel_mode`. Called when
     /// the user presses `Esc` to cancel an in-flight stream.
     fn push_cancel_note(&mut self) {
