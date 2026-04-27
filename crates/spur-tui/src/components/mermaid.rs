@@ -148,8 +148,32 @@ impl std::error::Error for RenderError {}
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
-/// Default target pixel-width for rasterised diagrams.
-pub const DEFAULT_WIDTH: u32 = 800;
+// ─── Raster bucket policy ─────────────────────────────────────────────────────
+
+/// Discrete raster-width buckets in pixels. Chosen so a typical pane finds a
+/// bucket within 1.25× of its pixel width — minimising terminal-side scaling
+/// without re-rasterising on every column resize.
+///
+/// Capped at 3200, not higher, because v2 has no LRU eviction and
+/// `4000 × 3000 RGBA ≈ 48 MB` per diagram is too high a per-session
+/// memory ceiling for sessions with many diagrams. `3200 × 2400 RGBA ≈ 30 MB`
+/// is the v2 worst-case per-diagram budget.
+pub const RASTER_BUCKETS: [u32; 6] = [800, 1200, 1600, 2000, 2400, 3200];
+
+/// Choose the smallest bucket whose pixel width is ≥ `pane_w_px`.
+/// Falls back to the largest bucket for very wide panes.
+///
+/// **Bucket-up only** is the SessionDetailView re-raster policy: once we
+/// render at a higher bucket, we never downgrade for the same diagram
+/// (see `MermaidState::Ready.rastered_at_bucket` and `maybe_request_rerasters`).
+pub fn raster_width_for_pane(pane_w_px: u32) -> u32 {
+    for &b in &RASTER_BUCKETS {
+        if b >= pane_w_px {
+            return b;
+        }
+    }
+    *RASTER_BUCKETS.last().unwrap()
+}
 
 /// Render a Mermaid diagram source string to a [`DynamicImage`].
 ///
@@ -293,6 +317,36 @@ fn rasterize_svg(svg: &str, target_width: u32) -> Result<DynamicImage, RenderErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bucket_zero_returns_smallest() {
+        assert_eq!(raster_width_for_pane(0), 800);
+    }
+
+    #[test]
+    fn bucket_below_smallest_returns_smallest() {
+        assert_eq!(raster_width_for_pane(400), 800);
+    }
+
+    #[test]
+    fn bucket_exact_match_returns_match() {
+        assert_eq!(raster_width_for_pane(1200), 1200);
+    }
+
+    #[test]
+    fn bucket_just_above_returns_next() {
+        assert_eq!(raster_width_for_pane(1201), 1600);
+    }
+
+    #[test]
+    fn bucket_at_3200_match() {
+        assert_eq!(raster_width_for_pane(3200), 3200);
+    }
+
+    #[test]
+    fn bucket_above_largest_caps_at_3200() {
+        assert_eq!(raster_width_for_pane(99_999), 3200);
+    }
 
     #[test]
     fn fix_font_families_replaces_inner_quotes() {
