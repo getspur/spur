@@ -1,12 +1,10 @@
 //! End-to-end smoke for the v2 PR-3 free-text picker against codex's
 //! `/review-branch` advertised command.
 //!
-//! Composes the public surfaces in one happy path so a regression in any of:
-//!   - `arg_picker_hint::parse`
-//!   - `agents::build_entry` auto-derivation
-//!   - `CommandRegistry::set_agent_commands` + `arg_picker_spec` lookup
-//!   - `submit_router::route` (PromptText path with arg)
-//! ...surfaces here.
+//! Composes the public surfaces in one happy path so a regression in
+//! any of `arg_picker_hint::parse`, `agents::build_entry` auto-derivation,
+//! `CommandRegistry::set_agent_commands` + `arg_picker_spec` lookup, or
+//! `submit_router::route` (PromptText path with arg) surfaces here.
 //!
 //! Wire reality: codex-acp 0.12.0 emits an `available_commands_update`
 //! notification with /review-branch carrying `input.hint = "branch name"`
