@@ -315,6 +315,46 @@ mod sessions_slash_tests {
         }
     }
 
+    /// Wave B.8: an agent-advertised command with Unstructured input (e.g.
+    /// codex's /review-branch) routes free-text submits as PromptText so the
+    /// agent receives the full canonical "/<cmd> <arg>" string.
+    #[test]
+    fn slash_review_branch_with_arg_routes_as_prompt_text() {
+        use spur_acp::{
+            AvailableCommand, AvailableCommandInput, CommandsConfig, DispatchKind,
+            UnstructuredCommandInput,
+        };
+
+        let mut registry = CommandRegistry::new();
+        let cfg = CommandsConfig {
+            dispatch: DispatchKind::PromptText,
+            ..Default::default()
+        };
+        let cmd = AvailableCommand::new("review-branch", "Review against branch")
+            .input(AvailableCommandInput::Unstructured(
+                UnstructuredCommandInput::new("branch name"),
+            ));
+        let entry = crate::agents::build_entry("codex", &cfg, &cmd);
+        // Sanity-check the auto-derived spec from Wave B.4 wired through.
+        assert!(entry.arg_picker_spec.is_some());
+        registry.set_agent_commands("codex", vec![entry]);
+
+        let decision = route("/review-branch main", &[], &registry, false);
+        match decision {
+            SubmitDecision::Send { blocks, interrupt } => {
+                assert!(!interrupt);
+                assert_eq!(blocks.len(), 1);
+                use agent_client_protocol::schema::ContentBlock;
+                let text = match &blocks[0] {
+                    ContentBlock::Text(t) => &t.text,
+                    other => panic!("expected Text, got {other:?}"),
+                };
+                assert_eq!(text, "/review-branch main");
+            }
+            other => panic!("expected Send, got {:?}", other),
+        }
+    }
+
     /// Task 2.15: same entry but no value yet (`/model `) returns Empty so
     /// the picker stays open waiting for selection.
     #[test]
