@@ -684,6 +684,14 @@ pub enum InteractiveInput {
     SetSessionMode {
         mode_id: String,
     },
+    /// Request `set_session_config_option` on the active brain session for
+    /// the v1 codex `/model` and `/effort` slash pickers. No-op if there is
+    /// no active brain session. On success, refreshes the orchestrator's
+    /// cached `config_options` from the response.
+    SetSessionConfigOption {
+        config_id: String,
+        value: String,
+    },
     /// Invoke an agent vendor-extension RPC on the active brain session.
     /// No-op if there is no active brain session. The method name and params
     /// are chosen by the TUI's config-driven dispatch path — the
@@ -2110,6 +2118,44 @@ impl Orchestrator {
                             warn!(
                                 mode_id = %mode_id,
                                 "SetSessionMode received but no active brain session"
+                            );
+                        }
+                    }
+
+                    // ── SetSessionConfigOption ───────────────────────────
+                    InteractiveInput::SetSessionConfigOption { config_id, value } => {
+                        if let Some(b) = brain.as_mut() {
+                            let req = agent_client_protocol::schema::SetSessionConfigOptionRequest::new(
+                                agent_client_protocol::schema::SessionId::new(
+                                    b.acp_session_id.clone(),
+                                ),
+                                agent_client_protocol::schema::SessionConfigId::new(
+                                    std::sync::Arc::<str>::from(config_id.as_str()),
+                                ),
+                                agent_client_protocol::schema::SessionConfigValueId::new(
+                                    std::sync::Arc::<str>::from(value.as_str()),
+                                ),
+                            );
+                            match b.connection.set_session_config_option(req).await {
+                                Ok(resp) => {
+                                    self.replace_session_config_options(b, resp.config_options);
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        brain = %b.brain_name,
+                                        session_id = %b.spur_session_id,
+                                        config_id = %config_id,
+                                        value = %value,
+                                        error = %e,
+                                        "set_session_config_option failed"
+                                    );
+                                }
+                            }
+                        } else {
+                            warn!(
+                                config_id = %config_id,
+                                value = %value,
+                                "SetSessionConfigOption received but no active brain session"
                             );
                         }
                     }
