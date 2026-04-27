@@ -4674,6 +4674,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "spur-license-admin"
+version = "0.4.5"
+dependencies = [
+ "anyhow",
+ "base64",
+ "chrono",
+ "clap",
+ "ed25519-dalek",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "spur-license",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "spur-mcp"
 version = "0.4.5"
 dependencies = [
