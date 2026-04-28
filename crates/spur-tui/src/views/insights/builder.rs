@@ -7,22 +7,60 @@ use spur_context::{AgentViewStatus, AsyncEngine};
 use std::collections::BTreeMap;
 
 pub async fn build_snapshot(engine: &AsyncEngine) -> Result<InsightsSnapshot> {
+    let t0 = std::time::Instant::now();
+    tracing::info!(target: "spur_tui::insights::builder", "build_snapshot: dispatching to spawn_blocking");
     let queries = engine
         .run(|e| -> anyhow::Result<AtomicQueries> {
-            e.refresh_cache()?;
+            tracing::info!(target: "spur_tui::insights::builder", "build_snapshot: inside blocking closure (mutex acquired)");
+            let step = std::time::Instant::now();
+            let materialized_rows = e.refresh_cache()?;
+            tracing::info!(target: "spur_tui::insights::builder", elapsed_ms = step.elapsed().as_millis() as u64, materialized_rows, "step refresh_cache done");
+
+            let step = std::time::Instant::now();
             e.use_cached_events()?;
+            tracing::info!(target: "spur_tui::insights::builder", elapsed_ms = step.elapsed().as_millis() as u64, "step use_cached_events done");
+
+            let step = std::time::Instant::now();
+            let daily_90 = e.daily_report(90)?;
+            tracing::info!(target: "spur_tui::insights::builder", elapsed_ms = step.elapsed().as_millis() as u64, rows = daily_90.len(), "step daily_report(90) done");
+
+            let step = std::time::Instant::now();
+            let weekly_12 = e.weekly_report(12)?;
+            tracing::info!(target: "spur_tui::insights::builder", elapsed_ms = step.elapsed().as_millis() as u64, rows = weekly_12.len(), "step weekly_report(12) done");
+
+            let step = std::time::Instant::now();
+            let monthly_6 = e.monthly_report(6)?;
+            tracing::info!(target: "spur_tui::insights::builder", elapsed_ms = step.elapsed().as_millis() as u64, rows = monthly_6.len(), "step monthly_report(6) done");
+
+            let step = std::time::Instant::now();
+            let by_agent_30d = e.daily_report(30)?;
+            tracing::info!(target: "spur_tui::insights::builder", elapsed_ms = step.elapsed().as_millis() as u64, rows = by_agent_30d.len(), "step daily_report(30) done");
+
+            let step = std::time::Instant::now();
+            let by_model_30d = e.model_breakdown()?;
+            tracing::info!(target: "spur_tui::insights::builder", elapsed_ms = step.elapsed().as_millis() as u64, rows = by_model_30d.len(), "step model_breakdown done");
+
+            let step = std::time::Instant::now();
+            let by_project_30d = e.project_breakdown()?;
+            tracing::info!(target: "spur_tui::insights::builder", elapsed_ms = step.elapsed().as_millis() as u64, rows = by_project_30d.len(), "step project_breakdown done");
+
+            let step = std::time::Instant::now();
+            let live_30min = e.live_recent_sessions(30)?;
+            tracing::info!(target: "spur_tui::insights::builder", elapsed_ms = step.elapsed().as_millis() as u64, rows = live_30min.len(), "step live_recent_sessions(30) done");
+
             Ok(AtomicQueries {
-                daily_90: e.daily_report(90)?,
-                weekly_12: e.weekly_report(12)?,
-                monthly_6: e.monthly_report(6)?,
-                by_agent_30d: e.daily_report(30)?,
-                by_model_30d: e.model_breakdown()?,
-                by_project_30d: e.project_breakdown()?,
-                live_30min: e.live_recent_sessions(30)?,
+                daily_90,
+                weekly_12,
+                monthly_6,
+                by_agent_30d,
+                by_model_30d,
+                by_project_30d,
+                live_30min,
             })
         })
         .await?;
     let kpis = derive_kpis(&queries);
+    tracing::info!(target: "spur_tui::insights::builder", total_ms = t0.elapsed().as_millis() as u64, "build_snapshot complete");
     Ok(InsightsSnapshot {
         fetched_at: Utc::now(),
         queries,
