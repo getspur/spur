@@ -415,15 +415,16 @@ async fn main() -> ExitCode {
     }
 }
 
-/// Render the top-level error. If stderr is a TTY and the error
-/// chain contains a [`spur_license::FeatureGateError`], render the
-/// structured upgrade CTA. Otherwise fall through to anyhow's
-/// `{:#}` formatter, which walks the Display chain (root cause +
-/// every `.context(...)` link) but does NOT include Debug or
-/// backtrace frames. Non-TTY stderr (piped/scripted output)
-/// always uses the plain path so tooling parsing isn't broken.
+/// Render the top-level error. If stderr is a TTY (or
+/// `SPUR_FORCE_TTY=1` in debug builds) and the error chain contains
+/// a [`spur_license::FeatureGateError`], render the structured
+/// upgrade CTA. Otherwise fall through to anyhow's `{:#}` formatter,
+/// which walks the Display chain (root cause + every `.context(...)`
+/// link) but does NOT include Debug or backtrace frames. Non-TTY
+/// stderr (piped/scripted output) always uses the plain path so
+/// tooling parsing isn't broken.
 fn render_top_level_error(err: &anyhow::Error) {
-    if std::io::stderr().is_terminal() {
+    if is_tty_or_forced() {
         if let Some(gate_err) = spur_license::upgrade_cta::find_gate_error(err) {
             eprint!(
                 "{}",
@@ -433,6 +434,25 @@ fn render_top_level_error(err: &anyhow::Error) {
         }
     }
     eprintln!("Error: {err:#}");
+}
+
+/// True if stderr is a real terminal, or — in debug builds only —
+/// if `SPUR_FORCE_TTY` is set (any non-empty value). The
+/// `cfg(debug_assertions)` gate ensures the env override is
+/// compiled out of release binaries; it exists solely to let
+/// `assert_cmd`-driven binary tests force the CTA dispatch path
+/// without allocating a pty for the spawned child.
+fn is_tty_or_forced() -> bool {
+    if std::io::stderr().is_terminal() {
+        return true;
+    }
+    #[cfg(debug_assertions)]
+    {
+        if std::env::var("SPUR_FORCE_TTY").is_ok() {
+            return true;
+        }
+    }
+    false
 }
 
 async fn run() -> Result<()> {
