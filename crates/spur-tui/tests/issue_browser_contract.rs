@@ -155,14 +155,15 @@ fn status_keys_emit_update_actions() {
     let mut view = IssueBrowserView::default();
     seed_issues(&mut view);
 
-    let cases: Vec<(char, &str)> = vec![
-        ('o', "open"),
-        ('w', "in_progress"),
-        ('b', "blocked"),
-        ('d', "closed"),
+    let cases: Vec<(char, &str, bool)> = vec![
+        ('o', "open", false),
+        ('w', "in_progress", false),
+        ('b', "blocked", false),
+        ('x', "closed", false),
+        ('d', "closed", true),
     ];
 
-    for (key, expected_status) in cases {
+    for (key, expected_status, expected_legacy) in cases {
         let action = view.handle_key(
             KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
             &test_ctx(),
@@ -170,8 +171,14 @@ fn status_keys_emit_update_actions() {
         assert!(
             matches!(
                 action,
-                Some(Action::Issue(IssueAction::UpdateStatus { ref id, ref status }))
-                if id == "issue-1" && status == expected_status
+                Some(Action::Issue(IssueAction::UpdateStatus {
+                    ref id,
+                    ref status,
+                    via_legacy_key,
+                }))
+                if id == "issue-1"
+                    && status == expected_status
+                    && via_legacy_key == expected_legacy
             ),
             "key '{}' should emit UpdateStatus({}, {}), got {:?}",
             key,

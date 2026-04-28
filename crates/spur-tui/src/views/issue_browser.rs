@@ -159,10 +159,13 @@ impl IssueBrowserView {
             },
 
             // Status actions
-            KeyCode::Char('o') if key.modifiers.is_empty() => self.update_status("open"),
-            KeyCode::Char('w') if key.modifiers.is_empty() => self.update_status("in_progress"),
-            KeyCode::Char('b') if key.modifiers.is_empty() => self.update_status("blocked"),
-            KeyCode::Char('d') if key.modifiers.is_empty() => self.update_status("closed"),
+            KeyCode::Char('o') if key.modifiers.is_empty() => self.update_status("open", false),
+            KeyCode::Char('w') if key.modifiers.is_empty() => {
+                self.update_status("in_progress", false)
+            }
+            KeyCode::Char('b') if key.modifiers.is_empty() => self.update_status("blocked", false),
+            KeyCode::Char('x') if key.modifiers.is_empty() => self.update_status("closed", false),
+            KeyCode::Char('d') if key.modifiers.is_empty() => self.update_status("closed", true),
             KeyCode::Char('W') if key.modifiers.is_empty() => {
                 let id = match &self.issue_focus {
                     IssueFocus::Loaded { id, .. } => Some(id.clone()),
@@ -188,7 +191,7 @@ impl IssueBrowserView {
         }
     }
 
-    fn update_status(&self, status: &str) -> Option<Action> {
+    fn update_status(&self, status: &str, via_legacy_key: bool) -> Option<Action> {
         let id = match &self.issue_focus {
             IssueFocus::Loaded { id, .. } => Some(id.clone()),
             _ => self
@@ -200,6 +203,7 @@ impl IssueBrowserView {
             Action::Issue(IssueAction::UpdateStatus {
                 id,
                 status: status.into(),
+                via_legacy_key,
             })
         })
     }
