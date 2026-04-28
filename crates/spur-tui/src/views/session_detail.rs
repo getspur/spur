@@ -2263,8 +2263,11 @@ impl SessionDetailView {
             })
             .unwrap_or((0, 0));
         let caps = self.spur_agent_caps.as_deref();
+        // Model freshness still derives from the frozen caps snapshot; M10.2
+        // will add live model writeback when that state has a mutable owner.
         let model_label = caps.and_then(spur_acp::SpurAgentCaps::current_model_label);
-        let effort_label = caps.and_then(spur_acp::SpurAgentCaps::current_effort_label);
+        let effort_label =
+            spur_acp::SpurAgentCaps::effort_label_from(&self.session_config_options);
         let usage_supported = caps
             .map(spur_acp::SpurAgentCaps::usage_supported)
             .unwrap_or(true);
