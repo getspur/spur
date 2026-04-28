@@ -4626,6 +4626,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "directories",
+ "file-rotate",
  "fs4",
  "futures",
  "libc",
@@ -4641,6 +4642,7 @@ dependencies = [
  "tokio-util",
  "toml",
  "tracing",
+ "tracing-appender",
  "tracing-subscriber",
  "uuid",
 ]

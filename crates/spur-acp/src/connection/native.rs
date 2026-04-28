@@ -65,6 +65,8 @@ use agent_client_protocol::schema::{
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
 
+use crate::config::LogConfig;
+use crate::connection::child_stderr_bridge::ChildStderrBridge;
 use crate::connection::{AgentConnection, ExtNotificationPayload};
 use crate::error::AcpError;
 use crate::spur_agent_caps::SpurAgentCaps;
@@ -206,6 +208,11 @@ pub struct NativeAcpConnection {
     /// reaping registry. Defaults to `PathBuf::from(".")` so production
     /// callers (which run with cwd at the repo root) need no extra wiring.
     repo_root: PathBuf,
+    /// Per-connection log configuration. Defaults to `LogConfig::default()`,
+    /// which has `child_stderr_pipe: true` (the new file-rotate-backed
+    /// stderr bridge is on by default). Tests and orchestrator wiring may
+    /// override via [`Self::set_log_config`].
+    log_config: LogConfig,
 }
 
 /// Compute the path where the ACP subprocess's stderr should be written.
@@ -281,6 +288,7 @@ impl NativeAcpConnection {
             session_notif_tx,
             child_pgid: Arc::new(Mutex::new(None)),
             repo_root: PathBuf::from("."),
+            log_config: LogConfig::default(),
         }
     }
 
@@ -289,6 +297,13 @@ impl NativeAcpConnection {
     /// tests use this to redirect the registry into a tempdir.
     pub fn set_repo_root(&mut self, root: PathBuf) {
         self.repo_root = root;
+    }
+
+    /// Override the log configuration used by the spawn site (controls the
+    /// child-stderr capture mode + per-child rotation caps). Default is
+    /// `LogConfig::default()`, which enables the file-rotate-backed bridge.
+    pub fn set_log_config(&mut self, log_config: LogConfig) {
+        self.log_config = log_config;
     }
 
     /// Issue ACP `session/set_model` with a state-gated fallback to
@@ -429,6 +444,7 @@ impl AgentConnection for NativeAcpConnection {
         let session_notif_tx_for_thread = self.session_notif_tx.clone();
         let child_pgid = self.child_pgid.clone();
         let repo_root = self.repo_root.clone();
+        let log_config = self.log_config.clone();
         let handle = std::thread::Builder::new()
             .name(format!("acp-{}", agent_name))
             .spawn(move || {
@@ -442,6 +458,7 @@ impl AgentConnection for NativeAcpConnection {
                     session_notif_tx_for_thread,
                     child_pgid,
                     repo_root,
+                    log_config,
                 );
             })
             .map_err(|e| {
@@ -843,6 +860,7 @@ fn acp_thread_main(
     session_notif_tx: tokio::sync::broadcast::Sender<SessionNotification>,
     child_pgid: Arc<Mutex<Option<i32>>>,
     repo_root: PathBuf,
+    log_config: LogConfig,
 ) {
     // Build a single-threaded runtime for this thread.
     let rt = match tokio::runtime::Builder::new_current_thread()
@@ -893,21 +911,29 @@ fn acp_thread_main(
             log_path = %log_path.display(),
             "NativeAcpConnection: capturing child stderr to log file"
         );
-        let stderr_cfg = match std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&log_path)
-        {
-            Ok(f) => std::process::Stdio::from(f),
-            Err(e) => {
-                tracing::warn!(
-                    agent = %agent_name,
-                    path = %log_path.display(),
-                    error = %e,
-                    "NativeAcpConnection: failed to open stderr log; falling back to inherit",
-                );
-                std::process::Stdio::inherit()
+        let stderr_cfg = if log_config.child_stderr_pipe {
+            // New default: spur owns the writer, child stderr flows through a
+            // bounded byte-chunk reader into a per-child file-rotate writer.
+            // See `connection/child_stderr_bridge.rs`.
+            std::process::Stdio::piped()
+        } else {
+            // Legacy fall-back: child holds the FD directly. No rotation.
+            match std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&log_path)
+            {
+                Ok(f) => std::process::Stdio::from(f),
+                Err(e) => {
+                    tracing::warn!(
+                        agent = %agent_name,
+                        path = %log_path.display(),
+                        error = %e,
+                        "NativeAcpConnection: child_stderr_pipe disabled but log open failed; using inherit",
+                    );
+                    std::process::Stdio::inherit()
+                }
             }
         };
 
@@ -967,6 +993,52 @@ fn acp_thread_main(
                 );
             }
         }
+
+        // Start the per-child stderr bridge when piping is enabled. The
+        // bridge owns the read side of the child's stderr pipe and writes
+        // through `file-rotate` so per-child disk usage stays bounded.
+        // The handle is kept in scope until after `child.wait()` returns
+        // so we can drain its `non_blocking` worker on shutdown.
+        let stderr_bridge: Option<ChildStderrBridge> = if log_config.child_stderr_pipe {
+            match child.stderr.take() {
+                Some(stderr) => {
+                    let log_dir = log_path
+                        .parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(|| PathBuf::from("."));
+                    let pid = child.id().unwrap_or(0);
+                    match ChildStderrBridge::start(
+                        stderr,
+                        &log_dir,
+                        &agent_name,
+                        pid,
+                        log_config.child_stderr_max_bytes,
+                        log_config.child_stderr_max_files,
+                        log_config.buffered_lines_limit,
+                    ) {
+                        Ok(bridge) => Some(bridge),
+                        Err(e) => {
+                            tracing::warn!(
+                                agent = %agent_name,
+                                error = %e,
+                                "NativeAcpConnection: failed to start child stderr bridge; \
+                                 child stderr will be discarded for this run"
+                            );
+                            None
+                        }
+                    }
+                }
+                None => {
+                    tracing::warn!(
+                        agent = %agent_name,
+                        "NativeAcpConnection: child_stderr_pipe enabled but child.stderr was None"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         let child_stdin = match child.stdin.take() {
             Some(s) => s,
@@ -1697,6 +1769,13 @@ fn acp_thread_main(
                 repo_root.join(".spur").join("pgids"),
             );
             let _ = registry.delete(pgid);
+        }
+
+        // Drain the per-child stderr bridge: child exit closed the pipe so
+        // the reader task is at EOF; awaiting the join handle then dropping
+        // the WorkerGuard lets `non_blocking` flush remaining chunks.
+        if let Some(bridge) = stderr_bridge {
+            bridge.shutdown().await;
         }
         // Mark pgid consumed so `Drop` won't re-kill a reaped or recycled
         // group id.
