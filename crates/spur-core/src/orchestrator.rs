@@ -332,7 +332,8 @@ mod session_attach_guard_transfer_tests {
         let json =
             include_str!("../../spur-acp/tests/data/codex_acp_0_12_new_session_response.json");
         let new: NewSessionResponse = serde_json::from_str(json).unwrap();
-        let caps = std::sync::Arc::new(SpurAgentCaps::new(&init, &new));
+        let caps =
+            std::sync::Arc::new(SpurAgentCaps::new(&init, &new, spur_acp::AgentKind::CodexAcp));
         brain.spur_agent_caps = Some(caps.clone());
 
         let read = orchestrator
@@ -513,7 +514,8 @@ mod session_attach_guard_transfer_tests {
                     "Claude Sonnet 4.7",
                 )],
             ));
-        let caps = std::sync::Arc::new(SpurAgentCaps::new(&init, &new));
+        let caps =
+            std::sync::Arc::new(SpurAgentCaps::new(&init, &new, spur_acp::AgentKind::CodexAcp));
         assert!(caps.supports_set_model());
 
         let mut brain = BrainSession {
@@ -3627,6 +3629,7 @@ impl Orchestrator {
         let spur_agent_caps = Some(Arc::new(spur_acp::SpurAgentCaps::new(
             &init_response,
             &session_response,
+            brain_cfg.kind,
         )));
 
         self.emit(SpurEvent::now(SpurEventBody::AgentSessionReady {

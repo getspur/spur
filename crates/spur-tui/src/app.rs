@@ -3314,7 +3314,11 @@ mod brain_retired_tests {
         let new = agent_client_protocol::schema::NewSessionResponse::new(
             agent_client_protocol::schema::SessionId::new("acp-b1"),
         );
-        std::sync::Arc::new(spur_acp::SpurAgentCaps::new(&init, &new))
+        std::sync::Arc::new(spur_acp::SpurAgentCaps::new(
+            &init,
+            &new,
+            spur_acp::AgentKind::CodexAcp,
+        ))
     }
 
     #[test]

@@ -18,6 +18,8 @@ use agent_client_protocol::schema::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::types::AgentKind;
+
 /// What the agent told spur during `initialize` + `session/new`.
 /// Captured ONCE per session at session-create and frozen for the
 /// session lifetime — ACP 0.12 has no protocol affordance for
@@ -35,17 +37,24 @@ pub struct SpurAgentCaps {
     /// `NewSessionResponse.config_options`. Non-empty ⇒
     /// `session/set_config_option` is usable.
     pub config_options: Vec<SessionConfigOption>,
+    /// Agent identity captured from config at session creation.
+    pub agent_kind: AgentKind,
 }
 
 impl SpurAgentCaps {
     /// Build from the two relevant wire responses.
     #[must_use]
-    pub fn new(initialize: &InitializeResponse, new_session: &NewSessionResponse) -> Self {
+    pub fn new(
+        initialize: &InitializeResponse,
+        new_session: &NewSessionResponse,
+        agent_kind: AgentKind,
+    ) -> Self {
         Self {
             agent: initialize.agent_capabilities.clone(),
             modes: new_session.modes.clone(),
             models: new_session.models.clone(),
             config_options: new_session.config_options.clone().unwrap_or_default(),
+            agent_kind,
         }
     }
 
@@ -102,6 +111,7 @@ mod tests {
     };
 
     use crate::spur_agent_caps::SpurAgentCaps;
+    use crate::types::AgentKind;
 
     fn empty_init_response() -> InitializeResponse {
         InitializeResponse::new(ProtocolVersion::LATEST)
@@ -115,7 +125,7 @@ mod tests {
     fn serialized_caps_include_agent_kind() {
         let init = empty_init_response();
         let new = empty_new_session_response();
-        let caps = SpurAgentCaps::new(&init, &new);
+        let caps = SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp);
 
         let value = serde_json::to_value(caps).expect("caps must serialize");
 
@@ -136,7 +146,7 @@ mod tests {
     fn empty_responses_yield_all_false() {
         let init = empty_init_response();
         let new = empty_new_session_response();
-        let caps = SpurAgentCaps::new(&init, &new);
+        let caps = SpurAgentCaps::new(&init, &new, AgentKind::Generic);
 
         assert!(!caps.supports_set_mode(), "empty modes => no set_mode");
         assert!(!caps.supports_set_model(), "empty models => no set_model");
@@ -163,7 +173,7 @@ mod tests {
         // Pair with a default InitializeResponse — set_* gating derives from
         // new_session state, not from AgentCapabilities flags.
         let init = empty_init_response();
-        let caps = SpurAgentCaps::new(&init, &new);
+        let caps = SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp);
 
         assert!(
             caps.supports_set_mode(),
@@ -193,7 +203,7 @@ mod tests {
                 )],
             ));
         let init = empty_init_response();
-        let caps = SpurAgentCaps::new(&init, &new);
+        let caps = SpurAgentCaps::new(&init, &new, AgentKind::Generic);
 
         assert!(caps.supports_set_model(), "gemini-style has models");
         assert!(
@@ -212,7 +222,7 @@ mod tests {
         let new = NewSessionResponse::new(SessionId::new("test-empty-models"))
             .models(SessionModelState::new(ModelId::new("only-current"), vec![]));
         let init = empty_init_response();
-        let caps = SpurAgentCaps::new(&init, &new);
+        let caps = SpurAgentCaps::new(&init, &new, AgentKind::Generic);
 
         assert!(
             !caps.supports_set_model(),
@@ -229,7 +239,7 @@ mod tests {
         );
         let new = NewSessionResponse::new(SessionId::new("test-models")).models(modes_state);
         let init = empty_init_response();
-        let caps = SpurAgentCaps::new(&init, &new);
+        let caps = SpurAgentCaps::new(&init, &new, AgentKind::Generic);
 
         assert!(caps.supports_set_model());
     }
@@ -239,7 +249,7 @@ mod tests {
         let modes = SessionModeState::new(SessionModeId::new("only-id"), vec![]);
         let new = NewSessionResponse::new(SessionId::new("test-empty-modes")).modes(modes);
         let init = empty_init_response();
-        let caps = SpurAgentCaps::new(&init, &new);
+        let caps = SpurAgentCaps::new(&init, &new, AgentKind::Generic);
 
         assert!(
             !caps.supports_set_mode(),
@@ -255,7 +265,7 @@ mod tests {
         );
         let new = NewSessionResponse::new(SessionId::new("test-modes")).modes(modes);
         let init = empty_init_response();
-        let caps = SpurAgentCaps::new(&init, &new);
+        let caps = SpurAgentCaps::new(&init, &new, AgentKind::Generic);
 
         assert!(caps.supports_set_mode());
     }
@@ -265,7 +275,7 @@ mod tests {
         let mut init = empty_init_response();
         init.agent_capabilities = AgentCapabilities::new().load_session(true);
         let new = empty_new_session_response();
-        let caps = SpurAgentCaps::new(&init, &new);
+        let caps = SpurAgentCaps::new(&init, &new, AgentKind::Generic);
 
         assert!(caps.supports_load_session());
     }
@@ -276,7 +286,7 @@ mod tests {
         init.agent_capabilities =
             agent_caps_with_meta("terminal_output", serde_json::Value::Bool(true));
         let new = empty_new_session_response();
-        let caps = SpurAgentCaps::new(&init, &new);
+        let caps = SpurAgentCaps::new(&init, &new, AgentKind::Generic);
 
         assert!(caps.meta_capability("terminal_output"));
         assert!(
@@ -293,7 +303,7 @@ mod tests {
             serde_json::Value::String("true".to_string()),
         );
         let new = empty_new_session_response();
-        let caps = SpurAgentCaps::new(&init, &new);
+        let caps = SpurAgentCaps::new(&init, &new, AgentKind::Generic);
 
         assert!(
             !caps.meta_capability("terminal_output"),

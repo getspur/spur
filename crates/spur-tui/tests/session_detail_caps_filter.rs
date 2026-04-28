@@ -12,7 +12,7 @@ use std::sync::Arc;
 use agent_client_protocol::schema::{
     InitializeResponse, NewSessionResponse, ProtocolVersion, SessionId,
 };
-use spur_acp::SpurAgentCaps;
+use spur_acp::{AgentKind, SpurAgentCaps};
 use spur_tui::commands::advertised::AdvertisedSource;
 use spur_tui::commands::CommandRegistry;
 use spur_tui::views::session_detail::SessionDetailView;
@@ -23,7 +23,7 @@ fn gemini_style_caps() -> Arc<SpurAgentCaps> {
     let init = InitializeResponse::new(ProtocolVersion::LATEST);
     // Synthetic gemini-style: neither models nor config_options.
     let new = NewSessionResponse::new(SessionId::new("gemini-sid"));
-    Arc::new(SpurAgentCaps::new(&init, &new))
+    Arc::new(SpurAgentCaps::new(&init, &new, AgentKind::Generic))
 }
 
 fn registry_with_model_and_effort() -> CommandRegistry {
