@@ -98,8 +98,12 @@ fn require_feature_returns_typed_error_with_key_when_absent() {
 
     let err = require_feature(&gate, FeatureKey::PM_PRO_BEADS_ADVANCED)
         .expect_err("empty Pro state must reject pm_pro_beads_advanced");
-    assert!(matches!(err, FeatureGateError::Denied { key }
-                    if key == FeatureKey::PM_PRO_BEADS_ADVANCED));
+    // `#[non_exhaustive]` makes irrefutable destructuring impossible in
+    // external crates; use `let ... else` form.
+    let FeatureGateError::Denied { key, .. } = err else {
+        panic!("expected Denied, got {err:?}");
+    };
+    assert_eq!(key, FeatureKey::PM_PRO_BEADS_ADVANCED);
 }
 
 #[test]
@@ -112,8 +116,7 @@ fn feature_gate_error_display_names_the_key_and_recovery() {
     let err = require_feature(&gate, FeatureKey::CLI_CORE_RUN).unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("cli_core_run"), "error must name the key: {msg}");
-    assert!(msg.to_lowercase().contains("license"),
-        "error must point at license recovery: {msg}");
+    assert!(msg.contains("tier"), "error must name the tier so callers can render recovery: {msg}");
 }
 ```
 
@@ -131,19 +134,18 @@ Append to `crates/spur-license/src/gate.rs` (after the existing
 /// Typed error returned by [`require_feature`] when the active
 /// license tier does not entitle the requested feature.
 ///
-/// Open-set enum: future variants (e.g. `Revoked`, `Expired`,
-/// `BootstrapPending`) can be added without breaking existing
-/// pattern matches that only match `Denied { key }`.
+/// `#[non_exhaustive]` reserves room for future denial-shape variants
+/// (e.g. `BootstrapPending` when the gate has not yet received its
+/// first snapshot, or future policy-mismatch conditions) without
+/// breaking downstream pattern matches. Note: provider-layer
+/// failures like `Expired { until }` and `Revoked { reason }` belong
+/// in `LicenseError`, not here — `require_feature` only knows
+/// feature presence in the snapshot, not denial cause.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum FeatureGateError {
-    #[error(
-        "`{}` is not available on the active license tier. \
-         Run `spur auth status` to inspect the current tier, or \
-         `spur auth login --key …` to activate a license that \
-         entitles this feature.",
-        key.as_str()
-    )]
-    Denied { key: FeatureKey },
+    #[error("feature `{}` is not available on tier `{:?}`", key.as_str(), tier)]
+    Denied { key: FeatureKey, tier: Tier },
 }
 
 /// Workspace-wide gate-check helper. Returns `Ok(())` if the
@@ -157,7 +159,7 @@ pub fn require_feature(gate: &FeatureGate, key: FeatureKey) -> Result<(), Featur
     if gate.has(key) {
         Ok(())
     } else {
-        Err(FeatureGateError::Denied { key })
+        Err(FeatureGateError::Denied { key, tier: gate.tier() })
     }
 }
 ```
@@ -193,7 +195,7 @@ Expected: clean.
 
 ```bash
 git add crates/spur-license/src/gate.rs crates/spur-license/src/lib.rs crates/spur-license/tests/feature_gate.rs
-git commit -m "feat(spur-license): require_feature + FeatureGateError typed contract (C.1)"
+git commit -m "feat(spur-license): C.1 require_feature + FeatureGateError typed contract"
 ```
 
 ---
@@ -381,7 +383,7 @@ Expected: clean.
 
 ```bash
 git add crates/spur-cli/src/main.rs
-git commit -m "feat(spur-cli): gate 8 cli_core_* arms via require_cli_gate (C.1)"
+git commit -m "feat(spur-cli): C.1 gate 8 cli_core_* arms via require_cli_gate"
 ```
 
 ---
@@ -456,7 +458,11 @@ fn empty_pro_gate_blocks_all_8_m0_cli_core_keys() {
             key.as_str(),
         ));
         // Verify the typed contract Plan D D.6 will rely on.
-        let spur_license::FeatureGateError::Denied { key: returned_key } = err;
+        // External crate + `#[non_exhaustive]` ⇒ pattern is refutable;
+        // use `let ... else` form.
+        let spur_license::FeatureGateError::Denied { key: returned_key, .. } = err else {
+            panic!("expected Denied, got {err:?}");
+        };
         assert_eq!(returned_key, key);
     }
 }
@@ -483,22 +489,32 @@ Expected: 3 tests pass.
 
 ```bash
 git add crates/spur-cli/tests/cli_core_gates.rs
-git commit -m "test(spur-cli): parameterized invariant for 8 m0 cli_core_* keys (C.1)"
+git commit -m "test(spur-cli): C.1 parameterized invariant for 8 m0 cli_core_* keys"
 ```
 
 ---
 
-## Task 5: Binary-level integration test (assert_cmd)
+## Task 5: Binary-level happy-path smoke (assert_cmd)
 
 **Files:**
 - Modify: `crates/spur-cli/Cargo.toml` (add `assert_cmd` to `[dev-dependencies]`)
 - Create: `crates/spur-cli/tests/cli_core_gate_e2e.rs`
 
-> **Why this task:** Tasks 1–4 verify the helper and registry shape.
-> This task verifies that the actual `spur` binary fails non-zero
-> with the right error text when a gate is denied. Without it, all
-> M0 tests exercise only the helper, never the wiring through clap
-> dispatch (per gemini + claude-code reviews of the M0 plan v1).
+> **Why this task — and what it does NOT prove (codex 🔴 fix):**
+> Tasks 1–4 verify the helper and the registry shape against the
+> in-process gate. This task is a **happy-path smoke** that proves
+> the `spur` binary still launches and runs `init --force` to
+> success on the default community tier — i.e., the new gate calls
+> do not break the daily-driver path.
+>
+> **It does NOT prove the gate fires under denial.** A real denial
+> e2e (binary exits non-zero + stderr names the missing key) needs
+> either a tampered policy fixture or a Pro JWT with stripped
+> entitlements; both are deferred to **M0.5** alongside the
+> `CLI_CORE_LICENSE_ACTIVATE` enforcement (the same fixture serves
+> both). Until M0.5, every test in this file passes whether or not
+> the per-arm `require_cli_gate(...)?` calls are present — that is
+> a known limitation, not a hidden bug.
 
 - [ ] **Step 1: Add `assert_cmd` to dev-deps.**
 
@@ -588,7 +604,7 @@ Expected: clean.
 
 ```bash
 git add crates/spur-cli/Cargo.toml crates/spur-cli/tests/cli_core_gate_e2e.rs
-git commit -m "test(spur-cli): assert_cmd e2e smoke for cli_core gate wiring (C.1)"
+git commit -m "test(spur-cli): C.1 assert_cmd happy-path smoke for cli_core gate"
 ```
 
 ---
@@ -624,8 +640,9 @@ If everything passes, no commit needed (verification-only task).**
 
 ## Acceptance criteria for Plan C M0
 
-- [ ] `FeatureGateError::Denied { key: FeatureKey }` lives in
-      `spur-license` and is re-exported from the crate root
+- [ ] `FeatureGateError::Denied { key: FeatureKey, tier: Tier }`
+      lives in `spur-license` (marked `#[non_exhaustive]`) and is
+      re-exported from the crate root
 - [ ] `require_feature(gate, key) -> Result<(), FeatureGateError>`
       is the workspace-wide gate-check API; spur-cli, spur-tui,
       spur-acp, spur-mcp etc. all use this same helper in
@@ -641,8 +658,10 @@ If everything passes, no commit needed (verification-only task).**
       unaffected)
 - [ ] Empty Pro policy correctly denies all 8 M0 keys with typed
       `FeatureGateError::Denied { key }`
-- [ ] One end-to-end binary smoke (`spur init --force` in tempdir)
-      proves the wiring fires through clap dispatch
+- [ ] One binary-level happy-path smoke (`spur init --force` in
+      tempdir) proves the new gate calls do not break the
+      community-tier daily-driver path; the full denial e2e is
+      explicitly deferred to M0.5 (see Out of scope)
 - [ ] Workspace clean: build, tests, clippy `-D warnings`, fmt
 - [ ] Total git history: 4 commits (helper, wiring, invariant test,
       e2e test) + 1 verification-only sweep task = 5 task commits
