@@ -902,15 +902,18 @@ impl SessionPickerView {
                     let archived = entry.map(|e| e.archived).unwrap_or(false);
                     let draft = entry.map(|e| e.draft.clone()).unwrap_or_default();
 
-                    let mut rows = vec![("Session".into(), id), ("CWD".into(), cwd)];
+                    let mut rows: Vec<crate::components::session_preview::PreviewRow> = vec![
+                        ("Session".to_string(), id).into(),
+                        ("CWD".to_string(), cwd).into(),
+                    ];
                     if !updated.is_empty() {
-                        rows.push(("Updated".into(), updated));
+                        rows.push(("Updated".to_string(), updated).into());
                     }
                     if pinned {
-                        rows.push(("Pinned".into(), "\u{2b50}".into()));
+                        rows.push(("Pinned".to_string(), "\u{2b50}".to_string()).into());
                     }
                     if archived {
-                        rows.push(("Archived".into(), "yes".into()));
+                        rows.push(("Archived".to_string(), "yes".to_string()).into());
                     }
                     if !draft.is_empty() {
                         let truncated = if draft.chars().count() > 80 {
@@ -919,7 +922,7 @@ impl SessionPickerView {
                         } else {
                             draft.clone()
                         };
-                        rows.push(("Draft".into(), truncated));
+                        rows.push(("Draft".to_string(), truncated).into());
                     }
                     PreviewContent {
                         rows,
