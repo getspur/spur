@@ -44,6 +44,29 @@ use crate::tools::{self, DelegationChannel, DelegationRequest};
 /// The 60 s TTL is generous for any residual debug-injection use; the
 /// map is allowed to stay permanently empty in production.
 const COMPLETED_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+/// Idle-session watchdog for the streamable-HTTP MCP transport.
+///
+/// rmcp's `SessionConfig::DEFAULT_KEEP_ALIVE` is 5 min, which is far too short
+/// for brain↔spur sessions where a brain agent commonly idles between user
+/// turns (lunch, overnight, parallel work in another window). When the watchdog
+/// fires, the worker quits and rmcp's tower layer logs a cascading
+/// `Failed to close session ... Session service terminated` ERROR. 4 hours
+/// preserves cleanup of truly-orphaned sessions while accommodating realistic
+/// idle gaps. Override via `SPUR_MCP_SESSION_KEEPALIVE_SECS` (env var, secs;
+/// `0` disables the watchdog entirely).
+const MCP_SESSION_KEEPALIVE_DEFAULT: std::time::Duration =
+    std::time::Duration::from_secs(4 * 60 * 60);
+
+fn mcp_session_keepalive() -> Option<std::time::Duration> {
+    match std::env::var("SPUR_MCP_SESSION_KEEPALIVE_SECS") {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(0) => None,
+            Ok(secs) => Some(std::time::Duration::from_secs(secs)),
+            Err(_) => Some(MCP_SESSION_KEEPALIVE_DEFAULT),
+        },
+        Err(_) => Some(MCP_SESSION_KEEPALIVE_DEFAULT),
+    }
+}
 #[cfg(test)]
 const PRODUCER_MAX_FIELD_BYTES: usize = 8192;
 const MCP_NOT_LICENSED_ERROR_CODE: i32 = -32041;
@@ -2103,7 +2126,9 @@ impl McpCallbackServer {
         let url = format!("http://{addr}/mcp");
         let mut config = StreamableHttpServerConfig::default();
         config.stateful_mode = true;
-        let session_manager = Arc::new(LocalSessionManager::default());
+        let mut session_manager_inner = LocalSessionManager::default();
+        session_manager_inner.session_config.keep_alive = mcp_session_keepalive();
+        let session_manager = Arc::new(session_manager_inner);
         let service = {
             let server = Arc::clone(&self);
             StreamableHttpService::new(move || Ok(Arc::clone(&server)), session_manager, config)
