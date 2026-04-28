@@ -1106,6 +1106,8 @@ fn acp_thread_main(
                             .stdout(std::process::Stdio::piped())
                             .stderr(std::process::Stdio::piped())
                             .kill_on_drop(true);
+                        #[cfg(unix)]
+                        cmd.process_group(0);
                         for env_var in &req.env {
                             cmd.env(&env_var.name, &env_var.value);
                         }
