@@ -2779,11 +2779,14 @@ pub async fn run_tui_with_license(
                 app.handle_permission_request(perm);
             }
             _ = shutdown_rx.recv() => {
-                // SIGTERM / SIGHUP / SIGQUIT: restore the terminal, then exit
-                // the loop so the caller's Orchestrator can drop and run its
-                // own cleanup (killpg + registry unregister).
-                let _ = tui::teardown(&mut terminal);
-                std::process::exit(0);
+                // SIGTERM / SIGHUP / SIGQUIT: take the same path as a confirmed
+                // Ctrl-Q. confirm_quit() flushes drafts + sets should_quit; the
+                // existing loop break runs the shared tui::teardown and the
+                // function returns so the caller's host.shutdown().await issues
+                // killpg and unregisters the pgid registry. Bypassing Drop here
+                // (e.g., via std::process::exit) defeats the orphan-reaping
+                // safety guarantees on catchable signals.
+                app.confirm_quit();
             }
         }
 
