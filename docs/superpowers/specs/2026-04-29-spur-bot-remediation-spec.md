@@ -1,20 +1,28 @@
-# spur-bot Remediation Spec — v2
+# spur-bot Remediation Spec — v3
 
-> **Status:** v2 — respun after dual-review-gate (codex bd-3qe.3.1, gemini bd-3qe.3.2). Pending re-gate.
+> **Status:** v3 — respun after gate-2 (codex bd-3qe.3.3 GATE FAIL, gemini bd-3qe.3.4 GATE BLOCKED). Pending gate-3.
 > **Parent epic:** bd-3qe.3
 > **Source review:** bd-3qe (gemini bd-3qe.2 + codex bd-3qe.1)
 > **Scope:** `crates/spur-bot/src/`
 
-v1 → v2 changelog:
-- **Added C0**: TCP half-open deadlocks (gemini's missed mode — arguably the most-critical of all).
-- **C1**: dropped fatal-panic escape hatch; added explicit `broadcast::error::RecvError::Lagged/Closed` handling (codex).
-- **C2**: removed `is_ok()` swallow; closure error propagates and terminates poll loop (codex).
-- **H3**: enumerated full async-ripple call graph including `ensure_topic_record`, `ensure_known_topic`, and `handle_spur_event` (codex). Aligned with H8's `spawn_blocking` strategy.
-- **H4**: REJECTED → redesigned. Single message + byte-aware truncation (gemini rate-limit + codex byte-cap merged).
-- **H5**: scoped to poll-loop spawn only; sender's per-draft spawns explicitly out of scope.
-- **H7**: `state.rs::load` errors now wrapped with `path/operation` context (codex).
-- **H8**: `tempfile` confirmed as dev-dep only — must promote to prod dep.
-- Build sequence: H8 + H3 squashed into one commit (both reviewers); C0 first.
+Gate-2 outcome (6/8 dual-approved): **C1, C2, H3, H6, H7, H8 ✅ APPROVE**. C0 dual-blocked, H4 dual-revise, H5 split-revise. v3 only re-opens those three.
+
+v2 → v3 changelog:
+- **C0 redesigned**. Both reviewers (correctly) blocked v2: (a) `frankenstein 0.49` does NOT have `Bot::with_client` — actual API is `Bot::builder().api_url(...).client(http).build()`; (b) `frankenstein 0.49` ALREADY ships `connect_timeout=10s, timeout=500s` defaults (verified at `frankenstein-0.49.0/src/client_reqwest.rs:20-29`), so v2's "no-timeout footgun" premise was factually wrong; (c) sharing a single `reqwest::Client` and `.clone()`-ing the `TelegramClient` couples poll-and-send timeouts — a 30s global hard-timeout severs any long-poll >30s. v3 uses **two separate `TelegramClient` instances** (one per timeout regime) and uses `saturating_add` for overflow safety.
+- **H4 budget bug fixed**. Both reviewers caught the same off-by-N: budget subtracted fixed `"\n\n…[truncated]"` (≈14 units) but actual tail is dynamic `"\n\n…[truncated; {N} chars dropped]"` (up to ~36+ units). v3 computes the actual tail before choosing the budget.
+- **H5 false rationale corrected**. v2 claimed `sender.rs:22` already logs per-draft errors; codex verified this is wrong (`let _ = ...await` at sender.rs:23). v3 folds the one-line `tracing::warn!` addition into H5 scope.
+- Build verification commands switched from `cargo` to `scripts/spur-cargo` per repo convention.
+
+v1 → v2 changelog (preserved for history):
+- Added C0: TCP half-open deadlocks (gemini's missed mode).
+- C1: dropped fatal-panic; added broadcast `Lagged/Closed` handling.
+- C2: removed `is_ok()` swallow; closure error propagates.
+- H3: enumerated full async-ripple call graph.
+- H4: REJECTED → redesigned (single-message + byte-aware truncate).
+- H5: scoped narrowed.
+- H7: path/operation context.
+- H8: `tempfile` dev-dep → prod-dep.
+- Build sequence: H8+H3 squashed; C0 first.
 
 ---
 
@@ -24,78 +32,101 @@ Each fix needs `APPROVE` from BOTH reviewers. `REVISE` triggers respin. `REJECT`
 
 ---
 
-## C0 — TCP half-open deadlocks (NEW, surfaced by gemini)
+## C0 — TCP half-open deadlocks + timeout regime split (REDESIGNED in v3)
 
-### Evidence
-`crates/spur-bot/src/telegram/client.rs:11` — `frankenstein::client_reqwest::Bot::new(token)` constructs the bot using `reqwest::Client::default()` under the hood, which ships with **no timeout**. Documented behavior: `reqwest::ClientBuilder::timeout` defaults to `None`.
+### Evidence (verified)
+- `crates/spur-bot/src/telegram/client.rs:11` — `frankenstein::client_reqwest::Bot::new(token)` is used.
+- `frankenstein-0.49.0/src/client_reqwest.rs:10-18` — `Bot` is a `bon::Builder`-derived struct with public `api_url` and `client` fields. Real builder API is `Bot::builder().api_url(...).client(reqwest_client).build()`.
+- `frankenstein-0.49.0/src/client_reqwest.rs:20-29` — default client already configures `connect_timeout=10s` and `timeout=500s`. **Not** "no timeout" as v2 implied.
 
-Failure modes:
-- A blackholed TCP connection (NAT eviction, ISP outage, dropped Wi-Fi handoff) leaves the socket hanging indefinitely.
-- `client.get_updates(...)` inside `poll_loop.rs:26` will never return — poll loop is permanently frozen, no inbound messages, no shutdown path.
-- `client.send_text_to_thread(...)`, `client.create_forum_topic(...)`, `client.answer_callback(...)` etc. called from the main `select!` loop will block the entire bot — single-threaded task can't service any other arm.
+Real failure modes (refined):
+- **A blackholed long-poll** sits in the 500s default before `get_updates` returns `reqwest::Error` (Timeout). 500s is too long for a healthy heartbeat; during this period the poll loop is single-threaded-frozen.
+- **A blackholed outbound call** (`send_text_to_thread`, `create_forum_topic`, `answer_callback`) sits in the same 500s — the main `select!` loop can't service its other arms while a sluggish-or-dead `await` holds the task.
+- **Operationally**, 500s is fine for long-poll (server-side `timeout=30s` + slack) but absurdly long for a fast outbound call.
 
-This is a **silent deadlock**, worse than C1's crash-on-error: the bot looks alive (process running, file handles held) but is functionally dead and won't auto-recover.
+The right model is **two timeout regimes** because they have different physics:
+- Polling: must allow the server-side long-poll to elapse naturally. `client_total_timeout > poll_timeout_secs + slack`.
+- General calls: should fail fast (≈30s) so the main loop doesn't stall on a flaky connection.
 
 ### Root cause (first principles)
-Network requests must have a deadline. `reqwest`'s default-no-timeout is a footgun acknowledged in their docs ("It is highly recommended to set a timeout"). frankenstein's `Bot::new` takes that footgun without warning.
+v2 confused two distinct requirements (long-tolerant poll vs. fast-fail RPC) into one configuration. Both reviewers correctly identified that sharing one `reqwest::Client` (or cloning a `TelegramClient` whose inner `Bot` shares the same `reqwest::Client`) makes the regime split impossible: the shorter timeout always wins.
 
-### Candidate fixes
+### Candidate fixes (v3)
 
-**A. Inject a configured `reqwest::Client` into frankenstein.** frankenstein 0.49 exposes `Bot::with_client(token, client)` (verify against `frankenstein::client_reqwest`). Configure the client with `.timeout(Duration::from_secs(N))`. For `get_updates`, the request internally exceeds the long-poll timeout by the timeout window — we want `client_timeout > long_poll_timeout`, not the other way.
-- Pros: covers ALL outbound calls in one place.
-- Cons: requires verifying the frankenstein constructor; client timeout must be tuned to be larger than `long_poll_timeout_secs`.
+**A. Two `TelegramClient` instances with independent `reqwest::Client`s.**
+- Pros: clean separation; each call site reaches for the right client; matches the dual-regime physics.
+- Cons: callers (`mod.rs`) must hold both; minor surface area.
 
-**B. Wrap each call in `tokio::time::timeout(...)`.** No client change; every `client.X(...)` await gets wrapped.
-- Pros: works without frankenstein API change.
-- Cons: ugly, repetitive, easy to miss a call site, doesn't help anyone adding a new method.
+**B. One `TelegramClient` with two internal clients, switched per method.**
+- Pros: callers don't change.
+- Cons: hides the regime split inside the abstraction; surprises readers; method-level switch table to maintain.
 
-**C. Hybrid: A for global default + dedicated `tokio::time::timeout` around `get_updates` in the poll loop** with `timeout_secs + 10s` to give the long-poll its own slack window before the global cap kicks in.
-- Pros: defense in depth; long-poll timeout is independent of global default.
-- Cons: two layers to reason about.
+**C. Single client with very long timeout, all sites wrapped in `tokio::time::timeout`.**
+- Pros: one client.
+- Cons: ugly; easy to forget a wrap on a new method; doesn't actually disable the broken default 500s for fast calls.
 
-### Chosen: **C**.
+### Chosen: **A** — two `TelegramClient` instances.
 
-Rationale: A alone forces the global timeout to be `> long_poll_timeout_secs + slack`, which makes ordinary `send_message` calls slow to fail. Layering allows global default of (e.g.) 30s for normal calls AND a long-poll-specific wrapper that allows up to `long_poll_timeout_secs + 10s`.
+Rationale: explicit beats implicit. Callers in `mod.rs` already deal with separate concerns (`poll_client.clone()` is passed to the spawned poll task, the main loop uses `client` for everything else); making the timeout split visible matches that structure.
 
 Sketch:
 ```rust
 // telegram/client.rs
 impl TelegramClient {
-    pub fn new(token: &str) -> anyhow::Result<Self> {
+    /// `request_timeout` should be:
+    ///   - ~30s for fast-fail RPC calls (send/create/answer)
+    ///   - poll_timeout_secs + 10s for long-poll
+    pub fn new(token: &str, request_timeout: std::time::Duration) -> anyhow::Result<Self> {
         let http = reqwest::ClientBuilder::new()
-            .timeout(std::time::Duration::from_secs(30))
             .connect_timeout(std::time::Duration::from_secs(10))
-            .build()?;
-        // Verify frankenstein 0.49 API; if `with_client` is not exposed,
-        // file an upstream issue and use B as fallback.
-        Ok(Self { inner: frankenstein::client_reqwest::Bot::with_client(token, http) })
+            .timeout(request_timeout)
+            .build()
+            .context("building reqwest client for telegram bot")?;
+        let api_url = format!("{}{}", frankenstein::BASE_API_URL, token);
+        Ok(Self {
+            inner: frankenstein::client_reqwest::Bot::builder()
+                .api_url(api_url)
+                .client(http)
+                .build(),
+        })
     }
 }
 
-// telegram/poll_loop.rs (inside the loop)
-let poll_deadline = std::time::Duration::from_secs(timeout_secs + 10);
+// telegram/mod.rs
+const RPC_TIMEOUT_SECS: u64 = 30;
+let request_timeout = std::time::Duration::from_secs(RPC_TIMEOUT_SECS);
+let poll_timeout = std::time::Duration::from_secs(cfg.poll_timeout_secs.saturating_add(10));
+let client = client::TelegramClient::new(cfg.bot_token.as_deref().expect("validated"), request_timeout)?;
+let poll_client = client::TelegramClient::new(cfg.bot_token.as_deref().expect("validated"), poll_timeout)?;
+// ... `poll_client` moves into the spawned poll task; `client` stays in the main loop.
+```
+
+Long-poll outer-deadline (defense in depth) inside `poll_loop.rs`:
+```rust
+let poll_deadline = std::time::Duration::from_secs(timeout_secs.saturating_add(10));
 let result = tokio::time::timeout(poll_deadline, client.get_updates(offset, timeout_secs)).await;
 match result {
     Ok(Ok(batch)) => { /* normal path */ }
     Ok(Err(error)) => { /* existing transient HTTP-error backoff */ }
     Err(_elapsed) => {
-        tracing::warn!(secs = poll_deadline.as_secs(), "long-poll exceeded deadline; rotating connection");
+        tracing::warn!(secs = poll_deadline.as_secs(), "long-poll exceeded outer deadline; rotating connection");
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(std::time::Duration::from_secs(5));
     }
 }
 ```
 
-Note: `TelegramClient::new` becomes fallible. `mod.rs:20` updates accordingly.
+Note: the inner `reqwest` timeout for the poll client (`poll_timeout_secs + 10s`) is INTENTIONALLY equal to the outer Tokio deadline. They're redundant by design — defense in depth. If reqwest cuts off first you get `Ok(Err(Timeout))` and existing backoff logic; if Tokio cuts off first you get `Err(Elapsed)` and the same backoff. Either path keeps the loop alive.
 
 ### Acceptance criteria
-- A test mocking a stalled connection (e.g., a `tokio::net::TcpListener` that accepts but never responds) causes `get_updates` to surface `Elapsed` within `timeout_secs + 10s` rather than blocking forever.
-- All `TelegramClient` outbound methods (text send, button send, draft send, callback answer) error within ~30s on a stalled peer.
-- Bot continues to make subsequent calls after a stall; does not lock up.
+- Test (`tokio::net::TcpListener` that accepts and never responds): `client.send_text_to_thread` errors within `request_timeout + 1s` on the general client; `poll_client.get_updates` errors within `poll_timeout_secs + 10s + 1s`.
+- Both clients are constructed in `mod.rs` from the same token; only the timeout differs.
+- Overflow safety: `cfg.poll_timeout_secs = u64::MAX` does not panic at startup.
+- Bot continues to make subsequent calls after a stall.
 
 ### Open questions for re-gate
-- Confirm `frankenstein::client_reqwest::Bot::with_client` exists in 0.49. If not, fallback B is the implementation path; either way the spec stays valid.
-- Should the global timeout be configurable via `TelegramBotConfig`? Probably yes, with a sensible default.
+- Should `request_timeout` be exposed via `TelegramBotConfig`? Recommend YES with default 30s.
+- `cfg.bot_token.as_deref().expect("validated")` is called twice in the sketch — fine (the `Option` is cheap to read), but a worker may prefer to bind once.
 
 ---
 
@@ -320,9 +351,9 @@ v1 conflated "preserve every character of the agent's answer" with "stay below t
 
 ### New design: single message, byte-aware truncate, "(truncated)" indicator
 
-**Text rule**: if `text.encode_utf16().count() <= 4096`, send as-is. Otherwise truncate to fit `4096 - len("\n\n…[truncated; N chars dropped]")` UTF-16 units on a char boundary, append the indicator with the count of dropped chars.
+**Text rule**: if `text.encode_utf16().count() <= 4096`, send as-is. Otherwise truncate to fit `4096 - actual_tail_units` UTF-16 units on a char boundary, append the indicator with the count of dropped chars. **Critical: the tail is dynamic** — `"\n\n…[truncated; {N} chars dropped]"` grows by ~one UTF-16 unit per decimal digit of N. v2 budgeted for the static template only and could overflow by up to ~20+ units for large drops. v3 computes the worst-case tail length from `text.chars().count()` BEFORE choosing the budget (since dropped ≤ total chars, the digit width is bounded).
 
-**Button rule**: if `label.len() <= 64` (bytes), keep. Otherwise truncate to ≤61 bytes on a char boundary, append `"…"`.
+**Button rule**: if `label.len() <= 64` (bytes), keep. Otherwise truncate to ≤61 bytes on a char boundary, append `"…"` (3 bytes UTF-8) for a final ≤64 bytes.
 
 Helpers needed in `format.rs`:
 ```rust
@@ -359,20 +390,31 @@ pub fn truncate_button_label_bytes(label: &str, max_bytes: usize) -> String {
 
 Existing `split_for_telegram` and `short_button_label` stay for now (used in tests / future), but renderer calls the new byte-/unit-aware helpers.
 
-Render-side application:
+Render-side application (v3 — budget computed against the actual maximum tail):
 ```rust
 const TG_TEXT_LIMIT: usize = 4096;
 const TG_BUTTON_LIMIT: usize = 64;
-const TRUNC_TAIL: &str = "\n\n…[truncated]";
+
+/// Returns the rendered body, single-message, ≤ TG_TEXT_LIMIT UTF-16 units.
+fn render_truncated_text(text: &str) -> String {
+    if text.encode_utf16().count() <= TG_TEXT_LIMIT {
+        return text.to_string();
+    }
+    // Worst-case tail length: dropped ≤ total chars, so use the total-char
+    // count to size the digit width pessimistically. This guarantees the
+    // final body fits regardless of the actual dropped count.
+    let total_chars = text.chars().count();
+    let worst_tail = format!("\n\n…[truncated; {total_chars} chars dropped]");
+    let worst_tail_units = worst_tail.encode_utf16().count();
+    let budget = TG_TEXT_LIMIT.saturating_sub(worst_tail_units);
+    let (kept, dropped) = format::truncate_to_utf16_units(text, budget);
+    let actual_tail = format!("\n\n…[truncated; {dropped} chars dropped]");
+    debug_assert!((kept.encode_utf16().count() + actual_tail.encode_utf16().count()) <= TG_TEXT_LIMIT);
+    format!("{kept}{actual_tail}")
+}
 
 RuntimeRender::ServiceMessage { text } | RuntimeRender::FinalAnswer { text } => {
-    let body = if text.encode_utf16().count() <= TG_TEXT_LIMIT {
-        text
-    } else {
-        let budget = TG_TEXT_LIMIT.saturating_sub(TRUNC_TAIL.encode_utf16().count());
-        let (kept, dropped) = format::truncate_to_utf16_units(&text, budget);
-        format!("{kept}\n\n…[truncated; {dropped} chars dropped]")
-    };
+    let body = render_truncated_text(&text);
     client.send_text_to_thread(chat_id, message_thread_id, body).await?;
 }
 
@@ -380,33 +422,36 @@ RuntimeRender::ReviewPrompt { text, buttons } | RuntimeRender::PermissionPrompt 
     let buttons: Vec<_> = buttons.into_iter()
         .map(|b| Button { label: format::truncate_button_label_bytes(&b.label, TG_BUTTON_LIMIT), ..b })
         .collect();
-    let text = /* same single-message-truncate logic as above */ ;
-    client.send_buttons_to_thread(chat_id, message_thread_id, text, &buttons).await?;
+    let body = render_truncated_text(&text);
+    client.send_buttons_to_thread(chat_id, message_thread_id, body, &buttons).await?;
 }
 ```
 
+Why "worst-case = total-char digit width" works: the actual dropped count is always ≤ total chars, so its decimal-digit width is ≤ that of total chars. The budget is therefore strictly large enough; the actual tail is strictly shorter than or equal to the worst-case tail. The `debug_assert!` makes the invariant explicit during tests.
+
 ### Acceptance criteria
 - A 10,000-char agent answer renders as exactly ONE message ending with `…[truncated; …]`.
+- **Budget invariant**: a property test feeding `render_truncated_text` with random texts of length 0–100,000 chars asserts `result.encode_utf16().count() <= 4096` for every output. This catches the v2 budget bug.
 - Button labels >64 bytes (incl. multi-byte/emoji cases) truncate to ≤64 bytes with no panic from `String::truncate` byte-vs-char misalignment.
 - Test the byte-edge: "🦀" (4 bytes UTF-8, 2 UTF-16 code units) repeated 20 times — verify both helpers don't slice mid-codepoint.
 - Bot does not get rate-limited on long answers (single-send keeps us under 20/min).
 
 ---
 
-## H5 — Detached poll-task failures swallowed (scope corrected)
+## H5 — Detached spawn-result failures swallowed (scope corrected in v3)
 
-### Evidence
-`crates/spur-bot/src/telegram/mod.rs:34–49` — `let _ = run_poll_loop(...)`.
-`crates/spur-bot/src/telegram/sender.rs:22` — also uses `tokio::spawn` inside the 400ms ticker; per-draft errors logged within the spawned task, intentionally fire-and-forget at the spawn site.
+### Evidence (verified in v3)
+- `crates/spur-bot/src/telegram/mod.rs:34–49` — `let _ = run_poll_loop(...).await;` (poll-task spawn).
+- `crates/spur-bot/src/telegram/sender.rs:22-31` — `tokio::spawn(async move { let _ = client.send_message_draft_to_thread(...).await; });` per-draft. **v2 incorrectly claimed errors were already logged here; codex verified they are not.**
 
 ### Root cause (first principles)
-Same as v1.
+Two distinct spawn sites both discard their result. v2 punted the sender to "out of scope, already logged" — but the sender genuinely doesn't log either, so the punt was based on a false premise. Cheaper to fix both in one commit than to track a follow-up.
 
-### Chosen: log + cancel-on-error at the poll-loop spawn site only.
+### Chosen: log at BOTH spawn sites; cancel-on-error only at the poll-loop site.
 
-Scope is **limited** to the `run_poll_loop` spawn in `mod.rs`. The sender's per-draft spawns (`sender.rs:22`) are intentionally fire-and-forget for individual API calls and are **out of scope** — those failures are logged within the spawned closure already (verify during impl; if not, add logging there as a sub-task).
+The poll-loop is load-bearing — its termination must wake the main loop. The sender's per-draft tasks are individually best-effort (the next 400ms tick can re-attempt or supersede the draft); they need logging but not cancellation propagation.
 
-Sketch:
+Sketch (poll-loop, mod.rs):
 ```rust
 let poll_cancellation_for_main = cancellation.clone();
 let poll_cancellation_for_loop = cancellation.clone();
@@ -423,12 +468,29 @@ tokio::spawn(async move {
 });
 ```
 
-Main loop's new `cancellation.cancelled()` arm (added in C1) catches the cancel signal and breaks.
+Sketch (sender, sender.rs:22):
+```rust
+tokio::spawn(async move {
+    if let Err(err) = client
+        .send_message_draft_to_thread(
+            update.chat_id,
+            update.message_thread_id,
+            &update.draft_id,
+            &update.text,
+        )
+        .await
+    {
+        tracing::warn!(error = ?err, draft_id = %update.draft_id, "telegram draft send failed");
+    }
+});
+```
+
+Main loop's new `cancellation.cancelled()` arm (added in C1) catches the poll-loop cancel signal and breaks.
 
 ### Acceptance criteria
 - A simulated `delete_webhook` failure causes the bot to log `error` and exit cleanly within 1s.
-- `let _ =` removed from the poll-loop spawn site only (sender's are out of scope, documented).
-- Verify (during impl) that `sender.rs:22` already logs per-draft errors; if not, add as part of this fix.
+- A simulated `send_message_draft_to_thread` failure (e.g., 400 from the mock server) emits a `warn` log with the draft_id.
+- `let _ =` removed from BOTH the poll-loop spawn site and the sender draft-send spawn site.
 
 ---
 
@@ -563,10 +625,10 @@ pub async fn save(&self, state: &PersistedBotState) -> anyhow::Result<()> {
 
 ## Cross-cutting open questions for re-gate
 
-1. **frankenstein `with_client` API.** Is `Bot::with_client(token, reqwest::Client)` exposed in 0.49? If not, fallback is per-call `tokio::time::timeout` wrappers.
-2. **TCP timeout config plumbing.** Should the global timeout (default 30s) and connect timeout (default 10s) be exposed via `TelegramBotConfig`? Recommend YES with the defaults shown.
-3. **`advance_offset` cleanup.** With `accepted=true` always, the parameter is dead. Remove it (and its unit tests) as part of C2's commit, or leave for a follow-up?
-4. **Sender per-draft logging audit.** Confirm `sender.rs:22` spawned closures already log errors; if not, fold a one-line log addition into H5.
+1. **TCP timeout config plumbing.** Should `request_timeout` (default 30s) and `connect_timeout` (default 10s) be exposed via `TelegramBotConfig`? Recommend YES with the defaults shown.
+2. **`advance_offset` cleanup.** With `accepted=true` always (post-C2), the parameter is dead. Remove it (and its unit tests) as part of C2's commit, or leave for a follow-up?
+3. **(Resolved in v3)** ~~frankenstein API~~ — verified: builder API is `Bot::builder().api_url(...).client(http).build()`; `client` field is `pub`.
+4. **(Resolved in v3)** ~~Sender logging audit~~ — verified: sender does NOT log; fix included in H5 v3.
 
 ---
 
@@ -583,10 +645,10 @@ Reordered per reviewer feedback. Each step is one commit; type-check + tests mus
 7. **C1** — main `select!` per-arm error wrappers + broadcast `Lagged/Closed` handling + `cancellation.cancelled()` arm finalization.
 8. **H6** — drop late fresh AgentSessionReady. Smallest diff; lands anywhere after C1, scheduled last for clarity.
 
-Build verification at each step:
-- `cargo check -p spur-bot`
-- `cargo test -p spur-bot`
-- `cargo clippy -p spur-bot --all-targets -- -D warnings`
+Build verification at each step (use repo wrapper per convention):
+- `scripts/spur-cargo check -p spur-bot`
+- `scripts/spur-cargo test -p spur-bot`
+- `scripts/spur-cargo clippy -p spur-bot --all-targets -- -D warnings`
 
 ---
 
