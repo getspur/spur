@@ -50,7 +50,7 @@ fn highlighted_session_id(picker: &SessionPickerView) -> Option<&str> {
     picker
         .cursor()
         .checked_sub(1)
-        .and_then(|idx| picker.visible_session_at(idx, synopsis()))
+        .and_then(|idx| picker.visible_session_at(idx))
         .map(|s| s.session_id.0.as_ref())
 }
 
@@ -153,7 +153,7 @@ fn cursor_preserved_by_session_id_after_set_sessions_reorders_list() {
     assert_eq!(picker.cursor(), 1);
     assert_eq!(
         picker
-            .visible_session_at(0, synopsis())
+            .visible_session_at(0)
             .map(|s| s.session_id.0.as_ref()),
         Some("a3")
     );
@@ -209,7 +209,7 @@ fn cursor_falls_through_to_p1_when_highlighted_session_disappears() {
     assert_eq!(picker.cursor(), 1);
     assert_eq!(
         picker
-            .visible_session_at(0, synopsis())
+            .visible_session_at(0)
             .map(|s| s.session_id.0.as_ref()),
         Some("a1")
     );
@@ -283,10 +283,10 @@ fn slash_focuses_search_and_typing_filters() {
         let _ = picker.handle_key(key(c), &test_ctx());
     }
 
-    assert_eq!(picker.visible_session_count(synopsis()), 1);
+    assert_eq!(picker.visible_session_count(), 1);
     assert_eq!(
         picker
-            .visible_session_at(0, synopsis())
+            .visible_session_at(0)
             .map(|s| s.session_id.0.as_ref()),
         Some("a2")
     );
@@ -306,7 +306,7 @@ fn esc_in_search_returns_to_list_keeping_filter() {
     let action = picker.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &test_ctx());
     assert!(action.is_none());
     // Filter still active
-    assert_eq!(picker.visible_session_count(synopsis()), 1);
+    assert_eq!(picker.visible_session_count(), 1);
 }
 
 #[test]
@@ -321,11 +321,11 @@ fn esc_in_list_with_active_filter_clears_it() {
     let _ = picker.handle_key(key('b'), &test_ctx());
     // Leave search mode but keep filter.
     let _ = picker.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &test_ctx());
-    assert_eq!(picker.visible_session_count(synopsis()), 1);
+    assert_eq!(picker.visible_session_count(), 1);
     // Second Esc clears filter.
     let action = picker.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &test_ctx());
     assert!(action.is_none());
-    assert_eq!(picker.visible_session_count(synopsis()), 2);
+    assert_eq!(picker.visible_session_count(), 2);
 }
 
 #[test]
@@ -437,7 +437,7 @@ fn toggle_show_archived_off_reprojects_cursor_off_archived_session() {
     picker.set_metadata(archived_meta("beta"));
     picker.set_sessions("t".into(), alpha_beta_sessions(), synopsis());
 
-    picker.toggle_show_archived(synopsis());
+    picker.toggle_show_archived();
     assert!(picker.is_show_archived());
     let _ = picker.handle_key(
         KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
@@ -446,7 +446,7 @@ fn toggle_show_archived_off_reprojects_cursor_off_archived_session() {
     assert_eq!(picker.cursor(), 2);
     assert_eq!(highlighted_session_id(&picker), Some("beta"));
 
-    picker.toggle_show_archived(synopsis());
+    picker.toggle_show_archived();
 
     assert!(!picker.is_show_archived());
     assert_eq!(picker.cursor(), 1);
@@ -462,7 +462,7 @@ fn toggle_show_archived_on_preserves_cursor_by_session_id() {
     assert_eq!(picker.cursor(), 1);
     assert_eq!(highlighted_session_id(&picker), Some("alpha"));
 
-    picker.toggle_show_archived(synopsis());
+    picker.toggle_show_archived();
 
     assert!(picker.is_show_archived());
     assert_eq!(highlighted_session_id(&picker), Some("alpha"));
@@ -476,7 +476,7 @@ fn toggle_show_archived_preserves_cursor_on_new_row() {
     let _ = picker.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &test_ctx());
     assert_eq!(picker.cursor(), 0);
 
-    picker.toggle_show_archived(synopsis());
+    picker.toggle_show_archived();
 
     assert_eq!(picker.cursor(), 0);
 }

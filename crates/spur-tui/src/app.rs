@@ -1870,7 +1870,7 @@ impl App {
 
             Action::ToggleShowArchived => {
                 if let Some(ref mut picker) = self.session_picker {
-                    picker.toggle_show_archived(&self.synopsis);
+                    picker.toggle_show_archived();
                 }
                 self.dirty = true;
             }
