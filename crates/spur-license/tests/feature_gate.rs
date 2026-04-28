@@ -1,5 +1,9 @@
 use spur_license::policy::{PolicyResolver, TierPolicy};
-use spur_license::{FeatureGate, FeatureKey, FlagKey, InstallId, QuotaKey, QuotaValue, Tier};
+use spur_license::{
+    require_feature, FeatureGate, FeatureGateError, FeatureKey, FlagKey, InstallId, LicenseState,
+    Plan, QuotaKey, QuotaValue, Tier,
+};
+use std::collections::BTreeSet;
 
 #[test]
 fn community_has_core_features() {
@@ -181,5 +185,51 @@ fn v1_silent_policy_uses_compatibility_quota_defaults() {
     assert_eq!(
         gate.quota(QuotaKey::MaxConcurrentWorkers),
         Some(QuotaValue::Count(5))
+    );
+}
+
+// ----- Plan C M0 (wave C.1) — `require_feature` typed-error contract -----
+
+#[test]
+fn require_feature_passes_when_key_present_in_community_tier() {
+    let policy = PolicyResolver::embedded();
+    let gate = FeatureGate::new(policy);
+
+    assert!(require_feature(&gate, FeatureKey::CORE_CORE_BRAIN_SESSION).is_ok());
+}
+
+#[test]
+fn require_feature_returns_typed_error_with_key_when_absent() {
+    let policy = PolicyResolver::embedded();
+    let gate = FeatureGate::new_with_install_id(policy, InstallId::from_uuid(uuid::Uuid::nil()));
+    let state = LicenseState::active_validated(Plan::Pro, BTreeSet::new());
+    gate.update_state(&state);
+
+    let err = require_feature(&gate, FeatureKey::PM_PRO_BEADS_ADVANCED)
+        .expect_err("empty Pro state must reject pm_pro_beads_advanced");
+    // `#[non_exhaustive]` makes irrefutable destructuring impossible in
+    // external crates; use `let ... else` form.
+    let FeatureGateError::Denied { key, .. } = err else {
+        panic!("expected Denied, got {err:?}");
+    };
+    assert_eq!(key, FeatureKey::PM_PRO_BEADS_ADVANCED);
+}
+
+#[test]
+fn feature_gate_error_display_names_the_key_and_tier() {
+    let policy = PolicyResolver::embedded();
+    let gate = FeatureGate::new_with_install_id(policy, InstallId::from_uuid(uuid::Uuid::nil()));
+    let state = LicenseState::active_validated(Plan::Pro, BTreeSet::new());
+    gate.update_state(&state);
+
+    let err = require_feature(&gate, FeatureKey::CLI_CORE_RUN).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("cli_core_run"),
+        "error must name the key: {msg}"
+    );
+    assert!(
+        msg.contains("tier"),
+        "error must name the tier so callers can render recovery: {msg}"
     );
 }
