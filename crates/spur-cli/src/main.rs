@@ -14,8 +14,8 @@ use commands::auth::AuthCommands;
 use commands::flags::FlagsCommands;
 use spur_acp::config::SpurConfig;
 use spur_acp::{BrainSessionId, SessionId};
-use spur_cli::pm_service_gate_allows_construction;
 use spur_cli::log_writer;
+use spur_cli::pm_service_gate_allows_construction;
 use spur_core::{Orchestrator, RunOpts};
 use spur_license::SpurLicense;
 
@@ -30,28 +30,21 @@ fn init_tracing(
         let log_dir = repo_root.join(".spur").join("logs");
         std::fs::create_dir_all(&log_dir)?;
 
-        // Load SpurConfig to get [log] settings; fall back to default.
-        let cfg_path = repo_root.join(".spur").join("config.toml");
-        let spur_config: SpurConfig = std::fs::read_to_string(&cfg_path)
-            .ok()
-            .and_then(|s| toml::from_str(&s).ok())
-            .unwrap_or_default();
+        // Load SpurConfig to get [log] settings using the same repo-local
+        // then user-global precedence as orchestrator startup.
+        let spur_config = load_config_for_repo(repo_root)?;
         let log_cfg = &spur_config.log;
 
         // Read [log].level from config; fall back to default. RUST_LOG overrides.
-        let env_filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new(&log_cfg.level));
+        let env_filter =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&log_cfg.level));
 
-        let rotator = log_writer::build_rotator(
-            &log_dir,
-            log_cfg.max_file_bytes,
-            log_cfg.max_files,
-        );
-        let (non_blocking, guard) =
-            tracing_appender::non_blocking::NonBlockingBuilder::default()
-                .lossy(true)
-                .buffered_lines_limit(log_cfg.buffered_lines_limit)
-                .finish(rotator);
+        let rotator =
+            log_writer::build_rotator(&log_dir, log_cfg.max_file_bytes, log_cfg.max_files);
+        let (non_blocking, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+            .lossy(true)
+            .buffered_lines_limit(log_cfg.buffered_lines_limit)
+            .finish(rotator);
 
         tracing_subscriber::registry()
             .with(env_filter)
@@ -1050,8 +1043,12 @@ fn format_duration(secs: i64) -> String {
 }
 
 fn load_config() -> Result<SpurConfig> {
+    load_config_for_repo(&std::env::current_dir()?)
+}
+
+fn load_config_for_repo(repo_root: &Path) -> Result<SpurConfig> {
     // Try project config first, then user config.
-    let project_config = PathBuf::from(".spur/config.toml");
+    let project_config = repo_root.join(".spur").join("config.toml");
     let user_config = directories::BaseDirs::new()
         .map(|d| d.home_dir().join(".spur/config.toml"))
         .unwrap_or_default();

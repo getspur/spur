@@ -585,6 +585,9 @@ pub struct LogConfig {
     /// `tracing_appender::non_blocking` channel depth.
     pub buffered_lines_limit: usize,
 
+    /// Per-child stderr bridge `non_blocking` channel depth.
+    pub child_stderr_buffered_lines_limit: usize,
+
     /// Per-chunk byte limit for ACP child stderr files.
     pub child_stderr_max_bytes: u64,
 
@@ -605,6 +608,7 @@ impl Default for LogConfig {
             max_file_bytes: 8_388_608,
             max_files: 3,
             buffered_lines_limit: 8_192,
+            child_stderr_buffered_lines_limit: 256,
             child_stderr_max_bytes: 2_621_440,
             child_stderr_max_files: 3,
             events_max_total_bytes: 67_108_864,
@@ -769,11 +773,10 @@ where
 
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("read config at {}", path.display()))?;
-    let mut cfg: SpurConfig = toml::from_str(&raw)
-        .with_context(|| format!("parse config at {}", path.display()))?;
+    let mut cfg: SpurConfig =
+        toml::from_str(&raw).with_context(|| format!("parse config at {}", path.display()))?;
     mutate(&mut cfg);
-    let serialized =
-        toml::to_string_pretty(&cfg).context("serialize SpurConfig to TOML")?;
+    let serialized = toml::to_string_pretty(&cfg).context("serialize SpurConfig to TOML")?;
 
     let dir = path
         .parent()
@@ -1014,6 +1017,7 @@ level = "warn,spur_core::orchestrator=info"
         assert_eq!(cfg.log.max_file_bytes, 8_388_608); // 8 MB
         assert_eq!(cfg.log.max_files, 3);
         assert_eq!(cfg.log.buffered_lines_limit, 8_192);
+        assert_eq!(cfg.log.child_stderr_buffered_lines_limit, 256);
         assert_eq!(cfg.log.child_stderr_max_bytes, 2_621_440); // 2.5 MB
         assert_eq!(cfg.log.child_stderr_max_files, 3);
         assert_eq!(cfg.log.events_max_total_bytes, 67_108_864); // 64 MB
@@ -1025,5 +1029,6 @@ level = "warn,spur_core::orchestrator=info"
         let cfg: SpurConfig = toml::from_str("").expect("empty config valid");
         assert_eq!(cfg.log.level, "warn,spur_core::orchestrator=info");
         assert_eq!(cfg.log.max_file_bytes, 8_388_608);
+        assert_eq!(cfg.log.child_stderr_buffered_lines_limit, 256);
     }
 }
