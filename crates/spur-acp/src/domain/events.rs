@@ -966,6 +966,19 @@ pub enum SpurEventBody {
         session: SessionId,
         reason: BrainRetireReason,
     },
+
+    /// Emitted by the startup orphan sweeper (T6/T7) for each stale
+    /// agent process tree it killed. Surfaces orphan-reaping in the TUI
+    /// activity log so users see that cleanup happened on launch.
+    ///
+    /// `agent_name` mirrors the `PgidRecord.agent_name`; `pgid` is the
+    /// reaped process-group leader; `age_secs` is how long the record
+    /// had been on disk (now − `spawned_at`).
+    OrphanReaped {
+        agent_name: String,
+        pgid: i32,
+        age_secs: i64,
+    },
 }
 
 /// A single entry in a replayed conversation history.
