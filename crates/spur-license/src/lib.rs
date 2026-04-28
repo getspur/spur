@@ -7,6 +7,7 @@ pub mod provider;
 mod quota;
 mod snapshot;
 mod tier;
+pub mod upgrade_cta;
 
 pub use community::CommunityProvider;
 pub use gate::{require_feature, FeatureGate, FeatureGateError};
