@@ -7,6 +7,7 @@ use ratatui::{
 };
 
 use crate::action::ViewId;
+use crate::components::tombstone::{Tombstone, TombstoneKind};
 
 pub struct StatusBar;
 
@@ -46,6 +47,30 @@ impl LicenseBadge {
             }
         }
     }
+}
+
+pub fn render_tombstone_badge(slot: Option<&Tombstone>, now: std::time::Instant) -> Line<'static> {
+    let Some(tombstone) = slot else {
+        return Line::default();
+    };
+
+    let remaining = tombstone.expires_at.saturating_duration_since(now);
+    let prefix = match &tombstone.kind {
+        TombstoneKind::Reversible { .. } => "u:",
+        TombstoneKind::QueuedRemote { .. } => "u: revert",
+    };
+    let label = if tombstone.label.chars().count() > 24 {
+        let mut truncated: String = tombstone.label.chars().take(23).collect();
+        truncated.push('…');
+        truncated
+    } else {
+        tombstone.label.clone()
+    };
+
+    Line::from(vec![Span::styled(
+        format!("  [{prefix} {label} {}s]", remaining.as_secs()),
+        Style::default().fg(Color::DarkGray),
+    )])
 }
 
 /// Returns the status-bar hint string for the SessionDetail view.
@@ -179,7 +204,11 @@ impl StatusBar {
             .map(|m| format!(" [{m}]"))
             .unwrap_or_default();
 
-        let usage_text = match (props.usage_supported, props.context_used, props.context_size) {
+        let usage_text = match (
+            props.usage_supported,
+            props.context_used,
+            props.context_size,
+        ) {
             (false, _, _) => None,
             (true, Some(used), Some(size)) if size > 0 => {
                 let pct = (used as f64 / size as f64) * 100.0;
