@@ -1,5 +1,47 @@
 ## Unreleased
 
+### Added
+- **Experimental TUI Insights view (`--features analytics`, default OFF).**
+  `Alt+i` from any view opens a 4-tab Insights surface (Overview / Timeline /
+  Breakdown / Live) backed by `spur-context::AnalyticsEngine`'s DuckDB store.
+  - Overview: KPI cards (Today / 7d / 30d / Cache hit), 7d cost sparkline,
+    cost-provenance gauge (native / priced / unpriced), top-3 agent / model /
+    project lists.
+  - Timeline: BarChart with `D`/`W`/`M` granularity toggle (no re-query).
+  - Breakdown: Pivot table over Agent / Model / Project (`A` / `M` / `P`).
+  - Live: per-session burn rate, hourly projection, refresh interval drops to
+    5s while this tab is active (60s otherwise).
+  Refresh is driven by an async `tokio::spawn` task with a signal channel and
+  30s timeout; the view never blocks the UI thread.
+- **Five well-known agents are first-class in analytics**: Claude Code,
+  Codex, Gemini, OpenCode, Kimi. Kiro remains a Phase-2 stub
+  (no token data via filesystem; ACP `UsageUpdate` capture pending).
+- **`spur-context` Gemini extractor (R4).** Parses `~/.gemini/tmp/<uuid>/chats/session-*.json`
+  with `tokens.{input,output,cached,thoughts,tool}` folding. Wires into
+  `AnalyticsEngine` alongside existing Claude / Codex / OpenCode / Kimi paths.
+- **OpenCode model-prefix strip (R1).** `anthropic/claude-opus-4-5` is now
+  stored as `claude-opus-4-5` so the pricing registry's `LIKE` matcher works.
+  Eliminates spurious `cost_source='unpriced'` rows for OpenCode users.
+- **Kimi `kimi-for-coding` pricing (R2).** Registered at $0.60 input /
+  $2.50 output / $0.15 cache-read per million tokens. Kimi events now surface
+  with correct `cost_source='priced'` instead of `'unpriced'`.
+- **OpenCode SQLite mtime in cache staleness (R3).** `newest_agent_mtime`
+  now includes `~/.local/share/opencode/opencode.db`, fixing permanently-stale
+  cache for OpenCode-only users.
+- **Dashboard cost-source switch (when feature on).** Dashboard's total cost
+  reads from a periodically-refreshed `LiveCostCache` populated via
+  `AnalyticsEngine::live_session_snapshot` instead of `ExecutorLineage`. The
+  status bar shows a `via analytics` pill while the cache has data for the
+  active session. Single source of truth for cost when feature is enabled.
+- **CI matrix for `spur-tui`.** New workflow runs
+  `cargo check + cargo test --lib` for `--no-default-features`, default, and
+  `--features analytics` configurations on every PR and `main` push.
+- **P0 cost-correctness fixes harvested onto this branch.**
+  - P0.1: Claude event dedup on `(sessionId, requestId, message.id)`.
+  - P0.2/3/4: `cost_source` column + Codex cache double-count fix.
+  - P0.6: `include_str!` per-report SQL with synced cache columns.
+  - P0.8: `SessionRow::models` aggregates across mid-session model switches.
+
 ### Changed
 - **Read-only future metadata saves now fail visibly.** When
   `.spur/session_metadata.json` was written by a future SPUR version,
