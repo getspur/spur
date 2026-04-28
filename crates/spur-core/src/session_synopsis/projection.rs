@@ -74,6 +74,30 @@ impl SessionSynopsisProjection {
             SpurEventBody::SessionAttachRejected { acp_session_id, .. } => {
                 self.flush_pending(&SessionId(acp_session_id.clone()));
             }
+            SpurEventBody::SessionHistory { session, entries } => {
+                // Drop any stale pending buffer for this session — the history
+                // is authoritative.
+                self.pending.remove(session);
+
+                let user_texts: Vec<&str> = entries
+                    .iter()
+                    .filter(|e| e.role == "user")
+                    .map(|e| e.text.trim())
+                    .filter(|t| !t.is_empty())
+                    .collect();
+
+                if user_texts.is_empty() {
+                    return;
+                }
+
+                let first = user_texts.first().copied().unwrap();
+                let last = user_texts.last().copied().unwrap();
+                let s = self.by_session.entry(session.clone()).or_default();
+                if s.first_user_msg.is_none() && !first.starts_with('/') {
+                    s.first_user_msg = Some(first.to_owned());
+                }
+                s.last_user_msg = Some(last.to_owned());
+            }
             _ => {}
         }
     }
@@ -109,7 +133,7 @@ mod tests {
     use agent_client_protocol::schema::{
         ContentBlock, ContentChunk, SessionNotification, SessionUpdate, TextContent,
     };
-    use spur_acp::domain::events::{SpurEvent, SpurEventBody};
+    use spur_acp::domain::events::{HistoryEntry, SpurEvent, SpurEventBody};
 
     fn user_chunk_event(session: &str, text: &str) -> SpurEvent {
         SpurEvent::now(SpurEventBody::AgentNotification {
@@ -133,6 +157,13 @@ mod tests {
                 ))),
             )),
         })
+    }
+
+    fn history_entry(role: &str, text: &str) -> HistoryEntry {
+        HistoryEntry {
+            role: role.into(),
+            text: text.into(),
+        }
     }
 
     #[test]
@@ -283,5 +314,62 @@ mod tests {
 
         let s = proj.get(&SessionId("S1".into())).unwrap();
         assert_eq!(s.last_user_msg.as_deref(), Some("before complete"));
+    }
+
+    #[test]
+    fn session_history_populates_first_and_last_user_msg() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&SpurEvent::now(SpurEventBody::SessionHistory {
+            session: SessionId("S1".into()),
+            entries: vec![
+                history_entry("user", "first kiro msg"),
+                history_entry("assistant", "ack"),
+                history_entry("user", "second kiro msg"),
+                history_entry("assistant", "ack"),
+                history_entry("user", "third kiro msg"),
+            ],
+        }));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(s.first_user_msg.as_deref(), Some("first kiro msg"));
+        assert_eq!(s.last_user_msg.as_deref(), Some("third kiro msg"));
+    }
+
+    #[test]
+    fn session_history_drops_pending_buffer() {
+        let mut proj = SessionSynopsisProjection::new();
+        // Stale pending from before history arrives.
+        proj.apply(&user_chunk_event("S1", "stale partial"));
+        proj.apply(&SpurEvent::now(SpurEventBody::SessionHistory {
+            session: SessionId("S1".into()),
+            entries: vec![history_entry("user", "real first")],
+        }));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(s.first_user_msg.as_deref(), Some("real first"));
+        // Stale pending should have been dropped, not appended.
+        assert_eq!(s.last_user_msg.as_deref(), Some("real first"));
+    }
+
+    #[test]
+    fn session_history_with_no_user_entries_is_noop() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&SpurEvent::now(SpurEventBody::SessionHistory {
+            session: SessionId("S1".into()),
+            entries: vec![history_entry("assistant", "only assistant")],
+        }));
+
+        assert!(proj.get(&SessionId("S1".into())).is_none());
+    }
+
+    #[test]
+    fn session_history_empty_entries_is_noop() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&SpurEvent::now(SpurEventBody::SessionHistory {
+            session: SessionId("S1".into()),
+            entries: vec![],
+        }));
+
+        assert!(proj.get(&SessionId("S1".into())).is_none());
     }
 }
