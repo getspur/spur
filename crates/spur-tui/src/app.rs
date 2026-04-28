@@ -1112,6 +1112,14 @@ impl App {
         self.dirty = true;
     }
 
+    /// Render-gate predicate for the upgrade modal. The upgrade modal is
+    /// suppressed whenever a higher-precedence modal (quit_confirm or
+    /// collision) is up so on-screen visibility matches input precedence
+    /// (quit_confirm > collision > upgrade).
+    fn should_render_upgrade_modal(&self) -> bool {
+        !self.quit_confirm_visible && self.collision_modal.is_none()
+    }
+
     fn confirm_quit(&mut self) {
         // Flush any unsent draft to disk before we exit so the next
         // `spur watch` restores the latest text.
@@ -2707,10 +2715,10 @@ impl App {
         // Plan C Tier 2 — upgrade modal renders LAST among overlays so it
         // visually preempts every informational overlay (matches the event-
         // priority placement between collision_modal and help_visible).
-        // When `collision_modal` is up, suppress the upgrade modal so the
-        // visual matches input precedence — collision keys go to the
-        // collision handler, so the user must see the collision modal.
-        if self.collision_modal.is_none() {
+        // Suppress the upgrade modal whenever a higher-precedence modal is
+        // up (quit_confirm or collision) so the visual matches input
+        // precedence: quit_confirm > collision > upgrade in BOTH dimensions.
+        if self.should_render_upgrade_modal() {
             if let Some(state) = &self.upgrade_modal {
                 upgrade_modal::render(frame, view_area, state);
             }
@@ -4004,5 +4012,60 @@ mod quit_shortcut_tests {
             app.dashboard_for_test().input_bar_text_for_test(),
             "visible"
         );
+    }
+
+    /// Regression: when `quit_confirm_visible` is true, the upgrade modal
+    /// must NOT render even if `upgrade_modal` is `Some`. Otherwise input
+    /// (handled by quit_confirm) and visuals (upgrade modal on top)
+    /// silently disagree — the user sees the wrong dialog for their keys.
+    #[test]
+    fn upgrade_modal_render_gate_respects_quit_and_collision_precedence() {
+        use crate::components::upgrade_modal::UpgradeModalState;
+        use spur_license::{FeatureGateError, FeatureKey, Tier};
+
+        let mut app = App::new_for_tests();
+        app.upgrade_modal = Some(UpgradeModalState {
+            err: FeatureGateError::Denied {
+                key: FeatureKey::CLI_CORE_EXEC,
+                tier: Tier::Community,
+            },
+            required_tier: None,
+        });
+
+        // Baseline: nothing else up — upgrade modal should render.
+        assert!(
+            app.should_render_upgrade_modal(),
+            "upgrade modal should render when no higher-precedence modal is up"
+        );
+
+        // quit_confirm preempts upgrade modal.
+        app.quit_confirm_visible = true;
+        assert!(
+            !app.should_render_upgrade_modal(),
+            "upgrade modal must NOT render when quit_confirm_visible is true"
+        );
+        app.quit_confirm_visible = false;
+
+        // collision preempts upgrade modal.
+        app.collision_modal = Some(CollisionModalState {
+            acp_id: "acp-1".into(),
+            holder: spur_acp::session_lock::HolderInfo::default(),
+        });
+        assert!(
+            !app.should_render_upgrade_modal(),
+            "upgrade modal must NOT render when collision_modal is up"
+        );
+
+        // Both up: still suppressed.
+        app.quit_confirm_visible = true;
+        assert!(
+            !app.should_render_upgrade_modal(),
+            "upgrade modal must NOT render when quit_confirm and collision are both up"
+        );
+        app.collision_modal = None;
+        app.quit_confirm_visible = false;
+
+        // Back to baseline.
+        assert!(app.should_render_upgrade_modal());
     }
 }
