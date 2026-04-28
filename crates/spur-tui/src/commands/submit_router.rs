@@ -447,7 +447,7 @@ mod sessions_slash_tests {
             ModelId::new("gpt-5-codex"),
             vec![ModelInfo::new(ModelId::new("gpt-5-codex"), "GPT-5 Codex")],
         ));
-        let caps = spur_acp::SpurAgentCaps::new(&init, &new);
+        let caps = spur_acp::SpurAgentCaps::new(&init, &new, spur_acp::AgentKind::CodexAcp);
 
         let decision = route_with_caps("/model gpt-5-codex", &[], &registry, false, Some(&caps));
         match decision {
@@ -494,7 +494,7 @@ mod sessions_slash_tests {
                 SessionConfigSelectOptions::Ungrouped(vec![]),
             )),
         )]);
-        let caps = spur_acp::SpurAgentCaps::new(&init, &new);
+        let caps = spur_acp::SpurAgentCaps::new(&init, &new, spur_acp::AgentKind::CodexAcp);
         assert!(!caps.supports_set_model());
         assert!(caps.supports_set_config_option());
 
