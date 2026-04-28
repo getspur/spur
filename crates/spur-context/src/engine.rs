@@ -173,7 +173,10 @@ impl AnalyticsEngine {
             return Ok(0);
         }
 
-        // Stale — TRUNCATE + INSERT.
+        // Stale — TRUNCATE + INSERT. Source from `all_events_raw` (the
+        // stable UNION), never `all_events` (which `use_cached_events`
+        // may have rebound to `events_cache` itself, producing a
+        // self-wipe).
         self.conn.execute_batch(
             r#"
             DELETE FROM events_cache;
@@ -181,7 +184,7 @@ impl AnalyticsEngine {
               SELECT timestamp, session_id, agent, model, project,
                      input_tokens, output_tokens, cache_read_tokens,
                      cache_creation_tokens, cost_usd
-              FROM all_events;
+              FROM all_events_raw;
             DELETE FROM scan_manifest;
             "#,
         )?;
@@ -200,6 +203,10 @@ impl AnalyticsEngine {
     /// Point `all_events` (and thus `all_events_with_cost`) at the
     /// materialized `events_cache` table. Call after `refresh_cache()`
     /// to make subsequent report queries sub-second.
+    ///
+    /// `all_events_raw` is **not** affected — `refresh_cache` keeps
+    /// reading the raw UNION through that stable name regardless of how
+    /// often `use_cached_events` is called.
     pub fn use_cached_events(&self) -> Result<()> {
         self.conn
             .execute_batch("CREATE OR REPLACE VIEW all_events AS SELECT * FROM events_cache;")?;
@@ -1189,10 +1196,23 @@ impl AnalyticsEngine {
         Ok(())
     }
 
+    /// Build the unified event views.
+    ///
+    /// Two views with distinct lifecycles:
+    /// - `all_events_raw` is the **stable** UNION over per-agent views.
+    ///   `refresh_cache` always sources its INSERT from this view.
+    /// - `all_events` is the **mutable** query-facing view. Initially
+    ///   it aliases `all_events_raw`; after `use_cached_events()` it is
+    ///   replaced to alias `events_cache` so report queries hit the
+    ///   materialized cache instead of re-scanning JSONL.
+    ///
+    /// Keeping the two names separate avoids the self-wipe bug where
+    /// `refresh_cache` previously read from `all_events` after that
+    /// name had been rebound to `events_cache`.
     fn rebuild_unified_views(&self) -> Result<()> {
         let sql = format!(
             r#"
-            CREATE OR REPLACE VIEW all_events AS
+            CREATE OR REPLACE VIEW all_events_raw AS
             SELECT * FROM claude_events
             UNION ALL
             SELECT * FROM codex_events
@@ -1204,6 +1224,8 @@ impl AnalyticsEngine {
             SELECT * FROM kimi_events
             UNION ALL
             SELECT * FROM gemini_events;
+
+            CREATE OR REPLACE VIEW all_events AS SELECT * FROM all_events_raw;
 
             {}
             "#,
@@ -1913,6 +1935,58 @@ mod tests {
             .load_pricing(&spur_cost::PricingRegistry::with_builtin_prices())
             .unwrap();
         engine
+    }
+
+    /// Regression: `refresh_cache()` must not zero out `events_cache` after
+    /// `use_cached_events()` has been called. The bug was that
+    /// `refresh_cache` sourced its INSERT from `all_events`, but
+    /// `use_cached_events` rebinds `all_events` to be `events_cache` itself
+    /// — so a stale-detection rebuild becomes "DELETE the cache, then
+    /// INSERT from the just-deleted cache" → 0 rows. Fix: source the
+    /// rebuild from a stable raw UNION view (`all_events_raw`).
+    #[test]
+    fn refresh_cache_does_not_self_wipe_after_use_cached_events() {
+        let engine = setup_engine();
+
+        engine
+            .conn
+            .execute_batch(
+                "CREATE OR REPLACE VIEW claude_events AS \
+                 SELECT * FROM (VALUES \
+                    (TIMESTAMP '2026-04-20 10:00:00', 'sess-1', 'claude', \
+                     'claude-opus-4', 'proj', 1000::BIGINT, 100::BIGINT, \
+                     0::BIGINT, 0::BIGINT, 0.05::DOUBLE) \
+                 ) AS t(timestamp, session_id, agent, model, project, \
+                        input_tokens, output_tokens, cache_read_tokens, \
+                        cache_creation_tokens, cost_usd);",
+            )
+            .unwrap();
+        engine.rebuild_unified_views().unwrap();
+
+        let first = engine.refresh_cache().unwrap();
+        assert_eq!(first, 1, "first refresh should materialize 1 row");
+
+        engine.use_cached_events().unwrap();
+
+        engine
+            .conn
+            .execute_batch("DELETE FROM scan_manifest;")
+            .unwrap();
+
+        let second = engine.refresh_cache().unwrap();
+        assert_eq!(
+            second, first,
+            "second refresh must produce the same row count as the first; \
+             a different count means refresh_cache lost rows when re-materializing"
+        );
+        let cache_count: i64 = engine
+            .conn
+            .query_row("SELECT COUNT(*) FROM events_cache", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            cache_count, 1,
+            "refresh_cache must not self-wipe events_cache after use_cached_events"
+        );
     }
 
     fn gemini_fixture_dir() -> std::path::PathBuf {
