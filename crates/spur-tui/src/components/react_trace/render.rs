@@ -447,12 +447,13 @@ impl ReactTrace {
         title_str: &'a str,
         accent: Color,
         following_indicator: &'static str,
+        focused: bool,
     ) -> Block<'a> {
         Block::default()
             .title(Span::styled(title_str, Style::default().fg(accent)))
             .title_bottom(following_indicator)
             .borders(Borders::TOP | Borders::BOTTOM)
-            .border_style(Style::default().fg(Color::DarkGray))
+            .border_style(crate::components::focused_border_style(focused))
     }
 
     fn position_indicator(
@@ -487,6 +488,16 @@ impl ReactTrace {
         area: Rect,
         lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
     ) {
+        self.render_focused(frame, area, lineage, false);
+    }
+
+    pub fn render_focused(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
+        focused: bool,
+    ) {
         let following_indicator = if self.is_following() {
             " ▼ following "
         } else {
@@ -494,7 +505,7 @@ impl ReactTrace {
         };
 
         let (title_str, accent) = self.pane_title_and_color();
-        let mut block = Self::build_trace_block(&title_str, accent, following_indicator);
+        let mut block = Self::build_trace_block(&title_str, accent, following_indicator, focused);
 
         let inner = block.inner(area);
         let effective_width = inner.width;
@@ -595,6 +606,18 @@ impl ReactTrace {
         ctx: &mut RenderContext<'_>,
         lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
     ) {
+        self.render_with_ctx_focused(frame, area, ctx, lineage, false);
+    }
+
+    #[cfg(feature = "markdown")]
+    pub fn render_with_ctx_focused(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        ctx: &mut RenderContext<'_>,
+        lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
+        focused: bool,
+    ) {
         let following_indicator = if self.is_following() {
             " ▼ following "
         } else {
@@ -602,7 +625,7 @@ impl ReactTrace {
         };
 
         let (title_str, accent) = self.pane_title_and_color();
-        let mut block = Self::build_trace_block(&title_str, accent, following_indicator);
+        let mut block = Self::build_trace_block(&title_str, accent, following_indicator, focused);
 
         let inner = block.inner(area);
 
