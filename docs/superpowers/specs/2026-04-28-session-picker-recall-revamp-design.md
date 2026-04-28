@@ -58,32 +58,33 @@ Both signals come from a single live-write path on the existing event router
 
 ## Architecture
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│ App (owner of metadata_store, app.rs:222)                        │
-│   process_spur_event(AgentNotification)                          │
-│     for each user_message_chunk:                                 │
-│       mutate metadata.sessions[id].synopsis in-memory            │
-│       mark synopsis_dirty[id] = true                             │
-│   coalesced flush to disk:                                       │
-│     - on turn-complete event                                     │
-│     - on 500ms idle tick (mirrors draft-debounce pattern         │
-│       in session_detail.rs:551-573)                              │
-│     - on App shutdown                                            │
-│   one persist_metadata call per flush, not per chunk             │
-└──────────────────────────────────────────────────────────────────┘
-              │
-              ▼
-┌──────────────────────────────────────────────────────────────────┐
-│ SessionMetadata.sessions[id].synopsis = Option<SessionSynopsis>  │
-└──────────────────────────────────────────────────────────────────┘
-              ▲
-              │ read-only
-┌──────────────────────────────────────────────────────────────────┐
-│ SessionPickerView (render path, synchronous, zero I/O)           │
-│   row label = resolve_label(session, entry)                      │
-│   preview   = build_preview(session, entry)                      │
-└──────────────────────────────────────────────────────────────────┘
+### Data flow
+
+```mermaid
+flowchart TD
+    ACP[ACP Agent stream<br/>SessionUpdate events]
+    App[App.process_spur_event<br/>app.rs:1388-1393]
+    Dirty[synopsis_dirty<br/>HashSet&lt;SessionId&gt;]
+    Tick{500ms idle tick<br/>or turn-complete<br/>or shutdown}
+    Mem[(SessionMetadata<br/>in-memory)]
+    Disk[(metadata.json<br/>on disk)]
+    Picker[SessionPickerView<br/>render — read-only]
+    Row[Row label]
+    Preview[Preview pane]
+
+    ACP -->|user_message_chunk| App
+    App -->|mutate in-memory| Mem
+    App -->|mark id| Dirty
+    Dirty --> Tick
+    Tick -->|persist_metadata once<br/>per flush| Disk
+    Mem -->|immutable borrow| Picker
+    Picker --> Row
+    Picker --> Preview
+
+    classDef writePath fill:#fef3c7,stroke:#d97706
+    classDef readPath fill:#dbeafe,stroke:#2563eb
+    class App,Dirty,Tick writePath
+    class Picker,Row,Preview readPath
 ```
 
 The picker view **never writes** metadata. All synopsis mutation flows
@@ -92,6 +93,90 @@ immutable reference to `SessionMetadata` for rendering only.
 
 Sessions with no live-write synopsis fall through to the existing
 agent-title path.
+
+### Component architecture
+
+Boundaries between modules and which files change. NEW additions are
+boxed; existing components shown for context.
+
+```mermaid
+flowchart LR
+    subgraph spur_acp["crates/spur-acp"]
+        ACPTypes["AgentNotification<br/>SessionUpdate variants"]
+    end
+
+    subgraph spur_tui["crates/spur-tui"]
+        subgraph appLayer["App layer (app.rs)"]
+            AppEvent["process_spur_event<br/>+ synopsis arm <b>NEW</b>"]
+            AppFlush["tick handler<br/>+ coalesced flush <b>NEW</b>"]
+            Dirty["synopsis_dirty: HashSet <b>NEW</b>"]
+        end
+
+        subgraph stateLayer["State layer"]
+            SM["session_metadata.rs<br/>SessionEntry<br/>+ SessionSynopsis <b>NEW</b>"]
+        end
+
+        subgraph viewsLayer["Views layer"]
+            Picker["views/session_picker.rs<br/>+ resolve_label <b>NEW</b><br/>+ truncate_for_row <b>NEW</b><br/>+ haystack cache <b>NEW</b>"]
+            Detail["views/session_detail.rs<br/>(unchanged)"]
+        end
+
+        subgraph componentsLayer["Components layer"]
+            PreviewC["components/session_preview.rs<br/>+ PreviewRow style/wrap <b>NEW</b>"]
+            StatusBar["components/status_bar.rs<br/>(unchanged)"]
+        end
+    end
+
+    ACPTypes -->|events| AppEvent
+    AppEvent -->|mutate| SM
+    AppEvent --> Dirty
+    Dirty --> AppFlush
+    AppFlush -->|persist_metadata| SM
+    SM -.read-only.-> Picker
+    SM -.read-only.-> Detail
+    Picker --> PreviewC
+    Picker --> StatusBar
+
+    classDef new fill:#fef3c7,stroke:#d97706,stroke-width:2px
+    class AppEvent,AppFlush,Dirty,SM,Picker,PreviewC new
+```
+
+Files touched: 4 in `spur-tui` (`app.rs`, `session_metadata.rs`,
+`views/session_picker.rs`, `components/session_preview.rs`). Zero
+changes in `spur-acp`.
+
+### Live-write sequence
+
+The coalesced-flush ordering, end-to-end:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant ACP as ACP stream
+    participant App as App.process_spur_event
+    participant Mem as SessionMetadata
+    participant Dirty as synopsis_dirty
+    participant Tick as App tick (500ms)
+    participant Disk as metadata.json
+
+    ACP->>App: user_message_chunk("fix auth")
+    App->>Mem: synopsis.first_user_msg = "fix auth"
+    App->>Mem: synopsis.last_user_msg = "fix auth"
+    App->>Mem: synopsis.last_msg_at = now
+    App->>Dirty: insert(session_id)
+    Note over App,Dirty: No disk write yet
+
+    ACP->>App: user_message_chunk("also bump version")
+    App->>Mem: synopsis.last_user_msg = "also bump version"
+    Note over Dirty: id already present
+
+    Tick-->>App: 500ms elapsed
+    App->>Disk: persist_metadata() (one save covers all dirty ids)
+    App->>Dirty: clear()
+```
+
+If a turn-complete event (`stop_reason` set) arrives before the 500ms
+tick, it short-circuits the wait and triggers the same flush.
 
 ## Data model
 
@@ -286,10 +371,13 @@ real terminal-size data shows it matters.
 
 ## Filter / search widening
 
-`filtered_indices` (lines 318-382) currently builds:
+`filtered_indices` (lines 318-382) currently builds the haystack inside
+the filter loop on every call:
 `format!("{title} {cwd} {id}")`.
 
-Change to:
+Two changes here:
+
+**1. Widen the haystack** to include synopsis content:
 ```rust
 let label = resolve_label(session, entry, false, usize::MAX);
 let first = entry.and_then(|e| e.synopsis.as_ref())
@@ -300,6 +388,47 @@ let haystack = format!("{label} {first} {last} {cwd} {id}");
 ```
 
 Nucleo matcher and scoring stay identical.
+
+**2. Precompute and cache haystacks** on `set_sessions()` so navigation
+and re-render don't rebuild them. `filtered_indices` currently runs from
+multiple paths (render at `session_picker.rs:659`, preview at
+`session_picker.rs:858-860`, every j/k keypress). Caching collapses the
+work from O(n × strlen) per call to O(strlen) once per session-list change.
+
+Add to `PickerState::Populated`:
+
+```rust
+PickerState::Populated {
+    agent: String,
+    sessions: Vec<SessionInfo>,
+    haystacks: Vec<String>,   // NEW: parallel to sessions, indexed by real_i
+    cursor: usize,
+    search_focused: bool,
+    filter: String,
+}
+```
+
+`haystacks[i]` is built once inside `set_sessions()` using the formula
+above; rebuild also triggers when:
+- a synopsis update lands for a visible session (App → Picker
+  notification — see "Synopsis-update notification" below).
+- the user issues a rename via `R` (existing path; rename already
+  triggers a list refresh).
+
+`filtered_indices` reads `&haystacks[i]` instead of recomputing.
+
+### Synopsis-update notification
+
+When App's coalesced flush completes, App must invalidate the picker's
+`haystacks` cache for any updated session that's currently visible.
+Lightweight path: App calls `picker.invalidate_haystack(session_id)`
+when the picker view is the active view; the picker rebuilds just
+that one entry on next render. No new Action variant; direct
+view-method call from App's flush handler.
+
+For sessions not currently visible in the picker (e.g. user is in
+`SessionDetail` view), no invalidation is needed — when they later open
+the picker, `set_sessions()` rebuilds all haystacks fresh.
 
 **Match-source hint:** when a filter is active and the matched query string
 does not appear (case-insensitive substring) in the rendered row label,
@@ -328,11 +457,10 @@ or message types needed.
 - **One save per coalesce window**, not per chunk. Worst case: an active
   session with continuous streaming generates 2 saves/sec (500ms window),
   not 50/sec.
-- **Filter haystack:** `filtered_indices` rebuilds the haystack per
-  candidate per call (`session_picker.rs:359-375`) and is invoked from
-  render and navigation paths (`session_picker.rs:659`,
-  `session_picker.rs:858-860`). Adding 240 chars per session per call is
-  probably fine at 200 sessions; benchmark before declaring.
+- **Filter haystack precomputed:** built once in `set_sessions()`,
+  invalidated per-session on synopsis flush. `filtered_indices` becomes
+  O(n) scoring instead of O(n × strlen) per call, so adding ~240 chars
+  per session no longer multiplies render cost on every j/k.
 
 ## Error handling
 
@@ -360,7 +488,8 @@ or message types needed.
 | User changes their mind about the first message and wants to "reset" the synopsis | Low | The existing `R` rename flow already overrides via `title_override`, which has top precedence |
 | Preview becomes useless for sessions with no `user_message_chunk` ever (silent agents) | Low | Falls through to existing behavior — preview shows `cwd · brain · short_id` footer only |
 | Match-source hint adds visible noise on every filter | Medium | Only render when label substring miss; cap hint at one short fragment |
-| Filter widening blows nucleo budget on large session lists | Low | Benchmark `filtered_indices` at 200 / 500 sessions before merge; if hot, hoist haystack into `SessionEntry` cache or precompute per `set_sessions` call |
+| Filter widening blows nucleo budget on large session lists | Low | Haystacks now precomputed per-session in `PickerState::Populated.haystacks`; filter only pays nucleo scoring cost. Benchmark at 200 / 500 sessions before merge anyway |
+| Haystack invalidation race — synopsis update lands while picker is filtering | Low | Invalidation is a pull-update on next render, not a mid-frame mutation. Worst case: one frame shows a stale match score, corrected on the next tick |
 | Coalesced flush window misses an in-flight crash | Low | 500ms loss is acceptable for synopsis (worst case: row label reverts to agent title until next live message). Drafts already accept this trade-off |
 
 ## Test surface
@@ -402,10 +531,11 @@ Manual QA checklist (terminal sizes):
 | Live-write hook in App's `AgentNotification` handler + `synopsis_dirty` tracker + coalesced flush | ~80 | `app.rs` (`process_spur_event`, tick handler) |
 | `resolve_label` + `truncate_for_row` + label_budget plumbing | ~80 | `session_picker.rs` |
 | `PreviewContent` extension + new preview population | ~60 | `session_preview.rs`, `session_picker.rs` |
-| Filter widening + match-source hint | ~30 | `session_picker.rs` |
+| Filter widening + haystack precompute + invalidate hook | ~50 | `session_picker.rs`, `app.rs` (invalidate call) |
+| Match-source hint | ~20 | `session_picker.rs` |
 | Tests (unit + snapshot) | ~250 | `session_picker.rs` (`#[cfg(test)]`), new fixtures |
 
-Total: ~540 LoC across 4 files. One implementation plan, no
+Total: ~580 LoC across 4 files. One implementation plan, no
 parallel-task decomposition needed.
 
 ## Open follow-ups (out of scope for this spec)
