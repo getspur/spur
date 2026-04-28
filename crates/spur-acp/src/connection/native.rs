@@ -31,7 +31,7 @@
 //! | `new_session()` | Send `NewSessionRequest` with cwd + MCP servers to the agent |
 //! | `prompt()` | Send `PromptRequest`; `SessionNotification`s flow out via the connection-scoped broadcast |
 //! | `cancel()` | Send `CancelNotification` via the connection |
-//! | `shutdown()` | Close stdin (drop the SDK connection), wait for the child, then `killpg` if needed |
+//! | `shutdown()` | Close stdin (drop the SDK connection), SIGTERM the process group, then SIGKILL if needed |
 //! | `health()` | Return cached `AgentHealth` |
 
 use std::collections::HashMap;
@@ -56,8 +56,8 @@ use agent_client_protocol::schema::{
     PermissionOptionId, PermissionOptionKind, PromptRequest, ReadTextFileRequest,
     ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionConfigId, SessionConfigValueId, SessionId,
-    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    SelectedPermissionOutcome, SessionConfigId, SessionConfigValueId, SessionId, SessionModeId,
+    SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse,
     SetSessionModelRequest, SetSessionModelResponse, TerminalExitStatus, TerminalId,
     TerminalOutputRequest, TerminalOutputResponse, WaitForTerminalExitRequest,
@@ -199,6 +199,10 @@ pub struct NativeAcpConnection {
     /// `load_session`. Task 4 rewires `session_notification` onto this;
     /// today it's only plumbed.
     session_notif_tx: tokio::sync::broadcast::Sender<SessionNotification>,
+    /// Last advertised session modes keyed by ACP session id. Populated from
+    /// `NewSessionResponse` / `LoadSessionResponse` so policy code can gate
+    /// `session/set_mode` without probing unsupported modes.
+    advertised_modes: Arc<Mutex<HashMap<String, Vec<SessionModeId>>>>,
     /// Process-group id of the spawned child (equal to its pid because we spawn
     /// with `process_group(0)`). Populated by the ACP thread after spawn, read
     /// by the graceful shutdown path and the `Drop` safety net to kill the
@@ -258,6 +262,24 @@ pub(crate) fn decide_set_session_model_dispatch(caps: &SpurAgentCaps) -> SetSess
     }
 }
 
+fn cache_session_modes(
+    advertised_modes: &Arc<Mutex<HashMap<String, Vec<SessionModeId>>>>,
+    session_id: &SessionId,
+    modes: Option<&SessionModeState>,
+) {
+    let Some(modes) = modes else {
+        return;
+    };
+    let ids = modes
+        .available_modes
+        .iter()
+        .map(|mode| mode.id.clone())
+        .collect();
+    if let Ok(mut guard) = advertised_modes.lock() {
+        guard.insert(session_id.0.to_string(), ids);
+    }
+}
+
 impl NativeAcpConnection {
     /// Create a new native ACP connection.
     ///
@@ -286,6 +308,7 @@ impl NativeAcpConnection {
             ext_notification_rx: Some(ext_rx),
             ext_notification_tx: ext_tx,
             session_notif_tx,
+            advertised_modes: Arc::new(Mutex::new(HashMap::new())),
             child_pgid: Arc::new(Mutex::new(None)),
             repo_root: PathBuf::from("."),
             log_config: LogConfig::default(),
@@ -383,6 +406,7 @@ impl AgentConnection for NativeAcpConnection {
         let permission_tx = self.permission_tx.clone();
         let ext_tx = self.ext_notification_tx.clone();
         let session_notif_tx_for_thread = self.session_notif_tx.clone();
+        let advertised_modes = self.advertised_modes.clone();
         let child_pgid = self.child_pgid.clone();
         let repo_root = self.repo_root.clone();
         let log_config = self.log_config.clone();
@@ -397,6 +421,7 @@ impl AgentConnection for NativeAcpConnection {
                     permission_tx,
                     ext_tx,
                     session_notif_tx_for_thread,
+                    advertised_modes,
                     child_pgid,
                     repo_root,
                     log_config,
@@ -583,6 +608,13 @@ impl AgentConnection for NativeAcpConnection {
 
     fn health(&self) -> AgentHealth {
         self.health_status.clone()
+    }
+
+    fn advertised_session_modes(&self, session_id: &SessionId) -> Option<Vec<SessionModeId>> {
+        self.advertised_modes
+            .lock()
+            .ok()
+            .and_then(|modes| modes.get(session_id.0.as_ref()).cloned())
     }
 
     // ─── load_session ────────────────────────────────────────────────────
@@ -860,6 +892,7 @@ fn acp_thread_main(
     permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
     ext_notification_tx: mpsc::UnboundedSender<ExtNotificationPayload>,
     session_notif_tx: tokio::sync::broadcast::Sender<SessionNotification>,
+    advertised_modes: Arc<Mutex<HashMap<String, Vec<SessionModeId>>>>,
     child_pgid: Arc<Mutex<Option<i32>>>,
     repo_root: PathBuf,
     log_config: LogConfig,
@@ -1522,6 +1555,13 @@ fn acp_thread_main(
                             AcpCommand::NewSession { request, reply } => {
                                 *cwd_loop.lock().unwrap() = request.cwd.clone();
                                 let result = cx.send_request(request).block_task().await;
+                                if let Ok(response) = &result {
+                                    cache_session_modes(
+                                        &advertised_modes,
+                                        &response.session_id,
+                                        response.modes.as_ref(),
+                                    );
+                                }
                                 let _ = reply.send(result.map_err(|e| {
                                     anyhow::anyhow!(
                                         "NativeAcpConnection '{}': new_session failed: {e}",
@@ -1585,7 +1625,12 @@ fn acp_thread_main(
                                     mpsc::unbounded_channel::<SessionNotification>();
                                 let session_id_for_probe = request.session_id.clone();
                                 match cx.send_request(request).block_task().await {
-                                    Ok(_) => {
+                                    Ok(response) => {
+                                        cache_session_modes(
+                                            &advertised_modes,
+                                            &session_id_for_probe,
+                                            response.modes.as_ref(),
+                                        );
                                         tracing::debug!(
                                             agent = %agent_name_loop,
                                             session = %session_id_for_probe,
@@ -1726,38 +1771,34 @@ fn acp_thread_main(
             }
         }
 
-        // Give the agent a short window to exit on its own — at this point
-        // its stdin has already closed (the SDK writer was dropped when the
-        // connection torn down). Then escalate via the process group, which
-        // catches grandchildren (e.g. the `node` tree under
+        // Stdin has already closed (the SDK writer was dropped when the
+        // connection tore down), but ACP+rmcp agents can remain alive on
+        // non-stdin event loops. Send SIGTERM immediately via the process
+        // group, which catches grandchildren (e.g. the `node` tree under
         // `claude-agent-acp`) that don't watch stdin themselves.
+        let pgid = child_pgid.lock().ok().and_then(|g| *g);
+        if let Some(pgid) = pgid {
+            killpg(pgid, "TERM");
+        }
         let graceful = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(1),
             child.wait(),
         )
         .await;
-        let pgid = child_pgid.lock().ok().and_then(|g| *g);
         match graceful {
             Ok(Ok(status)) => {
                 tracing::debug!(
                     agent = %agent_name,
                     ?status,
-                    "NativeAcpConnection: agent exited gracefully after stdin close"
+                    "NativeAcpConnection: agent exited gracefully after SIGTERM"
                 );
-                // Belt-and-suspenders: ESRCH on an already-empty group is
-                // silenced by `killpg`.
-                if let Some(pgid) = pgid {
-                    killpg(pgid, "TERM");
-                }
             }
             _ => {
                 tracing::warn!(
                     agent = %agent_name,
-                    "NativeAcpConnection: agent did not exit within 2s of stdin close; escalating"
+                    "NativeAcpConnection: agent did not exit within 1s of SIGTERM; escalating"
                 );
                 if let Some(pgid) = pgid {
-                    killpg(pgid, "TERM");
-                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                     killpg(pgid, "KILL");
                 }
                 let _ = child.kill().await;
@@ -2175,6 +2216,41 @@ mod set_session_model_dispatch_tests {
             Err(crate::AcpError::CapabilityMissing(name)) => assert_eq!(name, "set_model"),
             other => panic!("expected CapabilityMissing(\"set_model\"), got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod shutdown_ladder_tests {
+    #[test]
+    fn sends_sigterm_before_wait_timeout() {
+        let src = include_str!("native.rs");
+        let start = src
+            .find("// Kill any still-running terminals")
+            .expect("shutdown cleanup block should exist");
+        let end = src[start..]
+            .find("// Drain the per-child stderr bridge")
+            .expect("stderr bridge drain should follow shutdown cleanup");
+        let block = &src[start..start + end];
+
+        let term_idx = block
+            .find("killpg(pgid, \"TERM\");")
+            .expect("shutdown ladder should send SIGTERM to process group");
+        let timeout_idx = block
+            .find("tokio::time::timeout")
+            .expect("shutdown ladder should wait after SIGTERM");
+
+        assert!(
+            term_idx < timeout_idx,
+            "SIGTERM must be sent before waiting for child exit"
+        );
+        assert!(
+            block.contains("std::time::Duration::from_secs(1)"),
+            "shutdown ladder should wait 1s after SIGTERM"
+        );
+        assert!(
+            block.contains("did not exit within 1s of SIGTERM"),
+            "escalation log should describe the SIGTERM grace window"
+        );
     }
 }
 
