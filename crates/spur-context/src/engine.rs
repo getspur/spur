@@ -75,6 +75,16 @@ const ALL_EVENTS_WITH_COST_VIEW: &str = r#"
     ) p ON TRUE;
 "#;
 
+/// Strip a leading `<segment>/` from a model id.
+///
+/// OpenCode stores model strings as `<provider>/<canonical>`. The pricing
+/// registry keys on the canonical name, so strip the provider prefix at
+/// extraction time. Only the first slash is consumed.
+#[cfg(feature = "duckdb")]
+fn strip_provider_prefix(s: &str) -> &str {
+    s.split_once('/').map_or(s, |(_, rest)| rest)
+}
+
 // ─── Engine ───────────────────────────────────────────────────────────
 
 /// DuckDB-backed analytics engine.
@@ -977,7 +987,7 @@ impl AnalyticsEngine {
             let model = data
                 .get("modelID")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+                .map(|s| strip_provider_prefix(s).to_string());
             let cost = data.get("cost").and_then(|v| v.as_f64());
             let project = std::path::Path::new(&worktree)
                 .file_name()
@@ -1308,7 +1318,7 @@ impl AnalyticsEngine {
                 COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd,
                 COUNT(*) AS events
             FROM all_events_with_cost
-            WHERE timestamp >= now() - CAST(? || ' minutes' AS INTERVAL)
+            WHERE timestamp >= CAST(now() AS TIMESTAMP) - CAST(? || ' minutes' AS INTERVAL)
             GROUP BY session_id, agent, model
             ORDER BY cost_usd DESC
         "#;
@@ -1945,6 +1955,28 @@ mod tests {
     }
 
     #[test]
+    fn strip_provider_prefix_handles_known_providers() {
+        use super::strip_provider_prefix;
+
+        assert_eq!(
+            strip_provider_prefix("anthropic/claude-opus-4-5"),
+            "claude-opus-4-5"
+        );
+        assert_eq!(
+            strip_provider_prefix("google/gemini-2.5-pro"),
+            "gemini-2.5-pro"
+        );
+        assert_eq!(strip_provider_prefix("openai/gpt-5"), "gpt-5");
+        assert_eq!(strip_provider_prefix("z-ai/glm-4.6"), "glm-4.6");
+        assert_eq!(strip_provider_prefix("moonshotai/kimi-k2"), "kimi-k2");
+        assert_eq!(strip_provider_prefix("claude-opus-4-5"), "claude-opus-4-5");
+        assert_eq!(strip_provider_prefix("gpt-5-codex"), "gpt-5-codex");
+        assert_eq!(strip_provider_prefix(""), "");
+        assert_eq!(strip_provider_prefix("/leading-slash"), "leading-slash");
+        assert_eq!(strip_provider_prefix("a/b/c"), "b/c");
+    }
+
+    #[test]
     fn test_opencode_events_from_sqlite_fixture() {
         // Build a miniature opencode.db mirroring the real Drizzle schema
         // (columns narrowed to what our extractor reads).
@@ -1994,10 +2026,17 @@ mod tests {
                     [],
                 )
                 .unwrap();
+            sconn
+                .execute(
+                    "INSERT INTO session VALUES ('s2', 'p1', '/Volumes/Projects/spur', 't2', 'v1', 1, 1)",
+                    [],
+                )
+                .unwrap();
             // Two real assistant turns with nonzero cost + one zero-token turn
             // that the extractor must filter out (matches opencode's failed-call shape).
             let m1 = r#"{"role":"assistant","cost":0.01289272,"tokens":{"input":7650,"output":12,"reasoning":0,"cache":{"read":8192,"write":0}},"modelID":"z-ai/glm-5.1","providerID":"openrouter"}"#;
             let m2 = r#"{"role":"assistant","cost":0.0245,"tokens":{"input":3000,"output":500,"reasoning":100,"cache":{"read":0,"write":1024}},"modelID":"moonshotai/kimi-k2.6","providerID":"openrouter"}"#;
+            let m_anthropic = r#"{"role":"assistant","cost":0.031,"tokens":{"input":4000,"output":200,"reasoning":0,"cache":{"read":256,"write":128}},"modelID":"anthropic/claude-opus-4-5","providerID":"openrouter"}"#;
             let m_empty = r#"{"role":"assistant","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"modelID":"z-ai/glm-5.1","providerID":"openrouter"}"#;
             let m_user = r#"{"role":"user"}"#;
             let base_ms: i64 = 1776580000000; // any realistic unix-ms value
@@ -2023,6 +2062,12 @@ mod tests {
                 .execute(
                     "INSERT INTO message VALUES ('m4','s1',?1,?1,?2)",
                     rusqlite::params![base_ms + 180_000, m_user],
+                )
+                .unwrap();
+            sconn
+                .execute(
+                    "INSERT INTO message VALUES ('m5','s2',?1,?1,?2)",
+                    rusqlite::params![base_ms + 240_000, m_anthropic],
                 )
                 .unwrap();
         }
@@ -2070,12 +2115,12 @@ mod tests {
 
         assert_eq!(
             rows.len(),
-            2,
+            3,
             "user + zero-token assistant must be filtered"
         );
         assert_eq!(rows[0].0, "s1");
         assert_eq!(rows[0].1, "opencode");
-        assert_eq!(rows[0].2.as_deref(), Some("z-ai/glm-5.1"));
+        assert_eq!(rows[0].2.as_deref(), Some("glm-5.1"));
         assert_eq!(rows[0].3.as_deref(), Some("spur"));
         assert_eq!(
             (rows[0].4, rows[0].5, rows[0].6, rows[0].7),
@@ -2083,12 +2128,22 @@ mod tests {
         );
         assert!((rows[0].8.unwrap() - 0.01289272).abs() < 1e-9);
 
-        assert_eq!(rows[1].2.as_deref(), Some("moonshotai/kimi-k2.6"));
+        assert_eq!(rows[1].2.as_deref(), Some("kimi-k2.6"));
         // reasoning folds into output_tokens
         assert_eq!(
             (rows[1].4, rows[1].5, rows[1].6, rows[1].7),
             (3000, 600, 0, 1024)
         );
+
+        let stored_model: Option<String> = engine
+            .conn
+            .query_row(
+                "SELECT model FROM opencode_events WHERE session_id = 's2' LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_model.as_deref(), Some("claude-opus-4-5"));
 
         // all_events_with_cost must use data.cost as-is (pass-through, no reprice)
         let total_cost: f64 = engine
@@ -2099,7 +2154,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert!((total_cost - (0.01289272 + 0.0245)).abs() < 1e-9);
+        assert!((total_cost - (0.01289272 + 0.0245 + 0.031)).abs() < 1e-9);
     }
 
     /// Smoke test against the developer's real `~/.local/share/opencode/opencode.db`.
