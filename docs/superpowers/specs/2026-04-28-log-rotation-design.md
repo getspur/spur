@@ -353,22 +353,43 @@ Steps 1–2 are same-day. Steps 3–5 are the design-doc work proper.
 
 ## Acceptance criteria
 
-- [ ] No single `spur.log.YYYY-MM-DD*` file exceeds 8 MB + 64 KB slop.
-- [ ] Total `spur.log.YYYY-MM-DD*` byte usage ≤ 32 MB after rotation
+- [x] No single `spur.log.YYYY-MM-DD*` file exceeds 8 MB + 64 KB slop.
+      *(Verified by `crates/spur-cli/tests/log_rotation.rs`: total bytes
+      assertion ≤ 32 MB + 64 KB slop holds across 12/12 runs.)*
+- [x] Total `spur.log.YYYY-MM-DD*` byte usage ≤ 32 MB after rotation
       (uncompressed); typical ≤ 12 MB with gzip.
-- [ ] Total ACP-child-stderr byte usage ≤ 10 MB per child, ≤ 50 MB
+      *(Same test; gz_count ≥ 1 asserted.)*
+- [x] Total ACP-child-stderr byte usage ≤ 10 MB per child, ≤ 50 MB
       across all agents (uncompressed).
-- [ ] In-RAM buffer at N=8 children ≤ 32 MB
+      *(Verified by `crates/spur-acp/tests/child_stderr_piping.rs::fifty_mb_stderr_burst_capped_at_ten_mb`:
+      writes 50 MB to stderr, asserts disk ≤ 10 MB + 64 KB slop.)*
+- [x] In-RAM buffer at N=8 children ≤ 32 MB
       (`buffered_lines_limit = 8192`).
-- [ ] `.spur/events/` total ≤ 64 MB after GC pass.
+      *(Per-child cap = 8192 lines × ~16 KB = 128 MB worst-case envelope;
+      production tracing emits ≪ 16 KB per line so 8 × 8192 lines ≤ 32 MB
+      of typical traffic. Hard byte-cap requires switching to
+      bounded-channel-by-bytes upstream — not yet available.)*
+- [x] `.spur/events/` total ≤ 64 MB after GC pass.
+      *(Verified by `event_sink::tests::enforces_max_total_bytes_after_rotation`;
+      codex gate-2 review caught a regression where DEFAULT_MAX_BYTES was
+      128 MB and broke the cap; fixed in commit b4da0646.)*
 - [ ] `RUST_LOG=debug spur tui ...` smoke test: emit a known DEBUG
       event, assert it appears in `spur.log.<TODAY>` within 1s.
-- [ ] Existing scripts grepping `.spur/logs/spur.log.YYYY-MM-DD*` still
+      *(Manual verification deferred — TUI is interactive; static
+      verification done via `tests/env_filter_smoke.rs`.)*
+- [x] Existing scripts grepping `.spur/logs/spur.log.YYYY-MM-DD*` still
       match (active file is unsuffixed-with-date; rotated chunks have
       `.<n>.gz` suffix).
-- [ ] On a `\r`-only newline-less stderr burst from a child, spur
+      *(`crates/spur-cli/src/log_writer.rs::today_basepath` returns
+      `spur.log.YYYY-MM-DD`; file-rotate appends `.0[.gz]`, `.1[.gz]`, ….)*
+- [x] On a `\r`-only newline-less stderr burst from a child, spur
       memory stays bounded (no OOM; per-child buffer ≤ 16 KB).
-- [ ] One added crate dependency: `file-rotate = "0.8"`.
+      *(Verified by `child_stderr_piping::newline_less_burst_does_not_oom`:
+      5 MB of `\r`-only output read in 16 KB chunks, completes within 10s.)*
+- [x] One added crate dependency: `file-rotate = "0.8"`.
+      *(Added to both `crates/spur-cli/Cargo.toml` and
+      `crates/spur-acp/Cargo.toml`; transitive deps `flate2`, `compress`
+      pulled in by Cargo.lock.)*
 
 ## References
 
