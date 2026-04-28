@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -14,12 +14,13 @@ use spur_acp::{SessionId, SpurEvent, SpurEventBody};
 use crate::action::{Action, ViewId};
 use crate::components::input_bar::{ActivityKind, EditMode, InputBar};
 use crate::components::react_trace::{ReactTrace, TraceEntry, TraceKind};
-use crate::components::status_bar::{StatusBar, StatusBarProps};
+use crate::components::status_bar::{HintOverride, StatusBar, StatusBarProps};
 use crate::input_history::InputHistoryEntry;
 
 use super::View;
 
 const READY_BANNER_TEXT: &str = "✨ Session cleared — your next prompt starts a fresh brain.";
+const CANCEL_HINT_TEXT: &str = "Esc cancelled the active turn. Press Esc again to go back.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FocusedSessionPanel {
@@ -126,6 +127,7 @@ pub struct SessionDetailView {
     /// prevents re-entrant cancel dispatches (the next `Esc` falls through
     /// to existing handlers, e.g. NavigateBack).
     pub(crate) cancelling_in_flight: bool,
+    cancel_hint_until: Option<Instant>,
 
     /// How `AgentConnection::cancel` behaves for this session's transport.
     /// Populated from `SpurEventBody::AgentSessionReady`. Used to select
@@ -237,6 +239,7 @@ impl SessionDetailView {
             resume_banner: None,
             stream_in_flight: false,
             cancelling_in_flight: false,
+            cancel_hint_until: None,
             cancel_mode: None,
             fs_unsafe: false,
             workers_panel_collapsed: false,
@@ -319,6 +322,7 @@ impl SessionDetailView {
             resume_banner: None,
             stream_in_flight: false,
             cancelling_in_flight: false,
+            cancel_hint_until: None,
             cancel_mode: None,
             fs_unsafe: false,
             workers_panel_collapsed: false,
@@ -378,6 +382,7 @@ impl SessionDetailView {
             resume_banner: None,
             stream_in_flight: false,
             cancelling_in_flight: false,
+            cancel_hint_until: None,
             cancel_mode: None,
             fs_unsafe: false,
             workers_panel_collapsed: false,
@@ -466,7 +471,7 @@ impl SessionDetailView {
     ///   (plus `react_trace.set_mode(None)` — see §3.3 of spec), `context_used`,
     ///   `context_size`, `auth_error`.
     /// - Stream flags (Task 3): `stream_in_flight`, `cancelling_in_flight`.
-    /// - UI transient: `resume_banner`, `completion`.
+    /// - UI transient: `resume_banner`, `completion`, `cancel_hint_until`.
     /// - Draft debounce locals (Task 4): `last_persisted_draft`,
     ///   `last_draft_change_at`.
     /// - Marks set: `cleared = true`, `ready_banner = Some(...)`.
@@ -475,7 +480,7 @@ impl SessionDetailView {
     /// - `session_id`, `agent_name`, `role`, `agent_cfg`, `cwd`,
     ///   `command_registry`, `mention_registry`, `input_bar`,
     ///   `cancel_mode`, `workers_panel_collapsed`, `known_worker_names`,
-    ///   `render_picker` (mermaid picker).
+    ///   `focused_panel`, `render_picker` (mermaid picker).
     pub fn reset_for_clear(&mut self) {
         tracing::debug!(
             session = %self.session_id.0,
@@ -504,6 +509,7 @@ impl SessionDetailView {
         // Stream flags.
         self.stream_in_flight = false;
         self.cancelling_in_flight = false;
+        self.cancel_hint_until = None;
 
         // Draft debounce locals (spec §3.5). Gate is ALSO at the source in
         // force_save_draft/draft_save_action — this local wipe is
@@ -521,6 +527,7 @@ impl SessionDetailView {
         self.completion.reset();
         self.resume_banner = None;
         self.focused_panel = FocusedSessionPanel::ReactTrace;
+        self.cancel_hint_until = None;
     }
 
     pub fn focused_panel(&self) -> FocusedSessionPanel {
@@ -1189,6 +1196,7 @@ impl SessionDetailView {
             && !self.input_bar.wants_esc()
         {
             self.cancelling_in_flight = true;
+            self.cancel_hint_until = Some(Instant::now() + Duration::from_secs(2));
             self.push_cancel_note();
             self.input_bar.set_status(
                 Some(format!("[{}: cancelling{{spinner}}]", self.agent_name)),
@@ -1542,6 +1550,7 @@ impl SessionDetailView {
                             return Some(Action::ScrollDown);
                         }
                         KeyCode::Esc => {
+                            self.cancel_hint_until = None;
                             return Some(Action::NavigateBack);
                         }
                         _ => {}
@@ -2070,7 +2079,14 @@ impl SessionDetailView {
         let tracked_plan = ctx.plan_projection.current_for_session(self.session_id());
         let license_badge = ctx.license_badge;
         let flag_summary = ctx.flag_summary;
-        let view_hint_override = ctx.transient_hint_override;
+        let view_hint_override = if self
+            .cancel_hint_until
+            .is_some_and(|until| until > Instant::now())
+        {
+            Some(HintOverride::from_full(CANCEL_HINT_TEXT))
+        } else {
+            ctx.transient_hint_override
+        };
 
         // Pre-ready render path: show a status label until LoadState::Ready.
         match &self.load_state {
@@ -2363,6 +2379,24 @@ impl SessionDetailView {
     #[doc(hidden)]
     pub fn completion_active_for_test(&self) -> bool {
         self.completion.is_active()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn cancel_hint_until_for_test(&self) -> Option<Instant> {
+        self.cancel_hint_until
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn set_cancel_hint_until_for_test(&mut self, value: Option<Instant>) {
+        self.cancel_hint_until = value;
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn set_stream_in_flight_for_test(&mut self, value: bool) {
+        self.stream_in_flight = value;
     }
 
     /// Test-only: read tool_depth map.
