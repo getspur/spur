@@ -3525,6 +3525,7 @@ impl Orchestrator {
             resumed: false,
             cancel_mode: cancel_mode_for(brain_cfg.transport),
             fs_unsafe,
+            caps: None,
         }));
 
         let config_options = session_response.config_options.clone().unwrap_or_default();
@@ -3849,6 +3850,7 @@ impl Orchestrator {
             resumed,
             cancel_mode: cancel_mode_for(brain_cfg.transport),
             fs_unsafe,
+            caps: None,
         }));
 
         let brain_session = BrainSession {

@@ -16,12 +16,13 @@ use agent_client_protocol::schema::{
     AgentCapabilities, InitializeResponse, NewSessionResponse, SessionConfigOption,
     SessionModeState, SessionModelState,
 };
+use serde::{Deserialize, Serialize};
 
 /// What the agent told spur during `initialize` + `session/new`.
 /// Captured ONCE per session at session-create and frozen for the
 /// session lifetime — ACP 0.12 has no protocol affordance for
 /// mid-session capability renegotiation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpurAgentCaps {
     /// Verbatim `AgentCapabilities` from `InitializeResponse`. Read its
     /// fields directly; future protocol additions land here automatically.

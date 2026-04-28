@@ -3324,6 +3324,7 @@ mod brain_retired_tests {
             resumed: false,
             cancel_mode: spur_acp::CancelMode::AcpSoft,
             fs_unsafe: false,
+            caps: None,
         }));
         assert!(
             app.metadata_store.last_active_acp().is_some(),
