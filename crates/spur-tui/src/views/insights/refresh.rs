@@ -23,37 +23,63 @@ pub(crate) fn spawn_refresh_task(
     mut signal_rx: mpsc::Receiver<()>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        tracing::info!(target: "spur_tui::insights::refresh", "refresh task spawned, entering loop");
+        let mut iter: u64 = 0;
         loop {
-            let interval = if is_live_tab.load(Ordering::Relaxed) {
+            iter += 1;
+            let live = is_live_tab.load(Ordering::Relaxed);
+            let interval = if live {
                 Duration::from_secs(5)
             } else {
                 Duration::from_secs(60)
             };
+            let wake_reason: &'static str;
             tokio::select! {
-                _ = tokio::time::sleep(interval) => {}
+                _ = tokio::time::sleep(interval) => { wake_reason = "timer"; }
                 opt = signal_rx.recv() => {
                     if opt.is_none() {
+                        tracing::info!(target: "spur_tui::insights::refresh", "signal channel closed, exiting loop");
                         return;
                     }
+                    wake_reason = "signal";
                 }
             }
+            tracing::info!(target: "spur_tui::insights::refresh", iter, wake_reason, live, "wake; setting refreshing=true and calling build_snapshot");
             {
                 let mut s = state.write().await;
                 s.refreshing = true;
             }
+            let started = std::time::Instant::now();
             let result =
                 tokio::time::timeout(Duration::from_secs(30), build_snapshot(&engine)).await;
+            let elapsed_ms = started.elapsed().as_millis() as u64;
             let mut s = state.write().await;
             s.refreshing = false;
             match result {
                 Ok(Ok(snap)) => {
+                    let q = &snap.queries;
+                    tracing::info!(
+                        target: "spur_tui::insights::refresh",
+                        iter,
+                        elapsed_ms,
+                        daily_rows = q.daily_90.len(),
+                        weekly_rows = q.weekly_12.len(),
+                        monthly_rows = q.monthly_6.len(),
+                        agent_rows = q.by_agent_30d.len(),
+                        model_rows = q.by_model_30d.len(),
+                        project_rows = q.by_project_30d.len(),
+                        live_rows = q.live_30min.len(),
+                        "build_snapshot OK; publishing last_good"
+                    );
                     s.last_good = Some(snap);
                     s.last_error = None;
                 }
                 Ok(Err(e)) => {
+                    tracing::warn!(target: "spur_tui::insights::refresh", iter, elapsed_ms, error = %format!("{e:#}"), "build_snapshot returned Err");
                     s.last_error = Some(Arc::new(e));
                 }
                 Err(_) => {
+                    tracing::warn!(target: "spur_tui::insights::refresh", iter, elapsed_ms, "build_snapshot timed out (30s)");
                     s.last_error = Some(Arc::new(anyhow!("refresh timed out (30s)")));
                 }
             }

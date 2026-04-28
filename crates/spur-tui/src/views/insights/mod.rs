@@ -174,6 +174,7 @@ impl View for InsightsView {
                     } else {
                         body
                     };
+                    tracing::debug!(target: "spur_tui::insights::render", refreshing = state.refreshing, has_error = state.last_error.is_some(), "rendering placeholder (no snapshot yet)");
                     frame.render_widget(Paragraph::new(text), area);
                     return;
                 };

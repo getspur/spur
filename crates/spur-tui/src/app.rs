@@ -1176,11 +1176,16 @@ impl App {
     fn ensure_insights_engine_and_view(&mut self) -> anyhow::Result<()> {
         use spur_context::{AnalyticsEngine, AsyncEngine};
 
+        let t0 = std::time::Instant::now();
+        tracing::info!(target: "spur_tui::insights", "ensure_insights_engine_and_view: enter");
+
         if self.insights_view.is_some() {
+            tracing::info!(target: "spur_tui::insights", "ensure_insights_engine_and_view: insights_view already exists, returning");
             return Ok(());
         }
 
         let engine = if let Some(existing) = self.analytics_engine.clone() {
+            tracing::info!(target: "spur_tui::insights", "ensure_insights_engine_and_view: reusing existing analytics_engine");
             existing
         } else {
             let cache_dir = directories::BaseDirs::new()
@@ -1188,13 +1193,31 @@ impl App {
                 .unwrap_or_else(|| std::path::PathBuf::from(".spur/cache"));
             std::fs::create_dir_all(&cache_dir)?;
             let cache_path = cache_dir.join("cost.duckdb");
+            tracing::info!(target: "spur_tui::insights", path = %cache_path.display(), "opening DuckDB cache");
 
+            let step = std::time::Instant::now();
             let engine = AnalyticsEngine::open(&cache_path)?;
+            tracing::info!(target: "spur_tui::insights", elapsed_ms = step.elapsed().as_millis() as u64, "AnalyticsEngine::open done");
+
+            let step = std::time::Instant::now();
             engine.initialize()?;
-            engine.create_agent_views()?;
+            tracing::info!(target: "spur_tui::insights", elapsed_ms = step.elapsed().as_millis() as u64, "engine.initialize done");
+
+            let step = std::time::Instant::now();
+            let view_status = engine.create_agent_views()?;
+            tracing::info!(target: "spur_tui::insights", elapsed_ms = step.elapsed().as_millis() as u64, ?view_status, "engine.create_agent_views done");
+
+            let step = std::time::Instant::now();
             engine.load_pricing(&spur_cost::PricingRegistry::with_builtin_prices())?;
-            let _ = engine.refresh_cache()?;
+            tracing::info!(target: "spur_tui::insights", elapsed_ms = step.elapsed().as_millis() as u64, "engine.load_pricing done");
+
+            let step = std::time::Instant::now();
+            let materialized = engine.refresh_cache()?;
+            tracing::info!(target: "spur_tui::insights", elapsed_ms = step.elapsed().as_millis() as u64, materialized_rows = materialized, "engine.refresh_cache done (UI-thread)");
+
+            let step = std::time::Instant::now();
             engine.use_cached_events()?;
+            tracing::info!(target: "spur_tui::insights", elapsed_ms = step.elapsed().as_millis() as u64, "engine.use_cached_events done");
 
             let async_engine = AsyncEngine::new(engine);
             self.analytics_engine = Some(async_engine.clone());
@@ -1202,6 +1225,7 @@ impl App {
         };
 
         self.insights_view = Some(crate::views::insights::InsightsView::new(engine));
+        tracing::info!(target: "spur_tui::insights", total_ms = t0.elapsed().as_millis() as u64, "InsightsView constructed; refresh task spawned");
         Ok(())
     }
 
