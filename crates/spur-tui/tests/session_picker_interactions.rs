@@ -518,9 +518,11 @@ fn capital_r_enters_rename_mode_and_enter_commits() {
         Some(Action::RenameSession {
             session_id,
             new_title,
+            original_title,
         }) => {
             assert_eq!(session_id, "a1");
             assert_eq!(new_title, "new name");
+            assert_eq!(original_title, "old title");
         }
         other => panic!("expected RenameSession, got {other:?}"),
     }

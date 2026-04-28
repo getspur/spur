@@ -223,3 +223,51 @@ fn tombstone_pin_undo_restores_via_inverse() {
         Some(Action::ToggleSessionPin { .. })
     ));
 }
+
+#[test]
+fn tombstone_installs_on_rename_with_original_title_as_inverse() {
+    let mut app = App::new_for_tests();
+    process_action(
+        &mut app,
+        Action::RenameSession {
+            session_id: "s3".into(),
+            new_title: "New Name".into(),
+            original_title: "Old Name".into(),
+        },
+    );
+    let ts = app.tombstones_for_test().peek(&ViewId::SessionPicker);
+    assert!(ts.is_some());
+    let ts = ts.unwrap();
+    match &ts.kind {
+        TombstoneKind::Reversible { inverse } => {
+            assert!(
+                matches!(
+                    inverse,
+                    Action::RenameSession { new_title, .. } if new_title == "Old Name"
+                ),
+                "inverse should restore old title"
+            );
+        }
+        _ => panic!("expected Reversible tombstone"),
+    }
+}
+
+#[test]
+fn rename_undo_restores_original_title() {
+    let mut app = App::new_for_tests();
+    process_action(
+        &mut app,
+        Action::RenameSession {
+            session_id: "s3".into(),
+            new_title: "New".into(),
+            original_title: "Old".into(),
+        },
+    );
+    process_action(&mut app, Action::NavigateTo(ViewId::SessionPicker));
+    app.handle_undo_for_test();
+    assert!(!app.tombstones_for_test().has(&ViewId::SessionPicker));
+    assert!(matches!(
+        app.last_action_for_test(),
+        Some(Action::RenameSession { new_title, .. }) if new_title == "Old"
+    ));
+}

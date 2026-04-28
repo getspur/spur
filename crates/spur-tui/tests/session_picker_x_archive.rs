@@ -40,7 +40,10 @@ fn x_triggers_archive() {
             .map(|entry| entry.archived),
         Some(true)
     );
-    assert!(app.transient_hint_for_test().is_none());
+    assert_eq!(
+        app.transient_hint_for_test().map(|hint| hint.text.as_str()),
+        Some("Archived 'session-1' — press u to undo")
+    );
 }
 
 #[test]
