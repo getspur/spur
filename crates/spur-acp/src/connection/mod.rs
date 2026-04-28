@@ -9,6 +9,8 @@
 //! `AgentConnection` is `Send + Sync` so it can be held in an `Arc` and shared
 //! across Tokio tasks.
 
+pub mod child_stderr_bridge;
+
 pub mod cli_wrap_adapter;
 pub use cli_wrap_adapter::CliWrapAdapter;
 
