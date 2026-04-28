@@ -19,7 +19,7 @@ use crate::components::agents_tree::AgentsTree;
 use crate::components::detail_pane::{DetailPane, DetailTab};
 use crate::components::input_bar::{ActivityKind, EditMode, HandleOutcome, InputBar};
 
-use crate::components::status_bar::{StatusBar, StatusBarProps};
+use crate::components::status_bar::{HintOverride, StatusBar, StatusBarProps};
 use crate::components::{LogEntry, LogEntryKind};
 use crate::input_history::InputHistoryEntry;
 
@@ -483,11 +483,13 @@ impl DashboardView {
         &mut self,
         frame: &mut Frame,
         area: Rect,
-        lineage: &ExecutorLineage,
-        license_badge: Option<&crate::components::status_bar::LicenseBadge>,
         worker_streams: &mut crate::worker_streams::WorkerStreams,
-        flag_summary: Option<(usize, usize)>,
+        ctx: &super::ViewContext,
     ) {
+        let lineage = ctx.lineage;
+        let license_badge = ctx.license_badge;
+        let flag_summary = ctx.flag_summary;
+        let view_hint_override = ctx.transient_hint_override;
         let node_count = lineage.nodes().count();
 
         // Compute aggregates once for both empty and non-empty paths.
@@ -509,10 +511,23 @@ impl DashboardView {
 
         if node_count == 0 {
             if !self.agents_configured {
-                self.render_setup_nudge(frame, area, license_badge, flag_summary);
+                self.render_setup_nudge(
+                    frame,
+                    area,
+                    license_badge,
+                    flag_summary,
+                    view_hint_override,
+                );
                 return;
             }
-            self.render_empty_splash(frame, area, license_badge, flag_summary, lineage);
+            self.render_empty_splash(
+                frame,
+                area,
+                license_badge,
+                flag_summary,
+                lineage,
+                view_hint_override,
+            );
             return;
         }
 
@@ -608,7 +623,7 @@ impl DashboardView {
                 alert_summary: self.alert_summary,
                 license_badge,
                 flag_summary,
-                view_hint_override: None,
+                view_hint_override,
             },
         );
     }
@@ -620,6 +635,7 @@ impl DashboardView {
         license_badge: Option<&crate::components::status_bar::LicenseBadge>,
         flag_summary: Option<(usize, usize)>,
         lineage: &ExecutorLineage,
+        view_hint_override: Option<HintOverride<'_>>,
     ) {
         let example = self
             .example_prompts
@@ -716,7 +732,7 @@ impl DashboardView {
                 alert_summary: self.alert_summary,
                 license_badge,
                 flag_summary,
-                view_hint_override: None,
+                view_hint_override,
             },
         );
     }
@@ -727,6 +743,7 @@ impl DashboardView {
         area: Rect,
         license_badge: Option<&crate::components::status_bar::LicenseBadge>,
         flag_summary: Option<(usize, usize)>,
+        view_hint_override: Option<HintOverride<'_>>,
     ) {
         let input_height = self.input_bar.required_height(area.width);
         let chunks = Layout::vertical([
@@ -861,7 +878,7 @@ impl DashboardView {
                 alert_summary: self.alert_summary,
                 license_badge,
                 flag_summary,
-                view_hint_override: None,
+                view_hint_override,
             },
         );
     }
@@ -2108,14 +2125,7 @@ impl View for DashboardView {
         // directly so it can pass worker_streams. This fallback exists only to
         // satisfy the View trait (e.g., in tests that don't need stream traces).
         let mut empty_ws = crate::worker_streams::WorkerStreams::new();
-        self.render_with_lineage(
-            frame,
-            area,
-            ctx.lineage,
-            ctx.license_badge,
-            &mut empty_ws,
-            ctx.flag_summary,
-        );
+        self.render_with_lineage(frame, area, &mut empty_ws, ctx);
     }
 }
 

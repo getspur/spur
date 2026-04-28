@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use futures::StreamExt;
@@ -25,7 +25,7 @@ use crate::components::palette_sources::{
     CommandSource, PaletteSource, SessionSource, WorkerSource,
 };
 use crate::components::quit_confirm::QuitConfirmDialog;
-use crate::components::status_bar::{LicenseBadge, LicenseBadgeTone};
+use crate::components::status_bar::{HintOverride, LicenseBadge, LicenseBadgeTone};
 use crate::components::upgrade_modal::{self, UpgradeModalState};
 use crate::input_history::{InputHistoryEntry, HISTORY_CAP};
 use crate::session_metadata::{ReadOnlyFutureSchema, SessionMetadataStore};
@@ -42,6 +42,11 @@ const READ_ONLY_STARTUP_WARNING: &str =
 Edits this session WILL NOT be persisted. Upgrade SPUR to enable writes. (Esc to dismiss)";
 
 // ─── Supporting types ──────────────────────────────────────────────────
+
+pub struct TransientHint {
+    pub text: String,
+    pub expires_at: Instant,
+}
 
 /// A user input message or control command sent from the TUI to the backend.
 pub enum UserInput {
@@ -299,6 +304,7 @@ pub struct App {
     config: std::sync::Arc<spur_acp::SpurConfig>,
     palette_visible: bool,
     palette_state: crate::components::palette::PaletteState,
+    pub transient_hint: Option<TransientHint>,
     /// Startup landing decision. Drives initial view and banner state.
     landing: crate::landing::LandingDecision,
     /// Last dispatched Action, for integration tests only.
@@ -458,6 +464,7 @@ impl App {
             config,
             palette_visible: false,
             palette_state: crate::components::palette::PaletteState::new(),
+            transient_hint: None,
             landing,
             #[cfg(any(test, debug_assertions))]
             last_action: None,
@@ -575,6 +582,49 @@ impl App {
     #[doc(hidden)]
     pub fn pending_first_user_message_for_test(&self) -> Option<&str> {
         self.pending_first_user_message.as_deref()
+    }
+
+    pub fn flash_hint(&mut self, msg: impl Into<String>, duration: Duration) {
+        self.transient_hint = Some(TransientHint {
+            text: msg.into(),
+            expires_at: Instant::now() + duration,
+        });
+        self.dirty = true;
+    }
+
+    pub fn flash_hint_short(&mut self, msg: impl Into<String>) {
+        self.flash_hint(msg, Duration::from_secs(2));
+    }
+
+    fn tick_transient_hint(&mut self, now: Instant) {
+        if self
+            .transient_hint
+            .as_ref()
+            .is_some_and(|hint| now >= hint.expires_at)
+        {
+            self.transient_hint = None;
+            self.dirty = true;
+        }
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn transient_hint_for_test(&self) -> Option<&TransientHint> {
+        self.transient_hint.as_ref()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn flash_hint_short_for_test(&mut self, msg: &str) {
+        self.flash_hint_short(msg);
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn flash_hint_for_test(&mut self, msg: &str, duration: Duration) {
+        self.flash_hint(msg, duration);
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn tick_transient_hint_for_test(&mut self, now: Instant) {
+        self.tick_transient_hint(now);
     }
 
     fn update_license_state(&mut self, license_state: LicenseStateEvent) {
@@ -1062,6 +1112,7 @@ impl App {
                     brain_status: &self.brain_status,
                     license_badge: self.license_badge.as_ref(),
                     flag_summary: self.flag_summary,
+                    transient_hint_override: None,
                 };
                 let action = match self.current_view {
                     ViewId::Dashboard => self.dashboard.handle_key_with_worker_streams(
@@ -1661,6 +1712,7 @@ impl App {
             brain_status: &self.brain_status,
             license_badge: self.license_badge.as_ref(),
             flag_summary: self.flag_summary,
+            transient_hint_override: None,
         };
         self.dashboard.handle_spur_event(&event, &ctx);
         if let Some(ref mut picker) = self.session_picker {
@@ -2621,6 +2673,9 @@ impl App {
 
     /// Tick the active view (for animations, batched text flush, etc.).
     pub fn tick(&mut self) {
+        let now = Instant::now();
+        self.tick_transient_hint(now);
+
         #[cfg(feature = "markdown")]
         {
             while let Ok(action) = self.mermaid_rx.try_recv() {
@@ -2629,7 +2684,7 @@ impl App {
         }
 
         if let Some((_, deadline)) = &self.pending_permission {
-            if std::time::Instant::now() >= *deadline {
+            if now >= *deadline {
                 self.pending_permission.take(); // drops reply_tx → auto-deny
                 self.clear_pending_permission_trace();
                 self.dirty = true;
@@ -2736,6 +2791,9 @@ impl App {
         };
 
         // Construct the shared context once per frame.
+        let transient_hint_text = self.transient_hint.as_ref().map(|hint| hint.text.clone());
+        let transient_hint_override = transient_hint_text.as_deref().map(HintOverride::from_full);
+
         let ctx = crate::views::ViewContext {
             lineage: &self.lineage,
             plan_projection: &self.plan_projection,
@@ -2743,17 +2801,14 @@ impl App {
             brain_status: &self.brain_status,
             license_badge: self.license_badge.as_ref(),
             flag_summary: self.flag_summary,
+            transient_hint_override,
         };
 
         match self.current_view.clone() {
-            ViewId::Dashboard => self.dashboard.render_with_lineage(
-                frame,
-                view_area,
-                &self.lineage,
-                self.license_badge.as_ref(),
-                &mut self.worker_streams,
-                self.flag_summary,
-            ),
+            ViewId::Dashboard => {
+                self.dashboard
+                    .render_with_lineage(frame, view_area, &mut self.worker_streams, &ctx)
+            }
             ViewId::SessionDetail(_) => {
                 if let Some(ref mut detail) = self.session_detail {
                     detail.render(frame, view_area, &ctx);

@@ -10,7 +10,7 @@ use spur_acp::SpurEvent;
 use crate::action::{Action, IssueAction, ViewId};
 use crate::components::issue_detail_pane::IssueDetailPane;
 use crate::components::issues_panel::IssuesPanel;
-use crate::components::status_bar::{StatusBar, StatusBarProps};
+use crate::components::status_bar::{HintOverride, StatusBar, StatusBarProps};
 
 use super::View;
 
@@ -206,7 +206,12 @@ impl IssueBrowserView {
 
     // ── Render ──────────────────────────────────────────────────────────
 
-    fn render_inner(&mut self, frame: &mut Frame, area: Rect) {
+    fn render_inner(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        view_hint_override: Option<HintOverride<'_>>,
+    ) {
         let issue_count = self.tracked_issues.len();
 
         let issues_height = if issue_count == 0 {
@@ -292,7 +297,7 @@ impl IssueBrowserView {
                 alert_summary: None,
                 license_badge: None,
                 flag_summary: None,
-                view_hint_override: None,
+                view_hint_override,
             },
         );
     }
@@ -394,8 +399,8 @@ impl View for IssueBrowserView {
         }
     }
 
-    fn render(&mut self, frame: &mut Frame, area: Rect, _ctx: &super::ViewContext) {
-        self.render_inner(frame, area);
+    fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &super::ViewContext) {
+        self.render_inner(frame, area, ctx.transient_hint_override);
     }
 
     fn tick(&mut self) {

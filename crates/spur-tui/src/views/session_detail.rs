@@ -1988,14 +1988,7 @@ impl View for SessionDetailView {
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &super::ViewContext) {
-        self.render_inner(
-            frame,
-            area,
-            Some(ctx.lineage),
-            ctx.plan_projection.current_for_session(self.session_id()),
-            ctx.license_badge,
-            ctx.flag_summary,
-        );
+        self.render_inner(frame, area, ctx);
     }
 }
 
@@ -2036,11 +2029,14 @@ impl SessionDetailView {
         &mut self,
         frame: &mut Frame,
         area: Rect,
-        lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
-        tracked_plan: Option<&spur_core::TrackedPlan>,
-        license_badge: Option<&crate::components::status_bar::LicenseBadge>,
-        flag_summary: Option<(usize, usize)>,
+        ctx: &super::ViewContext,
     ) {
+        let lineage = Some(ctx.lineage);
+        let tracked_plan = ctx.plan_projection.current_for_session(self.session_id());
+        let license_badge = ctx.license_badge;
+        let flag_summary = ctx.flag_summary;
+        let view_hint_override = ctx.transient_hint_override;
+
         // Pre-ready render path: show a status label until LoadState::Ready.
         match &self.load_state {
             LoadState::Retiring => {
@@ -2283,7 +2279,7 @@ impl SessionDetailView {
                 alert_summary: None,
                 license_badge,
                 flag_summary,
-                view_hint_override: None,
+                view_hint_override,
             },
         );
 
@@ -2885,6 +2881,7 @@ mod invalidate_protocols_tests {
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
             flag_summary: None,
+            transient_hint_override: None,
         }
     }
 
@@ -2999,6 +2996,7 @@ mod cancel_state_tests {
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
             flag_summary: None,
+            transient_hint_override: None,
         }
     }
 
@@ -3421,6 +3419,7 @@ mod composer_routing_tests {
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
             flag_summary: None,
+            transient_hint_override: None,
         }
     }
 
@@ -3499,6 +3498,7 @@ mod composer_routing_tests {
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
             flag_summary: None,
+            transient_hint_override: None,
         }
     }
 
@@ -3679,6 +3679,7 @@ mod tests {
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
             flag_summary: None,
+            transient_hint_override: None,
         }
     }
 
@@ -3841,6 +3842,7 @@ mod tests {
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
             flag_summary: None,
+            transient_hint_override: None,
         };
 
         let backend = TestBackend::new(80, 24);

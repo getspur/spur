@@ -12,7 +12,7 @@ use ratatui::Frame;
 use spur_acp::SpurEvent;
 
 use crate::action::Action;
-use crate::components::status_bar::LicenseBadge;
+use crate::components::status_bar::{HintOverride, LicenseBadge};
 
 // ── macOS Option-key normalisation ────────────────────────────────────
 //
@@ -89,6 +89,7 @@ pub struct ViewContext<'a> {
     pub brain_status: &'a crate::app::BrainStatus,
     pub license_badge: Option<&'a LicenseBadge>,
     pub flag_summary: Option<(usize, usize)>,
+    pub transient_hint_override: Option<HintOverride<'a>>,
 }
 
 /// Test-only default context backed by empty lineage and idle status.
@@ -113,6 +114,7 @@ impl ViewContext<'_> {
             brain_status: &TEST_BRAIN_STATUS,
             license_badge: None,
             flag_summary: None,
+            transient_hint_override: None,
         }
     }
 }
