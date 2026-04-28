@@ -59,7 +59,7 @@ impl LiveTab {
 #[derive(Debug)]
 struct LiveMetrics {
     token_count: i64,
-    tokens_per_minute: f64,
+    tokens_per_minute: Option<f64>,
     burn_per_minute: Option<f64>,
     hourly: Option<f64>,
 }
@@ -72,9 +72,7 @@ impl LiveMetrics {
             + row.cache_creation_tokens;
         let minutes = minutes_since_started_at(row.started_at.as_deref());
         let burn_per_minute = minutes.map(|minutes| row.cost_usd / minutes);
-        let tokens_per_minute = minutes
-            .map(|minutes| token_count as f64 / minutes)
-            .unwrap_or_default();
+        let tokens_per_minute = minutes.map(|minutes| token_count as f64 / minutes);
         let hourly = burn_per_minute.map(|burn| burn * 60.0);
 
         Self {
@@ -122,37 +120,44 @@ fn render_live_row(
     frame.render_widget(Paragraph::new(model.to_string()), columns[2]);
     frame.render_widget(Paragraph::new(compact(metric.token_count)), columns[3]);
     frame.render_widget(
-        Paragraph::new(format!("{:.1}/m", metric.tokens_per_minute)),
+        Paragraph::new(
+            metric
+                .tokens_per_minute
+                .map(|tpm| format!("{:.1}/m", tpm))
+                .unwrap_or_else(|| "—".to_string()),
+        ),
         columns[4],
     );
     frame.render_widget(Paragraph::new(burn), columns[5]);
     frame.render_widget(Paragraph::new(hourly), columns[6]);
 
+    let tpm_value = metric.tokens_per_minute.unwrap_or(0.0);
     let ratio = if avg_tpm > 0.0 {
-        (metric.tokens_per_minute / avg_tpm).clamp(0.0, 1.0)
+        (tpm_value / avg_tpm).clamp(0.0, 1.0)
     } else {
         0.0
     };
+    let label = match metric.tokens_per_minute {
+        Some(tpm) => format!("tokens/min {:.1}", tpm),
+        None => "tokens/min —".to_string(),
+    };
     let gauge = Gauge::default()
         .ratio(ratio)
-        .label(format!("tokens/min {:.1}", metric.tokens_per_minute))
+        .label(label)
         .gauge_style(Style::default().fg(Color::Cyan));
     frame.render_widget(gauge, gauge_area);
 }
 
 fn running_average_tpm(metrics: &[LiveMetrics]) -> f64 {
-    let active: Vec<_> = metrics
+    let active: Vec<f64> = metrics
         .iter()
-        .filter(|metric| metric.tokens_per_minute > 0.0)
+        .filter_map(|metric| metric.tokens_per_minute)
+        .filter(|tpm| *tpm > 0.0)
         .collect();
     if active.is_empty() {
         return 0.0;
     }
-    active
-        .iter()
-        .map(|metric| metric.tokens_per_minute)
-        .sum::<f64>()
-        / active.len() as f64
+    active.iter().sum::<f64>() / active.len() as f64
 }
 
 fn minutes_since_started_at(started_at: Option<&str>) -> Option<f64> {

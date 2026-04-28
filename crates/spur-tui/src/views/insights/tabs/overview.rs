@@ -117,7 +117,7 @@ fn top_list(title: &'static str, rows: Vec<(String, f64)>) -> List<'static> {
 
 fn sorted_top<'a>(rows: impl Iterator<Item = (&'a str, f64)>) -> Vec<(String, f64)> {
     let mut rows: Vec<_> = rows.map(|(name, cost)| (name.to_string(), cost)).collect();
-    rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+    rows.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     rows.into_iter().take(3).collect()
 }
 
@@ -143,5 +143,15 @@ mod tests {
         assert!(text.contains("$28.40"), "rendered:\n{text}");
         assert!(text.contains("$112.00"), "rendered:\n{text}");
         assert!(text.contains("47.8%"), "rendered:\n{text}");
+    }
+
+    #[test]
+    fn sorted_top_breaks_ties_alphabetically() {
+        let names = sorted_top([("zeta", 10.0), ("alpha", 10.0), ("mango", 10.0)].into_iter())
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["alpha", "mango", "zeta"]);
     }
 }
