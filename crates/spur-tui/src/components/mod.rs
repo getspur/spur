@@ -38,6 +38,7 @@ pub mod session_preview;
 pub mod spinner;
 pub mod status_bar;
 pub(crate) mod trace_format;
+pub mod upgrade_modal;
 pub mod workers_panel;
 
 use ratatui::style::{Color, Style};

@@ -26,6 +26,7 @@ use crate::components::palette_sources::{
 };
 use crate::components::quit_confirm::QuitConfirmDialog;
 use crate::components::status_bar::{LicenseBadge, LicenseBadgeTone};
+use crate::components::upgrade_modal::{self, UpgradeModalState};
 use crate::input_history::{InputHistoryEntry, HISTORY_CAP};
 use crate::session_metadata::{ReadOnlyFutureSchema, SessionMetadataStore};
 use crate::tui;
@@ -200,6 +201,11 @@ pub struct App {
     quit_confirm_visible: bool,
     /// Visible when a resume attempt collides with another attached TUI.
     collision_modal: Option<CollisionModalState>,
+    /// Plan C Tier 2 — capability-tease modal shown when a TUI-side
+    /// feature gate denies. Owned (not borrowed) because the modal
+    /// outlives the gate-check call site. `FeatureGateError: Clone`
+    /// (Task 1) makes that ownership cheap.
+    upgrade_modal: Option<UpgradeModalState>,
     should_quit: bool,
     dirty: bool,
     /// Top-level user-visible warning banner rendered in a reserved top row.
@@ -219,6 +225,12 @@ pub struct App {
     license_state: LicenseStateEvent,
     license_badge: Option<LicenseBadge>,
     flag_summary: Option<(usize, usize)>, // (active_count, total_count)
+    /// Plan C Tier 2 — long-lived feature-gate snapshot reflecting the
+    /// embedded policy (community baseline + `SPUR_LICENSE_TEST_STRIP_KEYS`).
+    /// Used by the MVP gate-check site at `Action::SendMessage`. Future
+    /// M1 work will pump live `LicenseStateEvent` updates into this gate
+    /// via `update_state` so Pro-only gate sites resolve correctly.
+    feature_gate: spur_license::FeatureGate,
     #[cfg(feature = "markdown")]
     pub(crate) mermaid_picker: Option<Picker>,
     #[cfg(feature = "markdown")]
@@ -356,6 +368,7 @@ impl App {
             help_visible: false,
             quit_confirm_visible: false,
             collision_modal: None,
+            upgrade_modal: None,
             should_quit: false,
             dirty: true, // initial render
             user_warning: None,
@@ -378,6 +391,9 @@ impl App {
             license_state,
             license_badge: None,
             flag_summary: None,
+            feature_gate: spur_license::FeatureGate::new(
+                spur_license::policy::PolicyResolver::embedded(),
+            ),
             metadata_store,
             edit_mode: EditMode::from(config.tui.edit_mode),
             config,
@@ -497,7 +513,11 @@ impl App {
     }
 
     fn open_palette(&mut self) {
-        if self.help_visible || self.quit_confirm_visible || self.collision_modal.is_some() {
+        if self.help_visible
+            || self.quit_confirm_visible
+            || self.collision_modal.is_some()
+            || self.upgrade_modal.is_some()
+        {
             return; // palette won't open while a higher-priority overlay is up
         }
         tracing::debug!(target: "palette", "open_palette: start");
@@ -879,11 +899,43 @@ impl App {
                     return;
                 }
 
-                // Ctrl+C / Ctrl+Q are the global quit chords. First press opens
-                // the confirmation prompt; pressing it again while the prompt is
-                // visible bypasses confirmation and exits immediately.
+                // Ctrl+C / Ctrl+Q are the global quit chords. They run BEFORE
+                // the upgrade-modal handler so the modal's `_ => swallow` arm
+                // never eats a quit chord. First press opens the confirmation
+                // prompt; pressing it again while the prompt is visible
+                // bypasses confirmation and exits immediately.
                 if is_quit_chord(key) {
                     self.request_quit();
+                    return;
+                }
+
+                // Plan C Tier 2 — upgrade modal sits between Quit/Collision and
+                // Help in the priority chain: a denial CTA demands user
+                // attention so it preempts informational overlays, but defers
+                // to Quit/Collision (which are already-in-progress user-driven
+                // flows the modal would otherwise interrupt).
+                if self.upgrade_modal.is_some() {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('q') => {
+                            self.upgrade_modal = None;
+                        }
+                        KeyCode::Char('s') => {
+                            self.upgrade_modal = None;
+                            self.show_user_warning(
+                                "Run `spur auth status` in a shell to view tiers and license state."
+                                    .into(),
+                            );
+                        }
+                        KeyCode::Char('l') => {
+                            self.upgrade_modal = None;
+                            self.show_user_warning(
+                                "Run `spur auth login --key <KEY>` in a shell to activate a license."
+                                    .into(),
+                            );
+                        }
+                        _ => { /* swallow other keys while the modal is up */ }
+                    }
+                    self.dirty = true;
                     return;
                 }
 
@@ -1014,6 +1066,7 @@ impl App {
             Event::Paste(text) => {
                 if self.quit_confirm_visible
                     || self.collision_modal.is_some()
+                    || self.upgrade_modal.is_some()
                     || self.help_visible
                     || self.palette_visible
                 {
@@ -1616,6 +1669,29 @@ impl App {
                 blocks,
                 interrupt,
             } => {
+                // Plan C Tier 2 — MVP gate-check site for the upgrade
+                // modal. `Action::SendMessage` is the dominant interactive
+                // command-execution path in the TUI (every prompt to an
+                // attached brain flows through it), making it the natural
+                // counterpart to the CLI's `spur exec` denial path that
+                // Tier 1 wired into stderr.
+                //
+                // `cli_core_exec` is community-tier in the embedded
+                // policy, so production users will not normally hit this
+                // branch — the MVP demo path is
+                // `SPUR_LICENSE_TEST_STRIP_KEYS=cli_core_exec`, mirroring
+                // the binary smoke pattern from Tier 1.
+                if let Err(err) = spur_license::require_feature(
+                    &self.feature_gate,
+                    spur_license::FeatureKey::CLI_CORE_EXEC,
+                ) {
+                    let required_tier = spur_license::upgrade_cta::required_tier_for(
+                        spur_license::FeatureKey::CLI_CORE_EXEC,
+                    );
+                    self.process_action(Action::ShowUpgradeModal { err, required_tier });
+                    return;
+                }
+
                 // Empty session means "route to the currently active session".
                 // Dashboard's InputBar emits this when a brain is attached.
                 if session.0.is_empty() {
@@ -1794,6 +1870,14 @@ impl App {
                 if let Some(ref tx) = self.user_input_tx {
                     let _ = tx.try_send(UserInput::CancelStream { session });
                 }
+            }
+
+            Action::ShowUpgradeModal { err, required_tier } => {
+                // Plan C Tier 2 — open the capability-tease modal.
+                // Re-pop on every denial (no de-dup); the plan calls
+                // out session-level suppression as YAGNI for the MVP.
+                self.upgrade_modal = Some(UpgradeModalState { err, required_tier });
+                self.dirty = true;
             }
 
             Action::InspectWorkers => {
@@ -2618,6 +2702,18 @@ impl App {
                 crate::components::palette_overlay::PaletteOverlay::new(&self.palette_state)
                     .with_session_active(self.session_detail.is_some());
             frame.render_widget(overlay, view_area);
+        }
+
+        // Plan C Tier 2 — upgrade modal renders LAST among overlays so it
+        // visually preempts every informational overlay (matches the event-
+        // priority placement between collision_modal and help_visible).
+        // When `collision_modal` is up, suppress the upgrade modal so the
+        // visual matches input precedence — collision keys go to the
+        // collision handler, so the user must see the collision modal.
+        if self.collision_modal.is_none() {
+            if let Some(state) = &self.upgrade_modal {
+                upgrade_modal::render(frame, view_area, state);
+            }
         }
 
         if let (Some(area), Some(message)) = (banner_area, self.user_warning.as_deref()) {
