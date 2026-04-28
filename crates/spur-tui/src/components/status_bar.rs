@@ -120,6 +120,7 @@ impl<'a> HintOverride<'a> {
 #[derive(Clone, Copy)]
 pub struct StatusBarProps<'a> {
     pub view: &'a ViewId,
+    pub tombstone: Option<&'a Tombstone>,
     pub running: usize,
     pub pending_review: usize,
     pub total_cost: f64,
@@ -358,6 +359,11 @@ impl StatusBar {
             if !compact {
                 spans.push(Span::styled("· ", Style::default().fg(Color::DarkGray)));
             }
+        }
+        let tombstone_badge = render_tombstone_badge(props.tombstone, std::time::Instant::now());
+        if !tombstone_badge.spans.is_empty() {
+            spans.extend(tombstone_badge.spans);
+            spans.push(Span::styled(sep, Style::default().fg(Color::DarkGray)));
         }
         if let Some((active, total)) = props.flag_summary {
             let flag_style = if active == total {

@@ -787,6 +787,14 @@ impl SessionDetailView {
         self.input_bar.set_mode(mode);
     }
 
+    pub(crate) fn input_bar_active_non_empty(&self) -> bool {
+        !self.input_bar.is_empty()
+    }
+
+    pub(crate) fn completion_active(&self) -> bool {
+        self.completion.is_active()
+    }
+
     pub fn handle_paste(&mut self, text: &str) {
         self.input_bar.insert_paste(text);
         self.dispatch_intent(crate::components::completion_trigger::IntentEvent::Pasted);
@@ -2324,6 +2332,7 @@ impl SessionDetailView {
             chunks[5],
             StatusBarProps {
                 view: &ViewId::SessionDetail(self.session_id.clone()),
+                tombstone: ctx.tombstone,
                 running,
                 pending_review,
                 total_cost: self.cost,
@@ -2966,6 +2975,7 @@ mod invalidate_protocols_tests {
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
             flag_summary: None,
+            tombstone: None,
             transient_hint_override: None,
         }
     }
@@ -3081,6 +3091,7 @@ mod cancel_state_tests {
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
             flag_summary: None,
+            tombstone: None,
             transient_hint_override: None,
         }
     }
@@ -3504,6 +3515,7 @@ mod composer_routing_tests {
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
             flag_summary: None,
+            tombstone: None,
             transient_hint_override: None,
         }
     }
@@ -3583,6 +3595,7 @@ mod composer_routing_tests {
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
             flag_summary: None,
+            tombstone: None,
             transient_hint_override: None,
         }
     }
@@ -3764,6 +3777,7 @@ mod tests {
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
             flag_summary: None,
+            tombstone: None,
             transient_hint_override: None,
         }
     }
@@ -3927,6 +3941,7 @@ mod tests {
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
             flag_summary: None,
+            tombstone: None,
             transient_hint_override: None,
         };
 

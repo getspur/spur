@@ -40,6 +40,7 @@ pub mod test_support {
             brain_status: &IDLE,
             license_badge: None,
             flag_summary: None,
+            tombstone: None,
             transient_hint_override: None,
         }
     }
