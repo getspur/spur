@@ -80,7 +80,7 @@ impl SessionSynopsisProjection {
             return;
         }
         let s = self.by_session.entry(session.clone()).or_default();
-        if s.first_user_msg.is_none() {
+        if s.first_user_msg.is_none() && !trimmed.starts_with('/') {
             s.first_user_msg = Some(trimmed.to_owned());
         }
         s.last_user_msg = Some(trimmed.to_owned());
@@ -181,5 +181,36 @@ mod tests {
         let s = proj.get(&SessionId("S1".into())).unwrap();
         assert_eq!(s.first_user_msg.as_deref(), Some("first request"));
         assert_eq!(s.last_user_msg.as_deref(), Some("second request"));
+    }
+
+    #[test]
+    fn slash_command_first_message_does_not_become_first_user_msg() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&user_chunk_event("S1", "/clear"));
+        proj.apply(&agent_chunk_event("S1", "ok"));
+        proj.apply(&user_chunk_event("S1", "real first message"));
+        proj.apply(&agent_chunk_event("S1", "ack"));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(
+            s.first_user_msg.as_deref(),
+            Some("real first message"),
+            "slash-command should not lock in as first_user_msg"
+        );
+        // last_user_msg DOES get the most recent submission, even slash if it's last.
+        assert_eq!(s.last_user_msg.as_deref(), Some("real first message"));
+    }
+
+    #[test]
+    fn slash_command_still_updates_last_user_msg_when_most_recent() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&user_chunk_event("S1", "real msg"));
+        proj.apply(&agent_chunk_event("S1", "ok"));
+        proj.apply(&user_chunk_event("S1", "/clear"));
+        proj.apply(&agent_chunk_event("S1", "ok"));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(s.first_user_msg.as_deref(), Some("real msg"));
+        assert_eq!(s.last_user_msg.as_deref(), Some("/clear"));
     }
 }
