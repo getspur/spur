@@ -1,7 +1,18 @@
 # Tier Revamp Plan C — Tier 2: TUI Capability-Tease Modal
 
-> **Status:** Open. Filed 2026-04-28 after L9-MCTS evaluation
-> selected this as the highest-EV next move post-Tier-1.
+## Status: ✅ SHIPPED 2026-04-28
+
+> Tasks 1–3 + cleanup landed on `feat/tier-revamp-c-tier2` as the
+> post-rebase commit chain 620a474d / 0efffeaa / c0f59d25 / 10f792a4.
+> The dual-final-review findings (codex 🔴 / gemini 🟡) were integrated
+> in the cleanup commit (10f792a4) on top of the rebase. See
+> **Post-merge addendum (2026-04-28)** at the bottom of this document
+> for the full landed-deviations table, the `App::feature_gate`
+> startup-snapshot freshness gap, and the pointer to Plan C M1 where
+> live `update_state` wiring lands.
+
+> **Status (original):** Open. Filed 2026-04-28 after L9-MCTS
+> evaluation selected this as the highest-EV next move post-Tier-1.
 >
 > **For agentic workers:** Ships in 3 atomic implementation tasks;
 > each delegated to a fresh worker and gated by a 2-reviewer panel
@@ -899,3 +910,95 @@ impl (1 LOC) is a clean follow-up but not required.
   - `crates/spur-tui/src/components/palette_overlay.rs:200-217`
 - Event priority chain: `crates/spur-tui/src/app.rs::handle_crossterm_event` lines 832–1057
 - LicenseBadge tonal palette: `crates/spur-tui/src/components/status_bar.rs:36-48`
+
+## Post-merge addendum (2026-04-28)
+
+**Landed shape vs. plan v1 prescription:**
+
+| Concern | v1 prescription | v2 landed | Driver |
+|---|---|---|---|
+| `Action::ShowUpgradeModal` field name | `error: FeatureGateError` | `err: FeatureGateError` | Task 2 review (gemini): minor — match call-site brevity. |
+| `App::feature_gate` initialization | Wire from `LicenseStateEvent` snapshot | Embedded `PolicyResolver::embedded()` snapshot | Task 2 review: keeps Tier 2 self-contained; live updates land in Plan C M1 (see *freshness gap* below). |
+| Modal stacking when `collision_modal` visible | Render upgrade_modal on top | Suppress upgrade_modal render | Cross-Tier-2 review (codex 🔴): visual must match input precedence. |
+| Quit chord handling with modal visible | Modal handler swallows non-recovery keys | `is_quit_chord` runs BEFORE upgrade_modal handler | Cross-Tier-2 review (codex 🔴): `Ctrl+C` / `Ctrl+Q` must always reach the global quit path; the modal's `_ => swallow` arm cannot eat quit chords. Preserves main's `is_quit_chord` semantics. |
+| `Required tier` row when `required == current` | Always render when `Some(_)` | Omit when `Tier::from_plan(req) == current_tier` | Cross-Tier-2 review (codex 🔴): rendering "Required tier: Community" alongside "Current tier: Community" is confusing for the stripped-key demo path. |
+| `Plan` rendering in modal | `format!("{plan:?}")` Debug-format | `Plan::label()` | Cross-Tier-2 review (codex 🟡): `Plan::label()` already exists in `spur-license/src/lib.rs` and is the canonical display path. |
+| `SPUR_FORCE_TTY` env-var semantics | `is_ok()` (accepts empty) | `is_ok_and(|v| !v.is_empty())` | Task 3 codex review: empty `SPUR_FORCE_TTY=` should not force TTY. |
+| Release-safety wording for cfg gate | "cannot leak into release builds" | "not present in default release builds (when `debug_assertions` is off)" | Task 3 codex review: precision — `RUSTFLAGS=-C debug-assertions=on` re-enables it. |
+| Test name for CTA-shape smoke | `..._renders_full_cta_under_force_tty` | `..._renders_structured_upgrade_cta_under_force_tty` | Task 3 codex review: "full" overstates 4 substring asserts; "structured upgrade CTA" is precise. |
+| `dirty = true` after `ShowUpgradeModal` action | implied | explicit `self.dirty = true;` | Task 2 review (gemini): explicit re-render trigger; documented improvement. |
+| `[s]` / `[l]` action-key UX copy | `Run \`spur auth status\`` | `Run \`spur auth status\` in a shell to view tiers and license state.` | Task 2 review (gemini): "in a shell" disambiguates that the user must drop out of the TUI to invoke the command. Same copy expansion on `[l]`. |
+
+**Out of scope for Tier 2, all honored:**
+- ✅ No per-key user-facing labels (Tier 3 / future)
+- ✅ No tier-aware copy branching (Tier 3)
+- ✅ No JSON output for the CTA
+- ✅ No Pro-only gate site (community-tier MVP demo path only)
+- ✅ No session-level upgrade-modal de-dup (YAGNI for MVP)
+
+**Freshness gap — `App::feature_gate` startup snapshot:**
+
+The `App::feature_gate` field is initialized once at TUI startup
+from `PolicyResolver::embedded()`. Live `LicenseStateEvent`
+updates that arrive over the broadcast bus are NOT pumped into
+`feature_gate.update_state(...)` today. The MVP gate site at
+`Action::SendMessage` therefore reflects only the embedded policy
++ `SPUR_LICENSE_TEST_STRIP_KEYS` env override — sufficient for
+the community-tier denial demo path, but a Pro-only gate site
+added before live updates are wired would deny Pro users for the
+session lifetime even after their license refreshes.
+
+**This is the explicit blocker for adding any Pro-only TUI gate
+site.** Before Tier 3 (or any other surface) lands a Pro-tier
+gate-check inside `App`, the `update_state(...)` plumbing from
+`LicenseStateEvent` must land first.
+
+**Plan C M1 is where live `App::feature_gate.update_state(...)` wires up.**
+That wave deals with the dispatch-bus → license runtime → TUI
+gate refresh chain; Tier 2 deliberately stays in front of that
+work since the freshness gap doesn't affect the MVP demo path.
+
+**Cleanup commit applied on top of rebased Tasks 1–3:**
+
+1. **Quit-chord pass-through** — `is_quit_chord(key)` runs above
+   the `upgrade_modal` handler in `handle_crossterm_event` so
+   `Ctrl+C` / `Ctrl+Q` always reach `request_quit()` regardless of
+   modal visibility.
+2. **Modal stacking suppression** — the upgrade_modal render block
+   is gated by `App::should_render_upgrade_modal()` which suppresses
+   the upgrade modal when EITHER `collision_modal` is up OR
+   `quit_confirm_visible` is true. Visual precedence matches input
+   precedence (quit_confirm > collision > upgrade) in both
+   dimensions. (The `quit_confirm_visible` half of the gate landed in
+   a follow-up cleanup commit on top of 10f792a4, after codex's
+   pre-merge review caught the asymmetry; see
+   `quit_shortcut_tests::upgrade_modal_render_gate_respects_quit_and_collision_precedence`.)
+3. **Same-tier required_tier elision** — `modal_lines` skips the
+   "Required tier:" row when `Tier::from_plan(required) ==
+   current_tier`. Unit test
+   `modal_lines_omits_required_tier_when_same_as_current` locks
+   the behavior.
+4. **`SPUR_FORCE_TTY` non-empty semantics + doc precision** —
+   `is_ok_and(|v| !v.is_empty())` + new doc comment that scopes
+   "release builds" to `debug_assertions = off` (default `cargo
+   build --release`).
+5. **Test rename** — `..._renders_structured_upgrade_cta_under_force_tty`.
+6. **`Plan::label()` usage** — replaces `format!("{plan:?}")` in
+   `modal_lines`.
+
+**Foundation API stable for Tier 3:**
+
+```rust
+// TUI gate-check site pattern (post-Tier-2):
+if let Err(err) = spur_license::require_feature(&self.feature_gate, FeatureKey::FOO) {
+    let required_tier = spur_license::upgrade_cta::required_tier_for(FeatureKey::FOO);
+    self.process_action(Action::ShowUpgradeModal { err, required_tier });
+    return;
+}
+// Modal handles Esc/q dismiss + s/l shell hint + visual stacking + quit-chord
+// pass-through automatically. Required-tier row hides when same as current.
+```
+
+Plan doc preserved as audit trail above; this addendum is the
+canonical reference for Tier 3 implementers and for whoever wires
+`App::feature_gate.update_state(...)` in Plan C M1.

@@ -126,3 +126,52 @@ fn spur_exec_under_stripped_key_renders_typed_error_at_binary_boundary() {
         "stderr must name the denied key, got:\n{stderr}",
     );
 }
+
+#[test]
+fn spur_exec_under_stripped_key_renders_structured_upgrade_cta_under_force_tty() {
+    // Plan C Tier 2 Task 3 — closes the Tier 1 follow-up
+    // (`2026-04-28-tier-revamp-tier1-followup-tty-test-hook.md`).
+    //
+    // assert_cmd does not allocate a pty for the child, so
+    // `is_terminal()` returns false and the CTA path is normally
+    // bypassed. The debug-only `SPUR_FORCE_TTY=1` env var forces
+    // the TTY-gate to true (via `is_tty_or_forced()` in
+    // `crates/spur-cli/src/main.rs`), exercising the CTA renderer
+    // dispatch path end-to-end at the binary boundary.
+    //
+    // Together with the existing
+    // `spur_exec_under_stripped_key_renders_typed_error_at_binary_boundary`
+    // smoke (which only asserts key-name propagation without the
+    // CTA), this gives a regression net for:
+    //   1. `is_terminal()` predicate inversion (e.g. `if !...`)
+    //   2. dropping the `find_gate_error` branch
+    //   3. renaming `format_upgrade_cta` without updating main.rs
+    //
+    // All three would PASS the existing key-name-only smoke but
+    // FAIL this CTA-shape smoke.
+    let assert = Command::cargo_bin("spur")
+        .expect("spur binary builds")
+        .env("SPUR_LICENSE_TEST_STRIP_KEYS", "cli_core_exec")
+        .env("SPUR_FORCE_TTY", "1")
+        .env_remove("SPUR_LICENSE_DEV_PLAN")
+        .args(["exec", "--agent", "claude-code", "irrelevant-task"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("cli_core_exec"),
+        "stderr must name the denied key, got:\n{stderr}",
+    );
+    assert!(
+        stderr.contains("spur auth status"),
+        "stderr must include `spur auth status` recovery line, got:\n{stderr}",
+    );
+    assert!(
+        stderr.contains("spur auth login --key"),
+        "stderr must include `spur auth login --key` recovery line, got:\n{stderr}",
+    );
+    assert!(
+        stderr.contains("spur auth logout"),
+        "stderr must include `spur auth logout` re-login hint, got:\n{stderr}",
+    );
+}
