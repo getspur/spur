@@ -18,7 +18,7 @@
 
 Ship a feature-gated TUI surface that exposes spur-context's analytics directly to the user while running the agent, with **single-source-of-truth cost** when the feature is enabled. After this work:
 
-- Pressing `Alt+i` from any view opens an Insights view with four tabs (Overview, Timeline, Breakdown, Live) backed by `spur-context::AnalyticsEngine`.
+- Pressing `Alt+a` from any view opens an Insights view with four tabs (Overview, Timeline, Breakdown, Live) backed by `spur-context::AnalyticsEngine`. (Alt+a chosen to avoid collision with the pre-existing Alt+i vim-mode toggle.)
 - Five well-known agents are first-class citizens: Claude Code, Codex, Gemini, OpenCode, Kimi. Kiro stays a stub with a clearly-labeled "no token data — ACP capture pending" badge (Phase 2 work).
 - The dashboard's cost segment, when the `analytics` feature is on, sources from the same `AnalyticsEngine::live_session_snapshot` query the Insights view consumes — not from `ExecutorLineage`. One number, one truth, on screen.
 - The feature is **default OFF** (experimental). When off, the Insights view shows a "feature disabled — rebuild with `--features analytics`" splash, the dashboard continues to use lineage cost (pre-existing behavior), and `cargo build` produces a binary identical in size and capability to today's.
@@ -553,7 +553,7 @@ Three exhaustive-match update sites:
 | `crates/spur-tui/src/app.rs:1536` (view dispatch on key) | new arm: `ViewId::Insights => self.insights_view.handle_key(key)` |
 | `crates/spur-tui/src/components/status_bar.rs:195` (label per view) | new arm: `ViewId::Insights => "Insights"` |
 
-`Alt+i` global keybinding emits `Action::OpenInsights`. `Esc` from the Insights view returns to the previous view via the existing view-stack pattern.
+`Alt+a` global keybinding emits `Action::OpenInsights`. `Esc` from the Insights view returns to the previous view via the existing view-stack pattern.
 
 ### 5.10 Refresh policy
 
