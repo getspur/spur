@@ -47,6 +47,8 @@ pub enum Action {
     CycleFocus,
     ShowHelp,
     HideHelp,
+    /// Triple-Esc panic reset back to the Dashboard root.
+    PanicReset,
     /// Push a trace entry showing the current session cost.
     ShowSessionCost,
     Tick,

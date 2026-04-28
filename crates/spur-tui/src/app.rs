@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
@@ -44,6 +45,8 @@ const LEGACY_ARCHIVE_HINT: &str = "d \u{2192} archive renamed to x";
 const LEGACY_CLOSE_HINT: &str = "d \u{2192} close renamed to x";
 const DASHBOARD_TAB_DEPRECATION_HINT: &str =
     "Tab now cycles panels; press Ctrl+E to cycle examples";
+const PANIC_RESET_HINT: &str = "Returned to Dashboard root";
+const PANIC_RESET_ESC_WINDOW: Duration = Duration::from_millis(1000);
 
 // ─── Supporting types ──────────────────────────────────────────────────
 
@@ -312,6 +315,7 @@ pub struct App {
     legacy_archive_hint_shown: bool,
     legacy_issue_close_hint_shown: bool,
     dashboard_tab_empty_deprecation_shown: bool,
+    esc_chain: VecDeque<Instant>,
     /// Startup landing decision. Drives initial view and banner state.
     landing: crate::landing::LandingDecision,
     /// Last dispatched Action, for integration tests only.
@@ -475,6 +479,7 @@ impl App {
             legacy_archive_hint_shown: false,
             legacy_issue_close_hint_shown: false,
             dashboard_tab_empty_deprecation_shown: false,
+            esc_chain: VecDeque::new(),
             landing,
             #[cfg(any(test, debug_assertions))]
             last_action: None,
@@ -635,6 +640,30 @@ impl App {
     #[cfg(any(test, debug_assertions))]
     pub fn tick_transient_hint_for_test(&mut self, now: Instant) {
         self.tick_transient_hint(now);
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn is_help_visible_for_test(&self) -> bool {
+        self.help_visible
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn current_view_for_test(&self) -> &ViewId {
+        &self.current_view
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn age_esc_chain_for_test(&mut self, duration: Duration) {
+        for instant in &mut self.esc_chain {
+            if let Some(aged) = instant.checked_sub(duration) {
+                *instant = aged;
+            }
+        }
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn esc_chain_len_for_test(&self) -> usize {
+        self.esc_chain.len()
     }
 
     fn update_license_state(&mut self, license_state: LicenseStateEvent) {
@@ -983,6 +1012,10 @@ impl App {
     pub fn handle_crossterm_event(&mut self, event: Event) {
         match event {
             Event::Key(key) => {
+                if self.record_panic_esc(key) {
+                    return;
+                }
+
                 // Quit-confirm dialog takes priority: it captures every key.
                 if self.quit_confirm_visible {
                     if is_quit_chord(key) {
@@ -1254,6 +1287,32 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn record_panic_esc(&mut self, key: KeyEvent) -> bool {
+        if key.code != KeyCode::Esc {
+            return false;
+        }
+
+        let now = Instant::now();
+        self.esc_chain.push_back(now);
+        while self
+            .esc_chain
+            .front()
+            .is_some_and(|instant| now.duration_since(*instant) > PANIC_RESET_ESC_WINDOW)
+        {
+            self.esc_chain.pop_front();
+        }
+        while self.esc_chain.len() > 3 {
+            self.esc_chain.pop_front();
+        }
+
+        if self.esc_chain.len() == 3 {
+            self.process_action(Action::PanicReset);
+            return true;
+        }
+
+        false
     }
 
     fn request_quit(&mut self) {
@@ -2250,6 +2309,25 @@ impl App {
 
             Action::HideHelp => {
                 self.help_visible = false;
+            }
+
+            Action::PanicReset => {
+                self.quit_confirm_visible = false;
+                self.collision_modal = None;
+                self.upgrade_modal = None;
+                self.help_visible = false;
+                self.palette_visible = false;
+                self.palette_state.reset();
+                // TODO: tombstones.cancel_all_without_dispatch()
+                // Wire per 2026-04-28-tui-destructive-undo-design.md §4.7.
+                self.current_view = ViewId::Dashboard;
+                self.dashboard.reset_to_root();
+                if let Some(detail) = self.session_detail.as_mut() {
+                    detail.reset_to_root();
+                }
+                self.esc_chain.clear();
+                self.flash_hint_short(PANIC_RESET_HINT);
+                self.dirty = true;
             }
 
             Action::ShowSessionCost => {
