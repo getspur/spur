@@ -85,6 +85,11 @@ impl IssueBrowserView {
         &self.tracked_issues
     }
 
+    #[cfg(any(test, debug_assertions))]
+    pub fn set_issues_for_test(&mut self, issues: Vec<spur_pm::IssueSummary>) {
+        self.tracked_issues = issues;
+    }
+
     pub fn issue_detail_visible(&self) -> bool {
         matches!(self.issue_focus, IssueFocus::Loaded { .. })
     }
