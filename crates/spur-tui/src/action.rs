@@ -194,6 +194,7 @@ pub enum Action {
         err: spur_license::FeatureGateError,
         required_tier: Option<spur_license::Plan>,
     },
+    OpenInsights,
 }
 
 /// Which permission option the user selected.
@@ -217,4 +218,5 @@ pub enum ViewId {
     PlanInspector(SessionId),
     #[cfg(feature = "markdown")]
     MermaidOverlay(SessionId),
+    Insights,
 }

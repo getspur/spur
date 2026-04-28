@@ -10,7 +10,7 @@ use ratatui::{
     Frame,
 };
 
-use spur_acp::{DelegationStatus, SpurEvent, SpurEventBody};
+use spur_acp::{DelegationStatus, SessionId, SpurEvent, SpurEventBody};
 use spur_core::{ExecutorId, ExecutorLineage};
 
 use crate::action::{Action, ViewId};
@@ -90,6 +90,8 @@ pub struct DashboardView {
     example_index: usize,
     /// When the example prompt last rotated (for 8s auto-advance).
     example_last_rotated: Instant,
+    #[cfg(feature = "analytics")]
+    live_cost_cache: Option<std::sync::Arc<tokio::sync::RwLock<crate::app::LiveCostCache>>>,
 }
 
 /// Convert spur_acp mirror type back to spur_pm::Issue for TUI rendering.
@@ -175,7 +177,75 @@ impl DashboardView {
             ],
             example_index: 0,
             example_last_rotated: Instant::now(),
+            #[cfg(feature = "analytics")]
+            live_cost_cache: None,
         }
+    }
+
+    #[cfg(feature = "analytics")]
+    pub fn with_cache(
+        cache: std::sync::Arc<tokio::sync::RwLock<crate::app::LiveCostCache>>,
+    ) -> Self {
+        let mut view = Self::new();
+        view.live_cost_cache = Some(cache);
+        view
+    }
+
+    fn lookup_cached_cost(&self, session_id: &SessionId) -> Option<f64> {
+        #[cfg(feature = "analytics")]
+        {
+            if let Some(cache) = &self.live_cost_cache {
+                if let Ok(guard) = cache.try_read() {
+                    return guard.by_session.get(session_id).copied();
+                }
+            }
+        }
+
+        #[cfg(not(feature = "analytics"))]
+        let _ = session_id;
+
+        None
+    }
+
+    /// Returns a cached session aggregate when present, otherwise the first
+    /// matching node's current-attempt cost. This is not a lineage aggregate.
+    pub fn current_cost(&self, session_id: &SessionId, lineage: &ExecutorLineage) -> Option<f64> {
+        if let Some(cost) = self.lookup_cached_cost(session_id) {
+            return Some(cost);
+        }
+
+        lineage.nodes().find_map(|node| {
+            let attempt = node.current_attempt()?;
+            if &attempt.session_id == session_id {
+                Some(attempt.cost_usd)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn total_cost(&self, lineage: &ExecutorLineage) -> f64 {
+        let mut total = 0.0;
+        let mut handled_sessions: HashSet<SessionId> = HashSet::new();
+
+        for node in lineage.nodes() {
+            let Some(attempt) = node.current_attempt() else {
+                continue;
+            };
+            let session_id = &attempt.session_id;
+            match self.lookup_cached_cost(session_id) {
+                Some(cached) => {
+                    if handled_sessions.insert(session_id.clone()) {
+                        total += cached;
+                    }
+                }
+                None => {
+                    total += attempt.cost_usd;
+                }
+            }
+        }
+
+        total
     }
 
     pub fn set_agents_configured(&mut self, configured: bool) {
@@ -545,10 +615,7 @@ impl DashboardView {
             })
             .count();
         let pending_review = lineage.pending_reviews().len();
-        let total_cost: f64 = lineage
-            .nodes()
-            .map(|n| n.current_attempt().map(|a| a.cost_usd).unwrap_or(0.0))
-            .sum();
+        let total_cost = self.total_cost(lineage);
         let elapsed = self.elapsed();
 
         if node_count == 0 {
@@ -2281,5 +2348,253 @@ impl DashboardView {
     #[doc(hidden)]
     pub fn command_registry_for_test(&self) -> &crate::commands::CommandRegistry {
         &self.command_registry
+    }
+}
+
+#[cfg(all(test, feature = "analytics"))]
+mod live_cost_cache_tests {
+    use super::*;
+    use crate::app::LiveCostCache;
+    use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    fn sid(value: &str) -> spur_acp::SessionId {
+        spur_acp::SessionId(value.to_string())
+    }
+
+    fn cache_with(session_id: spur_acp::SessionId, cost: f64) -> Arc<RwLock<LiveCostCache>> {
+        Arc::new(RwLock::new(LiveCostCache {
+            by_session: HashMap::from([(session_id, cost)]),
+            last_refresh: chrono::Utc::now(),
+            last_error: None,
+        }))
+    }
+
+    fn empty_cache() -> Arc<RwLock<LiveCostCache>> {
+        Arc::new(RwLock::new(LiveCostCache::default()))
+    }
+
+    fn lineage_with_cost(session_id: spur_acp::SessionId, cost: f64) -> ExecutorLineage {
+        let mut lineage = ExecutorLineage::new();
+        lineage.apply(&spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::WorkerSpawned {
+                agent: "codex".to_string(),
+                session: session_id.clone(),
+                worktree: std::path::PathBuf::new(),
+            },
+        ));
+        lineage.apply(&spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::CostUpdate {
+                session: session_id,
+                agent: "codex".to_string(),
+                estimated_cost_usd: cost,
+            },
+        ));
+        lineage
+    }
+
+    fn lineage_with_shared_session_costs(
+        session_id: spur_acp::SessionId,
+        costs: impl IntoIterator<Item = f64>,
+    ) -> ExecutorLineage {
+        let mut lineage = ExecutorLineage::new();
+        for (idx, cost) in costs.into_iter().enumerate() {
+            let node_id = format!("node-{}", idx + 1);
+            lineage.apply(&spur_acp::SpurEvent::now(
+                spur_acp::SpurEventBody::ExecutorSpawned {
+                    id: node_id.clone(),
+                    parent_id: None,
+                    session_id: session_id.clone(),
+                    agent: "codex".to_string(),
+                    role: spur_acp::Role::Executor,
+                    task_spec: format!("task {}", idx + 1),
+                },
+            ));
+            lineage.apply(&spur_acp::SpurEvent::now(
+                spur_acp::SpurEventBody::CostUpdate {
+                    session: sid(&node_id),
+                    agent: "codex".to_string(),
+                    estimated_cost_usd: cost,
+                },
+            ));
+        }
+        lineage
+    }
+
+    fn render_dashboard_text(dash: &mut DashboardView, lineage: &ExecutorLineage) -> String {
+        let backend = TestBackend::new(120, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut worker_streams = crate::worker_streams::WorkerStreams::new();
+        let ctx = crate::views::ViewContext::test_ctx(lineage);
+        terminal
+            .draw(|frame| {
+                dash.render_with_lineage(
+                    frame,
+                    Rect::new(0, 0, 120, 20),
+                    &mut worker_streams,
+                    &ctx,
+                );
+            })
+            .unwrap();
+
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn dashboard_reads_from_live_cost_cache_when_present() {
+        let session_id = sid("abc");
+        let cache = cache_with(session_id.clone(), 4.21);
+        let dash = DashboardView::with_cache(cache);
+
+        assert_eq!(
+            dash.current_cost(&session_id, &ExecutorLineage::new()),
+            Some(4.21)
+        );
+    }
+
+    #[test]
+    fn dashboard_falls_through_to_lineage_when_cache_cold() {
+        let session_id = sid("xyz");
+        let cache = Arc::new(RwLock::new(LiveCostCache::default()));
+        let dash = DashboardView::with_cache(cache);
+        let lineage = lineage_with_cost(session_id.clone(), 2.10);
+
+        assert_eq!(dash.current_cost(&session_id, &lineage), Some(2.10));
+    }
+
+    #[test]
+    fn dashboard_falls_through_when_cache_session_missing() {
+        let session_id = sid("xyz");
+        let cache = cache_with(sid("other"), 4.21);
+        let dash = DashboardView::with_cache(cache);
+        let lineage = lineage_with_cost(session_id.clone(), 2.10);
+
+        assert_eq!(dash.current_cost(&session_id, &lineage), Some(2.10));
+    }
+
+    #[test]
+    fn dashboard_total_cost_dedupes_cached_session_across_multiple_nodes() {
+        let session_id = sid("S");
+        let lineage = lineage_with_shared_session_costs(session_id.clone(), [10.0, 20.0, 30.0]);
+        let cache = cache_with(session_id, 100.0);
+        let mut dash = DashboardView::with_cache(cache);
+
+        let text = render_dashboard_text(&mut dash, &lineage);
+
+        assert!(
+            text.contains("$100.00"),
+            "expected cached session cost to be counted once, got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn dashboard_total_cost_sums_per_node_when_cache_cold() {
+        let session_id = sid("S");
+        let lineage = lineage_with_shared_session_costs(session_id.clone(), [10.0, 20.0, 30.0]);
+        let cache = empty_cache();
+        let mut dash = DashboardView::with_cache(cache);
+
+        let text = render_dashboard_text(&mut dash, &lineage);
+
+        assert!(
+            text.contains("$60.00"),
+            "expected cold cache to use the per-node sum, got:\n{text}"
+        );
+
+        let non_ambiguous_lineage =
+            lineage_with_shared_session_costs(session_id, [10.0, 20.0, 40.0]);
+        let cache = empty_cache();
+        let mut dash = DashboardView::with_cache(cache);
+
+        let text = render_dashboard_text(&mut dash, &non_ambiguous_lineage);
+
+        assert!(
+            text.contains("$70.00"),
+            "expected cold cache to avoid first-match aggregation, got:\n{text}"
+        );
+    }
+}
+
+#[cfg(all(test, not(feature = "analytics")))]
+mod total_cost_no_analytics_tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+
+    fn sid(value: &str) -> spur_acp::SessionId {
+        spur_acp::SessionId(value.to_string())
+    }
+
+    fn lineage_with_shared_session_costs(
+        session_id: spur_acp::SessionId,
+        costs: impl IntoIterator<Item = f64>,
+    ) -> ExecutorLineage {
+        let mut lineage = ExecutorLineage::new();
+        for (idx, cost) in costs.into_iter().enumerate() {
+            let node_id = format!("node-{}", idx + 1);
+            lineage.apply(&spur_acp::SpurEvent::now(
+                spur_acp::SpurEventBody::ExecutorSpawned {
+                    id: node_id.clone(),
+                    parent_id: None,
+                    session_id: session_id.clone(),
+                    agent: "codex".to_string(),
+                    role: spur_acp::Role::Executor,
+                    task_spec: format!("task {}", idx + 1),
+                },
+            ));
+            lineage.apply(&spur_acp::SpurEvent::now(
+                spur_acp::SpurEventBody::CostUpdate {
+                    session: sid(&node_id),
+                    agent: "codex".to_string(),
+                    estimated_cost_usd: cost,
+                },
+            ));
+        }
+        lineage
+    }
+
+    fn render_dashboard_text(dash: &mut DashboardView, lineage: &ExecutorLineage) -> String {
+        let backend = TestBackend::new(120, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut worker_streams = crate::worker_streams::WorkerStreams::new();
+        let ctx = crate::views::ViewContext::test_ctx(lineage);
+        terminal
+            .draw(|frame| {
+                dash.render_with_lineage(
+                    frame,
+                    Rect::new(0, 0, 120, 20),
+                    &mut worker_streams,
+                    &ctx,
+                );
+            })
+            .unwrap();
+
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn dashboard_total_cost_no_analytics_uses_per_node_sum() {
+        let lineage = lineage_with_shared_session_costs(sid("S"), [10.0, 20.0, 40.0]);
+        let mut dash = DashboardView::new();
+
+        let text = render_dashboard_text(&mut dash, &lineage);
+
+        assert!(
+            text.contains("$70.00"),
+            "expected no-analytics total to use the per-node sum, got:\n{text}"
+        );
     }
 }

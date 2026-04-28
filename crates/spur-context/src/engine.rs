@@ -21,6 +21,13 @@ use tracing;
 
 #[cfg(feature = "duckdb")]
 const SCHEMA_SQL: &str = include_str!("sql/schema.sql");
+const DAILY_REPORT_SQL: &str = include_str!("sql/daily_report.sql");
+const WEEKLY_REPORT_SQL: &str = include_str!("sql/weekly_report.sql");
+const MONTHLY_REPORT_SQL: &str = include_str!("sql/monthly_report.sql");
+const MODEL_BREAKDOWN_SQL: &str = include_str!("sql/model_breakdown.sql");
+const PROJECT_BREAKDOWN_SQL: &str = include_str!("sql/project_breakdown.sql");
+const SESSION_DETAIL_SQL: &str = include_str!("sql/session_detail.sql");
+const LIVE_SNAPSHOT_SQL: &str = include_str!("sql/live_session_snapshot.sql");
 
 /// Cost-enrichment view.
 ///
@@ -39,6 +46,11 @@ const ALL_EVENTS_WITH_COST_VIEW: &str = r#"
     CREATE OR REPLACE VIEW all_events_with_cost AS
     SELECT
         e.*,
+        CASE
+            WHEN e.cost_usd IS NOT NULL THEN 'native'
+            WHEN p.model IS NOT NULL THEN 'priced'
+            ELSE 'unpriced'
+        END AS cost_source,
         COALESCE(
             e.cost_usd,
             (e.input_tokens * p.input_price_per_1m / 1000000.0)
@@ -62,6 +74,16 @@ const ALL_EVENTS_WITH_COST_VIEW: &str = r#"
         LIMIT 1
     ) p ON TRUE;
 "#;
+
+/// Strip a leading `<segment>/` from a model id.
+///
+/// OpenCode stores model strings as `<provider>/<canonical>`. The pricing
+/// registry keys on the canonical name, so strip the provider prefix at
+/// extraction time. Only the first slash is consumed.
+#[cfg(feature = "duckdb")]
+fn strip_provider_prefix(s: &str) -> &str {
+    s.split_once('/').map_or(s, |(_, rest)| rest)
+}
 
 // ─── Engine ───────────────────────────────────────────────────────────
 
@@ -191,20 +213,48 @@ impl AnalyticsEngine {
 
     fn newest_agent_mtime() -> Option<std::time::SystemTime> {
         let mut newest: Option<std::time::SystemTime> = None;
-        for dir in [
-            Self::discover_claude_dir(),
-            Self::discover_codex_dir(),
-            Self::discover_kiro_dir(),
-        ] {
-            if let Ok(files) = Self::find_jsonl_files(&dir) {
+        {
+            let mut bump = |m| {
+                newest = Some(match newest {
+                    Some(cur) if cur >= m => cur,
+                    _ => m,
+                });
+            };
+
+            for dir in [
+                Self::discover_claude_dir(),
+                Self::discover_codex_dir(),
+                Self::discover_kiro_dir(),
+                Self::discover_kimi_dir(),
+            ] {
+                if let Ok(files) = Self::find_jsonl_files(&dir) {
+                    for f in files {
+                        if let Ok(meta) = std::fs::metadata(&f) {
+                            if let Ok(m) = meta.modified() {
+                                bump(m);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Gemini uses JSON documents, not JSONL logs.
+            if let Ok(files) = Self::find_files_with_ext(&Self::discover_gemini_dir(), "json") {
                 for f in files {
                     if let Ok(meta) = std::fs::metadata(&f) {
                         if let Ok(m) = meta.modified() {
-                            newest = Some(match newest {
-                                Some(cur) if cur >= m => cur,
-                                _ => m,
-                            });
+                            bump(m);
                         }
+                    }
+                }
+            }
+
+            // OpenCode is a single SQLite file, not a directory walk.
+            let opencode_db = Self::discover_opencode_db();
+            if opencode_db.is_file() {
+                if let Ok(meta) = std::fs::metadata(&opencode_db) {
+                    if let Ok(m) = meta.modified() {
+                        bump(m);
                     }
                 }
             }
@@ -290,6 +340,42 @@ impl AnalyticsEngine {
         } else {
             self.create_empty_stub("opencode_events")?;
             tracing::debug!("created empty opencode_events stub");
+        }
+
+        // ─── Kimi ───────────────────────────────────────────────
+        let kimi_dir = Self::discover_kimi_dir();
+        if kimi_dir.is_dir() {
+            match self.create_kimi_view(&kimi_dir) {
+                Ok(()) => {
+                    status.kimi = true;
+                    tracing::debug!(dir = %kimi_dir.display(), "created kimi_events view");
+                }
+                Err(e) => {
+                    tracing::warn!(dir = %kimi_dir.display(), error = %e, "failed to create kimi_events view, using stub");
+                    self.create_empty_stub("kimi_events")?;
+                }
+            }
+        } else {
+            self.create_empty_stub("kimi_events")?;
+            tracing::debug!("created empty kimi_events stub");
+        }
+
+        // ─── Gemini ─────────────────────────────────────────────
+        let gemini_dir = Self::discover_gemini_dir();
+        if gemini_dir.is_dir() {
+            match self.create_gemini_view(&gemini_dir) {
+                Ok(()) => {
+                    status.gemini = true;
+                    tracing::debug!(dir = %gemini_dir.display(), "created gemini_events view");
+                }
+                Err(e) => {
+                    tracing::warn!(dir = %gemini_dir.display(), error = %e, "failed to create gemini_events view, using stub");
+                    self.create_empty_stub("gemini_events")?;
+                }
+            }
+        } else {
+            self.create_empty_stub("gemini_events")?;
+            tracing::debug!("created empty gemini_events stub");
         }
 
         // ─── Rebuild unified views ─────────────────────────────
@@ -385,6 +471,23 @@ impl AnalyticsEngine {
         Ok(files)
     }
 
+    fn find_files_with_ext(dir: &Path, ext: &str) -> Result<Vec<PathBuf>> {
+        let mut files = Vec::new();
+        if !dir.is_dir() {
+            return Ok(files);
+        }
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                files.extend(Self::find_files_with_ext(&path, ext)?);
+            } else if path.extension().and_then(|s| s.to_str()) == Some(ext) {
+                files.push(path);
+            }
+        }
+        Ok(files)
+    }
+
     fn create_claude_view(&self, dir: &Path) -> Result<()> {
         let pattern = format!(
             "{}/**/*.jsonl",
@@ -408,19 +511,32 @@ impl AnalyticsEngine {
 
              CREATE OR REPLACE VIEW claude_events AS
              SELECT
-                TRY_CAST(json_extract_string(line, '$.timestamp') AS TIMESTAMP) AS timestamp,
-                json_extract_string(line, '$.sessionId') AS session_id,
-                'claude' AS agent,
-                NULLIF(json_extract_string(line, '$.message.model'), '<synthetic>') AS model,
-                NULLIF(regexp_extract(filename, '.*/projects/([^/]+)/.*[.]jsonl$', 1), '') AS project,
-                TRY_CAST(json_extract(line, '$.message.usage.input_tokens') AS BIGINT) AS input_tokens,
-                TRY_CAST(json_extract(line, '$.message.usage.output_tokens') AS BIGINT) AS output_tokens,
-                TRY_CAST(json_extract(line, '$.message.usage.cache_read_input_tokens') AS BIGINT) AS cache_read_tokens,
-                TRY_CAST(json_extract(line, '$.message.usage.cache_creation_input_tokens') AS BIGINT) AS cache_creation_tokens,
-                TRY_CAST(json_extract(line, '$.costUSD') AS DOUBLE) AS cost_usd
-             FROM claude_raw
-             WHERE json_valid(line)
-               AND json_extract_string(line, '$.type') = 'assistant';"#,
+                timestamp, session_id, agent, model, project,
+                input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd
+             FROM (
+                SELECT
+                    TRY_CAST(json_extract_string(line, '$.timestamp') AS TIMESTAMP) AS timestamp,
+                    json_extract_string(line, '$.sessionId') AS session_id,
+                    'claude' AS agent,
+                    NULLIF(json_extract_string(line, '$.message.model'), '<synthetic>') AS model,
+                    NULLIF(regexp_extract(filename, '.*/projects/([^/]+)/.*[.]jsonl$', 1), '') AS project,
+                    TRY_CAST(json_extract(line, '$.message.usage.input_tokens') AS BIGINT) AS input_tokens,
+                    TRY_CAST(json_extract(line, '$.message.usage.output_tokens') AS BIGINT) AS output_tokens,
+                    TRY_CAST(json_extract(line, '$.message.usage.cache_read_input_tokens') AS BIGINT) AS cache_read_tokens,
+                    TRY_CAST(json_extract(line, '$.message.usage.cache_creation_input_tokens') AS BIGINT) AS cache_creation_tokens,
+                    TRY_CAST(json_extract(line, '$.costUSD') AS DOUBLE) AS cost_usd,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY
+                            json_extract_string(line, '$.sessionId'),
+                            COALESCE(json_extract_string(line, '$.requestId'), ''),
+                            COALESCE(json_extract_string(line, '$.message.id'), '')
+                        ORDER BY TRY_CAST(json_extract_string(line, '$.timestamp') AS TIMESTAMP)
+                    ) AS _dedup_rn
+                FROM claude_raw
+                WHERE json_valid(line)
+                  AND json_extract_string(line, '$.type') = 'assistant'
+             )
+             WHERE _dedup_rn = 1;"#,
             pattern
         );
         self.conn
@@ -512,7 +628,12 @@ impl AnalyticsEngine {
                 'codex' AS agent,
                 NULLIF(NULLIF(current_model, ''), '<synthetic>') AS model,
                 NULL::VARCHAR AS project,
-                input_delta AS input_tokens,
+                -- P0.4: Codex reports input_tokens as a SUPERSET of cached_input_tokens
+                -- (verified 2026-04-24 against 13,499 live token_count rows:
+                -- sum_in + sum_out = sum_total exactly, so cached ⊂ input). Subtract
+                -- the cached portion so `input_tokens` means billable non-cached input
+                -- consistently across Claude and Codex.
+                GREATEST(input_delta - LEAST(cached_delta, input_delta), 0::BIGINT) AS input_tokens,
                 output_delta AS output_tokens,
                 LEAST(cached_delta, input_delta) AS cache_read_tokens,
                 0::BIGINT AS cache_creation_tokens,
@@ -555,6 +676,44 @@ impl AnalyticsEngine {
             directories::BaseDirs::new()
                 .map(|b| b.home_dir().join(".local/share/opencode/opencode.db"))
                 .unwrap_or_else(|| PathBuf::from("~/.local/share/opencode/opencode.db"))
+        }
+    }
+
+    /// Discover the Kimi sessions directory.
+    ///
+    /// Probe order: `$KIMI_HOME/sessions` → `~/.kimi/sessions`.
+    fn discover_kimi_dir() -> PathBuf {
+        if let Ok(path) = env::var("KIMI_HOME") {
+            return PathBuf::from(path).join("sessions");
+        }
+        #[cfg(test)]
+        {
+            PathBuf::from("__spur_context_test_missing__/kimi")
+        }
+        #[cfg(not(test))]
+        {
+            directories::BaseDirs::new()
+                .map(|b| b.home_dir().join(".kimi/sessions"))
+                .unwrap_or_else(|| PathBuf::from("~/.kimi/sessions"))
+        }
+    }
+
+    /// Discover the Gemini sessions directory.
+    ///
+    /// Probe order: `$GEMINI_HOME/tmp` → `~/.gemini/tmp`.
+    fn discover_gemini_dir() -> PathBuf {
+        if let Ok(path) = env::var("GEMINI_HOME") {
+            return PathBuf::from(path).join("tmp");
+        }
+        #[cfg(test)]
+        {
+            PathBuf::from("__spur_context_test_missing__/gemini")
+        }
+        #[cfg(not(test))]
+        {
+            directories::BaseDirs::new()
+                .map(|b| b.home_dir().join(".gemini/tmp"))
+                .unwrap_or_else(|| PathBuf::from("~/.gemini/tmp"))
         }
     }
 
@@ -656,6 +815,274 @@ impl AnalyticsEngine {
         Ok(())
     }
 
+    /// Populate `kimi_events` from Kimi session JSONL files.
+    ///
+    /// `sessions_root` is the `.kimi/sessions` directory. We walk
+    /// `<project_hash>/<session_uuid>/context.jsonl`, pair odd/even `_usage`
+    /// rows per turn, and emit one event per assistant turn. File mtime is
+    /// used as the base timestamp with a back-dating offset so intra-session
+    /// ordering is preserved.
+    fn create_kimi_view(&self, sessions_root: &Path) -> Result<()> {
+        self.conn.execute_batch(
+            r#"
+            DROP TABLE IF EXISTS kimi_events_table;
+            CREATE TABLE kimi_events_table (
+                timestamp_ms          BIGINT,
+                session_id            VARCHAR,
+                agent                 VARCHAR,
+                model                 VARCHAR,
+                project               VARCHAR,
+                input_tokens          BIGINT,
+                output_tokens         BIGINT,
+                cache_read_tokens     BIGINT,
+                cache_creation_tokens BIGINT,
+                cost_usd              DOUBLE
+            );
+            "#,
+        )?;
+
+        let rows = Self::extract_kimi_rows(sessions_root).with_context(|| {
+            format!(
+                "failed to scan kimi sessions at {}",
+                sessions_root.display()
+            )
+        })?;
+
+        if !rows.is_empty() {
+            let mut appender = self
+                .conn
+                .appender("kimi_events_table")
+                .context("failed to open kimi_events_table appender")?;
+            for r in &rows {
+                appender
+                    .append_row(params![
+                        r.timestamp_ms,
+                        r.session_id,
+                        "kimi",
+                        "kimi-for-coding",
+                        r.project,
+                        r.input_tokens,
+                        r.output_tokens,
+                        0_i64,
+                        0_i64,
+                        None::<f64>,
+                    ])
+                    .context("failed to append kimi row")?;
+            }
+            appender.flush().context("failed to flush kimi appender")?;
+        }
+
+        self.conn.execute_batch(
+            r#"
+            CREATE OR REPLACE VIEW kimi_events AS
+            SELECT
+                epoch_ms(timestamp_ms) AS timestamp,
+                session_id,
+                agent,
+                model,
+                project,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+                cost_usd
+            FROM kimi_events_table;
+            "#,
+        )?;
+
+        tracing::debug!(
+            root = %sessions_root.display(),
+            rows = rows.len(),
+            "populated kimi_events"
+        );
+        Ok(())
+    }
+
+    /// Populate `gemini_events` from Gemini CLI session JSON files.
+    fn create_gemini_view(&self, tmp_root: &Path) -> Result<()> {
+        self.conn.execute_batch(
+            r#"
+            DROP TABLE IF EXISTS gemini_events_table;
+            CREATE TABLE gemini_events_table (
+                timestamp_ms          BIGINT,
+                session_id            VARCHAR,
+                agent                 VARCHAR,
+                model                 VARCHAR,
+                project               VARCHAR,
+                input_tokens          BIGINT,
+                output_tokens         BIGINT,
+                cache_read_tokens     BIGINT,
+                cache_creation_tokens BIGINT,
+                cost_usd              DOUBLE
+            );
+            "#,
+        )?;
+
+        let rows = crate::extractors::gemini::extract(tmp_root).with_context(|| {
+            format!(
+                "failed to extract gemini sessions at {}",
+                tmp_root.display()
+            )
+        })?;
+
+        if !rows.is_empty() {
+            let mut appender = self
+                .conn
+                .appender("gemini_events_table")
+                .context("failed to open gemini_events_table appender")?;
+            for r in &rows {
+                appender
+                    .append_row(params![
+                        r.timestamp.timestamp_millis(),
+                        r.session_id,
+                        "gemini",
+                        r.model,
+                        r.project,
+                        r.input_tokens,
+                        r.output_tokens,
+                        r.cache_read_tokens,
+                        r.cache_creation_tokens,
+                        r.cost_usd,
+                    ])
+                    .context("failed to append gemini row")?;
+            }
+            appender
+                .flush()
+                .context("failed to flush gemini appender")?;
+        }
+
+        self.conn.execute_batch(
+            r#"
+            CREATE OR REPLACE VIEW gemini_events AS
+            SELECT
+                epoch_ms(timestamp_ms) AS timestamp,
+                session_id,
+                agent,
+                model,
+                project,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+                cost_usd
+            FROM gemini_events_table;
+            "#,
+        )?;
+        Ok(())
+    }
+
+    fn extract_kimi_rows(sessions_root: &Path) -> Result<Vec<KimiRow>> {
+        use std::io::BufRead;
+
+        let mut out = Vec::new();
+        if !sessions_root.is_dir() {
+            return Ok(out);
+        }
+        for project_entry in std::fs::read_dir(sessions_root)? {
+            let project_entry = project_entry?;
+            if !project_entry.path().is_dir() {
+                continue;
+            }
+            let project = project_entry.file_name().to_string_lossy().to_string();
+            for session_entry in std::fs::read_dir(project_entry.path())? {
+                let session_entry = session_entry?;
+                let session_dir = session_entry.path();
+                let ctx = session_dir.join("context.jsonl");
+                if !ctx.is_file() {
+                    continue;
+                }
+                let session_id = session_dir
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let mtime_ms = std::fs::metadata(&ctx)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+
+                let file = std::fs::File::open(&ctx)
+                    .with_context(|| format!("failed to open {}", ctx.display()))?;
+                let mut usage: Vec<u64> = Vec::new();
+                let mut assistant_turns: usize = 0;
+                for line in std::io::BufReader::new(file).lines() {
+                    let line = line?;
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let Ok(row) = serde_json::from_str::<serde_json::Value>(&line) else {
+                        continue;
+                    };
+                    let role = row.get("role").and_then(|v| v.as_str()).unwrap_or("");
+                    match role {
+                        "_usage" => {
+                            if let Some(t) = row.get("token_count").and_then(|v| v.as_u64()) {
+                                usage.push(t);
+                            }
+                        }
+                        "assistant" => assistant_turns += 1,
+                        _ => {}
+                    }
+                }
+
+                let pair_ok = usage.len() == assistant_turns * 2 && !usage.is_empty();
+                if pair_ok {
+                    let turns = usage.len() / 2;
+                    let mut prev_post: Option<u64> = None;
+                    for t in 0..turns {
+                        let pre = usage[t * 2];
+                        let post = usage[t * 2 + 1];
+                        let output = post.saturating_sub(pre);
+                        let input = match prev_post {
+                            Some(p) => pre.saturating_sub(p),
+                            None => pre,
+                        };
+                        prev_post = Some(post);
+                        if output == 0 && input == 0 {
+                            continue;
+                        }
+                        let ts_offset_ms = ((turns - t - 1) as i64) * 1000;
+                        out.push(KimiRow {
+                            timestamp_ms: mtime_ms.saturating_sub(ts_offset_ms),
+                            session_id: session_id.clone(),
+                            project: Some(project.clone()),
+                            input_tokens: input as i64,
+                            output_tokens: output as i64,
+                        });
+                    }
+                } else {
+                    // Fallback: cumulative diffs as input tokens only. Still useful volume.
+                    tracing::warn!(
+                        file = %ctx.display(),
+                        usage_count = usage.len(),
+                        assistant_count = assistant_turns,
+                        "kimi _usage/assistant count mismatch; falling back to input-only deltas"
+                    );
+                    let mut prev = 0u64;
+                    let total = usage.len();
+                    for (i, &cur) in usage.iter().enumerate() {
+                        let delta = cur.saturating_sub(prev);
+                        prev = cur;
+                        if delta == 0 {
+                            continue;
+                        }
+                        let ts_offset_ms = ((total - i - 1) as i64) * 1000;
+                        out.push(KimiRow {
+                            timestamp_ms: mtime_ms.saturating_sub(ts_offset_ms),
+                            session_id: session_id.clone(),
+                            project: Some(project.clone()),
+                            input_tokens: delta as i64,
+                            output_tokens: 0,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
     fn extract_opencode_rows(db_path: &Path) -> Result<Vec<OpenCodeRow>> {
         // `mode=ro` + `immutable=1` avoids creating WAL sidecar files and is
         // safe even if the user's opencode process has the DB open for writes.
@@ -714,7 +1141,7 @@ impl AnalyticsEngine {
             let model = data
                 .get("modelID")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+                .map(|s| strip_provider_prefix(s).to_string());
             let cost = data.get("cost").and_then(|v| v.as_f64());
             let project = std::path::Path::new(&worktree)
                 .file_name()
@@ -772,7 +1199,11 @@ impl AnalyticsEngine {
             UNION ALL
             SELECT * FROM kiro_events
             UNION ALL
-            SELECT * FROM opencode_events;
+            SELECT * FROM opencode_events
+            UNION ALL
+            SELECT * FROM kimi_events
+            UNION ALL
+            SELECT * FROM gemini_events;
 
             {}
             "#,
@@ -959,23 +1390,7 @@ impl AnalyticsEngine {
 
     /// Daily cost report for a specific date range.
     pub fn daily_report_range(&self, start: NaiveDate, end: NaiveDate) -> Result<Vec<DailyRow>> {
-        let sql = r#"
-            SELECT
-                strftime(timestamp, '%Y-%m-%d') AS day,
-                agent,
-                COUNT(DISTINCT session_id) AS sessions,
-                COALESCE(SUM(input_tokens), 0) AS input_tokens,
-                COALESCE(SUM(output_tokens), 0) AS output_tokens,
-                COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-                COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
-                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd
-            FROM all_events_with_cost
-            WHERE timestamp >= CAST(? AS DATE) AND timestamp < CAST(? AS DATE)
-            GROUP BY day, agent
-            ORDER BY day DESC, cost_usd DESC
-        "#;
-
-        let mut stmt = self.conn.prepare(sql)?;
+        let mut stmt = self.conn.prepare(DAILY_REPORT_SQL)?;
         let start_str = start.format("%Y-%m-%d").to_string();
         let end_str = end.format("%Y-%m-%d").to_string();
         let rows = stmt.query_map([&start_str, &end_str], |row| {
@@ -997,23 +1412,7 @@ impl AnalyticsEngine {
 
     /// Weekly cost report for a specific date range.
     pub fn weekly_report_range(&self, start: NaiveDate, end: NaiveDate) -> Result<Vec<WeeklyRow>> {
-        let sql = r#"
-            SELECT
-                strftime(date_trunc('week', timestamp), '%Y-%m-%d') AS week,
-                agent,
-                COUNT(DISTINCT session_id) AS sessions,
-                COALESCE(SUM(input_tokens), 0) AS input_tokens,
-                COALESCE(SUM(output_tokens), 0) AS output_tokens,
-                COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-                COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
-                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd
-            FROM all_events_with_cost
-            WHERE timestamp >= CAST(? AS DATE) AND timestamp < CAST(? AS DATE)
-            GROUP BY week, agent
-            ORDER BY week DESC, cost_usd DESC
-        "#;
-
-        let mut stmt = self.conn.prepare(sql)?;
+        let mut stmt = self.conn.prepare(WEEKLY_REPORT_SQL)?;
         let start_str = start.format("%Y-%m-%d").to_string();
         let end_str = end.format("%Y-%m-%d").to_string();
         let rows = stmt.query_map([&start_str, &end_str], |row| {
@@ -1039,23 +1438,7 @@ impl AnalyticsEngine {
         start: NaiveDate,
         end: NaiveDate,
     ) -> Result<Vec<MonthlyRow>> {
-        let sql = r#"
-            SELECT
-                strftime(timestamp, '%Y-%m') AS month,
-                agent,
-                COUNT(DISTINCT session_id) AS sessions,
-                COALESCE(SUM(input_tokens), 0) AS input_tokens,
-                COALESCE(SUM(output_tokens), 0) AS output_tokens,
-                COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-                COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
-                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd
-            FROM all_events_with_cost
-            WHERE timestamp >= CAST(? AS DATE) AND timestamp < CAST(? AS DATE)
-            GROUP BY month, agent
-            ORDER BY month DESC, cost_usd DESC
-        "#;
-
-        let mut stmt = self.conn.prepare(sql)?;
+        let mut stmt = self.conn.prepare(MONTHLY_REPORT_SQL)?;
         let start_str = start.format("%Y-%m-%d").to_string();
         let end_str = end.format("%Y-%m-%d").to_string();
         let rows = stmt.query_map([&start_str, &end_str], |row| {
@@ -1091,7 +1474,7 @@ impl AnalyticsEngine {
                 COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd,
                 COUNT(*) AS events
             FROM all_events_with_cost
-            WHERE timestamp >= now() - CAST(? || ' minutes' AS INTERVAL)
+            WHERE timestamp >= (now() AT TIME ZONE 'UTC') - CAST(? || ' minutes' AS INTERVAL)
             GROUP BY session_id, agent, model
             ORDER BY cost_usd DESC
         "#;
@@ -1119,22 +1502,7 @@ impl AnalyticsEngine {
 
     /// Model cost breakdown.
     pub fn model_breakdown(&self) -> Result<Vec<ModelRow>> {
-        let sql = r#"
-            SELECT
-                model,
-                agent,
-                COUNT(*) AS requests,
-                COALESCE(SUM(input_tokens), 0) AS input_tokens,
-                COALESCE(SUM(output_tokens), 0) AS output_tokens,
-                COALESCE(ROUND(AVG(computed_cost_usd), 6), 0.0) AS avg_cost,
-                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS total_cost
-            FROM all_events_with_cost
-            WHERE model IS NOT NULL
-            GROUP BY model, agent
-            ORDER BY total_cost DESC
-        "#;
-
-        let mut stmt = self.conn.prepare(sql)?;
+        let mut stmt = self.conn.prepare(MODEL_BREAKDOWN_SQL)?;
         let rows = stmt.query_map([], |row| {
             Ok(ModelRow {
                 model: row.get(0)?,
@@ -1153,20 +1521,7 @@ impl AnalyticsEngine {
 
     /// Project cost breakdown.
     pub fn project_breakdown(&self) -> Result<Vec<ProjectRow>> {
-        let sql = r#"
-            SELECT
-                COALESCE(project, '(none)') AS project,
-                agent,
-                COUNT(DISTINCT session_id) AS sessions,
-                COALESCE(SUM(input_tokens), 0) AS input_tokens,
-                COALESCE(SUM(output_tokens), 0) AS output_tokens,
-                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd
-            FROM all_events_with_cost
-            GROUP BY project, agent
-            ORDER BY cost_usd DESC
-        "#;
-
-        let mut stmt = self.conn.prepare(sql)?;
+        let mut stmt = self.conn.prepare(PROJECT_BREAKDOWN_SQL)?;
         let rows = stmt.query_map([], |row| {
             Ok(ProjectRow {
                 project: row.get(0)?,
@@ -1184,31 +1539,12 @@ impl AnalyticsEngine {
 
     /// Detail for a single session.
     pub fn session_detail(&self, session_id: &str) -> Result<Option<SessionRow>> {
-        let sql = r#"
-            SELECT
-                session_id,
-                agent,
-                model,
-                strftime(MIN(timestamp), '%Y-%m-%dT%H:%M:%S') AS started_at,
-                strftime(MAX(timestamp), '%Y-%m-%dT%H:%M:%S') AS ended_at,
-                EXTRACT(EPOCH FROM (MAX(timestamp) - MIN(timestamp)))::BIGINT AS duration_seconds,
-                COALESCE(SUM(input_tokens), 0) AS input_tokens,
-                COALESCE(SUM(output_tokens), 0) AS output_tokens,
-                COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-                COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
-                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd,
-                COUNT(*) AS events
-            FROM all_events_with_cost
-            WHERE session_id = ?
-            GROUP BY session_id, agent, model
-        "#;
-
-        let mut stmt = self.conn.prepare(sql)?;
+        let mut stmt = self.conn.prepare(SESSION_DETAIL_SQL)?;
         let mut rows = stmt.query_map([session_id], |row| {
             Ok(SessionRow {
                 session_id: row.get(0)?,
                 agent: row.get(1)?,
-                model: row.get(2)?,
+                models: row.get(2)?,
                 started_at: row.get(3)?,
                 ended_at: row.get(4)?,
                 duration_seconds: row.get(5)?,
@@ -1231,30 +1567,12 @@ impl AnalyticsEngine {
     ///
     /// This is optimized for frequent polling (every 1-5 seconds).
     pub fn live_session_snapshot(&self, session_id: &str) -> Result<Option<LiveSnapshot>> {
-        let sql = r#"
-            SELECT
-                session_id,
-                agent,
-                model,
-                strftime(MIN(timestamp), '%Y-%m-%dT%H:%M:%S') AS started_at,
-                strftime(MAX(timestamp), '%Y-%m-%dT%H:%M:%S') AS last_activity,
-                COALESCE(SUM(input_tokens), 0) AS input_tokens,
-                COALESCE(SUM(output_tokens), 0) AS output_tokens,
-                COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-                COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
-                COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd,
-                COUNT(*) AS events
-            FROM all_events_with_cost
-            WHERE session_id = ?
-            GROUP BY session_id, agent, model
-        "#;
-
-        let mut stmt = self.conn.prepare(sql)?;
+        let mut stmt = self.conn.prepare(LIVE_SNAPSHOT_SQL)?;
         let mut rows = stmt.query_map([session_id], |row| {
             Ok(LiveSnapshot {
                 session_id: row.get(0)?,
                 agent: row.get(1)?,
-                model: row.get(2)?,
+                models: row.get(2)?,
                 started_at: row.get(3)?,
                 last_activity: row.get(4)?,
                 input_tokens: row.get(5)?,
@@ -1484,11 +1802,15 @@ pub struct ProjectRow {
 }
 
 /// Session detail row.
+///
+/// `models` is a comma-separated list of distinct model names that ran in
+/// this session (was a single `Option<String>`; P0.8 changed it to surface
+/// all models when a session switched mid-run).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionRow {
     pub session_id: String,
     pub agent: String,
-    pub model: Option<String>,
+    pub models: Option<String>,
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
     pub duration_seconds: Option<i64>,
@@ -1507,6 +1829,8 @@ pub struct AgentViewStatus {
     pub codex: bool,
     pub kiro: bool,
     pub opencode: bool,
+    pub kimi: bool,
+    pub gemini: bool,
 }
 
 /// Intermediate row shape used when copying OpenCode messages from SQLite
@@ -1523,6 +1847,17 @@ struct OpenCodeRow {
     cache_read_tokens: i64,
     cache_creation_tokens: i64,
     cost_usd: Option<f64>,
+}
+
+/// Intermediate row shape used when copying Kimi _usage events from JSONL
+/// into DuckDB via the appender. Not part of the public API.
+#[derive(Debug)]
+struct KimiRow {
+    timestamp_ms: i64,
+    session_id: String,
+    project: Option<String>,
+    input_tokens: i64,
+    output_tokens: i64,
 }
 
 /// Live session block row for recent activity.
@@ -1542,11 +1877,13 @@ pub struct LiveBlockRow {
 }
 
 /// Live session snapshot.
+///
+/// `models` is a comma-separated list of distinct models (see SessionRow).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LiveSnapshot {
     pub session_id: String,
     pub agent: String,
-    pub model: Option<String>,
+    pub models: Option<String>,
     pub started_at: Option<String>,
     pub last_activity: Option<String>,
     pub input_tokens: i64,
@@ -1563,7 +1900,10 @@ pub struct LiveSnapshot {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn setup_engine() -> AnalyticsEngine {
         let engine = AnalyticsEngine::open_in_memory().unwrap();
@@ -1575,6 +1915,11 @@ mod tests {
         engine
     }
 
+    fn gemini_fixture_dir() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/gemini/two_session_synthetic")
+    }
+
     #[test]
     fn test_schema_initialization() {
         let engine = setup_engine();
@@ -1584,6 +1929,50 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM pricing", [], |r| r.get(0))
             .unwrap();
         assert!(count > 0, "pricing table should have rows");
+    }
+
+    #[test]
+    fn create_gemini_view_populates_fixture_and_unified_events() {
+        let engine = AnalyticsEngine::open_in_memory().unwrap();
+        engine.initialize().unwrap();
+        for view in [
+            "claude_events",
+            "codex_events",
+            "kiro_events",
+            "opencode_events",
+            "kimi_events",
+        ] {
+            engine.create_empty_stub(view).unwrap();
+        }
+        engine.create_gemini_view(&gemini_fixture_dir()).unwrap();
+        engine.rebuild_unified_views().unwrap();
+
+        let gemini_count: i64 = engine
+            .conn
+            .query_row("SELECT COUNT(*) FROM gemini_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(gemini_count, 3);
+
+        let unified_count: i64 = engine
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM all_events WHERE agent = 'gemini'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(unified_count, 3);
+
+        let totals: (Option<i64>, Option<i64>, Option<i64>) = engine
+            .conn
+            .query_row(
+                "SELECT SUM(input_tokens), SUM(output_tokens), SUM(cache_read_tokens)
+                 FROM all_events WHERE agent = 'gemini'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(totals, (Some(357), Some(75), Some(90)));
     }
 
     #[test]
@@ -1692,13 +2081,218 @@ mod tests {
 
         assert_eq!(rows.len(), 2, "zero-delta row should be excluded");
 
+        // After P0.4 fix: input_tokens is billable-non-cached input, so the
+        // cached portion is subtracted. Event 1 raw: input=1000, cached=200 →
+        // billable input=800, cache_read=200.
         assert_eq!(rows[0].0, "codex-session");
         assert_eq!(rows[0].1.as_deref(), Some("gpt-5"));
-        assert_eq!((rows[0].2, rows[0].3, rows[0].4), (1000, 500, 200));
+        assert_eq!((rows[0].2, rows[0].3, rows[0].4), (800, 500, 200));
 
+        // Event 2 delta: input=1000, cached_delta=100 → billable=900, cache=100.
         assert_eq!(rows[1].0, "codex-session");
         assert_eq!(rows[1].1.as_deref(), Some("gpt-5"));
-        assert_eq!((rows[1].2, rows[1].3, rows[1].4), (1000, 300, 100));
+        assert_eq!((rows[1].2, rows[1].3, rows[1].4), (900, 300, 100));
+    }
+
+    #[test]
+    fn test_cost_source_column_values() {
+        let engine = AnalyticsEngine::open_in_memory().unwrap();
+        engine.initialize().unwrap();
+
+        // Load pricing for one known model.
+        engine
+            .conn
+            .execute_batch(
+                "INSERT INTO pricing VALUES \
+                 ('claude-opus-4', 15.0, 75.0, 1.5, 18.75, '2020-01-01', NULL);",
+            )
+            .unwrap();
+
+        // Override all_events with three manual rows covering each provenance.
+        engine
+            .conn
+            .execute_batch(
+                "CREATE OR REPLACE VIEW all_events AS \
+                 SELECT * FROM (VALUES \
+                    (TIMESTAMP '2026-04-20 10:00:00', 'sess-native', 'claude', 'claude-opus-4', 'proj', \
+                     1000::BIGINT, 100::BIGINT, 0::BIGINT, 0::BIGINT, 0.05::DOUBLE), \
+                    (TIMESTAMP '2026-04-20 10:05:00', 'sess-priced', 'claude', 'claude-opus-4', 'proj', \
+                     1000::BIGINT, 100::BIGINT, 0::BIGINT, 0::BIGINT, NULL::DOUBLE), \
+                    (TIMESTAMP '2026-04-20 10:10:00', 'sess-unpriced', 'claude', 'ghost-model-xyz', 'proj', \
+                     1000::BIGINT, 100::BIGINT, 0::BIGINT, 0::BIGINT, NULL::DOUBLE) \
+                 ) AS t(timestamp, session_id, agent, model, project, \
+                        input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd);",
+            )
+            .unwrap();
+
+        let rows: Vec<(String, String)> = {
+            let mut stmt = engine
+                .conn
+                .prepare(
+                    "SELECT session_id, cost_source FROM all_events_with_cost \
+                     ORDER BY session_id",
+                )
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap()
+        };
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0], ("sess-native".to_string(), "native".to_string()));
+        assert_eq!(rows[1], ("sess-priced".to_string(), "priced".to_string()));
+        assert_eq!(
+            rows[2],
+            ("sess-unpriced".to_string(), "unpriced".to_string())
+        );
+
+        // Unpriced events must yield NULL computed_cost — no silent $0.
+        let unpriced_cost: Option<f64> = engine
+            .conn
+            .query_row(
+                "SELECT computed_cost_usd FROM all_events_with_cost \
+                 WHERE session_id = 'sess-unpriced'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            unpriced_cost.is_none(),
+            "unpriced event should have NULL computed_cost, not silent $0"
+        );
+    }
+
+    #[test]
+    fn live_recent_sessions_window_uses_utc() {
+        let engine = setup_engine();
+        engine
+            .conn
+            .execute_batch("SET TimeZone = 'Asia/Ho_Chi_Minh';")
+            .unwrap();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let recent_ms = now_ms - 60_000;
+        let stale_ms = now_ms - 5 * 60_000;
+
+        engine
+            .conn
+            .execute_batch(
+                r#"
+                DROP TABLE IF EXISTS live_recent_sessions_window_events;
+                CREATE TABLE live_recent_sessions_window_events (
+                    timestamp_ms          BIGINT,
+                    session_id            VARCHAR,
+                    agent                 VARCHAR,
+                    model                 VARCHAR,
+                    project               VARCHAR,
+                    input_tokens          BIGINT,
+                    output_tokens         BIGINT,
+                    cache_read_tokens     BIGINT,
+                    cache_creation_tokens BIGINT,
+                    cost_usd              DOUBLE
+                );
+                "#,
+            )
+            .unwrap();
+        engine
+            .conn
+            .execute(
+                "INSERT INTO live_recent_sessions_window_events VALUES \
+                 (?1, 'recent-session', 'claude', 'claude-sonnet-4', 'spur', \
+                  100::BIGINT, 50::BIGINT, 0::BIGINT, 0::BIGINT, 0.01::DOUBLE)",
+                duckdb::params![recent_ms],
+            )
+            .unwrap();
+        engine
+            .conn
+            .execute(
+                "INSERT INTO live_recent_sessions_window_events VALUES \
+                 (?1, 'stale-session', 'claude', 'claude-sonnet-4', 'spur', \
+                  200::BIGINT, 75::BIGINT, 0::BIGINT, 0::BIGINT, 0.02::DOUBLE)",
+                duckdb::params![stale_ms],
+            )
+            .unwrap();
+        engine
+            .conn
+            .execute_batch(
+                r#"
+                CREATE OR REPLACE VIEW all_events AS
+                SELECT
+                    epoch_ms(timestamp_ms) AS timestamp,
+                    session_id,
+                    agent,
+                    model,
+                    project,
+                    input_tokens,
+                    output_tokens,
+                    cache_read_tokens,
+                    cache_creation_tokens,
+                    cost_usd
+                FROM live_recent_sessions_window_events;
+                "#,
+            )
+            .unwrap();
+        engine.conn.execute_batch(ALL_EVENTS_WITH_COST_VIEW).unwrap();
+
+        let rows = engine.live_recent_sessions(2).unwrap();
+        let session_ids = rows
+            .iter()
+            .map(|row| row.session_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(session_ids, vec!["recent-session"]);
+    }
+
+    #[test]
+    fn strip_provider_prefix_handles_known_providers() {
+        use super::strip_provider_prefix;
+
+        assert_eq!(
+            strip_provider_prefix("anthropic/claude-opus-4-5"),
+            "claude-opus-4-5"
+        );
+        assert_eq!(
+            strip_provider_prefix("google/gemini-2.5-pro"),
+            "gemini-2.5-pro"
+        );
+        assert_eq!(strip_provider_prefix("openai/gpt-5"), "gpt-5");
+        assert_eq!(strip_provider_prefix("z-ai/glm-4.6"), "glm-4.6");
+        assert_eq!(strip_provider_prefix("moonshotai/kimi-k2"), "kimi-k2");
+        assert_eq!(strip_provider_prefix("claude-opus-4-5"), "claude-opus-4-5");
+        assert_eq!(strip_provider_prefix("gpt-5-codex"), "gpt-5-codex");
+        assert_eq!(strip_provider_prefix(""), "");
+        assert_eq!(strip_provider_prefix("/leading-slash"), "leading-slash");
+        assert_eq!(strip_provider_prefix("a/b/c"), "b/c");
+    }
+
+    #[test]
+    fn newest_agent_mtime_detects_opencode_db_changes() {
+        use filetime::FileTime;
+        use std::time::{Duration, SystemTime};
+
+        let _env_guard = ENV_LOCK.lock().unwrap();
+        let tmp = TempDir::new().unwrap();
+        let opencode_dir = tmp.path().join(".local/share/opencode");
+        std::fs::create_dir_all(&opencode_dir).unwrap();
+        let opencode_db = opencode_dir.join("opencode.db");
+        std::fs::write(&opencode_db, b"").unwrap();
+        env::set_var("OPENCODE_DATA_DIR", &opencode_dir);
+
+        let first = AnalyticsEngine::newest_agent_mtime().unwrap();
+
+        let bumped = SystemTime::now() + Duration::from_secs(60);
+        filetime::set_file_mtime(&opencode_db, FileTime::from_system_time(bumped)).unwrap();
+
+        let second = AnalyticsEngine::newest_agent_mtime().unwrap();
+        assert!(
+            second > first,
+            "expected newest_agent_mtime to detect OpenCode DB mtime change"
+        );
+
+        env::remove_var("OPENCODE_DATA_DIR");
     }
 
     #[test]
@@ -1751,10 +2345,17 @@ mod tests {
                     [],
                 )
                 .unwrap();
+            sconn
+                .execute(
+                    "INSERT INTO session VALUES ('s2', 'p1', '/Volumes/Projects/spur', 't2', 'v1', 1, 1)",
+                    [],
+                )
+                .unwrap();
             // Two real assistant turns with nonzero cost + one zero-token turn
             // that the extractor must filter out (matches opencode's failed-call shape).
             let m1 = r#"{"role":"assistant","cost":0.01289272,"tokens":{"input":7650,"output":12,"reasoning":0,"cache":{"read":8192,"write":0}},"modelID":"z-ai/glm-5.1","providerID":"openrouter"}"#;
             let m2 = r#"{"role":"assistant","cost":0.0245,"tokens":{"input":3000,"output":500,"reasoning":100,"cache":{"read":0,"write":1024}},"modelID":"moonshotai/kimi-k2.6","providerID":"openrouter"}"#;
+            let m_anthropic = r#"{"role":"assistant","cost":0.031,"tokens":{"input":4000,"output":200,"reasoning":0,"cache":{"read":256,"write":128}},"modelID":"anthropic/claude-opus-4-5","providerID":"openrouter"}"#;
             let m_empty = r#"{"role":"assistant","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"modelID":"z-ai/glm-5.1","providerID":"openrouter"}"#;
             let m_user = r#"{"role":"user"}"#;
             let base_ms: i64 = 1776580000000; // any realistic unix-ms value
@@ -1780,6 +2381,12 @@ mod tests {
                 .execute(
                     "INSERT INTO message VALUES ('m4','s1',?1,?1,?2)",
                     rusqlite::params![base_ms + 180_000, m_user],
+                )
+                .unwrap();
+            sconn
+                .execute(
+                    "INSERT INTO message VALUES ('m5','s2',?1,?1,?2)",
+                    rusqlite::params![base_ms + 240_000, m_anthropic],
                 )
                 .unwrap();
         }
@@ -1827,12 +2434,12 @@ mod tests {
 
         assert_eq!(
             rows.len(),
-            2,
+            3,
             "user + zero-token assistant must be filtered"
         );
         assert_eq!(rows[0].0, "s1");
         assert_eq!(rows[0].1, "opencode");
-        assert_eq!(rows[0].2.as_deref(), Some("z-ai/glm-5.1"));
+        assert_eq!(rows[0].2.as_deref(), Some("glm-5.1"));
         assert_eq!(rows[0].3.as_deref(), Some("spur"));
         assert_eq!(
             (rows[0].4, rows[0].5, rows[0].6, rows[0].7),
@@ -1840,12 +2447,22 @@ mod tests {
         );
         assert!((rows[0].8.unwrap() - 0.01289272).abs() < 1e-9);
 
-        assert_eq!(rows[1].2.as_deref(), Some("moonshotai/kimi-k2.6"));
+        assert_eq!(rows[1].2.as_deref(), Some("kimi-k2.6"));
         // reasoning folds into output_tokens
         assert_eq!(
             (rows[1].4, rows[1].5, rows[1].6, rows[1].7),
             (3000, 600, 0, 1024)
         );
+
+        let stored_model: Option<String> = engine
+            .conn
+            .query_row(
+                "SELECT model FROM opencode_events WHERE session_id = 's2' LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_model.as_deref(), Some("claude-opus-4-5"));
 
         // all_events_with_cost must use data.cost as-is (pass-through, no reprice)
         let total_cost: f64 = engine
@@ -1856,7 +2473,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert!((total_cost - (0.01289272 + 0.0245)).abs() < 1e-9);
+        assert!((total_cost - (0.01289272 + 0.0245 + 0.031)).abs() < 1e-9);
     }
 
     /// Smoke test against the developer's real `~/.local/share/opencode/opencode.db`.
@@ -1905,6 +2522,138 @@ mod tests {
     }
 
     #[test]
+    fn test_kimi_events_pair_pre_post() {
+        let tmp = TempDir::new().unwrap();
+        let sessions = tmp.path().join("kimi").join("sessions");
+        let session_dir = sessions.join("projhash").join("sess-uuid");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let mut f = std::fs::File::create(session_dir.join("context.jsonl")).unwrap();
+        for line in [
+            r#"{"role":"_system_prompt","content":"sys"}"#,
+            r#"{"role":"user","content":"hi"}"#,
+            r#"{"role":"_usage","token_count":13000}"#,
+            r#"{"role":"assistant","content":"hello"}"#,
+            r#"{"role":"_usage","token_count":13500}"#,
+            r#"{"role":"tool","content":"t"}"#,
+            r#"{"role":"_usage","token_count":14000}"#,
+            r#"{"role":"assistant","content":"second"}"#,
+            r#"{"role":"_usage","token_count":14100}"#,
+        ] {
+            writeln!(f, "{}", line).unwrap();
+        }
+
+        let engine = setup_engine();
+        engine.create_kimi_view(&sessions).unwrap();
+
+        let mut stmt = engine
+            .conn
+            .prepare(
+                "SELECT session_id, agent, model, project, input_tokens, output_tokens, cost_usd \
+                 FROM kimi_events ORDER BY timestamp",
+            )
+            .unwrap();
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            i64,
+            i64,
+            Option<f64>,
+        )> = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "sess-uuid");
+        assert_eq!(rows[0].1, "kimi");
+        assert_eq!(rows[0].2.as_deref(), Some("kimi-for-coding"));
+        assert_eq!(rows[0].3.as_deref(), Some("projhash"));
+        // Turn 1: pre=13000, post=13500 -> input=13000 (first), output=500
+        assert_eq!((rows[0].4, rows[0].5), (13000, 500));
+        // Turn 2: pre=14000, post=14100 -> input=500 (14000-13500), output=100
+        assert_eq!((rows[1].4, rows[1].5), (500, 100));
+        assert!(
+            rows.iter().all(|r| r.6.is_none()),
+            "cost must be NULL for kimi"
+        );
+    }
+
+    #[test]
+    fn test_kimi_events_fallback_on_count_mismatch() {
+        let tmp = TempDir::new().unwrap();
+        let sessions = tmp.path().join("kimi").join("sessions");
+        let session_dir = sessions.join("ph").join("sess");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let mut f = std::fs::File::create(session_dir.join("context.jsonl")).unwrap();
+        // 3 _usage for 1 assistant -> invariant broken, expect fallback path.
+        for line in [
+            r#"{"role":"user","content":"x"}"#,
+            r#"{"role":"_usage","token_count":100}"#,
+            r#"{"role":"_usage","token_count":150}"#,
+            r#"{"role":"assistant","content":"y"}"#,
+            r#"{"role":"_usage","token_count":200}"#,
+        ] {
+            writeln!(f, "{}", line).unwrap();
+        }
+        let engine = setup_engine();
+        engine.create_kimi_view(&sessions).unwrap();
+        let rows: Vec<(i64, i64)> = engine
+            .conn
+            .prepare("SELECT input_tokens, output_tokens FROM kimi_events ORDER BY timestamp")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+        // Cumulative diffs: 100, 50, 50 -> all as input tokens.
+        assert_eq!(
+            rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+            vec![100, 50, 50]
+        );
+        assert!(rows.iter().all(|r| r.1 == 0));
+    }
+
+    #[test]
+    #[ignore]
+    fn smoke_kimi_real_dir() {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            return;
+        };
+        let sessions = home.join(".kimi/sessions");
+        if !sessions.is_dir() {
+            return;
+        }
+        let engine = AnalyticsEngine::open_in_memory().unwrap();
+        engine.initialize().unwrap();
+        engine.create_kimi_view(&sessions).unwrap();
+        let (n, i, o): (i64, Option<i64>, Option<i64>) = engine
+            .conn
+            .query_row(
+                "SELECT COUNT(*), SUM(input_tokens), SUM(output_tokens) FROM kimi_events",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        eprintln!("kimi smoke: rows={} input={:?} output={:?}", n, i, o);
+        assert!(n > 0, "expected kimi data on this dev machine");
+    }
+
+    #[test]
     fn test_daily_report_empty() {
         let engine = setup_engine();
         let report = engine.daily_report(7).unwrap();
@@ -1921,6 +2670,34 @@ mod tests {
         assert!(
             report.is_empty(),
             "model breakdown should be empty with no data"
+        );
+    }
+
+    #[test]
+    fn report_sql_files_include_cache_columns() {
+        assert!(
+            DAILY_REPORT_SQL.contains("cache_read_tokens"),
+            "daily_report.sql must include cache_read_tokens"
+        );
+        assert!(
+            DAILY_REPORT_SQL.contains("cache_creation_tokens"),
+            "daily_report.sql must include cache_creation_tokens"
+        );
+        assert!(
+            WEEKLY_REPORT_SQL.contains("cache_read_tokens"),
+            "weekly_report.sql must include cache_read_tokens (was missing)"
+        );
+        assert!(
+            WEEKLY_REPORT_SQL.contains("cache_creation_tokens"),
+            "weekly_report.sql must include cache_creation_tokens (was missing)"
+        );
+        assert!(
+            MONTHLY_REPORT_SQL.contains("cache_read_tokens"),
+            "monthly_report.sql must include cache_read_tokens (was missing)"
+        );
+        assert!(
+            MONTHLY_REPORT_SQL.contains("cache_creation_tokens"),
+            "monthly_report.sql must include cache_creation_tokens (was missing)"
         );
     }
 }
