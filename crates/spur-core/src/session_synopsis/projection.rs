@@ -36,8 +36,6 @@ impl SessionSynopsisProjection {
     }
 
     /// Fold an event into the projection. Idempotent on irrelevant variants.
-    // Outer `match` has a single arm for now; later tasks add more event variants.
-    #[allow(clippy::single_match)]
     pub fn apply(&mut self, event: &spur_acp::SpurEvent) {
         use agent_client_protocol::schema::SessionUpdate;
         use spur_acp::domain::events::SpurEventBody;
@@ -66,6 +64,9 @@ impl SessionSynopsisProjection {
                 }
                 _ => {}
             },
+            SpurEventBody::TurnComplete { session } => {
+                self.flush_pending(session);
+            }
             _ => {}
         }
     }
@@ -235,5 +236,19 @@ mod tests {
 
         let s = proj.get(&SessionId("S1".into())).unwrap();
         assert_eq!(s.first_user_msg.as_deref(), Some("actual content"));
+    }
+
+    #[test]
+    fn turn_complete_flushes_pending_buffer() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&user_chunk_event("S1", "abandoned partial msg"));
+        // No agent reply — only TurnComplete.
+        proj.apply(&SpurEvent::now(SpurEventBody::TurnComplete {
+            session: SessionId("S1".into()),
+        }));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(s.first_user_msg.as_deref(), Some("abandoned partial msg"));
+        assert_eq!(s.last_user_msg.as_deref(), Some("abandoned partial msg"));
     }
 }
