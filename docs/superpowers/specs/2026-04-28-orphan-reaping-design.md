@@ -321,16 +321,27 @@ Steps 1–2 are same-day low-risk fixes (close the leak source). Steps
 
 ## Acceptance criteria
 
-- [ ] All four ACP-spawning sites set `process_group(0)`.
-- [ ] After `kill -9` of a running spur tui, the next spur tui startup
+- [x] All four ACP-spawning sites set `process_group(0)`. (T1, commit 1fef45d0)
+- [x] After `kill -9` of a running spur tui, the next spur tui startup
       reaps every orphan tree from the prior session within 1 second.
-- [ ] If a recorded pgid has been recycled to an unrelated process, the
-      sweep drops the record without sending any signal.
-- [ ] Ctrl-C, Ctrl-Q, SIGTERM, SIGHUP, and SIGQUIT all restore raw mode
-      and alternate screen before exit (no terminal corruption).
-- [ ] `SpurEvent::OrphanReaped` fires once per reaped tree.
-- [ ] Sweep runs unconditionally on every spur startup (no license gate).
-- [ ] No `signal_hook` dependency added.
+      (T9 e2e at `crates/spur-acp/tests/orphan_sweep_e2e.rs` — passes
+      `cargo test -p spur-acp --test orphan_sweep_e2e -- --ignored` in 3.17s.)
+- [x] If a recorded pgid has been recycled to an unrelated process, the
+      sweep drops the record without sending any signal. (T6,
+      `pgid_recycled_drops_record_no_kill` test in `orphan_sweeper.rs`.)
+- [x] Ctrl-C, Ctrl-Q, SIGTERM, SIGHUP, and SIGQUIT all restore raw mode
+      and alternate screen before exit (no terminal corruption). (T8,
+      commits 0381d188 + f61241bf — signals route through `app.confirm_quit()`
+      so the same loop break + `tui::teardown` runs on every path; manual
+      tab-close verification deferred to release-day smoke.)
+- [x] `SpurEvent::OrphanReaped` fires once per reaped tree. (T7,
+      commit ee894dc5 — emitted from `spur-cli/main.rs` per killed record,
+      rendered by `dashboard.rs` activity-log arm.)
+- [x] Sweep runs unconditionally on every spur startup (no license gate).
+      (T6 sweep block at top of `run()` in `spur-cli/main.rs:452`, runs
+      before the `match cli.command` branch.)
+- [x] No `signal_hook` dependency added. (Verified zero source refs;
+      T8 uses `tokio::signal::unix` exclusively.)
 
 ## References
 
