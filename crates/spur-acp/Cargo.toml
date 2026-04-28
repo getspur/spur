@@ -26,6 +26,8 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 directories = { workspace = true }
 agent-client-protocol = { workspace = true }
+tracing-appender = { workspace = true }
+file-rotate = "0.8"
 fs4 = "0.13"
 tempfile = "3"
 
