@@ -3,7 +3,9 @@ mod onboarding;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::time::Duration;
 
 use tracing_subscriber::prelude::*;
@@ -383,7 +385,36 @@ enum BotCommands {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            render_top_level_error(&err);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Render the top-level error. If stderr is a TTY and the error
+/// chain contains a [`spur_license::FeatureGateError`], render the
+/// structured upgrade CTA. Otherwise fall through to anyhow's
+/// chain-printing (`{:#}`) for full debug context. Non-TTY stderr
+/// (piped/scripted output) always uses the plain path so tooling
+/// parsing isn't broken.
+fn render_top_level_error(err: &anyhow::Error) {
+    if std::io::stderr().is_terminal() {
+        if let Some(gate_err) = spur_license::upgrade_cta::find_gate_error(err) {
+            eprint!(
+                "{}",
+                spur_license::upgrade_cta::format_upgrade_cta(gate_err)
+            );
+            return;
+        }
+    }
+    eprintln!("Error: {err:#}");
+}
+
+async fn run() -> Result<()> {
     let cli = Cli::parse();
     let repo_root = std::env::current_dir()?;
 
