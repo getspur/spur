@@ -213,4 +213,27 @@ mod tests {
         assert_eq!(s.first_user_msg.as_deref(), Some("real msg"));
         assert_eq!(s.last_user_msg.as_deref(), Some("/clear"));
     }
+
+    #[test]
+    fn whitespace_only_user_message_does_not_commit_synopsis() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&user_chunk_event("S1", "   \t\n  "));
+        proj.apply(&agent_chunk_event("S1", "ok"));
+
+        assert!(
+            proj.get(&SessionId("S1".into())).is_none(),
+            "whitespace-only flush should not create a synopsis"
+        );
+    }
+
+    #[test]
+    fn empty_chunk_then_real_chunk_commits_only_real_text() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&user_chunk_event("S1", ""));
+        proj.apply(&user_chunk_event("S1", "actual content"));
+        proj.apply(&agent_chunk_event("S1", "ok"));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(s.first_user_msg.as_deref(), Some("actual content"));
+    }
 }
