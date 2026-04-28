@@ -8,6 +8,7 @@ license.workspace = true
 
 [features]
 test-support = []
+test-helpers = []
 
 [dependencies]
 fs4 = "0.13"

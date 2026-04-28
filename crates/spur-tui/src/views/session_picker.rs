@@ -78,6 +78,18 @@ fn render_footer_hint(frame: &mut Frame, area: Rect, hint: &str) {
     );
 }
 
+fn compute_label_budget(area_width: u16, show_cwd: bool, show_brain: bool) -> usize {
+    let mut gutter = 2 /* prefix */ + 8 + 2 /* short_id+gap */ + 8 + 2 /* time+gap */;
+    if show_brain {
+        gutter += 8 + 2;
+    }
+    if show_cwd {
+        gutter += 16 + 2; // cwd basename + slash + gap
+    }
+    let avail = (area_width as usize).saturating_sub(gutter);
+    avail.clamp(8, 60)
+}
+
 // ─── State ────────────────────────────────────────────────────────────
 
 enum PickerState {
@@ -85,6 +97,7 @@ enum PickerState {
     Populated {
         agent: String,
         sessions: Vec<SessionInfo>,
+        haystacks: Vec<String>,
         cursor: usize,
         search_focused: bool,
         filter: String,
@@ -205,13 +218,19 @@ impl SessionPickerView {
         self.show_archived = !self.show_archived;
         if let PickerState::Populated {
             sessions,
+            haystacks,
             cursor,
             filter,
             ..
         } = &mut self.state
         {
-            let indices =
-                Self::filtered_indices(sessions, filter, &self.metadata, self.show_archived);
+            let indices = Self::filtered_indices(
+                sessions,
+                haystacks,
+                filter,
+                &self.metadata,
+                self.show_archived,
+            );
             let new_cursor = Self::project_cursor(
                 sessions,
                 &indices,
@@ -246,7 +265,12 @@ impl SessionPickerView {
         }
     }
 
-    pub fn set_sessions(&mut self, agent: String, sessions: Vec<SessionInfo>) {
+    pub fn set_sessions(
+        &mut self,
+        agent: String,
+        sessions: Vec<SessionInfo>,
+        synopsis: &spur_core::SessionSynopsisProjection,
+    ) {
         // P2 (cursor preservation by session_id) — only meaningful when we
         // were already Populated. Captured here so it sees the *previous*
         // state before we overwrite it.
@@ -257,8 +281,18 @@ impl SessionPickerView {
             _ => String::new(),
         };
 
-        let indices =
-            Self::filtered_indices(&sessions, &prev_filter, &self.metadata, self.show_archived);
+        let haystacks: Vec<String> = sessions
+            .iter()
+            .map(|s| self.build_haystack_for(s, synopsis))
+            .collect();
+
+        let indices = Self::filtered_indices(
+            &sessions,
+            &haystacks,
+            &prev_filter,
+            &self.metadata,
+            self.show_archived,
+        );
 
         let cursor = if !self.preselect_consumed {
             if let Some(target) = self.preselect.as_ref() {
@@ -290,6 +324,7 @@ impl SessionPickerView {
         self.state = PickerState::Populated {
             agent,
             sessions,
+            haystacks,
             cursor,
             search_focused: false,
             filter: prev_filter,
@@ -300,6 +335,7 @@ impl SessionPickerView {
     fn highlighted_session_id(&self) -> Option<String> {
         let PickerState::Populated {
             sessions,
+            haystacks,
             cursor,
             filter,
             ..
@@ -310,13 +346,43 @@ impl SessionPickerView {
         if *cursor == 0 {
             return None;
         }
-        let indices = Self::filtered_indices(sessions, filter, &self.metadata, self.show_archived);
+        let indices = Self::filtered_indices(
+            sessions,
+            haystacks,
+            filter,
+            &self.metadata,
+            self.show_archived,
+        );
         let real_idx = indices.get(*cursor - 1).copied()?;
         Some(sessions[real_idx].session_id.0.as_ref().to_string())
     }
 
+    fn build_haystack_for(
+        &self,
+        session: &SessionInfo,
+        synopsis: &spur_core::SessionSynopsisProjection,
+    ) -> String {
+        let entry = self.metadata.sessions.get(session.session_id.0.as_ref());
+        let synopsis_for = synopsis.get(&spur_acp::SessionId(
+            session.session_id.0.as_ref().to_string(),
+        ));
+        let label = resolve_label(session, entry, synopsis_for.as_ref(), false, usize::MAX);
+        let first = synopsis_for
+            .as_ref()
+            .and_then(|s| s.first_user_msg.as_deref())
+            .unwrap_or("");
+        let last = synopsis_for
+            .as_ref()
+            .and_then(|s| s.last_user_msg.as_deref())
+            .unwrap_or("");
+        let cwd = session.cwd.display().to_string();
+        let id = session.session_id.0.as_ref();
+        format!("{label} {first} {last} {cwd} {id}")
+    }
+
     fn filtered_indices(
         sessions: &[SessionInfo],
+        haystacks: &[String],
         filter: &str,
         metadata: &SessionMetadata,
         show_archived: bool,
@@ -365,13 +431,8 @@ impl SessionPickerView {
         let mut scored: Vec<(u32, usize)> = candidates
             .into_iter()
             .filter_map(|i| {
-                let session = &sessions[i];
-                let title = Self::resolved_title(session, metadata, false);
-                let cwd = session.cwd.display().to_string();
-                let id = session.session_id.0.as_ref();
-                let haystack = format!("{title} {cwd} {id}");
                 let score = pattern.score(
-                    nucleo_matcher::Utf32Str::new(&haystack, &mut Vec::new()),
+                    nucleo_matcher::Utf32Str::new(&haystacks[i], &mut Vec::new()),
                     &mut matcher,
                 )?;
                 Some((score, i))
@@ -417,8 +478,18 @@ impl SessionPickerView {
     pub fn visible_session_count(&self) -> usize {
         match &self.state {
             PickerState::Populated {
-                sessions, filter, ..
-            } => Self::filtered_indices(sessions, filter, &self.metadata, self.show_archived).len(),
+                sessions,
+                haystacks,
+                filter,
+                ..
+            } => Self::filtered_indices(
+                sessions,
+                haystacks,
+                filter,
+                &self.metadata,
+                self.show_archived,
+            )
+            .len(),
             _ => 0,
         }
     }
@@ -426,10 +497,19 @@ impl SessionPickerView {
     pub fn visible_session_at(&self, idx: usize) -> Option<&SessionInfo> {
         match &self.state {
             PickerState::Populated {
-                sessions, filter, ..
-            } => Self::filtered_indices(sessions, filter, &self.metadata, self.show_archived)
-                .get(idx)
-                .and_then(|&i| sessions.get(i)),
+                sessions,
+                haystacks,
+                filter,
+                ..
+            } => Self::filtered_indices(
+                sessions,
+                haystacks,
+                filter,
+                &self.metadata,
+                self.show_archived,
+            )
+            .get(idx)
+            .and_then(|&i| sessions.get(i)),
             _ => None,
         }
     }
@@ -508,31 +588,6 @@ impl SessionPickerView {
             .unwrap_or_else(|| cwd.to_str().unwrap_or(""))
     }
 
-    fn display_text(session: &SessionInfo, show_cwd: bool) -> String {
-        if let Some(ref title) = session.title {
-            title.clone()
-        } else if show_cwd {
-            format!("{}/", Self::cwd_basename(&session.cwd))
-        } else {
-            "(untitled session)".to_string()
-        }
-    }
-
-    fn resolved_title(
-        session: &spur_acp::SessionInfo,
-        metadata: &SessionMetadata,
-        show_cwd: bool,
-    ) -> String {
-        if let Some(entry) = metadata.sessions.get(session.session_id.0.as_ref()) {
-            if let Some(ref t) = entry.title_override {
-                if !t.is_empty() {
-                    return t.clone();
-                }
-            }
-        }
-        Self::display_text(session, show_cwd)
-    }
-
     fn render_loading(
         &self,
         frame: &mut Frame,
@@ -592,10 +647,22 @@ impl SessionPickerView {
         );
     }
 
-    fn build_preselect_banner(&self, acp_id: &str) -> Line<'static> {
+    fn build_preselect_banner(
+        &self,
+        acp_id: &str,
+        synopsis: &spur_core::SessionSynopsisProjection,
+    ) -> Line<'static> {
         if let PickerState::Populated { sessions, .. } = &self.state {
             if let Some(session) = sessions.iter().find(|s| s.session_id.0.as_ref() == acp_id) {
-                let label = Self::resolved_title(session, &self.metadata, false);
+                let synopsis_key = spur_acp::SessionId(session.session_id.0.as_ref().to_string());
+                let synopsis_data = synopsis.get(&synopsis_key);
+                let label = resolve_label(
+                    session,
+                    self.metadata.sessions.get(session.session_id.0.as_ref()),
+                    synopsis_data.as_ref(),
+                    false,
+                    usize::MAX,
+                );
                 let mut spans = vec![
                     Span::raw(" Last: "),
                     Span::styled(
@@ -645,10 +712,12 @@ impl SessionPickerView {
         &self,
         frame: &mut Frame,
         area: Rect,
+        ctx: &super::ViewContext,
         license_badge: Option<&crate::components::status_bar::LicenseBadge>,
         flag_summary: Option<(usize, usize)>,
         agent: &str,
         sessions: &[SessionInfo],
+        haystacks: &[String],
         cursor: usize,
         search_focused: bool,
         filter: &str,
@@ -656,7 +725,13 @@ impl SessionPickerView {
         let show_cwd = Self::cwds_are_heterogeneous(sessions);
         let visible_height = area.height.saturating_sub(4) as usize;
 
-        let indices = Self::filtered_indices(sessions, filter, &self.metadata, self.show_archived);
+        let indices = Self::filtered_indices(
+            sessions,
+            haystacks,
+            filter,
+            &self.metadata,
+            self.show_archived,
+        );
 
         // Clamp scroll_offset so cursor is always visible.
         // `cursor` indexes a virtual list where 0 = [+ New session] row and
@@ -739,7 +814,16 @@ impl SessionPickerView {
             let prefix = if is_selected { "\u{25b8} " } else { "  " };
             let raw_id = session.session_id.0.as_ref();
             let short_id = &raw_id[..8.min(raw_id.len())];
-            let display = Self::resolved_title(session, &self.metadata, show_cwd);
+            let synopsis_key = spur_acp::SessionId(session.session_id.0.as_ref().to_string());
+            let synopsis = ctx.synopsis.get(&synopsis_key);
+            let label_budget = compute_label_budget(area.width, show_cwd, show_brain);
+            let display = resolve_label(
+                session,
+                self.metadata.sessions.get(session.session_id.0.as_ref()),
+                synopsis.as_ref(),
+                show_cwd,
+                label_budget,
+            );
             let time_str = session
                 .updated_at
                 .as_deref()
@@ -799,7 +883,7 @@ impl SessionPickerView {
             lines.push(Line::from(spans));
         }
 
-        let preview_height: u16 = 8;
+        let preview_height: u16 = 12;
         // Layout: chunks[1]/[2] (status + footer hint) are kept as two rows
         // ONLY when a state-specific prompt is active (rename or confirm-switch),
         // so that the prompt and its key-hint can coexist on separate rows.
@@ -845,48 +929,87 @@ impl SessionPickerView {
         };
 
         if self.preview_visible {
-            use crate::components::session_preview::{PreviewContent, SessionPreview};
+            use crate::components::session_preview::{PreviewContent, PreviewRow, SessionPreview};
+            use ratatui::style::{Color, Style};
+
             let content = if cursor == 0 {
                 PreviewContent {
+                    rows: vec![],
                     placeholder: Some(
                         "Press Enter to start a new session \u{00b7} any unsent draft will be saved"
                             .to_string(),
                     ),
-                    ..Default::default()
                 }
             } else {
-                let indices =
-                    Self::filtered_indices(sessions, filter, &self.metadata, self.show_archived);
+                let indices = Self::filtered_indices(
+                    sessions,
+                    haystacks,
+                    filter,
+                    &self.metadata,
+                    self.show_archived,
+                );
                 let real_idx = indices.get(cursor - 1).copied();
                 if let Some(i) = real_idx {
                     let session = &sessions[i];
-                    let id = session.session_id.0.as_ref().to_string();
-                    let cwd = session.cwd.display().to_string();
-                    let updated = session.updated_at.clone().unwrap_or_default();
                     let entry = self.metadata.sessions.get(session.session_id.0.as_ref());
-                    let pinned = entry.map(|e| e.pinned).unwrap_or(false);
-                    let archived = entry.map(|e| e.archived).unwrap_or(false);
+                    // Use the same SessionId wrapper conversion idiom as Task 15.
+                    let synopsis_key =
+                        spur_acp::SessionId(session.session_id.0.as_ref().to_string());
+                    let synopsis = ctx.synopsis.get(&synopsis_key);
                     let draft = entry.map(|e| e.draft.clone()).unwrap_or_default();
+                    let brain = entry.and_then(|e| e.brain_name.clone()).unwrap_or_default();
+                    let cwd = session.cwd.display().to_string();
+                    let short_id = {
+                        let raw = session.session_id.0.as_ref();
+                        raw[..8.min(raw.len())].to_string()
+                    };
 
-                    let mut rows = vec![("Session".into(), id), ("CWD".into(), cwd)];
-                    if !updated.is_empty() {
-                        rows.push(("Updated".into(), updated));
+                    let mut rows: Vec<PreviewRow> = Vec::new();
+
+                    // 1. Last user message (state-first: what was just said)
+                    if let Some(last) = synopsis.as_ref().and_then(|s| s.last_user_msg.clone()) {
+                        rows.push(PreviewRow {
+                            label: "Last".into(),
+                            value: last,
+                            value_style: None,
+                            wrap: false,
+                        });
                     }
-                    if pinned {
-                        rows.push(("Pinned".into(), "\u{2b50}".into()));
-                    }
-                    if archived {
-                        rows.push(("Archived".into(), "yes".into()));
-                    }
+
+                    // 2. Draft (state-first: what's pending)
                     if !draft.is_empty() {
-                        let truncated = if draft.chars().count() > 80 {
-                            let t: String = draft.chars().take(80).collect();
-                            format!("{t}\u{2026}")
-                        } else {
-                            draft.clone()
-                        };
-                        rows.push(("Draft".into(), truncated));
+                        rows.push(PreviewRow {
+                            label: "Draft".into(),
+                            value: draft,
+                            value_style: Some(Style::default().fg(Color::Yellow)),
+                            wrap: false,
+                        });
                     }
+
+                    // 3. Blank separator between state-first and original-intent
+                    rows.push(PreviewRow::default());
+
+                    // 4. Intent (original first message, dim/wrapped)
+                    if let Some(first) = synopsis.as_ref().and_then(|s| s.first_user_msg.clone()) {
+                        rows.push(PreviewRow {
+                            label: "Intent".into(),
+                            value: first,
+                            value_style: Some(Style::default().fg(Color::Gray)),
+                            wrap: true,
+                        });
+                    }
+
+                    // 5. Blank separator
+                    rows.push(PreviewRow::default());
+
+                    // 6. Footer (cwd · brain · short id)
+                    rows.push(PreviewRow {
+                        label: "".into(),
+                        value: format!("{cwd} \u{00b7} {brain} \u{00b7} {short_id}"),
+                        value_style: Some(Style::default().fg(Color::DarkGray)),
+                        wrap: false,
+                    });
+
                     PreviewContent {
                         rows,
                         placeholder: None,
@@ -1048,8 +1171,66 @@ impl SessionPickerView {
     }
 }
 
+/// Truncate a string for row display: cut at the first sentence
+/// boundary or `budget` graphemes, whichever comes first. Strips
+/// leading whitespace. Adds `…` when the cut shortened the text or
+/// when the budget is < 1.
+pub(super) fn truncate_for_row(input: &str, budget: usize) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    let trimmed = input.trim_start();
+    if budget == 0 {
+        return "\u{2026}".to_string();
+    }
+
+    let punct_cut = trimmed.find(['.', '?', '!', '\n']);
+    let punct_text = punct_cut.map(|i| &trimmed[..i]).unwrap_or(trimmed);
+
+    let graphemes: Vec<&str> = punct_text.graphemes(true).collect();
+    if graphemes.len() <= budget && punct_cut.is_none() {
+        return punct_text.to_string();
+    }
+    if graphemes.len() <= budget {
+        return punct_text.to_string();
+    }
+    let mut out: String = graphemes.iter().take(budget).copied().collect();
+    out.push('\u{2026}');
+    out
+}
+
+/// Resolve which label to render for a session-picker row. Precedence:
+/// title_override > first_user_msg > agent title > cwd basename >
+/// "(untitled session)". Empty strings are skipped at each tier.
+pub(super) fn resolve_label(
+    session: &spur_acp::SessionInfo,
+    entry: Option<&crate::session_metadata::SessionEntry>,
+    synopsis: Option<&spur_core::SessionSynopsis>,
+    show_cwd: bool,
+    label_budget: usize,
+) -> String {
+    if let Some(t) = entry
+        .and_then(|e| e.title_override.as_deref())
+        .filter(|t| !t.is_empty())
+    {
+        return truncate_for_row(t, label_budget);
+    }
+    if let Some(snippet) = synopsis
+        .and_then(|s| s.first_user_msg.as_deref())
+        .filter(|s| !s.is_empty())
+    {
+        return truncate_for_row(snippet, label_budget);
+    }
+    if let Some(t) = session.title.as_deref().filter(|t| !t.is_empty()) {
+        return truncate_for_row(t, label_budget);
+    }
+    if show_cwd {
+        return format!("{}/", SessionPickerView::cwd_basename(&session.cwd));
+    }
+    "(untitled session)".to_string()
+}
+
 impl View for SessionPickerView {
-    fn handle_key(&mut self, key: KeyEvent, _ctx: &super::ViewContext) -> Option<Action> {
+    fn handle_key(&mut self, key: KeyEvent, ctx: &super::ViewContext) -> Option<Action> {
         // 0. Confirm-switch intercepts all keys until y/Enter commits or anything else cancels.
         if let Some(ref target) = self.confirm_switch {
             match key.code {
@@ -1139,6 +1320,7 @@ impl View for SessionPickerView {
             match state {
                 PickerState::Populated {
                     sessions,
+                    haystacks,
                     cursor,
                     search_focused,
                     filter,
@@ -1181,6 +1363,7 @@ impl View for SessionPickerView {
                             KeyCode::Down | KeyCode::Char('j') => {
                                 let visible = Self::filtered_indices(
                                     sessions,
+                                    haystacks,
                                     filter,
                                     metadata,
                                     *show_archived,
@@ -1215,6 +1398,7 @@ impl View for SessionPickerView {
                                 } else {
                                     let indices = Self::filtered_indices(
                                         sessions,
+                                        haystacks,
                                         filter,
                                         metadata,
                                         *show_archived,
@@ -1270,7 +1454,19 @@ impl View for SessionPickerView {
                                     let buffer = sessions
                                         .iter()
                                         .find(|s| s.session_id.0.as_ref() == sid.as_str())
-                                        .map(|s| Self::resolved_title(s, metadata, false))
+                                        .map(|s| {
+                                            let synopsis_key = spur_acp::SessionId(
+                                                s.session_id.0.as_ref().to_string(),
+                                            );
+                                            let synopsis = ctx.synopsis.get(&synopsis_key);
+                                            resolve_label(
+                                                s,
+                                                metadata.sessions.get(s.session_id.0.as_ref()),
+                                                synopsis.as_ref(),
+                                                false,
+                                                usize::MAX,
+                                            )
+                                        })
                                         .unwrap_or_default();
                                     post = Post::StartRename {
                                         session_id: sid.clone(),
@@ -1318,7 +1514,10 @@ impl View for SessionPickerView {
         let (banner_area, content_area) = if let Some(acp_id) = self.preselect.as_deref() {
             let [banner, content] =
                 Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-            frame.render_widget(Paragraph::new(self.build_preselect_banner(acp_id)), banner);
+            frame.render_widget(
+                Paragraph::new(self.build_preselect_banner(acp_id, ctx.synopsis)),
+                banner,
+            );
             (Some(banner), content)
         } else {
             (None, area)
@@ -1331,16 +1530,19 @@ impl View for SessionPickerView {
             PickerState::Populated {
                 agent,
                 sessions,
+                haystacks,
                 cursor,
                 search_focused,
                 filter,
             } => self.render_populated(
                 frame,
                 content_area,
+                ctx,
                 ctx.license_badge,
                 ctx.flag_summary,
                 agent,
                 sessions,
+                haystacks,
                 *cursor,
                 *search_focused,
                 filter,
@@ -1372,9 +1574,12 @@ mod current_session_shortcut_tests {
             std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
         static PLAN_PROJECTION: std::sync::OnceLock<spur_core::PlanProjectionStore> =
             std::sync::OnceLock::new();
+        static SYNOPSIS: std::sync::OnceLock<spur_core::SessionSynopsisProjection> =
+            std::sync::OnceLock::new();
         crate::views::ViewContext {
             lineage: &LINEAGE,
             plan_projection: PLAN_PROJECTION.get_or_init(spur_core::PlanProjectionStore::new),
+            synopsis: SYNOPSIS.get_or_init(spur_core::SessionSynopsisProjection::new),
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
             flag_summary: None,
@@ -1388,7 +1593,11 @@ mod current_session_shortcut_tests {
     #[test]
     fn enter_on_current_session_row_navigates_back() {
         let mut picker = SessionPickerView::new();
-        picker.set_sessions("test-brain".into(), vec![make_session("A")]);
+        picker.set_sessions(
+            "test-brain".into(),
+            vec![make_session("A")],
+            test_ctx().synopsis,
+        );
         picker.set_current_session_id(Some("A".into()));
 
         // Cursor starts at 0 ([+ New session]); move to 1 (the A row).
@@ -1415,6 +1624,7 @@ mod current_session_shortcut_tests {
         picker.set_sessions(
             "test-brain".into(),
             vec![make_session("A"), make_session("B")],
+            test_ctx().synopsis,
         );
         picker.set_current_session_id(Some("A".into()));
 
@@ -1446,6 +1656,7 @@ mod current_session_shortcut_tests {
         picker.set_sessions(
             "test-brain".into(),
             vec![make_session("A"), make_session("B")],
+            test_ctx().synopsis,
         );
 
         assert_eq!(picker.cursor(), 2);
@@ -1457,6 +1668,7 @@ mod current_session_shortcut_tests {
         picker.set_sessions(
             "test-brain".into(),
             vec![make_session("A"), make_session("B")],
+            test_ctx().synopsis,
         );
 
         assert_eq!(picker.cursor(), 0);
@@ -1468,9 +1680,9 @@ mod current_session_shortcut_tests {
         let mut session = make_session("B");
         session.title = Some("Build fix".to_string());
         session.updated_at = Some((chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339());
-        picker.set_sessions("test-brain".into(), vec![session]);
+        picker.set_sessions("test-brain".into(), vec![session], test_ctx().synopsis);
 
-        let banner = picker.build_preselect_banner("B");
+        let banner = picker.build_preselect_banner("B", test_ctx().synopsis);
         let text = banner
             .spans
             .iter()
@@ -1490,6 +1702,7 @@ mod current_session_shortcut_tests {
         picker.set_sessions(
             "test-brain".into(),
             vec![make_session("X"), make_session("Y"), make_session("Z")],
+            test_ctx().synopsis,
         );
         // No current session id set — all rows are resume candidates.
 
@@ -1525,6 +1738,322 @@ mod current_session_shortcut_tests {
         assert_ne!(
             before_cursor, after_cursor,
             "picker ignored input — resuming flag likely still present"
+        );
+    }
+}
+
+#[cfg(test)]
+mod preview_render_tests {
+    use super::*;
+    use crate::session_metadata::SessionEntry;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::{backend::TestBackend, buffer::Buffer, layout::Rect, Terminal};
+    use spur_acp::{HistoryEntry, SessionId, SpurEventBody};
+    use std::path::PathBuf;
+
+    fn buffer_text(buf: &Buffer) -> String {
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn preview_prioritizes_state_then_intent_then_footer() {
+        let mut synopsis = spur_core::SessionSynopsisProjection::new();
+        synopsis.apply(&SpurEvent::now(SpurEventBody::SessionHistory {
+            session: SessionId("a1xxxxxx".into()),
+            entries: vec![
+                HistoryEntry {
+                    role: "user".into(),
+                    text: "original goal".into(),
+                },
+                HistoryEntry {
+                    role: "assistant".into(),
+                    text: "ack".into(),
+                },
+                HistoryEntry {
+                    role: "user".into(),
+                    text: "latest request".into(),
+                },
+            ],
+        }));
+
+        let lineage = spur_core::lineage::projection::ExecutorLineage::new();
+        let plan_projection = spur_core::PlanProjectionStore::new();
+        let brain_status = crate::app::BrainStatus::Idle;
+        let ctx = crate::views::ViewContext {
+            lineage: &lineage,
+            plan_projection: &plan_projection,
+            synopsis: &synopsis,
+            brain_status: &brain_status,
+            license_badge: None,
+            flag_summary: None,
+        };
+
+        let mut metadata = SessionMetadata::default();
+        metadata.sessions.insert(
+            "a1xxxxxx".into(),
+            SessionEntry {
+                draft: "unsent edit".into(),
+                brain_name: Some("claude".into()),
+                ..SessionEntry::default()
+            },
+        );
+
+        let mut picker = SessionPickerView::new();
+        picker.set_metadata(metadata);
+        picker.set_sessions(
+            "claude".into(),
+            vec![SessionInfo::new(
+                "a1xxxxxx".to_string(),
+                PathBuf::from("/work/spur"),
+            )],
+            ctx.synopsis,
+        );
+        let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE), &ctx);
+
+        let backend = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|frame| picker.render(frame, Rect::new(0, 0, 80, 24), &ctx))
+            .unwrap();
+
+        let text = buffer_text(term.backend().buffer());
+        assert!(text.contains("Last: latest request"));
+        assert!(text.contains("Draft: unsent edit"));
+        assert!(text.contains("Intent: original goal"));
+        assert!(text.contains("/work/spur \u{00b7} claude \u{00b7} a1xxxxxx"));
+        assert!(!text.contains("Session: a1xxxxxx"));
+        assert!(!text.contains("CWD: /work/spur"));
+    }
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::truncate_for_row;
+
+    #[test]
+    fn keeps_short_text_unchanged() {
+        assert_eq!(truncate_for_row("short", 10), "short");
+    }
+
+    #[test]
+    fn cuts_at_first_sentence_boundary() {
+        assert_eq!(
+            truncate_for_row("First sentence. Second one.", 100),
+            "First sentence"
+        );
+    }
+
+    #[test]
+    fn cuts_at_first_question_mark() {
+        assert_eq!(truncate_for_row("Why? Because.", 100), "Why");
+    }
+
+    #[test]
+    fn cuts_at_newline() {
+        assert_eq!(truncate_for_row("line one\nline two", 100), "line one");
+    }
+
+    #[test]
+    fn cuts_at_grapheme_budget_with_ellipsis() {
+        assert_eq!(truncate_for_row("abcdefghij", 5), "abcde\u{2026}");
+    }
+
+    #[test]
+    fn handles_unicode_grapheme_clusters() {
+        let s = "ééééé";
+        assert_eq!(truncate_for_row(s, 3), "ééé\u{2026}");
+    }
+
+    #[test]
+    fn returns_ellipsis_when_budget_under_one() {
+        assert_eq!(truncate_for_row("anything", 0), "\u{2026}");
+    }
+
+    #[test]
+    fn strips_leading_whitespace() {
+        assert_eq!(truncate_for_row("   hello", 10), "hello");
+    }
+}
+
+#[cfg(test)]
+mod resolve_label_tests {
+    use super::*;
+    use crate::session_metadata::SessionEntry;
+    use spur_acp::SessionInfo;
+    use spur_core::SessionSynopsis;
+    use std::path::PathBuf;
+
+    fn info_with_title(title: Option<&str>) -> SessionInfo {
+        let mut info = SessionInfo::new("S1".to_string(), PathBuf::from("/tmp/proj"));
+        info.title = title.map(|t| t.to_string());
+        info
+    }
+
+    fn entry_with_override(t: Option<&str>) -> SessionEntry {
+        SessionEntry {
+            title_override: t.map(|s| s.to_string()),
+            ..SessionEntry::default()
+        }
+    }
+
+    fn synopsis_with_first(t: Option<&str>) -> SessionSynopsis {
+        SessionSynopsis {
+            first_user_msg: t.map(|s| s.to_string()),
+            last_user_msg: None,
+        }
+    }
+
+    #[test]
+    fn title_override_wins_over_everything() {
+        let info = info_with_title(Some("agent title"));
+        let entry = entry_with_override(Some("manual rename"));
+        let synopsis = synopsis_with_first(Some("first user msg"));
+        assert_eq!(
+            resolve_label(&info, Some(&entry), Some(&synopsis), false, 60),
+            "manual rename"
+        );
+    }
+
+    #[test]
+    fn first_user_msg_beats_agent_title_when_no_override() {
+        let info = info_with_title(Some("agent title"));
+        let entry = entry_with_override(None);
+        let synopsis = synopsis_with_first(Some("real intent"));
+        assert_eq!(
+            resolve_label(&info, Some(&entry), Some(&synopsis), false, 60),
+            "real intent"
+        );
+    }
+
+    #[test]
+    fn agent_title_used_when_no_synopsis() {
+        let info = info_with_title(Some("agent title"));
+        let entry = entry_with_override(None);
+        let synopsis = synopsis_with_first(None);
+        assert_eq!(
+            resolve_label(&info, Some(&entry), Some(&synopsis), false, 60),
+            "agent title"
+        );
+    }
+
+    #[test]
+    fn cwd_fallback_when_no_title_or_synopsis() {
+        let info = info_with_title(None);
+        let entry = entry_with_override(None);
+        assert_eq!(resolve_label(&info, Some(&entry), None, true, 60), "proj/");
+    }
+
+    #[test]
+    fn final_fallback_to_untitled_session() {
+        let info = info_with_title(None);
+        assert_eq!(
+            resolve_label(&info, None, None, false, 60),
+            "(untitled session)"
+        );
+    }
+
+    #[test]
+    fn empty_string_override_is_skipped() {
+        let info = info_with_title(Some("agent title"));
+        let entry = entry_with_override(Some(""));
+        let synopsis = synopsis_with_first(Some("first user msg"));
+        assert_eq!(
+            resolve_label(&info, Some(&entry), Some(&synopsis), false, 60),
+            "first user msg"
+        );
+    }
+}
+
+#[cfg(test)]
+mod filter_haystack_tests {
+    use super::*;
+    use crate::session_metadata::SessionMetadata;
+    use spur_core::{SessionSynopsis, SessionSynopsisProjection};
+    use std::path::PathBuf;
+
+    fn make_session(id: &str, title: Option<&str>) -> SessionInfo {
+        let mut s = SessionInfo::new(id.to_string(), PathBuf::from("/tmp"));
+        s.title = title.map(|t| t.to_string());
+        s
+    }
+
+    fn set_filter(picker: &mut SessionPickerView, value: &str) {
+        let PickerState::Populated { filter, .. } = &mut picker.state else {
+            panic!("picker should be populated");
+        };
+        *filter = value.to_string();
+    }
+
+    #[test]
+    fn filter_matches_first_user_msg_even_when_label_does_not() {
+        let sessions = vec![make_session("S1", Some("Build fix"))];
+        let metadata = SessionMetadata::default();
+
+        let mut synopsis = SessionSynopsisProjection::new();
+        synopsis.insert_for_test(
+            spur_acp::SessionId("S1".into()),
+            SessionSynopsis {
+                first_user_msg: Some("refactor auth callers".into()),
+                last_user_msg: Some("ack".into()),
+            },
+        );
+
+        let picker = SessionPickerView::new();
+        let haystacks: Vec<String> = sessions
+            .iter()
+            .map(|session| picker.build_haystack_for(session, &synopsis))
+            .collect();
+
+        let indices =
+            SessionPickerView::filtered_indices(&sessions, &haystacks, "auth", &metadata, false);
+        assert_eq!(
+            indices,
+            vec![0],
+            "filter 'auth' should match synopsis content"
+        );
+    }
+
+    #[test]
+    fn haystack_cache_does_not_pick_up_late_synopsis_updates() {
+        let mut picker = SessionPickerView::new();
+        let sessions = vec![make_session("S1", Some("Build fix"))];
+        let mut synopsis = SessionSynopsisProjection::new();
+        synopsis.insert_for_test(
+            spur_acp::SessionId("S1".into()),
+            SessionSynopsis {
+                first_user_msg: Some("alpha tag".into()),
+                last_user_msg: None,
+            },
+        );
+
+        picker.set_sessions("agent".into(), sessions, &synopsis);
+
+        synopsis.insert_for_test(
+            spur_acp::SessionId("S1".into()),
+            SessionSynopsis {
+                first_user_msg: Some("beta tag".into()),
+                last_user_msg: None,
+            },
+        );
+
+        set_filter(&mut picker, "alpha");
+        assert_eq!(
+            picker.visible_session_count(),
+            1,
+            "should still find session by cached 'alpha' haystack"
+        );
+
+        set_filter(&mut picker, "beta");
+        assert_eq!(
+            picker.visible_session_count(),
+            0,
+            "should not find session by late 'beta' synopsis update"
         );
     }
 }
