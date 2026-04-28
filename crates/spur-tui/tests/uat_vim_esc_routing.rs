@@ -1,6 +1,7 @@
 mod common;
 
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::KeyCode;
+use spur_tui::action::Action;
 use spur_tui::components::input_bar::{EditMode, VimMode};
 
 use common::TestHarness;
@@ -9,7 +10,7 @@ use common::TestHarness;
 fn vim_insert_esc_routes_to_input_bar_before_global_handlers() {
     let mut h = TestHarness::new(80, 24);
 
-    h.send_key_with_mods(KeyCode::Char('i'), KeyModifiers::ALT);
+    spur_tui::test_support::process_action(h.app_mut(), Action::ToggleVimMode);
     h.send_key(KeyCode::Char('i'));
     assert_eq!(
         h.app_mut()

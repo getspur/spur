@@ -204,6 +204,7 @@ impl StatusBar {
                 }
                 ViewId::SessionPicker => " [\u{2191}\u{2193}]navigate [Enter]select [Esc]back",
                 ViewId::PlanInspector(_) => " [Esc]back [Alt-p]close",
+                ViewId::Insights => "Insights",
                 #[cfg(feature = "markdown")]
                 ViewId::MermaidOverlay(_) => " [Esc]close",
             }
