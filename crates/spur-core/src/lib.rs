@@ -18,6 +18,7 @@ pub mod peer_mailbox;
 pub mod plan_projection;
 pub mod retry_loop;
 pub mod review_sink;
+pub mod session_synopsis;
 pub mod skills;
 pub mod skip_perm;
 pub mod spur_ext_interp;
@@ -34,6 +35,7 @@ pub use orchestrator::{
 };
 pub use plan_projection::{PlanProjectionStore, TrackedPlan, TrackedTask};
 pub use review_sink::{ReviewSink, ReviewSinkError};
+pub use session_synopsis::{SessionSynopsis, SessionSynopsisProjection};
 pub use spur_acp::{
     Artifact, DiffSummary, LifecycleState, ReviewDecision, ReviewKind, ReviewPayload, Role,
 };
