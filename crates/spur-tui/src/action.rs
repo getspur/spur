@@ -163,6 +163,14 @@ pub enum Action {
     /// highest-priority executor pre-selected (AwaitingReview > Running
     /// > most recent worker). Emitted by Alt+w in SessionDetailView.
     InspectWorkers,
+    /// Plan C Tier 2 — show the capability-tease modal in response to
+    /// a TUI-side feature-gate denial. The orchestrator-resolved
+    /// `required_tier` (if any) is surfaced as the upgrade target;
+    /// `None` means the policy does not yet grant the key on any tier.
+    ShowUpgradeModal {
+        err: spur_license::FeatureGateError,
+        required_tier: Option<spur_license::Plan>,
+    },
 }
 
 /// Which permission option the user selected.
