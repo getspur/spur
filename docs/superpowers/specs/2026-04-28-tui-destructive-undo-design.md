@@ -199,9 +199,51 @@ Equivalent shape for `Action::ToggleSessionArchive`, `Action::ToggleSessionPin`,
 
 If the inverse dispatch FAILS at backend (e.g. beads write error), the `IssueAction::UpdateStatus` arm's existing error path fires — `App` extends it to call `self.flash_hint("Undo failed: …; original action stands", Duration::from_secs(3))`. The user sees their request was rejected.
 
-### 4.5.1 Two `SubmitReview` emit sites
+### 4.5.1 Two `SubmitReview` emit sites + dispatch-vs-install bifurcation
 
 Claude-code's feasibility review noted that `SubmitReview` is dispatched from two locations in `dashboard.rs`: the vim Normal handler at `:1112` and the Insert-mode handler at `:1238`. Both already route through `App::process_action(Action::SubmitReview { … })` — installing the queue tombstone in `process_action`'s `Action::SubmitReview` arm covers both sites with a single change. No view-level patching needed.
+
+**Re-entrance hazard (amendment 2026-04-28, brain self-review found this latent at Task 9):** if both the user-press path AND the tick-driven 3s-expiry dispatch route through the same `process_action(Action::SubmitReview)` arm, the tick-expiry would re-install another tombstone instead of actually sending the review — the action would never reach the ACP backend (infinite-delay loop, review never sent).
+
+**Resolution: bifurcate the dispatch path.** Introduce a new `Action::SubmitReviewDispatch { ... }` variant whose `process_action` arm performs the bare ACP send WITHOUT installing a tombstone. The existing `Action::SubmitReview { ... }` arm continues to install the queue tombstone (no actual send). Tombstone's `pending` field stores the *Dispatch* variant.
+
+```rust
+// User presses A → Dashboard returns Action::SubmitReview { decision: Approve, … }
+// process_action arm:
+Action::SubmitReview { ref executor_id, attempt_n, decision } => {
+    let pending = Action::SubmitReviewDispatch {
+        executor_id: executor_id.clone(),
+        attempt_n,
+        decision,
+    };
+    self.tombstones.install(Tombstone {
+        view: ViewId::Dashboard,
+        kind: TombstoneKind::QueuedRemote { pending },
+        label: format!("{}", decision),
+        created_at: Instant::now(),
+        expires_at: Instant::now() + Duration::from_secs(3),
+    });
+    self.flash_hint(format!("{} — press u to revert (3s)", decision),
+                    Duration::from_secs(2));
+    // No actual send. Send happens via tick-expiry → SubmitReviewDispatch.
+}
+
+// 3s tick-expiry → tombstones.tick(now) returns vec![Action::SubmitReviewDispatch { … }]
+// process_action arm:
+Action::SubmitReviewDispatch { ref executor_id, attempt_n, decision } => {
+    // Bare ACP send. Reuses existing send-review code path — no tombstone install.
+    self.send_review_to_acp(executor_id, attempt_n, decision);
+    self.flash_hint_short("Sent.");
+}
+```
+
+The displaced-by-next-action path (§4.3 bullet 6) also dispatches the displaced `Action::SubmitReviewDispatch` directly — same bare-send path, no re-install.
+
+The `u` cancel path is unchanged: tombstone evicted, `pending` (the Dispatch variant) is dropped, never dispatched.
+
+This bifurcation also prevents the brain-self-review's secondary concern: if process_action ever runs into a cycle where install-arms call other install-arms, the bifurcation ensures dispatch-arms are terminal (no further installs).
+
+The same bifurcation pattern applies to any future QueuedRemote action class — define a `*Dispatch` variant for the bare-send path. Reversible tombstones don't need bifurcation (their inverse is the SAME variant as the install, and the install arm correctly captures-and-dispatches; tick-expiry of Reversible silently drops without re-dispatch per §4.7).
 
 ### 4.6 `u` / `Ctrl+Z` keystroke handler
 
