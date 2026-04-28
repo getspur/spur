@@ -104,11 +104,12 @@ impl SpurAgentCaps {
         )
     }
 
-    /// Display label for the active reasoning effort.
+    /// Display label for the active reasoning effort from a config-options
+    /// snapshot. Callers with live session state should pass that fresh
+    /// snapshot instead of the frozen caps copy captured at session init.
     #[must_use]
-    pub fn current_effort_label(&self) -> Option<String> {
-        let option = self
-            .config_options
+    pub fn effort_label_from(options: &[SessionConfigOption]) -> Option<String> {
+        let option = options
             .iter()
             .find(|option| option.id.0.as_ref() == "reasoning_effort")?;
 
@@ -131,6 +132,14 @@ impl SpurAgentCaps {
         };
 
         Some(name.unwrap_or_else(|| current.to_string()))
+    }
+
+    /// Display label for the active reasoning effort from this caps snapshot.
+    /// This is the initial session state only; TUI status rendering should
+    /// prefer live `BrainSession.config_options` snapshots when available.
+    #[must_use]
+    pub fn current_effort_label(&self) -> Option<String> {
+        Self::effort_label_from(&self.config_options)
     }
 
     /// Whether this agent is expected to emit usage updates.
