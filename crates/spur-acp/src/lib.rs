@@ -1,4 +1,5 @@
 pub mod adapter;
+pub mod agent_quirks;
 pub mod agents;
 pub mod config;
 pub mod connection;
