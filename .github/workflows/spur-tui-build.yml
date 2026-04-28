@@ -1,0 +1,30 @@
+name: spur-tui build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    name: spur-tui (${{ matrix.features.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        features:
+          - name: no-default
+            flag: "--no-default-features"
+          - name: default
+            flag: ""
+          - name: analytics
+            flag: "--features analytics"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check
+        run: cargo check -p spur-tui ${{ matrix.features.flag }}
+
+      - name: Test
+        run: cargo test -p spur-tui ${{ matrix.features.flag }} --lib
