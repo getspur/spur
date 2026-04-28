@@ -6,6 +6,7 @@ pub mod domain;
 pub mod error;
 pub mod ext;
 pub mod orphan_registry;
+pub mod process_inspector;
 pub mod protocol;
 pub mod registry;
 pub mod session_liveness;

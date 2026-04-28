@@ -947,20 +947,18 @@ fn acp_thread_main(
 
             // Persist a registry record so the next-boot sweep can
             // reconcile this pgid even if spur dies before reaping it.
-            // ProcessInspector start_time hooks are stubbed here; Task 5
-            // wires real per-OS reads.
             let registry = crate::orphan_registry::PgidRegistry::new(
                 repo_root.join(".spur").join("pgids"),
             );
-            let now = chrono::Utc::now().timestamp();
             let rec = crate::orphan_registry::PgidRecord {
                 spur_pid: std::process::id() as i32,
-                spur_pid_start_time: now, // STUB — T5 wires real inspector
+                spur_pid_start_time: crate::process_inspector::starttime_of_self(),
                 agent_name: agent_name.clone(),
                 cmd: format!("{} {}", command, extra_args.join(" ")),
                 pgid: pid as i32,
-                pgid_leader_start_time: now, // STUB — T5 wires real inspector
-                spawned_at: now,
+                pgid_leader_start_time: crate::process_inspector::starttime_of(pid as i32)
+                    .unwrap_or(0),
+                spawned_at: chrono::Utc::now().timestamp(),
             };
             if let Err(e) = registry.write(&rec) {
                 tracing::warn!(
