@@ -177,6 +177,7 @@ mod tests {
 
         assert!(text.contains("Timeline"), "rendered:\n{text}");
         assert!(text.contains("Granularity"), "rendered:\n{text}");
+        assert!(text.contains("[D]aily"), "rendered:\n{text}");
         assert!(text.contains("2026-04-28"), "rendered:\n{text}");
         assert!(text.contains("█"), "rendered:\n{text}");
     }
