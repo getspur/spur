@@ -111,6 +111,21 @@ mod tests {
         NewSessionResponse::new(SessionId::new("test-empty"))
     }
 
+    #[test]
+    fn serialized_caps_include_agent_kind() {
+        let init = empty_init_response();
+        let new = empty_new_session_response();
+        let caps = SpurAgentCaps::new(&init, &new);
+
+        let value = serde_json::to_value(caps).expect("caps must serialize");
+
+        assert_eq!(
+            value.get("agent_kind").and_then(serde_json::Value::as_str),
+            Some("codex-acp"),
+            "caps snapshots must carry the agent kind that created them"
+        );
+    }
+
     fn agent_caps_with_meta(key: &str, val: serde_json::Value) -> AgentCapabilities {
         let mut meta = serde_json::Map::new();
         meta.insert(key.to_string(), val);
