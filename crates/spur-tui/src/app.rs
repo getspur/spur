@@ -1496,7 +1496,7 @@ impl App {
                 }
 
                 if key.modifiers.contains(KeyModifiers::ALT)
-                    && matches!(key.code, KeyCode::Char('i'))
+                    && matches!(key.code, KeyCode::Char('a'))
                 {
                     self.process_action(Action::OpenInsights);
                     return;
@@ -4098,10 +4098,10 @@ mod insights_navigation_tests {
     use super::*;
 
     #[test]
-    fn alt_i_opens_insights_view() {
+    fn alt_a_opens_insights_view() {
         let mut app = App::new_for_tests();
 
-        app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT));
+        app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT));
 
         assert_eq!(app.current_view(), &ViewId::Insights);
     }
