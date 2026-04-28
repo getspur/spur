@@ -930,6 +930,13 @@ impl App {
                     return;
                 }
 
+                if key.modifiers.contains(KeyModifiers::ALT)
+                    && matches!(key.code, KeyCode::Char('i'))
+                {
+                    self.process_action(Action::OpenInsights);
+                    return;
+                }
+
                 let ctx = crate::views::ViewContext {
                     lineage: &self.lineage,
                     plan_projection: &self.plan_projection,
@@ -962,6 +969,7 @@ impl App {
                         .issue_browser
                         .as_mut()
                         .and_then(|view| view.handle_key(key, &ctx)),
+                    ViewId::Insights => None,
                     #[cfg(feature = "markdown")]
                     ViewId::MermaidOverlay(_) => {
                         if let Some(viewer) = self.mermaid_viewer.as_mut() {
@@ -1045,6 +1053,7 @@ impl App {
                     }
                     ViewId::PlanInspector(_) => {}
                     ViewId::IssueBrowser => {}
+                    ViewId::Insights => {}
                     #[cfg(feature = "markdown")]
                     ViewId::MermaidOverlay(_) => {}
                 }
@@ -1124,6 +1133,7 @@ impl App {
                     }
                 }
             }
+            ViewId::Insights => {}
             #[cfg(feature = "markdown")]
             ViewId::MermaidOverlay(_) => {}
         }
@@ -1565,6 +1575,11 @@ impl App {
                     self.issue_browser = Some(IssueBrowserView::new());
                 }
                 self.current_view = ViewId::IssueBrowser;
+                self.dirty = true;
+            }
+
+            Action::OpenInsights | Action::NavigateTo(ViewId::Insights) => {
+                self.current_view = ViewId::Insights;
                 self.dirty = true;
             }
 
@@ -2495,6 +2510,7 @@ impl App {
                     view.tick();
                 }
             }
+            ViewId::Insights => {}
             #[cfg(feature = "markdown")]
             ViewId::MermaidOverlay(_) => {
                 // The underlying session detail continues receiving
@@ -2571,6 +2587,7 @@ impl App {
                     view.render(frame, view_area, &ctx);
                 }
             }
+            ViewId::Insights => {}
             #[cfg(feature = "markdown")]
             ViewId::MermaidOverlay(ref session) => {
                 let session_matches = self
@@ -3021,6 +3038,20 @@ impl App {
     /// `SessionMetadataStore::load`.
     pub fn new_for_tests() -> Self {
         App::new(None, false)
+    }
+}
+
+#[cfg(test)]
+mod insights_navigation_tests {
+    use super::*;
+
+    #[test]
+    fn alt_i_opens_insights_view() {
+        let mut app = App::new_for_tests();
+
+        app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT));
+
+        assert_eq!(app.current_view(), &ViewId::Insights);
     }
 }
 
