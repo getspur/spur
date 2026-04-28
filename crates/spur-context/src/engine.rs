@@ -213,21 +213,37 @@ impl AnalyticsEngine {
 
     fn newest_agent_mtime() -> Option<std::time::SystemTime> {
         let mut newest: Option<std::time::SystemTime> = None;
-        for dir in [
-            Self::discover_claude_dir(),
-            Self::discover_codex_dir(),
-            Self::discover_kiro_dir(),
-            Self::discover_kimi_dir(),
-        ] {
-            if let Ok(files) = Self::find_jsonl_files(&dir) {
-                for f in files {
-                    if let Ok(meta) = std::fs::metadata(&f) {
-                        if let Ok(m) = meta.modified() {
-                            newest = Some(match newest {
-                                Some(cur) if cur >= m => cur,
-                                _ => m,
-                            });
+        {
+            let mut bump = |m| {
+                newest = Some(match newest {
+                    Some(cur) if cur >= m => cur,
+                    _ => m,
+                });
+            };
+
+            for dir in [
+                Self::discover_claude_dir(),
+                Self::discover_codex_dir(),
+                Self::discover_kiro_dir(),
+                Self::discover_kimi_dir(),
+            ] {
+                if let Ok(files) = Self::find_jsonl_files(&dir) {
+                    for f in files {
+                        if let Ok(meta) = std::fs::metadata(&f) {
+                            if let Ok(m) = meta.modified() {
+                                bump(m);
+                            }
                         }
+                    }
+                }
+            }
+
+            // OpenCode is a single SQLite file, not a directory walk.
+            let opencode_db = Self::discover_opencode_db();
+            if opencode_db.is_file() {
+                if let Ok(meta) = std::fs::metadata(&opencode_db) {
+                    if let Ok(m) = meta.modified() {
+                        bump(m);
                     }
                 }
             }
@@ -1743,7 +1759,10 @@ pub struct LiveSnapshot {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn setup_engine() -> AnalyticsEngine {
         let engine = AnalyticsEngine::open_in_memory().unwrap();
@@ -2057,6 +2076,33 @@ mod tests {
         assert_eq!(strip_provider_prefix(""), "");
         assert_eq!(strip_provider_prefix("/leading-slash"), "leading-slash");
         assert_eq!(strip_provider_prefix("a/b/c"), "b/c");
+    }
+
+    #[test]
+    fn newest_agent_mtime_detects_opencode_db_changes() {
+        use filetime::FileTime;
+        use std::time::{Duration, SystemTime};
+
+        let _env_guard = ENV_LOCK.lock().unwrap();
+        let tmp = TempDir::new().unwrap();
+        let opencode_dir = tmp.path().join(".local/share/opencode");
+        std::fs::create_dir_all(&opencode_dir).unwrap();
+        let opencode_db = opencode_dir.join("opencode.db");
+        std::fs::write(&opencode_db, b"").unwrap();
+        env::set_var("OPENCODE_DATA_DIR", &opencode_dir);
+
+        let first = AnalyticsEngine::newest_agent_mtime().unwrap();
+
+        let bumped = SystemTime::now() + Duration::from_secs(60);
+        filetime::set_file_mtime(&opencode_db, FileTime::from_system_time(bumped)).unwrap();
+
+        let second = AnalyticsEngine::newest_agent_mtime().unwrap();
+        assert!(
+            second > first,
+            "expected newest_agent_mtime to detect OpenCode DB mtime change"
+        );
+
+        env::remove_var("OPENCODE_DATA_DIR");
     }
 
     #[test]
