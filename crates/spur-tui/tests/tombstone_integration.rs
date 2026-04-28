@@ -150,3 +150,44 @@ fn undo_blocked_by_help_overlay_flashes_close_hint() {
         "expected close-help hint"
     );
 }
+
+#[test]
+fn tombstone_installs_on_archive_with_60s_window() {
+    let mut app = App::new_for_tests();
+    let before = Instant::now();
+    process_action(
+        &mut app,
+        Action::ToggleSessionArchive {
+            session_id: "s1".into(),
+            via_legacy_key: false,
+        },
+    );
+    let ts = app.tombstones_for_test().peek(&ViewId::SessionPicker);
+    assert!(ts.is_some(), "tombstone must be installed");
+    let ts = ts.unwrap();
+    assert!(matches!(ts.kind, TombstoneKind::Reversible { .. }));
+    let elapsed = ts.expires_at.saturating_duration_since(before);
+    assert!(
+        elapsed >= Duration::from_secs(59) && elapsed <= Duration::from_secs(61),
+        "expires_at must be ~60s from now, got {elapsed:?}"
+    );
+}
+
+#[test]
+fn tombstone_archive_undo_restores_via_inverse() {
+    let mut app = App::new_for_tests();
+    process_action(
+        &mut app,
+        Action::ToggleSessionArchive {
+            session_id: "s1".into(),
+            via_legacy_key: false,
+        },
+    );
+    process_action(&mut app, Action::NavigateTo(ViewId::SessionPicker));
+    app.handle_undo_for_test();
+    assert!(!app.tombstones_for_test().has(&ViewId::SessionPicker));
+    assert!(matches!(
+        app.last_action_for_test(),
+        Some(Action::ToggleSessionArchive { .. })
+    ));
+}

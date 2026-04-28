@@ -27,7 +27,7 @@ use crate::components::palette_sources::{
 };
 use crate::components::quit_confirm::QuitConfirmDialog;
 use crate::components::status_bar::{HintOverride, LicenseBadge, LicenseBadgeTone};
-use crate::components::tombstone::TombstoneKind;
+use crate::components::tombstone::{Tombstone, TombstoneKind};
 use crate::components::upgrade_modal::{self, UpgradeModalState};
 use crate::input_history::{InputHistoryEntry, HISTORY_CAP};
 use crate::session_metadata::{ReadOnlyFutureSchema, SessionMetadataStore};
@@ -309,6 +309,8 @@ pub struct App {
     /// Per-view tombstone slots for Gmail-toast-style destructive-action undo.
     /// Driven by tick; install points live in process_action arms.
     tombstones: crate::components::tombstone::TombstoneSlots,
+    /// Suppresses tombstone re-install while an undo inverse is replayed.
+    tombstone_undo_replay: bool,
     /// Loaded Spur configuration. Used to resolve per-agent `AgentConfig`
     /// at session-creation time (see `resolve_agent_config`). Defaults to
     /// `SpurConfig::default()` when no config is supplied.
@@ -477,6 +479,7 @@ impl App {
             metadata_store,
             edit_mode: EditMode::from(config.tui.edit_mode),
             tombstones: crate::components::tombstone::TombstoneSlots::new(),
+            tombstone_undo_replay: false,
             config,
             palette_visible: false,
             palette_state: crate::components::palette::PaletteState::new(),
@@ -1401,7 +1404,9 @@ impl App {
         match tombstone.kind {
             TombstoneKind::Reversible { inverse } => {
                 self.flash_hint_short(format!("Undid: {}", tombstone.label));
+                self.tombstone_undo_replay = true;
                 self.process_action(inverse);
+                self.tombstone_undo_replay = false;
             }
             TombstoneKind::QueuedRemote { pending: _ } => {
                 self.flash_hint_short(format!("Cancelled: {}", tombstone.label));
@@ -2315,6 +2320,33 @@ impl App {
                 if via_legacy_key && !self.legacy_archive_hint_shown {
                     self.flash_hint_short(LEGACY_ARCHIVE_HINT);
                     self.legacy_archive_hint_shown = true;
+                }
+                if !self.tombstone_undo_replay {
+                    let will_archive = !self
+                        .metadata_store
+                        .entry(&session_id)
+                        .is_some_and(|entry| entry.archived);
+                    let label = if will_archive {
+                        format!("Archived '{}'", session_id)
+                    } else {
+                        format!("Restored '{}'", session_id)
+                    };
+                    let now = Instant::now();
+                    let inverse = Action::ToggleSessionArchive {
+                        session_id: session_id.clone(),
+                        via_legacy_key: false,
+                    };
+                    self.tombstones.install(Tombstone {
+                        view: ViewId::SessionPicker,
+                        kind: TombstoneKind::Reversible { inverse },
+                        label: label.clone(),
+                        created_at: now,
+                        expires_at: now + Duration::from_secs(60),
+                    });
+                    self.flash_hint(
+                        format!("{} — press u to undo", label),
+                        Duration::from_secs(2),
+                    );
                 }
                 let entry = self.metadata_store.entry_mut(&session_id);
                 entry.archived = !entry.archived;
