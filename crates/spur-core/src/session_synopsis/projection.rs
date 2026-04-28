@@ -21,7 +21,6 @@ pub struct SessionSynopsis {
 #[derive(Debug, Default)]
 pub struct SessionSynopsisProjection {
     by_session: HashMap<SessionId, SessionSynopsis>,
-    #[allow(dead_code)] // Populated by `apply` in Task 2; commit-on-read uses it in Task 9.
     pending: HashMap<SessionId, String>,
 }
 
@@ -35,11 +34,98 @@ impl SessionSynopsisProjection {
     pub fn get(&self, id: &SessionId) -> Option<SessionSynopsis> {
         self.by_session.get(id).cloned()
     }
+
+    /// Fold an event into the projection. Idempotent on irrelevant variants.
+    // Outer `match` has a single arm for now; later tasks add more event variants.
+    #[allow(clippy::single_match)]
+    pub fn apply(&mut self, event: &spur_acp::SpurEvent) {
+        use agent_client_protocol::schema::SessionUpdate;
+        use spur_acp::domain::events::SpurEventBody;
+
+        match &event.body {
+            SpurEventBody::AgentNotification {
+                session,
+                notification,
+            } => match &notification.update {
+                SessionUpdate::UserMessageChunk(chunk) => {
+                    let text = content_block_text(&chunk.content);
+                    self.pending
+                        .entry(session.clone())
+                        .or_default()
+                        .push_str(text);
+                }
+                // Any non-user agent update flushes the pending buffer.
+                SessionUpdate::AgentMessageChunk(_)
+                | SessionUpdate::AgentThoughtChunk(_)
+                | SessionUpdate::ToolCall(_)
+                | SessionUpdate::ToolCallUpdate(_)
+                | SessionUpdate::Plan(_)
+                | SessionUpdate::AvailableCommandsUpdate(_)
+                | SessionUpdate::CurrentModeUpdate(_) => {
+                    self.flush_pending(session);
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    fn flush_pending(&mut self, session: &SessionId) {
+        let buf = match self.pending.remove(session) {
+            Some(b) => b,
+            None => return,
+        };
+        let trimmed = buf.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let s = self.by_session.entry(session.clone()).or_default();
+        if s.first_user_msg.is_none() {
+            s.first_user_msg = Some(trimmed.to_owned());
+        }
+        s.last_user_msg = Some(trimmed.to_owned());
+    }
+}
+
+fn content_block_text(content: &agent_client_protocol::schema::ContentBlock) -> &str {
+    use agent_client_protocol::schema::ContentBlock;
+    match content {
+        ContentBlock::Text(t) => &t.text,
+        _ => "",
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_client_protocol::schema::{
+        ContentBlock, ContentChunk, SessionNotification, SessionUpdate, TextContent,
+    };
+    use spur_acp::domain::events::{SpurEvent, SpurEventBody};
+
+    fn user_chunk_event(session: &str, text: &str) -> SpurEvent {
+        SpurEvent::now(SpurEventBody::AgentNotification {
+            session: SessionId(session.into()),
+            notification: Box::new(SessionNotification::new(
+                agent_client_protocol::schema::SessionId::new(session),
+                SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Text(
+                    TextContent::new(text),
+                ))),
+            )),
+        })
+    }
+
+    fn agent_chunk_event(session: &str, text: &str) -> SpurEvent {
+        SpurEvent::now(SpurEventBody::AgentNotification {
+            session: SessionId(session.into()),
+            notification: Box::new(SessionNotification::new(
+                agent_client_protocol::schema::SessionId::new(session),
+                SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                    TextContent::new(text),
+                ))),
+            )),
+        })
+    }
 
     #[test]
     fn projection_starts_empty() {
@@ -52,5 +138,21 @@ mod tests {
         let s = SessionSynopsis::default();
         assert!(s.first_user_msg.is_none());
         assert!(s.last_user_msg.is_none());
+    }
+
+    #[test]
+    fn first_user_chunk_is_buffered_then_flushed_on_agent_reply() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&user_chunk_event("S1", "fix the auth bug"));
+
+        // Pending — not yet committed.
+        assert!(proj.get(&SessionId("S1".into())).is_none());
+
+        // Agent reply triggers flush.
+        proj.apply(&agent_chunk_event("S1", "I'll take a look."));
+
+        let s = proj.get(&SessionId("S1".into())).expect("synopsis present");
+        assert_eq!(s.first_user_msg.as_deref(), Some("fix the auth bug"));
+        assert_eq!(s.last_user_msg.as_deref(), Some("fix the auth bug"));
     }
 }
