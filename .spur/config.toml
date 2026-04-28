@@ -327,7 +327,7 @@ inherit_defaults = true
 [[agents.entries]]
 name = "kimi"
 command = "kimi"
-args = ["acp"]
+args = ["-y", "acp"]
 transport = "acp"
 kind = "generic"
 role = "both"
@@ -356,7 +356,7 @@ static = []
 
 [agents.entries.permissions]
 skip = true
-args = ["-y"]
+args = [""]
 session_mode = "full-auto"
 
 [agents.entries.delegation]
