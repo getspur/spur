@@ -11,6 +11,7 @@ python/dist/
 .bv/
 **/.spur/events/**
 **/.spur/logs/**
+**/.spur/pgids/**
 .spur/session_metadata.json
 **/.spur/session_metadata.json
 **/.spur/session_metadata.json.tmp
