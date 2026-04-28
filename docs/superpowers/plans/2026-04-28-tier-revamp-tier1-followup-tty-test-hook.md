@@ -1,9 +1,15 @@
 # Tier Revamp Plan C — Tier 1 Follow-up: `SPUR_FORCE_TTY` Test Hook
 
-**Status:** Open follow-up. Filed 2026-04-28 from codex post-merge
-review of Tier 1 (commits `94a6ff9d`, `f28374ba`, `1c17732a`).
-**Priority:** Low. Manual pty verification confirmed CTA dispatch
-works end-to-end on real terminals; no user-facing bug.
+**Status:** ✅ RESOLVED 2026-04-28 by Plan C Tier 2 Task 3 on
+`feat/tier-revamp-c-tier2` (single commit titled
+`test(spur-cli): C Tier 2 Task 3 — SPUR_FORCE_TTY hook +
+CTA-shape binary smoke`). The `SPUR_FORCE_TTY=1` debug-only env
+override + CTA-shape binary smoke have landed.
+
+Originally filed 2026-04-28 from codex post-merge review of Tier 1
+(commits `94a6ff9d`, `f28374ba`, `1c17732a`). **Priority at filing:**
+Low — manual pty verification confirmed CTA dispatch works
+end-to-end on real terminals; no user-facing bug.
 
 ## The gap
 
