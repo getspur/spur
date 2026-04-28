@@ -12,7 +12,8 @@
 //! Tier 3 (trial JWT CTA refinements). All three tiers consume
 //! [`format_upgrade_cta`].
 
-use crate::FeatureGateError;
+use crate::policy::PolicyResolver;
+use crate::{FeatureGateError, FeatureKey, Plan};
 
 /// Walk an `anyhow::Error` chain looking for a [`FeatureGateError`]
 /// root cause. Returns `Some(&FeatureGateError)` if found.
@@ -63,10 +64,51 @@ pub fn format_upgrade_cta(gate_err: &FeatureGateError) -> String {
     out
 }
 
+/// Return the lowest tier that grants `key`, walking the embedded
+/// policy in ascending order (Community → Pro → Team → Enterprise).
+/// Returns `None` if no tier grants the key (e.g. unknown / future
+/// key not yet in policy).
+///
+/// The TUI upgrade-CTA modal uses this to surface "Required tier:
+/// Pro" alongside "Current tier: Community" — the single most
+/// conversion-relevant line in the modal.
+///
+/// Note: this is intentionally separate from `FeatureGate` itself,
+/// which is per-instance (snapshot of resolved features for the
+/// current license state). The required-tier query needs the
+/// global policy, not a snapshot.
+pub fn required_tier_for(key: FeatureKey) -> Option<Plan> {
+    let resolver = PolicyResolver::embedded();
+    let needle = key.as_str();
+    for plan in [Plan::Community, Plan::Pro, Plan::Team, Plan::Enterprise] {
+        let tier_label = plan_to_resolver_label(plan);
+        match resolver.tier_features(tier_label) {
+            Ok(features) if features.iter().any(|f| f == needle) => return Some(plan),
+            _ => continue,
+        }
+    }
+    None
+}
+
+fn plan_to_resolver_label(plan: Plan) -> &'static str {
+    match plan {
+        Plan::Community => "community",
+        Plan::Pro => "pro",
+        Plan::Team => "team",
+        Plan::Enterprise => "enterprise",
+        // LTD plans inherit the Pro feature set; treat as Pro for
+        // the required-tier display.
+        Plan::StarterLtd | Plan::BuilderLtd | Plan::FounderLtd => "pro",
+        // Defensive default for an unknown plan: render as community
+        // (the most conservative tier).
+        Plan::Unknown => "community",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FeatureKey, Tier};
+    use crate::Tier;
 
     fn denied(key: FeatureKey, tier: Tier) -> FeatureGateError {
         FeatureGateError::Denied { key, tier }
@@ -118,5 +160,39 @@ mod tests {
     fn find_gate_error_returns_none_for_unrelated_anyhow_error() {
         let err = anyhow::anyhow!("totally unrelated I/O failure");
         assert!(find_gate_error(&err).is_none());
+    }
+
+    #[test]
+    fn required_tier_for_community_key_returns_community() {
+        // `cli_core_init` is in the community feature set per the
+        // embedded policy (verified against
+        // `resources/default_policy.json`).
+        assert_eq!(
+            required_tier_for(FeatureKey::CLI_CORE_INIT),
+            Some(Plan::Community),
+        );
+    }
+
+    #[test]
+    fn required_tier_for_pro_only_key_returns_pro() {
+        // `pm_pro_beads_advanced` is in the Pro feature set but NOT
+        // in the community feature set per the embedded policy
+        // (verified against `resources/default_policy.json`). Pro
+        // walks before Team / Enterprise so the lowest-granting
+        // tier is Pro.
+        assert_eq!(
+            required_tier_for(FeatureKey::PM_PRO_BEADS_ADVANCED),
+            Some(Plan::Pro),
+        );
+    }
+
+    #[test]
+    fn feature_gate_error_is_clone() {
+        // Tier 2 TUI App owns a `FeatureGateError` inside
+        // `App::upgrade_modal: Option<UpgradeModalState>`, so the
+        // error must be `Clone`. This smoke also pins the derive
+        // against accidental removal.
+        let err = denied(FeatureKey::CLI_CORE_EXEC, Tier::Community);
+        let _cloned: FeatureGateError = err.clone();
     }
 }
