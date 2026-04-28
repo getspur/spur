@@ -1,10 +1,11 @@
 //! Stateless renderer for the Insights overview tab.
 
 use crate::views::insights::state::InsightsSnapshot;
+use crate::views::insights::widgets::{render_kpi_strip, render_sparkline};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
-    widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, Sparkline},
+    widgets::{Block, Borders, Gauge, List, ListItem},
     Frame,
 };
 
@@ -24,67 +25,15 @@ impl OverviewTab {
         ])
         .areas(inner);
 
-        Self::render_kpis(frame, kpis_area, snap);
-        Self::render_sparkline(frame, spark_area, snap);
-        Self::render_provenance(frame, provenance_area, snap);
-        Self::render_top_lists(frame, lists_area, snap);
-    }
-
-    fn render_kpis(frame: &mut Frame, area: Rect, snap: &InsightsSnapshot) {
-        let chunks = Layout::horizontal([
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-        ])
-        .split(area);
-
-        let cards = [
-            (
-                "Today",
-                format!(
-                    "{}\nactive sessions: {}",
-                    dollars(snap.kpis.today_cost),
-                    snap.kpis.active_session_count
-                ),
-            ),
-            (
-                "7d",
-                format!("{}\nlast 7 days", dollars(snap.kpis.last_7d_cost)),
-            ),
-            (
-                "30d",
-                format!("{}\nlast 30 days", dollars(snap.kpis.last_30d_cost)),
-            ),
-            (
-                "Cache hit",
-                format!("{:.1}%\nread reuse", snap.kpis.cache_hit_pct),
-            ),
-        ];
-
-        for (idx, (title, body)) in cards.into_iter().enumerate() {
-            let paragraph = Paragraph::new(body)
-                .block(Block::default().borders(Borders::ALL).title(title))
-                .style(Style::default().fg(Color::White));
-            frame.render_widget(paragraph, chunks[idx]);
-        }
-    }
-
-    fn render_sparkline(frame: &mut Frame, area: Rect, snap: &InsightsSnapshot) {
+        render_kpi_strip(frame, kpis_area, &snap.kpis);
         let rows = snap
             .queries
             .daily_90
             .get(60..90)
             .unwrap_or(snap.queries.daily_90.as_slice());
-        let data: Vec<u64> = rows.iter().map(|d| d.cost_usd.max(0.0) as u64).collect();
-        let max = data.iter().copied().max().unwrap_or(1).max(1);
-        let sparkline = Sparkline::default()
-            .block(Block::default().borders(Borders::ALL).title("7d Sparkline"))
-            .data(&data)
-            .max(max)
-            .style(Style::default().fg(Color::Cyan));
-
-        frame.render_widget(sparkline, area);
+        render_sparkline(frame, spark_area, rows, "7d Sparkline");
+        Self::render_provenance(frame, provenance_area, snap);
+        Self::render_top_lists(frame, lists_area, snap);
     }
 
     fn render_provenance(frame: &mut Frame, area: Rect, snap: &InsightsSnapshot) {
