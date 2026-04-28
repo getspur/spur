@@ -52,6 +52,8 @@ pub mod engine;
 pub mod live;
 pub mod reporter;
 
+mod extractors;
+
 pub use async_engine::AsyncEngine;
 pub use engine::{
     AgentViewStatus, AnalyticsEngine, DailyRow, LiveBlockRow, LiveSnapshot, ModelRow, MonthlyRow,
