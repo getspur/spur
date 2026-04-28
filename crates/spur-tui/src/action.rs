@@ -72,6 +72,8 @@ pub enum Action {
     RenameSession {
         session_id: String,
         new_title: String,
+        /// Title in place before this rename. Used by tombstone undo to construct inverse.
+        original_title: String,
     },
     /// Persist a session's unsent InputBar text to metadata.
     SaveDraft {

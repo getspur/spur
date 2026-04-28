@@ -2343,8 +2343,8 @@ impl App {
                 session_id,
                 via_legacy_key,
             } => {
-                if via_legacy_key && !self.legacy_archive_hint_shown {
-                    self.flash_hint_short(LEGACY_ARCHIVE_HINT);
+                let show_legacy_archive_hint = via_legacy_key && !self.legacy_archive_hint_shown;
+                if show_legacy_archive_hint {
                     self.legacy_archive_hint_shown = true;
                 }
                 if !self.tombstone_undo_replay {
@@ -2369,15 +2369,20 @@ impl App {
                         created_at: now,
                         expires_at: now + Duration::from_secs(60),
                     });
-                    self.flash_hint(
-                        format!("{} — press u to undo", label),
-                        Duration::from_secs(2),
-                    );
+                    if !show_legacy_archive_hint {
+                        self.flash_hint(
+                            format!("{} — press u to undo", label),
+                            Duration::from_secs(2),
+                        );
+                    }
                 }
                 let entry = self.metadata_store.entry_mut(&session_id);
                 entry.archived = !entry.archived;
                 self.persist_metadata("archive toggle");
                 self.refresh_picker_metadata();
+                if show_legacy_archive_hint {
+                    self.flash_hint_short(LEGACY_ARCHIVE_HINT);
+                }
                 self.dirty = true;
             }
 
@@ -2389,14 +2394,35 @@ impl App {
             }
 
             Action::RenameSession {
-                session_id,
-                new_title,
+                ref session_id,
+                ref new_title,
+                ref original_title,
             } => {
-                let entry = self.metadata_store.entry_mut(&session_id);
+                if !self.tombstone_undo_replay {
+                    let label = format!("Renamed '{}' → '{}'", original_title, new_title);
+                    let now = Instant::now();
+                    let inverse = Action::RenameSession {
+                        session_id: session_id.clone(),
+                        new_title: original_title.clone(),
+                        original_title: new_title.clone(),
+                    };
+                    self.tombstones.install(Tombstone {
+                        view: ViewId::SessionPicker,
+                        kind: TombstoneKind::Reversible { inverse },
+                        label: label.clone(),
+                        created_at: now,
+                        expires_at: now + Duration::from_secs(60),
+                    });
+                    self.flash_hint(
+                        format!("{} — press u to undo", label),
+                        Duration::from_secs(2),
+                    );
+                }
+                let entry = self.metadata_store.entry_mut(session_id);
                 entry.title_override = if new_title.trim().is_empty() {
                     None
                 } else {
-                    Some(new_title)
+                    Some(new_title.clone())
                 };
                 self.persist_metadata("rename");
                 self.refresh_picker_metadata();
