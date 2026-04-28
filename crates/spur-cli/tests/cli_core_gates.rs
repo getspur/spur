@@ -72,13 +72,24 @@ fn empty_pro_gate_blocks_all_8_m0_cli_core_keys() {
 }
 
 #[test]
-fn auth_arm_remains_ungated_in_m0() {
-    // Documents the M0 Special Case: CLI_CORE_LICENSE_ACTIVATE is
-    // not enforced at dispatch. If/when this changes (M0.5), this
-    // test should be updated or deleted.
+fn auth_login_is_gated_inside_auth_run_in_m0p5() {
+    // Plan C M0.5 — `CLI_CORE_LICENSE_ACTIVATE` is now gated, but
+    // not at the dispatch level. Enforcement lives inside
+    // `crates/spur-cli/src/commands/auth.rs::login_inner` so that
+    // Logout / Refresh / Status remain ungated and the brick-recovery
+    // path stays open for tampered tiers.
     //
-    // The community gate still grants the key; the registry presence
-    // does not imply runtime enforcement.
+    // Registry assertion: community gate must still grant the key
+    // so daily-driver Free users can run `spur auth login` against
+    // a fresh community-policy install.
     let gate = community_gate();
     assert!(gate.has(FeatureKey::CLI_CORE_LICENSE_ACTIVATE));
+
+    // The "denial returns FeatureGateError::Denied" invariant is
+    // exercised at the binary boundary by
+    // `cli_core_gate_e2e::spur_auth_login_exits_nonzero_*` and at
+    // the in-process boundary by
+    // `auth_fake_provider::login_blocked_by_empty_pro_gate_*`.
+    // Not duplicated here because this file is a registry-level
+    // invariant test; auth-flow specifics belong in those files.
 }
