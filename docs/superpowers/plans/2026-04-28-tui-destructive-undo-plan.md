@@ -1463,14 +1463,15 @@ The previous-status capture reads from `IssueBrowserView::tracked_issues` before
 
 ## Task 9 — Wire `Action::SubmitReview` queue install (3s deferred dispatch)
 
+**Spec amendment 2026-04-28**: spec §4.5.1 now resolves the install-vs-dispatch re-entrance hazard via a NEW action variant `Action::SubmitReviewDispatch { … }` for the bare ACP send. The old `Action::SubmitReview` arm becomes install-only; the new `SubmitReviewDispatch` arm performs the actual send. Tombstone's `pending` field stores the *Dispatch* variant. The previously-proposed `executing_queued_review: bool` sentinel flag is REJECTED as a code smell (mutable shared state, panic-unsafe, magic behavior). Bifurcating into variants is type-safe, exception-safe, and self-documenting.
+
 **Files:**
-- Modify: `crates/spur-tui/src/app.rs` (around line 2212)
+- Modify: `crates/spur-tui/src/action.rs` (add `SubmitReviewDispatch` variant)
+- Modify: `crates/spur-tui/src/app.rs` (around line 2212 — bifurcate into install-arm + dispatch-arm)
 
-This is the only `QueuedRemote` tombstone class. The action must NOT be dispatched to the orchestrator immediately; it goes into the tombstone and fires at expiry (via `tick`) or is cancelled by `u`.
+This is the only `QueuedRemote` tombstone class. The user-press → `Action::SubmitReview` arm installs a tombstone with `pending = Action::SubmitReviewDispatch { … }` and does NOT actually send. The 3s tick-expiry calls `process_action(pending)` which hits the new `Action::SubmitReviewDispatch` arm — bare ACP send, no install. The displacement path (§4.3 bullet 6) also dispatches via the `SubmitReviewDispatch` variant directly.
 
-The existing `app.rs:2212` arm currently dispatches immediately via `tx.try_send(UserInput::SubmitReview { … })`. That immediate dispatch must be replaced by a tombstone install. The `tick` loop dispatches the action 3s later, which then re-enters the `SubmitReview` arm. To avoid infinite re-queuing, the arm must distinguish a "live" dispatch (install tombstone) from a "queued" dispatch (execute immediately).
-
-Use a sentinel approach: add a private `executing_queued_review: bool` flag on `App`. When `tick` dispatches an expired `QueuedRemote`, set the flag; the arm sees the flag and proceeds with immediate dispatch without re-queuing.
+`u` cancellation drops the tombstone (and its `pending` Dispatch variant) — never sent.
 
 - [ ] **Step 1: Append review-queue tests.**
 
@@ -1537,17 +1538,25 @@ Use a sentinel approach: add a private `executing_queued_review: bool` flag on `
   scripts/spur-cargo test -p spur-tui --test tombstone_integration
   ```
 
-- [ ] **Step 3: Add `executing_queued_review: bool` field to `App` struct.**
+- [ ] **Step 3: Add `Action::SubmitReviewDispatch` variant to `action.rs`.**
 
+  Locate the existing `Action::SubmitReview` variant. Add a sibling variant immediately after it:
   ```rust
-  /// Sentinel flag set by the tick loop when dispatching an expired
-  /// QueuedRemote SubmitReview. Prevents the process_action arm from
-  /// re-queuing the action into another tombstone on re-entry.
-  executing_queued_review: bool,
+  /// Bare ACP-dispatch path for SubmitReview. Constructed ONLY by the
+  /// SubmitReview install arm (user-press) or by the displacement-flush
+  /// path. The process_action arm for this variant performs the actual
+  /// orchestrator send WITHOUT installing a tombstone. Tombstone's
+  /// pending field stores this variant; tick-expiry dispatches it.
+  /// Never emitted by views — strictly an internal dispatch primitive.
+  SubmitReviewDispatch {
+      executor_id: String,
+      attempt_n: u32,
+      decision: spur_core::ReviewDecision,
+  },
   ```
-  Initialize to `false` in the constructor.
+  Update any exhaustive match on `Action` (search `match action` / `match self`) to handle the new variant — most can route the same as `SubmitReview` for everything except the actual dispatch site.
 
-- [ ] **Step 4: Rewrite the `SubmitReview` arm at `app.rs:2212`.**
+- [ ] **Step 4: Rewrite the `SubmitReview` arm at `app.rs:2212` (install-only).**
 
   ```rust
   Action::SubmitReview {
@@ -1565,50 +1574,56 @@ Use a sentinel approach: add a private `executing_queued_review: bool` flag on `
           return;
       }
 
-      // If this is a tick-dispatched execution (not a live keypress),
-      // skip re-queuing and proceed with the real dispatch immediately.
-      if self.executing_queued_review {
-          // Fall through to the real dispatch below.
-      } else {
-          // Install as QueuedRemote — do NOT dispatch now.
-          let decision_label = format!("{:?}", decision);
-          let label = format!("{}…", decision_label);
-          let now = std::time::Instant::now();
+      // Construct the bare-dispatch variant for the tombstone's pending field.
+      let pending_dispatch = Action::SubmitReviewDispatch {
+          executor_id: executor_id.clone(),
+          attempt_n,
+          decision: decision.clone(),
+      };
+      let decision_label = format!("{:?}", decision);
+      let label = format!("{}…", decision_label);
+      let now = std::time::Instant::now();
 
-          // If a prior tombstone exists for Dashboard, displace it and
-          // dispatch it immediately (spec §4.3 bullet 6).
-          let displaced = self.tombstones.install_and_get_displaced(
-              crate::components::tombstone::Tombstone {
-                  view: ViewId::Dashboard,
-                  kind: crate::components::tombstone::TombstoneKind::QueuedRemote {
-                      pending: Action::SubmitReview {
-                          executor_id: executor_id.clone(),
-                          attempt_n,
-                          decision: decision.clone(),
-                      },
-                  },
-                  label: label.clone(),
-                  created_at: now,
-                  expires_at: now + std::time::Duration::from_secs(3),
+      // If a prior tombstone exists for Dashboard, displace it and dispatch
+      // its pending action immediately (spec §4.3 bullet 6). The displaced
+      // pending is already a SubmitReviewDispatch variant, so process_action
+      // will hit the dispatch arm below — no re-installation, no recursion.
+      let displaced = self.tombstones.install_and_get_displaced(
+          crate::components::tombstone::Tombstone {
+              view: ViewId::Dashboard,
+              kind: crate::components::tombstone::TombstoneKind::QueuedRemote {
+                  pending: pending_dispatch,
               },
-          );
-          if let Some(displaced_ts) = displaced {
-              if let crate::components::tombstone::TombstoneKind::QueuedRemote { pending } = displaced_ts.kind {
-                  self.executing_queued_review = true;
-                  self.process_action(pending);
-                  self.executing_queued_review = false;
-              }
+              label: label.clone(),
+              created_at: now,
+              expires_at: now + std::time::Duration::from_secs(3),
+          },
+      );
+      if let Some(displaced_ts) = displaced {
+          if let crate::components::tombstone::TombstoneKind::QueuedRemote { pending } = displaced_ts.kind {
+              self.process_action(pending);
           }
-
-          self.flash_hint(
-              format!("{}. Press u to revert (3s)", label),
-              std::time::Duration::from_secs(3),
-          );
-          self.dirty = true;
-          return; // do NOT proceed to real dispatch
       }
 
-      // Real dispatch path (reached only when executing_queued_review = true).
+      self.flash_hint(
+          format!("{}. Press u to revert (3s)", label),
+          std::time::Duration::from_secs(2),
+      );
+      self.dirty = true;
+      // Install-only — no actual send. Send happens via tick-expiry or
+      // displacement-flush, both of which dispatch SubmitReviewDispatch.
+  }
+  ```
+
+- [ ] **Step 4b: Add the `SubmitReviewDispatch` arm — bare ACP send.**
+
+  Append immediately after the `SubmitReview` arm:
+  ```rust
+  Action::SubmitReviewDispatch {
+      ref executor_id,
+      attempt_n,
+      ref decision,
+  } => {
       if let Some(ref tx) = self.user_input_tx {
           let _ = tx.try_send(UserInput::SubmitReview {
               executor_id: executor_id.clone(),
@@ -1616,7 +1631,7 @@ Use a sentinel approach: add a private `executing_queued_review: bool` flag on `
               decision: decision.clone(),
           });
       }
-      // Optimistic local state update (existing code).
+      // Optimistic local state update (preserved from old SubmitReview arm).
       self.lineage.apply(&spur_acp::SpurEvent::now(
           spur_acp::SpurEventBody::ExecutorReviewResolved {
               id: executor_id.clone(),
@@ -1628,15 +1643,7 @@ Use a sentinel approach: add a private `executing_queued_review: bool` flag on `
   }
   ```
 
-  Note: the `tick` loop must set `executing_queued_review = true` before dispatching expired queued actions. Update `App::tick` (added in Task 3):
-  ```rust
-  let expired_queued = self.tombstones.tick(now);
-  for action in expired_queued {
-      self.executing_queued_review = true;
-      self.process_action(action);
-      self.executing_queued_review = false;
-  }
-  ```
+  Note: the `App::tick` loop (added in Task 3) requires NO changes — it already calls `process_action(action)` for each expired pending. Since the pending is now a `SubmitReviewDispatch` variant, it routes to the bare-send arm with no re-installation. The sentinel-flag approach is no longer needed and must NOT be added.
 
 - [ ] **Step 5: Run tests.**
 
