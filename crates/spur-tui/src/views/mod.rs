@@ -1,10 +1,56 @@
 pub mod dashboard;
+#[cfg(feature = "analytics")]
+pub mod insights;
 pub mod issue_browser;
 #[cfg(feature = "markdown")]
 pub mod mermaid_viewer;
 pub mod plan_inspector;
 pub mod session_detail;
 pub mod session_picker;
+
+#[cfg(not(feature = "analytics"))]
+pub mod insights {
+    use crossterm::event::KeyEvent;
+    use ratatui::{layout::Rect, Frame};
+    use spur_acp::SpurEvent;
+
+    use crate::action::Action;
+
+    use super::{View, ViewContext};
+
+    pub struct InsightsView;
+
+    impl InsightsView {
+        pub fn new() -> Self {
+            Self
+        }
+    }
+
+    impl Default for InsightsView {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl View for InsightsView {
+        fn handle_key(&mut self, _key: KeyEvent, _ctx: &ViewContext) -> Option<Action> {
+            None
+        }
+
+        fn handle_spur_event(&mut self, _event: &SpurEvent, _ctx: &ViewContext) {}
+
+        fn render(&mut self, frame: &mut Frame, area: Rect, _ctx: &ViewContext) {
+            use ratatui::widgets::Paragraph;
+
+            let p = Paragraph::new(
+                "Analytics feature disabled — rebuild with --features spur-tui/analytics",
+            );
+            frame.render_widget(p, area);
+        }
+
+        fn tick(&mut self) {}
+    }
+}
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
