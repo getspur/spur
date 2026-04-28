@@ -2619,7 +2619,7 @@ impl App {
                 self.help_visible = false;
                 self.palette_visible = false;
                 self.palette_state.reset();
-                // TODO: tombstones.cancel_all_without_dispatch()
+                self.tombstones.cancel_all_without_dispatch();
                 // Wire per 2026-04-28-tui-destructive-undo-design.md §4.7.
                 self.current_view = ViewId::Dashboard;
                 self.dashboard.reset_to_root();
