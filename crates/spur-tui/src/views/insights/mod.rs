@@ -9,7 +9,12 @@ pub mod tabs;
 pub mod widgets;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{layout::Rect, Frame};
+use ratatui::{
+    layout::{Constraint, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    Frame,
+};
 use spur_acp::SpurEvent;
 use spur_context::AsyncEngine;
 use state::{Dimension, Granularity, InsightsTab, RefreshState};
@@ -153,33 +158,87 @@ impl View for InsightsView {
     fn handle_spur_event(&mut self, _event: &SpurEvent, _ctx: &ViewContext) {}
 
     fn render(&mut self, frame: &mut Frame, area: Rect, _ctx: &ViewContext) {
-        use ratatui::widgets::Paragraph;
+        use ratatui::{layout::Layout, widgets::Paragraph};
 
         let _keep_engine_alive = &self.engine;
 
-        let text = match self.state.try_read() {
+        match self.state.try_read() {
             Ok(state) => {
-                let body = if state.last_good.is_some() {
-                    "(snapshot lines TBD by C.7)".to_string()
-                } else if let Some(error) = &state.last_error {
-                    format!("Error: {error:#}")
-                } else {
-                    "Loading...".to_string()
+                let Some(snapshot) = state.last_good.as_ref() else {
+                    let body = if let Some(error) = &state.last_error {
+                        format!("Error: {error:#}")
+                    } else {
+                        "Loading...".to_string()
+                    };
+                    let text = if state.refreshing {
+                        format!("{body}\nRefreshing...")
+                    } else {
+                        body
+                    };
+                    frame.render_widget(Paragraph::new(text), area);
+                    return;
                 };
 
-                if state.refreshing {
-                    format!("{body}\nRefreshing...")
-                } else {
-                    body
+                let [header_area, body_area] =
+                    Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+                render_header(frame, header_area, self.active_tab, state.refreshing);
+
+                match self.active_tab {
+                    InsightsTab::Overview => tabs::OverviewTab::render(frame, body_area, snapshot),
+                    InsightsTab::Timeline => {
+                        tabs::TimelineTab::render(frame, body_area, snapshot, self.granularity)
+                    }
+                    InsightsTab::Breakdown => {
+                        tabs::BreakdownTab::render(frame, body_area, snapshot, self.dimension)
+                    }
+                    InsightsTab::Live => tabs::LiveTab::render(frame, body_area, snapshot),
                 }
             }
-            Err(_) => "Refreshing...".to_string(),
-        };
-
-        frame.render_widget(Paragraph::new(text), area);
+            Err(_) => frame.render_widget(Paragraph::new("Refreshing..."), area),
+        }
     }
 
     fn tick(&mut self) {}
+}
+
+fn render_header(frame: &mut Frame, area: Rect, active_tab: InsightsTab, refreshing: bool) {
+    use ratatui::widgets::Paragraph;
+
+    let left_width = " 1 Overview │ 2 Timeline │ 3 Breakdown │ 4 Live "
+        .chars()
+        .count();
+    let right = if refreshing {
+        "[via analytics] Refreshing"
+    } else {
+        "[via analytics]"
+    };
+    let pad = area
+        .width
+        .saturating_sub((left_width + right.chars().count()) as u16) as usize;
+
+    let line = Line::from(vec![
+        Span::raw(" "),
+        tab_label("1 Overview", active_tab == InsightsTab::Overview),
+        Span::raw(" │ "),
+        tab_label("2 Timeline", active_tab == InsightsTab::Timeline),
+        Span::raw(" │ "),
+        tab_label("3 Breakdown", active_tab == InsightsTab::Breakdown),
+        Span::raw(" │ "),
+        tab_label("4 Live", active_tab == InsightsTab::Live),
+        Span::raw(" ".repeat(pad + 1)),
+        Span::styled(right, Style::default().fg(Color::Green)),
+    ]);
+
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+fn tab_label(label: &'static str, active: bool) -> Span<'static> {
+    let style = if active {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+    };
+    Span::styled(label, style)
 }
 
 #[cfg(test)]
