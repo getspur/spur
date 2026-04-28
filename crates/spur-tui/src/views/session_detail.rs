@@ -503,6 +503,12 @@ impl SessionDetailView {
         self.ready_banner = Some(READY_BANNER_TEXT.to_string());
     }
 
+    /// Return SessionDetail to its root transient UI state.
+    pub fn reset_to_root(&mut self) {
+        self.completion.reset();
+        self.resume_banner = None;
+    }
+
     /// Whether the resume banner is currently visible (not dismissed and
     /// within its 3s auto-fade window).
     pub fn banner_is_visible(&self) -> bool {
