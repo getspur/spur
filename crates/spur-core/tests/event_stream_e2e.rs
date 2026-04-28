@@ -26,6 +26,7 @@ async fn funnel_plus_sink_round_trip() {
     spawn_sink(
         bcast_tx.subscribe(),
         spur_core::event_sink::DEFAULT_MAX_BYTES,
+        u64::MAX,
     );
 
     for i in 0..10 {

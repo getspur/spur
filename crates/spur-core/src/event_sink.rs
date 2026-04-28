@@ -27,7 +27,15 @@ static ROTATION_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Spawn the sink task. Returns immediately; the task runs until the
 /// broadcast channel closes (orchestrator shutdown).
-pub fn spawn_sink(mut rx: broadcast::Receiver<SpurEvent>, max_bytes: u64) {
+///
+/// `max_bytes` controls per-file rotation. `max_total_bytes` caps the
+/// cumulative size of all `.ndjson` files in the events dir; oldest
+/// files are deleted on every rotation to honour the cap.
+pub fn spawn_sink(
+    mut rx: broadcast::Receiver<SpurEvent>,
+    max_bytes: u64,
+    max_total_bytes: u64,
+) {
     let events_dir = events_dir();
     if let Err(e) = fs::create_dir_all(&events_dir) {
         tracing::error!(error = %e, dir = %events_dir.display(),
@@ -36,7 +44,7 @@ pub fn spawn_sink(mut rx: broadcast::Receiver<SpurEvent>, max_bytes: u64) {
     }
 
     tokio::spawn(async move {
-        let mut state = match SinkState::open(&events_dir, max_bytes) {
+        let mut state = match SinkState::open_with_caps(&events_dir, max_bytes, max_total_bytes) {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!(error = %e,
@@ -81,6 +89,12 @@ struct SinkState {
     current_path: PathBuf,
     bytes_in_file: u64,
     max_bytes: u64,
+    /// Cap on total bytes across all `.ndjson` files in `dir`. When set,
+    /// `enforce_event_cap` runs after every rotation, deleting oldest
+    /// files until the cumulative size is within the cap (with
+    /// `max_bytes` reserved as headroom for the active file to grow
+    /// before the next rotation).
+    max_total_bytes: Option<u64>,
 }
 
 impl SinkState {
@@ -94,7 +108,21 @@ impl SinkState {
             current_path: path,
             bytes_in_file: bytes,
             max_bytes,
+            max_total_bytes: None,
         })
+    }
+
+    /// Open a sink that, in addition to per-file rotation at `max_per_file`,
+    /// enforces a total-directory byte cap of `max_total` after every
+    /// rotation by deleting oldest `.ndjson` files.
+    fn open_with_caps(
+        dir: &Path,
+        max_per_file: u64,
+        max_total: u64,
+    ) -> std::io::Result<Self> {
+        let mut state = Self::open(dir, max_per_file)?;
+        state.max_total_bytes = Some(max_total);
+        Ok(state)
     }
 
     fn write_event(&mut self, event: &SpurEvent) -> std::io::Result<()> {
@@ -119,12 +147,51 @@ impl SinkState {
         self.writer = BufWriter::with_capacity(FLUSH_BYTES, file);
         self.current_path = new_path;
         self.bytes_in_file = 0;
+        if let Some(cap) = self.max_total_bytes {
+            // Reserve `max_bytes` of headroom so the freshly opened file
+            // can grow up to its rotation threshold without pushing the
+            // directory total past the user-visible cap.
+            let effective = cap.saturating_sub(self.max_bytes);
+            if let Err(e) = enforce_event_cap(&self.dir, effective) {
+                tracing::warn!(error = %e,
+                    "event_sink: enforce_event_cap failed");
+            }
+        }
         Ok(())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         self.writer.flush()
     }
+}
+
+/// Garbage-collect oldest `.ndjson` files in `dir` until the cumulative
+/// size of the remaining files is ≤ `cap_bytes`. Returns the number of
+/// files deleted (for telemetry).
+fn enforce_event_cap(dir: &Path, cap_bytes: u64) -> std::io::Result<usize> {
+    let mut entries: Vec<(PathBuf, SystemTime, u64)> = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("ndjson") {
+            continue;
+        }
+        let md = entry.metadata()?;
+        entries.push((path, md.modified()?, md.len()));
+    }
+    // Sort newest-first so we keep newest until we cross the cap.
+    entries.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let mut running = 0u64;
+    let mut deleted = 0usize;
+    for (path, _mtime, size) in entries {
+        running += size;
+        if running > cap_bytes {
+            fs::remove_file(&path)?;
+            deleted += 1;
+        }
+    }
+    Ok(deleted)
 }
 
 fn events_dir() -> PathBuf {
@@ -206,5 +273,54 @@ mod tests {
             "expected rotation; got {} file(s)",
             files.len()
         );
+    }
+
+    /// Helper: produce a fake event whose JSONL representation is ≈ 2 KB.
+    fn fake_event_2_kb() -> SpurEvent {
+        SpurEvent {
+            occurred_at: SystemTime::UNIX_EPOCH,
+            seq: 0,
+            body: SpurEventBody::BrainError {
+                session: SessionId("test".to_string()),
+                message: "x".repeat(1900),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn enforces_max_total_bytes_after_rotation() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = tmpdir.path().join("events");
+        fs::create_dir_all(&dir).unwrap();
+
+        // Use a small max_total_bytes so we trigger GC quickly.
+        let max_total: u64 = 256 * 1024; // 256 KB total cap
+        let max_per_file: u64 = 64 * 1024; // 64 KB per file → ~4 files at cap
+
+        let mut state =
+            SinkState::open_with_caps(&dir, max_per_file, max_total).expect("open");
+
+        // Write enough events to trigger ~6 rotations.
+        for _ in 0..200 {
+            state.write_event(&fake_event_2_kb()).expect("write");
+        }
+        state.flush().unwrap();
+
+        let mut total = 0u64;
+        let mut count = 0;
+        for entry in fs::read_dir(&dir).expect("read_dir") {
+            let entry = entry.expect("entry");
+            if entry.file_name().to_string_lossy().ends_with(".ndjson") {
+                total += entry.metadata().expect("md").len();
+                count += 1;
+            }
+        }
+        assert!(
+            total <= max_total,
+            "total bytes {} exceeds cap {}",
+            total,
+            max_total
+        );
+        assert!(count >= 1, "expected at least 1 file, got {}", count);
     }
 }
