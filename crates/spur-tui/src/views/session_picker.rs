@@ -78,6 +78,18 @@ fn render_footer_hint(frame: &mut Frame, area: Rect, hint: &str) {
     );
 }
 
+fn compute_label_budget(area_width: u16, show_cwd: bool, show_brain: bool) -> usize {
+    let mut gutter = 2 /* prefix */ + 8 + 2 /* short_id+gap */ + 8 + 2 /* time+gap */;
+    if show_brain {
+        gutter += 8 + 2;
+    }
+    if show_cwd {
+        gutter += 16 + 2; // cwd basename + slash + gap
+    }
+    let avail = (area_width as usize).saturating_sub(gutter);
+    avail.clamp(8, 60)
+}
+
 // ─── State ────────────────────────────────────────────────────────────
 
 enum PickerState {
@@ -592,10 +604,22 @@ impl SessionPickerView {
         );
     }
 
-    fn build_preselect_banner(&self, acp_id: &str) -> Line<'static> {
+    fn build_preselect_banner(
+        &self,
+        acp_id: &str,
+        synopsis: &spur_core::SessionSynopsisProjection,
+    ) -> Line<'static> {
         if let PickerState::Populated { sessions, .. } = &self.state {
             if let Some(session) = sessions.iter().find(|s| s.session_id.0.as_ref() == acp_id) {
-                let label = Self::resolved_title(session, &self.metadata, false);
+                let synopsis_key = spur_acp::SessionId(session.session_id.0.as_ref().to_string());
+                let synopsis_data = synopsis.get(&synopsis_key);
+                let label = resolve_label(
+                    session,
+                    self.metadata.sessions.get(session.session_id.0.as_ref()),
+                    synopsis_data.as_ref(),
+                    false,
+                    usize::MAX,
+                );
                 let mut spans = vec![
                     Span::raw(" Last: "),
                     Span::styled(
@@ -645,6 +669,7 @@ impl SessionPickerView {
         &self,
         frame: &mut Frame,
         area: Rect,
+        ctx: &super::ViewContext,
         license_badge: Option<&crate::components::status_bar::LicenseBadge>,
         flag_summary: Option<(usize, usize)>,
         agent: &str,
@@ -739,7 +764,16 @@ impl SessionPickerView {
             let prefix = if is_selected { "\u{25b8} " } else { "  " };
             let raw_id = session.session_id.0.as_ref();
             let short_id = &raw_id[..8.min(raw_id.len())];
-            let display = Self::resolved_title(session, &self.metadata, show_cwd);
+            let synopsis_key = spur_acp::SessionId(session.session_id.0.as_ref().to_string());
+            let synopsis = ctx.synopsis.get(&synopsis_key);
+            let label_budget = compute_label_budget(area.width, show_cwd, show_brain);
+            let display = resolve_label(
+                session,
+                self.metadata.sessions.get(session.session_id.0.as_ref()),
+                synopsis.as_ref(),
+                show_cwd,
+                label_budget,
+            );
             let time_str = session
                 .updated_at
                 .as_deref()
@@ -1078,7 +1112,6 @@ pub(super) fn truncate_for_row(input: &str, budget: usize) -> String {
 /// Resolve which label to render for a session-picker row. Precedence:
 /// title_override > first_user_msg > agent title > cwd basename >
 /// "(untitled session)". Empty strings are skipped at each tier.
-#[allow(dead_code)]
 pub(super) fn resolve_label(
     session: &spur_acp::SessionInfo,
     entry: Option<&crate::session_metadata::SessionEntry>,
@@ -1108,7 +1141,7 @@ pub(super) fn resolve_label(
 }
 
 impl View for SessionPickerView {
-    fn handle_key(&mut self, key: KeyEvent, _ctx: &super::ViewContext) -> Option<Action> {
+    fn handle_key(&mut self, key: KeyEvent, ctx: &super::ViewContext) -> Option<Action> {
         // 0. Confirm-switch intercepts all keys until y/Enter commits or anything else cancels.
         if let Some(ref target) = self.confirm_switch {
             match key.code {
@@ -1329,7 +1362,19 @@ impl View for SessionPickerView {
                                     let buffer = sessions
                                         .iter()
                                         .find(|s| s.session_id.0.as_ref() == sid.as_str())
-                                        .map(|s| Self::resolved_title(s, metadata, false))
+                                        .map(|s| {
+                                            let synopsis_key = spur_acp::SessionId(
+                                                s.session_id.0.as_ref().to_string(),
+                                            );
+                                            let synopsis = ctx.synopsis.get(&synopsis_key);
+                                            resolve_label(
+                                                s,
+                                                metadata.sessions.get(s.session_id.0.as_ref()),
+                                                synopsis.as_ref(),
+                                                false,
+                                                usize::MAX,
+                                            )
+                                        })
                                         .unwrap_or_default();
                                     post = Post::StartRename {
                                         session_id: sid.clone(),
@@ -1377,7 +1422,10 @@ impl View for SessionPickerView {
         let (banner_area, content_area) = if let Some(acp_id) = self.preselect.as_deref() {
             let [banner, content] =
                 Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-            frame.render_widget(Paragraph::new(self.build_preselect_banner(acp_id)), banner);
+            frame.render_widget(
+                Paragraph::new(self.build_preselect_banner(acp_id, ctx.synopsis)),
+                banner,
+            );
             (Some(banner), content)
         } else {
             (None, area)
@@ -1396,6 +1444,7 @@ impl View for SessionPickerView {
             } => self.render_populated(
                 frame,
                 content_area,
+                ctx,
                 ctx.license_badge,
                 ctx.flag_summary,
                 agent,
@@ -1532,7 +1581,7 @@ mod current_session_shortcut_tests {
         session.updated_at = Some((chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339());
         picker.set_sessions("test-brain".into(), vec![session]);
 
-        let banner = picker.build_preselect_banner("B");
+        let banner = picker.build_preselect_banner("B", test_ctx().synopsis);
         let text = banner
             .spans
             .iter()
