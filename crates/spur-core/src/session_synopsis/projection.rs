@@ -119,11 +119,16 @@ impl SessionSynopsisProjection {
                     return;
                 }
 
-                let first = user_texts.first().copied().unwrap();
+                // Mirror live-flow semantics: skip slash-commands when picking
+                // first_user_msg, so `/clear` followed by a real message replays
+                // the same way as a live session.
+                let first_non_slash = user_texts.iter().copied().find(|t| !t.starts_with('/'));
                 let last = user_texts.last().copied().unwrap();
                 let s = self.by_session.entry(session.clone()).or_default();
-                if s.first_user_msg.is_none() && !first.starts_with('/') {
-                    s.first_user_msg = Some(first.to_owned());
+                if let Some(first) = first_non_slash {
+                    if s.first_user_msg.is_none() {
+                        s.first_user_msg = Some(first.to_owned());
+                    }
                 }
                 s.last_user_msg = Some(last.to_owned());
             }
@@ -405,6 +410,49 @@ mod tests {
         }));
 
         assert!(proj.get(&SessionId("S1".into())).is_none());
+    }
+
+    #[test]
+    fn session_history_skips_leading_slash_command_for_first_user_msg() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&SpurEvent::now(SpurEventBody::SessionHistory {
+            session: SessionId("S1".into()),
+            entries: vec![
+                history_entry("user", "/clear"),
+                history_entry("assistant", "ok"),
+                history_entry("user", "real first message"),
+                history_entry("assistant", "ack"),
+                history_entry("user", "later message"),
+            ],
+        }));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(
+            s.first_user_msg.as_deref(),
+            Some("real first message"),
+            "first_user_msg should skip leading slash-command"
+        );
+        assert_eq!(s.last_user_msg.as_deref(), Some("later message"));
+    }
+
+    #[test]
+    fn session_history_all_slash_commands_leaves_first_user_msg_none() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&SpurEvent::now(SpurEventBody::SessionHistory {
+            session: SessionId("S1".into()),
+            entries: vec![
+                history_entry("user", "/clear"),
+                history_entry("assistant", "ok"),
+                history_entry("user", "/help"),
+            ],
+        }));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert!(
+            s.first_user_msg.is_none(),
+            "all-slash history has no real first"
+        );
+        assert_eq!(s.last_user_msg.as_deref(), Some("/help"));
     }
 
     #[test]
