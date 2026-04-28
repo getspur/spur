@@ -137,7 +137,9 @@ block M1.
 | File | Action | Responsibility |
 |---|---|---|
 | `crates/spur-tui/src/app.rs` | Modify | M1.1: Add `LicenseStateEvent → LicenseState` converter helper + call `self.feature_gate.update_state(&state)` in `update_license_state`. M1.3: Add gate-check at `Action::ShowSessionCost` arm in `process_action`. |
+| `crates/spur-tui/src/lib.rs` | Modify | M1.2: Add `pub fn test_support::feature_enabled` so integration tests can observe the private `App::feature_gate` outcome without exposing the field. |
 | `crates/spur-tui/tests/license_state_gate_refresh.rs` | Create | M1.2: Integration test asserting Pro `LicenseUpdated` event makes Pro-only `FeatureKey` pass through `App::feature_gate`; initial Community state denies. Pins the freshness contract against future regression. |
+| `docs/superpowers/plans/2026-04-28-tier-revamp-plan-c-tier2-tui-upgrade-modal.md` | Modify | M1.3: Append a one-line landed pointer noting the real Pro-tier `Action::ShowSessionCost` gate added by Plan C M1. |
 
 No new deps. Touches only spur-tui crate (and reads enums from
 spur-license + spur-acp, which are already in the dep graph).
@@ -742,3 +744,47 @@ Acceptance criteria explicitly disallow hardcoded feature lists.
 - M1.3 demo target: `Action::ShowSessionCost` at
   `crates/spur-tui/src/app.rs:2084` × `COST_PRO_PER_PROJECT_TRACKING`
   at `crates/spur-license/src/policy/feature_key.rs:117`
+
+## Post-merge addendum (2026-04-28)
+
+**Status:** ✅ SHIPPED 2026-04-28
+
+**Final commit chain on `feat/tier-revamp-c-m1`:**
+
+`bbcaf702` feat(spur-tui): C M1 Task 1 hydrate live feature_gate →
+`c9be6518` test(spur-tui): C M1 Task 2 add freshness tests →
+`dbae8abc` feat(spur-tui): C M1 Task 3 - Pro-tier gate at
+ShowSessionCost → cleanup commit
+`chore(spur-tui,docs): C M1 cleanup polish`.
+
+**Documented landed deviations:**
+
+| Area | Landed shape |
+|---|---|
+| M1.1 placeholder handling | Startup hydration skips only the App-internal placeholder via `is_placeholder_license_state`, preserving fail-closed hydration for real inactive provider states. The placeholder guard was pinned with private TDD unit tests instead of integration tests. |
+| M1.2 test accessor | Added `pub(crate) fn App::feature_enabled_for_test`, then exposed it through `pub fn test_support::feature_enabled` for integration tests. This matches Tier 2's pattern of keeping `App` internals crate-local while giving tests a narrow observation surface. |
+| M1.3 gate coverage | Landed two unit tests: the M1.3 `ShowSessionCost` Pro gate test and a Tier 2 `SendMessage` regression citation. This went beyond the plan's two-file edit because the regression test protects the existing modal path while adding the new Pro-only site. |
+
+**Cleanup commit fixes landed:**
+
+1. Extracted `PLACEHOLDER_STATUS_TEXT` for the App-internal
+   `"licensing not configured"` sentinel.
+2. Renamed `session_cost_gate_tests` to `feature_gate_tests`, since
+   the module covers both the M1.3 ShowSessionCost gate and the
+   Tier 2 SendMessage regression.
+3. Added this addendum and updated the File Structure table to
+   reflect the landed `lib.rs` test helper and Tier 2 plan-doc
+   cross-edit.
+
+**Follow-up:** the broader stale `SpurLicense::feature_gate()` bug
+remains deferred to M1.x:
+`docs/superpowers/plans/2026-04-28-tier-revamp-m1x-followup-spurlicense-gate-refresh.md`.
+M1 fixes the TUI `App::feature_gate` refresh path only.
+
+Manual TUI verification is deferred to a post-merge user follow-up.
+The integration test `pro_license_update_grants_pro_only_key`
+exercises the same production code path with high confidence: CLI
+seeds the initial license state, `build_with_license_state` hydrates
+`App::feature_gate`, the `/cost` slash command dispatches
+`Action::ShowSessionCost`, and the action gate-check opens
+`Action::ShowUpgradeModal` for denied users.
