@@ -20,3 +20,4 @@ python/dist/
 /.beads/
 /resource/superpowers/
 .superpowers/brainstorm/
+/.spur/sessions/**
