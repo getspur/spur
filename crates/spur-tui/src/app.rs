@@ -30,7 +30,7 @@ use crate::components::upgrade_modal::{self, UpgradeModalState};
 use crate::input_history::{InputHistoryEntry, HISTORY_CAP};
 use crate::session_metadata::{ReadOnlyFutureSchema, SessionMetadataStore};
 use crate::tui;
-use crate::views::dashboard::DashboardView;
+use crate::views::dashboard::{DashboardMode, DashboardView};
 use crate::views::issue_browser::IssueBrowserView;
 use crate::views::plan_inspector::PlanInspectorView;
 use crate::views::session_detail::SessionDetailView;
@@ -1102,11 +1102,15 @@ impl App {
                     return;
                 }
 
-                // Global Ctrl+K opens palette (checked only when no higher-priority
-                // overlay is up — QuitConfirm and HelpOverlay already returned above).
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && matches!(key.code, KeyCode::Char('k'))
-                {
+                // Global Ctrl+K opens palette. Plain `:` is a Dashboard Navigate
+                // alias only, so Compose mode can still type the character.
+                let is_ctrl_k = key.modifiers.contains(KeyModifiers::CONTROL)
+                    && matches!(key.code, KeyCode::Char('k'));
+                let is_dashboard_colon_alias = key.code == KeyCode::Char(':')
+                    && key.modifiers.is_empty()
+                    && self.current_view == ViewId::Dashboard
+                    && self.dashboard.mode() == DashboardMode::Navigate;
+                if is_ctrl_k || is_dashboard_colon_alias {
                     self.open_palette();
                     return;
                 }
