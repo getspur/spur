@@ -428,6 +428,21 @@ async fn run() -> Result<()> {
     let tui_mode = matches!(cli.command, Commands::Tui { .. });
     let _tracing_guard = init_tracing(tui_mode, &repo_root)?;
 
+    {
+        use spur_acp::orphan_sweeper::OrphanSweeper;
+        use spur_acp::process_inspector::production_inspector;
+        let pgids_dir = repo_root.join(".spur").join("pgids");
+        let report = OrphanSweeper::new(&pgids_dir, production_inspector()).run();
+        if !report.killed.is_empty() {
+            tracing::warn!(
+                killed = report.killed.len(),
+                recycled = report.skipped_recycled,
+                "orphan_sweeper: cleaned up stale agent trees from prior session"
+            );
+            // T7 will emit one SpurEvent::OrphanReaped per killed tree here.
+        }
+    }
+
     match cli.command {
         Commands::Init { force, with_skills } => {
             require_cli_gate(spur_license::FeatureKey::CLI_CORE_INIT)?;
