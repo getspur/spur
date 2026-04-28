@@ -7,12 +7,12 @@
 
 ## What Plan A delivered
 
-- **64 new typed `FeatureKey` constants** in `crates/spur-license/src/policy/feature_key.rs` (final shape after 9 design-pass waves)
+- **63 new typed `FeatureKey` constants** in `crates/spur-license/src/policy/feature_key.rs` (Wave-9 plan landed at 64; Wave-8.5 ghost-adapter drop removed `acp_core_adapter_gemini` for the final 63)
 - **1 new `QuotaKey` variant**: `BrainFailoverChainDepth`
 - **Per-crate roundtrip tests** for every kept key, including negative assertions for absorbed/dropped/deferred keys (guards against accidental re-introduction)
-- **Comprehensive 64-key roundtrip test** (Task 24): `tier_revamp_v1_keys_roundtrip` validates exact registry shape
-- **Boundary comment marker** (Task 25) separating legacy 36-key block from Wave-9-final 64-key block in source
-- **Total registry**: 100 typed `pub const` (36 legacy + 64 Wave-9 new)
+- **Comprehensive 63-key roundtrip test** (Task 24): `tier_revamp_v1_keys_roundtrip` validates exact registry shape
+- **Boundary comment marker** (Task 25) separating legacy 36-key block from Wave-9-final 63-key block in source
+- **Total registry**: 99 typed `pub const` (36 legacy + 63 Wave-9-final new)
 - **Test count**: 26 in `policy::feature_key::tests`, all passing
 - **Clippy**: clean with `-D warnings`
 
@@ -26,18 +26,20 @@
 | 7 | 2026-04-26 | Wave 7 4-reviewer: drop trait-impl variants + ghost notif keys | −8 | 99 |
 | 8 | 2026-04-26 | Second-order composition: 15 family consolidations + 4 drops + 5 defers | −35 | 64 |
 | 9 | 2026-04-27 | Iceberg+MCTS: 2 surgical Pro→Free tier shifts (with renames) | 0 | 64 |
-| Final | 2026-04-27 | Comprehensive 64-key roundtrip + boundary marker | 0 | 64 |
+| 8.5 | 2026-04-27 | Ghost-adapter drop: `acp_core_adapter_gemini` (no `AgentKind::Gemini`) | −1 | 63 |
+| Final | 2026-04-27 | Comprehensive 63-key roundtrip + boundary marker | 0 | 63 |
 
-## Final tier composition (post-Wave-9)
+## Final tier composition (post-Wave-8.5)
 
 ```
-Free   (48)  ← daily-driver baseline; covers solo-dev complete workflow
-Pro v1 (15)  ← 5 ★ headline conversion triggers (Remote Control,
-              Multi-Agent Coordination, Review Control Plane, Cost
-              Insights, Extensibility)
-Pro v1.1 (1) ← session_resume_event_replay (Q3 roadmap)
+Free      (47)  ← daily-driver baseline; covers solo-dev complete workflow
+Pro v1    (15)  ← 5 ★ headline conversion triggers (Remote Control,
+                Multi-Agent Coordination, Review Control Plane, Cost
+                Insights, Extensibility)
+Pro v1.1  (1)   ← session_resume_event_replay (Q3 roadmap)
+Team      (0)   ← deferred to Plan E.h hygiene + future Team tier work
 ─────────────
-Total   64
+Total     63
 ```
 
 ## What Plan A did NOT change
@@ -53,7 +55,7 @@ Total   64
 
 - **Free users**: identical experience to pre-Plan A (legacy 11-key Community policy still active)
 - **Pro users** (if any exist): identical experience (legacy 8 Pro keys still active)
-- **New 64 keys**: typed-known but unreachable through `FeatureGate::has()` because no policy declares them in any tier
+- **New 63 keys**: typed-known but unreachable through `FeatureGate::has()` because no policy declares them in any tier
 - Workspace builds clean; clippy passes; all `policy::feature_key` tests green
 
 ## Plan B prerequisites (verify before starting Plan B)
@@ -65,7 +67,7 @@ Total   64
 
 ## What Plan B will do
 
-1. Rewrite `crates/spur-license/resources/default_policy.json` per spec §5 (with Wave-9-final 64-key tier composition: 48 Free + 15 Pro v1 + 1 Pro v1.1 + 0 Team)
+1. Rewrite `crates/spur-license/resources/default_policy.json` per spec §5 (with Wave-8.5-final 63-key tier composition: 47 Free + 15 Pro v1 + 1 Pro v1.1 + 0 Team)
 2. Extend `PolicyResolver` to handle `@inherit:community` directive
 3. Extend `PolicyResolver` to handle `v1_1_q3_roadmap` field
 4. Re-sign with `spur-policy-2026-04` Ed25519 key (use `scripts/sign-policy.sh`)
@@ -74,7 +76,7 @@ Total   64
 7. Remove legacy 36 keys from `feature_key.rs` after migration completes (delete the boundary block above)
 8. Update `from_known()` to no longer parse legacy keys
 
-After Plan B ships, the registry has only the 64 Wave-9 new keys and the policy reflects the new tier structure.
+After Plan B ships, the registry has only the 63 Wave-8.5-final new keys and the policy reflects the new tier structure.
 
 ## Known unrelated issue
 
@@ -82,7 +84,7 @@ After Plan B ships, the registry has only the 64 Wave-9 new keys and the policy 
 
 ## Spec sections worth re-reading before starting Plans B–E
 
-- **§4.15 Registry summary** — final tier counts (48F/15P/1Pv1.1/0T)
+- **§4.15 Registry summary** — final tier counts (47F/15P/1Pv1.1/0T)
 - **§4.16 Deferred-keys backlog** — full audit trail of every dropped/deferred/consolidated key with code-grounded reasoning + wave attribution (10+ Wave-1-through-9 subsections)
 - **§9.1 Comparison Table** — Wave-9-corrected marketing copy (no ghost adapters; graph_tools in Free; review retry config in Free)
 - **§9.5 Iceberg framework analysis** — 4-persona model with B2D-realistic 2-12% conversion baseline + 5 Pro headline groups + explicit Plan D/E deferrals (trial mechanism, capability teases, skills marketplace, Team tier pricing)

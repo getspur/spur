@@ -171,7 +171,7 @@ High-risk callsites:
   PR creation, advanced beads extensions, and MCP durable-plan behavior. Do not
   map it blindly to one `PM_*` key without deciding which concrete behavior each
   callsite gates.
-- The four G2 flags have no replacement registry in Plan A's 64-key final
+- The four G2 flags have no replacement registry in Plan A's 63-key final
   shape, but they are surfaced by CLI and TUI. Removing the legacy 36 before
   designing a flag registry or replacement constants will make
   `flags list`, TUI flag summary, and flag tests fail.
@@ -185,7 +185,7 @@ High-risk callsites:
   Any migration sweep that touches `brain_session_id`, outcome projection keys,
   or ACP event payload strings should run targeted serialization tests, not just
   `spur-license` tests.
-- Spec section 5 is stale relative to the Wave-9-final 64-key registry: it
+- Spec section 5 is stale relative to the Wave-8.5-final 63-key registry: it
   still lists keys later dropped, consolidated, renamed, or deferred. Rewriting
   `default_policy.json` must use `feature_key.rs` final registry and spec 4.15
   / 4.16, not copy the section 5 JSON verbatim.
@@ -202,7 +202,7 @@ schema version 2, `policy_version`, `expires_at`, `@inherit:community`, and
 current-tier features.
 
 Wave 2: default policy rewrite + re-sign + build validation. Replace the
-legacy signed payload with the 64-key Wave-9-final policy, re-sign with
+legacy signed payload with the 63-key Wave-8.5-final policy, re-sign with
 `spur-policy-2026-04`, and update `build.rs` to validate the new schema shape.
 Rollback is restoring the old signed policy and schema cap.
 
