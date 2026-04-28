@@ -833,7 +833,7 @@ impl SessionPickerView {
             lines.push(Line::from(spans));
         }
 
-        let preview_height: u16 = 8;
+        let preview_height: u16 = 12;
         // Layout: chunks[1]/[2] (status + footer hint) are kept as two rows
         // ONLY when a state-specific prompt is active (rename or confirm-switch),
         // so that the prompt and its key-hint can coexist on separate rows.
@@ -879,14 +879,16 @@ impl SessionPickerView {
         };
 
         if self.preview_visible {
-            use crate::components::session_preview::{PreviewContent, SessionPreview};
+            use crate::components::session_preview::{PreviewContent, PreviewRow, SessionPreview};
+            use ratatui::style::{Color, Style};
+
             let content = if cursor == 0 {
                 PreviewContent {
+                    rows: vec![],
                     placeholder: Some(
                         "Press Enter to start a new session \u{00b7} any unsent draft will be saved"
                             .to_string(),
                     ),
-                    ..Default::default()
                 }
             } else {
                 let indices =
@@ -894,36 +896,65 @@ impl SessionPickerView {
                 let real_idx = indices.get(cursor - 1).copied();
                 if let Some(i) = real_idx {
                     let session = &sessions[i];
-                    let id = session.session_id.0.as_ref().to_string();
-                    let cwd = session.cwd.display().to_string();
-                    let updated = session.updated_at.clone().unwrap_or_default();
                     let entry = self.metadata.sessions.get(session.session_id.0.as_ref());
-                    let pinned = entry.map(|e| e.pinned).unwrap_or(false);
-                    let archived = entry.map(|e| e.archived).unwrap_or(false);
+                    // Use the same SessionId wrapper conversion idiom as Task 15.
+                    let synopsis_key =
+                        spur_acp::SessionId(session.session_id.0.as_ref().to_string());
+                    let synopsis = ctx.synopsis.get(&synopsis_key);
                     let draft = entry.map(|e| e.draft.clone()).unwrap_or_default();
+                    let brain = entry.and_then(|e| e.brain_name.clone()).unwrap_or_default();
+                    let cwd = session.cwd.display().to_string();
+                    let short_id = {
+                        let raw = session.session_id.0.as_ref();
+                        raw[..8.min(raw.len())].to_string()
+                    };
 
-                    let mut rows: Vec<crate::components::session_preview::PreviewRow> = vec![
-                        ("Session".to_string(), id).into(),
-                        ("CWD".to_string(), cwd).into(),
-                    ];
-                    if !updated.is_empty() {
-                        rows.push(("Updated".to_string(), updated).into());
+                    let mut rows: Vec<PreviewRow> = Vec::new();
+
+                    // 1. Last user message (state-first: what was just said)
+                    if let Some(last) = synopsis.as_ref().and_then(|s| s.last_user_msg.clone()) {
+                        rows.push(PreviewRow {
+                            label: "Last".into(),
+                            value: last,
+                            value_style: None,
+                            wrap: false,
+                        });
                     }
-                    if pinned {
-                        rows.push(("Pinned".to_string(), "\u{2b50}".to_string()).into());
-                    }
-                    if archived {
-                        rows.push(("Archived".to_string(), "yes".to_string()).into());
-                    }
+
+                    // 2. Draft (state-first: what's pending)
                     if !draft.is_empty() {
-                        let truncated = if draft.chars().count() > 80 {
-                            let t: String = draft.chars().take(80).collect();
-                            format!("{t}\u{2026}")
-                        } else {
-                            draft.clone()
-                        };
-                        rows.push(("Draft".to_string(), truncated).into());
+                        rows.push(PreviewRow {
+                            label: "Draft".into(),
+                            value: draft,
+                            value_style: Some(Style::default().fg(Color::Yellow)),
+                            wrap: false,
+                        });
                     }
+
+                    // 3. Blank separator between state-first and original-intent
+                    rows.push(PreviewRow::default());
+
+                    // 4. Intent (original first message, dim/wrapped)
+                    if let Some(first) = synopsis.as_ref().and_then(|s| s.first_user_msg.clone()) {
+                        rows.push(PreviewRow {
+                            label: "Intent".into(),
+                            value: first,
+                            value_style: Some(Style::default().fg(Color::Gray)),
+                            wrap: true,
+                        });
+                    }
+
+                    // 5. Blank separator
+                    rows.push(PreviewRow::default());
+
+                    // 6. Footer (cwd · brain · short id)
+                    rows.push(PreviewRow {
+                        label: "".into(),
+                        value: format!("{cwd} \u{00b7} {brain} \u{00b7} {short_id}"),
+                        value_style: Some(Style::default().fg(Color::DarkGray)),
+                        wrap: false,
+                    });
+
                     PreviewContent {
                         rows,
                         placeholder: None,
@@ -1640,6 +1671,95 @@ mod current_session_shortcut_tests {
             before_cursor, after_cursor,
             "picker ignored input — resuming flag likely still present"
         );
+    }
+}
+
+#[cfg(test)]
+mod preview_render_tests {
+    use super::*;
+    use crate::session_metadata::SessionEntry;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::{backend::TestBackend, buffer::Buffer, layout::Rect, Terminal};
+    use spur_acp::{HistoryEntry, SessionId, SpurEventBody};
+    use std::path::PathBuf;
+
+    fn buffer_text(buf: &Buffer) -> String {
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn preview_prioritizes_state_then_intent_then_footer() {
+        let mut synopsis = spur_core::SessionSynopsisProjection::new();
+        synopsis.apply(&SpurEvent::now(SpurEventBody::SessionHistory {
+            session: SessionId("a1xxxxxx".into()),
+            entries: vec![
+                HistoryEntry {
+                    role: "user".into(),
+                    text: "original goal".into(),
+                },
+                HistoryEntry {
+                    role: "assistant".into(),
+                    text: "ack".into(),
+                },
+                HistoryEntry {
+                    role: "user".into(),
+                    text: "latest request".into(),
+                },
+            ],
+        }));
+
+        let lineage = spur_core::lineage::projection::ExecutorLineage::new();
+        let plan_projection = spur_core::PlanProjectionStore::new();
+        let brain_status = crate::app::BrainStatus::Idle;
+        let ctx = crate::views::ViewContext {
+            lineage: &lineage,
+            plan_projection: &plan_projection,
+            synopsis: &synopsis,
+            brain_status: &brain_status,
+            license_badge: None,
+            flag_summary: None,
+        };
+
+        let mut metadata = SessionMetadata::default();
+        metadata.sessions.insert(
+            "a1xxxxxx".into(),
+            SessionEntry {
+                draft: "unsent edit".into(),
+                brain_name: Some("claude".into()),
+                ..SessionEntry::default()
+            },
+        );
+
+        let mut picker = SessionPickerView::new();
+        picker.set_metadata(metadata);
+        picker.set_sessions(
+            "claude".into(),
+            vec![SessionInfo::new(
+                "a1xxxxxx".to_string(),
+                PathBuf::from("/work/spur"),
+            )],
+        );
+        let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE), &ctx);
+
+        let backend = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|frame| picker.render(frame, Rect::new(0, 0, 80, 24), &ctx))
+            .unwrap();
+
+        let text = buffer_text(term.backend().buffer());
+        assert!(text.contains("Last: latest request"));
+        assert!(text.contains("Draft: unsent edit"));
+        assert!(text.contains("Intent: original goal"));
+        assert!(text.contains("/work/spur \u{00b7} claude \u{00b7} a1xxxxxx"));
+        assert!(!text.contains("Session: a1xxxxxx"));
+        assert!(!text.contains("CWD: /work/spur"));
     }
 }
 
