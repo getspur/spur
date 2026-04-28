@@ -314,7 +314,7 @@ fn legacy_to_wave9_mapping(s: &str) -> Option<FeatureKey> {
 /// expiry and revocation belong in [`crate::LicenseError`], not here:
 /// `require_feature` only knows feature presence in the snapshot,
 /// not denial cause.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum FeatureGateError {
     #[error("feature `{}` is not available on tier `{:?}`", key.as_str(), tier)]
