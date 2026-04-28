@@ -4737,6 +4737,7 @@ dependencies = [
  "chrono",
  "directories",
  "duckdb",
+ "filetime",
  "rusqlite",
  "serde",
  "serde_json",
