@@ -107,9 +107,12 @@ The "consume on close" rule (codex's spec review concrete amendment) avoids a cl
 
 New module: `crates/spur-tui/src/components/leader.rs`.
 
+Claude-code's feasibility review caught several compile-blockers in the original sketch. The corrected shape:
+
 ```rust
 pub struct LeaderMenu {
     is_open: bool,
+    armed_at: Option<Instant>,    // Space pressed; popup shows after 250ms
     bindings: Vec<&'static LeaderBinding>,  // filtered per-view at open time
 }
 
@@ -117,17 +120,21 @@ pub struct LeaderBinding {
     pub key: char,
     pub label: &'static str,
     pub command: LeaderCommand,
-    pub visible_in: ViewScope,  // Dashboard | SessionDetail | Both
-    pub gate: Option<fn(&AppContext) -> bool>,  // e.g. plan-exists check
+    pub visible_in: ViewScope,    // Dashboard | SessionDetail | Both
+    /// Use ViewContext (the existing crate type at `views/mod.rs:85`), NOT
+    /// AppContext (which doesn't exist).
+    pub gate: Option<fn(&crate::views::ViewContext<'_>) -> bool>,
 }
 
 impl LeaderMenu {
-    pub fn open(&mut self, ctx: &AppContext) { /* filter bindings, set is_open */ }
-    pub fn close(&mut self) { self.is_open = false; }
-    pub fn handle_key(&mut self, key: KeyEvent, app: &mut App) -> Option<Action> {
-        // Look up letter; if registered, run command.resolve(app).
+    pub fn open(&mut self, ctx: &crate::views::ViewContext<'_>) { /* filter bindings, arm timer */ }
+    pub fn close(&mut self) { self.is_open = false; self.armed_at = None; }
+    pub fn handle_key(&mut self, key: KeyEvent, app: &mut crate::App) -> Option<Action> {
+        // Look up letter; if registered, run command.dispatch(app).
     }
     pub fn render(&self, frame: &mut Frame, area: Rect) { /* overlay */ }
+    /// Called from App::tick(); reveals popup after 250ms armed.
+    pub fn tick(&mut self, now: Instant) { /* see §4.7 */ }
 }
 ```
 
@@ -139,13 +146,13 @@ pub enum LeaderCommand {
     Static(Action),
     /// Resolves dynamically against the current app state. Used for commands that
     /// need session_id, current selection, etc.
-    Resolved(fn(&mut App) -> Option<Action>),
+    Resolved(fn(&mut crate::App) -> Option<Action>),
     /// View-local mutation that doesn't emit an Action (e.g. toggle a panel flag).
-    Mutate(fn(&mut App)),
+    Mutate(fn(&mut crate::App)),
 }
 
 impl LeaderCommand {
-    pub fn dispatch(&self, app: &mut App) -> Option<Action> {
+    pub fn dispatch(&self, app: &mut crate::App) -> Option<Action> {
         match self {
             LeaderCommand::Static(a) => Some(a.clone()),
             LeaderCommand::Resolved(f) => f(app),
@@ -158,7 +165,11 @@ impl LeaderCommand {
 This lets the registry encode all three classes uniformly:
 
 ```rust
-const LEADER_BINDINGS: &[LeaderBinding] = &[
+// IMPORTANT: `static`, NOT `const`. `Action` carries `String` / `Vec<ContentBlock>` /
+// `SessionId` fields with non-const Drop semantics, so a const slice of items
+// containing Action variants does NOT compile. `static` is fine because Drop
+// runs at program exit.
+static LEADER_BINDINGS: &[LeaderBinding] = &[
     LeaderBinding {
         key: 'i',
         label: "toggle vim mode",
@@ -170,7 +181,11 @@ const LEADER_BINDINGS: &[LeaderBinding] = &[
         key: 'p',
         label: "plan inspector",
         command: LeaderCommand::Resolved(|app| {
-            app.current_session_id().map(|sid| Action::NavigateTo(ViewId::PlanInspector(sid)))
+            // `app.current_session_id()` does NOT exist. Closest is private
+            // `App::current_acp_session_id()` at app.rs:693. Inline the access:
+            app.session_detail.as_ref().map(|v| {
+                Action::NavigateTo(ViewId::PlanInspector(v.session_id().clone()))
+            })
         }),
         visible_in: ViewScope::SessionDetail,
         gate: Some(|ctx| ctx.has_plan()),
@@ -179,7 +194,13 @@ const LEADER_BINDINGS: &[LeaderBinding] = &[
         key: 'd',
         label: "toggle workers panel",
         command: LeaderCommand::Mutate(|app| {
-            app.session_detail.workers_panel_collapsed ^= true;
+            // `workers_panel_collapsed` is private at session_detail.rs:133.
+            // Use a pub method to toggle. Extract the existing Alt+D handler
+            // at session_detail.rs:1206 into `pub fn toggle_workers_panel_collapsed()`
+            // and call it here.
+            if let Some(view) = app.session_detail.as_mut() {
+                view.toggle_workers_panel_collapsed();
+            }
         }),
         visible_in: ViewScope::SessionDetail,
         gate: None,
@@ -187,6 +208,29 @@ const LEADER_BINDINGS: &[LeaderBinding] = &[
     // ...
 ];
 ```
+
+### 4.4.1 Space-interception path (REQUIRED)
+
+Claude-code's feasibility review flagged that **Space currently routes to Composer** in Emacs/Navigate mode at `dashboard.rs:946-953` — leader will never fire without app-level interception BEFORE view dispatch.
+
+The interception must happen in `App::handle_key_inner` between the modal-overlay checks and the view dispatch (around `app.rs:996`):
+
+```rust
+// Pseudo-code in App::handle_key_inner, after modal overlays, before view dispatch:
+if !self.leader.is_open() && self.can_open_leader(&key) {
+    if matches!(key.code, KeyCode::Char(' ')) {
+        self.leader.arm(Instant::now());
+        return None;  // Space consumed; popup may appear after 250ms
+    }
+}
+if self.leader.is_open() {
+    return self.leader.handle_key(key, self);  // dispatch leader binding
+}
+// ... existing view dispatch ...
+```
+
+`can_open_leader` enforces §4.1 activation rule. It needs:
+- `pub fn is_picker_active(&self) -> bool` on `DashboardView` (currently private at `dashboard.rs:64, 584, 692, 837, 888`).
 
 Wire into `app.rs` key dispatch:
 
@@ -222,12 +266,14 @@ The help overlay (`?`) appends a "Leader (Space)" section listing all bindings. 
 A leader key architecture fails if users cannot discover the follow-up keys. Helix solves this via a transient menu — pressing `<leader>` opens a contextual hint that reveals available keystrokes after a brief delay.
 
 **Behavior:**
-- T0: User presses Space. Leader is "armed".
-- T0+0ms: If a registered letter is pressed BEFORE 250ms elapses, dispatch immediately (zero-flicker for power users who know the binding).
-- T0+250ms: If no letter has been pressed, render the contextual popup (the box at §4.2). User now sees options.
+- T0: User presses Space. Leader is "armed". `LeaderMenu.armed_at = Some(T0)`. NO popup rendered yet.
+- T0+0ms: If a registered letter is pressed BEFORE 250ms elapses, dispatch immediately (zero-flicker for power users who know the binding). Clear `armed_at`.
+- T0+250ms: `LeaderMenu::tick(now)` (called from existing `App::tick()` per claude-code's feasibility note) sees armed_at + 250ms ≤ now → sets `is_open = true`, popup renders next frame.
 - After popup: any registered letter dispatches; Esc/Space closes; unregistered letter consumes-and-closes per §4.3.
 
 The 250ms threshold is calibrated for "intentional pause to look at options" — fast enough that confident users never see the menu, slow enough that searching users do.
+
+**Tick-driver integration** (claude-code's feasibility note): the existing TUI tick runs at 33ms intervals (`app.rs:2843`). 250ms = ~7-8 ticks. `LeaderMenu::tick(now)` checks `armed_at` and flips `is_open` when threshold crossed. NO new tokio timer needed — rides the existing tick.
 
 ### 4.8 `Alt+*` deprecation horizon (gemini A2 — compromise)
 
@@ -240,6 +286,8 @@ Permanent dual-track is debt; instant removal breaks existing user muscle memory
 This compromise (between codex's "permanent" and gemini's "1 release") gives existing users a full development cycle to retrain while keeping the cleanup horizon firm.
 
 **Out-of-scope for sunset**: `Alt+I` (toggle vim mode) is too useful as a globally-accessible shortcut and stays as a permanent alias even post-sunset for the leader-mapped subset. The registry can mark bindings `keep_modifier_alias: true` to opt-out.
+
+**Toast infrastructure**: deprecation toast uses `App::flash_hint_short(msg)` defined in quick-fixes spec §4.11. No new TTL machinery in this spec — depends on quick-fixes shipping first.
 
 ## 5. Activation in input-bar context — strict gating (gemini A1)
 

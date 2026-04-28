@@ -65,7 +65,14 @@ All five rows in this spec's scope (rows 1–4) get the same tombstone UX. Local
 
 One tombstone slot per view. Hosted on the App.
 
+**Prerequisite** (claude-code feasibility review): `ViewId` at `crates/spur-tui/src/action.rs:188` derives `Debug, Clone, PartialEq, Eq` only. To use it as a `HashMap` key, **add `Hash` to its derive list** (one-line patch). All inner fields (`SessionId` is `String`-backed) Hash trivially.
+
 ```rust
+// In action.rs:
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]  // ← Hash added
+pub enum ViewId { Dashboard, SessionDetail(SessionId), ... }
+
+// In crates/spur-tui/src/components/tombstone.rs (new module):
 pub struct Tombstone {
     pub view: ViewId,
     pub kind: TombstoneKind,
@@ -92,6 +99,14 @@ pub struct TombstoneSlots {
     /// SessionPicker, IssueBrowser, PlanInspector. MermaidViewer has no
     /// destructive ops.
     by_view: HashMap<ViewId, Tombstone>,
+}
+
+impl TombstoneSlots {
+    /// Quick-fixes spec §4.10 panic-Esc handler calls this. Drops all
+    /// tombstones WITHOUT dispatching queued-remote actions.
+    pub fn cancel_all_without_dispatch(&mut self) {
+        self.by_view.clear();
+    }
 }
 ```
 
@@ -123,56 +138,89 @@ When an irrevocable-class key fires (e.g. Dashboard Review `A` for Approve):
 
 ### 4.4 Coverage map
 
-| Action | Class | Window | Notes |
-|---|---|---|---|
-| SessionPicker archive (`x`, deprecated `d`) | reversible | 60s | Inverse: same toggle action |
-| SessionPicker pin (`p`) | reversible | 60s | Inverse: same toggle action |
-| SessionPicker rename | reversible | 60s | Inverse: `Action::RenameSession { new = previous_title }` |
-| IssueBrowser status set (`o`/`w`/`b`/`d`/`x`/`W`) | reversible | 60s | Inverse: `Action::SetIssueStatus { previous_status }` |
-| Dashboard Review Approve (`A`) | irrevocable | 3s queue | Network dispatch deferred 3s |
-| Dashboard Review Reject (`D`) | irrevocable | 3s queue | Same |
-| Dashboard Review Modify (`M`) | irrevocable | 3s queue | Same |
-| Dashboard Review Retry (`R`) | irrevocable | 3s queue | Same |
+| Action variant | View | Class | Window | Inverse |
+|---|---|---|---|---|
+| `Action::ToggleSessionArchive { session_id }` (`x`, deprecated `d`) | SessionPicker | reversible | 60s | same variant (toggling twice returns) |
+| `Action::ToggleSessionPin { session_id }` (`p`) | SessionPicker | reversible | 60s | same variant |
+| `Action::RenameSession { session_id, new_title }` | SessionPicker | reversible | 60s | same variant with `new_title = original_title` (captured from `RenameState.original_title` — new field, see §7) |
+| `Action::Issue(IssueAction::UpdateStatus { id, status })` (`o`/`w`/`b`/`d`/`x`/`W`) | IssueBrowser | reversible | 60s | same variant with `status = previous_status` (`String` snapshot read from `IssueRow::status` before dispatch) |
+| `Action::SubmitReview { decision: Approve, … }` (`A`) | Dashboard | irrevocable | 3s queue | (queue cancel; never dispatched) |
+| `Action::SubmitReview { decision: Reject, … }` (`D`) | Dashboard | irrevocable | 3s queue | (queue cancel) |
+| `Action::SubmitReview { decision: Modify, … }` (`M`) | Dashboard | irrevocable | 3s queue | (queue cancel) |
+| `Action::SubmitReview { decision: Retry, … }` (`R`) | Dashboard | irrevocable | 3s queue | (queue cancel) |
 
 Out of scope: composer Submit (chat send), SessionDetail Esc-cancel-stream (quick-fixes §4.9 covers), `WorkOn` session spawn (separate decision — acceptable to confirm via leader sequence later).
 
-### 4.5 Inverse-action dispatch (codex's amendment)
+**Action variant verification** (claude-code feasibility review): all variants above are confirmed against `crates/spur-tui/src/action.rs` as of HEAD. The original spec invented `Action::SetIssueStatus { issue_id, status }` which does NOT exist; the real path goes through `Action::Issue(IssueAction::UpdateStatus { id, status })` where `status` is a raw `String`.
 
-The inverse goes through `process_action`, NOT a captured closure. Codex's spec review caught that issue-status undo isn't an in-memory op — it must hit beads, handle failure, and refresh the issue list. Closure-based revert can't express that without re-implementing every mutation path inside the closure.
+### 4.5 Inverse-action dispatch (codex's + claude-code's amendments)
 
-Concrete:
+The inverse goes through `App::process_action`, NOT a captured closure. Codex's spec review caught that issue-status undo isn't an in-memory op — it must hit beads, handle failure, and refresh the issue list. Closure-based revert can't express that without re-implementing every mutation path inside the closure.
+
+**Important install location** (claude-code's feasibility review): tombstone install fires in `App::process_action`'s arm for each tracked action. Views still return the `Action` upward unchanged from their `handle_key` — they don't manage tombstones directly. This keeps the dispatch graph linear and avoids two parallel mutation sites.
+
+**Concrete API references** (claude-code's feasibility review caught the original spec invented `Action::SetIssueStatus`):
 
 ```rust
-// IssueBrowser, on status-set keystroke 'o' (issue → open):
-let previous_status = current_issue_status(&issue_id);
-let inverse = Action::SetIssueStatus { issue_id, status: previous_status };
-self.tombstones.install(ViewId::IssueBrowser, Tombstone {
-    view: ViewId::IssueBrowser,
-    kind: TombstoneKind::Reversible { inverse },
-    label: format!("issue '{}' → open", issue_label),
-    created_at: now, expires_at: now + Duration::from_secs(60),
-});
-// THEN dispatch the original Action::SetIssueStatus { status: Open } via process_action.
+// IssueBrowser status set goes through Action::Issue(IssueAction::UpdateStatus)
+// which is the actual variant at action.rs:7-8. Status is a String, not an enum.
+
+// In App::process_action:
+Action::Issue(IssueAction::UpdateStatus { ref id, ref status }) => {
+    // Capture previous status BEFORE dispatching.
+    let previous_status: String = self.issue_browser
+        .as_ref()
+        .and_then(|v| v.row_status(id))
+        .unwrap_or_else(|| "open".into());
+
+    let inverse = Action::Issue(IssueAction::UpdateStatus {
+        id: id.clone(),
+        status: previous_status,
+    });
+    let label = format!("issue '{}' → {}", id, status);
+    self.tombstones.install(ViewId::IssueBrowser, Tombstone {
+        view: ViewId::IssueBrowser,
+        kind: TombstoneKind::Reversible { inverse },
+        label: label.clone(),
+        created_at: Instant::now(),
+        expires_at: Instant::now() + Duration::from_secs(60),
+    });
+    self.flash_hint(format!("{}. Press u to undo (60s)", label),
+                    Duration::from_secs(60));
+    // THEN dispatch the original (e.g. via PM service call).
+    // ... existing dispatch path ...
+}
 ```
 
-If the inverse dispatch FAILS at backend (e.g. beads write error), the toast updates to `"Undo failed: <error>; original action stands"`. The user sees their request was rejected.
+Equivalent shape for `Action::ToggleSessionArchive`, `Action::ToggleSessionPin`, `Action::RenameSession`. Each captures its own inverse-Action shape:
+- `ToggleSessionArchive` is its own inverse (toggling twice returns).
+- `ToggleSessionPin` is its own inverse.
+- `RenameSession` inverse needs the previous title — captured from `RenameState.original_title` (new field; see §7).
+
+If the inverse dispatch FAILS at backend (e.g. beads write error), the `IssueAction::UpdateStatus` arm's existing error path fires — `App` extends it to call `self.flash_hint("Undo failed: …; original action stands", Duration::from_secs(3))`. The user sees their request was rejected.
+
+### 4.5.1 Two `SubmitReview` emit sites
+
+Claude-code's feasibility review noted that `SubmitReview` is dispatched from two locations in `dashboard.rs`: the vim Normal handler at `:1112` and the Insert-mode handler at `:1238`. Both already route through `App::process_action(Action::SubmitReview { … })` — installing the queue tombstone in `process_action`'s `Action::SubmitReview` arm covers both sites with a single change. No view-level patching needed.
 
 ### 4.6 `u` / `Ctrl+Z` keystroke handler
+
+`flash_hint` is defined in quick-fixes spec §4.11 (the shared `App::transient_hint` infrastructure). Both specs ship together so the API is available.
 
 ```rust
 fn handle_undo(app: &mut App) -> Option<Action> {
     let view = app.current_view();
     let Some(tombstone) = app.tombstones.evict(view) else {
-        app.flash_hint("nothing to undo");
+        app.flash_hint_short("nothing to undo");  // 2s
         return None;
     };
     match tombstone.kind {
         TombstoneKind::Reversible { inverse } => {
-            app.flash_hint(format!("Undid: {}", tombstone.label));
+            app.flash_hint_short(format!("Undid: {}", tombstone.label));
             Some(inverse)  // dispatched through normal process_action
         }
         TombstoneKind::QueuedRemote { pending: _ } => {
-            app.flash_hint(format!("Cancelled: {}", tombstone.label));
+            app.flash_hint_short(format!("Cancelled: {}", tombstone.label));
             None  // queued action dropped; never dispatched
         }
     }
@@ -180,6 +228,8 @@ fn handle_undo(app: &mut App) -> Option<Action> {
 ```
 
 Bound at the app level so `u` from vim Normal and `Ctrl+Z` from Emacs both route here. The handler is gated on `is_vim_normal() && view_owner` (vim) or `Ctrl+Z + view_owner` (emacs).
+
+**Compose-mode passthrough**: when input bar is composing (vim Insert / Emacs typing), `u` and `Ctrl+Z` MUST flow through to the input bar (eventual text undo via tui-textarea). The activation gate is identical to leader-key §5: input-bar focused = passthrough.
 
 ### 4.7 Tombstone tick driver
 
@@ -279,7 +329,7 @@ There is NO config toggle — every user gets tombstone behavior. Power users wh
 
 1. **Compose-mode `u`**: in vim Insert / Emacs typing mode, `u` and `Ctrl+Z` should pass through to the input bar (eventual text undo via tui-textarea). Tombstone undo only fires when input bar is NOT composing. Confirmed by the activation gate; tested explicitly.
 2. **Tombstone visibility during fast pressing**: if user does Q1 + Q2 in <500ms, the toast for Q1 is barely visible. Acceptable — the design intent is that fast users don't need confirmation. Toast is for the slow/unsure user.
-3. **Picker rename undo**: rename's "previous title" capture must happen BEFORE the rename-prompt opens. The session_picker rename mode (R key) currently lets users edit a buffer; capture occurs at the moment they press Enter to commit. Implementation detail; non-blocking.
+3. **Picker rename undo — `RenameState.original_title` required**: rename's "previous title" capture must happen BEFORE the rename-prompt opens. Current `RenameState` at `session_picker.rs:1476-1486` lacks an `original_title: String` field. **This spec adds that field** as part of its implementation surface. The session_picker rename mode (R key) currently lets users edit a buffer; the capture is taken at rename-mode entry, not at commit time. The Action::RenameSession dispatcher in process_action reads `RenameState.original_title` to construct the inverse Action.
 4. **WorkOn session-spawn tombstone**: should `W` in IssueBrowser get the 3s queue treatment too? Subprocess spawn IS reversible at process-creation time (kill the subprocess) but introduces complexity (need to track child PID). Defer — `W` keeps current immediate-spawn behavior with a regular toast `"Spawned WorkOn session 'foo'"` (no tombstone).
 5. **Tombstone display when view-overlay visible**: if leader popup or quit-confirm is open, where does the toast render? Per quick-fixes §6.3, panic-Esc preempts; otherwise the toast renders into the bottom-of-view single-line slot, possibly under the leader popup. Defer detailed rendering — simplest impl is "toast renders in slot regardless of overlay".
 
