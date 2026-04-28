@@ -25,6 +25,10 @@ fn buffer_to_lines(buf: &Buffer) -> Vec<String> {
 static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
     std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
 
+fn synopsis() -> &'static spur_core::SessionSynopsisProjection {
+    spur_tui::test_support::test_view_ctx(&LINEAGE).synopsis
+}
+
 fn assert_render(picker: &mut SessionPickerView, expected: &[&str]) {
     let backend = TestBackend::new(W, H);
     let mut term = Terminal::new(backend).unwrap();
@@ -76,6 +80,7 @@ fn populated_single_brain_no_filter() {
     picker.set_sessions(
         "claude".into(),
         vec![session("a1b2c3d4e5", "Refactor auth flow", "/work/spur")],
+        synopsis(),
     );
 
     // Inline golden — capture current layout exactly. Any visual change to
@@ -113,7 +118,7 @@ fn populated_single_brain_no_filter() {
 fn populated_empty_no_filter() {
     let mut picker = SessionPickerView::new();
     picker.set_metadata(SessionMetadata::default());
-    picker.set_sessions("claude".into(), vec![]);
+    picker.set_sessions("claude".into(), vec![], synopsis());
 
     // Inline golden — captures the empty-list layout: only the [+ New]
     // virtual row + separator visible, status bar at line 22, footer at 23.
@@ -232,6 +237,7 @@ fn populated_multi_brain_no_filter() {
             session("a1xxxxxx", "Refactor auth", "/work/spur"),
             session("a2xxxxxx", "Tier 1 fixes", "/work/spur"),
         ],
+        synopsis(),
     );
     let expected: &[&str] = &[
         "Sessions (claude)",
@@ -272,6 +278,7 @@ fn populated_with_filter() {
             session("a1xxxxxx", "alpha", "/tmp"),
             session("a2xxxxxx", "beta", "/tmp"),
         ],
+        synopsis(),
     );
     // Focus search and type 'b'.
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -311,7 +318,11 @@ fn populated_with_filter() {
 fn populated_with_rename_active() {
     let mut picker = SessionPickerView::new();
     picker.set_metadata(SessionMetadata::default());
-    picker.set_sessions("t".into(), vec![session("a1xxxxxx", "alpha", "/tmp")]);
+    picker.set_sessions(
+        "t".into(),
+        vec![session("a1xxxxxx", "alpha", "/tmp")],
+        synopsis(),
+    );
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let ctx = spur_tui::test_support::test_view_ctx(&LINEAGE);
     // Cursor on a1 by P1; press R to enter rename mode.
@@ -356,6 +367,7 @@ fn populated_with_confirm_switch() {
             session("a1xxxxxx", "alpha", "/tmp"),
             session("a2xxxxxx", "beta", "/tmp"),
         ],
+        synopsis(),
     );
     picker.set_current_session_has_draft(Some("a1".into()));
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -397,7 +409,11 @@ fn populated_with_confirm_switch() {
 fn populated_with_preview_visible() {
     let mut picker = SessionPickerView::new();
     picker.set_metadata(SessionMetadata::default());
-    picker.set_sessions("t".into(), vec![session("a1xxxxxx", "alpha", "/tmp")]);
+    picker.set_sessions(
+        "t".into(),
+        vec![session("a1xxxxxx", "alpha", "/tmp")],
+        synopsis(),
+    );
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let ctx = spur_tui::test_support::test_view_ctx(&LINEAGE);
     let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE), &ctx);
@@ -441,8 +457,9 @@ fn populated_with_archived_shown() {
     picker.set_sessions(
         "t".into(),
         vec![session("a1xxxxxx", "alpha-archived", "/tmp")],
+        synopsis(),
     );
-    picker.toggle_show_archived();
+    picker.toggle_show_archived(synopsis());
     let expected: &[&str] = &[
         "Sessions (t) [showing archived]",
         "  Search",

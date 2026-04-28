@@ -11,6 +11,10 @@ fn test_ctx() -> spur_tui::views::ViewContext<'static> {
     spur_tui::test_support::test_view_ctx(&LINEAGE)
 }
 
+fn synopsis() -> &'static spur_core::SessionSynopsisProjection {
+    test_ctx().synopsis
+}
+
 fn key(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
 }
@@ -46,7 +50,7 @@ fn highlighted_session_id(picker: &SessionPickerView) -> Option<&str> {
     picker
         .cursor()
         .checked_sub(1)
-        .and_then(|idx| picker.visible_session_at(idx))
+        .and_then(|idx| picker.visible_session_at(idx, synopsis()))
         .map(|s| s.session_id.0.as_ref())
 }
 
@@ -65,6 +69,7 @@ fn cursor_default_lands_on_last_active_when_present() {
             session("a2", "beta"),
             session("a3", "gamma"),
         ],
+        synopsis(),
     );
     // a2 is the second session; in virtual cursor space [+ New]=0, a1=1, a2=2.
     assert_eq!(picker.cursor(), 2);
@@ -78,6 +83,7 @@ fn cursor_default_falls_back_to_first_row_when_last_active_absent() {
     picker.set_sessions(
         "t".into(),
         vec![session("a1", "alpha"), session("a2", "beta")],
+        synopsis(),
     );
     assert_eq!(picker.cursor(), 1);
 }
@@ -86,7 +92,7 @@ fn cursor_default_falls_back_to_first_row_when_last_active_absent() {
 fn cursor_default_falls_back_to_zero_when_no_sessions() {
     let mut picker = SessionPickerView::new();
     picker.set_metadata(spur_tui::session_metadata::SessionMetadata::default());
-    picker.set_sessions("t".into(), vec![]);
+    picker.set_sessions("t".into(), vec![], synopsis());
     assert_eq!(picker.cursor(), 0);
 }
 
@@ -98,7 +104,7 @@ fn cursor_default_falls_back_when_last_active_not_in_visible_list() {
         ..Default::default()
     };
     picker.set_metadata(meta);
-    picker.set_sessions("t".into(), vec![session("a1", "alpha")]);
+    picker.set_sessions("t".into(), vec![session("a1", "alpha")], synopsis());
     // last_active id is unknown → fall back to row 1.
     assert_eq!(picker.cursor(), 1);
 }
@@ -114,6 +120,7 @@ fn cursor_preserved_by_session_id_after_set_sessions_reorders_list() {
             session("a2", "beta"),
             session("a3", "gamma"),
         ],
+        synopsis(),
     );
 
     // Move cursor to a3 (cursor 3 = third session row).
@@ -139,13 +146,14 @@ fn cursor_preserved_by_session_id_after_set_sessions_reorders_list() {
             session("a1", "alpha"),
             session("a2", "beta"),
         ],
+        synopsis(),
     );
 
     // Cursor should follow a3, which is now at row 1.
     assert_eq!(picker.cursor(), 1);
     assert_eq!(
         picker
-            .visible_session_at(0)
+            .visible_session_at(0, synopsis())
             .map(|s| s.session_id.0.as_ref()),
         Some("a3")
     );
@@ -158,7 +166,7 @@ fn cursor_preserves_new_session_row_across_refresh() {
         last_active_session_id: Some("a1".to_string()),
         ..Default::default()
     });
-    picker.set_sessions("t".into(), vec![session("a1", "alpha")]);
+    picker.set_sessions("t".into(), vec![session("a1", "alpha")], synopsis());
     // last_active=a1 → cursor lands on row 1 by P1.
     assert_eq!(picker.cursor(), 1);
 
@@ -167,7 +175,7 @@ fn cursor_preserves_new_session_row_across_refresh() {
     assert_eq!(picker.cursor(), 0);
 
     // Refresh.
-    picker.set_sessions("t".into(), vec![session("a1", "alpha")]);
+    picker.set_sessions("t".into(), vec![session("a1", "alpha")], synopsis());
 
     // P2 special case: cursor==0 stays at 0 (don't yank the user away from [+ New]).
     assert_eq!(picker.cursor(), 0);
@@ -183,6 +191,7 @@ fn cursor_falls_through_to_p1_when_highlighted_session_disappears() {
     picker.set_sessions(
         "t".into(),
         vec![session("a1", "alpha"), session("a2", "beta")],
+        synopsis(),
     );
     // Move to a2.
     let _ = picker.handle_key(
@@ -196,11 +205,11 @@ fn cursor_falls_through_to_p1_when_highlighted_session_disappears() {
     assert_eq!(picker.cursor(), 2);
 
     // Refresh with a2 missing — P2 finds nothing; falls through to P1, which lands on a1.
-    picker.set_sessions("t".into(), vec![session("a1", "alpha")]);
+    picker.set_sessions("t".into(), vec![session("a1", "alpha")], synopsis());
     assert_eq!(picker.cursor(), 1);
     assert_eq!(
         picker
-            .visible_session_at(0)
+            .visible_session_at(0, synopsis())
             .map(|s| s.session_id.0.as_ref()),
         Some("a1")
     );
@@ -209,7 +218,7 @@ fn cursor_falls_through_to_p1_when_highlighted_session_disappears() {
 #[test]
 fn n_key_on_picker_emits_new_session_requested() {
     let mut picker = SessionPickerView::new();
-    picker.set_sessions("test-agent".into(), vec![]);
+    picker.set_sessions("test-agent".into(), vec![], synopsis());
     let action = picker.handle_key(key('n'), &test_ctx());
     assert!(
         matches!(action, Some(Action::NewSessionRequested)),
@@ -221,7 +230,7 @@ fn n_key_on_picker_emits_new_session_requested() {
 fn n_key_with_current_draft_shows_confirm_switch() {
     let mut picker = SessionPickerView::new();
     picker.set_metadata(spur_tui::session_metadata::SessionMetadata::default());
-    picker.set_sessions("t".into(), vec![session("a1", "alpha")]);
+    picker.set_sessions("t".into(), vec![session("a1", "alpha")], synopsis());
     picker.set_current_session_id(Some("a1".to_string()));
     picker.set_current_session_has_draft(Some("a1".to_string()));
 
@@ -245,7 +254,7 @@ fn n_key_with_current_draft_shows_confirm_switch() {
 #[test]
 fn enter_on_new_session_row_emits_new_session_requested() {
     let mut picker = SessionPickerView::new();
-    picker.set_sessions("test-agent".into(), vec![]);
+    picker.set_sessions("test-agent".into(), vec![], synopsis());
     // Cursor defaults to [+ New session] row at index 0.
     let action = picker.handle_key(
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
@@ -264,6 +273,7 @@ fn slash_focuses_search_and_typing_filters() {
             session("a2", "debug race condition"),
             session("a3", "perf investigation"),
         ],
+        synopsis(),
     );
 
     // Focus search
@@ -273,10 +283,10 @@ fn slash_focuses_search_and_typing_filters() {
         let _ = picker.handle_key(key(c), &test_ctx());
     }
 
-    assert_eq!(picker.visible_session_count(), 1);
+    assert_eq!(picker.visible_session_count(synopsis()), 1);
     assert_eq!(
         picker
-            .visible_session_at(0)
+            .visible_session_at(0, synopsis())
             .map(|s| s.session_id.0.as_ref()),
         Some("a2")
     );
@@ -288,6 +298,7 @@ fn esc_in_search_returns_to_list_keeping_filter() {
     picker.set_sessions(
         "t".into(),
         vec![session("a1", "alpha"), session("a2", "beta")],
+        synopsis(),
     );
     let _ = picker.handle_key(key('/'), &test_ctx());
     let _ = picker.handle_key(key('b'), &test_ctx());
@@ -295,7 +306,7 @@ fn esc_in_search_returns_to_list_keeping_filter() {
     let action = picker.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &test_ctx());
     assert!(action.is_none());
     // Filter still active
-    assert_eq!(picker.visible_session_count(), 1);
+    assert_eq!(picker.visible_session_count(synopsis()), 1);
 }
 
 #[test]
@@ -304,22 +315,23 @@ fn esc_in_list_with_active_filter_clears_it() {
     picker.set_sessions(
         "t".into(),
         vec![session("a1", "alpha"), session("a2", "beta")],
+        synopsis(),
     );
     let _ = picker.handle_key(key('/'), &test_ctx());
     let _ = picker.handle_key(key('b'), &test_ctx());
     // Leave search mode but keep filter.
     let _ = picker.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &test_ctx());
-    assert_eq!(picker.visible_session_count(), 1);
+    assert_eq!(picker.visible_session_count(synopsis()), 1);
     // Second Esc clears filter.
     let action = picker.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &test_ctx());
     assert!(action.is_none());
-    assert_eq!(picker.visible_session_count(), 2);
+    assert_eq!(picker.visible_session_count(synopsis()), 2);
 }
 
 #[test]
 fn esc_in_list_with_no_filter_navigates_back() {
     let mut picker = SessionPickerView::new();
-    picker.set_sessions("t".into(), vec![session("a1", "x")]);
+    picker.set_sessions("t".into(), vec![session("a1", "x")], synopsis());
     let action = picker.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &test_ctx());
     assert!(matches!(action, Some(Action::NavigateTo(_))));
 }
@@ -327,7 +339,11 @@ fn esc_in_list_with_no_filter_navigates_back() {
 #[test]
 fn p_key_emits_toggle_pin_for_highlighted_session() {
     let mut picker = SessionPickerView::new();
-    picker.set_sessions("t".into(), vec![session("a1", "x"), session("a2", "y")]);
+    picker.set_sessions(
+        "t".into(),
+        vec![session("a1", "x"), session("a2", "y")],
+        synopsis(),
+    );
     // Cursor defaults to first real session (index 1, [+ New] is at 0).
     let action = picker.handle_key(key('p'), &test_ctx());
     match action {
@@ -341,7 +357,7 @@ fn p_key_emits_toggle_pin_for_highlighted_session() {
 #[test]
 fn p_key_on_new_session_row_is_noop() {
     let mut picker = SessionPickerView::new();
-    picker.set_sessions("t".into(), vec![session("a1", "x")]);
+    picker.set_sessions("t".into(), vec![session("a1", "x")], synopsis());
     let _ = picker.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &test_ctx());
     let action = picker.handle_key(key('p'), &test_ctx());
     assert!(action.is_none());
@@ -350,7 +366,7 @@ fn p_key_on_new_session_row_is_noop() {
 #[test]
 fn d_key_emits_toggle_archive_for_highlighted_session() {
     let mut picker = SessionPickerView::new();
-    picker.set_sessions("t".into(), vec![session("a1", "x")]);
+    picker.set_sessions("t".into(), vec![session("a1", "x")], synopsis());
     let _ = picker.handle_key(
         KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
         &test_ctx(),
@@ -365,7 +381,7 @@ fn d_key_emits_toggle_archive_for_highlighted_session() {
 #[test]
 fn d_key_on_new_session_row_is_noop() {
     let mut picker = SessionPickerView::new();
-    picker.set_sessions("t".into(), vec![session("a1", "x")]);
+    picker.set_sessions("t".into(), vec![session("a1", "x")], synopsis());
     let _ = picker.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &test_ctx());
     let action = picker.handle_key(key('d'), &test_ctx());
     assert!(action.is_none());
@@ -381,6 +397,7 @@ fn y_emits_copy_session_id_for_highlighted_row() {
     picker.set_sessions(
         "t".into(),
         vec![session("a1", "alpha"), session("a2", "beta")],
+        synopsis(),
     );
     // Cursor lands on a1 by P1.
     let action = picker.handle_key(key('y'), &test_ctx());
@@ -394,7 +411,7 @@ fn y_emits_copy_session_id_for_highlighted_row() {
 fn y_on_new_session_row_emits_nothing() {
     let mut picker = SessionPickerView::new();
     picker.set_metadata(spur_tui::session_metadata::SessionMetadata::default());
-    picker.set_sessions("t".into(), vec![session("a1", "alpha")]);
+    picker.set_sessions("t".into(), vec![session("a1", "alpha")], synopsis());
     // Move cursor to [+ New] row (cursor=0).
     let _ = picker.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &test_ctx());
     assert_eq!(picker.cursor(), 0);
@@ -409,7 +426,7 @@ fn y_on_new_session_row_emits_nothing() {
 #[test]
 fn a_key_toggles_show_archived() {
     let mut picker = SessionPickerView::new();
-    picker.set_sessions("t".into(), vec![session("a1", "x")]);
+    picker.set_sessions("t".into(), vec![session("a1", "x")], synopsis());
     let action = picker.handle_key(key('a'), &test_ctx());
     assert!(matches!(action, Some(Action::ToggleShowArchived)));
 }
@@ -418,9 +435,9 @@ fn a_key_toggles_show_archived() {
 fn toggle_show_archived_off_reprojects_cursor_off_archived_session() {
     let mut picker = SessionPickerView::new();
     picker.set_metadata(archived_meta("beta"));
-    picker.set_sessions("t".into(), alpha_beta_sessions());
+    picker.set_sessions("t".into(), alpha_beta_sessions(), synopsis());
 
-    picker.toggle_show_archived();
+    picker.toggle_show_archived(synopsis());
     assert!(picker.is_show_archived());
     let _ = picker.handle_key(
         KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
@@ -429,7 +446,7 @@ fn toggle_show_archived_off_reprojects_cursor_off_archived_session() {
     assert_eq!(picker.cursor(), 2);
     assert_eq!(highlighted_session_id(&picker), Some("beta"));
 
-    picker.toggle_show_archived();
+    picker.toggle_show_archived(synopsis());
 
     assert!(!picker.is_show_archived());
     assert_eq!(picker.cursor(), 1);
@@ -440,12 +457,12 @@ fn toggle_show_archived_off_reprojects_cursor_off_archived_session() {
 fn toggle_show_archived_on_preserves_cursor_by_session_id() {
     let mut picker = SessionPickerView::new();
     picker.set_metadata(archived_meta("beta"));
-    picker.set_sessions("t".into(), alpha_beta_sessions());
+    picker.set_sessions("t".into(), alpha_beta_sessions(), synopsis());
 
     assert_eq!(picker.cursor(), 1);
     assert_eq!(highlighted_session_id(&picker), Some("alpha"));
 
-    picker.toggle_show_archived();
+    picker.toggle_show_archived(synopsis());
 
     assert!(picker.is_show_archived());
     assert_eq!(highlighted_session_id(&picker), Some("alpha"));
@@ -455,11 +472,11 @@ fn toggle_show_archived_on_preserves_cursor_by_session_id() {
 fn toggle_show_archived_preserves_cursor_on_new_row() {
     let mut picker = SessionPickerView::new();
     picker.set_metadata(archived_meta("beta"));
-    picker.set_sessions("t".into(), alpha_beta_sessions());
+    picker.set_sessions("t".into(), alpha_beta_sessions(), synopsis());
     let _ = picker.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &test_ctx());
     assert_eq!(picker.cursor(), 0);
 
-    picker.toggle_show_archived();
+    picker.toggle_show_archived(synopsis());
 
     assert_eq!(picker.cursor(), 0);
 }
@@ -467,7 +484,7 @@ fn toggle_show_archived_preserves_cursor_on_new_row() {
 #[test]
 fn capital_r_enters_rename_mode_and_enter_commits() {
     let mut picker = SessionPickerView::new();
-    picker.set_sessions("t".into(), vec![session("a1", "old title")]);
+    picker.set_sessions("t".into(), vec![session("a1", "old title")], synopsis());
     let _ = picker.handle_key(
         KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
         &test_ctx(),
@@ -507,7 +524,7 @@ fn capital_r_enters_rename_mode_and_enter_commits() {
 #[test]
 fn esc_in_rename_cancels_without_action() {
     let mut picker = SessionPickerView::new();
-    picker.set_sessions("t".into(), vec![session("a1", "old")]);
+    picker.set_sessions("t".into(), vec![session("a1", "old")], synopsis());
     let _ = picker.handle_key(
         KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
         &test_ctx(),
@@ -525,7 +542,7 @@ fn esc_in_rename_cancels_without_action() {
 #[test]
 fn capital_p_toggles_preview_visible() {
     let mut picker = SessionPickerView::new();
-    picker.set_sessions("t".into(), vec![session("a1", "x")]);
+    picker.set_sessions("t".into(), vec![session("a1", "x")], synopsis());
     assert!(!picker.is_preview_visible());
     let _ = picker.handle_key(
         KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT),
@@ -542,7 +559,7 @@ fn capital_p_toggles_preview_visible() {
 #[test]
 fn r_key_emits_refresh_sessions() {
     let mut picker = SessionPickerView::new();
-    picker.set_sessions("t".into(), vec![session("a1", "x")]);
+    picker.set_sessions("t".into(), vec![session("a1", "x")], synopsis());
     let action = picker.handle_key(key('r'), &test_ctx());
     assert!(matches!(action, Some(Action::RefreshSessions)));
 }
@@ -553,6 +570,7 @@ fn picker_preserves_cursor_and_filter_across_set_sessions() {
     picker.set_sessions(
         "t".into(),
         vec![session("a1", "alpha"), session("a2", "beta")],
+        synopsis(),
     );
     // Navigate to cursor=2 and set filter to "b".
     let _ = picker.handle_key(
@@ -574,6 +592,7 @@ fn picker_preserves_cursor_and_filter_across_set_sessions() {
     picker.set_sessions(
         "t".into(),
         vec![session("a1", "alpha"), session("a2", "beta")],
+        synopsis(),
     );
 
     // Cursor and filter should be preserved.
@@ -587,6 +606,7 @@ fn enter_switching_session_with_current_draft_shows_confirm() {
     picker.set_sessions(
         "t".into(),
         vec![session("a1", "alpha"), session("a2", "beta")],
+        synopsis(),
     );
     // Tell picker that session a1 has an unsent draft (simulates the App's
     // coordination — picker doesn't look up metadata itself).
@@ -625,6 +645,7 @@ fn esc_cancels_confirm_switch() {
     picker.set_sessions(
         "t".into(),
         vec![session("a1", "alpha"), session("a2", "beta")],
+        synopsis(),
     );
     picker.set_current_session_has_draft(Some("a1".to_string()));
     let _ = picker.handle_key(
@@ -651,6 +672,7 @@ fn enter_on_same_session_id_does_not_show_confirm() {
     picker.set_sessions(
         "t".into(),
         vec![session("a1", "alpha"), session("a2", "beta")],
+        synopsis(),
     );
     picker.set_current_session_has_draft(Some("a1".to_string()));
     // Cursor on a1 (cursor=1).
@@ -666,7 +688,7 @@ fn enter_on_same_session_id_does_not_show_confirm() {
 #[test]
 fn enter_on_new_session_row_with_draft_shows_confirm() {
     let mut picker = SessionPickerView::new();
-    picker.set_sessions("t".into(), vec![session("a1", "alpha")]);
+    picker.set_sessions("t".into(), vec![session("a1", "alpha")], synopsis());
     picker.set_current_session_has_draft(Some("a1".to_string()));
     let _ = picker.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &test_ctx());
     // Cursor is at [+ New session] (cursor=0).
@@ -686,7 +708,7 @@ fn enter_on_new_session_row_with_draft_shows_confirm() {
 fn footer_hint_changes_with_mode() {
     let mut picker = SessionPickerView::new();
     picker.set_metadata(spur_tui::session_metadata::SessionMetadata::default());
-    picker.set_sessions("t".into(), vec![session("a1", "alpha")]);
+    picker.set_sessions("t".into(), vec![session("a1", "alpha")], synopsis());
 
     assert!(!picker.is_rename_active());
     assert!(!picker.is_confirm_switch_visible());
@@ -705,7 +727,7 @@ fn populated_list_footer_hint_advertises_p_pin() {
     // are caught.
     let mut picker = SessionPickerView::new();
     picker.set_metadata(spur_tui::session_metadata::SessionMetadata::default());
-    picker.set_sessions("test".into(), vec![session("a1", "alpha")]);
+    picker.set_sessions("test".into(), vec![session("a1", "alpha")], synopsis());
     // Cursor on a1 by P1; state is Populated/list (not search-focused, no
     // rename, no confirm-switch). The picker exposes footer_hint indirectly
     // via the rendered footer; we assert by rendering and checking the
@@ -733,7 +755,7 @@ fn populated_list_footer_hint_advertises_p_pin() {
 fn populated_footer_hint_changes_on_new_row_cursor() {
     let mut picker = SessionPickerView::new();
     picker.set_metadata(spur_tui::session_metadata::SessionMetadata::default());
-    picker.set_sessions("test".into(), vec![session("a1", "alpha")]);
+    picker.set_sessions("test".into(), vec![session("a1", "alpha")], synopsis());
     assert_eq!(picker.cursor(), 1);
 
     let backend = TestBackend::new(200, 24);
