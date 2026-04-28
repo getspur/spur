@@ -274,6 +274,8 @@ pub struct App {
     /// Top-level user-visible warning banner rendered in a reserved top row.
     user_warning: Option<String>,
     user_input_tx: Option<mpsc::Sender<UserInput>>,
+    #[cfg(any(test, debug_assertions))]
+    user_input_rx_for_test: Option<mpsc::Receiver<UserInput>>,
     brain_status: BrainStatus,
     brain_name: Option<String>,
     pending_first_user_message: Option<String>,
@@ -454,6 +456,8 @@ impl App {
             dirty: true, // initial render
             user_warning: None,
             user_input_tx,
+            #[cfg(any(test, debug_assertions))]
+            user_input_rx_for_test: None,
             brain_status: BrainStatus::Idle,
             brain_name: None,
             pending_first_user_message: None,
@@ -663,6 +667,80 @@ impl App {
     #[cfg(any(test, debug_assertions))]
     pub fn tombstones_for_test(&mut self) -> &mut crate::components::tombstone::TombstoneSlots {
         &mut self.tombstones
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    fn ensure_user_input_capture_for_test(&mut self) {
+        if self.user_input_rx_for_test.is_none() {
+            let (tx, rx) = mpsc::channel::<UserInput>(16);
+            self.user_input_tx = Some(tx);
+            self.user_input_rx_for_test = Some(rx);
+        }
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn add_pending_review_for_test(&mut self, executor_id: &str, attempt_n: u32) {
+        use spur_acp::{ReviewKind, ReviewPayload, Role};
+
+        self.ensure_user_input_capture_for_test();
+
+        let executor = spur_core::ExecutorId(executor_id.to_string());
+        if self.lineage.node(&executor).is_none() {
+            self.lineage
+                .apply(&SpurEvent::now(SpurEventBody::ExecutorSpawned {
+                    id: executor_id.into(),
+                    parent_id: None,
+                    session_id: SessionId(format!("session-{executor_id}")),
+                    agent: "codex".into(),
+                    role: Role::Executor,
+                    task_spec: "test task".into(),
+                }));
+        }
+
+        self.lineage
+            .apply(&SpurEvent::now(SpurEventBody::ExecutorReviewRequested {
+                id: executor_id.into(),
+                attempt_n,
+                kind: ReviewKind::Completion,
+                payload: ReviewPayload {
+                    summary: "test pending review".into(),
+                    diff_summary: None,
+                    pr_url: None,
+                    error: None,
+                    delegation_plan: None,
+                    chosen_matches_dispatched: None,
+                    peer_influence: None,
+                },
+            }));
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn user_input_sent_for_test(&mut self) -> bool {
+        self.user_input_sent_for_test_matching(None)
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn user_input_sent_for_test_with_executor(&mut self, executor_id: &str) -> bool {
+        self.user_input_sent_for_test_matching(Some(executor_id))
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    fn user_input_sent_for_test_matching(&mut self, expected_executor_id: Option<&str>) -> bool {
+        let Some(rx) = self.user_input_rx_for_test.as_mut() else {
+            return false;
+        };
+
+        let mut found = false;
+        while let Ok(input) = rx.try_recv() {
+            if let UserInput::SubmitReview { executor_id, .. } = input {
+                let matches_expected = match expected_executor_id {
+                    Some(expected) => executor_id == expected,
+                    None => true,
+                };
+                found |= matches_expected;
+            }
+        }
+        found
     }
 
     #[cfg(any(test, debug_assertions))]
@@ -2691,6 +2769,39 @@ impl App {
                     tracing::warn!(executor_id = %executor_id, "SubmitReview ignored: no pending review on this node");
                     return;
                 }
+                let decision_label = format!("{decision:?}");
+                let label = format!("{decision_label}…");
+                let pending_dispatch = Action::SubmitReviewDispatch {
+                    executor_id: executor_id.clone(),
+                    attempt_n,
+                    decision,
+                };
+                let now = Instant::now();
+                let displaced = self.tombstones.install_and_get_displaced(Tombstone {
+                    view: ViewId::Dashboard,
+                    kind: TombstoneKind::QueuedRemote {
+                        pending: pending_dispatch,
+                    },
+                    label: label.clone(),
+                    created_at: now,
+                    expires_at: now + Duration::from_secs(3),
+                });
+                if let Some(displaced_ts) = displaced {
+                    if let TombstoneKind::QueuedRemote { pending } = displaced_ts.kind {
+                        self.process_action(pending);
+                    }
+                }
+                self.flash_hint(
+                    format!("{label} — press u to revert (3s)"),
+                    Duration::from_secs(2),
+                );
+                self.dirty = true;
+            }
+            Action::SubmitReviewDispatch {
+                executor_id,
+                attempt_n,
+                decision,
+            } => {
                 if let Some(ref tx) = self.user_input_tx {
                     let _ = tx.try_send(UserInput::SubmitReview {
                         executor_id: executor_id.clone(),
@@ -2707,6 +2818,8 @@ impl App {
                         decision: to_wire_decision(&decision),
                     },
                 ));
+                self.flash_hint_short("Sent.");
+                self.dirty = true;
             }
 
             #[cfg(feature = "markdown")]
