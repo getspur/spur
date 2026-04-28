@@ -213,14 +213,12 @@ impl StatusBar {
         let compact_line = Line::from(compact_spans);
         let compact_width = compact_line.width() as u16;
 
-        let hints_reserve = 45u16;
-        let (right, right_width) = if full_width + hints_reserve > area.width
-            && compact_width + hints_reserve <= area.width
-        {
+        let (right, right_width) = if full_width > area.width {
             (compact_line, compact_width)
         } else {
             (full_line, full_width)
         };
+        let right_width = right_width.min(area.width);
 
         let hint_area_width = area
             .width
