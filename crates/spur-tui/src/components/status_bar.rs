@@ -100,6 +100,9 @@ pub struct StatusBarProps<'a> {
     pub total_cost: f64,
     pub elapsed: &'a str,
     pub current_mode: Option<&'a str>,
+    pub current_model_label: Option<&'a str>,
+    pub current_effort_label: Option<&'a str>,
+    pub usage_supported: bool,
     pub context_used: Option<u64>,
     pub context_size: Option<u64>,
     /// True when the SessionDetail view has an in-flight stream; toggles
@@ -124,6 +127,10 @@ pub struct StatusBarProps<'a> {
 }
 
 impl StatusBar {
+    pub(crate) fn truncate_model_label(label: &str, _available_width: u16) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Borrowed(label)
+    }
+
     pub fn render(frame: &mut Frame, area: Rect, props: StatusBarProps<'_>) {
         let mode_text = props
             .current_mode
@@ -349,7 +356,7 @@ impl StatusBar {
 
 #[cfg(test)]
 mod status_bar_hint_tests {
-    use super::hint_for_session_detail;
+    use super::{hint_for_session_detail, StatusBar};
 
     #[test]
     fn hint_shows_stop_when_streaming_and_esc_can_cancel() {
@@ -370,5 +377,17 @@ mod status_bar_hint_tests {
         let hint = hint_for_session_detail(false, false);
         assert!(hint.contains("[Esc]back"), "got: {hint}");
         assert!(!hint.contains("[Esc]stop"));
+    }
+
+    #[test]
+    fn truncate_model_label_strips_common_prefix_and_caps_length() {
+        let label = StatusBar::truncate_model_label("gpt-5-super-long-model-name", 14);
+        assert_eq!(label.as_ref(), "super-long-mo…");
+    }
+
+    #[test]
+    fn truncate_model_label_strips_date_suffix_after_prefix() {
+        let label = StatusBar::truncate_model_label("claude-3-5-sonnet-20241022", 14);
+        assert_eq!(label.as_ref(), "sonnet");
     }
 }
