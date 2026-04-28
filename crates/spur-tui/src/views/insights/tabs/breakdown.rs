@@ -199,6 +199,7 @@ mod tests {
         });
 
         assert!(text.contains("Breakdown"), "rendered:\n{text}");
+        assert!(text.contains("[M]odel"), "rendered:\n{text}");
         assert!(text.contains("claude-opus-4-5"), "rendered:\n{text}");
         assert!(text.contains("gpt-5-codex"), "rendered:\n{text}");
         assert!(text.contains("claude-sonnet-4"), "rendered:\n{text}");

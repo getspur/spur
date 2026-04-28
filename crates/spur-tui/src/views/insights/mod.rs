@@ -28,6 +28,7 @@ use crate::action::Action;
 use super::{View, ViewContext};
 
 pub struct InsightsView {
+    #[allow(dead_code)]
     engine: AsyncEngine,
     state: Arc<RwLock<RefreshState>>,
     is_live_tab: Arc<AtomicBool>,
@@ -159,8 +160,6 @@ impl View for InsightsView {
 
     fn render(&mut self, frame: &mut Frame, area: Rect, _ctx: &ViewContext) {
         use ratatui::{layout::Layout, widgets::Paragraph};
-
-        let _keep_engine_alive = &self.engine;
 
         match self.state.try_read() {
             Ok(state) => {
