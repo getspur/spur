@@ -149,14 +149,13 @@ impl StatusBar {
 
         if shortened.len() > 9 {
             let split = shortened.len() - 9;
-            let (head, tail) = shortened.split_at(split);
-            if tail
-                .strip_prefix('-')
-                .is_some_and(|digits| {
+            if shortened.is_char_boundary(split) {
+                let (head, tail) = shortened.split_at(split);
+                if tail.strip_prefix('-').is_some_and(|digits| {
                     digits.len() == 8 && digits.bytes().all(|b| b.is_ascii_digit())
-                })
-            {
-                shortened = head;
+                }) {
+                    shortened = head;
+                }
             }
         }
 
