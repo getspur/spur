@@ -209,7 +209,7 @@ fn is_placeholder_license_state(state: &LicenseStateEvent) -> bool {
         && state.features.is_empty()
         && matches!(state.binding_mode, LicenseBindingMode::Unknown)
         && !state.offline_ok
-        && state.status_text == "licensing not configured"
+        && state.status_text == PLACEHOLDER_STATUS_TEXT
 }
 
 fn compute_flag_summary() -> Option<(usize, usize)> {
@@ -312,6 +312,13 @@ struct CollisionModalState {
     holder: spur_acp::session_lock::HolderInfo,
 }
 
+/// Sentinel status_text used by `default_license_state` to identify
+/// the App-internal placeholder license state (vs. real provider
+/// states that may also be Inactive). Used by `is_placeholder_license_state`
+/// to skip startup-hydration of `feature_gate` when no real license
+/// has been seeded yet.
+const PLACEHOLDER_STATUS_TEXT: &str = "licensing not configured";
+
 impl App {
     pub fn new(user_input_tx: Option<mpsc::Sender<UserInput>>, start_in_picker: bool) -> Self {
         Self::new_with_config(
@@ -361,7 +368,7 @@ impl App {
             user_input_tx,
             start_in_picker,
             config,
-            Self::default_license_state("licensing not configured"),
+            Self::default_license_state(PLACEHOLDER_STATUS_TEXT),
             landing,
         )
     }
@@ -521,7 +528,7 @@ impl App {
             None,
             None,
             std::sync::Arc::new(spur_acp::SpurConfig::default()),
-            Self::default_license_state("licensing not configured"),
+            Self::default_license_state(PLACEHOLDER_STATUS_TEXT),
             crate::landing::LandingDecision::ShowDashboard,
             metadata_path,
         )
@@ -534,7 +541,7 @@ impl App {
             None,
             Some(None),
             std::sync::Arc::new(spur_acp::SpurConfig::default()),
-            Self::default_license_state("licensing not configured"),
+            Self::default_license_state(PLACEHOLDER_STATUS_TEXT),
             crate::landing::LandingDecision::ShowDashboard,
             metadata_path,
         )
@@ -2877,7 +2884,7 @@ pub async fn run_tui(
         perm_rx,
         start_in_picker.then_some(None),
         std::sync::Arc::new(spur_acp::SpurConfig::default()),
-        App::default_license_state("licensing not configured"),
+        App::default_license_state(PLACEHOLDER_STATUS_TEXT),
         crate::landing::LandingDecision::ShowDashboard,
     )
     .await
@@ -3061,7 +3068,7 @@ pub async fn run_tui_with_config(
         perm_rx,
         start_in_picker.then_some(None),
         config,
-        App::default_license_state("licensing not configured"),
+        App::default_license_state(PLACEHOLDER_STATUS_TEXT),
         crate::landing::LandingDecision::ShowDashboard,
     )
     .await
@@ -4057,7 +4064,7 @@ mod brain_retired_tests {
 }
 
 #[cfg(test)]
-mod session_cost_gate_tests {
+mod feature_gate_tests {
     use super::*;
     use spur_license::{FeatureGateError, FeatureKey, Plan, Tier};
 
