@@ -22,7 +22,7 @@ fn render_status(width: u16) -> String {
             current_mode: None,
             current_model_label: None,
             current_effort_label: None,
-            usage_supported: true,
+            usage_supported: false,
             context_used: None,
             context_size: None,
             stream_in_flight: false,

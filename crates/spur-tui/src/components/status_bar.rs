@@ -127,8 +127,50 @@ pub struct StatusBarProps<'a> {
 }
 
 impl StatusBar {
-    pub(crate) fn truncate_model_label(label: &str, _available_width: u16) -> std::borrow::Cow<'_, str> {
-        std::borrow::Cow::Borrowed(label)
+    pub(crate) fn truncate_model_label(
+        label: &str,
+        available_width: u16,
+    ) -> std::borrow::Cow<'_, str> {
+        let available = usize::from(available_width);
+        if available == 0 {
+            return std::borrow::Cow::Borrowed("");
+        }
+        if label.chars().count() <= available {
+            return std::borrow::Cow::Borrowed(label);
+        }
+
+        let mut shortened = label;
+        for prefix in ["claude-3-5-", "claude-4-", "gpt-5-"] {
+            if let Some(rest) = shortened.strip_prefix(prefix) {
+                shortened = rest;
+                break;
+            }
+        }
+
+        if shortened.len() > 9 {
+            let split = shortened.len() - 9;
+            let (head, tail) = shortened.split_at(split);
+            if tail
+                .strip_prefix('-')
+                .is_some_and(|digits| {
+                    digits.len() == 8 && digits.bytes().all(|b| b.is_ascii_digit())
+                })
+            {
+                shortened = head;
+            }
+        }
+
+        let cap = available.min(14);
+        if shortened.chars().count() <= cap {
+            return std::borrow::Cow::Borrowed(shortened);
+        }
+        if cap <= 1 {
+            return std::borrow::Cow::Owned("…".to_string());
+        }
+
+        let mut out: String = shortened.chars().take(cap - 1).collect();
+        out.push('…');
+        std::borrow::Cow::Owned(out)
     }
 
     pub fn render(frame: &mut Frame, area: Rect, props: StatusBarProps<'_>) {
@@ -138,12 +180,13 @@ impl StatusBar {
             .map(|m| format!(" [{m}]"))
             .unwrap_or_default();
 
-        let usage_text = match (props.context_used, props.context_size) {
-            (Some(used), Some(size)) if size > 0 => {
+        let usage_text = match (props.usage_supported, props.context_used, props.context_size) {
+            (false, _, _) => None,
+            (true, Some(used), Some(size)) if size > 0 => {
                 let pct = (used as f64 / size as f64) * 100.0;
-                format!(" ctx {:.0}%", pct)
+                Some(format!("ctx {:.0}%", pct))
             }
-            _ => String::new(),
+            (true, _, _) => Some("ctx --%".to_string()),
         };
 
         // Build the review span: yellow+bold when reviews are pending, dark-gray otherwise.
@@ -239,7 +282,7 @@ impl StatusBar {
     fn metric_spans(
         props: &StatusBarProps<'_>,
         mode_text: String,
-        usage_text: String,
+        usage_text: Option<String>,
         review_style: Style,
         compact: bool,
     ) -> Vec<Span<'static>> {
@@ -328,10 +371,41 @@ impl StatusBar {
             Style::default().fg(Color::DarkGray),
         ));
         spans.push(Span::styled(mode_text, Style::default().fg(Color::Magenta)));
-        spans.push(Span::styled(
-            usage_text,
-            Style::default().fg(Color::LightBlue),
-        ));
+
+        let mut has_status_segment = false;
+        if let Some(model) = props.current_model_label.filter(|label| !label.is_empty()) {
+            let model = Self::truncate_model_label(model, if compact { 14 } else { 24 });
+            spans.push(Span::styled(
+                format!(" {}", model),
+                Style::default().fg(Color::White),
+            ));
+            has_status_segment = true;
+        }
+        if !compact {
+            if let Some(effort) = props.current_effort_label.filter(|label| !label.is_empty()) {
+                if has_status_segment {
+                    spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
+                } else {
+                    spans.push(Span::raw(" "));
+                }
+                spans.push(Span::styled(
+                    effort.to_string(),
+                    Style::default().fg(Color::LightMagenta),
+                ));
+                has_status_segment = true;
+            }
+        }
+        if let Some(usage_text) = usage_text {
+            if has_status_segment {
+                spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
+            } else {
+                spans.push(Span::raw(" "));
+            }
+            spans.push(Span::styled(
+                usage_text,
+                Style::default().fg(Color::LightBlue),
+            ));
+        }
 
         if !compact {
             spans.push(Span::styled(
