@@ -1048,6 +1048,34 @@ impl SessionPickerView {
     }
 }
 
+/// Truncate a string for row display: cut at the first sentence
+/// boundary or `budget` graphemes, whichever comes first. Strips
+/// leading whitespace. Adds `…` when the cut shortened the text or
+/// when the budget is < 1.
+#[allow(dead_code)]
+pub(super) fn truncate_for_row(input: &str, budget: usize) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    let trimmed = input.trim_start();
+    if budget == 0 {
+        return "\u{2026}".to_string();
+    }
+
+    let punct_cut = trimmed.find(['.', '?', '!', '\n']);
+    let punct_text = punct_cut.map(|i| &trimmed[..i]).unwrap_or(trimmed);
+
+    let graphemes: Vec<&str> = punct_text.graphemes(true).collect();
+    if graphemes.len() <= budget && punct_cut.is_none() {
+        return punct_text.to_string();
+    }
+    if graphemes.len() <= budget {
+        return punct_text.to_string();
+    }
+    let mut out: String = graphemes.iter().take(budget).copied().collect();
+    out.push('\u{2026}');
+    out
+}
+
 impl View for SessionPickerView {
     fn handle_key(&mut self, key: KeyEvent, _ctx: &super::ViewContext) -> Option<Action> {
         // 0. Confirm-switch intercepts all keys until y/Enter commits or anything else cancels.
@@ -1529,5 +1557,54 @@ mod current_session_shortcut_tests {
             before_cursor, after_cursor,
             "picker ignored input — resuming flag likely still present"
         );
+    }
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::truncate_for_row;
+
+    #[test]
+    fn keeps_short_text_unchanged() {
+        assert_eq!(truncate_for_row("short", 10), "short");
+    }
+
+    #[test]
+    fn cuts_at_first_sentence_boundary() {
+        assert_eq!(
+            truncate_for_row("First sentence. Second one.", 100),
+            "First sentence"
+        );
+    }
+
+    #[test]
+    fn cuts_at_first_question_mark() {
+        assert_eq!(truncate_for_row("Why? Because.", 100), "Why");
+    }
+
+    #[test]
+    fn cuts_at_newline() {
+        assert_eq!(truncate_for_row("line one\nline two", 100), "line one");
+    }
+
+    #[test]
+    fn cuts_at_grapheme_budget_with_ellipsis() {
+        assert_eq!(truncate_for_row("abcdefghij", 5), "abcde\u{2026}");
+    }
+
+    #[test]
+    fn handles_unicode_grapheme_clusters() {
+        let s = "ééééé";
+        assert_eq!(truncate_for_row(s, 3), "ééé\u{2026}");
+    }
+
+    #[test]
+    fn returns_ellipsis_when_budget_under_one() {
+        assert_eq!(truncate_for_row("anything", 0), "\u{2026}");
+    }
+
+    #[test]
+    fn strips_leading_whitespace() {
+        assert_eq!(truncate_for_row("   hello", 10), "hello");
     }
 }
