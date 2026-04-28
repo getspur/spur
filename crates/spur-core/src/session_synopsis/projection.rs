@@ -55,6 +55,15 @@ impl SessionSynopsisProjection {
         }
     }
 
+    /// Test-only helper to inject a synopsis directly without going
+    /// through the event stream. Visible to in-crate `#[cfg(test)]`
+    /// modules and to consumers via the optional `test-helpers` feature.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn insert_for_test(&mut self, id: spur_acp::SessionId, synopsis: SessionSynopsis) {
+        self.pending.remove(&id);
+        self.by_session.insert(id, synopsis);
+    }
+
     /// Fold an event into the projection. Idempotent on irrelevant variants.
     pub fn apply(&mut self, event: &spur_acp::SpurEvent) {
         use agent_client_protocol::schema::SessionUpdate;
