@@ -6,6 +6,11 @@
 
 use std::collections::HashMap;
 
+const KIMI_INPUT_PRICE_PER_MTOK: f64 = 0.60;
+const KIMI_OUTPUT_PRICE_PER_MTOK: f64 = 2.50;
+const KIMI_CACHE_READ_PRICE_PER_MTOK: f64 = 0.15;
+const KIMI_CACHE_CREATE_PRICE_PER_MTOK: f64 = 0.0;
+
 // ─── Types ────────────────────────────────────────────────────────────
 
 /// Per-model pricing rates in USD per token.
@@ -230,6 +235,18 @@ impl PricingRegistry {
                 output_cost_per_token: 0.60 / 1_000_000.0,
                 cache_creation_input_token_cost: 0.15 / 1_000_000.0,
                 cache_read_input_token_cost: 0.075 / 1_000_000.0,
+                tiered: None,
+            },
+        );
+
+        // ─── Moonshot AI / Kimi ─────────────────────────────────────
+        reg.insert(
+            "kimi-for-coding",
+            ModelPricing {
+                input_cost_per_token: KIMI_INPUT_PRICE_PER_MTOK / 1_000_000.0,
+                output_cost_per_token: KIMI_OUTPUT_PRICE_PER_MTOK / 1_000_000.0,
+                cache_creation_input_token_cost: KIMI_CACHE_CREATE_PRICE_PER_MTOK / 1_000_000.0,
+                cache_read_input_token_cost: KIMI_CACHE_READ_PRICE_PER_MTOK / 1_000_000.0,
                 tiered: None,
             },
         );
@@ -553,6 +570,13 @@ mod tests {
         let reg = PricingRegistry::with_builtin_prices();
         assert!(reg.get("gpt-5").is_some());
         assert!(reg.get("claude-sonnet-4").is_some());
+    }
+
+    #[test]
+    fn pricing_registry_includes_kimi_for_coding() {
+        let pricing = PricingRegistry::with_builtin_prices();
+        let entry = pricing.get("kimi-for-coding");
+        assert!(entry.is_some(), "kimi-for-coding must be registered");
     }
 
     #[test]
