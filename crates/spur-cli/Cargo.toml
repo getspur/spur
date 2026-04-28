@@ -17,6 +17,7 @@ path = "src/lib.rs"
 [features]
 default = []
 duckdb = ["spur-context/duckdb"]
+test-seam = []
 
 [dependencies]
 spur-acp = { workspace = true }
@@ -41,6 +42,7 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 toml = { workspace = true }
 directories = { workspace = true }
+file-rotate = "0.8"
 
 [dev-dependencies]
 tempfile = "3"
