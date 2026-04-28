@@ -35,13 +35,29 @@
 
 | File | Action | Responsibility |
 |---|---|---|
-| `crates/spur-tui/src/action.rs` | Modify | Add `Hash` to `ViewId` derive at line 188 |
-| `crates/spur-tui/src/components/tombstone.rs` | Create | `Tombstone`, `TombstoneKind`, `TombstoneSlots` with `install`, `evict`, `tick`, `cancel_all_without_dispatch` |
-| `crates/spur-tui/src/components/mod.rs` | Modify | Declare `pub mod tombstone` |
-| `crates/spur-tui/src/app.rs` | Modify | Add `tombstones: TombstoneSlots` field; wire tick; wire undo handler; wire per-action install arms; wire `PanicReset` arm |
+| `crates/spur-tui/src/action.rs` | Modify | Add `Hash` to `ViewId` derive at line 188 (Task 1) |
+| `crates/spur-tui/src/components/tombstone.rs` | Create | `Tombstone`, `TombstoneKind`, `TombstoneSlots` with `install`, `evict`, `tick`, `cancel_all_without_dispatch` (Task 2) |
+| `crates/spur-tui/src/components/mod.rs` | Modify | Declare `pub mod tombstone` (Task 2) |
+| `crates/spur-tui/src/components/status_bar.rs` | Modify | Add `render_tombstone_badge(Option<&Tombstone>, Instant) -> Line<'a>` for Channel A (Task 3.5, spec §4.10) |
+| `crates/spur-tui/src/app.rs` | Modify | Add `tombstones: TombstoneSlots` field; wire tick; wire undo handler with §4.6 gate cascade; wire per-action install arms; wire `PanicReset` arm; pass tombstone peek into status-bar render |
 | `crates/spur-tui/src/views/session_picker.rs` | Modify | Add `original_title: String` to `RenameState` at line 113; capture at `Post::StartRename` at line 1502 |
-| `crates/spur-tui/tests/tombstone_unit.rs` | Create | Unit tests for `TombstoneSlots` (install, evict, tick, expiry, cancel) |
-| `crates/spur-tui/tests/tombstone_integration.rs` | Create | App-level integration tests for each action class and undo paths |
+| `crates/spur-tui/tests/tombstone_unit.rs` | Create | Unit tests for `TombstoneSlots` (install, evict, tick, expiry, cancel) (Task 2) |
+| `crates/spur-tui/tests/tombstone_badge_render.rs` | Create | Render tests for ambient countdown badge (Task 3.5) |
+| `crates/spur-tui/tests/tombstone_integration.rs` | Create | App-level integration tests for each action class and undo paths (Task 3 onward) |
+
+**Amended task ordering (post-2026-04-28 first-principles UX review):**
+
+1. Task 1: `Hash` derive on `ViewId` — DONE.
+2. Task 2: `TombstoneSlots` module + unit tests — DONE.
+3. Task 3: `App.tombstones` field + tick wire — IN FLIGHT.
+4. **Task 3.5 (NEW): Channel A ambient badge render helper.** Must land BEFORE Task 4 so the undo handler has somewhere to display the countdown.
+5. Task 4: undo handler with §4.6 ownership-cascade gate (10 contexts enumerated).
+6. Tasks 5–9: per-action install arms.
+7. Tasks 10–12: PanicReset, deprecation toast, workspace sweep.
+
+The two-channel split (spec §4.8) means Tasks 5–9 must call BOTH channels at install:
+- Channel A (badge): `tombstones.install(...)` — handled by App.
+- Channel B (flash): `app.flash_hint(install_message, Duration::from_secs(2))` — install confirmation flash.
 
 ---
 
@@ -517,7 +533,213 @@
 
 ---
 
+## Task 3.5 — Render ambient countdown badge (Channel A, spec §4.10)
+
+**Spec amendment 2026-04-28**: tombstone display split into two channels. Channel A is the ambient badge in the status bar, right-aligned, showing `[u: archived 'foo' 45s]`. This task adds the render helper and wires it into the status bar build path.
+
+**Files:**
+- Modify: `crates/spur-tui/src/components/status_bar.rs` (or whichever module owns status-bar rendering — verify with `grep -n "render_status_bar\|StatusBar" crates/spur-tui/src/`)
+- Modify: `crates/spur-tui/src/app.rs` (pass tombstone peek result into status-bar render context)
+- Create: `crates/spur-tui/tests/tombstone_badge_render.rs`
+
+- [ ] **Step 1: Write failing render test.**
+
+  Create `crates/spur-tui/tests/tombstone_badge_render.rs`:
+  ```rust
+  use std::time::{Duration, Instant};
+  use spur_tui::action::ViewId;
+  use spur_tui::components::tombstone::{Tombstone, TombstoneKind, TombstoneSlots};
+
+  #[test]
+  fn badge_renders_when_current_view_matches_slot() {
+      let mut slots = TombstoneSlots::new();
+      let now = Instant::now();
+      slots.install(Tombstone {
+          view: ViewId::SessionPicker,
+          kind: TombstoneKind::Reversible {
+              inverse: spur_tui::action::Action::ToggleSessionArchive {
+                  session_id: "s1".into(),
+                  via_legacy_key: false,
+              },
+          },
+          label: "archived 'foo'".into(),
+          created_at: now,
+          expires_at: now + Duration::from_secs(45),
+      });
+      let badge = spur_tui::components::status_bar::render_tombstone_badge(
+          slots.peek(&ViewId::SessionPicker),
+          now,
+      );
+      let text = format!("{}", badge);  // ratatui::text::Line Display impl
+      assert!(text.contains("[u:"), "expected `[u:` prefix, got: {text}");
+      assert!(text.contains("archived 'foo'"), "expected label, got: {text}");
+      assert!(text.contains("45s"), "expected countdown, got: {text}");
+  }
+
+  #[test]
+  fn badge_returns_empty_line_when_slot_is_none() {
+      let now = Instant::now();
+      let badge = spur_tui::components::status_bar::render_tombstone_badge(None, now);
+      let text = format!("{}", badge);
+      assert!(text.is_empty(), "expected empty line, got: {text}");
+  }
+
+  #[test]
+  fn badge_uses_revert_verb_for_queued_remote() {
+      let mut slots = TombstoneSlots::new();
+      let now = Instant::now();
+      slots.install(Tombstone {
+          view: ViewId::Dashboard,
+          kind: TombstoneKind::QueuedRemote {
+              pending: spur_tui::action::Action::SubmitReview {
+                  executor_id: "x".into(),
+                  attempt_n: 1,
+                  decision: spur_core::ReviewDecision::Approve,
+              },
+          },
+          label: "Approve".into(),
+          created_at: now,
+          expires_at: now + Duration::from_secs(2),
+      });
+      let badge = spur_tui::components::status_bar::render_tombstone_badge(
+          slots.peek(&ViewId::Dashboard),
+          now,
+      );
+      let text = format!("{}", badge);
+      assert!(text.contains("revert"), "expected `revert` verb, got: {text}");
+      assert!(text.contains("2s"), "expected 2s countdown, got: {text}");
+  }
+
+  #[test]
+  fn badge_truncates_long_labels() {
+      let mut slots = TombstoneSlots::new();
+      let now = Instant::now();
+      let long = "archived 'verylongsessionnametotest'";
+      slots.install(Tombstone {
+          view: ViewId::SessionPicker,
+          kind: TombstoneKind::Reversible {
+              inverse: spur_tui::action::Action::ToggleSessionArchive {
+                  session_id: "s1".into(),
+                  via_legacy_key: false,
+              },
+          },
+          label: long.into(),
+          created_at: now,
+          expires_at: now + Duration::from_secs(60),
+      });
+      let badge = spur_tui::components::status_bar::render_tombstone_badge(
+          slots.peek(&ViewId::SessionPicker),
+          now,
+      );
+      let text = format!("{}", badge);
+      assert!(text.contains("…"), "expected ellipsis truncation, got: {text}");
+      assert!(text.len() <= 40, "badge text too long: {} chars in: {text}", text.len());
+  }
+  ```
+
+- [ ] **Step 2: Confirm tests fail (helper not defined).**
+
+  ```bash
+  scripts/spur-cargo test -p spur-tui --test tombstone_badge_render
+  ```
+  Expected: compile error — `render_tombstone_badge` does not exist.
+
+- [ ] **Step 3: Implement `render_tombstone_badge` in `status_bar.rs`.**
+
+  Public function signature:
+  ```rust
+  pub fn render_tombstone_badge<'a>(
+      slot: Option<&crate::components::tombstone::Tombstone>,
+      now: std::time::Instant,
+  ) -> ratatui::text::Line<'a> {
+      let Some(t) = slot else {
+          return ratatui::text::Line::default();
+      };
+      let remaining = t.expires_at.saturating_duration_since(now);
+      let secs = remaining.as_secs();
+      let verb = match t.kind {
+          crate::components::tombstone::TombstoneKind::Reversible { .. } => "u",
+          crate::components::tombstone::TombstoneKind::QueuedRemote { .. } => "u: revert",
+      };
+      let label = if t.label.chars().count() > 24 {
+          let mut truncated: String = t.label.chars().take(23).collect();
+          truncated.push('…');
+          truncated
+      } else {
+          t.label.clone()
+      };
+      ratatui::text::Line::from(vec![
+          ratatui::text::Span::styled(
+              format!("  [{}: {} {}s]", verb, label, secs),
+              ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray),
+          ),
+      ])
+  }
+  ```
+
+  Note: the `verb` returns `"u"` for Reversible (so output reads `[u: archived 'foo' 45s]`) and `"u: revert"` for QueuedRemote (so output reads `[u: revert Approve 2s]`). Verify against spec §4.10 examples.
+
+- [ ] **Step 4: Wire badge into status-bar render path.**
+
+  In the existing status-bar render code (likely `StatusBar::render` or a similar method), append the badge to the right-aligned segment AFTER the license badge and BEFORE any clock/right-edge element. Pass the tombstone peek as part of `StatusBarProps` or add a new field.
+
+  The `App` render code that constructs `StatusBarProps` must compute:
+  ```rust
+  let tombstone_for_view = self.tombstones.peek(self.current_view());
+  ```
+  and pass it through.
+
+- [ ] **Step 5: Run badge tests + spur-tui suite.**
+
+  ```bash
+  scripts/spur-cargo test -p spur-tui --test tombstone_badge_render
+  scripts/spur-cargo test -p spur-tui
+  ```
+
+- [ ] **Step 6: Clippy + fmt.**
+
+  ```bash
+  scripts/spur-cargo clippy -p spur-tui -- -D warnings
+  scripts/spur-cargo fmt -p spur-tui -- --check
+  ```
+
+- [ ] **Step 7: Commit.**
+
+  ```bash
+  git add crates/spur-tui/src/components/status_bar.rs \
+          crates/spur-tui/src/app.rs \
+          crates/spur-tui/tests/tombstone_badge_render.rs
+  git commit -m "feat(spur-tui): tombstone ambient countdown badge in status bar (Channel A)"
+  ```
+
+**Acceptance Criteria:**
+- `render_tombstone_badge(Option<&Tombstone>, Instant) -> Line<'a>` exists in `status_bar.rs`.
+- Badge renders `[u: <label> <Ns>]` for Reversible and `[u: revert <label> <Ns>]` for QueuedRemote.
+- Badge truncates labels > 24 chars with ellipsis.
+- Returns empty `Line` when slot is `None`.
+- Badge appears in status bar render output ONLY when `current_view == slot.view`.
+- All 4 unit tests pass + spur-tui suite green.
+
+---
+
 ## Task 4 — Implement `u` / `Ctrl+Z` undo handler at app level
+
+**Spec amendment 2026-04-28**: §4.6 now enumerates an explicit activation-gate ownership cascade. The undo handler MUST short-circuit BEFORE evicting the tombstone for any of these contexts:
+
+| # | Gate (early return) | `u` flows to | Slot lifecycle |
+|---|---|---|---|
+| 1 | `input_bar.is_active() && !input_bar.is_empty()` | input_bar (text-undo via tui-textarea) | unchanged |
+| 2 | mention picker open (`@`-trigger) | picker | unchanged |
+| 3 | slash command picker open (`/`-trigger) | picker | unchanged |
+| 4 | history shell active (Up/Down history nav showing body) | history shell | unchanged |
+| 5 | permission prompt pending (`y/n/a` waiting) | permission handler | unchanged |
+| 6 | help overlay open (`?`) | block + flash `"close help to undo"` | unchanged |
+| 7 | mermaid render-picker open | render-picker | unchanged |
+| 8 | quit-confirm modal open | block (no-op) | unchanged |
+| 9 | leader-menu popup (post-leader-key spec) | block (no-op) | unchanged |
+| 10 | none of the above | tombstone undo (consume) | evicted |
+
+This cascade matches quick-fixes T5's owner-order discipline (composer-non-empty > picker > history-shell > view-keys). The implementation MUST grep the existing context-check helpers and reuse them — do NOT introduce new boolean flags.
 
 **Files:**
 - Modify: `crates/spur-tui/src/app.rs`
