@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -9,6 +10,31 @@ use crate::domain::continuation::{DeferReason, DropReason};
 use crate::domain::delegation::{DelegationId, DelegationStatus};
 use crate::types::{CancelMode, SessionId};
 use agent_client_protocol::schema::{SessionConfigOption, SessionInfo, SessionNotification};
+
+mod option_arc_spur_agent_caps_serde {
+    use std::sync::Arc;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(
+        caps: &Option<Arc<crate::SpurAgentCaps>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        caps.as_deref().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<Option<Arc<crate::SpurAgentCaps>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Option::<crate::SpurAgentCaps>::deserialize(deserializer).map(|caps| caps.map(Arc::new))
+    }
+}
 
 /// Review kind for `ExecutorReviewRequested`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -363,6 +389,10 @@ pub enum SpurEventBody {
         /// True when this session was attached without an enforceable
         /// lockfile (NFS/sshfs/SMB). Multi-instance protection is OFF.
         fs_unsafe: bool,
+        /// Caps snapshot at session-create. None for resumed-pre-M9 sessions
+        /// (M8 §F-3 permissive fallback).
+        #[serde(default, with = "option_arc_spur_agent_caps_serde")]
+        caps: Option<Arc<crate::SpurAgentCaps>>,
     },
     SessionAttachRejected {
         acp_session_id: String,
@@ -1050,6 +1080,7 @@ mod cancel_mode_field_tests {
             resumed: false,
             cancel_mode: CancelMode::AcpSoft,
             fs_unsafe: false,
+            caps: None,
         });
         match ev.body {
             SpurEventBody::AgentSessionReady { cancel_mode, .. } => {

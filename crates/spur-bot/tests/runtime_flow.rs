@@ -65,6 +65,7 @@ fn ready_event(session: &str, acp_session_id: &str, brain: &str) -> spur_acp::Sp
         resumed: true,
         cancel_mode: spur_acp::CancelMode::AcpSoft,
         fs_unsafe: false,
+        caps: None,
     })
 }
 
@@ -621,6 +622,7 @@ async fn same_topic_does_not_start_two_fresh_sessions_before_ready() {
                 resumed: false,
                 cancel_mode: spur_acp::CancelMode::AcpSoft,
                 fs_unsafe: false,
+                caps: None,
             },
         ))
         .unwrap();
@@ -680,6 +682,7 @@ async fn stale_fresh_ready_does_not_reactivate_rebound_topic() {
                 resumed: false,
                 cancel_mode: spur_acp::CancelMode::AcpSoft,
                 fs_unsafe: false,
+                caps: None,
             },
         ))
         .unwrap();
@@ -736,6 +739,7 @@ async fn same_topic_resume_supersession_keeps_new_binding_when_old_ready_arrives
                 resumed: true,
                 cancel_mode: spur_acp::CancelMode::AcpSoft,
                 fs_unsafe: false,
+                caps: None,
             },
         ))
         .unwrap();
@@ -749,6 +753,7 @@ async fn same_topic_resume_supersession_keeps_new_binding_when_old_ready_arrives
                 resumed: true,
                 cancel_mode: spur_acp::CancelMode::AcpSoft,
                 fs_unsafe: false,
+                caps: None,
             },
         ))
         .unwrap();
@@ -784,6 +789,7 @@ async fn same_topic_resume_supersession_ignores_old_ready_until_new_ready_arrive
                 resumed: true,
                 cancel_mode: spur_acp::CancelMode::AcpSoft,
                 fs_unsafe: false,
+                caps: None,
             },
         ))
         .unwrap();
@@ -827,6 +833,7 @@ async fn late_resumed_ready_without_pending_target_is_ignored() {
                 resumed: true,
                 cancel_mode: spur_acp::CancelMode::AcpSoft,
                 fs_unsafe: false,
+                caps: None,
             },
         ))
         .unwrap();
@@ -876,6 +883,7 @@ async fn fresh_ready_replaces_existing_live_route_for_same_topic() {
                 resumed: false,
                 cancel_mode: spur_acp::CancelMode::AcpSoft,
                 fs_unsafe: false,
+                caps: None,
             },
         ))
         .unwrap();
@@ -940,6 +948,7 @@ async fn multiple_pending_new_sessions_bind_in_fifo_order() {
                 resumed: false,
                 cancel_mode: spur_acp::CancelMode::AcpSoft,
                 fs_unsafe: false,
+                caps: None,
             },
         ))
         .unwrap();
@@ -952,6 +961,7 @@ async fn multiple_pending_new_sessions_bind_in_fifo_order() {
                 resumed: false,
                 cancel_mode: spur_acp::CancelMode::AcpSoft,
                 fs_unsafe: false,
+                caps: None,
             },
         ))
         .unwrap();
@@ -1077,6 +1087,7 @@ async fn agent_session_ready_commits_binding_and_persists() {
                 resumed: false,
                 cancel_mode: spur_acp::CancelMode::AcpSoft,
                 fs_unsafe: false,
+                caps: None,
             },
         ))
         .unwrap();
@@ -1434,6 +1445,7 @@ async fn restore_pending_plain_text_queues_resume_then_message() {
                 resumed: true,
                 cancel_mode: spur_acp::CancelMode::AcpSoft,
                 fs_unsafe: false,
+                caps: None,
             },
         ))
         .unwrap();

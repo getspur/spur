@@ -100,6 +100,9 @@ pub struct StatusBarProps<'a> {
     pub total_cost: f64,
     pub elapsed: &'a str,
     pub current_mode: Option<&'a str>,
+    pub current_model_label: Option<&'a str>,
+    pub current_effort_label: Option<&'a str>,
+    pub usage_supported: bool,
     pub context_used: Option<u64>,
     pub context_size: Option<u64>,
     /// True when the SessionDetail view has an in-flight stream; toggles
@@ -124,6 +127,51 @@ pub struct StatusBarProps<'a> {
 }
 
 impl StatusBar {
+    pub(crate) fn truncate_model_label(
+        label: &str,
+        available_width: u16,
+    ) -> std::borrow::Cow<'_, str> {
+        let available = usize::from(available_width);
+        if available == 0 {
+            return std::borrow::Cow::Borrowed("");
+        }
+        if label.chars().count() <= available {
+            return std::borrow::Cow::Borrowed(label);
+        }
+
+        let mut shortened = label;
+        for prefix in ["claude-3-5-", "claude-4-", "gpt-5-"] {
+            if let Some(rest) = shortened.strip_prefix(prefix) {
+                shortened = rest;
+                break;
+            }
+        }
+
+        if shortened.len() > 9 {
+            let split = shortened.len() - 9;
+            if shortened.is_char_boundary(split) {
+                let (head, tail) = shortened.split_at(split);
+                if tail.strip_prefix('-').is_some_and(|digits| {
+                    digits.len() == 8 && digits.bytes().all(|b| b.is_ascii_digit())
+                }) {
+                    shortened = head;
+                }
+            }
+        }
+
+        let cap = available.min(14);
+        if shortened.chars().count() <= cap {
+            return std::borrow::Cow::Borrowed(shortened);
+        }
+        if cap <= 1 {
+            return std::borrow::Cow::Owned("…".to_string());
+        }
+
+        let mut out: String = shortened.chars().take(cap - 1).collect();
+        out.push('…');
+        std::borrow::Cow::Owned(out)
+    }
+
     pub fn render(frame: &mut Frame, area: Rect, props: StatusBarProps<'_>) {
         let mode_text = props
             .current_mode
@@ -131,12 +179,13 @@ impl StatusBar {
             .map(|m| format!(" [{m}]"))
             .unwrap_or_default();
 
-        let usage_text = match (props.context_used, props.context_size) {
-            (Some(used), Some(size)) if size > 0 => {
+        let usage_text = match (props.usage_supported, props.context_used, props.context_size) {
+            (false, _, _) => None,
+            (true, Some(used), Some(size)) if size > 0 => {
                 let pct = (used as f64 / size as f64) * 100.0;
-                format!(" ctx {:.0}%", pct)
+                Some(format!("ctx {:.0}%", pct))
             }
-            _ => String::new(),
+            (true, _, _) => Some("ctx --%".to_string()),
         };
 
         // Build the review span: yellow+bold when reviews are pending, dark-gray otherwise.
@@ -163,14 +212,21 @@ impl StatusBar {
         let compact_line = Line::from(compact_spans);
         let compact_width = compact_line.width() as u16;
 
-        let hints_reserve = 45u16;
-        let (right, right_width) = if full_width + hints_reserve > area.width
-            && compact_width + hints_reserve <= area.width
-        {
+        // SessionDetail has a dedicated hint area allocated separately below, so the
+        // 45-col reserve doesn't apply — fit metrics fully unless they exceed area.
+        // Other views render hints inline, so reserve space to keep them readable.
+        let use_compact = if matches!(props.view, ViewId::SessionDetail(_)) {
+            full_width > area.width
+        } else {
+            let hints_reserve = 45u16;
+            full_width + hints_reserve > area.width && compact_width + hints_reserve <= area.width
+        };
+        let (right, right_width) = if use_compact {
             (compact_line, compact_width)
         } else {
             (full_line, full_width)
         };
+        let right_width = right_width.min(area.width);
 
         let hint_area_width = area
             .width
@@ -229,15 +285,15 @@ impl StatusBar {
     /// Build the right-hand metric spans. When `compact` is true, use
     /// abbreviated symbols and drop low-priority items so the status bar
     /// stays readable on narrow terminals.
-    fn metric_spans(
-        props: &StatusBarProps<'_>,
+    fn metric_spans<'a>(
+        props: &StatusBarProps<'a>,
         mode_text: String,
-        usage_text: String,
+        usage_text: Option<String>,
         review_style: Style,
         compact: bool,
-    ) -> Vec<Span<'static>> {
+    ) -> Vec<Span<'a>> {
         let sep = if compact { " " } else { " · " };
-        let mut spans: Vec<Span> = Vec::new();
+        let mut spans: Vec<Span<'a>> = Vec::new();
 
         if props.issue_count > 0 {
             spans.push(Span::styled(
@@ -321,10 +377,41 @@ impl StatusBar {
             Style::default().fg(Color::DarkGray),
         ));
         spans.push(Span::styled(mode_text, Style::default().fg(Color::Magenta)));
-        spans.push(Span::styled(
-            usage_text,
-            Style::default().fg(Color::LightBlue),
-        ));
+
+        let mut has_status_segment = false;
+        if let Some(model) = props.current_model_label.filter(|label| !label.is_empty()) {
+            let model = Self::truncate_model_label(model, if compact { 14 } else { 24 });
+            spans.push(Span::styled(
+                format!(" {}", model),
+                Style::default().fg(Color::White),
+            ));
+            has_status_segment = true;
+        }
+        if !compact {
+            if let Some(effort) = props.current_effort_label.filter(|label| !label.is_empty()) {
+                if has_status_segment {
+                    spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
+                } else {
+                    spans.push(Span::raw(" "));
+                }
+                spans.push(Span::styled(
+                    effort,
+                    Style::default().fg(Color::LightMagenta),
+                ));
+                has_status_segment = true;
+            }
+        }
+        if let Some(usage_text) = usage_text {
+            if has_status_segment {
+                spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
+            } else {
+                spans.push(Span::raw(" "));
+            }
+            spans.push(Span::styled(
+                usage_text,
+                Style::default().fg(Color::LightBlue),
+            ));
+        }
 
         if !compact {
             spans.push(Span::styled(
@@ -349,7 +436,7 @@ impl StatusBar {
 
 #[cfg(test)]
 mod status_bar_hint_tests {
-    use super::hint_for_session_detail;
+    use super::{hint_for_session_detail, StatusBar};
 
     #[test]
     fn hint_shows_stop_when_streaming_and_esc_can_cancel() {
@@ -370,5 +457,26 @@ mod status_bar_hint_tests {
         let hint = hint_for_session_detail(false, false);
         assert!(hint.contains("[Esc]back"), "got: {hint}");
         assert!(!hint.contains("[Esc]stop"));
+    }
+
+    #[test]
+    fn truncate_model_label_strips_common_prefix_and_caps_length() {
+        let label = StatusBar::truncate_model_label("gpt-5-super-long-model-name", 14);
+        assert_eq!(label.as_ref(), "super-long-mo…");
+    }
+
+    #[test]
+    fn truncate_model_label_strips_date_suffix_after_prefix() {
+        let label = StatusBar::truncate_model_label("claude-3-5-sonnet-20241022", 14);
+        assert_eq!(label.as_ref(), "sonnet");
+    }
+
+    #[test]
+    fn truncate_model_label_handles_multibyte_text_near_date_suffix() {
+        let date_suffixed = StatusBar::truncate_model_label("a名前-20241022", 4);
+        assert_eq!(date_suffixed.as_ref(), "a名前");
+
+        let truncated = StatusBar::truncate_model_label("a-名前20241022", 4);
+        assert_eq!(truncated.as_ref(), "a-名…");
     }
 }

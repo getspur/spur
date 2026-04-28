@@ -136,6 +136,50 @@ mod session_attach_guard_transfer_tests {
         }
     }
 
+    struct NewSessionConnection {
+        response: Option<agent_client_protocol::schema::NewSessionResponse>,
+    }
+
+    #[async_trait]
+    impl AgentConnection for NewSessionConnection {
+        async fn initialize(
+            &mut self,
+            _request: InitializeRequest,
+        ) -> anyhow::Result<agent_client_protocol::schema::InitializeResponse> {
+            unimplemented!("NewSessionConnection: initialize")
+        }
+
+        async fn new_session(
+            &mut self,
+            _cwd: PathBuf,
+            _mcp_servers: Vec<McpServer>,
+        ) -> anyhow::Result<agent_client_protocol::schema::NewSessionResponse> {
+            self.response
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("new_session called twice"))
+        }
+
+        async fn prompt(
+            &mut self,
+            _request: PromptRequest,
+        ) -> anyhow::Result<Pin<Box<dyn Stream<Item = spur_acp::SessionNotification> + Send>>>
+        {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        async fn cancel(&mut self, _session_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn health(&self) -> AgentHealth {
+            AgentHealth::Ready
+        }
+    }
+
     #[tokio::test]
     async fn retire_active_brain_moves_attach_guard_to_active_connection() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -288,7 +332,8 @@ mod session_attach_guard_transfer_tests {
         let json =
             include_str!("../../spur-acp/tests/data/codex_acp_0_12_new_session_response.json");
         let new: NewSessionResponse = serde_json::from_str(json).unwrap();
-        let caps = std::sync::Arc::new(SpurAgentCaps::new(&init, &new));
+        let caps =
+            std::sync::Arc::new(SpurAgentCaps::new(&init, &new, spur_acp::AgentKind::CodexAcp));
         brain.spur_agent_caps = Some(caps.clone());
 
         let read = orchestrator
@@ -469,7 +514,8 @@ mod session_attach_guard_transfer_tests {
                     "Claude Sonnet 4.7",
                 )],
             ));
-        let caps = std::sync::Arc::new(SpurAgentCaps::new(&init, &new));
+        let caps =
+            std::sync::Arc::new(SpurAgentCaps::new(&init, &new, spur_acp::AgentKind::CodexAcp));
         assert!(caps.supports_set_model());
 
         let mut brain = BrainSession {
@@ -509,6 +555,64 @@ mod session_attach_guard_transfer_tests {
         );
         assert_eq!(log.set_session_model[0].0, "acp-x");
         assert_eq!(log.set_session_model[0].1, "claude-sonnet-4-7");
+
+        brain.delegation_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn fresh_agent_session_ready_event_carries_caps() {
+        use agent_client_protocol::schema::{ModelId, ModelInfo, NewSessionResponse};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = SpurConfig::default();
+        config.cost.db_path = tmp.path().join("cost.db").display().to_string();
+        config.agents.entries = vec![spur_acp::AgentConfig::with_defaults("codex")];
+        let mut orchestrator = Orchestrator::new(tmp.path().to_path_buf(), config, None).unwrap();
+        let mut event_rx = orchestrator.subscribe();
+
+        let new_session =
+            NewSessionResponse::new(agent_client_protocol::schema::SessionId::new("acp-codex"))
+                .models(agent_client_protocol::schema::SessionModelState::new(
+                    ModelId::new("gpt-5-codex"),
+                    vec![ModelInfo::new(ModelId::new("gpt-5-codex"), "GPT-5 Codex")],
+                ));
+        let init = agent_client_protocol::schema::InitializeResponse::new(ProtocolVersion::LATEST);
+
+        let brain = orchestrator
+            .create_brain_session(
+                Box::new(NewSessionConnection {
+                    response: Some(new_session),
+                }),
+                "codex".to_string(),
+                None,
+                None,
+                false,
+                init,
+            )
+            .await
+            .expect("fresh brain session must be created");
+
+        assert!(
+            brain.spur_agent_caps.is_some(),
+            "fresh BrainSession must cache caps after session/new"
+        );
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut ready_caps = None;
+        while tokio::time::Instant::now() < deadline && ready_caps.is_none() {
+            let remaining = deadline - tokio::time::Instant::now();
+            match tokio::time::timeout(remaining, event_rx.recv()).await {
+                Ok(Ok(ev)) => {
+                    if let SpurEventBody::AgentSessionReady { caps, .. } = ev.body {
+                        ready_caps = caps;
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        let caps = ready_caps.expect("AgentSessionReady must carry caps for fresh sessions");
+        assert!(caps.supports_set_model());
 
         brain.delegation_handle.abort();
     }
@@ -3518,6 +3622,16 @@ impl Orchestrator {
             )
         });
 
+        let config_options = session_response.config_options.clone().unwrap_or_default();
+        // M8.A: build the frozen-per-session capability cache from both
+        // the InitializeResponse (`AgentCapabilities`) and the
+        // NewSessionResponse (modes/models/config_options). Spec §6.1.
+        let spur_agent_caps = Some(Arc::new(spur_acp::SpurAgentCaps::new(
+            &init_response,
+            &session_response,
+            brain_cfg.kind,
+        )));
+
         self.emit(SpurEvent::now(SpurEventBody::AgentSessionReady {
             session: session_id.clone(),
             acp_session_id: session_response.session_id.to_string(),
@@ -3525,9 +3639,9 @@ impl Orchestrator {
             resumed: false,
             cancel_mode: cancel_mode_for(brain_cfg.transport),
             fs_unsafe,
+            caps: spur_agent_caps.clone(),
         }));
 
-        let config_options = session_response.config_options.clone().unwrap_or_default();
         if !config_options.is_empty() {
             // Surface the initial cache so spur-tui can synthesize
             // advertised slash commands (e.g. /model, /effort) from
@@ -3537,14 +3651,6 @@ impl Orchestrator {
                 config_options: config_options.clone(),
             }));
         }
-
-        // M8.A: build the frozen-per-session capability cache from both
-        // the InitializeResponse (`AgentCapabilities`) and the
-        // NewSessionResponse (modes/models/config_options). Spec §6.1.
-        let spur_agent_caps = Some(Arc::new(spur_acp::SpurAgentCaps::new(
-            &init_response,
-            &session_response,
-        )));
 
         self.self_held.insert(brain_session_id.clone());
 
@@ -3849,6 +3955,7 @@ impl Orchestrator {
             resumed,
             cancel_mode: cancel_mode_for(brain_cfg.transport),
             fs_unsafe,
+            caps: None,
         }));
 
         let brain_session = BrainSession {
