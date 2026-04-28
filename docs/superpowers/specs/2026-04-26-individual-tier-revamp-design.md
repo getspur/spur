@@ -15,7 +15,7 @@ This spec replaces the existing tier-plan's individual-tier section (Community +
 **Core decisions:**
 
 1. **All 7 ACP vendor adapters Free.** Cross-vendor orchestration is SPUR's competitive moat; gating vendors at Pro is product self-sabotage.
-2. **All 17 bundled skills × 7 render targets Free.** Crippling skills cripples agent quality. Only `skills_pro_custom` (org-internal extensions) is Pro.
+2. **All 19 bundled skills Free.** Crippling skills cripples agent quality. Only `skills_pro_custom` (org-internal extensions) is Pro. Render-target enumeration is verified against `crates/spur-core/src/skills/adapters.rs` at install time, not asserted in spec copy (the count grew as kimi/codex/gemini adapters shipped).
 3. **Capability gates, not quota gates.** People pay to UNLOCK CAPABILITIES they can't otherwise do. Quotas exist but stay symbolic for the persona.
 4. **Honest launch with dated roadmap.** Pro v1 ships ~40 real features today. 4 vapor features are explicitly listed as "v1.1 Q3 2026" with date buffer. Existing Pro buyers get v1.1 unlocks free.
 5. **Pricing: $12/mo or $99 lifetime** (lifetime explicitly bound to v1.x).
@@ -133,7 +133,7 @@ Risk-blocked features cite the relevant Risk # from `architecture.md` §8.
 |---|---|---|---|
 | `skills_core_registry` | F | v1 | Context-aware loading of bundled skills |
 | `skills_core_atomic_installation` | F | v1 | SPUR-MANAGED marker + SHA-256 integrity (Risk #16 mitigation) |
-| `skills_core_render_per_vendor` | F | v1 | All 17 bundled skills × 7 render targets (claude/codex/gemini/kiro/cursor/opencode/kimi) |
+| `skills_core_render_per_vendor` | F | v1 | All 19 bundled skills × N render targets (claude/codex/gemini/kiro/cursor/opencode/kimi/etc. — exact list in `crates/spur-core/src/skills/adapters.rs`) |
 | `skills_pro_custom` | P | v1 | Register org-internal MCP/agent skills |
 | `skills_pro_role_gating` | P | v1 | Per-role skill bundle access control |
 
