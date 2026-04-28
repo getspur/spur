@@ -1,19 +1,16 @@
-//! Plan C M0 (wave C.1) — binary-level happy-path smoke.
+//! Plan C M0 + M0.5 (wave C.1) — binary-level gate tests.
 //!
-//! Proves the `spur` binary still launches and the gated community-tier
-//! daily-driver paths still return 0 after wave C.1's `require_cli_gate`
-//! calls land. Functions as a regression net: if a future commit
-//! accidentally inverts a gate's logic or wires the wrong key, the
-//! community-tier happy path goes red.
+//! - **Happy-path smokes** (M0): prove the `spur` binary launches and
+//!   that gated community-tier daily-driver paths still return 0
+//!   after wave C.1's `require_cli_gate` calls land. Regression net
+//!   for any future commit that accidentally inverts a gate or wires
+//!   the wrong key.
 //!
-//! It does NOT prove the gate fires under denial. A real denial e2e
-//! (binary exits non-zero + stderr names the missing key) needs either
-//! a tampered policy fixture or a Pro JWT with stripped entitlements;
-//! both are deferred to **M0.5** alongside the
-//! `CLI_CORE_LICENSE_ACTIVATE` enforcement (the same fixture serves
-//! both). Until M0.5, every test in this file passes whether or not
-//! the per-arm `require_cli_gate(...)?` calls are present — that is a
-//! known limitation, not a hidden bug.
+//! - **Denial e2e** (M0.5): proves `spur auth login` exits non-zero
+//!   with a typed-error stderr message when the spawned binary's
+//!   gate denies `cli_core_license_activate`. This is the first
+//!   binary-level test that actually exercises the denial leg of
+//!   `require_feature` through the clap dispatch path.
 
 #![cfg(unix)]
 
@@ -53,4 +50,34 @@ fn spur_init_succeeds_on_default_community_tier() {
         .arg("init")
         .assert()
         .success();
+}
+
+#[test]
+fn spur_auth_login_exits_nonzero_when_cli_core_license_activate_denied() {
+    // Plan C M0.5 — first true wiring assertion at the binary
+    // boundary. The dev-only `SPUR_LICENSE_DEV_PLAN=enterprise` env
+    // var forces the spawned `spur` to resolve an empty Enterprise
+    // tier (because the embedded policy currently has no `enterprise`
+    // block — see policy-gap follow-up doc). With zero features, the
+    // gate denies `cli_core_license_activate` and `spur auth login`
+    // exits non-zero before reaching the licenseseat provider.
+    //
+    // FIXTURE COUPLING: when policy-gap option B lands (embed
+    // `enterprise` = `@inherit:pro`), this approach stops producing
+    // an empty tier. Switch to a test-support strip-keys mechanism
+    // then. The test will fail loudly instead of silently passing
+    // because the gate would let `auth login` through and we'd hit
+    // a `NotConfigured` exit (still non-zero) but stderr would no
+    // longer name the gated key — the second assertion catches that.
+    let assert = Command::cargo_bin("spur")
+        .expect("spur binary builds")
+        .env("SPUR_LICENSE_DEV_PLAN", "enterprise")
+        .args(["auth", "login", "--key", "irrelevant-fixture-key"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("cli_core_license_activate"),
+        "stderr must name the denied key, got:\n{stderr}",
+    );
 }
