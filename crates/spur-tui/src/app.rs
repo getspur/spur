@@ -1197,7 +1197,7 @@ impl App {
         match &event.body {
             SpurEventBody::SessionsListed { agent, sessions } => {
                 if let Some(ref mut picker) = self.session_picker {
-                    picker.set_sessions(agent.clone(), sessions.clone());
+                    picker.set_sessions(agent.clone(), sessions.clone(), &self.synopsis);
                 }
                 return;
             }
@@ -1870,7 +1870,7 @@ impl App {
 
             Action::ToggleShowArchived => {
                 if let Some(ref mut picker) = self.session_picker {
-                    picker.toggle_show_archived();
+                    picker.toggle_show_archived(&self.synopsis);
                 }
                 self.dirty = true;
             }
