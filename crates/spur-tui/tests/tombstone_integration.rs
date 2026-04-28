@@ -335,3 +335,27 @@ fn tombstone_issue_undo_restores_previous_status() {
         Some(Action::Issue(IssueAction::UpdateStatus { status, .. })) if status == "open"
     ));
 }
+
+#[test]
+fn tombstone_skipped_when_issue_not_in_tracked_issues() {
+    // Regression test: previously the UpdateStatus arm guessed `previous_status = "open"`
+    // when the issue wasn't found in tracked_issues, which silently corrupted undo.
+    // Now: skip tombstone install entirely so undo is "nothing to undo" rather than wrong.
+    let mut app = App::new_for_tests();
+    process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
+    // Empty tracked_issues — issue "ghost-1" is NOT registered.
+    process_action(
+        &mut app,
+        Action::Issue(IssueAction::UpdateStatus {
+            id: "ghost-1".into(),
+            status: "closed".into(),
+            via_legacy_key: false,
+        }),
+    );
+
+    // No tombstone installed because previous_status couldn't be captured.
+    assert!(
+        !app.tombstones_for_test().has(&ViewId::IssueBrowser),
+        "tombstone must NOT be installed when issue is missing from tracked_issues"
+    );
+}
