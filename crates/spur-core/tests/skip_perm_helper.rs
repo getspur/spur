@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::{
     InitializeRequest, InitializeResponse, LoadSessionRequest, McpServer, NewSessionResponse,
-    PromptRequest, SessionId, SessionNotification, SetSessionModeRequest, SetSessionModeResponse,
+    PromptRequest, SessionId, SessionMode, SessionModeId, SessionModeState, SessionNotification,
+    SetSessionModeRequest, SetSessionModeResponse,
 };
 use async_trait::async_trait;
 use futures::Stream;
@@ -23,6 +24,7 @@ struct MockConn {
     calls: Arc<Mutex<Vec<(String, String)>>>,
     /// If set, `set_session_mode` returns this error instead of Ok.
     fail_set_session_mode: bool,
+    advertised_modes: Option<Vec<SessionModeId>>,
 }
 
 #[async_trait]
@@ -40,9 +42,11 @@ impl AgentConnection for MockConn {
             .lock()
             .unwrap()
             .push(("new_session".into(), cwd.display().to_string()));
-        Ok(NewSessionResponse::new(SessionId::new(
-            "mock-session".to_string(),
-        )))
+        let mut response = NewSessionResponse::new(SessionId::new("mock-session".to_string()));
+        if let Some(modes) = self.advertised_modes.clone() {
+            response = response.modes(mode_state(modes));
+        }
+        Ok(response)
     }
 
     async fn prompt(
@@ -60,6 +64,10 @@ impl AgentConnection for MockConn {
     }
     fn health(&self) -> AgentHealth {
         AgentHealth::Ready
+    }
+
+    fn advertised_session_modes(&self, _session_id: &SessionId) -> Option<Vec<SessionModeId>> {
+        self.advertised_modes.clone()
     }
 
     async fn set_session_mode(
@@ -87,6 +95,30 @@ impl AgentConnection for MockConn {
             .unwrap()
             .push(("load_session".into(), req.session_id.0.to_string()));
         Ok(Box::pin(futures::stream::empty()))
+    }
+}
+
+fn mode_state(mode_ids: Vec<SessionModeId>) -> SessionModeState {
+    let current = mode_ids
+        .first()
+        .cloned()
+        .unwrap_or_else(|| SessionModeId::new("default"));
+    SessionModeState::new(
+        current,
+        mode_ids
+            .into_iter()
+            .map(|id| {
+                let name = id.0.to_string();
+                SessionMode::new(id, name)
+            })
+            .collect(),
+    )
+}
+
+fn conn_with_modes(modes: &[&str]) -> MockConn {
+    MockConn {
+        advertised_modes: Some(modes.iter().map(|mode| SessionModeId::new(*mode)).collect()),
+        ..Default::default()
     }
 }
 
@@ -138,7 +170,7 @@ async fn skips_set_session_mode_when_mode_absent() {
 
 #[tokio::test]
 async fn calls_set_session_mode_when_bypass_and_mode_present() {
-    let mut conn = MockConn::default();
+    let mut conn = conn_with_modes(&["bypassPermissions"]);
     let calls = conn.calls.clone();
     let cfg = cfg(true, Some("bypassPermissions"));
     new_session_with_bypass(&mut conn, &cfg, PathBuf::from("/cwd"), vec![])
@@ -158,6 +190,7 @@ async fn calls_set_session_mode_when_bypass_and_mode_present() {
 async fn set_session_mode_error_is_non_fatal() {
     let mut conn = MockConn {
         fail_set_session_mode: true,
+        advertised_modes: Some(vec![SessionModeId::new("bypassPermissions")]),
         calls: Arc::default(),
     };
     let cfg = cfg(true, Some("bypassPermissions"));
@@ -217,7 +250,7 @@ async fn load_session_skips_set_session_mode_when_mode_absent() {
 
 #[tokio::test]
 async fn load_session_calls_set_session_mode_when_bypass_and_mode_present() {
-    let mut conn = MockConn::default();
+    let mut conn = conn_with_modes(&["bypassPermissions"]);
     let calls = conn.calls.clone();
     let cfg = cfg(true, Some("bypassPermissions"));
     let _stream = load_session_with_bypass(
@@ -243,6 +276,7 @@ async fn load_session_calls_set_session_mode_when_bypass_and_mode_present() {
 async fn load_session_set_session_mode_error_is_non_fatal() {
     let mut conn = MockConn {
         fail_set_session_mode: true,
+        advertised_modes: Some(vec![SessionModeId::new("bypassPermissions")]),
         calls: Arc::default(),
     };
     let cfg = cfg(true, Some("bypassPermissions"));
