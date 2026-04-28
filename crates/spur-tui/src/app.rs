@@ -1323,7 +1323,18 @@ impl App {
 
                 return;
             }
-            _ => {}
+            // Variants outside the session-list / auth pre-routing surface.
+            // They flow through to the brain-status match below and the view
+            // fan-out at the end of `handle_spur_event`. Logged at debug so
+            // that a future variant added to `SpurEventBody` without a
+            // routing decision is visible (R3: observability requires
+            // explicitness — see docs/architecture.md §Risk Register #3).
+            _ => {
+                tracing::debug!(
+                    seq = event.seq,
+                    "SpurEventBody not pre-routed by session-list match; deferring to brain-status match + view fan-out"
+                );
+            }
         }
 
         // Track brain status transitions
