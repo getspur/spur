@@ -193,6 +193,25 @@ impl HelpOverlay {
         )));
         out.push(Line::from(""));
 
+        out.push(header(" Keyboard environment"));
+        out.push(Line::from(
+            "  macOS Terminal.app: enable \"View \u{2192} Use Option as Meta key\" or `Alt+*` shortcuts will not register.",
+        ));
+        out.push(Line::from(
+            "  iTerm2: Profiles \u{2192} Keys \u{2192} set Left Option to \"Esc+\".",
+        ));
+        out.push(Line::from("  Windows Terminal: native \u{2014} works."));
+        out.push(Line::from(
+            "  tmux passthrough: Ctrl+P/N/O may be intercepted by your tmux prefix; consider rebinding tmux prefix to Ctrl+A.",
+        ));
+        out.push(Line::from(
+            "  Legacy terminals: Ctrl+digit (e.g. Ctrl+1 for tab jump) may not encode reliably.",
+        ));
+        out.push(Line::from(
+            "  Flow control: terminals running `stty ixon` will eat `Ctrl+S`/`Ctrl+Q`. Set `stty -ixon` or use a different shortcut.",
+        ));
+        out.push(Line::from(""));
+
         out.push(Line::from(Span::styled(
             " Press ? or Esc to close",
             Style::default().fg(Color::DarkGray),
