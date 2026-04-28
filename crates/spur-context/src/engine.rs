@@ -1318,7 +1318,7 @@ impl AnalyticsEngine {
                 COALESCE(ROUND(SUM(computed_cost_usd), 4), 0.0) AS cost_usd,
                 COUNT(*) AS events
             FROM all_events_with_cost
-            WHERE timestamp >= CAST(now() AS TIMESTAMP) - CAST(? || ' minutes' AS INTERVAL)
+            WHERE timestamp >= (now() AT TIME ZONE 'UTC') - CAST(? || ' minutes' AS INTERVAL)
             GROUP BY session_id, agent, model
             ORDER BY cost_usd DESC
         "#;
@@ -1952,6 +1952,89 @@ mod tests {
             unpriced_cost.is_none(),
             "unpriced event should have NULL computed_cost, not silent $0"
         );
+    }
+
+    #[test]
+    fn live_recent_sessions_window_uses_utc() {
+        let engine = setup_engine();
+        engine
+            .conn
+            .execute_batch("SET TimeZone = 'Asia/Ho_Chi_Minh';")
+            .unwrap();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let recent_ms = now_ms - 60_000;
+        let stale_ms = now_ms - 5 * 60_000;
+
+        engine
+            .conn
+            .execute_batch(
+                r#"
+                DROP TABLE IF EXISTS live_recent_sessions_window_events;
+                CREATE TABLE live_recent_sessions_window_events (
+                    timestamp_ms          BIGINT,
+                    session_id            VARCHAR,
+                    agent                 VARCHAR,
+                    model                 VARCHAR,
+                    project               VARCHAR,
+                    input_tokens          BIGINT,
+                    output_tokens         BIGINT,
+                    cache_read_tokens     BIGINT,
+                    cache_creation_tokens BIGINT,
+                    cost_usd              DOUBLE
+                );
+                "#,
+            )
+            .unwrap();
+        engine
+            .conn
+            .execute(
+                "INSERT INTO live_recent_sessions_window_events VALUES \
+                 (?1, 'recent-session', 'claude', 'claude-sonnet-4', 'spur', \
+                  100::BIGINT, 50::BIGINT, 0::BIGINT, 0::BIGINT, 0.01::DOUBLE)",
+                duckdb::params![recent_ms],
+            )
+            .unwrap();
+        engine
+            .conn
+            .execute(
+                "INSERT INTO live_recent_sessions_window_events VALUES \
+                 (?1, 'stale-session', 'claude', 'claude-sonnet-4', 'spur', \
+                  200::BIGINT, 75::BIGINT, 0::BIGINT, 0::BIGINT, 0.02::DOUBLE)",
+                duckdb::params![stale_ms],
+            )
+            .unwrap();
+        engine
+            .conn
+            .execute_batch(
+                r#"
+                CREATE OR REPLACE VIEW all_events AS
+                SELECT
+                    epoch_ms(timestamp_ms) AS timestamp,
+                    session_id,
+                    agent,
+                    model,
+                    project,
+                    input_tokens,
+                    output_tokens,
+                    cache_read_tokens,
+                    cache_creation_tokens,
+                    cost_usd
+                FROM live_recent_sessions_window_events;
+                "#,
+            )
+            .unwrap();
+        engine.conn.execute_batch(ALL_EVENTS_WITH_COST_VIEW).unwrap();
+
+        let rows = engine.live_recent_sessions(2).unwrap();
+        let session_ids = rows
+            .iter()
+            .map(|row| row.session_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(session_ids, vec!["recent-session"]);
     }
 
     #[test]
