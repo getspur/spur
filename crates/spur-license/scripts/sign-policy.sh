@@ -22,10 +22,16 @@ trap 'rm -f "$TMP_PAYLOAD" "$TMP_SIG"' EXIT
 # Detect whether the file already has a SignedPolicy wrapper or is a raw
 # PolicyDocument. If wrapped, extract .payload; otherwise treat the whole
 # file as the payload.
+#
+# IMPORTANT: jq always emits a trailing newline. The Rust verifier
+# (build.rs + at runtime) calls `signed.payload.as_bytes()` which does
+# NOT include any trailing newline, so we strip it here. Without this
+# strip the signed bytes would differ by one byte from the verified
+# bytes and ed25519-dalek would reject the signature.
 if jq -e '.payload and .signature and .key_id' "$POLICY_FILE" >/dev/null 2>&1; then
-  jq -r '.payload' "$POLICY_FILE" > "$TMP_PAYLOAD"
+  jq -r '.payload' "$POLICY_FILE" | tr -d '\n' > "$TMP_PAYLOAD"
 else
-  jq -c . "$POLICY_FILE" > "$TMP_PAYLOAD"
+  jq -c . "$POLICY_FILE" | tr -d '\n' > "$TMP_PAYLOAD"
 fi
 
 # Sign the canonical payload bytes.
