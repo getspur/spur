@@ -11,7 +11,7 @@ use spur_acp::{
     LicenseBindingMode, LicensePlan as EventLicensePlan, LicenseStateEvent, LicenseStatusEvent,
     LicenseSubjectKind, SessionId, SpurEvent, SpurEventBody,
 };
-use spur_core::{ExecutorLineage, PlanProjectionStore};
+use spur_core::{ExecutorLineage, PlanProjectionStore, SessionSynopsisProjection};
 
 #[cfg(feature = "markdown")]
 use ratatui_image::picker::Picker;
@@ -205,6 +205,7 @@ pub struct App {
     lineage: ExecutorLineage,
     /// Durable plan snapshots keyed by session and plan id.
     plan_projection: PlanProjectionStore,
+    synopsis: SessionSynopsisProjection,
     /// Per-executor `ReactTrace` instances rendered by the Stream tab.
     /// Populated on every `SpurEventBody::WorkerNotification`.
     pub(crate) worker_streams: crate::worker_streams::WorkerStreams,
@@ -358,6 +359,7 @@ impl App {
             pending_permission: None,
             lineage: ExecutorLineage::new(),
             plan_projection: PlanProjectionStore::new(),
+            synopsis: SessionSynopsisProjection::new(),
             worker_streams: crate::worker_streams::WorkerStreams::new(),
             #[cfg(feature = "markdown")]
             mermaid_picker,
@@ -1138,6 +1140,7 @@ impl App {
         // pure function of the event stream — view code reads from it later.
         self.lineage.apply(&event);
         self.plan_projection.apply(&event);
+        self.synopsis.apply(&event);
 
         // Route worker stream updates into per-executor ReactTraces.
         // Orphan drop: skip events whose executor the lineage doesn't
@@ -2407,6 +2410,10 @@ impl App {
 
     pub fn plan_projection(&self) -> &PlanProjectionStore {
         &self.plan_projection
+    }
+
+    pub fn synopsis(&self) -> &SessionSynopsisProjection {
+        &self.synopsis
     }
 
     pub fn current_view(&self) -> &ViewId {
@@ -3859,5 +3866,40 @@ mod quit_shortcut_tests {
             app.dashboard_for_test().input_bar_text_for_test(),
             "visible"
         );
+    }
+}
+
+#[cfg(test)]
+mod synopsis_wire_tests {
+    use super::*;
+    use agent_client_protocol::schema::{
+        ContentBlock, ContentChunk, SessionNotification, SessionUpdate, TextContent,
+    };
+    use spur_acp::domain::events::{SpurEvent, SpurEventBody};
+    use spur_acp::SessionId;
+
+    fn wrap(body: SpurEventBody) -> SpurEvent {
+        SpurEvent::now(body)
+    }
+
+    #[test]
+    fn handle_spur_event_applies_to_synopsis_projection() {
+        let mut app = App::new_for_tests();
+
+        app.handle_spur_event(wrap(SpurEventBody::AgentNotification {
+            session: SessionId("S1".into()),
+            notification: Box::new(SessionNotification::new(
+                agent_client_protocol::schema::SessionId::new("S1"),
+                SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Text(
+                    TextContent::new("hello world"),
+                ))),
+            )),
+        }));
+
+        let s = app
+            .synopsis()
+            .get(&SessionId("S1".into()))
+            .expect("commit-on-read fallback");
+        assert_eq!(s.last_user_msg.as_deref(), Some("hello world"));
     }
 }
