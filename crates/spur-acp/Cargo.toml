@@ -32,6 +32,12 @@ tempfile = "3"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+libproc = "0.14"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# /proc reads are pure std::fs; no extra dep needed.
+
 [dev-dependencies]
 spur-acp = { path = ".", features = ["test-support"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
