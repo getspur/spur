@@ -2079,6 +2079,19 @@ impl View for DashboardView {
                 });
             }
 
+            SpurEventBody::OrphanReaped {
+                agent_name,
+                pgid,
+                age_secs,
+            } => {
+                self.activity_log.push(LogEntry {
+                    timestamp: Self::now_stamp(),
+                    prefix: format!("[orphan:{}]", agent_name),
+                    message: format!("Reaped orphan (pgid {pgid}, age {age_secs}s)"),
+                    kind: LogEntryKind::Info,
+                });
+            }
+
             _ => {}
         }
     }

@@ -446,7 +446,7 @@ async fn run() -> Result<()> {
     let tui_mode = matches!(cli.command, Commands::Tui { .. });
     let _tracing_guard = init_tracing(tui_mode, &repo_root)?;
 
-    {
+    let reaped_orphans: Vec<spur_acp::orphan_registry::PgidRecord> = {
         use spur_acp::orphan_sweeper::OrphanSweeper;
         use spur_acp::process_inspector::production_inspector;
         let pgids_dir = repo_root.join(".spur").join("pgids");
@@ -457,9 +457,9 @@ async fn run() -> Result<()> {
                 recycled = report.skipped_recycled,
                 "orphan_sweeper: cleaned up stale agent trees from prior session"
             );
-            // T7 will emit one SpurEvent::OrphanReaped per killed tree here.
         }
-    }
+        report.killed
+    };
 
     match cli.command {
         Commands::Init { force, with_skills } => {
@@ -805,6 +805,21 @@ async fn run() -> Result<()> {
                 orch
             };
             let _license_runtime = orch.spawn_license_runtime(license.clone());
+
+            // Surface orphan-sweep results in the TUI activity log. Sent
+            // directly on `event_tx` (not via the funnel) because the
+            // funnel handle is private; `seq=0` is fine here — these
+            // events arrive before any other startup events.
+            let now_secs = chrono::Utc::now().timestamp();
+            for rec in &reaped_orphans {
+                let _ = orch.event_tx.send(spur_acp::SpurEvent::now(
+                    spur_acp::SpurEventBody::OrphanReaped {
+                        agent_name: rec.agent_name.clone(),
+                        pgid: rec.pgid,
+                        age_secs: now_secs - rec.spawned_at,
+                    },
+                ));
+            }
 
             // Retain a copy of the brain override before it is moved into the
             // orchestrator spawn below, so the auto-resume block can inspect it.
