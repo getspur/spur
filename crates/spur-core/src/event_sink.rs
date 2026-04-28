@@ -16,8 +16,10 @@ use tokio::sync::broadcast;
 use spur_acp::domain::events::SpurEvent;
 
 /// Maximum file size before rotation. Override with
-/// `SPUR_EVENT_LOG_MAX_BYTES`.
-pub const DEFAULT_MAX_BYTES: u64 = 128 * 1024 * 1024; // 128 MB
+/// `SPUR_EVENT_LOG_MAX_BYTES`. Sized to play well with the
+/// `LogConfig::events_max_total_bytes` cap (default 64 MB): 8 MB per file
+/// × ~7 rotated chunks + 8 MB active ≈ 64 MB total on disk.
+pub const DEFAULT_MAX_BYTES: u64 = 8 * 1024 * 1024; // 8 MB
 const FLUSH_BYTES: usize = 64 * 1024; // 64 KB buffer threshold
 const FLUSH_INTERVAL_MS: u64 = 100;
 
@@ -152,7 +154,7 @@ impl SinkState {
             // can grow up to its rotation threshold without pushing the
             // directory total past the user-visible cap.
             let effective = cap.saturating_sub(self.max_bytes);
-            if let Err(e) = enforce_event_cap(&self.dir, effective) {
+            if let Err(e) = enforce_event_cap(&self.dir, effective, &self.current_path) {
                 tracing::warn!(error = %e,
                     "event_sink: enforce_event_cap failed");
             }
@@ -166,9 +168,18 @@ impl SinkState {
 }
 
 /// Garbage-collect oldest `.ndjson` files in `dir` until the cumulative
-/// size of the remaining files is ≤ `cap_bytes`. Returns the number of
-/// files deleted (for telemetry).
-fn enforce_event_cap(dir: &Path, cap_bytes: u64) -> std::io::Result<usize> {
+/// size of the remaining files is ≤ `cap_bytes`. The active file at
+/// `protected` is never deleted (it's just been opened by the caller and
+/// will be written to immediately). Returns the number of files deleted.
+fn enforce_event_cap(
+    dir: &Path,
+    cap_bytes: u64,
+    protected: &Path,
+) -> std::io::Result<usize> {
+    // Short-circuit the disable sentinel — no point in scanning the dir.
+    if cap_bytes == u64::MAX {
+        return Ok(0);
+    }
     let mut entries: Vec<(PathBuf, SystemTime, u64)> = Vec::new();
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
@@ -176,8 +187,20 @@ fn enforce_event_cap(dir: &Path, cap_bytes: u64) -> std::io::Result<usize> {
         if path.extension().and_then(|s| s.to_str()) != Some("ndjson") {
             continue;
         }
-        let md = entry.metadata()?;
-        entries.push((path, md.modified()?, md.len()));
+        if path == protected {
+            continue;
+        }
+        let md = match entry.metadata() {
+            Ok(md) => md,
+            // Tolerate concurrent deletion; just skip the entry.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        let mtime = match md.modified() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        entries.push((path, mtime, md.len()));
     }
     // Sort newest-first so we keep newest until we cross the cap.
     entries.sort_by(|a, b| b.1.cmp(&a.1));
@@ -187,8 +210,12 @@ fn enforce_event_cap(dir: &Path, cap_bytes: u64) -> std::io::Result<usize> {
     for (path, _mtime, size) in entries {
         running += size;
         if running > cap_bytes {
-            fs::remove_file(&path)?;
-            deleted += 1;
+            match fs::remove_file(&path) {
+                Ok(()) => deleted += 1,
+                // Already gone; treat as a successful delete.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
         }
     }
     Ok(deleted)
