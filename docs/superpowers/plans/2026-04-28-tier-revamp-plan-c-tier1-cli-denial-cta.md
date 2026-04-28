@@ -492,3 +492,10 @@ if let Some(gate_err) = find_gate_error(&anyhow_err) {
 
 Plan doc preserved as audit trail above; this addendum is the
 canonical reference for Tier 2 / Tier 3 implementers.
+
+**Tier 2 has now landed** (commits f5cf3a87 / af0ae021 / 13fb4740 +
+cleanup commit on top, rebased onto current main): TUI capability-tease
+modal, MVP gate site at `Action::SendMessage`, and the `SPUR_FORCE_TTY`
+test hook that closes follow-up #2 above. See
+`docs/superpowers/plans/2026-04-28-tier-revamp-plan-c-tier2-tui-upgrade-modal.md`
+for the Tier 2 plan + post-merge addendum.

@@ -14,7 +14,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
-use spur_license::{FeatureGateError, Plan};
+use spur_license::{FeatureGateError, Plan, Tier};
 
 /// Data carried by `App::upgrade_modal` while the modal is visible.
 #[derive(Debug, Clone)]
@@ -52,10 +52,13 @@ fn modal_lines(state: &UpgradeModalState) -> Vec<Line<'static>> {
     // any future variant falls back to a minimal "feature unavailable"
     // line so the modal still renders something useful before we add
     // a dedicated branch.
-    let (key_text, tier_label): (String, &'static str) = match &state.err {
-        FeatureGateError::Denied { key, tier } => (key.as_str().to_string(), tier.label()),
-        _ => ("(unknown)".to_string(), "Unknown"),
-    };
+    let (key_text, current_tier, tier_label): (String, Option<Tier>, &'static str) =
+        match &state.err {
+            FeatureGateError::Denied { key, tier } => {
+                (key.as_str().to_string(), Some(*tier), tier.label())
+            }
+            _ => ("(unknown)".to_string(), None, "Unknown"),
+        };
     let mut out: Vec<Line<'static>> = Vec::with_capacity(14);
 
     // Spacer
@@ -78,21 +81,26 @@ fn modal_lines(state: &UpgradeModalState) -> Vec<Line<'static>> {
         Span::styled(tier_label.to_string(), Style::default().fg(Color::DarkGray)),
     ]));
 
-    // Required tier: <plan>  (Cyan-BOLD if Some, omit row if None).
-    // `Plan` has no `Display` impl today; `{plan:?}` produces
-    // PascalCase ("Pro", "Community", …) which is the desired
-    // display form. Adding a Display impl is a clean follow-up but
-    // not required for this MVP.
+    // Required tier: <plan>  (Cyan-BOLD if Some AND it differs from
+    // the current tier; omit otherwise). Suppressing same-tier rows
+    // avoids the confusing "Required tier: Community" beside
+    // "Current tier: Community" rendering that surfaces when the
+    // stripped-key demo path denies a community-tier key.
     if let Some(req) = state.required_tier {
-        out.push(Line::from(vec![
-            Span::raw("  Required tier: "),
-            Span::styled(
-                format!("{req:?}"),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
+        let same_as_current = current_tier
+            .map(|cur| Tier::from_plan(req) == cur)
+            .unwrap_or(false);
+        if !same_as_current {
+            out.push(Line::from(vec![
+                Span::raw("  Required tier: "),
+                Span::styled(
+                    req.label().to_string(),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        }
     }
 
     // Spacer + "To unlock this feature:"
@@ -229,6 +237,25 @@ mod tests {
         assert!(
             !flat.contains("Required tier"),
             "required-tier row must be omitted when None: {flat}"
+        );
+    }
+
+    #[test]
+    fn modal_lines_omits_required_tier_when_same_as_current() {
+        // `cli_core_exec` IS in the embedded community policy, so its
+        // `required_tier` is `Some(Plan::Community)`. With the gated
+        // user already on Community, rendering "Required tier:
+        // Community" alongside "Current tier: Community" would be
+        // confusing. The same-tier elision suppresses that row.
+        let lines = modal_lines(&fixture_state(Some(Plan::Community)));
+        let flat = flatten(&lines);
+        assert!(
+            flat.contains("Current tier"),
+            "current-tier row must still render: {flat}"
+        );
+        assert!(
+            !flat.contains("Required tier"),
+            "required-tier row must be omitted when it equals current tier: {flat}"
         );
     }
 

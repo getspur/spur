@@ -128,7 +128,7 @@ fn spur_exec_under_stripped_key_renders_typed_error_at_binary_boundary() {
 }
 
 #[test]
-fn spur_exec_under_stripped_key_renders_full_cta_under_force_tty() {
+fn spur_exec_under_stripped_key_renders_structured_upgrade_cta_under_force_tty() {
     // Plan C Tier 2 Task 3 — closes the Tier 1 follow-up
     // (`2026-04-28-tier-revamp-tier1-followup-tty-test-hook.md`).
     //
