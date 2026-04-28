@@ -65,13 +65,17 @@ fn stub_binary(dir: &std::path::Path, name: &str) {
 
 fn spur() -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_spur"));
-    // The embedded policy only defines `community` and `pro` tiers, so a
-    // dev-machine `SPUR_LICENSE_DEV_PLAN=enterprise` (or any other unknown
-    // value) leaks into the child as a tier with zero features and trips
-    // every `require_cli_gate(...)` call (Plan C wave C.1). Tests in this
-    // file exercise the default community-tier path, so always strip the
-    // override before spawning.
+    // Strip both debug-only env vars that can perturb the resolved
+    // feature snapshot in the spawned child:
+    //
+    // - `SPUR_LICENSE_DEV_PLAN`: post-policy-gap fix, unknown values
+    //   fall through to community, but an explicit `pro` would change
+    //   the resolved feature set beyond what these tests assert.
+    // - `SPUR_LICENSE_TEST_STRIP_KEYS`: a dev shell that has set this
+    //   for an unrelated test run would otherwise strip features the
+    //   `init` path needs, tripping `require_cli_gate(...)`.
     c.env_remove("SPUR_LICENSE_DEV_PLAN");
+    c.env_remove("SPUR_LICENSE_TEST_STRIP_KEYS");
     c
 }
 
