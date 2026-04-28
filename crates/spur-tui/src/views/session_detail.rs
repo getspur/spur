@@ -21,6 +21,15 @@ use super::View;
 
 const READY_BANNER_TEXT: &str = "✨ Session cleared — your next prompt starts a fresh brain.";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FocusedSessionPanel {
+    /// Inline workers list above the ReAct trace when visible.
+    Workers,
+    /// Main ReAct trace pane.
+    #[default]
+    ReactTrace,
+}
+
 /// Derived render state for a session the user has navigated to but
 /// whose resume pipeline may not yet be complete. Each variant is a
 /// projection of the most recent milestone event received for this
@@ -129,6 +138,7 @@ pub struct SessionDetailView {
 
     /// Whether the inline workers panel is collapsed. Toggled by Alt+D.
     workers_panel_collapsed: bool,
+    focused_panel: FocusedSessionPanel,
     /// Maps ToolCall id -> render depth for subagent nesting.
     /// Populated on each ToolCall; read on subsequent ToolCalls to resolve
     /// the parent's depth. Capped at 8 to prevent runaway indentation.
@@ -230,6 +240,7 @@ impl SessionDetailView {
             cancel_mode: None,
             fs_unsafe: false,
             workers_panel_collapsed: false,
+            focused_panel: FocusedSessionPanel::ReactTrace,
             tool_depth: std::collections::HashMap::new(),
             known_worker_names,
             cleared: false,
@@ -311,6 +322,7 @@ impl SessionDetailView {
             cancel_mode: None,
             fs_unsafe: false,
             workers_panel_collapsed: false,
+            focused_panel: FocusedSessionPanel::ReactTrace,
             tool_depth: std::collections::HashMap::new(),
             known_worker_names: std::collections::HashSet::new(),
             cleared: false,
@@ -369,6 +381,7 @@ impl SessionDetailView {
             cancel_mode: None,
             fs_unsafe: false,
             workers_panel_collapsed: false,
+            focused_panel: FocusedSessionPanel::ReactTrace,
             tool_depth: std::collections::HashMap::new(),
             known_worker_names: std::collections::HashSet::new(),
             cleared: false,
@@ -507,6 +520,11 @@ impl SessionDetailView {
     pub fn reset_to_root(&mut self) {
         self.completion.reset();
         self.resume_banner = None;
+        self.focused_panel = FocusedSessionPanel::ReactTrace;
+    }
+
+    pub fn focused_panel(&self) -> FocusedSessionPanel {
+        self.focused_panel
     }
 
     /// Whether the resume banner is currently visible (not dismissed and
@@ -1233,7 +1251,12 @@ impl SessionDetailView {
                 let shell_consumes = if is_trigger_driven {
                     matches!(
                         key.code,
-                        KeyCode::Up | KeyCode::Down | KeyCode::Esc | KeyCode::Tab | KeyCode::Enter
+                        KeyCode::Up
+                            | KeyCode::Down
+                            | KeyCode::Esc
+                            | KeyCode::Tab
+                            | KeyCode::BackTab
+                            | KeyCode::Enter
                     ) || ((key.code == KeyCode::Char('c')
                         || key.code == KeyCode::Char('p')
                         || key.code == KeyCode::Char('n'))
@@ -1265,6 +1288,8 @@ impl SessionDetailView {
                     // Pending permission keys are never Composer-owned.
                     let is_permission_key = self.react_trace.has_pending_permission()
                         && matches!(key.code, KeyCode::Char('y' | 'n' | 'a'));
+                    let is_tab_owned_by_composer = !self.input_bar.is_empty()
+                        && matches!(key.code, KeyCode::Tab | KeyCode::BackTab);
                     let is_composer_editing = (matches!(
                         key.code,
                         KeyCode::Char(_)
@@ -1277,8 +1302,8 @@ impl SessionDetailView {
                             | KeyCode::Enter
                             | KeyCode::Up
                             | KeyCode::Down
-                    ) || (key.code == KeyCode::Esc
-                        && self.input_bar.wants_esc()))
+                    ) || is_tab_owned_by_composer
+                        || (key.code == KeyCode::Esc && self.input_bar.wants_esc()))
                         && !is_permission_key;
 
                     if is_composer_editing {
@@ -1401,6 +1426,15 @@ impl SessionDetailView {
             }
 
             KeyOwner::View => {
+                if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) && self.input_bar.is_empty()
+                {
+                    self.focused_panel = match self.focused_panel {
+                        FocusedSessionPanel::ReactTrace => FocusedSessionPanel::Workers,
+                        FocusedSessionPanel::Workers => FocusedSessionPanel::ReactTrace,
+                    };
+                    return Some(Action::CycleFocus);
+                }
+
                 // Ctrl+O → toggle collapse/expand on Observe entries.
                 if matches!(key.code, KeyCode::Char('o'))
                     && key.modifiers.contains(KeyModifiers::CONTROL)
@@ -2031,12 +2065,7 @@ fn build_session_error_widget<'a>(message: &'a str) -> Paragraph<'a> {
 }
 
 impl SessionDetailView {
-    fn render_inner(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        ctx: &super::ViewContext,
-    ) {
+    fn render_inner(&mut self, frame: &mut Frame, area: Rect, ctx: &super::ViewContext) {
         let lineage = Some(ctx.lineage);
         let tracked_plan = ctx.plan_projection.current_for_session(self.session_id());
         let license_badge = ctx.license_badge;
@@ -2185,11 +2214,21 @@ impl SessionDetailView {
                 picker: self.render_picker.as_ref(),
                 image_cache: &mut self.image_cache,
             };
-            self.react_trace
-                .render_with_ctx(frame, chunks[1], &mut ctx, lineage);
+            self.react_trace.render_with_ctx_focused(
+                frame,
+                chunks[1],
+                &mut ctx,
+                lineage,
+                self.focused_panel == FocusedSessionPanel::ReactTrace,
+            );
         }
         #[cfg(not(feature = "markdown"))]
-        self.react_trace.render(frame, chunks[1], lineage);
+        self.react_trace.render_focused(
+            frame,
+            chunks[1],
+            lineage,
+            self.focused_panel == FocusedSessionPanel::ReactTrace,
+        );
 
         // After react_trace render — re-raster on bucket-up.
         #[cfg(feature = "markdown")]
@@ -2205,12 +2244,13 @@ impl SessionDetailView {
         // ── Workers panel ───────────────────────────────────────────────
         if let Some(lin) = lineage {
             if workers_h > 0 {
-                crate::components::workers_panel::render(
+                crate::components::workers_panel::render_focused(
                     frame,
                     chunks[2],
                     lin,
                     &executor_ids,
                     self.workers_panel_collapsed,
+                    self.focused_panel == FocusedSessionPanel::Workers,
                 );
             }
         }
@@ -2258,8 +2298,7 @@ impl SessionDetailView {
         // Model freshness still derives from the frozen caps snapshot; M10.2
         // will add live model writeback when that state has a mutable owner.
         let model_label = caps.and_then(spur_acp::SpurAgentCaps::current_model_label);
-        let effort_label =
-            spur_acp::SpurAgentCaps::effort_label_from(&self.session_config_options);
+        let effort_label = spur_acp::SpurAgentCaps::effort_label_from(&self.session_config_options);
         let usage_supported = caps
             .map(spur_acp::SpurAgentCaps::usage_supported)
             .unwrap_or(true);
@@ -2318,6 +2357,12 @@ impl SessionDetailView {
     #[doc(hidden)]
     pub fn input_bar_mut_for_test(&mut self) -> &mut crate::components::input_bar::InputBar {
         &mut self.input_bar
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn completion_active_for_test(&self) -> bool {
+        self.completion.is_active()
     }
 
     /// Test-only: read tool_depth map.

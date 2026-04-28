@@ -13,6 +13,7 @@ use ratatui::{
 use spur_acp::domain::events::LifecycleState;
 use spur_core::{ExecutorId, ExecutorLineage, ExecutorNode};
 
+use super::focused_border_style;
 use super::inline_executor_card::{format_elapsed, phase_glyph, short_id};
 
 const MAX_VISIBLE: usize = 5;
@@ -51,6 +52,17 @@ pub fn render(
     executor_ids: &[String],
     collapsed: bool,
 ) {
+    render_focused(frame, area, lineage, executor_ids, collapsed, false);
+}
+
+pub fn render_focused(
+    frame: &mut Frame,
+    area: Rect,
+    lineage: &ExecutorLineage,
+    executor_ids: &[String],
+    collapsed: bool,
+    focused: bool,
+) {
     let nodes: Vec<(&str, &ExecutorNode)> = executor_ids
         .iter()
         .filter_map(|id| {
@@ -64,7 +76,7 @@ pub fn render(
     }
 
     if collapsed {
-        frame.render_widget(Paragraph::new(collapsed_line(&nodes)), area);
+        frame.render_widget(Paragraph::new(collapsed_line(&nodes, focused)), area);
         return;
     }
 
@@ -73,7 +85,7 @@ pub fn render(
         .title(title)
         .title_bottom(" Alt+D collapse ")
         .borders(Borders::TOP | Borders::BOTTOM)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(focused_border_style(focused));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -163,12 +175,10 @@ fn phase_label(phase: LifecycleState) -> &'static str {
     }
 }
 
-fn collapsed_line(nodes: &[(&str, &ExecutorNode)]) -> Line<'static> {
+fn collapsed_line(nodes: &[(&str, &ExecutorNode)], focused: bool) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = vec![Span::styled(
         format!(" ▸ Workers ({}): ", nodes.len()),
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
+        focused_border_style(focused).add_modifier(Modifier::BOLD),
     )];
 
     for (i, (_id, node)) in nodes.iter().enumerate() {
