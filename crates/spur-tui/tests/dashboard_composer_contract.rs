@@ -8,8 +8,7 @@ use spur_acp::ContentBlock;
 use spur_core::ExecutorLineage;
 use spur_tui::action::Action;
 use spur_tui::mentions::WorkerMentionDescriptor;
-use spur_tui::views::dashboard::DashboardMode;
-use spur_tui::views::dashboard::DashboardView;
+use spur_tui::views::dashboard::{DashboardMode, DashboardView, Panel};
 use spur_tui::views::View;
 
 fn test_ctx() -> spur_tui::views::ViewContext<'static> {
@@ -280,7 +279,7 @@ fn empty_review_tab_decision_routes_pre_key() {
 }
 
 #[test]
-fn non_empty_tab_stays_in_composer() {
+fn non_empty_tab_cycles_panel_from_compose() {
     let mut dashboard = DashboardView::new();
     dashboard.handle_paste("hello");
     let before = dashboard.input_bar_text_for_test();
@@ -288,18 +287,12 @@ fn non_empty_tab_stays_in_composer() {
     let action = dashboard.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &test_ctx());
 
     assert!(
-        action.is_none(),
-        "compose mode: Tab must stay in composer, got {:?}",
+        matches!(action, Some(Action::CycleFocus)),
+        "compose mode: Tab must cycle panel focus, got {:?}",
         action
     );
-    // In Compose mode Tab is consumed by the composer (tui-textarea may expand
-    // it to spaces, so we just verify the text changed).
-    let after = dashboard.input_bar_text_for_test();
-    assert_ne!(
-        after, before,
-        "compose mode: Tab must mutate composer text, got same: {}",
-        after
-    );
+    assert_eq!(dashboard.focused_panel(), Panel::Agents);
+    assert_eq!(dashboard.input_bar_text_for_test(), before);
 }
 
 #[test]
