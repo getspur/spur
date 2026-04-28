@@ -166,6 +166,7 @@ mod session_attach_guard_transfer_tests {
             started_at: std::time::Instant::now(),
             config_options: Vec::new(),
             spur_agent_caps: None,
+            session_info: None,
             init_response: agent_client_protocol::schema::InitializeResponse::new(
                 agent_client_protocol::schema::ProtocolVersion::LATEST,
             ),
@@ -239,6 +240,7 @@ mod session_attach_guard_transfer_tests {
             started_at: std::time::Instant::now(),
             config_options: Vec::new(),
             spur_agent_caps: None,
+            session_info: None,
             init_response: agent_client_protocol::schema::InitializeResponse::new(
                 agent_client_protocol::schema::ProtocolVersion::LATEST,
             ),
@@ -366,6 +368,150 @@ mod session_attach_guard_transfer_tests {
         // Idempotent abort of the dummy delegation_handle so Drop is clean.
         brain.delegation_handle.abort();
     }
+
+    /// M9 F-C: helper records set_session_model / set_session_config_option
+    /// dispatches so we can assert the orchestrator picks the dedicated
+    /// trait method instead of the config-option fallback when caps
+    /// advertise `supports_set_model()`.
+    #[derive(Default)]
+    struct DispatchLog {
+        set_session_model: Vec<(String, String)>,
+        set_session_config_option: Vec<(String, String, String)>,
+    }
+
+    struct TrackingConnection {
+        log: std::sync::Arc<std::sync::Mutex<DispatchLog>>,
+    }
+
+    #[async_trait]
+    impl AgentConnection for TrackingConnection {
+        async fn initialize(
+            &mut self,
+            _request: InitializeRequest,
+        ) -> anyhow::Result<agent_client_protocol::schema::InitializeResponse> {
+            unimplemented!()
+        }
+        async fn new_session(
+            &mut self,
+            _cwd: PathBuf,
+            _mcp_servers: Vec<McpServer>,
+        ) -> anyhow::Result<agent_client_protocol::schema::NewSessionResponse> {
+            unimplemented!()
+        }
+        async fn prompt(
+            &mut self,
+            _request: PromptRequest,
+        ) -> anyhow::Result<Pin<Box<dyn Stream<Item = spur_acp::SessionNotification> + Send>>>
+        {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+        async fn cancel(&mut self, _session_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn shutdown(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn health(&self) -> AgentHealth {
+            AgentHealth::Ready
+        }
+        async fn set_session_model(
+            &mut self,
+            sid: agent_client_protocol::schema::SessionId,
+            model_id: agent_client_protocol::schema::ModelId,
+            _caps: &spur_acp::SpurAgentCaps,
+        ) -> Result<(), spur_acp::AcpError> {
+            self.log
+                .lock()
+                .unwrap()
+                .set_session_model
+                .push((sid.0.to_string(), model_id.0.to_string()));
+            Ok(())
+        }
+        async fn set_session_config_option(
+            &mut self,
+            request: agent_client_protocol::schema::SetSessionConfigOptionRequest,
+        ) -> anyhow::Result<agent_client_protocol::schema::SetSessionConfigOptionResponse> {
+            self.log.lock().unwrap().set_session_config_option.push((
+                request.session_id.0.to_string(),
+                request.config_id.0.to_string(),
+                request.value.0.to_string(),
+            ));
+            Ok(agent_client_protocol::schema::SetSessionConfigOptionResponse::new(vec![]))
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_set_session_model_calls_connection_set_session_model() {
+        use agent_client_protocol::schema::{
+            InitializeResponse, ModelId, ModelInfo, NewSessionResponse, SessionModelState,
+        };
+        use spur_acp::SpurAgentCaps;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = SpurConfig::default();
+        config.cost.db_path = tmp.path().join("cost.db").display().to_string();
+        let orchestrator = Orchestrator::new(tmp.path().to_path_buf(), config, None).unwrap();
+
+        let _ = orchestrator; // helper does not need orchestrator state
+
+        let log = std::sync::Arc::new(std::sync::Mutex::new(DispatchLog::default()));
+        let conn = TrackingConnection {
+            log: std::sync::Arc::clone(&log),
+        };
+
+        // Caps that advertise the dedicated set_model trait method.
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+        let new = NewSessionResponse::new(agent_client_protocol::schema::SessionId::new("acp-x"))
+            .models(SessionModelState::new(
+                ModelId::new("claude-sonnet-4-7"),
+                vec![ModelInfo::new(
+                    ModelId::new("claude-sonnet-4-7"),
+                    "Claude Sonnet 4.7",
+                )],
+            ));
+        let caps = std::sync::Arc::new(SpurAgentCaps::new(&init, &new));
+        assert!(caps.supports_set_model());
+
+        let mut brain = BrainSession {
+            connection: Box::new(conn),
+            acp_session_id: "acp-x".to_string(),
+            spur_session_id: SessionId("spur-x".to_string()),
+            brain_name: "test-brain".to_string(),
+            delegation_handle: tokio::spawn(async {}),
+            mcp_server: None,
+            mcp_guard: None,
+            notification_pump_handle: None,
+            attach_guard: None,
+            fs_unsafe: false,
+            started_at: std::time::Instant::now(),
+            config_options: Vec::new(),
+            spur_agent_caps: Some(caps),
+            session_info: None,
+            init_response: agent_client_protocol::schema::InitializeResponse::new(
+                agent_client_protocol::schema::ProtocolVersion::LATEST,
+            ),
+        };
+
+        Orchestrator::dispatch_set_session_model(&mut brain, "claude-sonnet-4-7".to_string())
+            .await
+            .expect("dispatch must succeed when caps support set_model");
+
+        let log = log.lock().unwrap();
+        assert_eq!(
+            log.set_session_model.len(),
+            1,
+            "set_session_model must be called exactly once"
+        );
+        assert_eq!(
+            log.set_session_config_option.len(),
+            0,
+            "set_session_config_option must NOT be called when caps support set_model"
+        );
+        assert_eq!(log.set_session_model[0].0, "acp-x");
+        assert_eq!(log.set_session_model[0].1, "claude-sonnet-4-7");
+
+        brain.delegation_handle.abort();
+    }
 }
 
 /// Format a worker task string with an optional `## Relevant Files`
@@ -478,11 +624,53 @@ pub struct BrainSession {
     /// derive from `NewSessionResponse` payload state. Wrapped in `Arc`
     /// so UI consumers can clone cheaply.
     pub spur_agent_caps: Option<Arc<spur_acp::SpurAgentCaps>>,
+    /// Last-known `SessionInfoUpdate` payload (M9 hoist, F-3-1). Lives
+    /// on the orchestrator entry — not the transient
+    /// `SessionDetailView` — so the cached `title` and `updated_at`
+    /// survive the view's destruction on navigation away from the
+    /// session detail screen. `None` until the agent emits its first
+    /// `SessionInfoUpdate` notification.
+    pub session_info: Option<spur_acp::SessionInfoCache>,
     /// Captured `InitializeResponse` retained on the session entry so
     /// it can flow back to `ActiveConnection` when the brain is
     /// retired (and reused later for a fresh `new_session` without
     /// re-running `initialize`).
     pub(crate) init_response: agent_client_protocol::schema::InitializeResponse,
+}
+
+impl BrainSession {
+    /// Test-only constructor that fills the private `attach_guard`,
+    /// `fs_unsafe`, and `init_response` fields with sensible defaults so
+    /// integration tests in sibling crates can construct a
+    /// `BrainSession` without re-implementing the full session-create
+    /// pipeline. Hidden from rustdoc; not part of the stable API.
+    #[doc(hidden)]
+    pub fn for_test(
+        connection: Box<dyn AgentConnection>,
+        acp_session_id: impl Into<String>,
+        spur_session_id: SessionId,
+        brain_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            connection,
+            acp_session_id: acp_session_id.into(),
+            spur_session_id,
+            brain_name: brain_name.into(),
+            delegation_handle: tokio::spawn(async {}),
+            mcp_server: None,
+            mcp_guard: None,
+            notification_pump_handle: None,
+            attach_guard: None,
+            fs_unsafe: false,
+            started_at: std::time::Instant::now(),
+            config_options: Vec::new(),
+            spur_agent_caps: None,
+            session_info: None,
+            init_response: agent_client_protocol::schema::InitializeResponse::new(
+                agent_client_protocol::schema::ProtocolVersion::LATEST,
+            ),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -747,6 +935,16 @@ pub enum InteractiveInput {
     /// cached `config_options` from the response.
     SetSessionConfigOption {
         config_id: String,
+        value: String,
+    },
+    /// Dedicated `session/set_model` dispatch (M9 F-C). Fired when the
+    /// caps-aware submit-router routes `/model <value>` for an agent that
+    /// advertises `supports_set_model()` (e.g. claude-code-acp). The
+    /// orchestrator delegates to `AgentConnection::set_session_model`,
+    /// which carries its own state-gated fallback to
+    /// `session/set_config_option` for agents that lack the dedicated
+    /// method. No-op when there is no active brain session.
+    SetSessionModel {
         value: String,
     },
     /// Invoke an agent vendor-extension RPC on the active brain session.
@@ -2235,6 +2433,28 @@ impl Orchestrator {
                         }
                     }
 
+                    // ── SetSessionModel (M9 F-C) ──────────────────────────
+                    InteractiveInput::SetSessionModel { value } => {
+                        if let Some(b) = brain.as_mut() {
+                            if let Err(e) =
+                                Orchestrator::dispatch_set_session_model(b, value.clone()).await
+                            {
+                                warn!(
+                                    brain = %b.brain_name,
+                                    session_id = %b.spur_session_id,
+                                    value = %value,
+                                    error = %e,
+                                    "set_session_model failed"
+                                );
+                            }
+                        } else {
+                            warn!(
+                                value = %value,
+                                "SetSessionModel received but no active brain session"
+                            );
+                        }
+                    }
+
                     // ── CancelStream (outside active turn) ────────────────
                     InteractiveInput::CancelStream { session } => {
                         tracing::debug!(
@@ -3342,6 +3562,7 @@ impl Orchestrator {
             fs_unsafe,
             config_options,
             spur_agent_caps,
+            session_info: None,
             init_response,
         })
     }
@@ -3654,6 +3875,7 @@ impl Orchestrator {
             // render disabled state. New sessions populate caps in
             // `create_brain_session`.
             spur_agent_caps: None,
+            session_info: None,
             init_response,
         };
 
@@ -4222,6 +4444,69 @@ impl Orchestrator {
     /// which case downstream UI should render disabled state.
     pub fn spur_agent_caps(&self, brain: &BrainSession) -> Option<Arc<spur_acp::SpurAgentCaps>> {
         brain.spur_agent_caps.clone()
+    }
+
+    /// Read the cached `SessionInfoCache` for the active brain session
+    /// (M9 hoist, F-3-1). Mirrors `spur_agent_caps`'s shape — `BrainSession`
+    /// is the per-session entry, so the caller threads it in.
+    ///
+    /// Returns `None` when the agent has not yet emitted a
+    /// `SessionInfoUpdate` notification. Once emitted, the cache survives
+    /// view rebuilds (the cache lives on the orchestrator entry, not on
+    /// the transient `SessionDetailView`).
+    pub fn session_info(&self, brain: &BrainSession) -> Option<spur_acp::SessionInfoCache> {
+        brain.session_info.clone()
+    }
+
+    /// Merge a `SessionInfoUpdate` notification into the brain session's
+    /// cached `SessionInfoCache`, applying ACP `MaybeUndefined`
+    /// semantics (Undefined preserves, Null clears, Value sets). Creates
+    /// the cache lazily on the first emission.
+    pub fn apply_session_info_update(
+        &self,
+        brain: &mut BrainSession,
+        info: &agent_client_protocol::schema::SessionInfoUpdate,
+    ) {
+        let cache = brain
+            .session_info
+            .get_or_insert_with(spur_acp::SessionInfoCache::default);
+        cache.merge(info);
+        tracing::trace!(
+            brain = %brain.brain_name,
+            session_id = %brain.spur_session_id,
+            title = ?cache.title,
+            updated_at = ?cache.updated_at,
+            "session_info_update merged into orchestrator cache",
+        );
+    }
+
+    /// Dispatch `session/set_model` for `brain` via the trait method on
+    /// `AgentConnection`. Reads the cached `SpurAgentCaps` once and lets
+    /// the connection's typed surface decide between `Direct`,
+    /// `FallbackConfigOption`, and `Unsupported` (spec §6.3).
+    ///
+    /// `value` is the user-supplied model id (e.g. `"claude-sonnet-4-7"`).
+    /// `Err(AcpError::CapabilityMissing("set_model"))` when caps absent or
+    /// neither dispatch path is advertised. Defined as an associated
+    /// function (no `&self`) so the future stays `Send` when awaited
+    /// inside `run_interactive` — `Orchestrator` itself is `!Sync` due
+    /// to its embedded rusqlite connection, but no orchestrator state
+    /// is actually needed for this dispatch.
+    pub async fn dispatch_set_session_model(
+        brain: &mut BrainSession,
+        value: String,
+    ) -> Result<(), spur_acp::AcpError> {
+        let caps = brain
+            .spur_agent_caps
+            .as_ref()
+            .cloned()
+            .ok_or(spur_acp::AcpError::CapabilityMissing("set_model"))?;
+        let sid = agent_client_protocol::schema::SessionId::new(brain.acp_session_id.clone());
+        let model_id = agent_client_protocol::schema::ModelId::new(value);
+        brain
+            .connection
+            .set_session_model(sid, model_id, &caps)
+            .await
     }
 
     /// Replace the cached `config_options` on the active brain session and

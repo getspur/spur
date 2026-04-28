@@ -94,6 +94,18 @@ pub enum Action {
         config_id: String,
         value: String,
     },
+    /// Dedicated `session/set_model` dispatch (M9 F-C). Emitted by
+    /// the submit-router consumer when caps advertise
+    /// `supports_set_model()` so the orchestrator can route through
+    /// `AgentConnection::set_session_model` instead of the legacy
+    /// `set_session_config_option` fallback. The variant carries
+    /// `session_id` for forward-compat parity with other session-scoped
+    /// actions even though the orchestrator currently looks up the
+    /// active brain itself.
+    SetSessionModel {
+        session_id: SessionId,
+        value: String,
+    },
     /// Move tree selection down by N rows.
     SelectNextBy(usize),
     /// Move tree selection up by N rows.

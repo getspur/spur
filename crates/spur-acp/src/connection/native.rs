@@ -305,65 +305,6 @@ impl NativeAcpConnection {
     pub fn set_log_config(&mut self, log_config: LogConfig) {
         self.log_config = log_config;
     }
-
-    /// Issue ACP `session/set_model` with a state-gated fallback to
-    /// `session/set_config_option`. Spec §6.3.
-    ///
-    /// The dispatch decision is read from `caps` once (see
-    /// [`decide_set_session_model_dispatch`]); there is no try-and-see
-    /// runtime probe. Both `Direct` and `FallbackConfigOption` paths
-    /// drop the wire response — the orchestrator refreshes its cached
-    /// `current_model` from the next agent-emitted notification.
-    pub async fn set_session_model(
-        &mut self,
-        sid: SessionId,
-        model_id: ModelId,
-        caps: &SpurAgentCaps,
-    ) -> Result<(), AcpError> {
-        match decide_set_session_model_dispatch(caps) {
-            SetSessionModelDispatch::Direct => {
-                let request = SetSessionModelRequest::new(sid, model_id);
-                let agent_name = self.agent_name.clone();
-                let cmd_tx = self.cmd_tx.as_ref().ok_or_else(|| {
-                    AcpError::Transport(anyhow::anyhow!(
-                        "NativeAcpConnection '{agent_name}': not initialized"
-                    ))
-                })?;
-                let (reply_tx, reply_rx) = oneshot::channel();
-                cmd_tx
-                    .send(AcpCommand::SetSessionModel {
-                        request,
-                        reply: reply_tx,
-                    })
-                    .map_err(|_| {
-                        AcpError::Transport(anyhow::anyhow!(
-                            "NativeAcpConnection '{agent_name}': ACP thread died"
-                        ))
-                    })?;
-                reply_rx
-                    .await
-                    .map_err(|_| {
-                        AcpError::Transport(anyhow::anyhow!(
-                            "NativeAcpConnection '{agent_name}': ACP thread died during set_session_model"
-                        ))
-                    })?
-                    .map_err(AcpError::Transport)?;
-                Ok(())
-            }
-            SetSessionModelDispatch::FallbackConfigOption => {
-                let request = SetSessionConfigOptionRequest::new(
-                    sid,
-                    SessionConfigId::new(Arc::<str>::from("model")),
-                    SessionConfigValueId::new(model_id.0),
-                );
-                self.set_session_config_option(request)
-                    .await
-                    .map(|_| ())
-                    .map_err(AcpError::Transport)
-            }
-            SetSessionModelDispatch::Unsupported => Err(AcpError::CapabilityMissing("set_model")),
-        }
-    }
 }
 
 /// Send `signal` (e.g. `"TERM"`, `"KILL"`) to the process group `pgid` via the
@@ -759,6 +700,67 @@ impl AgentConnection for NativeAcpConnection {
                 self.agent_name
             )
         })?
+    }
+
+    // ─── set_session_model ───────────────────────────────────────────────
+
+    /// Issue ACP `session/set_model` with a state-gated fallback to
+    /// `session/set_config_option`. Spec §6.3.
+    ///
+    /// The dispatch decision is read from `caps` once (see
+    /// [`decide_set_session_model_dispatch`]); there is no try-and-see
+    /// runtime probe. Both `Direct` and `FallbackConfigOption` paths
+    /// drop the wire response — the orchestrator refreshes its cached
+    /// `current_model` from the next agent-emitted notification.
+    async fn set_session_model(
+        &mut self,
+        sid: SessionId,
+        model_id: ModelId,
+        caps: &SpurAgentCaps,
+    ) -> Result<(), AcpError> {
+        match decide_set_session_model_dispatch(caps) {
+            SetSessionModelDispatch::Direct => {
+                let request = SetSessionModelRequest::new(sid, model_id);
+                let agent_name = self.agent_name.clone();
+                let cmd_tx = self.cmd_tx.as_ref().ok_or_else(|| {
+                    AcpError::Transport(anyhow::anyhow!(
+                        "NativeAcpConnection '{agent_name}': not initialized"
+                    ))
+                })?;
+                let (reply_tx, reply_rx) = oneshot::channel();
+                cmd_tx
+                    .send(AcpCommand::SetSessionModel {
+                        request,
+                        reply: reply_tx,
+                    })
+                    .map_err(|_| {
+                        AcpError::Transport(anyhow::anyhow!(
+                            "NativeAcpConnection '{agent_name}': ACP thread died"
+                        ))
+                    })?;
+                reply_rx
+                    .await
+                    .map_err(|_| {
+                        AcpError::Transport(anyhow::anyhow!(
+                            "NativeAcpConnection '{agent_name}': ACP thread died during set_session_model"
+                        ))
+                    })?
+                    .map_err(AcpError::Transport)?;
+                Ok(())
+            }
+            SetSessionModelDispatch::FallbackConfigOption => {
+                let request = SetSessionConfigOptionRequest::new(
+                    sid,
+                    SessionConfigId::new(Arc::<str>::from("model")),
+                    SessionConfigValueId::new(model_id.0),
+                );
+                self.set_session_config_option(request)
+                    .await
+                    .map(|_| ())
+                    .map_err(AcpError::Transport)
+            }
+            SetSessionModelDispatch::Unsupported => Err(AcpError::CapabilityMissing("set_model")),
+        }
     }
 
     // ─── authenticate ────────────────────────────────────────────────────
@@ -2072,11 +2074,12 @@ mod client_capabilities_tests {
 #[cfg(test)]
 mod set_session_model_dispatch_tests {
     use super::{decide_set_session_model_dispatch, SetSessionModelDispatch};
+    use crate::connection::AgentConnection;
     use crate::SpurAgentCaps;
     use agent_client_protocol::schema::{
-        InitializeResponse, ModelId, NewSessionResponse, ProtocolVersion, SessionConfigId,
-        SessionConfigKind, SessionConfigOption, SessionConfigSelect, SessionConfigSelectOptions,
-        SessionConfigValueId, SessionId, SessionModelState,
+        InitializeResponse, ModelId, ModelInfo, NewSessionResponse, ProtocolVersion,
+        SessionConfigId, SessionConfigKind, SessionConfigOption, SessionConfigSelect,
+        SessionConfigSelectOptions, SessionConfigValueId, SessionId, SessionModelState,
     };
 
     fn caps_from(modify: impl FnOnce(&mut NewSessionResponse)) -> SpurAgentCaps {
@@ -2086,12 +2089,17 @@ mod set_session_model_dispatch_tests {
         SpurAgentCaps::new(&init, &new)
     }
 
+    fn codex_model_state() -> SessionModelState {
+        SessionModelState::new(
+            ModelId::new("gpt-5-codex"),
+            vec![ModelInfo::new(ModelId::new("gpt-5-codex"), "GPT-5 Codex")],
+        )
+    }
+
     #[test]
     fn caps_with_models_some_routes_direct() {
         let caps = caps_from(|n| {
-            *n = n
-                .clone()
-                .models(SessionModelState::new(ModelId::new("gpt-5-codex"), vec![]));
+            *n = n.clone().models(codex_model_state());
         });
         assert!(caps.supports_set_model());
         assert!(matches!(
@@ -2135,9 +2143,7 @@ mod set_session_model_dispatch_tests {
     fn models_takes_precedence_over_config_options() {
         // Codex case: both populated. Decision must pick Direct, not Fallback.
         let caps = caps_from(|n| {
-            *n = n
-                .clone()
-                .models(SessionModelState::new(ModelId::new("gpt-5-codex"), vec![]));
+            *n = n.clone().models(codex_model_state());
             n.config_options = Some(vec![SessionConfigOption::new(
                 SessionConfigId::new("model"),
                 "Model",
