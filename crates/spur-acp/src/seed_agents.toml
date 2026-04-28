@@ -92,9 +92,6 @@ handle = "codex"
 [agents.entries.commands]
 dispatch = "prompt_text"
 
-[agents.entries.permissions]
-session_mode = "full-auto"
-
 # ── codex (npx wrapper, version-pinned) ──────────────────────
 # Same agent as above but via npx — no pre-installed binary needed.
 # Pinned version is critical: @latest would silently pull breaking
@@ -145,9 +142,6 @@ description = "Undo Codex's most recent turn"
 name = "logout"
 description = "Logout of Codex"
 
-[agents.entries.permissions]
-session_mode = "full-auto"
-
 # ── gemini ────────────────────────────────────────────────────────
 [[agents.entries]]
 name = "gemini"
@@ -163,9 +157,6 @@ handle = "gemini"
 
 [agents.entries.commands]
 dispatch = "prompt_text"
-
-[agents.entries.permissions]
-session_mode = "full-auto"
 
 # ── opencode ──────────────────────────────────────────────────────
 [[agents.entries]]
@@ -183,9 +174,6 @@ handle = "opencode"
 [agents.entries.commands]
 dispatch = "prompt_text"
 
-[agents.entries.permissions]
-session_mode = "full-auto"
-
 
 # ── kimi ──────────────────────────────────────────────────────────
 [[agents.entries]]
@@ -202,6 +190,3 @@ handle = "kimi"
 
 [agents.entries.commands]
 dispatch = "prompt_text"
-
-[agents.entries.permissions]
-session_mode = "full-auto"

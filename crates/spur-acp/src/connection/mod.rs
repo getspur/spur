@@ -34,7 +34,7 @@ use futures::Stream;
 use agent_client_protocol::schema::{
     AuthenticateRequest, AuthenticateResponse, InitializeRequest, InitializeResponse,
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, McpServer, ModelId,
-    NewSessionResponse, PromptRequest, SessionId, SessionNotification,
+    NewSessionResponse, PromptRequest, SessionId, SessionModeId, SessionNotification,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
     SetSessionModeResponse,
 };
@@ -126,6 +126,16 @@ pub trait AgentConnection: Send + Sync {
     /// This is a synchronous, non-fallible query -- implementations should
     /// cache the last-known health and return it immediately.
     fn health(&self) -> AgentHealth;
+
+    /// Return the modes advertised for `session_id`, if this transport has
+    /// seen a `NewSessionResponse` / `LoadSessionResponse` carrying them.
+    ///
+    /// `None` means the advertisement is unavailable; callers should avoid
+    /// optimistic `set_session_mode` dispatch in that case.
+    fn advertised_session_modes(&self, session_id: &SessionId) -> Option<Vec<SessionModeId>> {
+        let _ = session_id;
+        None
+    }
 
     /// Load an existing session by ID, returning a stream of historical notifications.
     ///
