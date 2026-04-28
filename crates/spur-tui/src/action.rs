@@ -139,6 +139,16 @@ pub enum Action {
         attempt_n: u32,
         decision: spur_core::ReviewDecision,
     },
+    /// Bare ACP-dispatch path for SubmitReview. Constructed ONLY by the
+    /// SubmitReview install arm or by the tick-expiry/displacement-flush path.
+    /// The process_action arm performs the actual orchestrator send WITHOUT
+    /// installing a tombstone. Tombstone's pending field stores this variant;
+    /// tick-expiry dispatches it. Never emitted by views.
+    SubmitReviewDispatch {
+        executor_id: String,
+        attempt_n: u32,
+        decision: spur_core::ReviewDecision,
+    },
     /// Request the app to render a mermaid diagram on a blocking worker.
     /// Emitted when a new fence closes in `SessionDetailView`.
     #[cfg(feature = "markdown")]

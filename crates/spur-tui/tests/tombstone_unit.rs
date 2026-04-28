@@ -22,7 +22,7 @@ fn queued_tombstone(view: ViewId, now: Instant, window: Duration) -> Tombstone {
     Tombstone {
         view: view.clone(),
         kind: TombstoneKind::QueuedRemote {
-            pending: Action::SubmitReview {
+            pending: Action::SubmitReviewDispatch {
                 executor_id: "exec-1".into(),
                 attempt_n: 1,
                 decision: spur_core::ReviewDecision::Approve,
@@ -94,7 +94,7 @@ fn tick_dispatches_queued_remote_on_expiry() {
     let future = now + Duration::from_millis(10);
     let dispatched = slots.tick(future);
     assert_eq!(dispatched.len(), 1);
-    assert!(matches!(dispatched[0], Action::SubmitReview { .. }));
+    assert!(matches!(dispatched[0], Action::SubmitReviewDispatch { .. }));
     assert!(slots.evict(&ViewId::Dashboard).is_none());
 }
 
