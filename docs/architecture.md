@@ -1,8 +1,8 @@
 # SPUR Architecture
 
-> Grounded 2026-04-26. Covers all 13 workspace crates, ~100k lines of Rust.
+> Grounded 2026-04-28. Covers all 13 workspace crates, ~110k lines of Rust.
 >
-> **Map–territory note:** This document was re-evaluated against actual code paths (not commit messages). Where the map diverged from the territory, the territory wins. Updated 2026-04-26 to reflect bd-arch.21 (peer mailbox production wire-up; closes Risk #21), bd-arch.23 (cancellable permit acquire + heartbeat watchdog; closes Risk #23), bd-arch.26 (WorktreeAuthority with `SessionLivenessProbe` + startup/periodic sweep; partially addresses Risk #4), and post-arch commits through `c75e4586` (single-attach session lock, `--session` CLI flag, picker preselect, paste-as-atom).
+> **Map–territory note:** This document was re-evaluated against actual code paths (not commit messages). Where the map diverged from the territory, the territory wins. Updated 2026-04-28 to reflect bd-arch.21 (peer mailbox production wire-up; closes Risk #21), bd-arch.23 (cancellable permit acquire + heartbeat watchdog; closes Risk #23), bd-arch.26 (WorktreeAuthority with `SessionLivenessProbe` + startup/periodic sweep; partially addresses Risk #4), the M9 capability-aware Initialize bundle, M10.1 status surface (caps with `agent_kind` / `usage_emit_quirk` / status labels; `AgentSessionReady` carries caps), Plan C Tier 2 capability-tease (`required_tier_for`, `UpgradeModal`), the session-picker recall revamp (`SessionSynopsisProjection`, synopsis-aware filter haystack), event-log GC (`enforce_event_cap`, 8 MB per-file default), and post-arch commits through `ec5a706c`.
 
 ## 1. Component Architecture
 
@@ -76,15 +76,15 @@ graph TB
 
 | Crate | Lines | Role | Key Types |
 |---|---|---|---|
-| `spur-acp` | ~9.7k | Protocol foundation | `AgentConnection`, `SpurEvent`, `SpurEventBody`, `DelegationStatus`, `SpurConfig`, `OutcomeKey`, `OutcomeRef`, `SessionAttachGuard` |
-| `spur-core` | ~19.5k | Orchestration engine | `Orchestrator`, `BrainScheduler`, `ContinuationBridge`, `EventFunnel`, `ReviewSink`, `ExecutorLineage`, `SkillRegistry`, `PeerMailboxRouter`, `PeerMailboxLedger`, `WorktreeAuthority` |
-| `spur-mcp` | ~18k | Brain→SPUR bridge + durable plans | MCP `Server`, `Reconciler`, `PlanProjectionStore`, `MutationExecutor`, `OutcomeMaterializer` |
-| `spur-tui` | ~33.7k | Terminal interface | `App`, `DashboardView`, `SessionDetailView`, `PlanInspectorView`, `PaletteOverlay`, `IssueBrowserView`, `LandingDecision`, `CollisionModal` |
-| `spur-cli` | ~2.6k | Binary entry point | CLI args, `tui` command, `bot telegram`, `profile`, `--new`, `--session`, landing dispatch |
+| `spur-acp` | ~12.7k | Protocol foundation | `AgentConnection`, `SpurEvent`, `SpurEventBody`, `DelegationStatus`, `SpurConfig`, `OutcomeKey`, `OutcomeRef`, `SessionAttachGuard`, `AgentCaps` (carries `AgentKind`, `UsageEmitQuirk`, status-label accessors), `SessionLivenessProbe` |
+| `spur-core` | ~21.8k | Orchestration engine | `Orchestrator`, `BrainScheduler`, `ContinuationBridge`, `EventFunnel`, `ReviewSink`, `ExecutorLineage`, `SkillRegistry`, `PeerMailboxRouter`, `PeerMailboxLedger`, `WorktreeAuthority`, `SessionSynopsisProjection`, `enforce_event_cap` |
+| `spur-mcp` | ~18.6k | Brain→SPUR bridge + durable plans | MCP `Server`, `Reconciler`, `PlanProjectionStore`, `MutationExecutor`, `OutcomeMaterializer` (rmcp transport: 4h keep-alive) |
+| `spur-tui` | ~40.2k | Terminal interface | `App`, `DashboardView`, `SessionDetailView`, `PlanInspectorView`, `PaletteOverlay`, `IssueBrowserView`, `LandingDecision`, `CollisionModal`, `UpgradeModal`, `PreviewRow`, synopsis-aware picker filter, status-bar model+effort+usage |
+| `spur-cli` | ~2.9k | Binary entry point | CLI args, `tui` command, `bot telegram`, `profile`, `--new`, `--session`, landing dispatch, `SPUR_FORCE_TTY` test hook |
 | `spur-pm` | ~2.9k | PM integration — **beads-primary, GitHub-satellite** | `PmService`, `BeadsAdapter` (shells to `br`), `GitHubAdapter` (shells to `gh`), `BeadsAdvanced`, `BvAdapter` |
 | `spur-cost` | ~4.6k | Cost tracking + pricing + reports | `CostTracker`, `PricingRegistry`, `IngestionPipeline`, `TokenEvent`, SQLite schema |
-| `spur-worktree` | ~1.5k | Git isolation + blob backend | `WorktreeManager`, `MergeResult`, `ArtifactResolver`, `GitBlobOutcomeStore` |
-| `spur-license` | ~2.6k | Licensing & feature gates | `SpurLicense`, `FeatureGate`, `PolicyResolver`, `LicenseProvider` |
+| `spur-worktree` | ~1.8k | Git isolation + blob backend | `WorktreeManager`, `MergeResult`, `ArtifactResolver`, `GitBlobOutcomeStore` |
+| `spur-license` | ~3.9k | Licensing & feature gates | `SpurLicense`, `FeatureGate`, `FeatureGateError` (`Clone`), `PolicyResolver`, `LicenseProvider`, `required_tier_for`, `UpgradeCta` |
 | `spur-bot` | ~1.9k | Telegram frontend | `BotRuntime`, `ThreadRegistry`, `TelegramClient`, `RuntimeRender` |
 | `spur-interactive` | ~0.1k | Shared host glue | `InteractiveFrontendHost`, `InteractiveFrontendHandle`, `ReviewSubmission` |
 | `spur-blob-store` | ~1.5k | Outcome blob storage trait + impls | `OutcomeStore`, `FsOutcomeStore`, `MemoryOutcomeStore`, `MeasuredOutcomeStore`, `DeleteNamespaceReport` |
@@ -412,20 +412,20 @@ flowchart TB
     style BC fill:#0f3460,stroke:#0f3460,color:#fff
 ```
 
-### SpurEventBody Variants (~50+)
+### SpurEventBody Variants (~85+)
 
 | Category | Variants |
 |---|---|
-| Brain lifecycle | `BrainConnectStarted`, `BrainConnected`, `BrainConnectFailed`, `BrainSpawned`, `AgentSessionReady`, `BrainError`, `BrainFailover`, `BrainReconnecting`, `BrainReconnected`, `BrainReconnectFailed`, `BrainRetired` |
+| Brain lifecycle | `BrainConnectStarted`, `BrainConnected`, `BrainConnectFailed`, `BrainSpawned`, `AgentSessionReady`, `BrainError`, `BrainFailover`, `BrainReconnecting`, `BrainReconnected`, `BrainReconnectFailed`, `BrainRetired`, `SessionRetireStart`, `SessionRetireComplete` |
 | Session lifecycle | `SessionCompleted`, `TurnComplete`, `AgentNotification`, `AgentExtNotification` |
-| Attach lifecycle | `AgentSessionReady` (carries `fs_unsafe`, `cancel_mode`), `SessionAttachRejected` (carries `HolderInfo`, `fs_unsafe`) |
+| Attach lifecycle | `AgentSessionReady` (carries `fs_unsafe`, `cancel_mode`, `caps`), `SessionAttachRejected` (carries `HolderInfo`, `fs_unsafe`) |
 | Delegation | `DelegationRequested`, `DelegationDispatched`, `DelegationCompleted` |
 | Worker | `WorkerSpawned`, `WorkerNotification`, `WorkerProgress`, `WorkerFileTouched`, `WorkerHeartbeat` |
-| Peer mailbox | `WorkerPeerMessageAccepted`, `WorkerPeerMessageRejected`, `WorkerPeerMessageQueued`, `WorkerPeerMessageDelivered`, `WorkerPeerMessageConsumed`, `WorkerPeerMessageIgnored`, `WorkerPeerMessageDrainCappedOut`, `WorkerPeerMessageMalformed`, `WorkerPeerMessageExpired`, `WorkerPeerMessageDropped`, `WorkerPeerMessageUndeliverable`, `WorkerPeerMessageAuditFailed`, `WorkerPeerMessageReconciledStranded`, `WorkerPeerMailboxReconciled` |
+| Peer mailbox | `WorkerPeerMessageAccepted`, `WorkerPeerMessageRejected`, `WorkerPeerMessageQueued`, `WorkerPeerMessageDelivered`, `WorkerPeerMessageConsumed`, `WorkerPeerMessageIgnored`, `WorkerPeerMessageDrainStarted`, `WorkerPeerMessageDrainCappedOut`, `WorkerPeerMessageDrainTimedOut`, `WorkerPeerMessageMalformed`, `WorkerPeerMessageExpired`, `WorkerPeerMessageDropped`, `WorkerPeerMessageUndeliverable`, `WorkerPeerMessageAuditFailed`, `WorkerPeerMessageReconciledStranded`, `WorkerPeerMailboxReconciled` |
 | Executor state | `ExecutorPhaseChanged`, `ExecutorRetryStarted`, `ExecutorArtifact` |
 | Review | `ExecutorReviewRequested`, `ExecutorReviewResolved`, `ExecutorReviewCancelled` |
 | Plan | `PlanSnapshotUpdated`, `PlanCompleted`, `PlanReadyToMerge` |
-| System | `CostUpdate`, `ConflictDetected`, `RateLimitDetected`, `LicenseUpdated` |
+| System | `CostUpdate`, `ConflictDetected`, `RateLimitDetected`, `LicenseUpdated`, `CommandRegistryDirty`, `OrphanReaped`, `GraphAlertsSummary` |
 | PM | `IssueReceived`, `PrCreated`, `IssueUpdated`, `IssuesLoaded`, `IssueDetailFetched`, `IssueCommandError` |
 
 ---
@@ -653,6 +653,12 @@ flowchart TB
 - **WorktreeAuthority lease-aware GC** — `SessionLivenessProbe` via `fs4` advisory locks provides cross-process safety for orphan reclamation. Startup sweep + periodic background sweep (15 min + jitter) with quarantine grace. Replaces the unsafe per-delegation `cleanup_orphans` (bd-arch.26).
 - **Content-addressed blob storage** — `OutcomeStore` trait with pluggable backends (memory, FS, git) and measured instrumentation
 - **DuckDB analytics** — `spur-context` reads agent JSONL in place via SQL convert views, producing daily/weekly cost reports without ETL pipelines
+- **Capability-aware status surface (M10.1)** — `AgentCaps` carries `agent_kind`, a `UsageEmitQuirk` table, and status-label accessors (effort/usage); the TUI caches caps from `AgentSessionReady` and renders live model + effort + usage in the status bar with utf8-safe label truncation and width-aware compaction
+- **Capability-tease upgrade modal (Plan C Tier 2)** — `spur-license::required_tier_for` resolves the minimum tier for a gated feature; `FeatureGate` denials clone into the TUI `UpgradeModal`, which dispatches a CTA-aware upgrade flow at MVP gate sites instead of failing silently
+- **Synopsis-aware session-picker recall** — `SessionSynopsisProjection` lives on `App` and absorbs live event chunks plus `SessionHistory` fallbacks (skipping leading slash-commands for `first_user_msg`); the picker filter haystack matches synopsis first/last user messages and is precomputed on `set_sessions` for cheap incremental filtering
+- **Bounded event-log storage** — `enforce_event_cap` GC sweeps `.spur/events/` with an 8 MB per-file default, protecting the active file from rotation; complements NDJSON rotation and bounds disk growth across long-running sessions
+- **Graceful TUI shutdown** — Ctrl-Q runs the same teardown path as SIGTERM/SIGHUP/SIGQUIT; no `process::exit` shortcut means terminal restoration and orchestrator drain always run
+- **Per-agent stderr file-rotate bridge** — child agent stderr is piped through a rotating file sink so noisy agents do not interleave with the TUI or fill memory
 
 ### First-Principles & MCTS Risk Framework
 
@@ -682,7 +688,7 @@ Risks are grounded using first-principles axioms and evaluated with Monte Carlo 
 | 4 | Worktree orphaning on unclean shutdown | ~~High~~ **Medium** | **Partially addressed** | R1/R2/R4 | 0.25 | `worktree_authority.rs:99`, `orchestrator.rs:1106` | `WorktreeAuthority` deployed with `SessionLivenessProbe` + startup/periodic sweep. Original `cleanup_orphans` dead-code issue superseded. Residual: snapshot branches leak (R4b, no sweep), `fs_unsafe` skips all cleanup (R4a, see Risk #41), legacy pre-v2 namespaces skipped (R4c). See `docs/rca/2026-04-26-risk4-mcts-first-principles-evaluation.md` and `docs/rca/2026-04-27-full-architecture-mcts-first-principles-evaluation.md` §2.1/2.2. |
 | 5 | No backoff on delegation retry loops | ~~High~~ | **Fixed** | R7 | 0.00 | `orchestrator.rs:4202` | Exponential backoff `2^n` with 30 s cap. First retry delay is **2 s** (not 1 s). **No jitter.** |
 | 6 | Worker JoinHandles not tracked for shutdown abort | Medium | **Open** | R7 | 0.35 | `orchestrator.rs:3456` | `TaskTracker` is used in `spur-mcp` but **not in `spur-core`**. The per-delegation worker task (`:3456`) and three ext-notification pumps (`:2566,2830,4789`) are fire-and-forget `tokio::spawn` with stored `JoinHandle`. |
-| 7 | Orchestrator is a God Object | High | **Worsening** | R3 | 0.50 | `orchestrator.rs` | File is **8,646 lines** (was ~4,400). Delegation dispatch (`handle_delegations` 243 lines + `execute_delegation` 595 lines = **838 lines inline**) and review coordination remain inside `orchestrator.rs`. `run_interactive` is 892 lines. Session attach logic added ~140 lines. |
+| 7 | Orchestrator is a God Object | High | **Worsening** | R3 | 0.50 | `orchestrator.rs` | File is **9,456 lines** (was ~4,400; +810 since 2026-04-26 grounding). Delegation dispatch (`handle_delegations` 243 lines + `execute_delegation` 595 lines = **838 lines inline**) and review coordination remain inside `orchestrator.rs`. `run_interactive` is 892 lines. Session attach logic added ~140 lines. |
 | 8 | Single-process — no fault isolation between brain and workers | **Medium** | **Open** | R4 | 0.35 | Architecture-level | Workers are child OS processes, so a worker crash does not segfault the orchestrator. **However:** no outer worker timeout exists (hang = indefinite), no memory limits / cgroups, no sandbox. A rogue worker can exhaust host memory or damage the filesystem. Brain failover exists but is best-effort; no auto-respawn if brain dies idle. |
 | 9 | Broadcast `Lagged` recovery not implemented | ~~Low~~ **High** | **Open** | R3/R5 | 0.60 | `app.rs`, `event_sink.rs`, `notification_pump.rs` | Every subscriber logs `warn!` and continues. EventSink writes NDJSON but **no code reads it back** for replay. MCTS: this is a backpressure amplifier — under load, lineage projection diverges from ground truth. Severity raised from Low per `docs/rca/2026-04-27-full-architecture-mcts-first-principles-evaluation.md` §2.3. |
 | 10 | `delegate_async` MCP tool drops `delegation_plan` from schema | ~~Low~~ | **Fixed** | — | 0.00 | `tools.rs`, `server.rs` | Tool fully removed. Comments at `server.rs:41,312,1683` confirm retirement. |
