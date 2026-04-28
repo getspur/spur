@@ -246,6 +246,42 @@ takes `&self` (uses `ArcSwap` internally — atomic, lock-free). So
 `self.feature_gate.update_state(&resolved)` works even though we're
 inside `&mut self` here.
 
+### Subtask 1.1c: Hydrate `App::feature_gate` from INITIAL license state
+
+**Critical** (caught by codex pre-dispatch review): the event-pump
+fix from 1.1b is necessary but not sufficient. `App` is constructed
+in `build_with_license_state` (`crates/spur-tui/src/app.rs:393-398`)
+which receives an initial `LicenseStateEvent` AND constructs
+`feature_gate` via `FeatureGate::new(PolicyResolver::embedded())`
+— but never hydrates the gate from that initial state. So the gate
+starts at the embedded community baseline and only refreshes after
+the FIRST `LicenseUpdated` event arrives.
+
+Critically, `CommunityProvider::validate()` at
+`crates/spur-license/src/community.rs:97` returns state but emits
+NO event. So if a user starts the TUI with `SPUR_LICENSE_DEV_PLAN=pro`,
+the initial state IS Pro but no event broadcasts it — the gate
+stays at community forever, and M1.3's manual Pro verification
+silently fails.
+
+**Fix:** in `App::build_with_license_state` (or `App::new_with_license`,
+whichever owns the construction), AFTER `feature_gate` is
+constructed and BEFORE the App returns, call `update_state` with
+the seeded license state using the same converter from 1.1a:
+
+```rust
+// Hydrate the gate from the seeded license_state so the App's
+// initial entitlement set matches the license at startup, not the
+// embedded community policy. Required because some providers
+// (CommunityProvider in particular) return state but emit no
+// LicenseUpdated event, so the post-startup event pump can't fill
+// this gap.
+let initial_state = license_state_event_to_state(&license_state);
+feature_gate.update_state(&initial_state);
+```
+
+(Adapt the variable names to match the actual constructor flow.)
+
 ### Acceptance for M1.1
 
 - [ ] `license_state_event_to_state` helper defined; covers ALL
@@ -254,6 +290,11 @@ inside `&mut self` here.
       `_ => fallback` arm without comment).
 - [ ] `update_license_state` calls `self.feature_gate.update_state(&resolved)`
       before updating other fields.
+- [ ] **`build_with_license_state` (or App constructor) hydrates
+      `feature_gate` from the seeded `license_state` BEFORE returning.**
+      Without this, `SPUR_LICENSE_DEV_PLAN=pro` mode fails the M1.3
+      manual Pro verification because `CommunityProvider` emits no
+      startup event.
 - [ ] No new deps in `Cargo.toml`.
 - [ ] Workspace builds clean: `cargo build -p spur-tui`.
 - [ ] Existing `license_status_render` tests still pass.
@@ -271,91 +312,130 @@ inside `&mut self` here.
 - Create: `crates/spur-tui/tests/license_state_gate_refresh.rs`
   (~80 LOC integration test)
 
-### Subtask 1.2a: Integration test pinning the freshness contract
+### Subtask 1.2a: Add `pub` test-support surface for integration tests
+
+**Critical** (caught by codex pre-dispatch review): the existing
+`App::new_for_tests` helper is `#[cfg(test)]`-gated inside
+`crates/spur-tui/src/app.rs:3132` — integration tests under
+`crates/spur-tui/tests/` CANNOT call it. The integration test
+surface today is `spur_tui::test_support::{new_app, push_event}`
+at `crates/spur-tui/src/lib.rs:72`. M1.2 needs to add a public
+helper there that lets integration tests query gate state without
+needing direct access to private fields.
+
+Add to `crates/spur-tui/src/lib.rs::test_support` (or wherever the
+module lives):
+
+```rust
+/// Test-only helper: query whether a feature key is granted by
+/// the App's current `feature_gate` snapshot. Used by integration
+/// tests to assert freshness contracts without exposing the raw
+/// `feature_gate` field.
+pub fn feature_enabled(app: &crate::App, key: spur_license::FeatureKey) -> bool {
+    spur_license::require_feature(&app.feature_gate, key).is_ok()
+}
+```
+
+`update_license_state` is already called via `push_event` →
+`handle_spur_event` → `update_license_state` from the event pump,
+so the test doesn't need direct access to that method.
+
+**Implementer note:** if exposing `app.feature_gate` directly via
+the `feature_enabled` helper feels too tight, add an alternative:
+`pub fn current_tier(app: &crate::App) -> spur_license::Tier` that
+queries the gate's tier. Either is acceptable; the requirement is
+that integration tests can verify gate state.
+
+### Subtask 1.2b: Integration test pinning the freshness contract
 
 Create `crates/spur-tui/tests/license_state_gate_refresh.rs`:
 
 ```rust
-//! Plan C M1 — pin the contract that `App::update_license_state`
-//! refreshes `App::feature_gate`. Without this, a future change
-//! that drops the `feature_gate.update_state(...)` call from
-//! `update_license_state` would silently regress every Pro-tier
-//! gate site (including the M1.3 demo at `Action::ShowSessionCost`).
+//! Plan C M1 — pin the contract that the TUI's `feature_gate`
+//! refreshes when a `LicenseUpdated` event arrives. Without this,
+//! a future change that drops the `feature_gate.update_state(...)`
+//! call from `update_license_state` (or breaks the converter)
+//! would silently regress every Pro-tier gate site (including
+//! the M1.3 demo at `Action::ShowSessionCost`).
 //!
-//! Test shape: construct an `App` with initial Community state,
-//! assert a Pro-only `FeatureKey` is denied. Push a Pro
-//! `LicenseUpdated` event. Assert the same key is now granted.
+//! Uses the public `test_support` integration surface from
+//! `spur_tui::test_support::{new_app, push_event, feature_enabled}`
+//! (added in Subtask 1.2a). Does NOT touch private `App` fields.
 
 #![cfg(unix)]
 
-use spur_license::{require_feature, FeatureKey};
-use spur_tui::test_helpers::App; // OR whatever the test surface is
+use spur_license::FeatureKey;
+use spur_tui::test_support::{new_app, push_event, feature_enabled};
 
 #[test]
 fn pro_license_update_grants_pro_only_key() {
-    // 1. Construct App at Community baseline. Implementer must use
-    //    whatever test-construction helper exists. If none, file a
-    //    sub-task to add `App::new_for_tests(...)` (Tier 2 added a
-    //    similar helper for `quit_shortcut_tests` — reuse or extend).
-    let mut app = App::new_for_tests(/* community baseline state */);
+    // 1. Construct App at Community baseline via the public test
+    //    surface.
+    let mut app = new_app(/* community baseline LicenseStateEvent */);
 
     // 2. Assert COST_PRO_PER_PROJECT_TRACKING is denied initially.
-    let denied = require_feature(
-        &app.feature_gate(),
-        FeatureKey::COST_PRO_PER_PROJECT_TRACKING,
+    assert!(
+        !feature_enabled(&app, FeatureKey::COST_PRO_PER_PROJECT_TRACKING),
+        "community baseline must deny pro key",
     );
-    assert!(denied.is_err(), "community baseline must deny pro key");
 
-    // 3. Simulate a Pro license-update event.
-    let pro_event = build_pro_license_state_event(); // implementer-defined fixture
-    app.update_license_state(pro_event);
+    // 3. Push a Pro LicenseUpdated event through the broadcast.
+    //    `push_event` routes through the same handle_spur_event
+    //    path as production, so the test exercises the real wiring.
+    let pro_event = build_pro_license_state_event();
+    push_event(&mut app, spur_acp::SpurEventBody::LicenseUpdated { state: pro_event });
 
     // 4. Assert the SAME key is now granted.
-    let granted = require_feature(
-        &app.feature_gate(),
-        FeatureKey::COST_PRO_PER_PROJECT_TRACKING,
-    );
     assert!(
-        granted.is_ok(),
+        feature_enabled(&app, FeatureKey::COST_PRO_PER_PROJECT_TRACKING),
         "Pro license-update must refresh the gate; if this fails, \
          the freshness wiring in update_license_state regressed",
     );
 }
 ```
 
-**Implementer note:** the test surface (`App::new_for_tests`,
-`App::feature_gate()` accessor, `build_pro_license_state_event()`)
-may not exist today. The implementer should:
-1. Survey `crates/spur-tui/tests/` for existing test helpers (Tier
-   2 added `quit_shortcut_tests` which uses `App::new_for_tests`).
-2. Reuse the existing test surface; extend if needed.
-3. If a `feature_gate()` accessor on App doesn't exist (the field
-   may be private), add `pub(crate)` getter OR add a helper method
-   `app.is_feature_granted(key) -> bool` that wraps `require_feature(&self.feature_gate, key)`.
-4. The Pro fixture should produce a `LicenseStateEvent` with `plan:
-   LicensePlan::Pro` and `features: { ... pro-tier features
-   including cost_pro_per_project_tracking ... }`. Use the
-   embedded policy + `tier_features("pro")` to build the feature
-   set programmatically (no hardcoded list).
+**Implementer note on the Pro fixture:** the `LicenseStateEvent`
+must include the actual entitlement string `"cost_pro_per_project_tracking"`
+in its `features: BTreeSet<String>`, NOT just `plan: LicensePlan::Pro`.
+`FeatureGate::build_snapshot` (`crates/spur-license/src/gate.rs:88-93`)
+checks `state.features` directly against the resolved key set.
+A fixture with `Plan::Pro` and an empty/community-feature `features`
+set will deny Pro keys — this is the third codex-flagged risk.
 
-### Subtask 1.2b: Add test for "Community update keeps Pro denial"
+Build the feature set programmatically:
+```rust
+let pro_features: std::collections::BTreeSet<String> = spur_license::policy::PolicyResolver::embedded()
+    .tier_features("pro")
+    .expect("embedded policy must define `pro` tier")
+    .into_iter()
+    .collect();
+```
 
-Same pattern in reverse:
+Then use that set when constructing the Pro fixture event. This
+keeps the fixture synchronized with the policy — if the policy
+gains/loses Pro features, the test fixture follows automatically.
+
+### Subtask 1.2c: Add test for "Community update re-denies after Pro"
+
+Same pattern in reverse, using the same public `test_support` surface:
 
 ```rust
 #[test]
 fn community_license_update_after_pro_re_denies() {
-    let mut app = App::new_for_tests(/* community baseline */);
-    app.update_license_state(build_pro_license_state_event());
-    // Now downgrade back to community (e.g. license expired).
-    app.update_license_state(build_community_license_state_event());
+    let mut app = new_app(/* community baseline */);
+    push_event(&mut app, spur_acp::SpurEventBody::LicenseUpdated {
+        state: build_pro_license_state_event(),
+    });
+    // Confirm Pro is granted after upgrade event.
+    assert!(feature_enabled(&app, FeatureKey::COST_PRO_PER_PROJECT_TRACKING));
 
-    let denied = require_feature(
-        &app.feature_gate(),
-        FeatureKey::COST_PRO_PER_PROJECT_TRACKING,
-    );
+    // Now downgrade back to community (e.g. license expired).
+    push_event(&mut app, spur_acp::SpurEventBody::LicenseUpdated {
+        state: build_community_license_state_event(),
+    });
+
     assert!(
-        denied.is_err(),
+        !feature_enabled(&app, FeatureKey::COST_PRO_PER_PROJECT_TRACKING),
         "Community downgrade must re-deny Pro key; gate must reflect \
          current state, not high-water-mark",
     );
@@ -365,17 +445,51 @@ fn community_license_update_after_pro_re_denies() {
 This catches a stale-state bug where the gate retains Pro
 entitlements after the user's license downgrades.
 
+### Subtask 1.2d: Startup-hydration test
+
+Pin Subtask 1.1c's contract: an App constructed with a Pro
+`LicenseStateEvent` should grant Pro keys IMMEDIATELY, without
+needing a subsequent `LicenseUpdated` event:
+
+```rust
+#[test]
+fn pro_seeded_app_grants_pro_key_at_startup() {
+    // No event push; just construct App with Pro license state.
+    let app = new_app(build_pro_license_state_event());
+
+    assert!(
+        feature_enabled(&app, FeatureKey::COST_PRO_PER_PROJECT_TRACKING),
+        "App constructed with Pro initial state must grant Pro keys \
+         immediately; if this fails, build_with_license_state forgot \
+         to hydrate feature_gate from the seeded license_state \
+         (regression on Subtask 1.1c)",
+    );
+}
+```
+
+This is the test that catches `SPUR_LICENSE_DEV_PLAN=pro` mode
+breaking. Without it, the M1.3 manual verification is the only
+safety net for the startup-hydration path.
+
 ### Acceptance for M1.2
 
-- [ ] At least 2 tests: pro-update grants, community-downgrade
-      re-denies.
+- [ ] **`spur_tui::test_support::feature_enabled(&App, FeatureKey)
+      -> bool` exists as `pub`** (or analogous accessor); integration
+      tests under `tests/` can verify gate state without touching
+      private `App` fields.
+- [ ] At least 3 tests: pro-update grants, community-downgrade
+      re-denies, **pro-seeded-app grants at startup** (the
+      hydration test).
 - [ ] Tests use `COST_PRO_PER_PROJECT_TRACKING` (the M1.3 demo key)
       so the test pins exactly the production-relevant case.
-- [ ] No hardcoded feature lists in fixtures; build via
-      `PolicyResolver::tier_features("pro")` to stay synchronized
-      with policy.
-- [ ] Tests fail under `git revert <M1.1 commit>` (red-green
-      verified).
+- [ ] **No hardcoded feature lists in fixtures**; build via
+      `PolicyResolver::embedded().tier_features("pro")` to stay
+      synchronized with policy. **Critical:** `Plan::Pro` alone
+      without the entitlement strings in `features: BTreeSet<String>`
+      will deny Pro keys (gate checks `state.features` directly).
+- [ ] All 3 tests fail under `git revert <M1.1 commit>` (red-green
+      verified). Specifically: pro-update test fails when 1.1b is
+      reverted; pro-seeded-app test fails when 1.1c is reverted.
 - [ ] No new deps.
 - [ ] Build + clippy + fmt clean for the new test file.
 
@@ -561,6 +675,55 @@ startup-time entitlement set.
 This is a separate bug from M1's TUI-specific freshness gap. M1
 does NOT fix it. The M1.x follow-up doc captures it explicitly so
 it doesn't get forgotten.
+
+## Pre-dispatch risk register (from codex review)
+
+The dual review (codex + gemini) before dispatch surfaced 3 concrete
+implementation risks. Each is mitigated by an explicit subtask
+above; this section is the audit trail.
+
+### Risk 1 — Startup gate not hydrated; `SPUR_LICENSE_DEV_PLAN=pro` silently fails
+
+**Symptom:** User starts the TUI with `SPUR_LICENSE_DEV_PLAN=pro`,
+expects Pro features, but `Action::ShowSessionCost` denies.
+**Cause:** `App::feature_gate` is constructed via `FeatureGate::new(PolicyResolver::embedded())`
+which seeds an empty community snapshot. `CommunityProvider::validate()`
+(`crates/spur-license/src/community.rs:97`) returns the right state
+but emits NO `LicenseUpdated` event, so the post-startup pump from
+1.1b never fires.
+**Mitigation:** Subtask 1.1c hydrates the gate from the seeded
+`license_state` BEFORE the App returns. Subtask 1.2d pins the
+contract via integration test.
+
+### Risk 2 — Test surface gap; M1.2 test cannot reach private `App` state
+
+**Symptom:** Implementer writes the M1.2 integration test, hits a
+compile error: `App::new_for_tests` is not callable from `tests/*`
+(it's `#[cfg(test)]` inside `app.rs:3132`); `App::feature_gate`
+field is private.
+**Cause:** Tier 2 added `App::new_for_tests` for unit tests inside
+`app.rs::quit_shortcut_tests`, NOT for integration tests under
+`crates/spur-tui/tests/`. Integration tests use the
+`spur_tui::test_support::{new_app, push_event}` surface at
+`crates/spur-tui/src/lib.rs:72`.
+**Mitigation:** Subtask 1.2a adds a `pub fn feature_enabled(&App,
+FeatureKey) -> bool` to `test_support`. Integration tests use the
+public surface throughout.
+
+### Risk 3 — Pro fixture omits entitlement strings, denies Pro keys despite `Plan::Pro`
+
+**Symptom:** M1.2 test fails with "community baseline must deny pro
+key" passing (good) but "Pro license-update must refresh the gate"
+ALSO failing (bad), confusing the implementer about whether 1.1b
+landed correctly.
+**Cause:** `FeatureGate::build_snapshot` (`crates/spur-license/src/gate.rs:88-93`)
+computes the resolved feature set from `state.features` — the JWT
+feature key strings — combined with the policy. A fixture with
+`Plan::Pro` but `features: BTreeSet::new()` results in an empty
+resolved set; Pro keys are denied.
+**Mitigation:** Subtask 1.2b's implementer note shows the
+canonical fixture-build pattern via `PolicyResolver::embedded().tier_features("pro")`.
+Acceptance criteria explicitly disallow hardcoded feature lists.
 
 ## References
 
