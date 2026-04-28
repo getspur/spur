@@ -362,6 +362,10 @@ impl DashboardView {
         self.focused_panel
     }
 
+    pub(crate) fn is_empty_root_input(&self) -> bool {
+        self.focused_node.is_none() && self.input_bar.text().is_empty()
+    }
+
     pub fn mode(&self) -> DashboardMode {
         self.mode
     }
@@ -921,11 +925,20 @@ impl DashboardView {
         }
 
         // Global bypasses work in both modes.
+        if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+            return KeyOwner::View;
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(
                 key.code,
                 KeyCode::Char('p') | KeyCode::Char('n') | KeyCode::Char('o')
             )
+        {
+            return KeyOwner::View;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('e'))
+            && self.is_empty_root_input()
         {
             return KeyOwner::View;
         }
@@ -1397,12 +1410,13 @@ impl DashboardView {
                     Some(Action::ScrollDown)
                 }
             }
+            KeyCode::Char('e')
+                if key.modifiers.contains(KeyModifiers::CONTROL) && self.is_empty_root_input() =>
+            {
+                self.cycle_example();
+                None
+            }
             KeyCode::Tab => {
-                // In empty Dashboard state (no input, no focused node), Tab cycles examples.
-                if self.focused_node.is_none() && self.input_bar.text().is_empty() {
-                    self.cycle_example();
-                    return None;
-                }
                 self.focused_panel = match self.focused_panel {
                     Panel::Agents => Panel::Log,
                     Panel::Log => Panel::Agents,
@@ -2199,6 +2213,16 @@ impl DashboardView {
     #[doc(hidden)]
     pub fn input_bar_text_for_test(&self) -> String {
         self.input_bar.text()
+    }
+
+    /// Test-only: read the currently displayed example prompt.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn current_example_prompt_for_test(&self) -> &str {
+        self.example_prompts
+            .get(self.example_index)
+            .map(String::as_str)
+            .unwrap_or("")
     }
 
     /// Test-only: mutable InputBar access for seeding text in tests.
