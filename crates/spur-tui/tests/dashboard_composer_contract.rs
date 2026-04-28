@@ -438,9 +438,9 @@ fn vim_normal_focused_node_o_toggles_observe_not_compose() {
     ws.route(
         "e1",
         "claude",
-        &SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
-            TextContent::new("seed"),
-        ))),
+        &SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(
+            "seed",
+        )))),
     );
     let collapsed_before = ws.get("e1").expect("trace seeded").observe_collapsed();
 
@@ -527,10 +527,7 @@ fn empty_dashboard_up_in_agents_emits_select_prev_by_1() {
     let mut dashboard = DashboardView::new();
     dashboard.set_focused_panel(Panel::Agents);
 
-    let action = dashboard.handle_key(
-        KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
-        &test_ctx(),
-    );
+    let action = dashboard.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &test_ctx());
     assert!(
         matches!(action, Some(Action::SelectPrevBy(1))),
         "Up in Agents panel must emit SelectPrevBy(1) exactly once, got {:?}",

@@ -958,6 +958,8 @@ That wave deals with the dispatch-bus → license runtime → TUI
 gate refresh chain; Tier 2 deliberately stays in front of that
 work since the freshness gap doesn't affect the MVP demo path.
 
+- Plan C M1 Task 3 added a Pro-tier gate at `Action::ShowSessionCost` × `COST_PRO_PER_PROJECT_TRACKING`; community users now hit the upgrade modal naturally without `SPUR_LICENSE_TEST_STRIP_KEYS`.
+
 **Cleanup commit applied on top of rebased Tasks 1–3:**
 
 1. **Quit-chord pass-through** — `is_quit_chord(key)` runs above

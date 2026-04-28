@@ -85,9 +85,7 @@ pub struct SessionDetailView {
     pub(crate) image_cache: crate::components::image_cache::ImageCache,
     /// Coalesces re-raster requests — at most one in flight per id.
     #[cfg(feature = "markdown")]
-    pub(crate) in_flight_renders: std::collections::HashSet<
-        crate::components::mermaid::MermaidId,
-    >,
+    pub(crate) in_flight_renders: std::collections::HashSet<crate::components::mermaid::MermaidId>,
     /// Source of monotonic `image_generation` values stored on
     /// `MermaidState::Ready` and snapshotted by `image_cache` for
     /// stale-protocol detection.
@@ -706,10 +704,7 @@ impl SessionDetailView {
     /// pipeline; populated `Some(_)` for fresh sessions, left `None` for
     /// sessions resumed before M9 wires `LoadSessionResponse` into
     /// `SpurAgentCaps`. `None` is treated as permissive on read paths.
-    pub fn set_spur_agent_caps(
-        &mut self,
-        caps: Option<std::sync::Arc<spur_acp::SpurAgentCaps>>,
-    ) {
+    pub fn set_spur_agent_caps(&mut self, caps: Option<std::sync::Arc<spur_acp::SpurAgentCaps>>) {
         self.spur_agent_caps = caps;
     }
 
@@ -1060,10 +1055,11 @@ impl SessionDetailView {
             .mermaid_registry
             .iter()
             .filter_map(|(id, state)| match state {
-                MermaidState::Ready { rastered_at_bucket, code, .. }
-                    if *rastered_at_bucket < new_bucket
-                        && !self.in_flight_renders.contains(id) =>
-                {
+                MermaidState::Ready {
+                    rastered_at_bucket,
+                    code,
+                    ..
+                } if *rastered_at_bucket < new_bucket && !self.in_flight_renders.contains(id) => {
                     Some((*id, code.clone()))
                 }
                 _ => None,
@@ -1072,14 +1068,13 @@ impl SessionDetailView {
 
         for (id, code) in candidates {
             self.in_flight_renders.insert(id);
-            self.pending_fence_actions.push_back(
-                crate::action::Action::MermaidRenderRequest {
+            self.pending_fence_actions
+                .push_back(crate::action::Action::MermaidRenderRequest {
                     session: self.session_id.clone(),
                     ref_id: id,
                     code,
                     target_width: new_bucket,
-                },
-            );
+                });
         }
     }
 
@@ -1790,10 +1785,8 @@ impl View for SessionDetailView {
                                         // available; use the last known render width if cached,
                                         // else smallest bucket. The next render frame's
                                         // maybe_request_rerasters will upgrade if needed.
-                                        let pane_w_cols = self
-                                            .react_trace
-                                            .last_render_width()
-                                            .unwrap_or(80);
+                                        let pane_w_cols =
+                                            self.react_trace.last_render_width().unwrap_or(80);
                                         crate::components::mermaid::raster_width_for_pane(
                                             (pane_w_cols as u32).saturating_mul(cell_w_px as u32),
                                         )
@@ -1984,10 +1977,7 @@ impl View for SessionDetailView {
                             // available; use the last known render width if cached,
                             // else smallest bucket. The next render frame's
                             // maybe_request_rerasters will upgrade if needed.
-                            let pane_w_cols = self
-                                .react_trace
-                                .last_render_width()
-                                .unwrap_or(80);
+                            let pane_w_cols = self.react_trace.last_render_width().unwrap_or(80);
                             crate::components::mermaid::raster_width_for_pane(
                                 (pane_w_cols as u32).saturating_mul(cell_w_px as u32),
                             )
@@ -2593,8 +2583,8 @@ mod banner_tests {
 mod maybe_request_rerasters_tests {
     use super::*;
     use crate::components::mermaid::{MermaidId, MermaidState, RASTER_BUCKETS};
-    use std::sync::Arc;
     use image::{DynamicImage, RgbaImage};
+    use std::sync::Arc;
 
     #[allow(dead_code)]
     fn buckets_constant_check() {
@@ -2618,8 +2608,10 @@ mod maybe_request_rerasters_tests {
         view.mermaid_registry.insert(MermaidId(1), ready_at(800, 1));
         // pane_w_px = 80 cols × 8 px = 640 → bucket 800. No upgrade.
         view.maybe_request_rerasters(80, 8);
-        assert!(view.pending_fence_actions.is_empty(),
-            "no requests when bucket unchanged");
+        assert!(
+            view.pending_fence_actions.is_empty(),
+            "no requests when bucket unchanged"
+        );
     }
 
     #[test]
@@ -2635,10 +2627,8 @@ mod maybe_request_rerasters_tests {
     #[test]
     fn maybe_request_rerasters_skips_pending() {
         let mut view = SessionDetailView::new_for_tests();
-        view.mermaid_registry.insert(
-            MermaidId(2),
-            MermaidState::Pending { code: "g".into() },
-        );
+        view.mermaid_registry
+            .insert(MermaidId(2), MermaidState::Pending { code: "g".into() });
         view.maybe_request_rerasters(200, 8);
         assert!(view.pending_fence_actions.is_empty());
     }
@@ -2649,14 +2639,17 @@ mod maybe_request_rerasters_tests {
         view.mermaid_registry.insert(MermaidId(3), ready_at(800, 1));
         view.in_flight_renders.insert(MermaidId(3));
         view.maybe_request_rerasters(200, 8);
-        assert!(view.pending_fence_actions.is_empty(),
-            "no duplicate requests for in-flight ids");
+        assert!(
+            view.pending_fence_actions.is_empty(),
+            "no duplicate requests for in-flight ids"
+        );
     }
 
     #[test]
     fn maybe_request_rerasters_skips_just_landed_at_new_bucket() {
         let mut view = SessionDetailView::new_for_tests();
-        view.mermaid_registry.insert(MermaidId(4), ready_at(1600, 1));
+        view.mermaid_registry
+            .insert(MermaidId(4), ready_at(1600, 1));
         // pane_w_px = 200 cols × 8 px = 1600 → bucket 1600. Already there.
         view.maybe_request_rerasters(200, 8);
         assert!(view.pending_fence_actions.is_empty());
@@ -2681,10 +2674,8 @@ mod maybe_request_rerasters_tests {
     fn handle_completed_clears_in_flight() {
         let mut view = SessionDetailView::new_for_tests();
         view.in_flight_renders.insert(MermaidId(6));
-        view.mermaid_registry.insert(
-            MermaidId(6),
-            MermaidState::Pending { code: "g".into() },
-        );
+        view.mermaid_registry
+            .insert(MermaidId(6), MermaidState::Pending { code: "g".into() });
         let img = Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(10, 10)));
         view.handle_mermaid_completed(MermaidId(6), 800, Ok(img));
         assert!(!view.in_flight_renders.contains(&MermaidId(6)));
@@ -2693,14 +2684,14 @@ mod maybe_request_rerasters_tests {
     #[test]
     fn handle_completed_records_target_width_on_ready() {
         let mut view = SessionDetailView::new_for_tests();
-        view.mermaid_registry.insert(
-            MermaidId(7),
-            MermaidState::Pending { code: "g".into() },
-        );
+        view.mermaid_registry
+            .insert(MermaidId(7), MermaidState::Pending { code: "g".into() });
         let img = Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(10, 10)));
         view.handle_mermaid_completed(MermaidId(7), 1600, Ok(img));
         match view.mermaid_registry.get(&MermaidId(7)) {
-            Some(MermaidState::Ready { rastered_at_bucket, .. }) => {
+            Some(MermaidState::Ready {
+                rastered_at_bucket, ..
+            }) => {
                 assert_eq!(*rastered_at_bucket, 1600);
             }
             _ => panic!("expected Ready"),
@@ -2710,12 +2701,15 @@ mod maybe_request_rerasters_tests {
     #[test]
     fn handle_completed_retains_code_on_ready_to_ready() {
         let mut view = SessionDetailView::new_for_tests();
-        view.mermaid_registry.insert(MermaidId(8), MermaidState::Ready {
-            image: Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(10, 10))),
-            code: "ORIGINAL".into(),
-            rastered_at_bucket: 800,
-            image_generation: 1,
-        });
+        view.mermaid_registry.insert(
+            MermaidId(8),
+            MermaidState::Ready {
+                image: Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(10, 10))),
+                code: "ORIGINAL".into(),
+                rastered_at_bucket: 800,
+                image_generation: 1,
+            },
+        );
         let img = Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(20, 20)));
         view.handle_mermaid_completed(MermaidId(8), 1600, Ok(img));
         match view.mermaid_registry.get(&MermaidId(8)) {
@@ -2729,7 +2723,9 @@ mod maybe_request_rerasters_tests {
         let mut view = SessionDetailView::new_for_tests();
         view.mermaid_registry.insert(
             MermaidId(9),
-            MermaidState::Pending { code: "PENDING_SOURCE".into() },
+            MermaidState::Pending {
+                code: "PENDING_SOURCE".into(),
+            },
         );
         let img = Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(10, 10)));
         view.handle_mermaid_completed(MermaidId(9), 800, Ok(img));
@@ -2742,19 +2738,21 @@ mod maybe_request_rerasters_tests {
     #[test]
     fn handle_completed_bumps_image_generation_on_ok() {
         let mut view = SessionDetailView::new_for_tests();
-        view.mermaid_registry.insert(
-            MermaidId(10),
-            MermaidState::Pending { code: "g".into() },
-        );
+        view.mermaid_registry
+            .insert(MermaidId(10), MermaidState::Pending { code: "g".into() });
         let img = Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(10, 10)));
         view.handle_mermaid_completed(MermaidId(10), 800, Ok(img.clone()));
         let gen1 = match view.mermaid_registry.get(&MermaidId(10)) {
-            Some(MermaidState::Ready { image_generation, .. }) => *image_generation,
+            Some(MermaidState::Ready {
+                image_generation, ..
+            }) => *image_generation,
             _ => panic!(),
         };
         view.handle_mermaid_completed(MermaidId(10), 1200, Ok(img));
         let gen2 = match view.mermaid_registry.get(&MermaidId(10)) {
-            Some(MermaidState::Ready { image_generation, .. }) => *image_generation,
+            Some(MermaidState::Ready {
+                image_generation, ..
+            }) => *image_generation,
             _ => panic!(),
         };
         assert!(gen2 > gen1, "generation must monotonically increase");
@@ -2763,12 +2761,15 @@ mod maybe_request_rerasters_tests {
     #[test]
     fn handle_completed_never_decreases_bucket() {
         let mut view = SessionDetailView::new_for_tests();
-        view.mermaid_registry.insert(MermaidId(11), MermaidState::Ready {
-            image: Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(10, 10))),
-            code: "g".into(),
-            rastered_at_bucket: 1600,
-            image_generation: 1,
-        });
+        view.mermaid_registry.insert(
+            MermaidId(11),
+            MermaidState::Ready {
+                image: Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(10, 10))),
+                code: "g".into(),
+                rastered_at_bucket: 1600,
+                image_generation: 1,
+            },
+        );
         // Even if a stale completion arrives with a smaller bucket, the
         // handler stores the COMPLETION's bucket — but maybe_request_rerasters
         // never EMITS at a smaller bucket (test is for the trigger, not the
@@ -2790,12 +2791,16 @@ mod maybe_request_rerasters_tests {
         // pane wider than 800. Initial fence emit (Task 14 wires this) uses
         // the same path conceptually.
         let mut view = SessionDetailView::new_for_tests();
-        view.mermaid_registry.insert(MermaidId(12), ready_at(800, 1));
+        view.mermaid_registry
+            .insert(MermaidId(12), ready_at(800, 1));
         view.maybe_request_rerasters(200, 8); // pane_w_px=1600 → bucket 1600
         assert_eq!(view.pending_fence_actions.len(), 1);
         match view.pending_fence_actions.front() {
             Some(crate::action::Action::MermaidRenderRequest { target_width, .. }) => {
-                assert!(*target_width >= 1200, "target_width should be ≥ 1200, got {target_width}");
+                assert!(
+                    *target_width >= 1200,
+                    "target_width should be ≥ 1200, got {target_width}"
+                );
             }
             _ => panic!("expected MermaidRenderRequest"),
         }
@@ -2807,8 +2812,8 @@ mod maybe_request_rerasters_tests {
         // re-raster request emitted, completion handler runs, bucket
         // updated, image_generation bumped.
         use crate::action::Action;
-        use std::sync::Arc;
         use image::{DynamicImage, RgbaImage};
+        use std::sync::Arc;
 
         let mut view = SessionDetailView::new_for_tests();
 
@@ -2865,9 +2870,6 @@ mod maybe_request_rerasters_tests {
 #[cfg(all(test, feature = "markdown"))]
 mod invalidate_protocols_tests {
     use super::*;
-    use crate::components::mermaid::{MermaidId, MermaidState};
-    use image::{DynamicImage, RgbaImage};
-    use std::cell::RefCell;
 
     fn test_ctx() -> crate::views::ViewContext<'static> {
         static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =

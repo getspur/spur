@@ -329,7 +329,9 @@ fn render_inline_image(
     let gen = *image_generation;
     let image_arc = image.clone(); // Arc clone is cheap; satisfies borrowck
 
-    let proto = ctx.image_cache.inline_protocol_mut(id, &image_arc, gen, picker);
+    let proto = ctx
+        .image_cache
+        .inline_protocol_mut(id, &image_arc, gen, picker);
     let widget = StatefulImage::default().resize(Resize::Fit(None));
     frame.render_stateful_widget(widget, rect, proto);
     true
@@ -383,7 +385,10 @@ pub(crate) fn render_partial_card(
         ))],
         2 => vec![
             Line::from(Span::styled(
-                format!("📊 mermaid #{} · {}% visible · {}", id.0, visible_pct, direction),
+                format!(
+                    "📊 mermaid #{} · {}% visible · {}",
+                    id.0, visible_pct, direction
+                ),
                 Style::default()
                     .fg(Color::Magenta)
                     .add_modifier(Modifier::BOLD),
@@ -399,7 +404,10 @@ pub(crate) fn render_partial_card(
             debug_assert!(run_len >= PARTIAL_CARD_MIN_ROWS);
             vec![
                 Line::from(Span::styled(
-                    format!("📊 mermaid #{} · {}% visible · {}", id.0, visible_pct, direction),
+                    format!(
+                        "📊 mermaid #{} · {}% visible · {}",
+                        id.0, visible_pct, direction
+                    ),
                     Style::default()
                         .fg(Color::Magenta)
                         .add_modifier(Modifier::BOLD),
@@ -611,19 +619,19 @@ impl ReactTrace {
 
             let (cell_w_px, cell_h_px) = ctx
                 .picker
-                .map(|p| { let (w, h) = p.font_size(); (w.max(1) as u32, h.max(1) as u32) })
+                .map(|p| {
+                    let (w, h) = p.font_size();
+                    (w.max(1) as u32, h.max(1) as u32)
+                })
                 .unwrap_or((8, 16));
             let soft_cap = compute_soft_cap(inner.height);
 
-            let key_ok = self
-                .line_cache
-                .as_ref()
-                .is_some_and(|c| {
-                    c.width == effective_width
-                        && c.soft_cap == soft_cap
-                        && c.cell_w_px == cell_w_px
-                        && c.cell_h_px == cell_h_px
-                });
+            let key_ok = self.line_cache.as_ref().is_some_and(|c| {
+                c.width == effective_width
+                    && c.soft_cap == soft_cap
+                    && c.cell_w_px == cell_w_px
+                    && c.cell_h_px == cell_h_px
+            });
             let fence_ok = self
                 .line_cache
                 .as_ref()
@@ -779,7 +787,9 @@ impl ReactTrace {
                             // Pending / Rendering / Error — single-line dim
                             // placeholder. Layout still preserved (run_len rows).
                             let msg = match ctx.mermaid_registry.get(&id) {
-                                Some(crate::components::mermaid::MermaidState::Error { .. }) => {
+                                Some(crate::components::mermaid::MermaidState::Error {
+                                    ..
+                                }) => {
                                     format!("   [⚠ mermaid #{} error · Alt-v to view]", id.0)
                                 }
                                 _ => format!("   [⏳ mermaid #{} rendering…]", id.0),
@@ -1191,21 +1201,21 @@ mod height_tests {
     #[test]
     fn height_grows_past_60_on_big_pane() {
         let i = img(800, 1280); // natural ≈ 80 at pane_w=100
-        // pane_h=120: target_cap = max(80, 60)=80; max_inline=116; soft=80 → result 80.
+                                // pane_h=120: target_cap = max(80, 60)=80; max_inline=116; soft=80 → result 80.
         assert_eq!(compute_inline_height_rows(&i, 100, 120, 8, 16), 80);
     }
 
     #[test]
     fn height_caps_at_hard_100() {
         let i = img(800, 2400); // natural ≈ 150 at pane_w=100
-        // pane_h=200: target_cap = max(133, 60)=133; min(133, 196, 100)=100.
+                                // pane_h=200: target_cap = max(133, 60)=133; min(133, 196, 100)=100.
         assert_eq!(compute_inline_height_rows(&i, 100, 200, 8, 16), 100);
     }
 
     #[test]
     fn height_floor_degrades_on_tiny_pane() {
         let i = img(800, 480); // natural ≈ 30 at pane_w=100
-        // pane_h=12: max_inline=8; soft_cap=min(60, 8, 100)=8; floor=min(8,8)=8.
+                               // pane_h=12: max_inline=8; soft_cap=min(60, 8, 100)=8; floor=min(8,8)=8.
         assert_eq!(compute_inline_height_rows(&i, 100, 12, 8, 16), 8);
     }
 
@@ -1231,24 +1241,27 @@ mod height_tests {
     #[test]
     fn height_preserves_trailing_context() {
         let i = img(800, 2000); // very tall
-        // pane_h=70: max_inline=66; target_cap=max(46, 60)=60; soft=60.
-        // Trailing context preserved: result=60 ≤ 66.
+                                // pane_h=70: max_inline=66; target_cap=max(46, 60)=60; soft=60.
+                                // Trailing context preserved: result=60 ≤ 66.
         let result = compute_inline_height_rows(&i, 100, 70, 8, 16);
-        assert!(result <= 70 - 4, "soft_cap must respect pane_h - 4 (got {result})");
+        assert!(
+            result <= 70 - 4,
+            "soft_cap must respect pane_h - 4 (got {result})"
+        );
     }
 
     #[test]
     fn height_preserves_legacy_60_at_medium_pane() {
         let i = img(800, 640); // natural ≈ 40
-        // pane_h=80, natural=40 → clamp(40, 8, 60) = 40.
+                               // pane_h=80, natural=40 → clamp(40, 8, 60) = 40.
         assert_eq!(compute_inline_height_rows(&i, 100, 80, 8, 16), 40);
     }
 
     #[test]
     fn height_two_thirds_active_when_above_60() {
         let i = img(800, 1600); // natural ≈ 100
-        // pane_h=100: target_cap = max(66, 60)=66; max_inline=96;
-        // soft=min(66,96,100)=66; result=clamp(100, 8, 66)=66.
+                                // pane_h=100: target_cap = max(66, 60)=66; max_inline=96;
+                                // soft=min(66,96,100)=66; result=clamp(100, 8, 66)=66.
         assert_eq!(compute_inline_height_rows(&i, 100, 100, 8, 16), 66);
     }
 
@@ -1256,8 +1269,8 @@ mod height_tests {
     fn height_pane_60_70_regresses_to_56() {
         // Documents the accepted ≤4-row regression for pane_h ∈ [60, 63].
         let i = img(800, 1120); // natural ≈ 70
-        // pane_h=60: target_cap = max(40, 60)=60; max_inline=56;
-        // soft=min(60,56,100)=56; result=clamp(70, 8, 56)=56.
+                                // pane_h=60: target_cap = max(40, 60)=60; max_inline=56;
+                                // soft=min(60,56,100)=56; result=clamp(70, 8, 56)=56.
         assert_eq!(compute_inline_height_rows(&i, 100, 60, 8, 16), 56);
     }
 
@@ -1281,9 +1294,15 @@ mod card_tests {
         let backend = TestBackend::new(80, rect_h);
         let mut term = Terminal::new(backend).unwrap();
         term.draw(|f| {
-            let r = Rect { x: 0, y: 0, width: 80, height: rect_h };
+            let r = Rect {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: rect_h,
+            };
             body(f, r);
-        }).unwrap();
+        })
+        .unwrap();
         // Pull the buffer cells into one string per row.
         let buf = term.backend().buffer().clone();
         (0..rect_h)
@@ -1304,7 +1323,10 @@ mod card_tests {
             render_partial_card(f, r, MermaidId(7), 20, 0, 5);
         });
         let joined = lines.join("\n");
-        assert!(joined.contains("▼ scroll down"), "expected scroll-down indicator: {joined}");
+        assert!(
+            joined.contains("▼ scroll down"),
+            "expected scroll-down indicator: {joined}"
+        );
     }
 
     #[test]
@@ -1314,7 +1336,10 @@ mod card_tests {
             render_partial_card(f, r, MermaidId(3), 20, 15, 5);
         });
         let joined = lines.join("\n");
-        assert!(joined.contains("▲ scroll up"), "expected scroll-up indicator: {joined}");
+        assert!(
+            joined.contains("▲ scroll up"),
+            "expected scroll-up indicator: {joined}"
+        );
     }
 
     #[test]
@@ -1324,7 +1349,10 @@ mod card_tests {
             render_partial_card(f, r, MermaidId(2), 20, 8, 5);
         });
         let joined = lines.join("\n");
-        assert!(joined.contains("▲▼ scroll for more"), "expected mid-window indicator: {joined}");
+        assert!(
+            joined.contains("▲▼ scroll for more"),
+            "expected mid-window indicator: {joined}"
+        );
     }
 
     #[test]
@@ -1342,7 +1370,10 @@ mod card_tests {
             render_partial_card(f, r, MermaidId(1), 0, 0, 1);
         });
         let joined = lines.join("\n");
-        assert!(joined.contains("100%"), "total_rows=0 should display 100%: {joined}");
+        assert!(
+            joined.contains("100%"),
+            "total_rows=0 should display 100%: {joined}"
+        );
     }
 
     #[test]
@@ -1352,7 +1383,10 @@ mod card_tests {
         });
         // Exactly one non-blank line.
         let non_blank = lines.iter().filter(|l| !l.is_empty()).count();
-        assert_eq!(non_blank, 1, "expected 1 non-blank line, got {non_blank}: {lines:?}");
+        assert_eq!(
+            non_blank, 1,
+            "expected 1 non-blank line, got {non_blank}: {lines:?}"
+        );
     }
 
     #[test]
@@ -1361,7 +1395,10 @@ mod card_tests {
             render_partial_card(f, r, MermaidId(1), 20, 0, 2);
         });
         let non_blank = lines.iter().filter(|l| !l.is_empty()).count();
-        assert_eq!(non_blank, 2, "expected 2 non-blank lines, got {non_blank}: {lines:?}");
+        assert_eq!(
+            non_blank, 2,
+            "expected 2 non-blank lines, got {non_blank}: {lines:?}"
+        );
     }
 
     #[test]
@@ -1380,7 +1417,10 @@ mod card_tests {
             render_partial_card(f, r, MermaidId(1), 20, 0, 0);
         });
         // No content rendered.
-        assert!(lines.iter().all(|l| l.is_empty()), "expected blank: {lines:?}");
+        assert!(
+            lines.iter().all(|l| l.is_empty()),
+            "expected blank: {lines:?}"
+        );
     }
 
     #[test]
@@ -1393,7 +1433,11 @@ mod card_tests {
         for (i, l) in lines.iter().take(4).enumerate() {
             assert!(l.is_empty(), "row {i} expected blank, got: {l:?}");
         }
-        assert!(lines[4].contains("mermaid #1"), "row 4 expected title, got: {:?}", lines[4]);
+        assert!(
+            lines[4].contains("mermaid #1"),
+            "row 4 expected title, got: {:?}",
+            lines[4]
+        );
     }
 }
 
