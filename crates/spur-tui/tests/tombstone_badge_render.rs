@@ -47,7 +47,7 @@ fn badge_uses_revert_verb_for_queued_remote() {
     slots.install(Tombstone {
         view: ViewId::Dashboard,
         kind: TombstoneKind::QueuedRemote {
-            pending: spur_tui::action::Action::SubmitReview {
+            pending: spur_tui::action::Action::SubmitReviewDispatch {
                 executor_id: "x".into(),
                 attempt_n: 1,
                 decision: spur_core::ReviewDecision::Approve,

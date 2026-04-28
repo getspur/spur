@@ -91,7 +91,7 @@ fn undo_queued_remote_cancels_without_dispatch() {
     app.tombstones_for_test().install(Tombstone {
         view: ViewId::Dashboard,
         kind: TombstoneKind::QueuedRemote {
-            pending: Action::SubmitReview {
+            pending: Action::SubmitReviewDispatch {
                 executor_id: "exec-1".into(),
                 attempt_n: 1,
                 decision: ReviewDecision::Approve,
@@ -107,7 +107,7 @@ fn undo_queued_remote_cancels_without_dispatch() {
     assert!(!app.tombstones_for_test().has(&ViewId::Dashboard));
     assert!(!matches!(
         app.last_action_for_test(),
-        Some(Action::SubmitReview { .. })
+        Some(Action::SubmitReviewDispatch { .. })
     ));
     assert!(
         app.transient_hint_text()
@@ -358,4 +358,84 @@ fn tombstone_skipped_when_issue_not_in_tracked_issues() {
         !app.tombstones_for_test().has(&ViewId::IssueBrowser),
         "tombstone must NOT be installed when issue is missing from tracked_issues"
     );
+}
+
+#[test]
+fn tombstone_remote_queue_installs_and_does_not_dispatch_immediately() {
+    let mut app = App::new_for_tests();
+    app.add_pending_review_for_test("exec-1", 1);
+    process_action(
+        &mut app,
+        Action::SubmitReview {
+            executor_id: "exec-1".into(),
+            attempt_n: 1,
+            decision: ReviewDecision::Approve,
+        },
+    );
+
+    let ts = app.tombstones_for_test().peek(&ViewId::Dashboard);
+    assert!(ts.is_some(), "tombstone must be installed");
+    match &ts.unwrap().kind {
+        TombstoneKind::QueuedRemote {
+            pending: Action::SubmitReviewDispatch { .. },
+        } => {}
+        other => panic!("expected QueuedRemote SubmitReviewDispatch tombstone, got {other:?}"),
+    }
+    assert!(
+        !app.user_input_sent_for_test(),
+        "SubmitReview must not dispatch during queue window"
+    );
+}
+
+#[test]
+fn tombstone_remote_queue_cancel_via_undo() {
+    let mut app = App::new_for_tests();
+    app.add_pending_review_for_test("exec-1", 1);
+    process_action(
+        &mut app,
+        Action::SubmitReview {
+            executor_id: "exec-1".into(),
+            attempt_n: 1,
+            decision: ReviewDecision::Approve,
+        },
+    );
+
+    app.handle_undo_for_test();
+
+    assert!(!app.tombstones_for_test().has(&ViewId::Dashboard));
+    assert!(!app.user_input_sent_for_test());
+    assert!(
+        app.transient_hint_text()
+            .unwrap_or("")
+            .contains("Cancelled"),
+        "expected cancel confirmation"
+    );
+}
+
+#[test]
+fn tombstone_remote_queue_displaced_by_next_review_dispatches_first_immediately() {
+    let mut app = App::new_for_tests();
+    app.add_pending_review_for_test("exec-1", 1);
+    app.add_pending_review_for_test("exec-2", 1);
+    process_action(
+        &mut app,
+        Action::SubmitReview {
+            executor_id: "exec-1".into(),
+            attempt_n: 1,
+            decision: ReviewDecision::Approve,
+        },
+    );
+    process_action(
+        &mut app,
+        Action::SubmitReview {
+            executor_id: "exec-2".into(),
+            attempt_n: 1,
+            decision: ReviewDecision::Reject {
+                reason: "needs changes".into(),
+            },
+        },
+    );
+
+    assert!(app.user_input_sent_for_test_with_executor("exec-1"));
+    assert!(app.tombstones_for_test().has(&ViewId::Dashboard));
 }
