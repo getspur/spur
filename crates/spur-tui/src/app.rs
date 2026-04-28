@@ -1340,6 +1340,13 @@ impl App {
     pub fn handle_crossterm_event(&mut self, event: Event) {
         match event {
             Event::Key(key) => {
+                // Normalize macOS Option-key Unicode chars (e.g. `å` → Alt+a)
+                // BEFORE any handler runs, so global chord checks like the
+                // Alt+a Insights bypass see the resolved KeyEvent rather than
+                // raw Option-character codepoints. View-level callers also
+                // invoke this; the function is idempotent.
+                let key = crate::views::normalize_macos_option(key);
+
                 if self.record_panic_esc(key) {
                     return;
                 }
@@ -4102,6 +4109,24 @@ mod insights_navigation_tests {
         let mut app = App::new_for_tests();
 
         app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT));
+
+        assert_eq!(app.current_view(), &ViewId::Insights);
+    }
+
+    /// macOS Terminal/iTerm with default "Use Option as Meta key" OFF emits
+    /// the Unicode char `å` for Option+A. The global Insights bypass must
+    /// trigger AFTER `normalize_macos_option` runs at the app entry point.
+    #[test]
+    fn macos_option_a_opens_insights_view() {
+        use crossterm::event::Event;
+
+        let mut app = App::new_for_tests();
+
+        // Simulate the raw key Crossterm reports on macOS without meta-key.
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('å'),
+            KeyModifiers::NONE,
+        )));
 
         assert_eq!(app.current_view(), &ViewId::Insights);
     }
