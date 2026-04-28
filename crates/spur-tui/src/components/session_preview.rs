@@ -57,15 +57,28 @@ impl SessionPreview {
                     let value_style = row
                         .value_style
                         .unwrap_or_else(|| Style::default().fg(Color::White));
-                    Line::from(vec![
-                        Span::styled(
-                            format!("  {}: ", row.label),
-                            Style::default()
-                                .fg(Color::DarkGray)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(row.value.clone(), value_style),
-                    ])
+                    if row.label.is_empty() {
+                        if row.value.is_empty() {
+                            // Both empty: pure blank line as visual separator.
+                            Line::from("")
+                        } else {
+                            // Empty label: render value only with leading indent.
+                            Line::from(vec![
+                                Span::raw("  "),
+                                Span::styled(row.value.clone(), value_style),
+                            ])
+                        }
+                    } else {
+                        Line::from(vec![
+                            Span::styled(
+                                format!("  {}: ", row.label),
+                                Style::default()
+                                    .fg(Color::DarkGray)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(row.value.clone(), value_style),
+                        ])
+                    }
                 })
                 .collect()
         };
