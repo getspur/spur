@@ -1,10 +1,15 @@
 # Tier Revamp Plan C — Tier 1: CLI Denial → Upgrade CTA
 
+> **Status:** ✅ SHIPPED 2026-04-28 (commits `94a6ff9d` plan,
+> `f28374ba` impl, `1c17732a` smoke). See **§ Post-merge addendum**
+> at the end of this doc for the canonical landed shape — sections
+> below preserve the v1 prescription as the audit trail of the
+> 3-gate review evolution.
+
 > **For agentic workers:** This plan ships in 2 atomic implementation
 > tasks; each task is delegated to a fresh worker and gated by a
-> 3-reviewer panel (kimi + gemini + claude-code) before merge. The
-> brain (orchestrator) judges reviewer output and decides accept /
-> iterate.
+> 3-reviewer panel before merge. The brain (orchestrator) judges
+> reviewer output and decides accept / iterate.
 
 **Goal:** Reverse the "anger without recovery" regression introduced
 by Plan C M0 + M0.5. Every gated denial today bubbles a terse
@@ -427,3 +432,63 @@ the alternative is to test the renderer via the binary-level
 `assert_cmd` path only (no unit test). The plan recommends the
 lib-export approach because (a) it gives faster failure isolation
 in CI and (b) the unit tests don't need a child-process spawn.
+
+---
+
+## Post-merge addendum (2026-04-28)
+
+The 3-gate review (kimi + gemini + claude-code on v1; codex deep +
+gemini side-by-side on v2) drove four intentional deviations from
+the v1 prescription above. All deltas are net-positive for Tier 2 /
+Tier 3 reuse.
+
+**Canonical landed shape:**
+
+| Concern | v1 prescription | v2 landed | Driver |
+|---|---|---|---|
+| Renderer crate | `crates/spur-cli/src/upgrade_cta.rs` | `crates/spur-license/src/upgrade_cta.rs` | gemini 🔴: `spur-cli` is a binary crate; future `spur-tui` capability-tease modal would hit a circular dep. Renderer lives next to `FeatureGateError` typed-error contract for cross-crate reuse. |
+| Function visibility | `pub(crate)` | `pub` | kimi 🔴: integration tests compile as external crates; `pub(crate)` blocks them. `pub` exposes via `spur_license::upgrade_cta::{find_gate_error, format_upgrade_cta}`. |
+| Exit pattern | `std::process::exit(1)` | `ExitCode::FAILURE` from `main` | gemini 🟡: idiomatic Rust; allows tokio runtime to drain cleanly. |
+| Dead-code block | `if let FeatureGateError::Denied { key, tier } = ... { let _ = ... }` | dropped | gemini 🟡: doc-comment on `format_upgrade_cta` carries the future-tier-aware-copy hint without silent code. |
+| Unit test location | `crates/spur-cli/tests/upgrade_cta_render.rs` | `crates/spur-license/src/upgrade_cta.rs::tests` (cfg(test)) | Ripple of moving the renderer to `spur-license`. Tests live with the code. |
+
+**Out of scope for Tier 1, all honored:**
+- ✅ No per-key user-facing labels (Tier 2)
+- ✅ No tier-aware copy branching (Tier 3)
+- ✅ No TUI modal rendering (Tier 2)
+- ✅ No JSON output (deferred future work)
+- ✅ No URL CTAs (no product authority)
+
+**Open follow-ups surfaced by post-merge review (codex):**
+
+1. **Doc-comment tightening** (trivial): `render_top_level_error`'s
+   doc says `{err:#}` provides "full debug context" — actually
+   only the Display chain. Tighten language. Lands in same commit
+   as this addendum.
+2. **`SPUR_FORCE_TTY` test hook** (testability gap): `assert_cmd`
+   does not allocate a pty for the child, so the TTY-gated CTA
+   dispatch path has no automated regression net. Manual pty
+   verification was performed. Filed as
+   `2026-04-28-tier-revamp-tier1-followup-tty-test-hook.md`.
+3. **Foundation-claim caveat**: `format_upgrade_cta -> String` is
+   sufficient for Tier 1 (CLI eprint!) and Tier 2 (TUI Paragraph
+   widget). Tier 3 (trial JWT) may want a structured
+   `Cta { lines: Vec<Line>, actions: Vec<Action>, trial_available: bool }`
+   instead. YAGNI for now; refactor when Tier 3 actually needs it.
+
+**Foundation API stable for Tier 2 / Tier 3:**
+
+```rust
+use spur_license::upgrade_cta::{find_gate_error, format_upgrade_cta};
+
+// At any error-rendering boundary:
+if let Some(gate_err) = find_gate_error(&anyhow_err) {
+    let cta_text = format_upgrade_cta(gate_err);
+    // Tier 1: eprint!("{cta_text}")
+    // Tier 2: render_modal(Paragraph::new(cta_text))
+    // Tier 3: format_upgrade_cta_with_trial(gate_err, trial_state)
+}
+```
+
+Plan doc preserved as audit trail above; this addendum is the
+canonical reference for Tier 2 / Tier 3 implementers.
