@@ -27,6 +27,7 @@ use crate::components::palette_sources::{
 };
 use crate::components::quit_confirm::QuitConfirmDialog;
 use crate::components::status_bar::{HintOverride, LicenseBadge, LicenseBadgeTone};
+use crate::components::tombstone::TombstoneKind;
 use crate::components::upgrade_modal::{self, UpgradeModalState};
 use crate::input_history::{InputHistoryEntry, HISTORY_CAP};
 use crate::session_metadata::{ReadOnlyFutureSchema, SessionMetadataStore};
@@ -647,6 +648,30 @@ impl App {
     }
 
     #[cfg(any(test, debug_assertions))]
+    pub fn transient_hint_text(&self) -> Option<&str> {
+        self.transient_hint.as_ref().map(|hint| hint.text.as_str())
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn handle_undo_for_test(&mut self) {
+        let _ = self.handle_undo();
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn tombstones_for_test(&mut self) -> &mut crate::components::tombstone::TombstoneSlots {
+        &mut self.tombstones
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn set_edit_mode_for_test(&mut self, mode: EditMode) {
+        self.edit_mode = mode;
+        self.dashboard.set_edit_mode(mode);
+        if let Some(detail) = self.session_detail.as_mut() {
+            detail.set_edit_mode(mode);
+        }
+    }
+
+    #[cfg(any(test, debug_assertions))]
     pub fn is_help_visible_for_test(&self) -> bool {
         self.help_visible
     }
@@ -822,6 +847,12 @@ impl App {
     #[doc(hidden)]
     pub fn dashboard_mut_for_test(&mut self) -> &mut crate::views::dashboard::DashboardView {
         &mut self.dashboard
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn open_dashboard_slash_picker_for_test(&mut self) {
+        self.current_view = ViewId::Dashboard;
+        self.dashboard.open_slash_picker_for_test();
     }
 
     #[cfg(any(test, debug_assertions))]
@@ -1020,6 +1051,11 @@ impl App {
                     return;
                 }
 
+                if self.is_undo_key(key) && self.handle_undo() {
+                    self.dirty = true;
+                    return;
+                }
+
                 // Quit-confirm dialog takes priority: it captures every key.
                 if self.quit_confirm_visible {
                     if is_quit_chord(key) {
@@ -1173,6 +1209,7 @@ impl App {
                     brain_status: &self.brain_status,
                     license_badge: self.license_badge.as_ref(),
                     flag_summary: self.flag_summary,
+                    tombstone: None,
                     transient_hint_override: None,
                 };
                 let action = match self.current_view {
@@ -1317,6 +1354,93 @@ impl App {
         }
 
         false
+    }
+
+    /// `u` is the view-level undo key. Ctrl+Z is only claimed in Emacs mode;
+    /// Vim users keep Ctrl+Z available to their terminal conventions.
+    fn is_undo_key(&self, key: KeyEvent) -> bool {
+        let bare_u = key.code == KeyCode::Char('u') && key.modifiers.is_empty();
+        let emacs_ctrl_z = key.code == KeyCode::Char('z')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && !matches!(self.edit_mode, EditMode::Vim(_));
+        bare_u || emacs_ctrl_z
+    }
+
+    /// Undo handler for `u` and Emacs Ctrl+Z.
+    ///
+    /// Returns `true` when the app consumed or explicitly blocked the key.
+    /// Returns `false` when a narrower owner, such as the composer or picker,
+    /// should receive the key unchanged.
+    fn handle_undo(&mut self) -> bool {
+        if self.input_bar_active_non_empty() {
+            return false;
+        }
+        if self.picker_or_history_active() {
+            return false;
+        }
+        if self.pending_permission.is_some() {
+            return false;
+        }
+        if self.help_visible {
+            self.flash_hint_short("close help to undo");
+            return true;
+        }
+        if self.mermaid_render_picker_active() {
+            return false;
+        }
+        if self.quit_confirm_visible {
+            return true;
+        }
+
+        let view = self.current_view.clone();
+        let Some(tombstone) = self.tombstones.evict(&view) else {
+            self.flash_hint_short("nothing to undo");
+            return true;
+        };
+
+        match tombstone.kind {
+            TombstoneKind::Reversible { inverse } => {
+                self.flash_hint_short(format!("Undid: {}", tombstone.label));
+                self.process_action(inverse);
+            }
+            TombstoneKind::QueuedRemote { pending: _ } => {
+                self.flash_hint_short(format!("Cancelled: {}", tombstone.label));
+            }
+        }
+        true
+    }
+
+    fn input_bar_active_non_empty(&self) -> bool {
+        match &self.current_view {
+            ViewId::Dashboard => self.dashboard.input_bar_active_non_empty(),
+            ViewId::SessionDetail(_) => self
+                .session_detail
+                .as_ref()
+                .is_some_and(SessionDetailView::input_bar_active_non_empty),
+            _ => false,
+        }
+    }
+
+    fn picker_or_history_active(&self) -> bool {
+        match &self.current_view {
+            ViewId::Dashboard => self.dashboard.completion_active(),
+            ViewId::SessionDetail(_) => self
+                .session_detail
+                .as_ref()
+                .is_some_and(SessionDetailView::completion_active),
+            _ => false,
+        }
+    }
+
+    fn mermaid_render_picker_active(&self) -> bool {
+        #[cfg(feature = "markdown")]
+        {
+            matches!(self.current_view, ViewId::MermaidOverlay(_)) && self.mermaid_viewer.is_some()
+        }
+        #[cfg(not(feature = "markdown"))]
+        {
+            false
+        }
     }
 
     fn request_quit(&mut self) {
@@ -1799,6 +1923,7 @@ impl App {
             brain_status: &self.brain_status,
             license_badge: self.license_badge.as_ref(),
             flag_summary: self.flag_summary,
+            tombstone: None,
             transient_hint_override: None,
         };
         self.dashboard.handle_spur_event(&event, &ctx);
@@ -2931,6 +3056,7 @@ impl App {
             brain_status: &self.brain_status,
             license_badge: self.license_badge.as_ref(),
             flag_summary: self.flag_summary,
+            tombstone: self.tombstones.peek(self.current_view()),
             transient_hint_override,
         };
 

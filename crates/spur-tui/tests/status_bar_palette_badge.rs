@@ -15,6 +15,7 @@ fn render_status(width: u16) -> String {
         };
         let props = StatusBarProps {
             view: &view,
+            tombstone: None,
             running: 0,
             pending_review: 0,
             total_cost: 0.0,

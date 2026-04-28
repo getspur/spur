@@ -17,6 +17,7 @@ fn status_bar_renders_flag_summary() {
                 area,
                 StatusBarProps {
                     view: &ViewId::Dashboard,
+                    tombstone: None,
                     running: 0,
                     pending_review: 0,
                     total_cost: 0.0,
@@ -65,6 +66,7 @@ fn status_bar_omits_flag_summary_when_none() {
                 area,
                 StatusBarProps {
                     view: &ViewId::Dashboard,
+                    tombstone: None,
                     running: 0,
                     pending_review: 0,
                     total_cost: 0.0,
@@ -114,6 +116,7 @@ fn status_bar_shows_back_when_streaming_but_composer_owns_esc() {
                 area,
                 StatusBarProps {
                     view: &view,
+                    tombstone: None,
                     running: 0,
                     pending_review: 0,
                     total_cost: 0.0,

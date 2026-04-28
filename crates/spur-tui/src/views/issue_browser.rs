@@ -11,6 +11,7 @@ use crate::action::{Action, IssueAction, ViewId};
 use crate::components::issue_detail_pane::IssueDetailPane;
 use crate::components::issues_panel::IssuesPanel;
 use crate::components::status_bar::{HintOverride, StatusBar, StatusBarProps};
+use crate::components::tombstone::Tombstone;
 
 use super::View;
 
@@ -214,6 +215,7 @@ impl IssueBrowserView {
         &mut self,
         frame: &mut Frame,
         area: Rect,
+        tombstone: Option<&Tombstone>,
         view_hint_override: Option<HintOverride<'_>>,
     ) {
         let issue_count = self.tracked_issues.len();
@@ -285,6 +287,7 @@ impl IssueBrowserView {
             chunks[2],
             StatusBarProps {
                 view: &ViewId::IssueBrowser,
+                tombstone,
                 running: 0,
                 pending_review: 0,
                 total_cost: 0.0,
@@ -404,7 +407,7 @@ impl View for IssueBrowserView {
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &super::ViewContext) {
-        self.render_inner(frame, area, ctx.transient_hint_override);
+        self.render_inner(frame, area, ctx.tombstone, ctx.transient_hint_override);
     }
 
     fn tick(&mut self) {
