@@ -54,6 +54,22 @@ fn init_tracing(
     }
 }
 
+/// Lazy gate-check used by all gated `Commands::*` arms.
+///
+/// Constructs `SpurLicense` + `FeatureGate` on first call. Non-gated
+/// arms (Skills, Workflow, Config, Flags, Gc, Bot, Profile, Auth)
+/// never invoke this helper, so they pay zero gate-construction cost.
+///
+/// `from_env_or_disabled` is fast for community-tier daily drivers
+/// (no `SPUR_LICENSESEAT_*` env vars set ⇒ embedded `CommunityProvider`,
+/// no I/O); for Pro users it reads the cached license JWT once.
+fn require_cli_gate(key: spur_license::FeatureKey) -> Result<()> {
+    let license = SpurLicense::from_env_or_disabled();
+    let gate = license.feature_gate();
+    spur_license::require_feature(&gate, key)?;
+    Ok(())
+}
+
 fn resolve_landing(
     new: bool,
     sessions: bool,
@@ -376,18 +392,23 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Init { force, with_skills } => {
+            require_cli_gate(spur_license::FeatureKey::CLI_CORE_INIT)?;
             commands::init::run(repo_root, force, with_skills).await
         }
         Commands::Skills { command } => match command {
             SkillsCommands::Init => commands::init::run_skills_init(&repo_root),
         },
-        Commands::Agents { command } => cmd_agents(repo_root, command).await,
+        Commands::Agents { command } => {
+            require_cli_gate(spur_license::FeatureKey::CLI_CORE_AGENTS)?;
+            cmd_agents(repo_root, command).await
+        }
         Commands::Run {
             task,
             brain,
             issue,
             background,
         } => {
+            require_cli_gate(spur_license::FeatureKey::CLI_CORE_RUN)?;
             let mut orch = load_orchestrator(repo_root)?;
             let result = orch
                 .run_adhoc(
@@ -415,6 +436,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Commands::Exec { agent, task } => {
+            require_cli_gate(spur_license::FeatureKey::CLI_CORE_EXEC)?;
             let mut orch = load_orchestrator(repo_root)?;
             let result = orch.exec_direct(&agent, &task).await?;
             println!(
@@ -430,6 +452,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Commands::Sessions { command } => {
+            require_cli_gate(spur_license::FeatureKey::CLI_CORE_SESSIONS)?;
             let orch = load_orchestrator(repo_root)?;
             match command {
                 None => {
@@ -537,28 +560,32 @@ async fn main() -> Result<()> {
             engine,
             experimental,
             range,
-        } => match engine.as_str() {
-            "sqlite" => run_cost_sqlite(&repo_root, week, by.as_deref(), export.as_deref()),
-            "duckdb" => {
-                if !experimental {
-                    eprintln!(
+        } => {
+            require_cli_gate(spur_license::FeatureKey::CLI_CORE_COST)?;
+            match engine.as_str() {
+                "sqlite" => run_cost_sqlite(&repo_root, week, by.as_deref(), export.as_deref()),
+                "duckdb" => {
+                    if !experimental {
+                        eprintln!(
                         "Error: --engine duckdb is experimental; pass --experimental to opt in."
                     );
-                    eprintln!("Note: the DuckDB engine rescans all agent JSONL on every");
-                    eprintln!("      invocation until Phase 2.5 (persistent cache) ships.");
+                        eprintln!("Note: the DuckDB engine rescans all agent JSONL on every");
+                        eprintln!("      invocation until Phase 2.5 (persistent cache) ships.");
+                        std::process::exit(2);
+                    }
+                    run_cost_duckdb(today, week, range.as_deref(), export.as_deref())
+                }
+                other => {
+                    eprintln!(
+                        "Error: unknown --engine '{}'. Expected 'sqlite' or 'duckdb'.",
+                        other
+                    );
                     std::process::exit(2);
                 }
-                run_cost_duckdb(today, week, range.as_deref(), export.as_deref())
             }
-            other => {
-                eprintln!(
-                    "Error: unknown --engine '{}'. Expected 'sqlite' or 'duckdb'.",
-                    other
-                );
-                std::process::exit(2);
-            }
-        },
+        }
         Commands::Connect { service } => {
+            require_cli_gate(spur_license::FeatureKey::CLI_CORE_CONNECT)?;
             match service.as_str() {
                 "github" => {
                     let cwd = std::env::current_dir()?;
@@ -627,6 +654,12 @@ async fn main() -> Result<()> {
             profile,
             duration,
         } => {
+            // Gate fires BEFORE the `--profile` re-spawn block: otherwise
+            // `spur tui --profile` would profile the parent successfully
+            // and then the child would fail the gate, producing a confusing
+            // "profile of an error exit" instead of failing fast on the
+            // parent invocation.
+            require_cli_gate(spur_license::FeatureKey::CLI_CORE_TUI)?;
             if profile {
                 let mut args = vec!["tui".to_string()];
                 if let Some(ref b) = brain {
