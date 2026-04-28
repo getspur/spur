@@ -238,6 +238,17 @@ impl AnalyticsEngine {
                 }
             }
 
+            // Gemini uses JSON documents, not JSONL logs.
+            if let Ok(files) = Self::find_files_with_ext(&Self::discover_gemini_dir(), "json") {
+                for f in files {
+                    if let Ok(meta) = std::fs::metadata(&f) {
+                        if let Ok(m) = meta.modified() {
+                            bump(m);
+                        }
+                    }
+                }
+            }
+
             // OpenCode is a single SQLite file, not a directory walk.
             let opencode_db = Self::discover_opencode_db();
             if opencode_db.is_file() {
@@ -349,6 +360,24 @@ impl AnalyticsEngine {
             tracing::debug!("created empty kimi_events stub");
         }
 
+        // ─── Gemini ─────────────────────────────────────────────
+        let gemini_dir = Self::discover_gemini_dir();
+        if gemini_dir.is_dir() {
+            match self.create_gemini_view(&gemini_dir) {
+                Ok(()) => {
+                    status.gemini = true;
+                    tracing::debug!(dir = %gemini_dir.display(), "created gemini_events view");
+                }
+                Err(e) => {
+                    tracing::warn!(dir = %gemini_dir.display(), error = %e, "failed to create gemini_events view, using stub");
+                    self.create_empty_stub("gemini_events")?;
+                }
+            }
+        } else {
+            self.create_empty_stub("gemini_events")?;
+            tracing::debug!("created empty gemini_events stub");
+        }
+
         // ─── Rebuild unified views ─────────────────────────────
         self.rebuild_unified_views()?;
 
@@ -436,6 +465,23 @@ impl AnalyticsEngine {
             if path.is_dir() {
                 files.extend(Self::find_jsonl_files(&path)?);
             } else if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+                files.push(path);
+            }
+        }
+        Ok(files)
+    }
+
+    fn find_files_with_ext(dir: &Path, ext: &str) -> Result<Vec<PathBuf>> {
+        let mut files = Vec::new();
+        if !dir.is_dir() {
+            return Ok(files);
+        }
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                files.extend(Self::find_files_with_ext(&path, ext)?);
+            } else if path.extension().and_then(|s| s.to_str()) == Some(ext) {
                 files.push(path);
             }
         }
@@ -652,6 +698,25 @@ impl AnalyticsEngine {
         }
     }
 
+    /// Discover the Gemini sessions directory.
+    ///
+    /// Probe order: `$GEMINI_HOME/tmp` → `~/.gemini/tmp`.
+    fn discover_gemini_dir() -> PathBuf {
+        if let Ok(path) = env::var("GEMINI_HOME") {
+            return PathBuf::from(path).join("tmp");
+        }
+        #[cfg(test)]
+        {
+            PathBuf::from("__spur_context_test_missing__/gemini")
+        }
+        #[cfg(not(test))]
+        {
+            directories::BaseDirs::new()
+                .map(|b| b.home_dir().join(".gemini/tmp"))
+                .unwrap_or_else(|| PathBuf::from("~/.gemini/tmp"))
+        }
+    }
+
     fn has_opencode_db(path: &Path) -> bool {
         path.is_file()
     }
@@ -830,6 +895,79 @@ impl AnalyticsEngine {
             rows = rows.len(),
             "populated kimi_events"
         );
+        Ok(())
+    }
+
+    /// Populate `gemini_events` from Gemini CLI session JSON files.
+    fn create_gemini_view(&self, tmp_root: &Path) -> Result<()> {
+        self.conn.execute_batch(
+            r#"
+            DROP TABLE IF EXISTS gemini_events_table;
+            CREATE TABLE gemini_events_table (
+                timestamp_ms          BIGINT,
+                session_id            VARCHAR,
+                agent                 VARCHAR,
+                model                 VARCHAR,
+                project               VARCHAR,
+                input_tokens          BIGINT,
+                output_tokens         BIGINT,
+                cache_read_tokens     BIGINT,
+                cache_creation_tokens BIGINT,
+                cost_usd              DOUBLE
+            );
+            "#,
+        )?;
+
+        let rows = crate::extractors::gemini::extract(tmp_root).with_context(|| {
+            format!(
+                "failed to extract gemini sessions at {}",
+                tmp_root.display()
+            )
+        })?;
+
+        if !rows.is_empty() {
+            let mut appender = self
+                .conn
+                .appender("gemini_events_table")
+                .context("failed to open gemini_events_table appender")?;
+            for r in &rows {
+                appender
+                    .append_row(params![
+                        r.timestamp.timestamp_millis(),
+                        r.session_id,
+                        "gemini",
+                        r.model,
+                        r.project,
+                        r.input_tokens,
+                        r.output_tokens,
+                        r.cache_read_tokens,
+                        r.cache_creation_tokens,
+                        r.cost_usd,
+                    ])
+                    .context("failed to append gemini row")?;
+            }
+            appender
+                .flush()
+                .context("failed to flush gemini appender")?;
+        }
+
+        self.conn.execute_batch(
+            r#"
+            CREATE OR REPLACE VIEW gemini_events AS
+            SELECT
+                epoch_ms(timestamp_ms) AS timestamp,
+                session_id,
+                agent,
+                model,
+                project,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+                cost_usd
+            FROM gemini_events_table;
+            "#,
+        )?;
         Ok(())
     }
 
@@ -1063,7 +1201,9 @@ impl AnalyticsEngine {
             UNION ALL
             SELECT * FROM opencode_events
             UNION ALL
-            SELECT * FROM kimi_events;
+            SELECT * FROM kimi_events
+            UNION ALL
+            SELECT * FROM gemini_events;
 
             {}
             "#,
@@ -1690,6 +1830,7 @@ pub struct AgentViewStatus {
     pub kiro: bool,
     pub opencode: bool,
     pub kimi: bool,
+    pub gemini: bool,
 }
 
 /// Intermediate row shape used when copying OpenCode messages from SQLite
@@ -1774,6 +1915,11 @@ mod tests {
         engine
     }
 
+    fn gemini_fixture_dir() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/gemini/two_session_synthetic")
+    }
+
     #[test]
     fn test_schema_initialization() {
         let engine = setup_engine();
@@ -1783,6 +1929,50 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM pricing", [], |r| r.get(0))
             .unwrap();
         assert!(count > 0, "pricing table should have rows");
+    }
+
+    #[test]
+    fn create_gemini_view_populates_fixture_and_unified_events() {
+        let engine = AnalyticsEngine::open_in_memory().unwrap();
+        engine.initialize().unwrap();
+        for view in [
+            "claude_events",
+            "codex_events",
+            "kiro_events",
+            "opencode_events",
+            "kimi_events",
+        ] {
+            engine.create_empty_stub(view).unwrap();
+        }
+        engine.create_gemini_view(&gemini_fixture_dir()).unwrap();
+        engine.rebuild_unified_views().unwrap();
+
+        let gemini_count: i64 = engine
+            .conn
+            .query_row("SELECT COUNT(*) FROM gemini_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(gemini_count, 3);
+
+        let unified_count: i64 = engine
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM all_events WHERE agent = 'gemini'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(unified_count, 3);
+
+        let totals: (Option<i64>, Option<i64>, Option<i64>) = engine
+            .conn
+            .query_row(
+                "SELECT SUM(input_tokens), SUM(output_tokens), SUM(cache_read_tokens)
+                 FROM all_events WHERE agent = 'gemini'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(totals, (Some(357), Some(75), Some(90)));
     }
 
     #[test]

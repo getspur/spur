@@ -46,7 +46,7 @@ struct Tokens {
 /// Extract all Gemini session chat files under `tmp_root`.
 ///
 /// `tmp_root` is `~/.gemini/tmp` — direct parent of per-session UUID dirs.
-/// Recursively walks `<uuid>/chats/session-*.json` files.
+/// Walks 2-level depth: `<uuid>/chats/session-*.json` files only.
 pub fn extract(tmp_root: &Path) -> Result<Vec<ExtractedRow>> {
     let mut out = Vec::new();
     if !tmp_root.is_dir() {
