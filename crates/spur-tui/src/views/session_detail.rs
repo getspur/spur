@@ -3023,6 +3023,7 @@ mod cancel_state_tests {
             resumed: false,
             cancel_mode: mode,
             fs_unsafe: false,
+            caps: None,
         })
     }
 
