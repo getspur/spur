@@ -1008,7 +1008,7 @@ impl DashboardView {
     /// - Navigate mode: nearly everything goes to the view
     /// - Compose mode: nearly everything goes to the composer
     ///
-    /// The only exceptions are global bypasses (Ctrl+P/N/O, Alt+i) and
+    /// The only exceptions are global bypasses (Ctrl+P/N/O, Alt+a) and
     /// Esc which exits Compose mode.
     fn key_owner(&self, key: KeyEvent) -> KeyOwner {
         if self.completion.is_active() {
@@ -1047,7 +1047,7 @@ impl DashboardView {
         {
             return KeyOwner::View;
         }
-        if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('i')) {
+        if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('a')) {
             return KeyOwner::View;
         }
 

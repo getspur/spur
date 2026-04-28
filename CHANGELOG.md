@@ -2,7 +2,7 @@
 
 ### Added
 - **Experimental TUI Insights view (`--features analytics`, default OFF).**
-  `Alt+i` from any view opens a 4-tab Insights surface (Overview / Timeline /
+  `Alt+a` from any view opens a 4-tab Insights surface (Overview / Timeline /
   Breakdown / Live) backed by `spur-context::AnalyticsEngine`'s DuckDB store.
   - Overview: KPI cards (Today / 7d / 30d / Cache hit), 7d cost sparkline,
     cost-provenance gauge (native / priced / unpriced), top-3 agent / model /
