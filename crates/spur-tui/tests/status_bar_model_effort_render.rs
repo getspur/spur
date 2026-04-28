@@ -89,3 +89,58 @@ fn supported_usage_without_update_renders_placeholder() {
         "usage-supported sessions should show a placeholder before updates: {line}"
     );
 }
+
+#[test]
+fn sixty_columns_use_compact_model_effort_usage_form() {
+    let line = render_status(
+        60,
+        Some("gpt-5-super-long-model-name"),
+        Some("Medium"),
+        true,
+        Some(47),
+        Some(100),
+    );
+
+    assert!(
+        line.contains("super-long-mo… · ctx 47%"),
+        "compact status bar should keep truncated model and usage: {line}"
+    );
+    assert!(
+        !line.contains("Medium"),
+        "compact status bar should drop effort: {line}"
+    );
+}
+
+#[test]
+fn one_hundred_columns_keep_full_model_effort_usage_form() {
+    let line = render_status(
+        100,
+        Some("GPT-5 Codex"),
+        Some("Medium"),
+        true,
+        Some(47),
+        Some(100),
+    );
+
+    assert!(
+        line.contains("[default] GPT-5 Codex · Medium · ctx 47%"),
+        "100-column status bar should keep the full model/effort/usage group: {line}"
+    );
+}
+
+#[test]
+fn one_hundred_sixty_columns_keep_full_model_effort_usage_form() {
+    let line = render_status(
+        160,
+        Some("GPT-5 Codex"),
+        Some("Medium"),
+        true,
+        Some(47),
+        Some(100),
+    );
+
+    assert!(
+        line.contains("[default] GPT-5 Codex · Medium · ctx 47%"),
+        "160-column status bar should keep the full model/effort/usage group: {line}"
+    );
+}
