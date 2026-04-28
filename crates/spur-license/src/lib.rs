@@ -9,7 +9,7 @@ mod snapshot;
 mod tier;
 
 pub use community::CommunityProvider;
-pub use gate::FeatureGate;
+pub use gate::{require_feature, FeatureGate, FeatureGateError};
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
