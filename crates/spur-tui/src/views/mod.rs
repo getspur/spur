@@ -85,6 +85,7 @@ fn macos_option_char(ch: char) -> Option<char> {
 pub struct ViewContext<'a> {
     pub lineage: &'a spur_core::lineage::projection::ExecutorLineage,
     pub plan_projection: &'a spur_core::PlanProjectionStore,
+    pub synopsis: &'a spur_core::SessionSynopsisProjection,
     pub brain_status: &'a crate::app::BrainStatus,
     pub license_badge: Option<&'a LicenseBadge>,
     pub flag_summary: Option<(usize, usize)>,
@@ -96,6 +97,9 @@ static TEST_BRAIN_STATUS: crate::app::BrainStatus = crate::app::BrainStatus::Idl
 #[cfg(test)]
 static TEST_PLAN_PROJECTION: std::sync::OnceLock<spur_core::PlanProjectionStore> =
     std::sync::OnceLock::new();
+#[cfg(test)]
+static TEST_SYNOPSIS: std::sync::OnceLock<spur_core::SessionSynopsisProjection> =
+    std::sync::OnceLock::new();
 
 #[cfg(test)]
 impl ViewContext<'_> {
@@ -105,6 +109,7 @@ impl ViewContext<'_> {
         ViewContext {
             lineage,
             plan_projection: TEST_PLAN_PROJECTION.get_or_init(spur_core::PlanProjectionStore::new),
+            synopsis: TEST_SYNOPSIS.get_or_init(spur_core::SessionSynopsisProjection::new),
             brain_status: &TEST_BRAIN_STATUS,
             license_badge: None,
             flag_summary: None,
