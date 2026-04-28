@@ -33,11 +33,7 @@ static ROTATION_SEQ: AtomicU64 = AtomicU64::new(0);
 /// `max_bytes` controls per-file rotation. `max_total_bytes` caps the
 /// cumulative size of all `.ndjson` files in the events dir; oldest
 /// files are deleted on every rotation to honour the cap.
-pub fn spawn_sink(
-    mut rx: broadcast::Receiver<SpurEvent>,
-    max_bytes: u64,
-    max_total_bytes: u64,
-) {
+pub fn spawn_sink(mut rx: broadcast::Receiver<SpurEvent>, max_bytes: u64, max_total_bytes: u64) {
     let events_dir = events_dir();
     if let Err(e) = fs::create_dir_all(&events_dir) {
         tracing::error!(error = %e, dir = %events_dir.display(),
@@ -117,13 +113,14 @@ impl SinkState {
     /// Open a sink that, in addition to per-file rotation at `max_per_file`,
     /// enforces a total-directory byte cap of `max_total` after every
     /// rotation by deleting oldest `.ndjson` files.
-    fn open_with_caps(
-        dir: &Path,
-        max_per_file: u64,
-        max_total: u64,
-    ) -> std::io::Result<Self> {
+    fn open_with_caps(dir: &Path, max_per_file: u64, max_total: u64) -> std::io::Result<Self> {
         let mut state = Self::open(dir, max_per_file)?;
         state.max_total_bytes = Some(max_total);
+        let effective = max_total.saturating_sub(state.max_bytes);
+        if let Err(e) = enforce_event_cap(&state.dir, effective, &state.current_path) {
+            tracing::warn!(error = %e,
+                "event_sink: enforce_event_cap failed");
+        }
         Ok(state)
     }
 
@@ -171,11 +168,7 @@ impl SinkState {
 /// size of the remaining files is ≤ `cap_bytes`. The active file at
 /// `protected` is never deleted (it's just been opened by the caller and
 /// will be written to immediately). Returns the number of files deleted.
-fn enforce_event_cap(
-    dir: &Path,
-    cap_bytes: u64,
-    protected: &Path,
-) -> std::io::Result<usize> {
+fn enforce_event_cap(dir: &Path, cap_bytes: u64, protected: &Path) -> std::io::Result<usize> {
     // Short-circuit the disable sentinel — no point in scanning the dir.
     if cap_bytes == u64::MAX {
         return Ok(0);
@@ -324,8 +317,7 @@ mod tests {
         let max_total: u64 = 256 * 1024; // 256 KB total cap
         let max_per_file: u64 = 64 * 1024; // 64 KB per file → ~4 files at cap
 
-        let mut state =
-            SinkState::open_with_caps(&dir, max_per_file, max_total).expect("open");
+        let mut state = SinkState::open_with_caps(&dir, max_per_file, max_total).expect("open");
 
         // Write enough events to trigger ~6 rotations.
         for _ in 0..200 {
@@ -349,5 +341,35 @@ mod tests {
             max_total
         );
         assert!(count >= 1, "expected at least 1 file, got {}", count);
+    }
+
+    #[tokio::test]
+    async fn open_with_caps_enforces_max_total_bytes_before_writes() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = tmpdir.path().join("events");
+        fs::create_dir_all(&dir).unwrap();
+
+        for n in 0..4 {
+            let path = dir.join(format!("old-{n}.ndjson"));
+            fs::write(path, vec![b'x'; 100 * 1024]).unwrap();
+        }
+
+        let max_total: u64 = 128 * 1024;
+        let max_per_file: u64 = 64 * 1024;
+        let _state = SinkState::open_with_caps(&dir, max_per_file, max_total).expect("open");
+
+        let total = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().and_then(|s| s.to_str()) == Some("ndjson"))
+            .map(|entry| entry.metadata().unwrap().len())
+            .sum::<u64>();
+
+        assert!(
+            total <= max_total,
+            "total bytes {} exceeds cap {} before any writes",
+            total,
+            max_total
+        );
     }
 }

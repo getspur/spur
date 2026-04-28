@@ -1016,7 +1016,7 @@ fn acp_thread_main(
                         pid,
                         log_config.child_stderr_max_bytes,
                         log_config.child_stderr_max_files,
-                        log_config.buffered_lines_limit,
+                        log_config.child_stderr_buffered_lines_limit,
                     ) {
                         Ok(bridge) => Some(bridge),
                         Err(e) => {
