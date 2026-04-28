@@ -52,6 +52,7 @@ pub mod engine;
 pub mod live;
 pub mod reporter;
 
+#[allow(dead_code)]
 mod extractors;
 
 pub use async_engine::AsyncEngine;
