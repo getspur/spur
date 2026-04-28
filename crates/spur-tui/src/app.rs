@@ -1367,6 +1367,7 @@ impl App {
                 resumed: _,
                 cancel_mode: _,
                 fs_unsafe: _,
+                caps: _,
             } => {
                 self.metadata_store
                     .set_acp_mapping(&session.0, acp_session_id, brain);
@@ -3285,6 +3286,80 @@ mod brain_retired_tests {
     fn app_with_user_input_tx() -> (App, tokio::sync::mpsc::Receiver<UserInput>) {
         let (tx, rx) = tokio::sync::mpsc::channel::<UserInput>(8);
         (App::new(Some(tx), false), rx)
+    }
+
+    fn effort_config_option() -> spur_acp::SessionConfigOption {
+        use spur_acp::{SessionConfigId, SessionConfigOption, SessionConfigSelectOption};
+
+        SessionConfigOption::select(
+            SessionConfigId::new("reasoning_effort".to_string()),
+            "effort".to_string(),
+            "medium".to_string(),
+            vec![SessionConfigSelectOption::new(
+                "medium".to_string(),
+                "Medium".to_string(),
+            )],
+        )
+    }
+
+    fn caps_without_config_options() -> std::sync::Arc<spur_acp::SpurAgentCaps> {
+        let init = agent_client_protocol::schema::InitializeResponse::new(
+            agent_client_protocol::schema::ProtocolVersion::LATEST,
+        );
+        let new = agent_client_protocol::schema::NewSessionResponse::new(
+            agent_client_protocol::schema::SessionId::new("acp-b1"),
+        );
+        std::sync::Arc::new(spur_acp::SpurAgentCaps::new(&init, &new))
+    }
+
+    #[test]
+    fn agent_session_ready_installs_caps_on_session_detail() {
+        let mut app = App::new_for_tests();
+        let session = SessionId("b1".into());
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "codex".into(),
+            session: session.clone(),
+        }));
+        app.handle_spur_event(wrap(SpurEventBody::CommandRegistryDirty {
+            session: session.clone(),
+            config_options: vec![effort_config_option()],
+        }));
+
+        let names_before: Vec<String> = app
+            .session_detail
+            .as_ref()
+            .expect("BrainSpawned must create session detail")
+            .available_slash_commands()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        assert!(
+            names_before.iter().any(|name| name == "effort"),
+            "precondition: caps=None keeps /effort visible; got {names_before:?}"
+        );
+
+        app.handle_spur_event(wrap(SpurEventBody::AgentSessionReady {
+            session: session.clone(),
+            acp_session_id: "acp-b1".into(),
+            brain: "codex".into(),
+            resumed: false,
+            cancel_mode: spur_acp::CancelMode::AcpSoft,
+            fs_unsafe: false,
+            caps: Some(caps_without_config_options()),
+        }));
+
+        let names_after: Vec<String> = app
+            .session_detail
+            .as_ref()
+            .expect("session detail must remain focused")
+            .available_slash_commands()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        assert!(
+            !names_after.iter().any(|name| name == "effort"),
+            "AgentSessionReady caps must constrain advertised commands; got {names_after:?}"
+        );
     }
 
     #[test]
