@@ -40,6 +40,8 @@ use crate::views::View;
 const READ_ONLY_STARTUP_WARNING: &str =
     "Read-only mode: session metadata was written by a newer SPUR. \
 Edits this session WILL NOT be persisted. Upgrade SPUR to enable writes. (Esc to dismiss)";
+const LEGACY_ARCHIVE_HINT: &str = "d \u{2192} archive renamed to x";
+const LEGACY_CLOSE_HINT: &str = "d \u{2192} close renamed to x";
 
 // ─── Supporting types ──────────────────────────────────────────────────
 
@@ -305,6 +307,8 @@ pub struct App {
     palette_visible: bool,
     palette_state: crate::components::palette::PaletteState,
     pub transient_hint: Option<TransientHint>,
+    legacy_archive_hint_shown: bool,
+    legacy_issue_close_hint_shown: bool,
     /// Startup landing decision. Drives initial view and banner state.
     landing: crate::landing::LandingDecision,
     /// Last dispatched Action, for integration tests only.
@@ -465,6 +469,8 @@ impl App {
             palette_visible: false,
             palette_state: crate::components::palette::PaletteState::new(),
             transient_hint: None,
+            legacy_archive_hint_shown: false,
+            legacy_issue_close_hint_shown: false,
             landing,
             #[cfg(any(test, debug_assertions))]
             last_action: None,
@@ -2096,7 +2102,14 @@ impl App {
                 self.dirty = true;
             }
 
-            Action::ToggleSessionArchive { session_id } => {
+            Action::ToggleSessionArchive {
+                session_id,
+                via_legacy_key,
+            } => {
+                if via_legacy_key && !self.legacy_archive_hint_shown {
+                    self.flash_hint_short(LEGACY_ARCHIVE_HINT);
+                    self.legacy_archive_hint_shown = true;
+                }
                 let entry = self.metadata_store.entry_mut(&session_id);
                 entry.archived = !entry.archived;
                 self.persist_metadata("archive toggle");
@@ -2434,7 +2447,18 @@ impl App {
                             let _ = tx.try_send(UserInput::GetIssueDetail { id });
                         }
                     }
-                    crate::action::IssueAction::UpdateStatus { id, status } => {
+                    crate::action::IssueAction::UpdateStatus {
+                        id,
+                        status,
+                        via_legacy_key,
+                    } => {
+                        if via_legacy_key
+                            && status == "closed"
+                            && !self.legacy_issue_close_hint_shown
+                        {
+                            self.flash_hint_short(LEGACY_CLOSE_HINT);
+                            self.legacy_issue_close_hint_shown = true;
+                        }
                         if let Some(ref tx) = self.user_input_tx {
                             let _ = tx.try_send(UserInput::UpdateIssue {
                                 id,

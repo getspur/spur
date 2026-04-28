@@ -373,7 +373,13 @@ fn d_key_emits_toggle_archive_for_highlighted_session() {
     );
     let action = picker.handle_key(key('d'), &test_ctx());
     match action {
-        Some(Action::ToggleSessionArchive { session_id }) => assert_eq!(session_id, "a1"),
+        Some(Action::ToggleSessionArchive {
+            session_id,
+            via_legacy_key,
+        }) => {
+            assert_eq!(session_id, "a1");
+            assert!(via_legacy_key);
+        }
         other => panic!("expected ToggleSessionArchive, got {other:?}"),
     }
 }

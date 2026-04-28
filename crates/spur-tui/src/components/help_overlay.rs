@@ -96,7 +96,8 @@ impl HelpOverlay {
             out.push(Line::from("  o                Set status: open"));
             out.push(Line::from("  w                Set status: in progress"));
             out.push(Line::from("  b                Set status: blocked"));
-            out.push(Line::from("  d                Set status: closed"));
+            out.push(Line::from("  x                Set status: closed"));
+            out.push(Line::from("  d                Deprecated close alias"));
             out.push(Line::from("  W                Work on issue"));
             out.push(Line::from("  PgUp / PgDn      Scroll detail"));
             out.push(Line::from("  s                Open session picker"));
@@ -113,7 +114,8 @@ impl HelpOverlay {
             Line::from("  /                  Focus search field"),
             Line::from("  n                  New session"),
             Line::from("  R                  Rename selected"),
-            Line::from("  d                  Archive (or unarchive)"),
+            Line::from("  x                  Archive (or unarchive)"),
+            Line::from("  d                  Deprecated archive alias"),
             Line::from("  p                  Toggle pin"),
             Line::from("  a                  Toggle show-archived"),
             Line::from("  P                  Toggle preview pane"),
