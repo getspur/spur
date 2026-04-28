@@ -285,15 +285,15 @@ impl StatusBar {
     /// Build the right-hand metric spans. When `compact` is true, use
     /// abbreviated symbols and drop low-priority items so the status bar
     /// stays readable on narrow terminals.
-    fn metric_spans(
-        props: &StatusBarProps<'_>,
+    fn metric_spans<'a>(
+        props: &StatusBarProps<'a>,
         mode_text: String,
         usage_text: Option<String>,
         review_style: Style,
         compact: bool,
-    ) -> Vec<Span<'static>> {
+    ) -> Vec<Span<'a>> {
         let sep = if compact { " " } else { " · " };
-        let mut spans: Vec<Span> = Vec::new();
+        let mut spans: Vec<Span<'a>> = Vec::new();
 
         if props.issue_count > 0 {
             spans.push(Span::styled(
@@ -395,7 +395,7 @@ impl StatusBar {
                     spans.push(Span::raw(" "));
                 }
                 spans.push(Span::styled(
-                    effort.to_string(),
+                    effort,
                     Style::default().fg(Color::LightMagenta),
                 ));
                 has_status_segment = true;
