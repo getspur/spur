@@ -1491,8 +1491,13 @@ impl View for SessionPickerView {
                         }
                     }
                 }
-                PickerState::Loading | PickerState::Error { .. } => match key.code {
+                PickerState::Loading => match key.code {
                     KeyCode::Esc => Some(Action::NavigateTo(ViewId::Dashboard)),
+                    _ => None,
+                },
+                PickerState::Error { .. } => match key.code {
+                    KeyCode::Esc => Some(Action::NavigateTo(ViewId::Dashboard)),
+                    KeyCode::Char('r') | KeyCode::Enter => Some(Action::RefreshSessions),
                     _ => None,
                 },
             }
