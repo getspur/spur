@@ -114,6 +114,8 @@ enum PickerState {
 struct RenameState {
     session_id: String,
     buffer: String,
+    /// Display label in place when rename mode was entered. Used to construct tombstone inverse.
+    original_title: String,
 }
 
 /// Pending switch-confirm target. `Some` on the view means the banner is up
@@ -1271,6 +1273,7 @@ impl View for SessionPickerView {
                     let out = Action::RenameSession {
                         session_id: rs.session_id.clone(),
                         new_title: rs.buffer.clone(),
+                        original_title: rs.original_title.clone(),
                     };
                     self.rename_state = None;
                     return Some(out);
@@ -1313,7 +1316,11 @@ impl View for SessionPickerView {
         // Deferred state transitions to apply after the split borrow ends.
         enum Post {
             None,
-            StartRename { session_id: String, buffer: String },
+            StartRename {
+                session_id: String,
+                buffer: String,
+                original_title: String,
+            },
             StartConfirmSwitch(ConfirmSwitchTarget),
         }
         let mut post = Post::None;
@@ -1491,6 +1498,7 @@ impl View for SessionPickerView {
                                         .unwrap_or_default();
                                     post = Post::StartRename {
                                         session_id: sid.clone(),
+                                        original_title: buffer.clone(),
                                         buffer,
                                     };
                                 }
@@ -1516,8 +1524,16 @@ impl View for SessionPickerView {
         // Apply deferred state transitions.
         match post {
             Post::None => {}
-            Post::StartRename { session_id, buffer } => {
-                self.rename_state = Some(RenameState { session_id, buffer });
+            Post::StartRename {
+                session_id,
+                buffer,
+                original_title,
+            } => {
+                self.rename_state = Some(RenameState {
+                    session_id,
+                    buffer,
+                    original_title,
+                });
             }
             Post::StartConfirmSwitch(target) => {
                 self.confirm_switch = Some(target);
