@@ -370,6 +370,16 @@ impl DashboardView {
         self.mode
     }
 
+    /// Return Dashboard to its root navigation focus.
+    pub fn reset_to_root(&mut self) {
+        self.mode = DashboardMode::Navigate;
+        self.focused_node = None;
+        self.focused_panel = Panel::Agents;
+        self.agents_tree.set_focused(true);
+        self.activity_log.set_focused(false);
+        self.completion.reset();
+    }
+
     pub fn detail_pane(&self) -> &DetailPane {
         &self.detail_pane
     }
@@ -2223,6 +2233,13 @@ impl DashboardView {
             .get(self.example_index)
             .map(String::as_str)
             .unwrap_or("")
+    }
+
+    /// Test-only: whether Dashboard's completion picker is open.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn completion_active_for_test(&self) -> bool {
+        self.completion.is_active()
     }
 
     /// Test-only: mutable InputBar access for seeding text in tests.
