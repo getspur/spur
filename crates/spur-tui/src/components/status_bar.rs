@@ -253,7 +253,7 @@ impl StatusBar {
                     " [i]nput [Enter]focus [r]eview [s]essions [Esc]back [Ctrl+C]quit [?]help"
                 }
                 ViewId::IssueBrowser => {
-                    " [j/k]navigate [Enter]detail [o/w/b/d]status [W]work [Esc]back [?]help"
+                    " [j/k]navigate [Enter]detail [o/w/b/x]status [W]work [Esc]back [?]help"
                 }
                 ViewId::SessionDetail(_) => {
                     hint_for_session_detail(props.stream_in_flight, props.esc_consumed_by_composer)

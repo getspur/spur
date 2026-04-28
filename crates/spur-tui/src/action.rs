@@ -3,9 +3,17 @@ use spur_acp::SessionId;
 /// Issue-related actions dispatched from IssuesPanel or slash commands.
 #[derive(Debug, Clone)]
 pub enum IssueAction {
-    ViewDetail { id: String },
-    UpdateStatus { id: String, status: String },
-    WorkOn { id: String },
+    ViewDetail {
+        id: String,
+    },
+    UpdateStatus {
+        id: String,
+        status: String,
+        via_legacy_key: bool,
+    },
+    WorkOn {
+        id: String,
+    },
 }
 
 /// Actions that flow between components and the app controller.
@@ -54,6 +62,7 @@ pub enum Action {
     /// Toggle the archived flag for a session in the picker metadata store.
     ToggleSessionArchive {
         session_id: String,
+        via_legacy_key: bool,
     },
     /// Toggle the picker's view-level show-archived flag.
     ToggleShowArchived,
