@@ -175,20 +175,21 @@ impl AgentConnection for StreamJsonAdapter {
         args.push(prompt_text);
 
         // Spawn one-shot process.
-        let mut child = tokio::process::Command::new(&self.command)
-            .args(&args)
+        let mut cmd = tokio::process::Command::new(&self.command);
+        cmd.args(&args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| {
-                self.health_status = AgentHealth::Error(format!("Failed to spawn: {e}"));
-                anyhow::anyhow!(
-                    "StreamJsonAdapter '{}': failed to spawn: {e}",
-                    self.agent_name
-                )
-            })?;
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        cmd.process_group(0);
+        let mut child = cmd.spawn().map_err(|e| {
+            self.health_status = AgentHealth::Error(format!("Failed to spawn: {e}"));
+            anyhow::anyhow!(
+                "StreamJsonAdapter '{}': failed to spawn: {e}",
+                self.agent_name
+            )
+        })?;
 
         let stdout = child.stdout.take().ok_or_else(|| {
             anyhow::anyhow!(
