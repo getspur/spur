@@ -85,6 +85,14 @@ pub enum UserInput {
         config_id: String,
         value: String,
     },
+    /// Dedicated `session/set_model` dispatch (M9 F-C). Maps 1:1 to
+    /// `spur_core::InteractiveInput::SetSessionModel`. The orchestrator
+    /// delegates to `AgentConnection::set_session_model`, which owns the
+    /// dispatch decision (Direct / FallbackConfigOption / Unsupported).
+    SetSessionModel {
+        session_id: SessionId,
+        value: String,
+    },
     /// Halt the in-flight agent stream on the given session. Maps 1:1 to
     /// `spur_core::InteractiveInput::CancelStream` via `spur-cli`.
     CancelStream {
@@ -716,18 +724,8 @@ impl App {
                         Some(Action::SetSessionConfigOption { config_id, value })
                     }
                     SubmitDecision::SetSessionModel { value } => {
-                        // Wave B.4: submit-router has decided this should
-                        // route via session/set_model. Bundle 3 / M9 wires
-                        // a dedicated InteractiveInput::SetSessionModel
-                        // through the orchestrator. Until then, dispatch
-                        // through the existing config-option pipeline so
-                        // codex /model still works end-to-end (its caps
-                        // include both Some(models) AND a 'model' config
-                        // option, so the wire result is equivalent for now).
-                        Some(Action::SetSessionConfigOption {
-                            config_id: "model".into(),
-                            value,
-                        })
+                        let session_id = self.current_acp_session_id()?;
+                        Some(Action::SetSessionModel { session_id, value })
                     }
                     SubmitDecision::Empty => None,
                 }
@@ -1782,6 +1780,12 @@ impl App {
             Action::SetSessionConfigOption { config_id, value } => {
                 if let Some(tx) = self.user_input_tx.as_ref() {
                     let _ = tx.try_send(UserInput::SetSessionConfigOption { config_id, value });
+                }
+            }
+
+            Action::SetSessionModel { session_id, value } => {
+                if let Some(tx) = self.user_input_tx.as_ref() {
+                    let _ = tx.try_send(UserInput::SetSessionModel { session_id, value });
                 }
             }
 
@@ -2902,8 +2906,16 @@ pub(crate) fn apply_session_update(
             state.context_used = Some(u.used);
             state.context_size = Some(u.size);
         }
-        SessionInfoUpdate(u) => {
-            state.apply_session_info_update(u);
+        SessionInfoUpdate(_) => {
+            // M9 hoist: the cached title / updated_at moved to
+            // BrainSession in spur-core. Wire-side ingestion of this
+            // notification onto the orchestrator entry is tracked as
+            // a follow-up; the explicit arm stays here so the variant
+            // is still tagged in trace logs (vs. the catch-all silent
+            // drop in `apply_session_update: unhandled variant`).
+            tracing::trace!(
+                "SessionInfoUpdate received in spur-tui — orchestrator-side ingestion is the canonical path post-M9"
+            );
         }
         _ => {
             tracing::trace!("apply_session_update: unhandled variant");

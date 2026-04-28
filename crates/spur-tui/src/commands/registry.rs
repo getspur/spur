@@ -546,14 +546,17 @@ mod tests {
     #[test]
     fn available_commands_for_session_with_codex_caps_keeps_all_entries() {
         use agent_client_protocol::schema::{
-            InitializeResponse, ModelId, NewSessionResponse, ProtocolVersion, SessionConfigId,
-            SessionConfigKind, SessionConfigOption, SessionConfigSelect,
+            InitializeResponse, ModelId, ModelInfo, NewSessionResponse, ProtocolVersion,
+            SessionConfigId, SessionConfigKind, SessionConfigOption, SessionConfigSelect,
             SessionConfigSelectOptions, SessionConfigValueId, SessionId, SessionModelState,
         };
 
         let init = InitializeResponse::new(ProtocolVersion::LATEST);
-        let mut new = NewSessionResponse::new(SessionId::new("sid"))
-            .models(SessionModelState::new(ModelId::new("gpt-5-codex"), vec![]));
+        let mut new =
+            NewSessionResponse::new(SessionId::new("sid")).models(SessionModelState::new(
+                ModelId::new("gpt-5-codex"),
+                vec![ModelInfo::new(ModelId::new("gpt-5-codex"), "GPT-5 Codex")],
+            ));
         new.config_options = Some(vec![SessionConfigOption::new(
             SessionConfigId::new("model"),
             "Model",
@@ -655,14 +658,17 @@ mod tests {
     #[test]
     fn available_commands_for_session_with_models_only_keeps_model_picker() {
         use agent_client_protocol::schema::{
-            InitializeResponse, ModelId, NewSessionResponse, ProtocolVersion, SessionId,
+            InitializeResponse, ModelId, ModelInfo, NewSessionResponse, ProtocolVersion, SessionId,
             SessionModelState,
         };
 
         let init = InitializeResponse::new(ProtocolVersion::LATEST);
         let new = NewSessionResponse::new(SessionId::new("sid")).models(SessionModelState::new(
             ModelId::new("gemini-1.5-pro"),
-            vec![],
+            vec![ModelInfo::new(
+                ModelId::new("gemini-1.5-pro"),
+                "Gemini 1.5 Pro",
+            )],
         ));
         let caps = spur_acp::SpurAgentCaps::new(&init, &new);
         assert!(caps.supports_set_model());

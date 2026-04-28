@@ -420,7 +420,7 @@ mod sessions_slash_tests {
     fn slash_model_with_caps_supporting_set_model_routes_to_set_session_model() {
         use crate::commands::entry::{CommandEntry, CommandSource, Dispatch};
         use agent_client_protocol::schema::{
-            InitializeResponse, ModelId, NewSessionResponse, ProtocolVersion, SessionId,
+            InitializeResponse, ModelId, ModelInfo, NewSessionResponse, ProtocolVersion, SessionId,
             SessionModelState,
         };
 
@@ -441,10 +441,12 @@ mod sessions_slash_tests {
             }],
         );
 
-        // Build caps that advertise `models: Some(_)` — supports_set_model() = true.
+        // Build caps that advertise non-empty available_models — supports_set_model() = true.
         let init = InitializeResponse::new(ProtocolVersion::LATEST);
-        let new = NewSessionResponse::new(SessionId::new("sid"))
-            .models(SessionModelState::new(ModelId::new("gpt-5-codex"), vec![]));
+        let new = NewSessionResponse::new(SessionId::new("sid")).models(SessionModelState::new(
+            ModelId::new("gpt-5-codex"),
+            vec![ModelInfo::new(ModelId::new("gpt-5-codex"), "GPT-5 Codex")],
+        ));
         let caps = spur_acp::SpurAgentCaps::new(&init, &new);
 
         let decision = route_with_caps("/model gpt-5-codex", &[], &registry, false, Some(&caps));
