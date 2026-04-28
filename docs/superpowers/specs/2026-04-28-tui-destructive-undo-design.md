@@ -120,7 +120,7 @@ When a reversible-class key fires (e.g. SessionPicker `x` archive):
 4. **Render toast**: `"Archived 'foo'. Press u to undo (60s)"` in the hint slot. Toast updates the countdown each render.
 5. **`u` keystroke** (vim Normal or Emacs `Ctrl+Z`) within window: pop tombstone, dispatch `kind.inverse` through `process_action`, render `"Undid: archived 'foo'"` for 1s, clear hint.
 6. **Window expires**: tombstone evicted, toast clears. Action is finalized.
-7. **View change**: tombstone evicted (action committed). Per-view persistence — switching views doesn't carry the slot.
+7. **View change**: Reversible tombstone **PERSISTS** until time-expiry. The ambient badge (§4.10) hides when the user is on a different view, but the slot survives — navigating back to the originating view restores the badge and `u` still works for the remaining window. Per-view scoping governs *`u`'s consumption rule* (only consumed when `current_view == slot.view`), NOT the slot's *lifecycle*. (Amendment 2026-04-28: original design evicted on nav; revised after first-principles UX review found that breaks Tab-cycle workflows where the user briefly checks another view mid-task.)
 8. **Triple-Esc panic** (quick-fixes T2.9): all tombstones cleared without dispatching anything. (Reversible has already committed; panic just stops the user undoing it. Acceptable — they pressed panic, they wanted out.)
 
 ### 4.3 Behavior — irrevocable network actions (3s queue window)
@@ -229,7 +229,22 @@ fn handle_undo(app: &mut App) -> Option<Action> {
 
 Bound at the app level so `u` from vim Normal and `Ctrl+Z` from Emacs both route here. The handler is gated on `is_vim_normal() && view_owner` (vim) or `Ctrl+Z + view_owner` (emacs).
 
-**Compose-mode passthrough**: when input bar is composing (vim Insert / Emacs typing), `u` and `Ctrl+Z` MUST flow through to the input bar (eventual text undo via tui-textarea). The activation gate is identical to leader-key §5: input-bar focused = passthrough.
+**Activation-gate enumeration** (amendment 2026-04-28): the undo handler ONLY consumes `u` / `Ctrl+Z` when the active view is in pure view-key context. The handler MUST NOT fire when ANY of the following ownership flags are true (verified against quick-fixes T5 owner-order):
+
+| Context | `u` / `Ctrl+Z` behavior | Routing |
+|---|---|---|
+| `input_bar.is_active() && !input_bar.is_empty()` (vim Insert / Emacs typing / vim Normal with cursor in non-empty buffer) | passthrough | input_bar handles → text-undo via tui-textarea |
+| Mention picker open (`@`-trigger active) | passthrough | picker consumes navigation/edit keys |
+| Slash command picker open (`/`-trigger active) | passthrough | same |
+| History shell active (`Up`/`Down` history nav with body shown) | passthrough | history shell consumes |
+| Permission prompt pending (`y/n/a` waiting on agent perm question) | passthrough | permission handler consumes |
+| Help overlay open (`?` toggled on) | block (no-op flash `"close help to undo"`) | overlay-modal — explicit don't-route |
+| Mermaid render-picker open | passthrough | render-picker consumes |
+| Quit-confirm modal open | block (no-op) | modal — only `y/n` consumed |
+| Leader-menu popup open (post-leader-key spec) | block (no-op) | leader sequence active |
+| **None of the above** | consume → tombstone undo | normal path |
+
+The implementation MUST grep for these context-active checks at handler entry and short-circuit BEFORE evicting the tombstone. Order matches quick-fixes T5's session_detail.rs ownership cascade (composer-non-empty > picker > history-shell > view-keys).
 
 ### 4.7 Tombstone tick driver
 
@@ -256,25 +271,82 @@ impl TombstoneSlots {
 
 Returned actions are dispatched by `App` via `process_action` after the retain pass. This keeps the tombstone slot pure-data and dispatch out-of-band.
 
-### 4.8 Hint-slot integration
+### 4.8 Hint-slot integration (two-channel split)
 
-Tombstone toast renders into the bottom-of-view single-line hint slot. Per quick-fixes §6.3, slot priority (highest first):
+**Amendment 2026-04-28**: original design routed the tombstone toast into the single-line hint slot at high priority, which monopolized the slot for 60s and suppressed unrelated transient feedback (`"Copied 'foo'"`, `"Saved draft"`, etc.). Revised first-principles UX review split the channel:
 
-1. Panic-Esc reset confirmation (1s flash)
-2. Tombstone toast ← **this spec**
+**Channel A — Ambient countdown badge (NEW, see §4.10)**: persistent, low-prominence, right-aligned in the status bar. Hosts ONLY the tombstone countdown. Always visible while a tombstone is active for the current view. Does NOT compete with hint-slot flashes.
+
+**Channel B — Transient hint slot (existing)**: short-lived 1–3s flashes for general feedback. Continues to host:
+1. Panic-Esc reset confirmation (1s flash) — highest priority
+2. **`"Undid: …"` / `"Cancelled: …"` confirmation flash on undo** (1s)
 3. Leader-menu inline preview
 4. Esc-cancel-stream hint
-5. General status
+5. General status (free for `"Copied"`, `"Saved"`, etc.)
 
-So a tombstone toast yields immediately to a panic-reset, but otherwise shows for its full window.
+The 60s "Press u to undo" copy lives in Channel A (badge); the 1s post-action confirmation flash lives in Channel B. Tombstone install fires BOTH channels at install time:
+- Channel A: badge appears, counts down for 60s (or 3s).
+- Channel B: optional install flash `"Archived 'foo' — press u to undo"` for 2s, then yields slot.
+
+The 2-second install flash is the "you've been heard" feedback. After it expires, the badge in Channel A continues showing the countdown unobtrusively. Other transient hints can flash in Channel B without affecting the badge.
 
 ### 4.9 What this design intentionally doesn't do
 
 - **Multiple tombstones per view**: rejected. Single slot keeps mental model simple ("u undoes my last action") and keeps memory bounded.
-- **Cross-view undo navigation**: rejected. Per-view isolation matches user mental model — you undo what you just did in the place you did it.
+- **Cross-view undo navigation**: rejected. Per-view isolation matches user mental model — you undo what you just did in the place you did it. (Note: the tombstone *slot* now persists across nav per amended §4.2 bullet 7, but `u` still consumes only when current_view matches slot.view.)
 - **Persistent tombstone across sessions**: rejected. 60s window assumes the user is paying attention; longer than that, the action is finalized. Restart = fresh slate.
 - **Configurable window length**: rejected. 60s and 3s are calibrated for the action classes. Don't expose tuning knobs that erode the mental model.
 - **Confirmation prompt fallback**: rejected (gemini's BLOCK was right). The toast is the confirmation. Adding "press X again to confirm" on top of the queue window would double-tax users.
+
+### 4.10 Ambient countdown badge — display location and format
+
+**Channel A** (new). The badge renders in the status bar, right-aligned, AFTER the license badge and before any clock/right-edge element. Format:
+
+```
+  [u: archived 'foo' 45s]
+```
+
+Components:
+- `[u: …]` prefix: literal `u` character + colon + space. Hints both at the action AND the keystroke. Reads as "press u: …".
+- `archived 'foo'` (or other label): the `Tombstone.label` field, abbreviated to fit. If the label > 24 chars, truncate with ellipsis: `archived 'verylongsessio…'`.
+- `45s` countdown: integer seconds remaining, monotonically decreasing. Updates every render frame (33ms tick); only visibly changes once per second.
+- Style: `Style::default().fg(Color::DarkGray)` matching other ambient indicators (license badge color). NOT bold, NOT highlighted — the goal is "ambient, glanceable, doesn't fight for attention."
+
+For QueuedRemote (3s window), the format adapts:
+```
+  [u: revert Approve 2s]
+```
+The `revert` verb reads more naturally for "you can still cancel" semantics than `undo`.
+
+The badge is rendered by a new `render_tombstone_badge` helper in `crates/spur-tui/src/components/status_bar.rs`. The helper takes `Option<&Tombstone>` (peek result from TombstoneSlots filtered to current_view) and returns an empty `Line` when None.
+
+**Visibility rule**: badge displays ONLY when `current_view == slot.view`. If the user navigates away from the originating view, the slot persists (per amended §4.2 bullet 7) but the badge is hidden. Returning to the view restores the badge with the remaining time.
+
+**Width budget**: 30 chars max (`[u: archived 'verylongsessio…' 60s]`). The status bar's right-aligned region must reserve this when active. If status bar width < 80 cols, the badge MAY render in shortened form `[u 45s]` (drop the label). Long labels, narrow widths — defer detailed width-aware truncation to render-time.
+
+### 4.11 `u` keybinding collision audit (PREREQUISITE — runs before Task 4)
+
+Before Task 4 wires the undo handler, an audit task verifies `u` (lowercase, no modifiers) is currently unbound in every view that will host a tombstone slot. The audit is a 5-minute grep + visual inspection task:
+
+```bash
+# Find every match of `KeyCode::Char('u')` in spur-tui:
+rg "KeyCode::Char\('u'\)" crates/spur-tui/src/views/
+```
+
+Expected outcome (verified at spec-amendment time, 2026-04-28): no matches in any of `dashboard.rs`, `session_picker.rs`, `issue_browser.rs`, `plan_inspector.rs`. SessionDetail's `u` may match for tui-textarea text undo; that's input-bar-owned and handled by §4.6's compose-mode passthrough.
+
+If the audit finds an unexpected `u` binding in a view-key context, the spec MUST be amended to either rebind that key or reroute the tombstone undo to an alternate (`U`?). Don't proceed to Task 4 until the audit is documented.
+
+The audit deliverable: a one-paragraph audit-result note appended to this spec confirming `u` is free, OR an amendment to use a different key.
+
+**Audit result (2026-04-28, executed by brain at spec amendment time):**
+
+```
+$ rg "Char\('u'\)" crates/spur-tui/src/views/
+crates/spur-tui/src/views/dashboard.rs:1128:    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+```
+
+Only one view-level match: `dashboard.rs:1128` — `Ctrl+U` for scroll-up-by-5. Bare lowercase `u` is **unbound in every view** (Dashboard, SessionPicker, IssueBrowser, PlanInspector, SessionDetail view-keys). Tombstone undo can safely claim bare `u` without collision. `Ctrl+U` continues to scroll Dashboard. `Ctrl+Z` (emacs undo) is also unbound at view level — `input_bar.rs:345` binds `Ctrl+U` for emacs kill-line-backward, which is composer-internal and gated by §4.6's compose-mode passthrough.
 
 ## 5. Test plan
 
@@ -284,7 +356,13 @@ So a tombstone toast yields immediately to a panic-reset, but otherwise shows fo
 | `tombstone_undo_dispatches_inverse_action` | archive + `u` within window | `Action::ToggleSessionArchive` re-dispatched; tombstone evicted; toast `"Undid: …"` |
 | `tombstone_undo_failure_surfaces_error` | issue status set + `u` + simulated beads write failure | toast updates to `"Undo failed: …; original action stands"`; tombstone evicted |
 | `tombstone_window_expiry_finalizes` | archive + wait 61s | tombstone evicted via tick; `u` after expiry → `"nothing to undo"` |
-| `tombstone_per_view_isolation` | archive in SessionPicker; switch to Dashboard; press `u` | Dashboard tombstone empty; SessionPicker tombstone evicted on view-change |
+| `tombstone_per_view_isolation` | archive in SessionPicker; switch to Dashboard; press `u` | Dashboard tombstone empty; press `u` → `"nothing to undo"` flash; SessionPicker slot still active (amended §4.2 bullet 7) |
+| `tombstone_persists_across_view_change` (NEW, amend) | archive in SessionPicker; nav to Dashboard; nav back to SessionPicker; press `u` within original 60s | tombstone still active; `u` consumes; inverse dispatched |
+| `tombstone_badge_hidden_when_off_view` (NEW, amend) | archive in SessionPicker; nav to Dashboard | render frame on Dashboard does NOT include `[u: archived ...]` badge in status bar; nav back → badge restored with reduced countdown |
+| `tombstone_install_flash_yields_after_2s` (NEW, amend §4.8) | archive | install-flash `"Archived 'foo' — press u to undo"` shows for 2s in Channel B; after 2s, badge in Channel A continues showing the countdown; Channel B is free for general status |
+| `general_status_flash_does_not_clobber_badge` (NEW, amend §4.8) | archive; immediately trigger general-status flash (e.g. `"Copied 'foo'"`) | Channel B shows the copy flash; Channel A badge continues unchanged |
+| `undo_blocked_by_picker_open` (NEW, amend §4.6) | archive in SessionPicker; open mention picker; press `u` | tombstone NOT consumed; `u` flows to picker; tombstone slot still active |
+| `undo_blocked_by_help_overlay` (NEW, amend §4.6) | archive in SessionPicker; open `?` help; press `u` | tombstone NOT consumed; flash `"close help to undo"`; help still open; tombstone slot still active |
 | `tombstone_replaces_on_new_destructive_action` | archive A; archive B 1s later | A's tombstone evicted; B's tombstone shown; `u` undoes B only |
 | `tombstone_remote_queue_dispatches_after_3s` | Review `A`; tick clock 3s | `Action::SubmitReview { Approve }` dispatched once via process_action; toast updates to `"Sent."` |
 | `tombstone_remote_queue_cancel_via_u` | Review `A`; press `u` within 3s | `Action::SubmitReview` NEVER dispatched; toast `"Cancelled: Approve"` |
@@ -327,11 +405,12 @@ There is NO config toggle — every user gets tombstone behavior. Power users wh
 
 ## 7. Open questions
 
-1. **Compose-mode `u`**: in vim Insert / Emacs typing mode, `u` and `Ctrl+Z` should pass through to the input bar (eventual text undo via tui-textarea). Tombstone undo only fires when input bar is NOT composing. Confirmed by the activation gate; tested explicitly.
-2. **Tombstone visibility during fast pressing**: if user does Q1 + Q2 in <500ms, the toast for Q1 is barely visible. Acceptable — the design intent is that fast users don't need confirmation. Toast is for the slow/unsure user.
+1. **Compose-mode `u`** — RESOLVED in §4.6 amendment: explicit ownership cascade enumerated. Input-bar non-empty (any mode) → passthrough; pickers/history-shell/permission-prompt → passthrough; help-overlay/quit-confirm/leader-popup → block (no-op flash). Tombstone consumes only in pure view-key context.
+2. **Tombstone visibility during fast pressing** — RESOLVED in §4.8 two-channel split: ambient badge persists across rapid actions; install-flash on each new action confirms "you've been heard." Power users see the badge update without losing other status flashes.
 3. **Picker rename undo — `RenameState.original_title` required**: rename's "previous title" capture must happen BEFORE the rename-prompt opens. Current `RenameState` at `session_picker.rs:1476-1486` lacks an `original_title: String` field. **This spec adds that field** as part of its implementation surface. The session_picker rename mode (R key) currently lets users edit a buffer; the capture is taken at rename-mode entry, not at commit time. The Action::RenameSession dispatcher in process_action reads `RenameState.original_title` to construct the inverse Action.
 4. **WorkOn session-spawn tombstone**: should `W` in IssueBrowser get the 3s queue treatment too? Subprocess spawn IS reversible at process-creation time (kill the subprocess) but introduces complexity (need to track child PID). Defer — `W` keeps current immediate-spawn behavior with a regular toast `"Spawned WorkOn session 'foo'"` (no tombstone).
-5. **Tombstone display when view-overlay visible**: if leader popup or quit-confirm is open, where does the toast render? Per quick-fixes §6.3, panic-Esc preempts; otherwise the toast renders into the bottom-of-view single-line slot, possibly under the leader popup. Defer detailed rendering — simplest impl is "toast renders in slot regardless of overlay".
+5. **Tombstone display when view-overlay visible** — RESOLVED in §4.10 (badge in status bar, right-aligned, ambient). Status bar renders below all overlays; badge is never occluded. Channel B (transient hint slot) follows quick-fixes §6.3 priority — panic-Esc preempts. Leader popup is a separate render layer that doesn't touch the status bar.
+6. **3s SubmitReview queue creates "schrödinger's submission" on crash/quick-close**: the action sits client-side for up to 3s before dispatch. If the app crashes in those 3s, the review is lost. Mitigation: the auto-flush-on-next-action rule (§4.3 bullet 6) and view-change rule (§4.3 bullet 7) collapse the window for power users. The bare-tail-of-batch case (single review, walk away) remains a 3s data-loss window. Accepted tradeoff — the user explicitly asked the spec to err on the safety side. If telemetry shows lost reviews from this window, ADR for an in-flight "draining queue on shutdown" handler.
 
 ## 8. Method note
 
