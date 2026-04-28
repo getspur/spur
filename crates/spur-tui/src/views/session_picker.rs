@@ -1372,9 +1372,12 @@ mod current_session_shortcut_tests {
             std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
         static PLAN_PROJECTION: std::sync::OnceLock<spur_core::PlanProjectionStore> =
             std::sync::OnceLock::new();
+        static SYNOPSIS: std::sync::OnceLock<spur_core::SessionSynopsisProjection> =
+            std::sync::OnceLock::new();
         crate::views::ViewContext {
             lineage: &LINEAGE,
             plan_projection: PLAN_PROJECTION.get_or_init(spur_core::PlanProjectionStore::new),
+            synopsis: SYNOPSIS.get_or_init(spur_core::SessionSynopsisProjection::new),
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
             flag_summary: None,
