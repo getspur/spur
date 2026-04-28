@@ -10,6 +10,7 @@ pub mod orphan_sweeper;
 pub mod process_inspector;
 pub mod protocol;
 pub mod registry;
+pub mod session_info_cache;
 pub mod session_liveness;
 pub mod session_lock;
 pub mod spur_agent_caps;
@@ -23,10 +24,11 @@ pub use config::{
 };
 pub use connection::{
     AgentConnection, CliWrapAdapter, ExtNotificationPayload, NativeAcpConnection, StdioAdapter,
-    StreamJsonAdapter,
+    StreamJsonAdapter, TestStubConnection,
 };
 pub use error::AcpError;
 pub use registry::AgentRegistry;
+pub use session_info_cache::SessionInfoCache;
 pub use session_liveness::SelfHeldSet;
 pub use spur_agent_caps::SpurAgentCaps;
 

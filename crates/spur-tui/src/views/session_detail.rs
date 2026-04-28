@@ -174,24 +174,6 @@ pub struct SessionDetailView {
     /// `LoadSessionResponse`); the registry filter and submit-router
     /// treat `None` as permissive — full capability set assumed (F-3).
     spur_agent_caps: Option<std::sync::Arc<spur_acp::SpurAgentCaps>>,
-
-    /// Wave E (M8): cached `SessionInfoUpdate` payload, populated by
-    /// `app::apply_session_update`'s explicit arm. Codex 0.12 currently
-    /// emits zero `session_info_update` notifications (per the Wave 0.3
-    /// probe); this cache is forward-compat for other agents and future
-    /// codex versions. `None` means no agent has emitted one yet.
-    session_info: Option<SessionInfoCache>,
-}
-
-/// Mirror of `agent_client_protocol::schema::SessionInfoUpdate` flattened
-/// into plain `Option<String>` so the view doesn't propagate the SDK's
-/// `MaybeUndefined` distinction. Empty / null fields land as `None`.
-#[derive(Debug, Default, Clone)]
-pub struct SessionInfoCache {
-    /// Human-readable session title.
-    pub title: Option<String>,
-    /// ISO 8601 timestamp of last activity.
-    pub updated_at: Option<String>,
 }
 
 impl SessionDetailView {
@@ -257,7 +239,6 @@ impl SessionDetailView {
             load_state: LoadState::Ready,
             session_config_options: Vec::new(),
             spur_agent_caps: None,
-            session_info: None,
         }
     }
 
@@ -339,7 +320,6 @@ impl SessionDetailView {
             load_state: LoadState::Ready,
             session_config_options: Vec::new(),
             spur_agent_caps: None,
-            session_info: None,
         }
     }
 
@@ -398,7 +378,6 @@ impl SessionDetailView {
             load_state: LoadState::Retiring,
             session_config_options: Vec::new(),
             spur_agent_caps: None,
-            session_info: None,
         }
     }
 
@@ -740,34 +719,6 @@ impl SessionDetailView {
     pub fn available_slash_commands(&self) -> Vec<crate::commands::CommandEntry> {
         self.command_registry
             .available_commands_for_session(self.spur_agent_caps.as_deref())
-    }
-
-    /// Wave E (M8): consume a `SessionInfoUpdate` notification. Codex 0.12
-    /// emits zero of these; the arm exists to remove the silent drop in
-    /// `apply_session_update` and to opportunistically cache `title` /
-    /// `updated_at` as other agents (or future codex versions) start
-    /// emitting them. Partial updates merge into the existing cache.
-    pub fn apply_session_info_update(&mut self, info: &spur_acp::SessionInfoUpdate) {
-        let cache = self
-            .session_info
-            .get_or_insert_with(SessionInfoCache::default);
-        if let Some(title) = info.title.as_opt_deref::<str>() {
-            cache.title = title.map(str::to_owned);
-        }
-        if let Some(updated_at) = info.updated_at.as_opt_deref::<str>() {
-            cache.updated_at = updated_at.map(str::to_owned);
-        }
-        tracing::trace!(
-            session = %self.session_id.0,
-            title = ?cache.title,
-            updated_at = ?cache.updated_at,
-            "session_info_update consumed",
-        );
-    }
-
-    /// Test-only getter mirroring `session_config_options_for_test`.
-    pub fn session_info_for_test(&self) -> Option<&SessionInfoCache> {
-        self.session_info.as_ref()
     }
 
     /// Test-only accessor for the cached snapshot of advertised session
@@ -1428,13 +1379,11 @@ impl SessionDetailView {
                                     }
                                 }
                                 SubmitDecision::SetSessionModel { value } => {
-                                    // Wave B.4: see app.rs comment — Bundle 3 wires
-                                    // dedicated dispatch; for now reuse config-option path.
                                     if self.is_cleared() {
                                         None
                                     } else {
-                                        Some(Action::SetSessionConfigOption {
-                                            config_id: "model".into(),
+                                        Some(Action::SetSessionModel {
+                                            session_id: self.session_id.clone(),
                                             value,
                                         })
                                     }

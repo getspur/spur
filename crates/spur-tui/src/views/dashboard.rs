@@ -1496,14 +1496,9 @@ impl DashboardView {
                                 }
                             }
                             SubmitDecision::SetSessionModel { value } => {
-                                // Wave B.4: dashboard does not yet thread caps,
-                                // so this branch is unreachable from `route()`
-                                // (caps-unaware). Reserved for the M9 wiring
-                                // that pumps caps into the dashboard's submit
-                                // path.
                                 if self.session_attached {
-                                    Some(Action::SetSessionConfigOption {
-                                        config_id: "model".into(),
+                                    Some(Action::SetSessionModel {
+                                        session_id: spur_acp::SessionId(String::new()),
                                         value,
                                     })
                                 } else {
