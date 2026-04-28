@@ -69,6 +69,13 @@ pub async fn run_with_license(command: AuthCommands, license: SpurLicense) -> Re
 }
 
 async fn login_inner(license: &SpurLicense, key: &str) -> Result<LicenseState> {
+    // Plan C M0.5 — gate the activation surface specifically. We
+    // deliberately do NOT gate Logout/Refresh/Status: a tampered
+    // tier that strips `cli_core_license_activate` must still let
+    // the user recover via `spur auth logout`, which falls back to
+    // the embedded community policy where the key IS granted.
+    let gate = license.feature_gate();
+    spur_license::require_feature(&gate, spur_license::FeatureKey::CLI_CORE_LICENSE_ACTIVATE)?;
     ensure_configured(license)?;
     Ok(license.activate(key).await?)
 }
