@@ -1,11 +1,17 @@
-# spur-bot Remediation Spec — v3
+# spur-bot Remediation Spec — v3.1
 
-> **Status:** v3 — respun after gate-2 (codex bd-3qe.3.3 GATE FAIL, gemini bd-3qe.3.4 GATE BLOCKED). Pending gate-3.
+> **Status:** v3.1 — gated for implementation. Codex gate-3 (bd-3qe.3.5) flagged two deterministic spec edits (reqwest version qualifier, saturating_add stale arithmetic); gemini gate-3 (bd-3qe.3.6) returned GATE PASS. v3.1 applies both edits with no design change.
 > **Parent epic:** bd-3qe.3
 > **Source review:** bd-3qe (gemini bd-3qe.2 + codex bd-3qe.1)
 > **Scope:** `crates/spur-bot/src/`
 
-Gate-2 outcome (6/8 dual-approved): **C1, C2, H3, H6, H7, H8 ✅ APPROVE**. C0 dual-blocked, H4 dual-revise, H5 split-revise. v3 only re-opens those three.
+Gate-3 outcome (8/8 gated): all 8 fixes (C0, C1, C2, H3, H4, H5, H6, H7, H8) ready for implementation per the build sequence below.
+
+v3 → v3.1 changelog (deterministic spec edits, no design change):
+- C0 sketch: qualified `reqwest::ClientBuilder` → `frankenstein::reqwest::ClientBuilder`. spur-bot's workspace reqwest is 0.12; frankenstein 0.49 uses reqwest 0.13. Passing a workspace-reqwest client into the frankenstein builder won't type-check. The re-export is verified at `frankenstein-0.49.0/src/lib.rs:6`.
+- C2 sketch: `timeout_secs + 10` → `timeout_secs.saturating_add(10)` (two occurrences). C2 lands after C0; the stale arithmetic would silently regress C0's overflow guarantee.
+
+Gate-2 outcome (6/8 dual-approved): **C1, C2, H3, H6, H7, H8 ✅ APPROVE**. C0 dual-blocked, H4 dual-revise, H5 split-revise. v3 re-opened those three.
 
 v2 → v3 changelog:
 - **C0 redesigned**. Both reviewers (correctly) blocked v2: (a) `frankenstein 0.49` does NOT have `Bot::with_client` — actual API is `Bot::builder().api_url(...).client(http).build()`; (b) `frankenstein 0.49` ALREADY ships `connect_timeout=10s, timeout=500s` defaults (verified at `frankenstein-0.49.0/src/client_reqwest.rs:20-29`), so v2's "no-timeout footgun" premise was factually wrong; (c) sharing a single `reqwest::Client` and `.clone()`-ing the `TelegramClient` couples poll-and-send timeouts — a 30s global hard-timeout severs any long-poll >30s. v3 uses **two separate `TelegramClient` instances** (one per timeout regime) and uses `saturating_add` for overflow safety.
@@ -77,7 +83,11 @@ impl TelegramClient {
     ///   - ~30s for fast-fail RPC calls (send/create/answer)
     ///   - poll_timeout_secs + 10s for long-poll
     pub fn new(token: &str, request_timeout: std::time::Duration) -> anyhow::Result<Self> {
-        let http = reqwest::ClientBuilder::new()
+        // Use frankenstein's re-export to avoid type-mismatch: spur-bot's
+        // workspace `reqwest = "0.12"` is incompatible with frankenstein 0.49's
+        // internal `reqwest 0.13`; passing a 0.12 client into the frankenstein
+        // builder won't type-check.
+        let http = frankenstein::reqwest::ClientBuilder::new()
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(request_timeout)
             .build()
@@ -256,7 +266,7 @@ where
         tokio::select! {
             _ = cancellation.cancelled() => return Ok(()),
             result = tokio::time::timeout(
-                std::time::Duration::from_secs(timeout_secs + 10),
+                std::time::Duration::from_secs(timeout_secs.saturating_add(10)),
                 client.get_updates(offset, timeout_secs),
             ) => {
                 match result {
@@ -272,7 +282,7 @@ where
                         backoff = (backoff * 2).min(std::time::Duration::from_secs(5));
                     }
                     Err(_elapsed) => {
-                        tracing::warn!(secs = timeout_secs + 10, "long-poll exceeded deadline");
+                        tracing::warn!(secs = timeout_secs.saturating_add(10), "long-poll exceeded deadline");
                         tokio::time::sleep(backoff).await;
                         backoff = (backoff * 2).min(std::time::Duration::from_secs(5));
                     }
