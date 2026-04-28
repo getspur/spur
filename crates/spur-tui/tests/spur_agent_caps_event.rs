@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use agent_client_protocol::schema::{InitializeResponse, NewSessionResponse, ProtocolVersion};
-use spur_acp::SpurAgentCaps;
+use spur_acp::{AgentKind, SpurAgentCaps};
 
 #[test]
 fn spur_agent_caps_constructed_from_codex_fixture_round_trips_via_arc() {
@@ -21,7 +21,7 @@ fn spur_agent_caps_constructed_from_codex_fixture_round_trips_via_arc() {
     let new: NewSessionResponse =
         serde_json::from_str(json).expect("codex fixture must deserialize");
 
-    let caps = Arc::new(SpurAgentCaps::new(&init, &new));
+    let caps = Arc::new(SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp));
 
     // Sanity: the codex fixture exercises all 3 set-* gates plus some
     // structural counts. If this regresses, downstream UI gating is
@@ -46,7 +46,7 @@ fn spur_agent_caps_constructed_from_codex_fixture_round_trips_via_arc() {
 fn empty_caps_yield_all_false_via_public_api() {
     let init = InitializeResponse::new(ProtocolVersion::LATEST);
     let new = NewSessionResponse::new(agent_client_protocol::schema::SessionId::new("x"));
-    let caps = SpurAgentCaps::new(&init, &new);
+    let caps = SpurAgentCaps::new(&init, &new, AgentKind::Generic);
     assert!(!caps.supports_set_mode());
     assert!(!caps.supports_set_model());
     assert!(!caps.supports_set_config_option());

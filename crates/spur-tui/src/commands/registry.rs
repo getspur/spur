@@ -565,7 +565,7 @@ mod tests {
                 SessionConfigSelectOptions::Ungrouped(vec![]),
             )),
         )]);
-        let caps = spur_acp::SpurAgentCaps::new(&init, &new);
+        let caps = spur_acp::SpurAgentCaps::new(&init, &new, spur_acp::AgentKind::CodexAcp);
         assert!(caps.supports_set_model());
         assert!(caps.supports_set_config_option());
 
@@ -604,7 +604,7 @@ mod tests {
         let init = InitializeResponse::new(ProtocolVersion::LATEST);
         // Gemini-style: no models, no config_options. set_model & set_config_option both false.
         let new = NewSessionResponse::new(SessionId::new("sid"));
-        let caps = spur_acp::SpurAgentCaps::new(&init, &new);
+        let caps = spur_acp::SpurAgentCaps::new(&init, &new, spur_acp::AgentKind::Generic);
         assert!(!caps.supports_set_model());
         assert!(!caps.supports_set_config_option());
 
@@ -670,7 +670,7 @@ mod tests {
                 "Gemini 1.5 Pro",
             )],
         ));
-        let caps = spur_acp::SpurAgentCaps::new(&init, &new);
+        let caps = spur_acp::SpurAgentCaps::new(&init, &new, spur_acp::AgentKind::Generic);
         assert!(caps.supports_set_model());
         assert!(!caps.supports_set_config_option());
 
@@ -710,8 +710,11 @@ mod tests {
         };
 
         let init = InitializeResponse::new(ProtocolVersion::LATEST);
-        let caps =
-            spur_acp::SpurAgentCaps::new(&init, &NewSessionResponse::new(SessionId::new("sid")));
+        let caps = spur_acp::SpurAgentCaps::new(
+            &init,
+            &NewSessionResponse::new(SessionId::new("sid")),
+            spur_acp::AgentKind::Generic,
+        );
 
         let mut reg = CommandRegistry::new();
         reg.set_agent_commands(
