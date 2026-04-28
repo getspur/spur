@@ -921,6 +921,47 @@ mod tests {
     }
 
     #[test]
+    fn seed_template_kimi_uses_yolo_via_l2_auto_approve() {
+        // kimi requires `-y` BEFORE the `acp` subcommand and relies on the
+        // L2 auto-approve path (orchestrator drops `permission_tx` when
+        // `effective_permissions().skip == true`) for the residual
+        // shell-command permission prompt that `-y` does NOT suppress.
+        // This locks both the argv order and the L2 opt-in — a
+        // future edit that breaks either should fail this test.
+        let seeds = load_seed_template();
+        let kimi = seeds
+            .entries
+            .iter()
+            .find(|a| a.name == "kimi")
+            .expect("kimi should be in seed template");
+        assert_eq!(
+            kimi.effective_args(),
+            vec!["-y".to_string(), "acp".to_string()],
+            "`-y` must precede `acp` (kimi top-level flag)"
+        );
+        assert!(
+            kimi.effective_permissions().skip,
+            "kimi must opt into L2 auto-approve via permissions.skip = true"
+        );
+        // Validator must accept kimi (R3 is a warning, not fatal) and the
+        // single error reported must be the expected R3 — proving the
+        // mechanism is intentionally L2-only.
+        let errs = crate::config::validate_agent_config(kimi).expect_err(
+            "expected R3 warning since mechanism is L2 auto-approve only",
+        );
+        assert_eq!(errs.len(), 1, "only R3 should fire: {errs:?}");
+        assert!(!errs[0].is_fatal(), "R3 must remain non-fatal");
+        assert!(
+            matches!(
+                errs[0],
+                crate::config::ConfigError::SkipPermissionsNoExplicitMechanism { .. }
+            ),
+            "expected R3 SkipPermissionsNoExplicitMechanism, got {:?}",
+            errs[0]
+        );
+    }
+
+    #[test]
     fn brain_delegation_framework_defaults_per_build() {
         // Empty [brain.delegation] block → build-aware default.
         let toml = r#"

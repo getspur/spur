@@ -176,10 +176,11 @@ dispatch = "prompt_text"
 
 
 # ── kimi ──────────────────────────────────────────────────────────
+# `-y` must precede `acp` (kimi top-level flag); covers file tools but not shell — L2 (perm_tx=None → auto_approve) handles the residual. R3 warn is intentional.
 [[agents.entries]]
 name = "kimi"
 command = "kimi"
-args = ["acp"]
+args = ["-y", "acp"]
 transport = "acp"
 kind = "generic"
 role = "both"
@@ -190,3 +191,6 @@ handle = "kimi"
 
 [agents.entries.commands]
 dispatch = "prompt_text"
+
+[agents.entries.permissions]
+skip = true
