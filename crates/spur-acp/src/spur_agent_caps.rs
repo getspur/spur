@@ -14,7 +14,7 @@
 
 use agent_client_protocol::schema::{
     AgentCapabilities, InitializeResponse, NewSessionResponse, SessionConfigOption,
-    SessionModeState, SessionModelState,
+    SessionConfigKind, SessionConfigSelectOptions, SessionModeState, SessionModelState,
 };
 use serde::{Deserialize, Serialize};
 
@@ -93,19 +93,50 @@ impl SpurAgentCaps {
     /// Display label for the active model.
     #[must_use]
     pub fn current_model_label(&self) -> Option<String> {
-        None
+        let models = self.models.as_ref()?;
+        Some(
+            models
+                .available_models
+                .iter()
+                .find(|info| info.model_id.0.as_ref() == models.current_model_id.0.as_ref())
+                .map(|info| info.name.clone())
+                .unwrap_or_else(|| models.current_model_id.0.to_string()),
+        )
     }
 
     /// Display label for the active reasoning effort.
     #[must_use]
     pub fn current_effort_label(&self) -> Option<String> {
-        None
+        let option = self
+            .config_options
+            .iter()
+            .find(|option| option.id.0.as_ref() == "reasoning_effort")?;
+
+        let select = match &option.kind {
+            SessionConfigKind::Select(select) => select,
+            _ => return None,
+        };
+        let current = select.current_value.0.as_ref();
+        let name = match &select.options {
+            SessionConfigSelectOptions::Ungrouped(options) => options
+                .iter()
+                .find(|option| option.value.0.as_ref() == current)
+                .map(|option| option.name.clone()),
+            SessionConfigSelectOptions::Grouped(groups) => groups
+                .iter()
+                .flat_map(|group| group.options.iter())
+                .find(|option| option.value.0.as_ref() == current)
+                .map(|option| option.name.clone()),
+            _ => None,
+        };
+
+        Some(name.unwrap_or_else(|| current.to_string()))
     }
 
     /// Whether this agent is expected to emit usage updates.
     #[must_use]
     pub fn usage_supported(&self) -> bool {
-        true
+        crate::agent_quirks::usage_emit_default(self.agent_kind)
     }
 
     /// Probe a vendor `_meta` extension key (e.g. `"terminal_output"`).
