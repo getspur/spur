@@ -155,4 +155,31 @@ mod tests {
         assert_eq!(s.first_user_msg.as_deref(), Some("fix the auth bug"));
         assert_eq!(s.last_user_msg.as_deref(), Some("fix the auth bug"));
     }
+
+    #[test]
+    fn multi_chunk_user_message_accumulates_then_flushes_as_one() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&user_chunk_event("S1", "fix the "));
+        proj.apply(&user_chunk_event("S1", "auth bug"));
+        proj.apply(&agent_chunk_event("S1", "ack"));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(s.first_user_msg.as_deref(), Some("fix the auth bug"));
+        assert_eq!(s.last_user_msg.as_deref(), Some("fix the auth bug"));
+    }
+
+    #[test]
+    fn second_user_message_in_same_session_updates_last_only() {
+        let mut proj = SessionSynopsisProjection::new();
+        // Turn 1.
+        proj.apply(&user_chunk_event("S1", "first request"));
+        proj.apply(&agent_chunk_event("S1", "ok"));
+        // Turn 2.
+        proj.apply(&user_chunk_event("S1", "second request"));
+        proj.apply(&agent_chunk_event("S1", "ok"));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(s.first_user_msg.as_deref(), Some("first request"));
+        assert_eq!(s.last_user_msg.as_deref(), Some("second request"));
+    }
 }
