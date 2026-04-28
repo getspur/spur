@@ -2,14 +2,14 @@
 
 ## Status: ✅ SHIPPED 2026-04-28
 
-> Tasks 1–3 landed as commits f5cf3a87 / af0ae021 / 13fb4740
-> (later rebased onto current main as 620a474d / 0efffeaa /
-> c0f59d25). The dual-final-review findings (codex 🔴 / gemini 🟡)
-> were integrated in a single cleanup commit on top of the rebase.
-> See **Post-merge addendum (2026-04-28)** at the bottom of this
-> document for the full landed-deviations table, the
-> `App::feature_gate` startup-snapshot freshness gap, and the
-> pointer to Plan C M1 where live `update_state` wiring lands.
+> Tasks 1–3 + cleanup landed on `feat/tier-revamp-c-tier2` as the
+> post-rebase commit chain 620a474d / 0efffeaa / c0f59d25 / 10f792a4.
+> The dual-final-review findings (codex 🔴 / gemini 🟡) were integrated
+> in the cleanup commit (10f792a4) on top of the rebase. See
+> **Post-merge addendum (2026-04-28)** at the bottom of this document
+> for the full landed-deviations table, the `App::feature_gate`
+> startup-snapshot freshness gap, and the pointer to Plan C M1 where
+> live `update_state` wiring lands.
 
 > **Status (original):** Open. Filed 2026-04-28 after L9-MCTS
 > evaluation selected this as the highest-EV next move post-Tier-1.
@@ -965,9 +965,14 @@ work since the freshness gap doesn't affect the MVP demo path.
    `Ctrl+C` / `Ctrl+Q` always reach `request_quit()` regardless of
    modal visibility.
 2. **Modal stacking suppression** — the upgrade_modal render block
-   is gated on `self.collision_modal.is_none()`; when both modals
-   would be visible, only the collision_modal renders, matching
-   input precedence.
+   is gated by `App::should_render_upgrade_modal()` which suppresses
+   the upgrade modal when EITHER `collision_modal` is up OR
+   `quit_confirm_visible` is true. Visual precedence matches input
+   precedence (quit_confirm > collision > upgrade) in both
+   dimensions. (The `quit_confirm_visible` half of the gate landed in
+   a follow-up cleanup commit on top of 10f792a4, after codex's
+   pre-merge review caught the asymmetry; see
+   `quit_shortcut_tests::upgrade_modal_render_gate_respects_quit_and_collision_precedence`.)
 3. **Same-tier required_tier elision** — `modal_lines` skips the
    "Required tier:" row when `Tier::from_plan(required) ==
    current_tier`. Unit test
