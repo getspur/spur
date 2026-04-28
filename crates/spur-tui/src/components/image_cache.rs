@@ -183,7 +183,7 @@ mod tests {
     }
 
     fn picker() -> Picker {
-        Picker::from_fontsize((8, 16))
+        Picker::halfblocks()
     }
 
     #[test]
@@ -256,7 +256,8 @@ mod tests {
         assert_eq!(c.len(), (1, 1));
 
         // Simulate font swap.
-        c.check_cell_size_with((10, 20));
+        let (cell_width, cell_height) = p.font_size();
+        c.check_cell_size_with((cell_width + 1, cell_height + 2));
         assert_eq!(c.len(), (0, 0));
     }
 
