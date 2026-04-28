@@ -434,4 +434,17 @@ mod tests {
         assert_eq!(s.first_user_msg.as_deref(), Some("committed msg"));
         assert_eq!(s.last_user_msg.as_deref(), Some("committed msg"));
     }
+
+    #[test]
+    fn unrelated_event_variants_are_ignored() {
+        let mut proj = SessionSynopsisProjection::new();
+        // CostUpdate has no session synopsis relevance.
+        proj.apply(&SpurEvent::now(SpurEventBody::CostUpdate {
+            session: SessionId("S1".into()),
+            agent: "claude".into(),
+            estimated_cost_usd: 0.001,
+        }));
+        assert!(proj.get(&SessionId("S1".into())).is_none());
+        assert!(proj.get(&SessionId("missing".into())).is_none());
+    }
 }
