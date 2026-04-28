@@ -266,6 +266,41 @@ fn legacy_to_wave9_mapping(s: &str) -> Option<FeatureKey> {
     }
 }
 
+/// Typed error returned by [`require_feature`] when the active
+/// license tier does not entitle the requested feature.
+///
+/// `#[non_exhaustive]` reserves room for future denial-shape variants
+/// (e.g. `BootstrapPending` when the gate has not yet received its
+/// first snapshot, or future policy-mismatch conditions) without
+/// breaking downstream pattern matches. Provider-layer failures like
+/// expiry and revocation belong in [`crate::LicenseError`], not here:
+/// `require_feature` only knows feature presence in the snapshot,
+/// not denial cause.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum FeatureGateError {
+    #[error("feature `{}` is not available on tier `{:?}`", key.as_str(), tier)]
+    Denied { key: FeatureKey, tier: Tier },
+}
+
+/// Workspace-wide gate-check helper. Returns `Ok(())` if the active
+/// snapshot grants `key`; otherwise returns
+/// [`FeatureGateError::Denied`] tagged with the key and active tier
+/// for downstream pattern-matching (e.g. CLI/TUI/MCP recovery copy).
+///
+/// Per Plan C survey § 8 this is the canonical contract every runtime
+/// gate-check site must use.
+pub fn require_feature(gate: &FeatureGate, key: FeatureKey) -> Result<(), FeatureGateError> {
+    if gate.has(key) {
+        Ok(())
+    } else {
+        Err(FeatureGateError::Denied {
+            key,
+            tier: gate.tier(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
