@@ -305,6 +305,9 @@ pub struct App {
     metadata_store: SessionMetadataStore,
     /// Current input editing mode, synced across all InputBar instances.
     edit_mode: EditMode,
+    /// Per-view tombstone slots for Gmail-toast-style destructive-action undo.
+    /// Driven by tick; install points live in process_action arms.
+    tombstones: crate::components::tombstone::TombstoneSlots,
     /// Loaded Spur configuration. Used to resolve per-agent `AgentConfig`
     /// at session-creation time (see `resolve_agent_config`). Defaults to
     /// `SpurConfig::default()` when no config is supplied.
@@ -472,6 +475,7 @@ impl App {
             ),
             metadata_store,
             edit_mode: EditMode::from(config.tui.edit_mode),
+            tombstones: crate::components::tombstone::TombstoneSlots::new(),
             config,
             palette_visible: false,
             palette_state: crate::components::palette::PaletteState::new(),
@@ -2794,6 +2798,12 @@ impl App {
     /// Tick the active view (for animations, batched text flush, etc.).
     pub fn tick(&mut self) {
         let now = Instant::now();
+        // Drive tombstone expiry. Expired reversible tombstones are silently
+        // dropped; expired QueuedRemote tombstones dispatch through App.
+        let expired_queued = self.tombstones.tick(now);
+        for action in expired_queued {
+            self.process_action(action);
+        }
         self.tick_transient_hint(now);
 
         #[cfg(feature = "markdown")]
@@ -3409,7 +3419,7 @@ fn humanize_since(iso: Option<&str>) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 impl App {
     /// Minimal `App` for unit tests. Avoids disk I/O from
     /// `SessionMetadataStore::load`.
