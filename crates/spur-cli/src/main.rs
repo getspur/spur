@@ -296,6 +296,9 @@ enum Commands {
         /// Profiling duration in seconds (requires --profile)
         #[arg(long, default_value = "30")]
         duration: u64,
+        /// Test-only: run the orphan sweep and exit before entering the TUI.
+        #[arg(long, hide = true)]
+        exit_after_sweep: bool,
     },
     /// Performance profiling and monitoring
     Profile {
@@ -717,7 +720,15 @@ async fn run() -> Result<()> {
             session,
             profile,
             duration,
+            exit_after_sweep,
         } => {
+            // Test-only escape hatch: the orphan sweep already ran above
+            // (see `reaped_orphans` block); exit before entering the TUI
+            // loop so integration tests can verify reaping without
+            // rendezvousing with the full TUI lifecycle.
+            if exit_after_sweep {
+                return Ok(());
+            }
             // Gate fires BEFORE the `--profile` re-spawn block: otherwise
             // `spur tui --profile` would profile the parent successfully
             // and then the child would fail the gate, producing a confusing
