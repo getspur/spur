@@ -97,6 +97,7 @@ enum PickerState {
     Populated {
         agent: String,
         sessions: Vec<SessionInfo>,
+        haystacks: Vec<String>,
         cursor: usize,
         search_focused: bool,
         filter: String,
@@ -211,12 +212,13 @@ impl SessionPickerView {
         self.metadata = metadata;
     }
 
-    pub fn toggle_show_archived(&mut self, synopsis: &spur_core::SessionSynopsisProjection) {
-        let prev_highlight = self.highlighted_session_id(synopsis);
+    pub fn toggle_show_archived(&mut self) {
+        let prev_highlight = self.highlighted_session_id();
         let prev_cursor_was_new = matches!(&self.state, PickerState::Populated { cursor: 0, .. });
         self.show_archived = !self.show_archived;
         if let PickerState::Populated {
             sessions,
+            haystacks,
             cursor,
             filter,
             ..
@@ -224,10 +226,10 @@ impl SessionPickerView {
         {
             let indices = Self::filtered_indices(
                 sessions,
+                haystacks,
                 filter,
                 &self.metadata,
                 self.show_archived,
-                synopsis,
             );
             let new_cursor = Self::project_cursor(
                 sessions,
@@ -272,19 +274,24 @@ impl SessionPickerView {
         // P2 (cursor preservation by session_id) — only meaningful when we
         // were already Populated. Captured here so it sees the *previous*
         // state before we overwrite it.
-        let prev_highlight = self.highlighted_session_id(synopsis);
+        let prev_highlight = self.highlighted_session_id();
         let prev_cursor_was_new = matches!(&self.state, PickerState::Populated { cursor: 0, .. });
         let prev_filter = match &self.state {
             PickerState::Populated { filter, .. } => filter.clone(),
             _ => String::new(),
         };
 
+        let haystacks: Vec<String> = sessions
+            .iter()
+            .map(|s| self.build_haystack_for(s, synopsis))
+            .collect();
+
         let indices = Self::filtered_indices(
             &sessions,
+            &haystacks,
             &prev_filter,
             &self.metadata,
             self.show_archived,
-            synopsis,
         );
 
         let cursor = if !self.preselect_consumed {
@@ -317,6 +324,7 @@ impl SessionPickerView {
         self.state = PickerState::Populated {
             agent,
             sessions,
+            haystacks,
             cursor,
             search_focused: false,
             filter: prev_filter,
@@ -324,12 +332,10 @@ impl SessionPickerView {
         self.scroll_offset.set(0);
     }
 
-    fn highlighted_session_id(
-        &self,
-        synopsis: &spur_core::SessionSynopsisProjection,
-    ) -> Option<String> {
+    fn highlighted_session_id(&self) -> Option<String> {
         let PickerState::Populated {
             sessions,
+            haystacks,
             cursor,
             filter,
             ..
@@ -342,21 +348,44 @@ impl SessionPickerView {
         }
         let indices = Self::filtered_indices(
             sessions,
+            haystacks,
             filter,
             &self.metadata,
             self.show_archived,
-            synopsis,
         );
         let real_idx = indices.get(*cursor - 1).copied()?;
         Some(sessions[real_idx].session_id.0.as_ref().to_string())
     }
 
+    fn build_haystack_for(
+        &self,
+        session: &SessionInfo,
+        synopsis: &spur_core::SessionSynopsisProjection,
+    ) -> String {
+        let entry = self.metadata.sessions.get(session.session_id.0.as_ref());
+        let synopsis_for = synopsis.get(&spur_acp::SessionId(
+            session.session_id.0.as_ref().to_string(),
+        ));
+        let label = resolve_label(session, entry, synopsis_for.as_ref(), false, usize::MAX);
+        let first = synopsis_for
+            .as_ref()
+            .and_then(|s| s.first_user_msg.as_deref())
+            .unwrap_or("");
+        let last = synopsis_for
+            .as_ref()
+            .and_then(|s| s.last_user_msg.as_deref())
+            .unwrap_or("");
+        let cwd = session.cwd.display().to_string();
+        let id = session.session_id.0.as_ref();
+        format!("{label} {first} {last} {cwd} {id}")
+    }
+
     fn filtered_indices(
         sessions: &[SessionInfo],
+        haystacks: &[String],
         filter: &str,
         metadata: &SessionMetadata,
         show_archived: bool,
-        synopsis: &spur_core::SessionSynopsisProjection,
     ) -> Vec<usize> {
         let candidates: Vec<usize> = (0..sessions.len())
             .filter(|&i| {
@@ -402,25 +431,8 @@ impl SessionPickerView {
         let mut scored: Vec<(u32, usize)> = candidates
             .into_iter()
             .filter_map(|i| {
-                let session = &sessions[i];
-                let entry = metadata.sessions.get(session.session_id.0.as_ref());
-                let synopsis_for = synopsis.get(&spur_acp::SessionId(
-                    session.session_id.0.as_ref().to_string(),
-                ));
-                let label = resolve_label(session, entry, synopsis_for.as_ref(), false, usize::MAX);
-                let first = synopsis_for
-                    .as_ref()
-                    .and_then(|s| s.first_user_msg.as_deref())
-                    .unwrap_or("");
-                let last = synopsis_for
-                    .as_ref()
-                    .and_then(|s| s.last_user_msg.as_deref())
-                    .unwrap_or("");
-                let cwd = session.cwd.display().to_string();
-                let id = session.session_id.0.as_ref();
-                let haystack = format!("{label} {first} {last} {cwd} {id}");
                 let score = pattern.score(
-                    nucleo_matcher::Utf32Str::new(&haystack, &mut Vec::new()),
+                    nucleo_matcher::Utf32Str::new(&haystacks[i], &mut Vec::new()),
                     &mut matcher,
                 )?;
                 Some((score, i))
@@ -463,36 +475,38 @@ impl SessionPickerView {
         }
     }
 
-    pub fn visible_session_count(&self, synopsis: &spur_core::SessionSynopsisProjection) -> usize {
+    pub fn visible_session_count(&self) -> usize {
         match &self.state {
             PickerState::Populated {
-                sessions, filter, ..
+                sessions,
+                haystacks,
+                filter,
+                ..
             } => Self::filtered_indices(
                 sessions,
+                haystacks,
                 filter,
                 &self.metadata,
                 self.show_archived,
-                synopsis,
             )
             .len(),
             _ => 0,
         }
     }
 
-    pub fn visible_session_at(
-        &self,
-        idx: usize,
-        synopsis: &spur_core::SessionSynopsisProjection,
-    ) -> Option<&SessionInfo> {
+    pub fn visible_session_at(&self, idx: usize) -> Option<&SessionInfo> {
         match &self.state {
             PickerState::Populated {
-                sessions, filter, ..
+                sessions,
+                haystacks,
+                filter,
+                ..
             } => Self::filtered_indices(
                 sessions,
+                haystacks,
                 filter,
                 &self.metadata,
                 self.show_archived,
-                synopsis,
             )
             .get(idx)
             .and_then(|&i| sessions.get(i)),
@@ -703,6 +717,7 @@ impl SessionPickerView {
         flag_summary: Option<(usize, usize)>,
         agent: &str,
         sessions: &[SessionInfo],
+        haystacks: &[String],
         cursor: usize,
         search_focused: bool,
         filter: &str,
@@ -712,10 +727,10 @@ impl SessionPickerView {
 
         let indices = Self::filtered_indices(
             sessions,
+            haystacks,
             filter,
             &self.metadata,
             self.show_archived,
-            ctx.synopsis,
         );
 
         // Clamp scroll_offset so cursor is always visible.
@@ -928,10 +943,10 @@ impl SessionPickerView {
             } else {
                 let indices = Self::filtered_indices(
                     sessions,
+                    haystacks,
                     filter,
                     &self.metadata,
                     self.show_archived,
-                    ctx.synopsis,
                 );
                 let real_idx = indices.get(cursor - 1).copied();
                 if let Some(i) = real_idx {
@@ -1281,7 +1296,7 @@ impl View for SessionPickerView {
         }
 
         // Compute once — needed by list-mode p/R/d arms before we split-borrow.
-        let hl_session_id = self.highlighted_session_id(ctx.synopsis);
+        let hl_session_id = self.highlighted_session_id();
 
         // Deferred state transitions to apply after the split borrow ends.
         enum Post {
@@ -1305,6 +1320,7 @@ impl View for SessionPickerView {
             match state {
                 PickerState::Populated {
                     sessions,
+                    haystacks,
                     cursor,
                     search_focused,
                     filter,
@@ -1347,10 +1363,10 @@ impl View for SessionPickerView {
                             KeyCode::Down | KeyCode::Char('j') => {
                                 let visible = Self::filtered_indices(
                                     sessions,
+                                    haystacks,
                                     filter,
                                     metadata,
                                     *show_archived,
-                                    ctx.synopsis,
                                 )
                                 .len();
                                 if *cursor < visible {
@@ -1382,10 +1398,10 @@ impl View for SessionPickerView {
                                 } else {
                                     let indices = Self::filtered_indices(
                                         sessions,
+                                        haystacks,
                                         filter,
                                         metadata,
                                         *show_archived,
-                                        ctx.synopsis,
                                     );
                                     let real_idx = indices.get(*cursor - 1).copied()?;
                                     let sid = sessions[real_idx].session_id.0.to_string();
@@ -1514,6 +1530,7 @@ impl View for SessionPickerView {
             PickerState::Populated {
                 agent,
                 sessions,
+                haystacks,
                 cursor,
                 search_focused,
                 filter,
@@ -1525,6 +1542,7 @@ impl View for SessionPickerView {
                 ctx.flag_summary,
                 agent,
                 sessions,
+                haystacks,
                 *cursor,
                 *search_focused,
                 filter,
@@ -1965,6 +1983,13 @@ mod filter_haystack_tests {
         s
     }
 
+    fn set_filter(picker: &mut SessionPickerView, value: &str) {
+        let PickerState::Populated { filter, .. } = &mut picker.state else {
+            panic!("picker should be populated");
+        };
+        *filter = value.to_string();
+    }
+
     #[test]
     fn filter_matches_first_user_msg_even_when_label_does_not() {
         let sessions = vec![make_session("S1", Some("Build fix"))];
@@ -1979,12 +2004,56 @@ mod filter_haystack_tests {
             },
         );
 
+        let picker = SessionPickerView::new();
+        let haystacks: Vec<String> = sessions
+            .iter()
+            .map(|session| picker.build_haystack_for(session, &synopsis))
+            .collect();
+
         let indices =
-            SessionPickerView::filtered_indices(&sessions, "auth", &metadata, false, &synopsis);
+            SessionPickerView::filtered_indices(&sessions, &haystacks, "auth", &metadata, false);
         assert_eq!(
             indices,
             vec![0],
             "filter 'auth' should match synopsis content"
+        );
+    }
+
+    #[test]
+    fn haystack_cache_does_not_pick_up_late_synopsis_updates() {
+        let mut picker = SessionPickerView::new();
+        let sessions = vec![make_session("S1", Some("Build fix"))];
+        let mut synopsis = SessionSynopsisProjection::new();
+        synopsis.insert_for_test(
+            spur_acp::SessionId("S1".into()),
+            SessionSynopsis {
+                first_user_msg: Some("alpha tag".into()),
+                last_user_msg: None,
+            },
+        );
+
+        picker.set_sessions("agent".into(), sessions, &synopsis);
+
+        synopsis.insert_for_test(
+            spur_acp::SessionId("S1".into()),
+            SessionSynopsis {
+                first_user_msg: Some("beta tag".into()),
+                last_user_msg: None,
+            },
+        );
+
+        set_filter(&mut picker, "alpha");
+        assert_eq!(
+            picker.visible_session_count(),
+            1,
+            "should still find session by cached 'alpha' haystack"
+        );
+
+        set_filter(&mut picker, "beta");
+        assert_eq!(
+            picker.visible_session_count(),
+            0,
+            "should not find session by late 'beta' synopsis update"
         );
     }
 }

@@ -459,7 +459,7 @@ fn populated_with_archived_shown() {
         vec![session("a1xxxxxx", "alpha-archived", "/tmp")],
         synopsis(),
     );
-    picker.toggle_show_archived(synopsis());
+    picker.toggle_show_archived();
     let expected: &[&str] = &[
         "Sessions (t) [showing archived]",
         "  Search",
