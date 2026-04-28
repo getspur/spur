@@ -212,6 +212,9 @@ impl StatusBar {
         let compact_line = Line::from(compact_spans);
         let compact_width = compact_line.width() as u16;
 
+        // SessionDetail has a dedicated hint area allocated separately below, so the
+        // 45-col reserve doesn't apply — fit metrics fully unless they exceed area.
+        // Other views render hints inline, so reserve space to keep them readable.
         let use_compact = if matches!(props.view, ViewId::SessionDetail(_)) {
             full_width > area.width
         } else {
