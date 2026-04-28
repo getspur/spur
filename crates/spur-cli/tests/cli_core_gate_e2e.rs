@@ -10,7 +10,9 @@
 //!   with a typed-error stderr message when the spawned binary's
 //!   gate denies `cli_core_license_activate`. This is the first
 //!   binary-level test that actually exercises the denial leg of
-//!   `require_feature` through the clap dispatch path.
+//!   `require_feature` through the clap dispatch path. The denial
+//!   fixture is the debug-only `SPUR_LICENSE_TEST_STRIP_KEYS` env
+//!   var (see `crates/spur-license/src/gate.rs::apply_test_strip_keys`).
 
 #![cfg(unix)]
 
@@ -46,7 +48,13 @@ fn spur_init_succeeds_on_default_community_tier() {
         .expect("spur binary builds")
         .current_dir(tmp.path())
         .env("PATH", "/usr/bin")
+        // Strip both dev-only env vars so a dev shell that has either
+        // set cannot perturb the snapshot. After the policy-gap fix,
+        // unknown DEV_PLAN values fall through to community, but
+        // explicit `pro` would still grant features beyond what the
+        // happy-path smoke wants to assert.
         .env_remove("SPUR_LICENSE_DEV_PLAN")
+        .env_remove("SPUR_LICENSE_TEST_STRIP_KEYS")
         .arg("init")
         .assert()
         .success();
@@ -55,23 +63,22 @@ fn spur_init_succeeds_on_default_community_tier() {
 #[test]
 fn spur_auth_login_exits_nonzero_when_cli_core_license_activate_denied() {
     // Plan C M0.5 — first true wiring assertion at the binary
-    // boundary. The dev-only `SPUR_LICENSE_DEV_PLAN=enterprise` env
-    // var forces the spawned `spur` to resolve an empty Enterprise
-    // tier (because the embedded policy currently has no `enterprise`
-    // block — see policy-gap follow-up doc). With zero features, the
-    // gate denies `cli_core_license_activate` and `spur auth login`
-    // exits non-zero before reaching the licenseseat provider.
+    // boundary. We strip `cli_core_license_activate` from the resolved
+    // community-tier feature set via the debug-only test hook
+    // `SPUR_LICENSE_TEST_STRIP_KEYS` (see
+    // `crates/spur-license/src/gate.rs::apply_test_strip_keys`).
+    // With the key stripped, the gate inside `auth::run`'s
+    // `login_inner` denies and `spur auth login` exits non-zero
+    // before reaching the licenseseat provider.
     //
-    // FIXTURE COUPLING: when policy-gap option B lands (embed
-    // `enterprise` = `@inherit:pro`), this approach stops producing
-    // an empty tier. Switch to a test-support strip-keys mechanism
-    // then. The test will fail loudly instead of silently passing
-    // because the gate would let `auth login` through and we'd hit
-    // a `NotConfigured` exit (still non-zero) but stderr would no
-    // longer name the gated key — the second assertion catches that.
+    // The hook is `#[cfg(debug_assertions)]`-gated so it cannot leak
+    // into release binaries. We also strip `SPUR_LICENSE_DEV_PLAN`
+    // so a dev-machine value doesn't perturb the snapshot before the
+    // strip applies (per the M0 init_ux fix pattern).
     let assert = Command::cargo_bin("spur")
         .expect("spur binary builds")
-        .env("SPUR_LICENSE_DEV_PLAN", "enterprise")
+        .env("SPUR_LICENSE_TEST_STRIP_KEYS", "cli_core_license_activate")
+        .env_remove("SPUR_LICENSE_DEV_PLAN")
         .args(["auth", "login", "--key", "irrelevant-fixture-key"])
         .assert()
         .failure();
