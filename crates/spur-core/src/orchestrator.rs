@@ -3620,6 +3620,15 @@ impl Orchestrator {
             )
         });
 
+        let config_options = session_response.config_options.clone().unwrap_or_default();
+        // M8.A: build the frozen-per-session capability cache from both
+        // the InitializeResponse (`AgentCapabilities`) and the
+        // NewSessionResponse (modes/models/config_options). Spec §6.1.
+        let spur_agent_caps = Some(Arc::new(spur_acp::SpurAgentCaps::new(
+            &init_response,
+            &session_response,
+        )));
+
         self.emit(SpurEvent::now(SpurEventBody::AgentSessionReady {
             session: session_id.clone(),
             acp_session_id: session_response.session_id.to_string(),
@@ -3627,10 +3636,9 @@ impl Orchestrator {
             resumed: false,
             cancel_mode: cancel_mode_for(brain_cfg.transport),
             fs_unsafe,
-            caps: None,
+            caps: spur_agent_caps.clone(),
         }));
 
-        let config_options = session_response.config_options.clone().unwrap_or_default();
         if !config_options.is_empty() {
             // Surface the initial cache so spur-tui can synthesize
             // advertised slash commands (e.g. /model, /effort) from
@@ -3640,14 +3648,6 @@ impl Orchestrator {
                 config_options: config_options.clone(),
             }));
         }
-
-        // M8.A: build the frozen-per-session capability cache from both
-        // the InitializeResponse (`AgentCapabilities`) and the
-        // NewSessionResponse (modes/models/config_options). Spec §6.1.
-        let spur_agent_caps = Some(Arc::new(spur_acp::SpurAgentCaps::new(
-            &init_response,
-            &session_response,
-        )));
 
         self.self_held.insert(brain_session_id.clone());
 
