@@ -1052,7 +1052,6 @@ impl SessionPickerView {
 /// boundary or `budget` graphemes, whichever comes first. Strips
 /// leading whitespace. Adds `…` when the cut shortened the text or
 /// when the budget is < 1.
-#[allow(dead_code)]
 pub(super) fn truncate_for_row(input: &str, budget: usize) -> String {
     use unicode_segmentation::UnicodeSegmentation;
 
@@ -1074,6 +1073,38 @@ pub(super) fn truncate_for_row(input: &str, budget: usize) -> String {
     let mut out: String = graphemes.iter().take(budget).copied().collect();
     out.push('\u{2026}');
     out
+}
+
+/// Resolve which label to render for a session-picker row. Precedence:
+/// title_override > first_user_msg > agent title > cwd basename >
+/// "(untitled session)". Empty strings are skipped at each tier.
+#[allow(dead_code)]
+pub(super) fn resolve_label(
+    session: &spur_acp::SessionInfo,
+    entry: Option<&crate::session_metadata::SessionEntry>,
+    synopsis: Option<&spur_core::SessionSynopsis>,
+    show_cwd: bool,
+    label_budget: usize,
+) -> String {
+    if let Some(t) = entry
+        .and_then(|e| e.title_override.as_deref())
+        .filter(|t| !t.is_empty())
+    {
+        return truncate_for_row(t, label_budget);
+    }
+    if let Some(snippet) = synopsis
+        .and_then(|s| s.first_user_msg.as_deref())
+        .filter(|s| !s.is_empty())
+    {
+        return truncate_for_row(snippet, label_budget);
+    }
+    if let Some(t) = session.title.as_deref().filter(|t| !t.is_empty()) {
+        return truncate_for_row(t, label_budget);
+    }
+    if show_cwd {
+        return format!("{}/", SessionPickerView::cwd_basename(&session.cwd));
+    }
+    "(untitled session)".to_string()
 }
 
 impl View for SessionPickerView {
@@ -1606,5 +1637,94 @@ mod truncate_tests {
     #[test]
     fn strips_leading_whitespace() {
         assert_eq!(truncate_for_row("   hello", 10), "hello");
+    }
+}
+
+#[cfg(test)]
+mod resolve_label_tests {
+    use super::*;
+    use crate::session_metadata::SessionEntry;
+    use spur_acp::SessionInfo;
+    use spur_core::SessionSynopsis;
+    use std::path::PathBuf;
+
+    fn info_with_title(title: Option<&str>) -> SessionInfo {
+        let mut info = SessionInfo::new("S1".to_string(), PathBuf::from("/tmp/proj"));
+        info.title = title.map(|t| t.to_string());
+        info
+    }
+
+    fn entry_with_override(t: Option<&str>) -> SessionEntry {
+        SessionEntry {
+            title_override: t.map(|s| s.to_string()),
+            ..SessionEntry::default()
+        }
+    }
+
+    fn synopsis_with_first(t: Option<&str>) -> SessionSynopsis {
+        SessionSynopsis {
+            first_user_msg: t.map(|s| s.to_string()),
+            last_user_msg: None,
+        }
+    }
+
+    #[test]
+    fn title_override_wins_over_everything() {
+        let info = info_with_title(Some("agent title"));
+        let entry = entry_with_override(Some("manual rename"));
+        let synopsis = synopsis_with_first(Some("first user msg"));
+        assert_eq!(
+            resolve_label(&info, Some(&entry), Some(&synopsis), false, 60),
+            "manual rename"
+        );
+    }
+
+    #[test]
+    fn first_user_msg_beats_agent_title_when_no_override() {
+        let info = info_with_title(Some("agent title"));
+        let entry = entry_with_override(None);
+        let synopsis = synopsis_with_first(Some("real intent"));
+        assert_eq!(
+            resolve_label(&info, Some(&entry), Some(&synopsis), false, 60),
+            "real intent"
+        );
+    }
+
+    #[test]
+    fn agent_title_used_when_no_synopsis() {
+        let info = info_with_title(Some("agent title"));
+        let entry = entry_with_override(None);
+        let synopsis = synopsis_with_first(None);
+        assert_eq!(
+            resolve_label(&info, Some(&entry), Some(&synopsis), false, 60),
+            "agent title"
+        );
+    }
+
+    #[test]
+    fn cwd_fallback_when_no_title_or_synopsis() {
+        let info = info_with_title(None);
+        let entry = entry_with_override(None);
+        assert_eq!(resolve_label(&info, Some(&entry), None, true, 60), "proj/");
+    }
+
+    #[test]
+    fn final_fallback_to_untitled_session() {
+        let info = info_with_title(None);
+        assert_eq!(
+            resolve_label(&info, None, None, false, 60),
+            "(untitled session)"
+        );
+    }
+
+    #[test]
+    fn empty_string_override_is_skipped() {
+        let info = info_with_title(Some("agent title"));
+        let entry = entry_with_override(Some(""));
+        let synopsis = synopsis_with_first(Some("first user msg"));
+        assert_eq!(
+            resolve_label(&info, Some(&entry), Some(&synopsis), false, 60),
+            "first user msg"
+        );
     }
 }
