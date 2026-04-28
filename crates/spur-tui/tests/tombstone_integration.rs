@@ -4,7 +4,7 @@
 use std::time::{Duration, Instant};
 
 use spur_core::ReviewDecision;
-use spur_tui::action::{Action, ViewId};
+use spur_tui::action::{Action, IssueAction, ViewId};
 use spur_tui::app::App;
 use spur_tui::components::input_bar::{EditMode, VimMode};
 use spur_tui::components::tombstone::{Tombstone, TombstoneKind};
@@ -29,6 +29,20 @@ fn reversible_tombstone(view: ViewId) -> Tombstone {
         label: "Archived 'foo'".into(),
         created_at: now,
         expires_at: now + Duration::from_secs(60),
+    }
+}
+
+fn issue_summary(id: &str, status: &str) -> spur_pm::IssueSummary {
+    spur_pm::IssueSummary {
+        id: id.into(),
+        source: spur_pm::PmSource::Beads,
+        title: "Fix bug".into(),
+        status: status.into(),
+        labels: vec![],
+        url: String::new(),
+        priority: None,
+        issue_type: None,
+        assignee: None,
     }
 }
 
@@ -269,5 +283,55 @@ fn rename_undo_restores_original_title() {
     assert!(matches!(
         app.last_action_for_test(),
         Some(Action::RenameSession { new_title, .. }) if new_title == "Old"
+    ));
+}
+
+#[test]
+fn tombstone_installs_on_issue_status_update_with_previous_status() {
+    let mut app = App::new_for_tests();
+    app.set_tracked_issues_for_test(vec![issue_summary("ISSUE-1", "open")]);
+    process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
+    process_action(
+        &mut app,
+        Action::Issue(IssueAction::UpdateStatus {
+            id: "ISSUE-1".into(),
+            status: "closed".into(),
+            via_legacy_key: false,
+        }),
+    );
+
+    let ts = app.tombstones_for_test().peek(&ViewId::IssueBrowser);
+    assert!(ts.is_some(), "tombstone must be installed");
+    match &ts.unwrap().kind {
+        TombstoneKind::Reversible { inverse } => {
+            assert!(matches!(
+                inverse,
+                Action::Issue(IssueAction::UpdateStatus { status, .. }) if status == "open"
+            ));
+        }
+        _ => panic!("expected Reversible"),
+    }
+}
+
+#[test]
+fn tombstone_issue_undo_restores_previous_status() {
+    let mut app = App::new_for_tests();
+    app.set_tracked_issues_for_test(vec![issue_summary("ISSUE-1", "open")]);
+    process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
+    process_action(
+        &mut app,
+        Action::Issue(IssueAction::UpdateStatus {
+            id: "ISSUE-1".into(),
+            status: "closed".into(),
+            via_legacy_key: false,
+        }),
+    );
+
+    app.handle_undo_for_test();
+
+    assert!(!app.tombstones_for_test().has(&ViewId::IssueBrowser));
+    assert!(matches!(
+        app.last_action_for_test(),
+        Some(Action::Issue(IssueAction::UpdateStatus { status, .. })) if status == "open"
     ));
 }

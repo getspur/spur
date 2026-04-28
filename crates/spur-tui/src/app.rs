@@ -666,6 +666,16 @@ impl App {
     }
 
     #[cfg(any(test, debug_assertions))]
+    pub fn set_tracked_issues_for_test(&mut self, issues: Vec<spur_pm::IssueSummary>) {
+        if self.issue_browser.is_none() {
+            self.issue_browser = Some(IssueBrowserView::new());
+        }
+        if let Some(browser) = self.issue_browser.as_mut() {
+            browser.set_issues_for_test(issues);
+        }
+    }
+
+    #[cfg(any(test, debug_assertions))]
     pub fn set_edit_mode_for_test(&mut self, mode: EditMode) {
         self.edit_mode = mode;
         self.dashboard.set_edit_mode(mode);
@@ -2761,12 +2771,44 @@ impl App {
                         status,
                         via_legacy_key,
                     } => {
-                        if via_legacy_key
+                        let show_legacy_close_hint = via_legacy_key
                             && status == "closed"
-                            && !self.legacy_issue_close_hint_shown
-                        {
-                            self.flash_hint_short(LEGACY_CLOSE_HINT);
+                            && !self.legacy_issue_close_hint_shown;
+                        if show_legacy_close_hint {
                             self.legacy_issue_close_hint_shown = true;
+                        }
+                        if !self.tombstone_undo_replay {
+                            let previous_status = self
+                                .issue_browser
+                                .as_ref()
+                                .and_then(|view| {
+                                    view.tracked_issues()
+                                        .iter()
+                                        .find(|issue| issue.id.as_str() == id.as_str())
+                                        .map(|issue| issue.status.clone())
+                                })
+                                .unwrap_or_else(|| "open".into());
+
+                            let label = format!("Issue '{}' → {}", id, status);
+                            let now = Instant::now();
+                            let inverse = Action::Issue(crate::action::IssueAction::UpdateStatus {
+                                id: id.clone(),
+                                status: previous_status,
+                                via_legacy_key: false,
+                            });
+                            self.tombstones.install(Tombstone {
+                                view: ViewId::IssueBrowser,
+                                kind: TombstoneKind::Reversible { inverse },
+                                label: label.clone(),
+                                created_at: now,
+                                expires_at: now + Duration::from_secs(60),
+                            });
+                            if !show_legacy_close_hint {
+                                self.flash_hint(
+                                    format!("{} — press u to undo", label),
+                                    Duration::from_secs(2),
+                                );
+                            }
                         }
                         if let Some(ref tx) = self.user_input_tx {
                             let _ = tx.try_send(UserInput::UpdateIssue {
@@ -2776,6 +2818,9 @@ impl App {
                                     ..Default::default()
                                 },
                             });
+                        }
+                        if show_legacy_close_hint {
+                            self.flash_hint_short(LEGACY_CLOSE_HINT);
                         }
                     }
                     crate::action::IssueAction::WorkOn { id } => {

@@ -50,7 +50,13 @@ fn x_triggers_close() {
     let (id, update) = next_update_issue(&mut rx);
     assert_eq!(id, "issue-1");
     assert_eq!(update.status.as_deref(), Some("closed"));
-    assert!(app.transient_hint_for_test().is_none());
+    assert!(app.tombstones_for_test().has(&ViewId::IssueBrowser));
+    assert!(app
+        .transient_hint_for_test()
+        .map(|hint| hint.text.as_str())
+        .is_some_and(
+            |text| text.contains("Issue 'issue-1' → closed") && text.contains("press u to undo")
+        ));
 }
 
 #[test]
@@ -62,6 +68,7 @@ fn d_triggers_close_with_deprecation_toast() {
     let (id, update) = next_update_issue(&mut rx);
     assert_eq!(id, "issue-1");
     assert_eq!(update.status.as_deref(), Some("closed"));
+    assert!(app.tombstones_for_test().has(&ViewId::IssueBrowser));
     assert_eq!(
         app.transient_hint_for_test().map(|hint| hint.text.as_str()),
         Some("d → close renamed to x")
