@@ -2862,9 +2862,12 @@ mod invalidate_protocols_tests {
             std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
         static PLAN_PROJECTION: std::sync::OnceLock<spur_core::PlanProjectionStore> =
             std::sync::OnceLock::new();
+        static SYNOPSIS: std::sync::OnceLock<spur_core::SessionSynopsisProjection> =
+            std::sync::OnceLock::new();
         crate::views::ViewContext {
             lineage: &LINEAGE,
             plan_projection: PLAN_PROJECTION.get_or_init(spur_core::PlanProjectionStore::new),
+            synopsis: SYNOPSIS.get_or_init(spur_core::SessionSynopsisProjection::new),
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
             flag_summary: None,
@@ -2973,9 +2976,12 @@ mod cancel_state_tests {
             std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
         static PLAN_PROJECTION: std::sync::OnceLock<spur_core::PlanProjectionStore> =
             std::sync::OnceLock::new();
+        static SYNOPSIS: std::sync::OnceLock<spur_core::SessionSynopsisProjection> =
+            std::sync::OnceLock::new();
         crate::views::ViewContext {
             lineage: &LINEAGE,
             plan_projection: PLAN_PROJECTION.get_or_init(spur_core::PlanProjectionStore::new),
+            synopsis: SYNOPSIS.get_or_init(spur_core::SessionSynopsisProjection::new),
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
             flag_summary: None,
@@ -3391,9 +3397,12 @@ mod composer_routing_tests {
             std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
         static PLAN_PROJECTION: std::sync::OnceLock<spur_core::PlanProjectionStore> =
             std::sync::OnceLock::new();
+        static SYNOPSIS: std::sync::OnceLock<spur_core::SessionSynopsisProjection> =
+            std::sync::OnceLock::new();
         crate::views::ViewContext {
             lineage: &LINEAGE,
             plan_projection: PLAN_PROJECTION.get_or_init(spur_core::PlanProjectionStore::new),
+            synopsis: SYNOPSIS.get_or_init(spur_core::SessionSynopsisProjection::new),
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
             flag_summary: None,
@@ -3466,9 +3475,12 @@ mod composer_routing_tests {
                 }));
                 store
             });
+        static SYNOPSIS: std::sync::LazyLock<spur_core::SessionSynopsisProjection> =
+            std::sync::LazyLock::new(spur_core::SessionSynopsisProjection::new);
         crate::views::ViewContext {
             lineage: &LINEAGE,
             plan_projection: &PLAN_PROJECTION,
+            synopsis: &SYNOPSIS,
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
             flag_summary: None,
@@ -3643,9 +3655,12 @@ mod tests {
             std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
         static PLAN_PROJECTION: std::sync::LazyLock<spur_core::PlanProjectionStore> =
             std::sync::LazyLock::new(spur_core::PlanProjectionStore::new);
+        static SYNOPSIS: std::sync::LazyLock<spur_core::SessionSynopsisProjection> =
+            std::sync::LazyLock::new(spur_core::SessionSynopsisProjection::new);
         crate::views::ViewContext {
             lineage: &LINEAGE,
             plan_projection: &PLAN_PROJECTION,
+            synopsis: &SYNOPSIS,
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
             flag_summary: None,
@@ -3802,9 +3817,12 @@ mod tests {
             std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
         static PLAN_PROJECTION: std::sync::OnceLock<spur_core::PlanProjectionStore> =
             std::sync::OnceLock::new();
+        static SYNOPSIS: std::sync::OnceLock<spur_core::SessionSynopsisProjection> =
+            std::sync::OnceLock::new();
         let ctx = crate::views::ViewContext {
             lineage: &LINEAGE,
             plan_projection: PLAN_PROJECTION.get_or_init(spur_core::PlanProjectionStore::new),
+            synopsis: SYNOPSIS.get_or_init(spur_core::SessionSynopsisProjection::new),
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
             flag_summary: None,
