@@ -60,26 +60,36 @@ Both signals come from a single live-write path on the existing event router
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│ Live event handler (existing event router)                       │
-│   on user_message_chunk      → write synopsis fields             │
-│   (no backfill, no async task, no log scan)                      │
+│ App (owner of metadata_store, app.rs:222)                        │
+│   process_spur_event(AgentNotification)                          │
+│     for each user_message_chunk:                                 │
+│       mutate metadata.sessions[id].synopsis in-memory            │
+│       mark synopsis_dirty[id] = true                             │
+│   coalesced flush to disk:                                       │
+│     - on turn-complete event                                     │
+│     - on 500ms idle tick (mirrors draft-debounce pattern         │
+│       in session_detail.rs:551-573)                              │
+│     - on App shutdown                                            │
+│   one persist_metadata call per flush, not per chunk             │
 └──────────────────────────────────────────────────────────────────┘
               │
               ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │ SessionMetadata.sessions[id].synopsis = Option<SessionSynopsis>  │
-│   persisted via existing debounced metadata save                 │
 └──────────────────────────────────────────────────────────────────┘
               ▲
-              │
+              │ read-only
 ┌──────────────────────────────────────────────────────────────────┐
-│ Render path (synchronous, zero I/O)                              │
+│ SessionPickerView (render path, synchronous, zero I/O)           │
 │   row label = resolve_label(session, entry)                      │
 │   preview   = build_preview(session, entry)                      │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-The render path never reads disk. The `synopsis` field IS the cache.
+The picker view **never writes** metadata. All synopsis mutation flows
+through App's existing `AgentNotification` handler. The picker holds an
+immutable reference to `SessionMetadata` for rendering only.
+
 Sessions with no live-write synopsis fall through to the existing
 agent-title path.
 
@@ -123,33 +133,54 @@ Not stored (cut during review):
 
 ## Live write path
 
-Hook into the existing event router that handles ACP `SessionUpdate` events
-(see Implementation note below for exact location). On each
-`user_message_chunk` for session `S`:
+Hook into App's existing `AgentNotification` handler (`app.rs:1388-1393`),
+which already inspects ACP `SessionUpdate` events for status. Add a
+synopsis-mutation arm:
 
 ```text
-text = chunk.content.text trimmed
-if text is empty: return
-entry = metadata.sessions.entry(S).or_default()
-synopsis = entry.synopsis.get_or_insert_with(SessionSynopsis::default)
+on AgentNotification with SessionUpdate::user_message_chunk:
+  text = chunk.content.text trimmed
+  if text is empty: return
+  entry = metadata.sessions.entry(S).or_default()
+  synopsis = entry.synopsis.get_or_insert_with(SessionSynopsis::default)
 
-if !text.starts_with('/') and synopsis.first_user_msg.is_none() {
-    synopsis.first_user_msg = Some(truncate_120(text))
-}
-synopsis.last_user_msg = Some(truncate_120(text))
-synopsis.last_msg_at   = Some(now_rfc3339())
-schedule_metadata_save()  // existing debounced save
+  if !text.starts_with('/') and synopsis.first_user_msg.is_none():
+      synopsis.first_user_msg = Some(truncate_120(text))
+  synopsis.last_user_msg = Some(truncate_120(text))
+  synopsis.last_msg_at   = Some(now_rfc3339())
+
+  app.synopsis_dirty.insert(S)   // marker, not a save
 ```
 
-Assistant chunks are ignored (we only care about user-authored content).
+Assistant chunks are ignored.
 
-The existing metadata save path is debounced, so per-keystroke chunks do not
-thrash disk.
+**Coalesced flush.** The existing metadata save path is *immediate*
+(`session_metadata.rs:373-379` performs a full-file JSON write + rename
+via `persist_metadata`, `app.rs:815-828`). The only real debounce in the
+codebase is for drafts, 500ms in `SessionDetailView`
+(`session_detail.rs:551-573`).
 
-**Implementation note:** the exact router location will be pinned during
-plan-writing. Candidates: `crates/spur-tui/src/app.rs` event-dispatch loop;
-or `crates/spur-tui/src/event_router.rs` if it exists. The router must
-hold (or be passed) `&mut SessionMetadata`.
+To avoid one full-file save per `user_message_chunk` (which can fire
+many times per second during streaming), synopsis mutations follow the
+same coalescing pattern as drafts:
+
+- Mutations are written in-memory immediately (so the picker reflects
+  current state if the user opens it mid-turn).
+- App tracks `synopsis_dirty: HashSet<SessionId>`.
+- Flush triggers (any one fires `persist_metadata` once for all dirty
+  ids):
+  1. `SessionUpdate` with `stop_reason` set (turn complete).
+  2. App tick observes `synopsis_dirty` non-empty and ≥ 500ms since the
+     last write attempt for that session.
+  3. App shutdown / cleanup path.
+
+The 500ms timer reuses App's existing tick infrastructure
+(`app.rs:2469-2477` for the draft pattern). No new tokio task or
+timer primitive is introduced.
+
+This matches codex's review prescription: "mutate in memory on
+`AgentNotification`, flush on turn/interval, batch backfill results,
+and perform one metadata save per batch."
 
 ## Row composition
 
@@ -290,11 +321,18 @@ or message types needed.
 ## Performance & invariants
 
 - **Synchronous render:** no I/O on the render path.
-- **No async tasks** introduced.
+- **No async tasks** introduced; coalesced flush rides App's existing tick.
 - **Single cache layer:** the `synopsis` field IS the cache.
 - **Truncation at write time:** stored value capped at 120 graphemes.
 - **Visible-height math unchanged:** all rows remain one line.
-- **Per-keystroke debounce reused:** existing metadata save path debounces.
+- **One save per coalesce window**, not per chunk. Worst case: an active
+  session with continuous streaming generates 2 saves/sec (500ms window),
+  not 50/sec.
+- **Filter haystack:** `filtered_indices` rebuilds the haystack per
+  candidate per call (`session_picker.rs:359-375`) and is invoked from
+  render and navigation paths (`session_picker.rs:659`,
+  `session_picker.rs:858-860`). Adding 240 chars per session per call is
+  probably fine at 200 sessions; benchmark before declaring.
 
 ## Error handling
 
@@ -322,6 +360,8 @@ or message types needed.
 | User changes their mind about the first message and wants to "reset" the synopsis | Low | The existing `R` rename flow already overrides via `title_override`, which has top precedence |
 | Preview becomes useless for sessions with no `user_message_chunk` ever (silent agents) | Low | Falls through to existing behavior — preview shows `cwd · brain · short_id` footer only |
 | Match-source hint adds visible noise on every filter | Medium | Only render when label substring miss; cap hint at one short fragment |
+| Filter widening blows nucleo budget on large session lists | Low | Benchmark `filtered_indices` at 200 / 500 sessions before merge; if hot, hoist haystack into `SessionEntry` cache or precompute per `set_sessions` call |
+| Coalesced flush window misses an in-flight crash | Low | 500ms loss is acceptable for synopsis (worst case: row label reverts to agent title until next live message). Drafts already accept this trade-off |
 
 ## Test surface
 
@@ -359,13 +399,13 @@ Manual QA checklist (terminal sizes):
 | Phase | LoC | Files touched |
 |---|---|---|
 | Data model + serde defaults | ~40 | `session_metadata.rs` |
-| Live-write hook in event router | ~50 | `app.rs` (or wherever the router lives) |
+| Live-write hook in App's `AgentNotification` handler + `synopsis_dirty` tracker + coalesced flush | ~80 | `app.rs` (`process_spur_event`, tick handler) |
 | `resolve_label` + `truncate_for_row` + label_budget plumbing | ~80 | `session_picker.rs` |
 | `PreviewContent` extension + new preview population | ~60 | `session_preview.rs`, `session_picker.rs` |
 | Filter widening + match-source hint | ~30 | `session_picker.rs` |
 | Tests (unit + snapshot) | ~250 | `session_picker.rs` (`#[cfg(test)]`), new fixtures |
 
-Total: ~510 LoC across 4 files. One implementation plan, no
+Total: ~540 LoC across 4 files. One implementation plan, no
 parallel-task decomposition needed.
 
 ## Open follow-ups (out of scope for this spec)
