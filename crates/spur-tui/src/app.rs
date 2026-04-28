@@ -2146,6 +2146,19 @@ impl App {
             }
 
             Action::ShowSessionCost => {
+                // M1.3 - Pro-tier demo gate: community users get the upgrade
+                // modal; Pro users see the per-project cost view.
+                if let Err(err) = spur_license::require_feature(
+                    &self.feature_gate,
+                    spur_license::FeatureKey::COST_PRO_PER_PROJECT_TRACKING,
+                ) {
+                    let required_tier = spur_license::upgrade_cta::required_tier_for(
+                        spur_license::FeatureKey::COST_PRO_PER_PROJECT_TRACKING,
+                    );
+                    self.process_action(Action::ShowUpgradeModal { err, required_tier });
+                    return;
+                }
+
                 if let Some(ref mut detail) = self.session_detail {
                     detail.push_cost_note();
                 }
@@ -4040,6 +4053,58 @@ mod brain_retired_tests {
             BrainStatus::Thinking,
             "brain_status must be unchanged on send failure (not forced to Idle)"
         );
+    }
+}
+
+#[cfg(test)]
+mod session_cost_gate_tests {
+    use super::*;
+    use spur_license::{FeatureGateError, FeatureKey, Plan, Tier};
+
+    #[test]
+    fn send_message_denied_by_feature_gate_opens_upgrade_modal() {
+        let mut app = App::new_for_tests();
+        app.feature_gate
+            .update_state(&spur_license::LicenseState::inactive("stripped for test"));
+
+        app.process_action(Action::SendMessage {
+            session: spur_acp::SessionId("session-1".to_string()),
+            blocks: Vec::new(),
+            interrupt: false,
+        });
+
+        let modal = app
+            .upgrade_modal
+            .as_ref()
+            .expect("denied send-message action must open upgrade modal");
+        assert_eq!(modal.required_tier, Some(Plan::Community));
+        match &modal.err {
+            FeatureGateError::Denied { key, tier } => {
+                assert_eq!(*key, FeatureKey::CLI_CORE_EXEC);
+                assert_eq!(*tier, Tier::Community);
+            }
+            other => panic!("unexpected feature gate error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn show_session_cost_denied_for_community_opens_pro_upgrade_modal() {
+        let mut app = App::new_for_tests();
+
+        app.process_action(Action::ShowSessionCost);
+
+        let modal = app
+            .upgrade_modal
+            .as_ref()
+            .expect("community session-cost action must open upgrade modal");
+        assert_eq!(modal.required_tier, Some(Plan::Pro));
+        match &modal.err {
+            FeatureGateError::Denied { key, tier } => {
+                assert_eq!(*key, FeatureKey::COST_PRO_PER_PROJECT_TRACKING);
+                assert_eq!(*tier, Tier::Community);
+            }
+            other => panic!("unexpected feature gate error: {other:?}"),
+        }
     }
 }
 
