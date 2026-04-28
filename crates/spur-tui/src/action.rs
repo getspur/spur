@@ -196,7 +196,7 @@ pub enum PermissionChoice {
 }
 
 /// Identifies which view is active.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ViewId {
     Dashboard,
     IssueBrowser,
