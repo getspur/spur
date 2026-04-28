@@ -8,13 +8,21 @@ use spur_context::AnalyticsEngine;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 fn repo_fixture(path: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(path)
 }
 
+/// Integration tests below manipulate process-global env vars
+/// (CLAUDE_CONFIG_DIR, CODEX_HOME, KIRO_HOME). Serialize them so
+/// parallel test execution doesn't interleave env writes and
+/// cause flaky view-creation failures.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
 #[test]
 fn real_fixtures_exercise_heterogeneous_views() -> Result<()> {
+    let _env_guard = ENV_LOCK.lock().unwrap();
     let temp = tempfile::tempdir()?;
 
     let claude_root = temp.path().join("claude-root");
@@ -51,7 +59,22 @@ fn real_fixtures_exercise_heterogeneous_views() -> Result<()> {
         engine
             .conn()
             .query_row("SELECT COUNT(*) FROM claude_events", [], |row| row.get(0))?;
-    assert_eq!(claude_count, 2, "assistant rows should survive the filter");
+    assert_eq!(
+        claude_count, 2,
+        "after dedup: two rows share requestId+message.id (collapsed to 1) + one unique = 2"
+    );
+
+    let raw_assistant_count: i64 = engine.conn().query_row(
+        "SELECT COUNT(*) FROM claude_raw
+         WHERE json_valid(line)
+           AND json_extract_string(line, '$.type') = 'assistant'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(
+        raw_assistant_count, 3,
+        "fixture has 3 assistant rows; dedup must reduce claude_events to 2"
+    );
 
     let codex_count: i64 =
         engine
@@ -65,8 +88,10 @@ fn real_fixtures_exercise_heterogeneous_views() -> Result<()> {
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-    assert_eq!(claude_input_sum, Some(12));
-    assert_eq!(claude_output_sum, Some(188));
+    // After dedup: earlier-timestamp row of the duplicate pair (input=6, output=8)
+    // survives; the distinct third row contributes (input=7, output=100).
+    assert_eq!(claude_input_sum, Some(13));
+    assert_eq!(claude_output_sum, Some(108));
 
     let codex_session_id: String =
         engine
@@ -88,6 +113,50 @@ fn real_fixtures_exercise_heterogeneous_views() -> Result<()> {
             .any(|model| model.as_deref() == Some("gpt-5.4")),
         "turn_context model should carry into codex token rows"
     );
+
+    Ok(())
+}
+
+#[test]
+fn session_detail_aggregates_across_models() -> Result<()> {
+    let _env_guard = ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir()?;
+    let claude_root = temp.path().join("claude-root");
+    let target = claude_root.join("projects/multi/fixture.jsonl");
+    fs::create_dir_all(target.parent().expect("multi fixture parent"))?;
+    fs::copy(
+        repo_fixture("tests/fixtures/multi_model_session.jsonl"),
+        &target,
+    )?;
+
+    let codex_empty = temp.path().join("codex-empty");
+    let kiro_empty = temp.path().join("kiro-empty");
+    fs::create_dir_all(&codex_empty)?;
+    fs::create_dir_all(&kiro_empty)?;
+
+    env::set_var("CLAUDE_CONFIG_DIR", &claude_root);
+    env::set_var("CODEX_HOME", &codex_empty);
+    env::set_var("KIRO_HOME", &kiro_empty);
+
+    let engine = AnalyticsEngine::open_in_memory()?;
+    engine.initialize()?;
+    engine.create_agent_views()?;
+
+    let detail = engine
+        .session_detail("multi-model-sess")?
+        .expect("session should be found");
+
+    // Two events across two models — session_detail must aggregate BOTH,
+    // not silently drop one model's bucket.
+    assert_eq!(
+        detail.input_tokens, 300,
+        "sum across both models (100 + 200)"
+    );
+    assert_eq!(
+        detail.output_tokens, 150,
+        "sum across both models (50 + 100)"
+    );
+    assert_eq!(detail.events, 2, "session spans 2 events across 2 models");
 
     Ok(())
 }

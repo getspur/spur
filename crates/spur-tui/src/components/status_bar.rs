@@ -5,11 +5,26 @@ use ratatui::{
     widgets::Paragraph,
     Frame,
 };
+#[cfg(feature = "analytics")]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::action::ViewId;
 use crate::components::tombstone::{Tombstone, TombstoneKind};
 
 pub struct StatusBar;
+
+#[cfg(feature = "analytics")]
+static VIA_ANALYTICS_VISIBLE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(feature = "analytics")]
+pub(crate) fn set_via_analytics_visible(visible: bool) {
+    VIA_ANALYTICS_VISIBLE.store(visible, Ordering::Relaxed);
+}
+
+#[cfg(feature = "analytics")]
+fn via_analytics_visible() -> bool {
+    VIA_ANALYTICS_VISIBLE.load(Ordering::Relaxed)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LicenseBadge {
@@ -290,6 +305,7 @@ impl StatusBar {
                 }
                 ViewId::SessionPicker => " [\u{2191}\u{2193}]navigate [Enter]select [Esc]back",
                 ViewId::PlanInspector(_) => " [Esc]back [Alt-p]close",
+                ViewId::Insights => "Insights",
                 #[cfg(feature = "markdown")]
                 ViewId::MermaidOverlay(_) => " [Esc]close",
             }
@@ -363,6 +379,16 @@ impl StatusBar {
         let tombstone_badge = render_tombstone_badge(props.tombstone, std::time::Instant::now());
         if !tombstone_badge.spans.is_empty() {
             spans.extend(tombstone_badge.spans);
+            spans.push(Span::styled(sep, Style::default().fg(Color::DarkGray)));
+        }
+        #[cfg(feature = "analytics")]
+        if via_analytics_visible() {
+            spans.push(Span::styled(
+                "via analytics",
+                Style::default()
+                    .fg(Color::LightBlue)
+                    .add_modifier(Modifier::BOLD),
+            ));
             spans.push(Span::styled(sep, Style::default().fg(Color::DarkGray)));
         }
         if let Some((active, total)) = props.flag_summary {

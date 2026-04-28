@@ -4,7 +4,11 @@ use std::time::{Duration, Instant};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use futures::StreamExt;
 use ratatui::Frame;
+#[cfg(feature = "analytics")]
+use tokio::sync::RwLock;
 use tokio::sync::{broadcast, mpsc};
+#[cfg(feature = "analytics")]
+use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use spur_acp::domain::events::BrainRetireReason;
@@ -251,6 +255,24 @@ fn compute_flag_summary() -> Option<(usize, usize)> {
 
 // ─── App state ─────────────────────────────────────────────────────────
 
+#[cfg(feature = "analytics")]
+pub struct LiveCostCache {
+    pub by_session: std::collections::HashMap<SessionId, f64>,
+    pub last_refresh: chrono::DateTime<chrono::Utc>,
+    pub last_error: Option<std::sync::Arc<anyhow::Error>>,
+}
+
+#[cfg(feature = "analytics")]
+impl Default for LiveCostCache {
+    fn default() -> Self {
+        Self {
+            by_session: std::collections::HashMap::new(),
+            last_refresh: chrono::Utc::now(),
+            last_error: None,
+        }
+    }
+}
+
 pub struct App {
     current_view: ViewId,
     dashboard: DashboardView,
@@ -282,6 +304,17 @@ pub struct App {
     pending_permission: Option<(spur_acp::types::PermissionRequest, std::time::Instant)>,
     /// Event-sourced projection of brain → executor lineage.
     lineage: ExecutorLineage,
+    #[cfg(feature = "analytics")]
+    analytics_engine: Option<spur_context::AsyncEngine>,
+    #[cfg(feature = "analytics")]
+    live_cost_cache: Option<std::sync::Arc<RwLock<LiveCostCache>>>,
+    #[cfg(feature = "analytics")]
+    live_cost_active_sessions:
+        Option<std::sync::Arc<RwLock<std::collections::HashSet<SessionId>>>>,
+    #[cfg(feature = "analytics")]
+    live_cost_signal_tx: Option<mpsc::Sender<()>>,
+    #[cfg(feature = "analytics")]
+    live_cost_handle: Option<JoinHandle<()>>,
     /// Durable plan snapshots keyed by session and plan id.
     plan_projection: PlanProjectionStore,
     synopsis: SessionSynopsisProjection,
@@ -440,10 +473,19 @@ impl App {
         let mermaid_picker = Picker::from_query_stdio().ok();
         #[cfg(feature = "markdown")]
         let (mermaid_tx, mermaid_rx) = tokio::sync::mpsc::unbounded_channel();
+        #[cfg(feature = "analytics")]
+        let live_cost_cache = std::sync::Arc::new(RwLock::new(LiveCostCache::default()));
+        #[cfg(feature = "analytics")]
+        let live_cost_active_sessions =
+            std::sync::Arc::new(RwLock::new(std::collections::HashSet::new()));
+        #[cfg(feature = "analytics")]
+        let dashboard = DashboardView::with_cache(live_cost_cache.clone());
+        #[cfg(not(feature = "analytics"))]
+        let dashboard = DashboardView::new();
 
         let mut app = Self {
             current_view,
-            dashboard: DashboardView::new(),
+            dashboard,
             session_detail: None,
             session_picker,
             plan_inspector: None,
@@ -463,6 +505,16 @@ impl App {
             pending_first_user_message: None,
             pending_permission: None,
             lineage: ExecutorLineage::new(),
+            #[cfg(feature = "analytics")]
+            analytics_engine: None,
+            #[cfg(feature = "analytics")]
+            live_cost_cache: Some(live_cost_cache),
+            #[cfg(feature = "analytics")]
+            live_cost_active_sessions: Some(live_cost_active_sessions),
+            #[cfg(feature = "analytics")]
+            live_cost_signal_tx: None,
+            #[cfg(feature = "analytics")]
+            live_cost_handle: None,
             plan_projection: PlanProjectionStore::new(),
             synopsis: SessionSynopsisProjection::new(),
             worker_streams: crate::worker_streams::WorkerStreams::new(),
@@ -520,6 +572,11 @@ impl App {
             app.show_user_warning(READ_ONLY_STARTUP_WARNING.to_string());
         }
         app.sync_dashboard_workers();
+        #[cfg(feature = "analytics")]
+        {
+            app.sync_live_cost_active_sessions();
+            app.spawn_live_cost_refresh();
+        }
 
         app.license_badge = license_badge_from_state(&app.license_state);
         app.flag_summary = compute_flag_summary();
@@ -1103,6 +1160,151 @@ impl App {
         self.dashboard.set_worker_snapshot(workers);
     }
 
+    #[cfg(feature = "analytics")]
+    fn sync_live_cost_active_sessions(&mut self) {
+        let active_sessions: std::collections::HashSet<SessionId> = self
+            .lineage
+            .nodes()
+            .filter(|node| {
+                matches!(
+                    node.phase,
+                    spur_core::LifecycleState::Running | spur_core::LifecycleState::Spawning
+                )
+            })
+            .filter_map(|node| {
+                node.current_attempt()
+                    .map(|attempt| attempt.session_id.clone())
+            })
+            .collect();
+
+        let changed = self
+            .live_cost_active_sessions
+            .as_ref()
+            .and_then(|shared| shared.try_write().ok())
+            .map(|mut guard| {
+                if *guard == active_sessions {
+                    false
+                } else {
+                    *guard = active_sessions;
+                    true
+                }
+            })
+            .unwrap_or(false);
+
+        if changed {
+            if let Some(tx) = &self.live_cost_signal_tx {
+                let _ = tx.try_send(());
+            }
+        }
+    }
+
+    #[cfg(feature = "analytics")]
+    fn spawn_live_cost_refresh(&mut self) {
+        if self.live_cost_handle.is_some() {
+            return;
+        }
+
+        let Some(engine) = self.analytics_engine.clone() else {
+            return;
+        };
+        let Some(cache) = self.live_cost_cache.clone() else {
+            return;
+        };
+        let Some(active_sessions) = self.live_cost_active_sessions.clone() else {
+            return;
+        };
+
+        let (signal_tx, mut signal_rx) = mpsc::channel(8);
+        self.live_cost_signal_tx = Some(signal_tx);
+        self.live_cost_handle = Some(tokio::spawn(async move {
+            loop {
+                let interval = {
+                    let guard = active_sessions.read().await;
+                    if guard.is_empty() {
+                        Duration::from_secs(30)
+                    } else {
+                        Duration::from_secs(5)
+                    }
+                };
+
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => {}
+                    opt = signal_rx.recv() => {
+                        if opt.is_none() {
+                            return;
+                        }
+                    }
+                }
+
+                let active_ids: Vec<SessionId> =
+                    active_sessions.read().await.iter().cloned().collect();
+                let refresh = engine.run(move |e| {
+                    let mut out = std::collections::HashMap::new();
+                    for sid in active_ids {
+                        if let Some(snapshot) = e.live_session_snapshot(&sid.0)? {
+                            out.insert(sid, snapshot.cost_usd);
+                        }
+                    }
+                    Ok(out)
+                });
+
+                // Timeout stops waiting; it does not cancel AsyncEngine's
+                // spawn_blocking closure, which will still run to completion.
+                let result = tokio::time::timeout(Duration::from_secs(30), refresh).await;
+                let mut guard = cache.write().await;
+                match result {
+                    Ok(Ok(costs)) => {
+                        guard.by_session = costs;
+                        guard.last_refresh = chrono::Utc::now();
+                        guard.last_error = None;
+                    }
+                    Ok(Err(error)) => {
+                        guard.last_error = Some(std::sync::Arc::new(error));
+                    }
+                    Err(_) => {
+                        guard.last_error = Some(std::sync::Arc::new(anyhow::anyhow!(
+                            "live cost refresh timed out (30s)"
+                        )));
+                    }
+                }
+            }
+        }));
+    }
+
+    #[cfg(feature = "analytics")]
+    fn via_analytics_visible_for_current_view(&self) -> bool {
+        let Some(cache) = &self.live_cost_cache else {
+            return false;
+        };
+        let Ok(guard) = cache.try_read() else {
+            return false;
+        };
+
+        match &self.current_view {
+            ViewId::Dashboard => {
+                if let Some(node_id) = self.dashboard.focused_node() {
+                    return self
+                        .lineage
+                        .node(node_id)
+                        .and_then(|node| node.current_attempt())
+                        .is_some_and(|attempt| {
+                            guard.by_session.contains_key(&attempt.session_id)
+                        });
+                }
+                self.lineage
+                    .nodes()
+                    .filter_map(|node| node.current_attempt())
+                    .any(|attempt| guard.by_session.contains_key(&attempt.session_id))
+            }
+            ViewId::SessionDetail(session) | ViewId::PlanInspector(session) => {
+                guard.by_session.contains_key(session)
+            }
+            #[cfg(feature = "markdown")]
+            ViewId::MermaidOverlay(session) => guard.by_session.contains_key(session),
+            ViewId::SessionPicker | ViewId::IssueBrowser | ViewId::Insights => false,
+        }
+    }
+
     fn show_user_warning(&mut self, message: String) {
         self.user_warning = Some(message);
         self.dirty = true;
@@ -1293,6 +1495,13 @@ impl App {
                     return;
                 }
 
+                if key.modifiers.contains(KeyModifiers::ALT)
+                    && matches!(key.code, KeyCode::Char('i'))
+                {
+                    self.process_action(Action::OpenInsights);
+                    return;
+                }
+
                 let ctx = crate::views::ViewContext {
                     lineage: &self.lineage,
                     plan_projection: &self.plan_projection,
@@ -1328,6 +1537,7 @@ impl App {
                         .issue_browser
                         .as_mut()
                         .and_then(|view| view.handle_key(key, &ctx)),
+                    ViewId::Insights => None,
                     #[cfg(feature = "markdown")]
                     ViewId::MermaidOverlay(_) => {
                         if let Some(viewer) = self.mermaid_viewer.as_mut() {
@@ -1412,6 +1622,7 @@ impl App {
                     }
                     ViewId::PlanInspector(_) => {}
                     ViewId::IssueBrowser => {}
+                    ViewId::Insights => {}
                     #[cfg(feature = "markdown")]
                     ViewId::MermaidOverlay(_) => {}
                 }
@@ -1614,6 +1825,7 @@ impl App {
                     }
                 }
             }
+            ViewId::Insights => {}
             #[cfg(feature = "markdown")]
             ViewId::MermaidOverlay(_) => {}
         }
@@ -1625,6 +1837,8 @@ impl App {
         // Always fold into the lineage projection first. The projection is a
         // pure function of the event stream — view code reads from it later.
         self.lineage.apply(&event);
+        #[cfg(feature = "analytics")]
+        self.sync_live_cost_active_sessions();
         self.plan_projection.apply(&event);
         self.synopsis.apply(&event);
 
@@ -2076,6 +2290,11 @@ impl App {
                     self.issue_browser = Some(IssueBrowserView::new());
                 }
                 self.current_view = ViewId::IssueBrowser;
+                self.dirty = true;
+            }
+
+            Action::OpenInsights | Action::NavigateTo(ViewId::Insights) => {
+                self.current_view = ViewId::Insights;
                 self.dirty = true;
             }
 
@@ -2820,6 +3039,8 @@ impl App {
                 ));
                 self.flash_hint_short("Sent.");
                 self.dirty = true;
+                #[cfg(feature = "analytics")]
+                self.sync_live_cost_active_sessions();
             }
 
             #[cfg(feature = "markdown")]
@@ -3253,6 +3474,7 @@ impl App {
                     view.tick();
                 }
             }
+            ViewId::Insights => {}
             #[cfg(feature = "markdown")]
             ViewId::MermaidOverlay(_) => {
                 // The underlying session detail continues receiving
@@ -3306,6 +3528,11 @@ impl App {
             transient_hint_override,
         };
 
+        #[cfg(feature = "analytics")]
+        crate::components::status_bar::set_via_analytics_visible(
+            self.via_analytics_visible_for_current_view(),
+        );
+
         match self.current_view.clone() {
             ViewId::Dashboard => {
                 self.dashboard
@@ -3331,6 +3558,7 @@ impl App {
                     view.render(frame, view_area, &ctx);
                 }
             }
+            ViewId::Insights => {}
             #[cfg(feature = "markdown")]
             ViewId::MermaidOverlay(ref session) => {
                 let session_matches = self
@@ -3394,6 +3622,15 @@ impl App {
 
         if let (Some(area), Some(message)) = (banner_area, self.user_warning.as_deref()) {
             render_user_warning(frame, area, message);
+        }
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        #[cfg(feature = "analytics")]
+        if let Some(handle) = self.live_cost_handle.take() {
+            handle.abort();
         }
     }
 }
@@ -3800,7 +4037,6 @@ impl App {
     }
 }
 
-#[cfg(test)]
 mod license_gate_refresh_tests {
     use super::*;
 
@@ -3854,6 +4090,20 @@ mod license_gate_refresh_tests {
         );
 
         assert_pro_cost_tracking_enabled(&app);
+    }
+}
+
+#[cfg(test)]
+mod insights_navigation_tests {
+    use super::*;
+
+    #[test]
+    fn alt_i_opens_insights_view() {
+        let mut app = App::new_for_tests();
+
+        app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT));
+
+        assert_eq!(app.current_view(), &ViewId::Insights);
     }
 }
 
