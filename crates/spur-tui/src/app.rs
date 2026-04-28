@@ -1367,8 +1367,13 @@ impl App {
                 resumed: _,
                 cancel_mode: _,
                 fs_unsafe: _,
-                caps: _,
+                caps,
             } => {
+                if let Some(ref mut detail) = self.session_detail {
+                    if detail.session_id() == session {
+                        detail.set_spur_agent_caps(caps.clone());
+                    }
+                }
                 self.metadata_store
                     .set_acp_mapping(&session.0, acp_session_id, brain);
                 self.persist_metadata("AgentSessionReady metadata");
