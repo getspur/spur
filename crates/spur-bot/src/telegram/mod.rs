@@ -6,6 +6,8 @@ pub mod render;
 pub mod router;
 pub mod sender;
 
+use std::time::Duration;
+
 pub async fn run_telegram_bot(
     cfg: &spur_acp::config::TelegramBotConfig,
     mut host: spur_interactive::InteractiveFrontendHost,
@@ -17,7 +19,15 @@ pub async fn run_telegram_bot(
     let mut perm_rx = host.take_permission_stream().expect("permission stream");
     let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(64);
     let mut runtime = crate::runtime::BotRuntime::new(crate::state::BotStateStore::new(state_path));
-    let client = client::TelegramClient::new(cfg.bot_token.as_deref().expect("validated"));
+    const RPC_TIMEOUT_SECS: u64 = 30;
+    let client = client::TelegramClient::new(
+        cfg.bot_token.as_deref().expect("validated"),
+        Duration::from_secs(RPC_TIMEOUT_SECS),
+    )?;
+    let poll_client = client::TelegramClient::new(
+        cfg.bot_token.as_deref().expect("validated"),
+        Duration::from_secs(cfg.poll_timeout_secs.saturating_add(10)),
+    )?;
     let sender =
         crate::telegram::sender::TelegramSender::new(client.clone(), cfg.max_requests_per_second);
     let cancellation = tokio_util::sync::CancellationToken::new();
@@ -30,7 +40,6 @@ pub async fn run_telegram_bot(
 
     let poll_cancellation = cancellation.clone();
     let cfg_poll_timeout = cfg.poll_timeout_secs;
-    let poll_client = client.clone();
     tokio::spawn(async move {
         let _ =
             poll_loop::run_poll_loop(&poll_client, cfg_poll_timeout, poll_cancellation, |batch| {
