@@ -10,7 +10,7 @@ use ratatui::{
     Frame,
 };
 
-use spur_acp::{DelegationStatus, SpurEvent, SpurEventBody};
+use spur_acp::{DelegationStatus, SessionId, SpurEvent, SpurEventBody};
 use spur_core::{ExecutorId, ExecutorLineage};
 
 use crate::action::{Action, ViewId};
@@ -89,6 +89,8 @@ pub struct DashboardView {
     example_index: usize,
     /// When the example prompt last rotated (for 8s auto-advance).
     example_last_rotated: Instant,
+    #[cfg(feature = "analytics")]
+    live_cost_cache: Option<std::sync::Arc<tokio::sync::RwLock<crate::app::LiveCostCache>>>,
 }
 
 /// Convert spur_acp mirror type back to spur_pm::Issue for TUI rendering.
@@ -174,7 +176,40 @@ impl DashboardView {
             ],
             example_index: 0,
             example_last_rotated: Instant::now(),
+            #[cfg(feature = "analytics")]
+            live_cost_cache: None,
         }
+    }
+
+    #[cfg(feature = "analytics")]
+    pub fn with_cache(
+        cache: std::sync::Arc<tokio::sync::RwLock<crate::app::LiveCostCache>>,
+    ) -> Self {
+        let mut view = Self::new();
+        view.live_cost_cache = Some(cache);
+        view
+    }
+
+    pub fn current_cost(&self, session_id: &SessionId, lineage: &ExecutorLineage) -> Option<f64> {
+        #[cfg(feature = "analytics")]
+        {
+            if let Some(cache) = &self.live_cost_cache {
+                if let Ok(guard) = cache.try_read() {
+                    if let Some(cost) = guard.by_session.get(session_id) {
+                        return Some(*cost);
+                    }
+                }
+            }
+        }
+
+        lineage.nodes().find_map(|node| {
+            let attempt = node.current_attempt()?;
+            if &attempt.session_id == session_id {
+                Some(attempt.cost_usd)
+            } else {
+                None
+            }
+        })
     }
 
     pub fn set_agents_configured(&mut self, configured: bool) {
@@ -503,7 +538,8 @@ impl DashboardView {
         let pending_review = lineage.pending_reviews().len();
         let total_cost: f64 = lineage
             .nodes()
-            .map(|n| n.current_attempt().map(|a| a.cost_usd).unwrap_or(0.0))
+            .filter_map(|n| n.current_attempt().map(|a| a.session_id.clone()))
+            .map(|session_id| self.current_cost(&session_id, lineage).unwrap_or(0.0))
             .sum();
         let elapsed = self.elapsed();
 
@@ -2184,5 +2220,77 @@ impl DashboardView {
     #[doc(hidden)]
     pub fn command_registry_for_test(&self) -> &crate::commands::CommandRegistry {
         &self.command_registry
+    }
+}
+
+#[cfg(all(test, feature = "analytics"))]
+mod live_cost_cache_tests {
+    use super::*;
+    use crate::app::LiveCostCache;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    fn sid(value: &str) -> spur_acp::SessionId {
+        spur_acp::SessionId(value.to_string())
+    }
+
+    fn cache_with(session_id: spur_acp::SessionId, cost: f64) -> Arc<RwLock<LiveCostCache>> {
+        Arc::new(RwLock::new(LiveCostCache {
+            by_session: HashMap::from([(session_id, cost)]),
+            last_refresh: chrono::Utc::now(),
+            last_error: None,
+        }))
+    }
+
+    fn lineage_with_cost(session_id: spur_acp::SessionId, cost: f64) -> ExecutorLineage {
+        let mut lineage = ExecutorLineage::new();
+        lineage.apply(&spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::WorkerSpawned {
+                agent: "codex".to_string(),
+                session: session_id.clone(),
+                worktree: std::path::PathBuf::new(),
+            },
+        ));
+        lineage.apply(&spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::CostUpdate {
+                session: session_id,
+                agent: "codex".to_string(),
+                estimated_cost_usd: cost,
+            },
+        ));
+        lineage
+    }
+
+    #[test]
+    fn dashboard_reads_from_live_cost_cache_when_present() {
+        let session_id = sid("abc");
+        let cache = cache_with(session_id.clone(), 4.21);
+        let dash = DashboardView::with_cache(cache);
+
+        assert_eq!(
+            dash.current_cost(&session_id, &ExecutorLineage::new()),
+            Some(4.21)
+        );
+    }
+
+    #[test]
+    fn dashboard_falls_through_to_lineage_when_cache_cold() {
+        let session_id = sid("xyz");
+        let cache = Arc::new(RwLock::new(LiveCostCache::default()));
+        let dash = DashboardView::with_cache(cache);
+        let lineage = lineage_with_cost(session_id.clone(), 2.10);
+
+        assert_eq!(dash.current_cost(&session_id, &lineage), Some(2.10));
+    }
+
+    #[test]
+    fn dashboard_falls_through_when_cache_session_missing() {
+        let session_id = sid("xyz");
+        let cache = cache_with(sid("other"), 4.21);
+        let dash = DashboardView::with_cache(cache);
+        let lineage = lineage_with_cost(session_id.clone(), 2.10);
+
+        assert_eq!(dash.current_cost(&session_id, &lineage), Some(2.10));
     }
 }
