@@ -48,10 +48,7 @@ fn enter_in_error_state_emits_refresh_sessions() {
 #[test]
 fn esc_in_error_state_navigates_back() {
     let mut picker = error_picker();
-    let action = picker.handle_key(
-        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        &test_ctx(),
-    );
+    let action = picker.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &test_ctx());
 
     assert!(
         matches!(action, Some(Action::NavigateTo(_))),

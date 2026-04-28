@@ -13,6 +13,7 @@ use spur_acp::{SessionInfo, SpurEvent};
 
 use crate::action::{Action, ViewId};
 use crate::components::status_bar::{HintOverride, StatusBar, StatusBarProps};
+use crate::components::tombstone::Tombstone;
 use crate::session_metadata::SessionMetadata;
 
 use super::View;
@@ -594,6 +595,7 @@ impl SessionPickerView {
         area: Rect,
         license_badge: Option<&crate::components::status_bar::LicenseBadge>,
         flag_summary: Option<(usize, usize)>,
+        tombstone: Option<&Tombstone>,
         view_hint_override: Option<HintOverride<'_>>,
     ) {
         let lines = vec![
@@ -626,6 +628,7 @@ impl SessionPickerView {
             chunks[1],
             StatusBarProps {
                 view: &ViewId::SessionPicker,
+                tombstone,
                 running: 0,
                 pending_review: 0,
                 total_cost: 0.0,
@@ -1063,6 +1066,7 @@ impl SessionPickerView {
                 chunks[status_idx],
                 StatusBarProps {
                     view: &ViewId::SessionPicker,
+                    tombstone: ctx.tombstone,
                     running: 0,
                     pending_review: 0,
                     total_cost: 0.0,
@@ -1108,15 +1112,11 @@ impl SessionPickerView {
         }
     }
 
-    fn render_error(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        message: &str,
-        license_badge: Option<&crate::components::status_bar::LicenseBadge>,
-        flag_summary: Option<(usize, usize)>,
-        view_hint_override: Option<HintOverride<'_>>,
-    ) {
+    fn render_error(&self, frame: &mut Frame, area: Rect, message: &str, ctx: &super::ViewContext) {
+        let license_badge = ctx.license_badge;
+        let flag_summary = ctx.flag_summary;
+        let tombstone = ctx.tombstone;
+        let view_hint_override = ctx.transient_hint_override;
         let lines = vec![
             Line::from(Span::styled(
                 "Sessions",
@@ -1148,6 +1148,7 @@ impl SessionPickerView {
             chunks[1],
             StatusBarProps {
                 view: &ViewId::SessionPicker,
+                tombstone,
                 running: 0,
                 pending_review: 0,
                 total_cost: 0.0,
@@ -1554,6 +1555,7 @@ impl View for SessionPickerView {
                 content_area,
                 ctx.license_badge,
                 ctx.flag_summary,
+                ctx.tombstone,
                 ctx.transient_hint_override,
             ),
             PickerState::Populated {
@@ -1576,14 +1578,7 @@ impl View for SessionPickerView {
                 *search_focused,
                 filter,
             ),
-            PickerState::Error { message } => self.render_error(
-                frame,
-                content_area,
-                message,
-                ctx.license_badge,
-                ctx.flag_summary,
-                ctx.transient_hint_override,
-            ),
+            PickerState::Error { message } => self.render_error(frame, content_area, message, ctx),
         }
     }
 
@@ -1613,6 +1608,7 @@ mod current_session_shortcut_tests {
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
             flag_summary: None,
+            tombstone: None,
             transient_hint_override: None,
         }
     }
@@ -1824,6 +1820,7 @@ mod preview_render_tests {
             brain_status: &brain_status,
             license_badge: None,
             flag_summary: None,
+            tombstone: None,
             transient_hint_override: None,
         };
 

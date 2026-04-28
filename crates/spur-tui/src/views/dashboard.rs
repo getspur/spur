@@ -20,6 +20,7 @@ use crate::components::detail_pane::{DetailPane, DetailTab};
 use crate::components::input_bar::{ActivityKind, EditMode, HandleOutcome, InputBar};
 
 use crate::components::status_bar::{HintOverride, StatusBar, StatusBarProps};
+use crate::components::tombstone::Tombstone;
 use crate::components::{LogEntry, LogEntryKind};
 use crate::input_history::InputHistoryEntry;
 
@@ -492,6 +493,32 @@ impl DashboardView {
         self.input_bar.has_active_animation()
     }
 
+    pub(crate) fn input_bar_active_non_empty(&self) -> bool {
+        self.mode == DashboardMode::Compose && !self.input_bar.is_empty()
+    }
+
+    pub(crate) fn completion_active(&self) -> bool {
+        self.completion.is_active()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn open_slash_picker_for_test(&mut self) {
+        self.mode = DashboardMode::Compose;
+        self.input_bar.set_text("/".to_string(), 1);
+        let env = crate::components::input_completion::CompletionEnv {
+            command_registry: &self.command_registry,
+            mention_registry: &self.mention_registry,
+            cwd: &self.cwd,
+            scope: crate::mentions::CompletionScope::PreSession,
+            session_config_options: &[],
+        };
+        self.completion.dispatch(
+            crate::components::completion_trigger::IntentEvent::TypedChar('/'),
+            &mut self.input_bar,
+            &env,
+        );
+    }
+
     /// Render the dashboard with access to the current lineage projection.
     pub fn render_with_lineage(
         &mut self,
@@ -503,6 +530,7 @@ impl DashboardView {
         let lineage = ctx.lineage;
         let license_badge = ctx.license_badge;
         let flag_summary = ctx.flag_summary;
+        let tombstone = ctx.tombstone;
         let view_hint_override = ctx.transient_hint_override;
         let node_count = lineage.nodes().count();
 
@@ -530,18 +558,12 @@ impl DashboardView {
                     area,
                     license_badge,
                     flag_summary,
+                    tombstone,
                     view_hint_override,
                 );
                 return;
             }
-            self.render_empty_splash(
-                frame,
-                area,
-                license_badge,
-                flag_summary,
-                lineage,
-                view_hint_override,
-            );
+            self.render_empty_splash(frame, area, lineage, ctx);
             return;
         }
 
@@ -621,6 +643,7 @@ impl DashboardView {
             chunks[status_chunk],
             StatusBarProps {
                 view: &ViewId::Dashboard,
+                tombstone,
                 running,
                 pending_review,
                 total_cost,
@@ -646,11 +669,13 @@ impl DashboardView {
         &mut self,
         frame: &mut Frame,
         area: Rect,
-        license_badge: Option<&crate::components::status_bar::LicenseBadge>,
-        flag_summary: Option<(usize, usize)>,
         lineage: &ExecutorLineage,
-        view_hint_override: Option<HintOverride<'_>>,
+        ctx: &super::ViewContext,
     ) {
+        let license_badge = ctx.license_badge;
+        let flag_summary = ctx.flag_summary;
+        let tombstone = ctx.tombstone;
+        let view_hint_override = ctx.transient_hint_override;
         let example = self
             .example_prompts
             .get(self.example_index)
@@ -730,6 +755,7 @@ impl DashboardView {
             chunks[2],
             StatusBarProps {
                 view: &ViewId::Dashboard,
+                tombstone,
                 running: 0,
                 pending_review: 0,
                 total_cost: 0.0,
@@ -757,6 +783,7 @@ impl DashboardView {
         area: Rect,
         license_badge: Option<&crate::components::status_bar::LicenseBadge>,
         flag_summary: Option<(usize, usize)>,
+        tombstone: Option<&Tombstone>,
         view_hint_override: Option<HintOverride<'_>>,
     ) {
         let input_height = self.input_bar.required_height(area.width);
@@ -876,6 +903,7 @@ impl DashboardView {
             chunks[2],
             StatusBarProps {
                 view: &ViewId::Dashboard,
+                tombstone,
                 running: 0,
                 pending_review: 0,
                 total_cost: 0.0,

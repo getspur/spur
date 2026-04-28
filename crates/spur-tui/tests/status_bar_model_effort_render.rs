@@ -31,6 +31,7 @@ fn render_status(
                 Rect::new(0, 0, width, 1),
                 StatusBarProps {
                     view: &view,
+                    tombstone: None,
                     running: 0,
                     pending_review: 0,
                     total_cost: 0.0,
