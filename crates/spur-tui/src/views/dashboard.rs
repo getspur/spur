@@ -1062,6 +1062,16 @@ impl DashboardView {
             }
             // ── Toggle observe collapsed (Stream tab) ─────────────────────
             KeyCode::Char('o')
+                if self.focused_node.is_some() && key.modifiers == KeyModifiers::CONTROL =>
+            {
+                if let Some(ref id) = self.focused_node.clone() {
+                    if let Some(trace) = worker_streams.get_mut(&id.0) {
+                        trace.toggle_observe_collapsed();
+                    }
+                }
+                None
+            }
+            KeyCode::Char('o')
                 if self.focused_node.is_some()
                     && !key
                         .modifiers
