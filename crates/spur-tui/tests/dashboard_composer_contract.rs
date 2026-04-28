@@ -409,6 +409,74 @@ fn vim_normal_review_tab_decision_routes_to_view() {
     assert_eq!(dashboard.input_bar_text_for_test(), "");
 }
 
+#[test]
+fn vim_normal_focused_node_o_toggles_observe_not_compose() {
+    // Regression: vim-Normal `o` on a focused detail-pane node must hit the
+    // observe-toggle binding, not be swallowed as vim's "open line below"
+    // into the input bar. The pre-fix routing consulted the vim
+    // compose-entry whitelist before `is_view_action_char`, making the
+    // observe binding unreachable in vim mode.
+    use spur_acp::{
+        ContentBlock, ContentChunk, Role, SessionId, SessionUpdate, SpurEvent, SpurEventBody,
+        TextContent,
+    };
+    use spur_core::{ExecutorId, ExecutorLineage};
+    use spur_tui::components::input_bar::{EditMode, VimMode};
+    use spur_tui::worker_streams::WorkerStreams;
+
+    let mut lineage = ExecutorLineage::new();
+    lineage.apply(&SpurEvent::now(SpurEventBody::ExecutorSpawned {
+        id: "e1".into(),
+        parent_id: None,
+        session_id: SessionId::new(),
+        agent: "claude".into(),
+        role: Role::Executor,
+        task_spec: "t".into(),
+    }));
+
+    let mut ws = WorkerStreams::new();
+    ws.route(
+        "e1",
+        "claude",
+        &SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+            TextContent::new("seed"),
+        ))),
+    );
+    let collapsed_before = ws.get("e1").expect("trace seeded").observe_collapsed();
+
+    let mut dashboard = DashboardView::new();
+    dashboard.set_edit_mode(EditMode::Vim(VimMode::Normal));
+    dashboard.set_focused_node(Some(ExecutorId::new("e1")));
+    // DetailPane defaults to DetailTab::Stream; no need to set explicitly.
+
+    let action = dashboard.handle_key_with_worker_streams(
+        KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
+        &lineage,
+        &mut ws,
+    );
+
+    assert!(
+        action.is_none(),
+        "vim-Normal `o` on focused node must not emit an action, got {:?}",
+        action
+    );
+    assert_eq!(
+        dashboard.input_bar_text_for_test(),
+        "",
+        "vim-Normal `o` on focused node must NOT route into the input bar"
+    );
+    assert_eq!(
+        dashboard.mode(),
+        DashboardMode::Navigate,
+        "vim-Normal `o` on focused node must NOT flip dashboard into Compose"
+    );
+    let collapsed_after = ws.get("e1").expect("trace").observe_collapsed();
+    assert_ne!(
+        collapsed_before, collapsed_after,
+        "vim-Normal `o` on focused node must toggle observe-collapsed on the trace"
+    );
+}
+
 // ── Page-wise navigation contract (PR1: counted-selection actions) ─────────
 //
 // These tests lock in the post-PR1 contract that PageUp/PageDown in the
