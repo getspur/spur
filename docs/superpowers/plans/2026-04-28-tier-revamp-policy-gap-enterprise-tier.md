@@ -1,5 +1,13 @@
 # Tier Revamp — Policy Gap: Embedded `enterprise` Tier Missing
 
+**Status:** ✅ RESOLVED 2026-04-28 (commit `1dfe4557`).
+The embedded signed policy now defines `community`, `pro`, `team`,
+and `enterprise` tier blocks. Team and Enterprise are placeholders
+that mirror Pro entitlements until product-spec'd feature deltas
+land (Plan E.h for Team; future tier-design pass for Enterprise).
+This doc is kept as the audit trail for the gap and the gap-fix
+process; do not delete.
+
 Date: 2026-04-28
 Filed during: Plan C M0 (wave C.1) execution
 Source: real-execution finding the M0 plan didn't anticipate
