@@ -27,221 +27,269 @@ Pressing any of these is **single-keystroke and irrevocable**. Codex's review el
 
 ## 1. Goal
 
-Provide either undo or pre-action confirmation (via configuration) for every key that durably mutates external state, without forcing users into a click-heavy workflow. After this work:
+Provide a single, uniform safety net for every key that durably mutates external state — locally OR remotely — using a Gmail-toast-style tombstone. After this work:
 
-- Every destructive action either produces an undo entry OR shows a one-keystroke confirmation, governed by a config setting.
-- Default mode is "soft confirm" — destructive keys flash an inline "press X again to confirm" hint that auto-clears.
-- An "undo stack" tracks the last N reversible actions per view; `u` (vim) or `Ctrl+Z` (emacs) reverts the most recent.
+- Every destructive action commits (or queues, for remote) immediately and shows a toast: `"Archived 'foo'. Press u to undo (60s)"` or `"Approving… Press u to revert (3s)"`.
+- One tombstone slot per view; the most-recent destructive action is always reversible.
+- Pressing `u` (vim) / `Ctrl+Z` (emacs) reverses the action OR cancels the queued network dispatch.
+- No config toggles. No pre-action confirm prompts. The toast IS the confirmation.
+
+This design replaces the original spec's per-view UndoStack + ConfirmState dual system. The L9 UX synthesis (round 1–7 sequential thinking, 2026-04-28) determined that the dual system was over-engineered for SPUR's actual destructive surface (only 2 reversible action families and 4 review-submit actions today) and that the Gmail toast pattern is a better mental-model fit for low-frequency destructive ops in productivity tools.
 
 ## 2. Non-goals
 
-- **No general text-input undo.** tui-textarea may have undo support; if so, expose `u`/`Ctrl+Z` in input bar — but that's a separate small task. This spec is about state-mutation undo.
-- **No undo for actions that are inherently destructive at a remote.** "Submit review Approve" sends a message to the agent; once delivered, no client-side undo can call it back. Those get the confirm UX, not the undo UX.
-- **No undo across sessions/restarts.** Undo stack is in-memory only.
-- **No multi-step undo replay** ("undo the last 5 actions"). Single-step `u`.
-- **No redo.** Single-direction undo. `Ctrl+r` for redo is a future ADR.
-- **No transactional batching** ("group these 3 actions; undo as one"). Each action is its own undo entry.
+- **No general text-input undo.** tui-textarea may have undo support; if so, expose via input_bar — that's a separate small task. This spec is about state-mutation undo.
+- **No undo across sessions / restarts.** Tombstone is in-memory only.
+- **No multi-step undo replay.** Single tombstone slot per view; the previous tombstone is gone the moment a new destructive action displaces it.
+- **No redo.** Single-direction undo. Future ADR if needed.
+- **No transactional batching.** Each action is its own tombstone entry.
+- **No config toggle.** No `[tui.destructive]`. The behavior is the behavior. (Gemini's spec review BLOCK on the config toggle was correct.)
+- **No pre-action confirm prompts.** No `"Press X again to confirm"`. The post-action toast covers the same UX surface without friction tax in the happy path.
 
 ## 3. Background — taxonomy of mutations
 
-| Mutation class | Examples | Reversible? | UX |
+| Mutation class | Examples | Local-reversible? | Tombstone behavior |
 |---|---|---|---|
-| Local-only state toggle | pin/unpin session, archive session | YES (write opposite) | undo stack |
-| Local-only status set | issue status → open/in_progress/blocked/closed | YES (write previous status) | undo stack |
-| Remote-trigger (irrevocable) | submit review Approve/Reject/Modify, send message, cancel stream | NO | confirm prompt |
-| External resource (irrevocable) | spawn WorkOn session (subprocess) | NO | confirm prompt |
+| Local toggle | session pin, session archive | YES — write opposite | 60s window; commit immediately, `u` reverses |
+| Local status set | issue status → open/in_progress/blocked/closed | YES — restore previous | 60s window; commit immediately, `u` reverses |
+| Remote-trigger irrevocable | submit review Approve/Reject/Modify/Retry | NO once dispatched | 3s client-side queue; `u` cancels queue; after 3s dispatches |
+| External resource | spawn WorkOn session (subprocess) | NO once spawned | 3s client-side queue; `u` cancels queue |
+| Stream-cancel | SessionDetail first-Esc cancels in-flight stream | already-irrevocable | covered by quick-fixes spec §4.9 (one-shot hint), NOT in this spec |
+| Send message | composer Submit | irrevocable to agent once on the wire | NOT covered by this spec — message-send is a primary user intent and adding tombstone friction breaks chat flow. Future ADR if needed. |
 
-The reversible class gets undo. The irrevocable class gets one-keystroke "press X again within 2s to confirm".
+All five rows in this spec's scope (rows 1–4) get the same tombstone UX. Local-reversible has a 60s window; remote-irrevocable uses a 3s client-queue window. The user sees the same toast pattern either way.
 
 ## 4. Design
 
-### 4.1 Config setting
+### 4.1 Tombstone data model
 
-```toml
-[ui.destructive]
-# "undo": for reversible actions, no confirm prompt; one undo stack per view.
-# "confirm": confirm prompt before EVERY destructive action.
-# "off": no confirm, no undo. Power-user mode.
-default = "undo"
-```
-
-Default is `undo`. `confirm` is the safest. `off` matches today's behavior.
-
-### 4.2 Undo stack — reversible actions
+One tombstone slot per view. Hosted on the App.
 
 ```rust
-pub struct UndoEntry {
+pub struct Tombstone {
     pub view: ViewId,
-    pub action_label: String,    // "Archived session 'foo'"
-    pub revert: Box<dyn FnOnce(&mut AppState)>,  // closure to undo
-    pub timestamp: Instant,
+    pub kind: TombstoneKind,
+    pub label: String,        // shown in toast: "Archived 'foo'"
+    pub created_at: Instant,
+    pub expires_at: Instant,  // created_at + window
 }
 
-pub struct UndoStack {
-    entries: VecDeque<UndoEntry>,
-    cap: usize,  // default 10
+pub enum TombstoneKind {
+    /// Action already committed locally. `u` dispatches the inverse action
+    /// through the normal process_action path so backend writes are routed
+    /// the same as the original mutation (codex's spec review:
+    /// closure-based revert breaks for beads-backed status changes).
+    Reversible { inverse: Action },
+
+    /// Action is queued; will dispatch at expires_at unless `u` cancels.
+    /// `u` cancels: drop the action, never dispatch.
+    /// Expiry: dispatch the action via process_action.
+    QueuedRemote { pending: Action },
 }
 
-impl UndoStack {
-    pub fn push<F: FnOnce(&mut AppState) + 'static>(
-        &mut self,
-        view: ViewId,
-        label: impl Into<String>,
-        revert: F,
-    ) { /* ... */ }
-
-    pub fn pop_for_view(&mut self, view: ViewId) -> Option<UndoEntry> { /* ... */ }
-}
-```
-
-Each reversible-class action push:
-
-```rust
-// session_picker.rs, on x/d archive:
-let prev_archived = current_archived_state(&session_id);
-app_state.toggle_archive(&session_id);
-undo_stack.push(
-    ViewId::SessionPicker,
-    format!("archived '{}'", session_label),
-    move |st| st.set_archived(&session_id, prev_archived),
-);
-```
-
-Undo binding (per view):
-- Vim Normal: `u` → pop most recent entry for current view, run revert closure, status hint: `"undid: archived 'foo'"`.
-- Emacs / not-vim: `Ctrl+Z`.
-
-If stack is empty: status hint `"nothing to undo"`.
-
-### 4.3 Confirm prompt — irrevocable actions
-
-For actions where revert is impossible (or remote), display a one-shot inline hint:
-
-```
-[Review] Approve · press A again within 2s to confirm
-```
-
-State machine in the view:
-```rust
-enum ConfirmState {
-    Idle,
-    Pending { key: KeyCode, action: Action, deadline: Instant },
+pub struct TombstoneSlots {
+    /// One slot per view. Keys ARE limited — Dashboard, SessionDetail,
+    /// SessionPicker, IssueBrowser, PlanInspector. MermaidViewer has no
+    /// destructive ops.
+    by_view: HashMap<ViewId, Tombstone>,
 }
 ```
 
-First press of `A` (Approve): set Pending, render hint.
-Second press of same key within 2s: emit action, clear state.
-Different key OR timeout: clear state silently.
+### 4.2 Behavior — reversible actions (60s window)
 
-This is the same UX pattern as `Ctrl+C`/`Ctrl+Q` quit-confirm.
+When a reversible-class key fires (e.g. SessionPicker `x` archive):
+
+1. **Commit immediately** through the normal action path. Backend write happens. UI updates.
+2. **Capture the inverse `Action`** (e.g. for "archived 'foo'" the inverse is `Action::ToggleSessionArchive { session_id }` — same action variant since it toggles).
+3. **Install tombstone** on `TombstoneSlots[ViewId::SessionPicker]` with `expires_at = now + 60s`. Replaces any prior tombstone for that view.
+4. **Render toast**: `"Archived 'foo'. Press u to undo (60s)"` in the hint slot. Toast updates the countdown each render.
+5. **`u` keystroke** (vim Normal or Emacs `Ctrl+Z`) within window: pop tombstone, dispatch `kind.inverse` through `process_action`, render `"Undid: archived 'foo'"` for 1s, clear hint.
+6. **Window expires**: tombstone evicted, toast clears. Action is finalized.
+7. **View change**: tombstone evicted (action committed). Per-view persistence — switching views doesn't carry the slot.
+8. **Triple-Esc panic** (quick-fixes T2.9): all tombstones cleared without dispatching anything. (Reversible has already committed; panic just stops the user undoing it. Acceptable — they pressed panic, they wanted out.)
+
+### 4.3 Behavior — irrevocable network actions (3s queue window)
+
+When an irrevocable-class key fires (e.g. Dashboard Review `A` for Approve):
+
+1. **DO NOT dispatch yet.** Capture the `Action` value into a `TombstoneKind::QueuedRemote { pending }`.
+2. **Install tombstone** on `TombstoneSlots[ViewId::Dashboard]` with `expires_at = now + 3s`. Replaces any prior tombstone for the view.
+3. **Render toast**: `"Approving… Press u to revert (3s)"` in the hint slot.
+4. **`u` keystroke within 3s**: drop the tombstone WITHOUT dispatching. Render `"Cancelled: Approve"` for 1s. Action never went anywhere.
+5. **Window expires (3s elapsed without `u`)**: dispatch `pending` through `process_action`. Toast updates to `"Sent."` for 1s, then clears.
+6. **User presses ANOTHER destructive key (e.g. another `A` on the next review)**: the new action displaces the current tombstone — Q1 dispatches IMMEDIATELY (before its 3s expires) so Q2 can take the slot. Toast for Q2 shows. **Zero friction tax for power-user rapid-approve flows** — the user just keeps pressing keys, the queue auto-flushes.
+7. **View change**: same as (6) — current tombstone dispatches immediately so it doesn't get stranded.
+8. **Triple-Esc panic**: tombstone CANCELLED without dispatching. This is the user's escape hatch from a queued action they regret AND can't reach `u` for.
 
 ### 4.4 Coverage map
 
-| Action | Class | UX |
-|---|---|---|
-| SessionPicker archive (`x`/`d`) | reversible | undo stack |
-| SessionPicker pin (`p`) | reversible | undo stack (toggle) |
-| SessionPicker rename | reversible | undo stack (restore prev title) |
-| IssueBrowser status set | reversible | undo stack (restore prev status) |
-| IssueBrowser WorkOn (`W`) | irrevocable | confirm prompt |
-| Dashboard Review Approve (`A`) | irrevocable | confirm prompt |
-| Dashboard Review Reject (`D`) | irrevocable | confirm prompt |
-| Dashboard Review Modify (`M`) | irrevocable | confirm prompt |
-| Dashboard Review Retry (`R`) | irrevocable | confirm prompt |
-| SessionDetail Esc-cancel-stream | irrevocable | hint after-the-fact (already covered in quick-fixes spec §4.9) |
+| Action | Class | Window | Notes |
+|---|---|---|---|
+| SessionPicker archive (`x`, deprecated `d`) | reversible | 60s | Inverse: same toggle action |
+| SessionPicker pin (`p`) | reversible | 60s | Inverse: same toggle action |
+| SessionPicker rename | reversible | 60s | Inverse: `Action::RenameSession { new = previous_title }` |
+| IssueBrowser status set (`o`/`w`/`b`/`d`/`x`/`W`) | reversible | 60s | Inverse: `Action::SetIssueStatus { previous_status }` |
+| Dashboard Review Approve (`A`) | irrevocable | 3s queue | Network dispatch deferred 3s |
+| Dashboard Review Reject (`D`) | irrevocable | 3s queue | Same |
+| Dashboard Review Modify (`M`) | irrevocable | 3s queue | Same |
+| Dashboard Review Retry (`R`) | irrevocable | 3s queue | Same |
 
-**Carve-out**: review submit can also be configured to skip confirm if `[ui.review.confirm = false]`. Reviewers may prefer fast workflow.
+Out of scope: composer Submit (chat send), SessionDetail Esc-cancel-stream (quick-fixes §4.9 covers), `WorkOn` session spawn (separate decision — acceptable to confirm via leader sequence later).
 
-### 4.5 Hint rendering
+### 4.5 Inverse-action dispatch (codex's amendment)
 
-Both undo confirmations and confirm prompts use the existing one-shot status-hint slot in the input-bar area (same slot that displays "Esc cancelled the active turn" from quick-fixes §4.9). One slot, one hint at a time. Newer hints overwrite older.
+The inverse goes through `process_action`, NOT a captured closure. Codex's spec review caught that issue-status undo isn't an in-memory op — it must hit beads, handle failure, and refresh the issue list. Closure-based revert can't express that without re-implementing every mutation path inside the closure.
 
-### 4.6 Implementation surface
-
-- New module: `crates/spur-tui/src/components/undo.rs`
-- New struct in `App`: `undo_stack: UndoStack`
-- New struct in views: `confirm_state: ConfirmState`
-- Per-view key handlers gain a "first invoke confirm; second invoke real" wrapper.
-
-A small helper:
+Concrete:
 
 ```rust
-fn confirm_or_dispatch(
-    state: &mut ConfirmState,
-    key: KeyCode,
-    action: Action,
-    setting: DestructivePolicy,
-) -> Option<Action> {
-    if setting == DestructivePolicy::Off {
-        return Some(action);
-    }
-    match state {
-        ConfirmState::Pending { key: pk, .. }
-            if *pk == key
-                && state.deadline > Instant::now() => {
-            *state = ConfirmState::Idle;
-            Some(action)
+// IssueBrowser, on status-set keystroke 'o' (issue → open):
+let previous_status = current_issue_status(&issue_id);
+let inverse = Action::SetIssueStatus { issue_id, status: previous_status };
+self.tombstones.install(ViewId::IssueBrowser, Tombstone {
+    view: ViewId::IssueBrowser,
+    kind: TombstoneKind::Reversible { inverse },
+    label: format!("issue '{}' → open", issue_label),
+    created_at: now, expires_at: now + Duration::from_secs(60),
+});
+// THEN dispatch the original Action::SetIssueStatus { status: Open } via process_action.
+```
+
+If the inverse dispatch FAILS at backend (e.g. beads write error), the toast updates to `"Undo failed: <error>; original action stands"`. The user sees their request was rejected.
+
+### 4.6 `u` / `Ctrl+Z` keystroke handler
+
+```rust
+fn handle_undo(app: &mut App) -> Option<Action> {
+    let view = app.current_view();
+    let Some(tombstone) = app.tombstones.evict(view) else {
+        app.flash_hint("nothing to undo");
+        return None;
+    };
+    match tombstone.kind {
+        TombstoneKind::Reversible { inverse } => {
+            app.flash_hint(format!("Undid: {}", tombstone.label));
+            Some(inverse)  // dispatched through normal process_action
         }
-        _ => {
-            *state = ConfirmState::Pending {
-                key,
-                action: action.clone(),
-                deadline: Instant::now() + Duration::from_secs(2),
-            };
-            // Status hint set elsewhere via state observer
-            None
+        TombstoneKind::QueuedRemote { pending: _ } => {
+            app.flash_hint(format!("Cancelled: {}", tombstone.label));
+            None  // queued action dropped; never dispatched
         }
     }
 }
 ```
+
+Bound at the app level so `u` from vim Normal and `Ctrl+Z` from Emacs both route here. The handler is gated on `is_vim_normal() && view_owner` (vim) or `Ctrl+Z + view_owner` (emacs).
+
+### 4.7 Tombstone tick driver
+
+Tombstones expire on a wall-clock basis. The TUI tick loop calls `app.tombstones.tick(now)` once per frame:
+
+```rust
+impl TombstoneSlots {
+    pub fn tick(&mut self, now: Instant) -> Vec<Action> {
+        let mut to_dispatch = Vec::new();
+        self.by_view.retain(|_view, ts| {
+            if now >= ts.expires_at {
+                if let TombstoneKind::QueuedRemote { pending } = &ts.kind {
+                    to_dispatch.push(pending.clone());
+                }
+                false  // drop
+            } else {
+                true  // keep
+            }
+        });
+        to_dispatch
+    }
+}
+```
+
+Returned actions are dispatched by `App` via `process_action` after the retain pass. This keeps the tombstone slot pure-data and dispatch out-of-band.
+
+### 4.8 Hint-slot integration
+
+Tombstone toast renders into the bottom-of-view single-line hint slot. Per quick-fixes §6.3, slot priority (highest first):
+
+1. Panic-Esc reset confirmation (1s flash)
+2. Tombstone toast ← **this spec**
+3. Leader-menu inline preview
+4. Esc-cancel-stream hint
+5. General status
+
+So a tombstone toast yields immediately to a panic-reset, but otherwise shows for its full window.
+
+### 4.9 What this design intentionally doesn't do
+
+- **Multiple tombstones per view**: rejected. Single slot keeps mental model simple ("u undoes my last action") and keeps memory bounded.
+- **Cross-view undo navigation**: rejected. Per-view isolation matches user mental model — you undo what you just did in the place you did it.
+- **Persistent tombstone across sessions**: rejected. 60s window assumes the user is paying attention; longer than that, the action is finalized. Restart = fresh slate.
+- **Configurable window length**: rejected. 60s and 3s are calibrated for the action classes. Don't expose tuning knobs that erode the mental model.
+- **Confirmation prompt fallback**: rejected (gemini's BLOCK was right). The toast is the confirmation. Adding "press X again to confirm" on top of the queue window would double-tax users.
 
 ## 5. Test plan
 
 | Test name | Scenario | Asserts |
 |---|---|---|
-| `undo_stack_pushes_on_archive` | SessionPicker `x` | stack has one entry, label includes session name |
-| `undo_stack_revert_restores_state` | archive + `u` | session unarchived; stack empty for view |
-| `undo_stack_per_view_isolation` | archive in picker, switch to dashboard, press `u` | nothing to undo (different view stack) |
-| `undo_stack_capped` | 11 archives | only 10 in stack; oldest evicted |
-| `confirm_prompt_first_press_doesnt_dispatch` | Review `A` once | no `SubmitReview` action emitted |
-| `confirm_prompt_second_press_within_window_dispatches` | Review `A`, `A` within 1s | `SubmitReview { Approve }` emitted |
-| `confirm_prompt_timeout_clears_state` | Review `A`, wait 3s, `A` | first press of second `A` re-enters pending; no double-dispatch |
-| `confirm_prompt_different_key_clears` | Review `A`, then `D` | `D` re-enters pending; no Approve |
-| `policy_off_skips_confirm` | config `destructive = "off"` + Review `A` | Approve emits on first press |
-| `policy_confirm_applies_to_reversible_too` | config `destructive = "confirm"` + archive | first `x` shows confirm; second `x` archives |
+| `tombstone_installs_on_archive_with_60s_window` | SessionPicker `x` | tombstone present for SessionPicker; `expires_at == created_at + 60s`; toast text includes session name |
+| `tombstone_undo_dispatches_inverse_action` | archive + `u` within window | `Action::ToggleSessionArchive` re-dispatched; tombstone evicted; toast `"Undid: …"` |
+| `tombstone_undo_failure_surfaces_error` | issue status set + `u` + simulated beads write failure | toast updates to `"Undo failed: …; original action stands"`; tombstone evicted |
+| `tombstone_window_expiry_finalizes` | archive + wait 61s | tombstone evicted via tick; `u` after expiry → `"nothing to undo"` |
+| `tombstone_per_view_isolation` | archive in SessionPicker; switch to Dashboard; press `u` | Dashboard tombstone empty; SessionPicker tombstone evicted on view-change |
+| `tombstone_replaces_on_new_destructive_action` | archive A; archive B 1s later | A's tombstone evicted; B's tombstone shown; `u` undoes B only |
+| `tombstone_remote_queue_dispatches_after_3s` | Review `A`; tick clock 3s | `Action::SubmitReview { Approve }` dispatched once via process_action; toast updates to `"Sent."` |
+| `tombstone_remote_queue_cancel_via_u` | Review `A`; press `u` within 3s | `Action::SubmitReview` NEVER dispatched; toast `"Cancelled: Approve"` |
+| `tombstone_remote_queue_displaced_by_next_action_dispatches_immediately` | Review `A`, then `D` 1s later | A dispatched immediately when D queued; D's tombstone shown |
+| `tombstone_view_change_flushes_remote_queue` | Review `A`; navigate to PlanInspector | A dispatched immediately; no orphan tombstone |
+| `tombstone_panic_esc_cancels_remote_without_dispatch` | Review `A`; triple-Esc within 1s | A NEVER dispatched; tombstone cleared; ViewId == Dashboard root |
+| `undo_keystroke_in_emacs_uses_ctrl_z` | archive + `Ctrl+Z` (emacs mode) | identical to vim `u` behavior |
+| `nothing_to_undo_status` | press `u` with empty tombstone slot | `"nothing to undo"` flashed for 1s |
 
-## 6. Rollout
+## 6. Rollout & cross-spec coordination
 
-Phase 1 (this ADR's PR):
-- Undo stack implementation, capped at 10 entries per view.
-- ConfirmState wrapper for irrevocable actions.
-- Config setting `[ui.destructive]` with default `undo`.
-- Integration: SessionPicker archive/pin, IssueBrowser status keys, Dashboard Review.
+### 6.1 Spec ordering (gemini's spec review)
 
-Phase 2 (separate):
-- Redo (`Ctrl+R` / `<C-r>`).
-- Configurable per-action policy (`[ui.review.confirm = false]`).
-- Persistent undo log (cross-session) — optional.
+This spec ships **in the same release** as `2026-04-28-tui-keybinding-quick-fixes-design.md`. Reasoning: quick-fixes commit 3 (`d`→`x` migration) changes the user's muscle memory for archiving. Without `u` available simultaneously, users hit a regression window where new keys exist but no safety net does.
 
-## 7. Migration / coexistence
+**Release N** (single PR or single feature branch):
+1. Quick-fixes commits 1–11 land (small surgical fixes).
+2. This spec lands as one feature commit on top.
+3. Both ship together as Release N.
 
-This spec coexists with quick-fixes §4.3 (the `d`→`x` migration). Order:
-1. Quick-fixes ships first, adding `x` alongside `d` as deprecation alias.
-2. This ADR ships second, layering undo on top of the (already-aliased) `x` archive.
+**Release N+1**: leader-key spec ships on the stabilized routing layer.
 
-If a user is on `destructive = "off"`, behavior is identical to today. No regression.
+### 6.2 Implementation surface
 
-## 8. Open questions
+- New module: `crates/spur-tui/src/components/tombstone.rs` (struct `Tombstone`, `TombstoneKind`, `TombstoneSlots`).
+- New field on `App`: `tombstones: TombstoneSlots`.
+- New tick driver call in the main TUI loop: `let to_dispatch = app.tombstones.tick(now); for action in to_dispatch { app.process_action(action); }`.
+- New keystroke routing: `u` (vim Normal) and `Ctrl+Z` (emacs) → `handle_undo` at app level, gated on view-owner status (i.e. not consumed when input bar is composing or picker active).
+- Per-action call sites: SessionPicker archive/pin/rename, IssueBrowser status set, Dashboard Review submit. Each gets a `tombstone.install(...)` call AROUND its existing dispatch (or REPLACING the dispatch for queued-remote class).
 
-1. **Default policy**: `undo` vs `confirm`? Recommend `undo` — it's strictly less interruptive and the safety net is real (capped stack, per-view).
-2. **Confirm prompt window**: 2 seconds? Recommend yes; align with `Ctrl+C` quit-confirm timing.
-3. **Should Review submit always confirm**, even with `destructive = "undo"`? Reviews are remote-irrevocable, so yes — confirm regardless of policy. Override only via per-key opt-out.
-4. **Capping the undo stack**: 10 entries per view? 50? Recommend 10 — keeps memory bounded; users undo recent, not week-old.
-5. **Cross-view undo navigation**: should `u` in Dashboard see SessionPicker's stack? Reject — per-view isolation is simpler and matches users' mental model.
-6. **Stream cancel as undo entry**: currently §4.9 of quick-fixes treats it as a one-shot hint. Should it also be on the undo stack ("undo cancel" = re-send the message)? Reject — the message was already cancelled at the network level; resending is a new request, not a revert.
+NO new module for `UndoStack`, `ConfirmState`, or config types. Those structures from the original spec are not built.
 
-## 9. Method note
+### 6.3 Migration / coexistence
 
-This spec consumes the cross-check finding that destructive-action UX is "trust-breaking" (codex) without confirm/undo, while general text undo is deferrable (gemini). The split enables shipping the safety net for state mutations without coupling to the much larger work of integrating tui-textarea undo or building a custom edit history.
+This spec consumes quick-fixes §4.3's `d`→`x` migration:
+- Both `x` (new primary) and `d` (deprecated alias) install tombstones identically.
+- The deprecation toast on `d` (quick-fixes spec) is rendered AFTER the tombstone toast — the user sees `"Archived 'foo'. Press u to undo (60s)"` first, then can dismiss to see `"d → archive renamed to x"` separately. This is fine because the deprecation toast is a one-shot per session.
 
-The confirm-prompt UX intentionally mirrors `Ctrl+C/Q` quit-confirm so users only learn one pattern.
+There is NO config toggle — every user gets tombstone behavior. Power users who would have set `destructive = "off"` are protected by the zero-friction-tax design (rapid sequential approves auto-flush the queue, so power-user flow is unaffected).
+
+## 7. Open questions
+
+1. **Compose-mode `u`**: in vim Insert / Emacs typing mode, `u` and `Ctrl+Z` should pass through to the input bar (eventual text undo via tui-textarea). Tombstone undo only fires when input bar is NOT composing. Confirmed by the activation gate; tested explicitly.
+2. **Tombstone visibility during fast pressing**: if user does Q1 + Q2 in <500ms, the toast for Q1 is barely visible. Acceptable — the design intent is that fast users don't need confirmation. Toast is for the slow/unsure user.
+3. **Picker rename undo**: rename's "previous title" capture must happen BEFORE the rename-prompt opens. The session_picker rename mode (R key) currently lets users edit a buffer; capture occurs at the moment they press Enter to commit. Implementation detail; non-blocking.
+4. **WorkOn session-spawn tombstone**: should `W` in IssueBrowser get the 3s queue treatment too? Subprocess spawn IS reversible at process-creation time (kill the subprocess) but introduces complexity (need to track child PID). Defer — `W` keeps current immediate-spawn behavior with a regular toast `"Spawned WorkOn session 'foo'"` (no tombstone).
+5. **Tombstone display when view-overlay visible**: if leader popup or quit-confirm is open, where does the toast render? Per quick-fixes §6.3, panic-Esc preempts; otherwise the toast renders into the bottom-of-view single-line slot, possibly under the leader popup. Defer detailed rendering — simplest impl is "toast renders in slot regardless of overlay".
+
+## 8. Method note
+
+This spec was rewritten on 2026-04-28 after dual-track cross-review (codex APPROVE-WITH-AMENDMENTS, gemini BLOCK on the original UndoStack+ConfirmState dual system) and a 7-round L9 UX synthesis. The key insights driving the rewrite:
+
+1. **YAGNI applies**: SPUR has 2 reversible-action families (archive/status) and 4 review-submit irrevocables. A generalized N-deep stack + ConfirmState wrapper is over-engineered for that surface (gemini's BLOCK).
+2. **Gmail toast is the right pattern** for low-frequency destructive ops in productivity tools. Editor-style stacks (vim's `u`) belong with high-frequency text mutations, not chat-archive operations.
+3. **Network irrevocability is solved by client-side queueing** during the toast window. Same UX path as reversible — same toast pattern, same `u` keybinding, just different mechanism (cancel-queue vs dispatch-inverse). Removes the need for separate confirm prompts.
+4. **Closure-based undo doesn't work for beads-backed mutations** (codex's amendment). Inverse-Action dispatch through `process_action` does, and threads through existing failure-handling.
+
+The original spec's `[ui.destructive]` config toggle is dropped — the behavior is universal. Codex's namespace correction (`[ui.*]` → `[tui.*]`) is moot since there's no config to namespace.
