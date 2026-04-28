@@ -468,4 +468,13 @@ mod status_bar_hint_tests {
         let label = StatusBar::truncate_model_label("claude-3-5-sonnet-20241022", 14);
         assert_eq!(label.as_ref(), "sonnet");
     }
+
+    #[test]
+    fn truncate_model_label_handles_multibyte_text_near_date_suffix() {
+        let date_suffixed = StatusBar::truncate_model_label("a名前-20241022", 4);
+        assert_eq!(date_suffixed.as_ref(), "a名前");
+
+        let truncated = StatusBar::truncate_model_label("a-名前20241022", 4);
+        assert_eq!(truncated.as_ref(), "a-名…");
+    }
 }
