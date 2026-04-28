@@ -90,6 +90,24 @@ impl SpurAgentCaps {
         self.agent.load_session
     }
 
+    /// Display label for the active model.
+    #[must_use]
+    pub fn current_model_label(&self) -> Option<String> {
+        None
+    }
+
+    /// Display label for the active reasoning effort.
+    #[must_use]
+    pub fn current_effort_label(&self) -> Option<String> {
+        None
+    }
+
+    /// Whether this agent is expected to emit usage updates.
+    #[must_use]
+    pub fn usage_supported(&self) -> bool {
+        true
+    }
+
     /// Probe a vendor `_meta` extension key (e.g. `"terminal_output"`).
     /// Returns false for missing keys, non-bool values, or absent meta.
     #[must_use]
@@ -107,7 +125,8 @@ impl SpurAgentCaps {
 mod tests {
     use agent_client_protocol::schema::{
         AgentCapabilities, InitializeResponse, ModelId, NewSessionResponse, ProtocolVersion,
-        SessionId, SessionMode, SessionModeId, SessionModeState, SessionModelState,
+        SessionConfigId, SessionConfigOption, SessionConfigSelectOption, SessionId, SessionMode,
+        SessionModeId, SessionModeState, SessionModelState,
     };
 
     use crate::spur_agent_caps::SpurAgentCaps;
@@ -140,6 +159,68 @@ mod tests {
         let mut meta = serde_json::Map::new();
         meta.insert(key.to_string(), val);
         AgentCapabilities::new().meta(meta)
+    }
+
+    #[test]
+    fn current_model_label_resolves_via_available_models() {
+        use agent_client_protocol::schema::ModelInfo;
+
+        let init = empty_init_response();
+        let new = NewSessionResponse::new(SessionId::new("model-label")).models(
+            SessionModelState::new(
+                ModelId::new("gpt-5"),
+                vec![ModelInfo::new(ModelId::new("gpt-5"), "GPT-5")],
+            ),
+        );
+        let caps = SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp);
+
+        assert_eq!(caps.current_model_label().as_deref(), Some("GPT-5"));
+    }
+
+    #[test]
+    fn current_model_label_falls_back_to_raw_id() {
+        let init = empty_init_response();
+        let new = NewSessionResponse::new(SessionId::new("model-label"))
+            .models(SessionModelState::new(ModelId::new("gpt-5"), vec![]));
+        let caps = SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp);
+
+        assert_eq!(caps.current_model_label().as_deref(), Some("gpt-5"));
+    }
+
+    #[test]
+    fn current_model_label_returns_none_when_models_none() {
+        let init = empty_init_response();
+        let new = empty_new_session_response();
+        let caps = SpurAgentCaps::new(&init, &new, AgentKind::Generic);
+
+        assert_eq!(caps.current_model_label(), None);
+    }
+
+    #[test]
+    fn current_effort_label_resolves_via_select() {
+        let init = empty_init_response();
+        let mut new = empty_new_session_response();
+        new.config_options = Some(vec![SessionConfigOption::select(
+            SessionConfigId::new("reasoning_effort"),
+            "Reasoning effort",
+            "medium",
+            vec![SessionConfigSelectOption::new("medium", "Medium")],
+        )]);
+        let caps = SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp);
+
+        assert_eq!(caps.current_effort_label().as_deref(), Some("Medium"));
+    }
+
+    #[test]
+    fn usage_supported_delegates_to_quirks() {
+        let init = empty_init_response();
+        let new = empty_new_session_response();
+
+        let claude = SpurAgentCaps::new(&init, &new, AgentKind::ClaudeCodeAcp);
+        let codex = SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp);
+
+        assert!(!claude.usage_supported());
+        assert!(codex.usage_supported());
     }
 
     #[test]
