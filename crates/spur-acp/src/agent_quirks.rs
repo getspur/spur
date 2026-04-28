@@ -7,8 +7,8 @@ use crate::types::AgentKind;
 
 /// Whether this agent kind is expected to emit `SessionUpdate::UsageUpdate`.
 #[must_use]
-pub fn usage_emit_default(_kind: AgentKind) -> bool {
-    true
+pub fn usage_emit_default(kind: AgentKind) -> bool {
+    !matches!(kind, AgentKind::ClaudeCodeAcp)
 }
 
 #[cfg(test)]
