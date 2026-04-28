@@ -1776,7 +1776,9 @@ fn acp_thread_main(
         // non-stdin event loops. Send SIGTERM immediately via the process
         // group, which catches grandchildren (e.g. the `node` tree under
         // `claude-agent-acp`) that don't watch stdin themselves.
-        let pgid = child_pgid.lock().ok().and_then(|g| *g);
+        // Take (not copy) so the Drop safety net at :349-373 sees `None`
+        // and does not later signal a recycled PID.
+        let pgid = child_pgid.lock().ok().and_then(|mut g| g.take());
         if let Some(pgid) = pgid {
             killpg(pgid, "TERM");
         }
@@ -2219,40 +2221,12 @@ mod set_session_model_dispatch_tests {
     }
 }
 
-#[cfg(test)]
-mod shutdown_ladder_tests {
-    #[test]
-    fn sends_sigterm_before_wait_timeout() {
-        let src = include_str!("native.rs");
-        let start = src
-            .find("// Kill any still-running terminals")
-            .expect("shutdown cleanup block should exist");
-        let end = src[start..]
-            .find("// Drain the per-child stderr bridge")
-            .expect("stderr bridge drain should follow shutdown cleanup");
-        let block = &src[start..start + end];
-
-        let term_idx = block
-            .find("killpg(pgid, \"TERM\");")
-            .expect("shutdown ladder should send SIGTERM to process group");
-        let timeout_idx = block
-            .find("tokio::time::timeout")
-            .expect("shutdown ladder should wait after SIGTERM");
-
-        assert!(
-            term_idx < timeout_idx,
-            "SIGTERM must be sent before waiting for child exit"
-        );
-        assert!(
-            block.contains("std::time::Duration::from_secs(1)"),
-            "shutdown ladder should wait 1s after SIGTERM"
-        );
-        assert!(
-            block.contains("did not exit within 1s of SIGTERM"),
-            "escalation log should describe the SIGTERM grace window"
-        );
-    }
-}
+// Note: behavioral verification of the SIGTERM-before-wait shutdown ladder
+// belongs in integration tests with a real subprocess (e.g. `sleep 30` +
+// signal-status capture: SIGTERM yields exit code 143, SIGKILL yields 137).
+// A unit-level "regression test" that greps this file's source for symbol
+// ordering passes for the wrong reasons (textual reorder, not runtime
+// ordering) and silently breaks on refactor — explicitly omitted.
 
 #[cfg(test)]
 mod stderr_capture_tests {

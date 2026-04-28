@@ -274,6 +274,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn skips_set_session_mode_when_no_advertisement() {
+        // Agent did not advertise any session modes (NewSessionResponse.modes
+        // is None). Conservative gate must skip dispatch — sending a mode the
+        // agent never advertised produces a -32602 Invalid params error.
+        let mut conn = MockConn {
+            calls: Arc::default(),
+            new_session_modes: None,
+        };
+        let calls = conn.calls.clone();
+
+        new_session_with_bypass(
+            &mut conn,
+            &cfg("bypassPermissions"),
+            PathBuf::from("/cwd"),
+            vec![],
+        )
+        .await
+        .expect("new_session should succeed");
+
+        let recorded = calls.lock().unwrap().clone();
+        assert_eq!(recorded, vec![("new_session".into(), "/cwd".into())]);
+    }
+
+    #[tokio::test]
     async fn applies_set_session_mode_when_requested_mode_advertised() {
         let mut conn = MockConn {
             calls: Arc::default(),
