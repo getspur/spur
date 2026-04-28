@@ -924,13 +924,12 @@ impl DashboardView {
                 // In Navigate mode, only explicit compose-entry keys go to the composer.
                 match key.code {
                     KeyCode::Char(c) if self.input_bar.is_vim_normal() => {
-                        // Review tab creates a local keybinding scope that
-                        // overrides global Vim mode. The on-screen labels
-                        // [a/d/m/R] are explicit UI contracts, not text input.
-                        let in_review = self.focused_node.is_some()
-                            && self.detail_pane.current_tab == DetailTab::Review
-                            && matches!(c, 'A' | 'D' | 'M' | 'R');
-                        if in_review {
+                        // View-reserved keys (panel/detail bindings, Review-tab
+                        // labels) win first. Only then does the vim
+                        // compose-entry whitelist apply, so plain-`o` on a
+                        // focused node hits the observe-toggle binding instead
+                        // of being swallowed as vim's "open line below".
+                        if self.is_view_action_char(c) {
                             KeyOwner::View
                         } else if matches!(c, 'i' | 'a' | 'A' | 'I' | 'o' | 'O') {
                             KeyOwner::Composer
