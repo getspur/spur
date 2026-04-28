@@ -15,6 +15,7 @@ use commands::flags::FlagsCommands;
 use spur_acp::config::SpurConfig;
 use spur_acp::{BrainSessionId, SessionId};
 use spur_cli::pm_service_gate_allows_construction;
+use spur_cli::log_writer;
 use spur_core::{Orchestrator, RunOpts};
 use spur_license::SpurLicense;
 
@@ -29,13 +30,29 @@ fn init_tracing(
         let log_dir = repo_root.join(".spur").join("logs");
         std::fs::create_dir_all(&log_dir)?;
 
-        // Read [log].level from config; fall back to default. RUST_LOG overrides.
-        let cfg_level = "warn,spur_core::orchestrator=info"; // TODO Task 4: read from SpurConfig
-        let env_filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new(cfg_level));
+        // Load SpurConfig to get [log] settings; fall back to default.
+        let cfg_path = repo_root.join(".spur").join("config.toml");
+        let spur_config: SpurConfig = std::fs::read_to_string(&cfg_path)
+            .ok()
+            .and_then(|s| toml::from_str(&s).ok())
+            .unwrap_or_default();
+        let log_cfg = &spur_config.log;
 
-        let file_appender = tracing_appender::rolling::daily(&log_dir, "spur.log");
-        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+        // Read [log].level from config; fall back to default. RUST_LOG overrides.
+        let env_filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new(&log_cfg.level));
+
+        let rotator = log_writer::build_rotator(
+            &log_dir,
+            log_cfg.max_file_bytes,
+            log_cfg.max_files,
+        );
+        let (non_blocking, guard) =
+            tracing_appender::non_blocking::NonBlockingBuilder::default()
+                .lossy(true)
+                .buffered_lines_limit(log_cfg.buffered_lines_limit)
+                .finish(rotator);
+
         tracing_subscriber::registry()
             .with(env_filter)
             .with(tracing_subscriber::fmt::layer().with_writer(non_blocking))
@@ -405,9 +422,10 @@ async fn main() -> ExitCode {
 /// Render the top-level error. If stderr is a TTY and the error
 /// chain contains a [`spur_license::FeatureGateError`], render the
 /// structured upgrade CTA. Otherwise fall through to anyhow's
-/// chain-printing (`{:#}`) for full debug context. Non-TTY stderr
-/// (piped/scripted output) always uses the plain path so tooling
-/// parsing isn't broken.
+/// `{:#}` formatter, which walks the Display chain (root cause +
+/// every `.context(...)` link) but does NOT include Debug or
+/// backtrace frames. Non-TTY stderr (piped/scripted output)
+/// always uses the plain path so tooling parsing isn't broken.
 fn render_top_level_error(err: &anyhow::Error) {
     if std::io::stderr().is_terminal() {
         if let Some(gate_err) = spur_license::upgrade_cta::find_gate_error(err) {
