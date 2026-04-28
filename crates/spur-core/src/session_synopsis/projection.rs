@@ -67,6 +67,13 @@ impl SessionSynopsisProjection {
             SpurEventBody::TurnComplete { session } => {
                 self.flush_pending(session);
             }
+            SpurEventBody::BrainRetired { session, .. }
+            | SpurEventBody::SessionCompleted { session, .. } => {
+                self.flush_pending(session);
+            }
+            SpurEventBody::SessionAttachRejected { acp_session_id, .. } => {
+                self.flush_pending(&SessionId(acp_session_id.clone()));
+            }
             _ => {}
         }
     }
@@ -250,5 +257,31 @@ mod tests {
         let s = proj.get(&SessionId("S1".into())).unwrap();
         assert_eq!(s.first_user_msg.as_deref(), Some("abandoned partial msg"));
         assert_eq!(s.last_user_msg.as_deref(), Some("abandoned partial msg"));
+    }
+
+    #[test]
+    fn brain_retired_flushes_pending() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&user_chunk_event("S1", "before retire"));
+        proj.apply(&SpurEvent::now(SpurEventBody::BrainRetired {
+            session: SessionId("S1".into()),
+            reason: spur_acp::domain::events::BrainRetireReason::Shutdown,
+        }));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(s.last_user_msg.as_deref(), Some("before retire"));
+    }
+
+    #[test]
+    fn session_completed_flushes_pending() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&user_chunk_event("S1", "before complete"));
+        proj.apply(&SpurEvent::now(SpurEventBody::SessionCompleted {
+            session: SessionId("S1".into()),
+            success: true,
+        }));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(s.last_user_msg.as_deref(), Some("before complete"));
     }
 }
