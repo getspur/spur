@@ -136,16 +136,37 @@ The destructive-undo spec (`2026-04-28-tui-destructive-undo-design.md`) covers t
 
 Add Tab/Shift+Tab cycling to SessionDetail panels (matching Dashboard's behavior at `dashboard.rs:1366-1390`).
 
+**Structural prerequisite** (claude-code feasibility review): `SessionDetailView` has NO panel-focus enum today. Dashboard has `Panel::{Agents, Detail, Log}` and `focused_panel`. SessionDetail must gain an analogous structure before the cycle handler can wire up. Pin the panel set explicitly:
+
+```rust
+// In session_detail.rs:
+pub enum FocusedSessionPanel {
+    /// Inline workers list (above react trace when un-collapsed).
+    Workers,
+    /// Main react trace pane (bulk of the view).
+    ReactTrace,
+}
+
+pub struct SessionDetailView {
+    // ... existing fields ...
+    focused_panel: FocusedSessionPanel,  // default: ReactTrace
+}
+```
+
+**Cycle order**: `Tab` → next (ReactTrace → Workers → ReactTrace); `Shift+Tab` → prev (Workers → ReactTrace → Workers). Two-state cycle, not a longer rotation. Future panels (e.g. an attachments pane) extend the enum.
+
+**Visual indicator**: focused panel gets a colored border (matching Dashboard's panel-focus convention). `Workers` collapsed-via-`Alt+D` still respects `focused_panel == Workers` for keyboard focus, even when not visually expanded.
+
 **Critical guards** (codex's TWEAK condition, §12.2; SessionDetail does NOT have explicit Navigate/Compose modes like Dashboard, so the guards are stated in terms of input-bar state, not mode):
 1. **Picker ownership**: if `completion.is_active()`, picker gets Tab unconditionally.
 2. **History-shell ownership**: if a history picker is open (`Ctrl+R` / `Alt+R` engaged), history-shell gets Tab.
 3. **Composer ownership**: if input bar is non-empty (i.e. user is composing), Tab/BackTab MUST be sent to `input_bar` (e.g. for completion accept). Panel cycling only applies when input is empty.
 4. Only when all three above release Tab → SessionDetail consumes it for panel cycle.
 
-**Implementation**: extend `session_detail.rs` `handle_key` so the picker/composer guards run BEFORE the panel-cycle handler. This is identical to Dashboard's existing precedence; the bug is just that the panel-cycle handler doesn't exist yet.
+**Implementation**: extend `session_detail.rs` `handle_key` so the picker/composer guards run BEFORE the panel-cycle handler.
 
 **Test**: integration test asserting:
-- Tab in SessionDetail with input empty + no picker → cycles panel focus.
+- Tab in SessionDetail with input empty + no picker → cycles panel focus (assert via new `pub fn focused_panel(&self) -> FocusedSessionPanel`).
 - Tab in SessionDetail with input non-empty → goes to composer (input_bar handles it).
 - Tab in SessionDetail with picker open → picker accepts.
 
@@ -253,9 +274,16 @@ The behavior at `session_detail.rs:1167` is correct — Esc SHOULD cancel an in-
 
 This makes the destructive aspect of Esc visible. Second Esc proceeds with NavigateBack (existing path).
 
-**No code change to the cancellation logic itself.** Just hint surfacing.
+**Implementation surface** (claude-code feasibility review): existing `hint_for_session_detail` in `status_bar.rs:58-67` returns `&'static str`. Dynamic hints flow through `StatusBarProps::view_hint_override: Option<String>` at `status_bar.rs:126`. Reuse that channel:
 
-**Test**: integration test asserts hint text appears post-cancel and clears on next render after second Esc.
+- Add field `cancel_hint_until: Option<Instant>` on `SessionDetailView`.
+- Set `cancel_hint_until = Some(Instant::now() + Duration::from_secs(2))` at the cancel-stream branch.
+- In `SessionDetailView::status_bar_props()` (or wherever `view_hint_override` is populated), if `cancel_hint_until.is_some_and(|t| t > Instant::now())`, set `view_hint_override = Some("Esc cancelled the active turn. Press Esc again to go back.".into())`. Otherwise `None`.
+- Tick driver evicts on expiry; second Esc clears explicitly.
+
+This consumes the existing `view_hint_override` slot per the priority rules in §6.3, without inventing new infrastructure.
+
+**Test**: integration test asserts hint text appears post-cancel via `view_hint_override` and clears on next render after second Esc.
 
 ### 4.10 T2.9 — Panic Esc hatch (MANDATORY)
 
@@ -263,17 +291,84 @@ This makes the destructive aspect of Esc visible. Second Esc proceeds with Navig
 
 Triple-Esc within 1000ms unconditionally returns to Dashboard root, dismissing all overlays / pickers / focus / compose mode AND clearing any pending destructive-action tombstone (per cross-spec coordination, §6 below).
 
-**Implementation**: in `app.rs`, track `esc_chain: Vec<Instant>` (capped at 3). On `Esc` keystroke, push current `Instant`, prune entries older than 1000ms. If `esc_chain.len() == 3` → emit a special action `Action::PanicReset` that:
+**Implementation surface** (claude-code feasibility review — these are NEW additions to the codebase, not retrofits):
 
-1. Clears every modal flag (`quit_confirm_visible`, `collision_modal`, `upgrade_modal`, `help_visible`, `palette_visible`).
-2. Closes any open completion / mention / history pickers.
-3. Cancels any in-flight tombstone client-queue **without dispatching**. (Coordinates with destructive-undo spec §4.)
-4. Forces `ViewId::Dashboard`, `focused_node = None`, `focused_panel = Agents`, `mode = Navigate`.
-5. Clears `esc_chain`.
+1. **New `Action::PanicReset` variant** in `crates/spur-tui/src/action.rs`. Unit variant. Routes through `process_action` like any other action.
+2. **New `App.esc_chain: VecDeque<Instant>`** field in `crates/spur-tui/src/app.rs` (capped at 3). On `Esc` keystroke: push `Instant::now()`, prune entries older than 1000ms. If `len() == 3` → emit `Action::PanicReset`, clear chain.
+3. **New `pub fn reset_to_root(&mut self)`** on `DashboardView`: forces private fields `mode = Navigate`, `focused_node = None`, `focused_panel = Agents`. Internal-only; call sites are `App::process_action(PanicReset)` only.
+4. **New `pub fn reset_to_root(&mut self)`** on `SessionDetailView`: dismisses pickers, clears `cancel_hint_until`, resets `focused_panel = ReactTrace` (per §4.5).
+5. **Existing methods/fields used** by `Action::PanicReset` handler in `process_action`:
+   - `quit_confirm_visible = false`, `collision_modal = None`, `upgrade_modal = None`, `help_visible = false`, `palette_visible = false`.
+   - `palette_state.dismiss()`, `dashboard.completion.dismiss()` (verify exact method names during implementation; the intent is "kill all overlay state").
+6. **Cross-spec wire-up**: also call `self.tombstones.cancel_all_without_dispatch()` (defined in destructive-undo spec §4.7); cancels any in-flight tombstone client-queue **without dispatching**.
+7. **Force navigation**: set `current_view = ViewId::Dashboard`, then call `dashboard.reset_to_root()`.
+
+Action sequence in `Action::PanicReset` arm:
+1. Clear all overlay flags (item 5 above).
+2. Cancel all tombstones without dispatch (item 6).
+3. Set view → Dashboard, reset Dashboard root (item 7).
+4. Reset SessionDetail if instantiated (calls its `reset_to_root`).
+5. Clear `esc_chain`.
 
 The 1000ms window (gemini's recommendation) is more forgiving than 500ms — accommodates users who pause briefly between Esc presses without losing the chain.
 
-**Test**: `tests/app_panic_esc_resets_to_root.rs` simulating layered state (overlay + picker + compose + tombstone) + triple Esc → asserts root state and that no destructive dispatch happened.
+**Test**: `tests/app_panic_esc_resets_to_root.rs` simulating layered state (overlay + picker + compose + tombstone) + triple Esc → asserts root state and that no destructive dispatch happened. Test accessors needed: `app.is_palette_visible()` exists at `app.rs:579`; the test must add or use `pub(crate)` visibility for the rest (`collision_modal_visible`, `dashboard.focused_panel`, `dashboard.mode`).
+
+### 4.11 Shared transient-hint infrastructure (consumed by destructive-undo)
+
+The destructive-undo spec relies on `App::flash_hint(msg)` to render tombstone toasts. Claude-code's feasibility review noted that this API does not exist today. Defining it HERE in quick-fixes (rather than in destructive-undo) makes sense because:
+
+- This spec already needs auto-dismissing transient hints for §4.9 (cancel-stream visibility) and §4.10 deprecation toasts.
+- A single shared mechanism avoids two parallel implementations.
+
+**Implementation surface**:
+
+```rust
+// In crates/spur-tui/src/app.rs:
+pub struct TransientHint {
+    pub text: String,
+    pub expires_at: Instant,
+}
+
+impl App {
+    pub transient_hint: Option<TransientHint>,  // new field
+
+    pub fn flash_hint(&mut self, msg: impl Into<String>, duration: Duration) {
+        self.transient_hint = Some(TransientHint {
+            text: msg.into(),
+            expires_at: Instant::now() + duration,
+        });
+    }
+
+    /// Called from App::tick(). Evicts on expiry.
+    fn tick_transient_hint(&mut self, now: Instant) {
+        if let Some(h) = &self.transient_hint {
+            if now >= h.expires_at {
+                self.transient_hint = None;
+            }
+        }
+    }
+}
+```
+
+The hint is rendered into `StatusBarProps::view_hint_override` (existing field at `status_bar.rs:126`) when `transient_hint.is_some()`. Per §6.3, `transient_hint` is overridden by panic-Esc reset confirmation but otherwise occupies the slot.
+
+**Convenience helpers** (deprecation toast variants):
+```rust
+pub fn flash_hint_short(&mut self, msg: impl Into<String>) {
+    self.flash_hint(msg, Duration::from_secs(2));
+}
+```
+
+**Used by**:
+- §4.3 `d` → `x` deprecation: `flash_hint_short("d → archive renamed to x")`.
+- §4.9 cancel-stream: replaced by SessionDetailView local field per §4.9 (since it's view-bound).
+- §4.10 panic-Esc post-reset: `flash_hint_short("Returned to Dashboard root")`.
+- §4.11 (this section) deprecation toasts.
+- Destructive-undo: `flash_hint(toast_text, tombstone_window)`.
+- Leader-key spec §4.8 deprecation toast on Alt+*.
+
+**Test**: `tests/app_transient_hint_dismisses_on_expiry.rs`.
 
 ## 5. Cross-cutting test plan
 
