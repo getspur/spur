@@ -332,8 +332,10 @@ Steps 1–2 are same-day low-risk fixes (close the leak source). Steps
 - [x] Ctrl-C, Ctrl-Q, SIGTERM, SIGHUP, and SIGQUIT all restore raw mode
       and alternate screen before exit (no terminal corruption). (T8,
       commits 0381d188 + f61241bf — signals route through `app.confirm_quit()`
-      so the same loop break + `tui::teardown` runs on every path; manual
-      tab-close verification deferred to release-day smoke.)
+      so the same loop break + `tui::teardown` runs on every path. Verified
+      end-to-end in a fork()-ed PTY by `scripts/uat/spur_signal_uat.py`:
+      all 5 paths exit with status 0 and emit the alt-screen-exit +
+      cursor-restore + paste/mouse-mode-off codes.)
 - [x] `SpurEvent::OrphanReaped` fires once per reaped tree. (T7,
       commit ee894dc5 — emitted from `spur-cli/main.rs` per killed record,
       rendered by `dashboard.rs` activity-log arm.)
