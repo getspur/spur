@@ -14,7 +14,6 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 toml = { workspace = true }
-reqwest = { workspace = true }
 agent-client-protocol = { workspace = true }
 frankenstein = { version = "0.49", features = ["client-reqwest"] }
 spur-acp = { workspace = true }

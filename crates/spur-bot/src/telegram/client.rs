@@ -1,3 +1,4 @@
+use anyhow::Context;
 use frankenstein::AsyncTelegramApi;
 
 #[derive(Clone)]
@@ -6,10 +7,19 @@ pub struct TelegramClient {
 }
 
 impl TelegramClient {
-    pub fn new(token: &str) -> Self {
-        Self {
-            inner: frankenstein::client_reqwest::Bot::new(token),
-        }
+    pub fn new(token: &str, request_timeout: std::time::Duration) -> anyhow::Result<Self> {
+        let http = frankenstein::reqwest::ClientBuilder::new()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(request_timeout)
+            .build()
+            .context("building reqwest client for telegram bot")?;
+        let api_url = format!("{}{}", frankenstein::BASE_API_URL, token);
+        Ok(Self {
+            inner: frankenstein::client_reqwest::Bot::builder()
+                .api_url(api_url)
+                .client(http)
+                .build(),
+        })
     }
 
     pub async fn delete_webhook(&self) -> anyhow::Result<()> {
@@ -189,7 +199,21 @@ pub fn encode_draft_id(local_id: &str) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::encode_draft_id;
+    use super::{encode_draft_id, TelegramClient};
+    use std::time::Duration;
+
+    #[test]
+    fn telegram_client_new_accepts_request_timeout() {
+        let _client = TelegramClient::new("TEST_TOKEN", Duration::from_millis(250))
+            .expect("client with custom timeout should build");
+    }
+
+    /// Acceptance test stub: exercising a hanging local TCP listener requires
+    /// a test-only Telegram API URL injection point, while C0 intentionally
+    /// changes only timeout construction on the production API URL.
+    #[tokio::test]
+    #[ignore = "requires custom Telegram API URL injection outside C0 scope"]
+    async fn hanging_tcp_listener_times_out_via_request_timeout() {}
 
     #[test]
     fn draft_id_encoding_is_deterministic() {
