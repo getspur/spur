@@ -162,6 +162,56 @@ fn license_badge_from_state(state: &LicenseStateEvent) -> Option<LicenseBadge> {
     }
 }
 
+/// Convert the ACP broadcast representation into the license resolver input.
+/// This is the inverse of `spur_core::license_runtime::to_event_state`.
+fn license_state_event_to_state(state: &LicenseStateEvent) -> spur_license::LicenseState {
+    spur_license::LicenseState {
+        status: match state.status {
+            LicenseStatusEvent::Inactive => spur_license::LicenseStatus::Inactive,
+            LicenseStatusEvent::Active => spur_license::LicenseStatus::Active,
+            LicenseStatusEvent::Degraded => spur_license::LicenseStatus::Degraded,
+            LicenseStatusEvent::Invalid => spur_license::LicenseStatus::Invalid,
+            LicenseStatusEvent::ConfigError => spur_license::LicenseStatus::ConfigError,
+        },
+        subject_kind: match state.subject_kind {
+            LicenseSubjectKind::User => spur_license::SubjectKind::User,
+            LicenseSubjectKind::Organization => spur_license::SubjectKind::Organization,
+            LicenseSubjectKind::Ci => spur_license::SubjectKind::Ci,
+            LicenseSubjectKind::Unknown => spur_license::SubjectKind::Unknown,
+        },
+        plan: match state.plan {
+            EventLicensePlan::Community => spur_license::Plan::Community,
+            EventLicensePlan::StarterLtd => spur_license::Plan::StarterLtd,
+            EventLicensePlan::BuilderLtd => spur_license::Plan::BuilderLtd,
+            EventLicensePlan::FounderLtd => spur_license::Plan::FounderLtd,
+            EventLicensePlan::Pro => spur_license::Plan::Pro,
+            EventLicensePlan::Team => spur_license::Plan::Team,
+            EventLicensePlan::Enterprise => spur_license::Plan::Enterprise,
+            EventLicensePlan::Unknown => spur_license::Plan::Unknown,
+        },
+        features: state.features.clone(),
+        expires_at: state.expires_at,
+        binding_mode: match state.binding_mode {
+            LicenseBindingMode::NodeLocked => spur_license::BindingMode::NodeLocked,
+            LicenseBindingMode::FloatingCi => spur_license::BindingMode::FloatingCi,
+            LicenseBindingMode::Organization => spur_license::BindingMode::Organization,
+            LicenseBindingMode::Unknown => spur_license::BindingMode::Unknown,
+        },
+        offline_ok: state.offline_ok,
+        status_text: state.status_text.clone(),
+    }
+}
+
+fn is_placeholder_license_state(state: &LicenseStateEvent) -> bool {
+    matches!(state.status, LicenseStatusEvent::Inactive)
+        && matches!(state.subject_kind, LicenseSubjectKind::Unknown)
+        && matches!(state.plan, EventLicensePlan::Unknown)
+        && state.features.is_empty()
+        && matches!(state.binding_mode, LicenseBindingMode::Unknown)
+        && !state.offline_ok
+        && state.status_text == PLACEHOLDER_STATUS_TEXT
+}
+
 fn compute_flag_summary() -> Option<(usize, usize)> {
     use spur_license::policy::PolicyResolver;
     use spur_license::{FeatureGate, FlagKey};
@@ -262,6 +312,13 @@ struct CollisionModalState {
     holder: spur_acp::session_lock::HolderInfo,
 }
 
+/// Sentinel status_text used by `default_license_state` to identify
+/// the App-internal placeholder license state (vs. real provider
+/// states that may also be Inactive). Used by `is_placeholder_license_state`
+/// to skip startup-hydration of `feature_gate` when no real license
+/// has been seeded yet.
+const PLACEHOLDER_STATUS_TEXT: &str = "licensing not configured";
+
 impl App {
     pub fn new(user_input_tx: Option<mpsc::Sender<UserInput>>, start_in_picker: bool) -> Self {
         Self::new_with_config(
@@ -311,7 +368,7 @@ impl App {
             user_input_tx,
             start_in_picker,
             config,
-            Self::default_license_state("licensing not configured"),
+            Self::default_license_state(PLACEHOLDER_STATUS_TEXT),
             landing,
         )
     }
@@ -406,6 +463,14 @@ impl App {
             last_action: None,
         };
 
+        // `App::default_license_state` is a local "no runtime seed" placeholder.
+        // Real provider states, including inactive LicenseSeat states, still
+        // hydrate the gate through the normal fail-closed path.
+        if !is_placeholder_license_state(&app.license_state) {
+            let initial_license_state = license_state_event_to_state(&app.license_state);
+            app.feature_gate.update_state(&initial_license_state);
+        }
+
         // Propagate the config-derived edit_mode to the dashboard's input bar.
         // `InputBar::new()` hardcodes EditMode::Emacs; without this sync, a
         // user with `tui.edit_mode = "vim"` would see Emacs on the dashboard
@@ -463,7 +528,7 @@ impl App {
             None,
             None,
             std::sync::Arc::new(spur_acp::SpurConfig::default()),
-            Self::default_license_state("licensing not configured"),
+            Self::default_license_state(PLACEHOLDER_STATUS_TEXT),
             crate::landing::LandingDecision::ShowDashboard,
             metadata_path,
         )
@@ -476,7 +541,7 @@ impl App {
             None,
             Some(None),
             std::sync::Arc::new(spur_acp::SpurConfig::default()),
-            Self::default_license_state("licensing not configured"),
+            Self::default_license_state(PLACEHOLDER_STATUS_TEXT),
             crate::landing::LandingDecision::ShowDashboard,
             metadata_path,
         )
@@ -502,6 +567,10 @@ impl App {
         self.license_badge.as_ref()
     }
 
+    pub(crate) fn feature_enabled_for_test(&self, key: spur_license::FeatureKey) -> bool {
+        spur_license::require_feature(&self.feature_gate, key).is_ok()
+    }
+
     /// Test-only accessor: borrow the first message waiting for trace seeding.
     #[doc(hidden)]
     pub fn pending_first_user_message_for_test(&self) -> Option<&str> {
@@ -509,6 +578,8 @@ impl App {
     }
 
     fn update_license_state(&mut self, license_state: LicenseStateEvent) {
+        let resolved = license_state_event_to_state(&license_state);
+        self.feature_gate.update_state(&resolved);
         self.license_badge = license_badge_from_state(&license_state);
         self.license_state = license_state;
         self.dirty = true;
@@ -2099,6 +2170,19 @@ impl App {
             }
 
             Action::ShowSessionCost => {
+                // M1.3 - Pro-tier demo gate: community users get the upgrade
+                // modal; Pro users see the per-project cost view.
+                if let Err(err) = spur_license::require_feature(
+                    &self.feature_gate,
+                    spur_license::FeatureKey::COST_PRO_PER_PROJECT_TRACKING,
+                ) {
+                    let required_tier = spur_license::upgrade_cta::required_tier_for(
+                        spur_license::FeatureKey::COST_PRO_PER_PROJECT_TRACKING,
+                    );
+                    self.process_action(Action::ShowUpgradeModal { err, required_tier });
+                    return;
+                }
+
                 if let Some(ref mut detail) = self.session_detail {
                     detail.push_cost_note();
                 }
@@ -2817,7 +2901,7 @@ pub async fn run_tui(
         perm_rx,
         start_in_picker.then_some(None),
         std::sync::Arc::new(spur_acp::SpurConfig::default()),
-        App::default_license_state("licensing not configured"),
+        App::default_license_state(PLACEHOLDER_STATUS_TEXT),
         crate::landing::LandingDecision::ShowDashboard,
     )
     .await
@@ -3001,7 +3085,7 @@ pub async fn run_tui_with_config(
         perm_rx,
         start_in_picker.then_some(None),
         config,
-        App::default_license_state("licensing not configured"),
+        App::default_license_state(PLACEHOLDER_STATUS_TEXT),
         crate::landing::LandingDecision::ShowDashboard,
     )
     .await
@@ -3094,12 +3178,16 @@ fn render_mermaid_overlay(
         let id = viewer.focused?;
         let picker = detail.render_picker.as_ref()?;
         let (image, image_generation) = match detail.mermaid_registry.get(&id)? {
-            crate::components::mermaid::MermaidState::Ready { image, image_generation, .. } => {
-                (image.clone(), *image_generation)
-            }
+            crate::components::mermaid::MermaidState::Ready {
+                image,
+                image_generation,
+                ..
+            } => (image.clone(), *image_generation),
             _ => return None,
         };
-        let proto = detail.image_cache.overlay_protocol_mut(id, &image, image_generation, picker);
+        let proto = detail
+            .image_cache
+            .overlay_protocol_mut(id, &image, image_generation, picker);
         let widget = StatefulImage::default().resize(Resize::Fit(None));
         frame.render_stateful_widget(widget, chunks[1], proto);
         Some(())
@@ -3152,6 +3240,63 @@ impl App {
     /// `SessionMetadataStore::load`.
     pub fn new_for_tests() -> Self {
         App::new(None, false)
+    }
+}
+
+#[cfg(test)]
+mod license_gate_refresh_tests {
+    use super::*;
+
+    fn pro_license_state_event() -> LicenseStateEvent {
+        LicenseStateEvent {
+            status: LicenseStatusEvent::Active,
+            subject_kind: LicenseSubjectKind::User,
+            plan: EventLicensePlan::Pro,
+            features: spur_license::policy::PolicyResolver::embedded()
+                .tier_features("pro")
+                .expect("embedded policy must define pro tier features"),
+            expires_at: None,
+            binding_mode: LicenseBindingMode::NodeLocked,
+            offline_ok: true,
+            status_text: "Pro license active".into(),
+        }
+    }
+
+    fn assert_pro_cost_tracking_enabled(app: &App) {
+        spur_license::require_feature(
+            &app.feature_gate,
+            spur_license::FeatureKey::COST_PRO_PER_PROJECT_TRACKING,
+        )
+        .expect("Pro cost tracking should be enabled");
+    }
+
+    #[test]
+    fn license_update_refreshes_feature_gate_snapshot() {
+        let mut app = App::new_for_tests();
+        assert!(spur_license::require_feature(
+            &app.feature_gate,
+            spur_license::FeatureKey::COST_PRO_PER_PROJECT_TRACKING,
+        )
+        .is_err());
+
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::LicenseUpdated {
+            state: pro_license_state_event(),
+        }));
+
+        assert_pro_cost_tracking_enabled(&app);
+    }
+
+    #[test]
+    fn seeded_license_state_hydrates_feature_gate_snapshot() {
+        let app = App::new_with_license(
+            None,
+            false,
+            std::sync::Arc::new(spur_acp::SpurConfig::default()),
+            pro_license_state_event(),
+            crate::landing::LandingDecision::ShowDashboard,
+        );
+
+        assert_pro_cost_tracking_enabled(&app);
     }
 }
 
@@ -4011,6 +4156,58 @@ mod brain_retired_tests {
             BrainStatus::Thinking,
             "brain_status must be unchanged on send failure (not forced to Idle)"
         );
+    }
+}
+
+#[cfg(test)]
+mod feature_gate_tests {
+    use super::*;
+    use spur_license::{FeatureGateError, FeatureKey, Plan, Tier};
+
+    #[test]
+    fn send_message_denied_by_feature_gate_opens_upgrade_modal() {
+        let mut app = App::new_for_tests();
+        app.feature_gate
+            .update_state(&spur_license::LicenseState::inactive("stripped for test"));
+
+        app.process_action(Action::SendMessage {
+            session: spur_acp::SessionId("session-1".to_string()),
+            blocks: Vec::new(),
+            interrupt: false,
+        });
+
+        let modal = app
+            .upgrade_modal
+            .as_ref()
+            .expect("denied send-message action must open upgrade modal");
+        assert_eq!(modal.required_tier, Some(Plan::Community));
+        match &modal.err {
+            FeatureGateError::Denied { key, tier } => {
+                assert_eq!(*key, FeatureKey::CLI_CORE_EXEC);
+                assert_eq!(*tier, Tier::Community);
+            }
+            other => panic!("unexpected feature gate error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn show_session_cost_denied_for_community_opens_pro_upgrade_modal() {
+        let mut app = App::new_for_tests();
+
+        app.process_action(Action::ShowSessionCost);
+
+        let modal = app
+            .upgrade_modal
+            .as_ref()
+            .expect("community session-cost action must open upgrade modal");
+        assert_eq!(modal.required_tier, Some(Plan::Pro));
+        match &modal.err {
+            FeatureGateError::Denied { key, tier } => {
+                assert_eq!(*key, FeatureKey::COST_PRO_PER_PROJECT_TRACKING);
+                assert_eq!(*tier, Tier::Community);
+            }
+            other => panic!("unexpected feature gate error: {other:?}"),
+        }
     }
 }
 
