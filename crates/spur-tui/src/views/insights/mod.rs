@@ -124,28 +124,35 @@ impl View for InsightsView {
                 self.set_active_tab(InsightsTab::Live);
                 None
             }
-            KeyCode::Char('a') => {
+            // Dimension keys (Breakdown tab only — `a` and `p` are unique
+            // to Breakdown; `m` is shared with Timeline's Monthly so it
+            // dispatches by active tab below).
+            KeyCode::Char('a') if matches!(self.active_tab, InsightsTab::Breakdown) => {
                 self.dimension = Dimension::Agent;
                 None
             }
-            KeyCode::Char('m') => {
-                self.dimension = Dimension::Model;
-                None
-            }
-            KeyCode::Char('p') => {
+            KeyCode::Char('p') if matches!(self.active_tab, InsightsTab::Breakdown) => {
                 self.dimension = Dimension::Project;
                 None
             }
-            KeyCode::Char('D') => {
+            // Granularity keys (Timeline tab only). Both upper- and
+            // lowercase to match the lowercase-by-default Dimension keys.
+            KeyCode::Char('D' | 'd') if matches!(self.active_tab, InsightsTab::Timeline) => {
                 self.granularity = Granularity::Daily;
                 None
             }
-            KeyCode::Char('W') => {
+            KeyCode::Char('W' | 'w') if matches!(self.active_tab, InsightsTab::Timeline) => {
                 self.granularity = Granularity::Weekly;
                 None
             }
-            KeyCode::Char('M') => {
-                self.granularity = Granularity::Monthly;
+            // `m`/`M` is context-sensitive: Monthly on Timeline, Model on
+            // Breakdown, ignored elsewhere.
+            KeyCode::Char('M' | 'm') => {
+                match self.active_tab {
+                    InsightsTab::Timeline => self.granularity = Granularity::Monthly,
+                    InsightsTab::Breakdown => self.dimension = Dimension::Model,
+                    _ => {}
+                }
                 None
             }
             KeyCode::Char('r') => {
@@ -179,8 +186,12 @@ impl View for InsightsView {
                     return;
                 };
 
-                let [header_area, body_area] =
-                    Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+                let [header_area, body_area, footer_area] = Layout::vertical([
+                    Constraint::Length(1),
+                    Constraint::Min(0),
+                    Constraint::Length(1),
+                ])
+                .areas(area);
                 render_header(frame, header_area, self.active_tab, state.refreshing);
 
                 match self.active_tab {
@@ -193,6 +204,8 @@ impl View for InsightsView {
                     }
                     InsightsTab::Live => tabs::LiveTab::render(frame, body_area, snapshot),
                 }
+
+                render_key_hint_footer(frame, footer_area, self.active_tab);
             }
             Err(_) => frame.render_widget(Paragraph::new("Refreshing..."), area),
         }
@@ -239,6 +252,24 @@ fn tab_label(label: &'static str, active: bool) -> Span<'static> {
         Style::default()
     };
     Span::styled(label, style)
+}
+
+/// Render a 1-row dim footer listing the keys that work in the current tab.
+/// Universal keys (Tab, r, Esc) come first; tab-specific keys are appended.
+fn render_key_hint_footer(frame: &mut Frame, area: Rect, active_tab: InsightsTab) {
+    use ratatui::widgets::Paragraph;
+
+    let universal = "[Tab] Next  [1-4] Tab  [r] Refresh  [Esc] Back";
+    let tab_specific: &str = match active_tab {
+        InsightsTab::Timeline => "  [d/w/m] Granularity",
+        InsightsTab::Breakdown => "  [a/m/p] Dimension",
+        _ => "",
+    };
+    let line = Line::from(vec![Span::styled(
+        format!(" {universal}{tab_specific}"),
+        Style::default().fg(Color::DarkGray),
+    )]);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 #[cfg(test)]
