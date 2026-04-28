@@ -1,9 +1,9 @@
 # Session Picker Recall Revamp — Design
 
 Date: 2026-04-28
-Status: Spec (pre-implementation)
+Status: Spec (pre-implementation, ready for plan-writing)
 Owner: TUI / Session UX
-Scope: `crates/spur-tui` only — no ACP / brain / protocol changes
+Scope: `spur-core` (new projection module) + `spur-tui` (consumer wiring).
 Pre-launch: SPUR has not shipped publicly; legacy session backfill is out of scope.
 
 ## Problem
@@ -12,51 +12,48 @@ The session picker (`crates/spur-tui/src/views/session_picker.rs`) lists
 sessions by an agent-generated `title` (e.g. "Build fix"). These titles
 carry weak semantic weight, so users returning to the picker struggle to
 recall which session was about what. The current preview pane (toggled
-with `P`) is dominated by administrative metadata — session ID, full CWD,
-ISO timestamp, pinned/archived flags — that does not help recall.
+with `P`) is dominated by administrative metadata that does not help recall.
 
 The picker fails the canonical recall journey at two steps:
 
 1. **Scan** — agent titles do not differentiate sessions in the same project.
-2. **Probe** (press `P`) — the preview pane shows admin metadata, not the
-   user's intent or last activity.
+2. **Probe** (press `P`) — preview surfaces admin metadata, not user intent
+   or last activity.
 
 ## Goal
 
 Replace weak agent-generated titles in the row with the user's first
-message to that session ("intent recall"), and invert the preview pane so
-the user's last message and unsent draft ("state recall") become the
-dominant elements, with metadata relegated to a single muted footer.
+message ("intent recall"), and invert the preview pane so the user's last
+message and unsent draft ("state recall") become the dominant elements,
+with metadata in a single muted footer.
 
 The synopsis is a **derived projection** of the existing event stream —
-matching SPUR's `ExecutorLineage` and `PlanProjectionStore` patterns. It
-holds no persistent state of its own.
+matching `ExecutorLineage` and `PlanProjectionStore`. It holds no
+persistent state of its own. For pre-launch this is acceptable; future
+NDJSON replay (arch.md Tier 1 #2) rehydrates projections at startup.
 
 ## Non-goals
 
-- No ACP protocol changes. `SessionInfo` stays as-is.
-- No new persistence file. No additions to `metadata.json`.
-- No AI-generated summaries. Snippets are verbatim slices of stored messages.
-- No legacy backfill, no NDJSON replay path. Both come for free when the
-  arch roadmap's Tier 1 #2 ("NDJSON replay on `Lagged`") lands.
-- No mutation of `SessionMetadata`. The picker view stays read-only against
-  metadata; the projection stays read-only to consumers.
-- No 2nd-line snippet under the selected row (would break the existing
-  `visible_height` scroll math; rejected during brainstorming).
+- No ACP protocol changes.
+- No new event variants. Synopsis observes existing
+  `SpurEventBody::AgentNotification` and `SpurEventBody::SessionHistory`.
+- No new persistence file or `metadata.json` field.
+- No AI-generated summaries.
+- No legacy backfill, no NDJSON replay path.
+- No mutation of `SessionMetadata` from the picker view.
+- No 2nd-line snippet under the selected row (would break `visible_height`
+  scroll math).
 
 ## Data tiers
 
-Synopsis recall has three potential data sources, each at a different
-durability tier:
-
 | Tier | Source | Lifetime | Role in v1 |
 |---|---|---|---|
-| **Long-term** | ACP vendor session (Claude Code / Codex / Kiro maintains its own history) | Persistent in agent | On resume, agent replays history → `AgentNotification` events → projection catches up |
-| **Mid-term** | `EventSink` NDJSON files in `.spur/events/*.ndjson` (128MB rotation) | Until rotation prunes | Out of scope; future NDJSON replay (Tier 1 #2 in `docs/architecture.md`) populates projection at startup |
-| **Short-term** | In-memory `SessionSynopsisProjection` in `spur-tui` | Current TUI process | Authoritative for the picker; populated by live broadcast |
+| **Long-term** | ACP vendor session | Persistent in agent | On `load_session`, agent replays history → `AgentNotification(UserMessageChunk)` → projection |
+| **Long-term (kiro fallback)** | `~/.kiro/sessions/cli/<id>.jsonl` | Persistent on disk | Orchestrator's `read_session_history_from_disk` (`orchestrator.rs:3944`) emits `SessionHistory { entries }` → projection |
+| **Mid-term** | `EventSink` NDJSON (128MB rotation) | Until rotation | Out of scope; future NDJSON replay populates projections at startup |
+| **Short-term** | In-memory projection | Current TUI process | Authoritative for picker |
 
-For v1 the picker relies on tier-3 plus the on-resume replay from tier-1.
-Sessions never resumed in the current TUI run, with no live messages,
+Sessions never observed in this TUI run, with no replay/live messages,
 have no synopsis and fall through to the existing agent-title path. The
 user can archive stale sessions via the existing `d` keybind.
 
@@ -65,54 +62,46 @@ user can archive stale sessions via the existing `d` keybind.
 | Question | Choice | Rationale |
 |---|---|---|
 | Where does enrichment go? | Hybrid: row label uses first-msg; preview pane carries last-msg + draft + first-msg | Row stays compact; preview becomes content-first |
-| Data source | Live event projection (no persistence, no backfill) | Matches `ExecutorLineage` pattern; future NDJSON replay is a free upgrade |
-| Row label precedence | `title_override` → first-msg → agent title → cwd | Manual user rename wins; otherwise snippet beats agent auto-title |
+| Data source | Live event projection (no persistence, no backfill) | Matches `ExecutorLineage` pattern |
+| Row label precedence | `title_override` → first-msg → agent title → cwd | Manual rename wins; otherwise snippet beats agent auto-title |
 | Per-row 2nd line for selected row | Rejected | Breaks `visible_height` math |
-| Preview pane height | Grow from 8 to 12 rows when `P` is on | Fits last-msg + draft + first-msg + footer |
+| Preview pane height | 8 → 12 rows when `P` is on | Fits last-msg + draft + first-msg + footer |
 | Preview hierarchy | State on top (last-msg + draft), intent below (first-msg breadcrumb) | "Where I left off" is the dominant resume question |
+| Projection crate | `spur-core` (types) + per-frontend instance | Mirrors `ExecutorLineage` (`app.rs:14,205-207,359-360`) |
+| Truncation crate | TUI-side at render | Avoids adding `unicode-segmentation` dep to core |
 
 ## Architecture
 
-### Data flow — projection pattern
+### Data flow
 
 ```mermaid
 flowchart TD
-    ACP[ACP Agent stream<br/>SessionUpdate events]
-    Orch[Orchestrator<br/>spur-core]
-    Funnel[EventFunnel<br/>singleton, seq stamping]
-    BC{broadcast::channel<br/>4096}
+    ACP[ACP Agent stream]
+    Orch[Orchestrator]
+    Funnel[EventFunnel<br/>singleton]
+    BC[broadcast::channel 4096]
     AppPump[App.NotificationDrain<br/>≤8 events/frame]
-    Proj[SessionSynopsisProjection<br/><b>NEW</b><br/>HashMap&lt;SessionId, SessionSynopsis&gt;]
+    Proj[SessionSynopsisProjection<br/><b>NEW · in spur-core</b>]
     Picker[SessionPickerView<br/>render — read-only]
-    Row[Row label]
-    Preview[Preview pane]
 
-    ACP -->|notifications| Orch
-    Orch -->|emit body| Funnel
+    ACP -->|notifications + replay| Orch
+    Orch -->|emit AgentNotification| Funnel
+    Orch -->|emit SessionHistory<br/>kiro fallback| Funnel
     Funnel --> BC
     BC -->|subscribe| AppPump
-    AppPump -->|observe AgentNotification| Proj
-    Proj -.immutable borrow.-> Picker
-    Picker --> Row
-    Picker --> Preview
+    AppPump -->|observe&lpar;event&rpar;| Proj
+    Proj -.immutable borrow via ViewContext.-> Picker
 
-    classDef projection fill:#fef3c7,stroke:#d97706,stroke-width:2px
-    classDef readPath fill:#dbeafe,stroke:#2563eb
-    class Proj projection
-    class Picker,Row,Preview readPath
+    classDef new fill:#fef3c7,stroke:#d97706,stroke-width:2px
+    class Proj new
 ```
 
-The projection mirrors SPUR's existing pattern (architecture.md §4):
-
-- `ExecutorLineage` — `HashMap<ExecutorId, Node>`, pure projection.
-- `PlanProjectionStore` — cache + snapshot, subscribes to broadcast.
-- **NEW `SessionSynopsisProjection`** — `HashMap<SessionId, SessionSynopsis>`,
-  observed from `SpurEventBody::AgentNotification`.
-
-The projection holds **no persistent state**. It rebuilds from the event
-stream during the lifetime of a TUI process. When NDJSON replay
-(arch roadmap Tier 1 #2) lands, this projection rehydrates at startup
-for free.
+The projection is a passive `apply(&event)` struct — same shape as
+`ExecutorLineage` (`spur-core/src/lineage/projection.rs`) and
+`PlanProjectionStore` (`spur-core/src/plan_projection/projection.rs`).
+TUI's App holds an instance and feeds it from the existing notification
+drain. No async tasks, no disk writes, no broadcast subscription beyond
+what App already does.
 
 ### Component architecture
 
@@ -120,167 +109,163 @@ for free.
 flowchart LR
     subgraph spur_core["crates/spur-core"]
         Funnel["EventFunnel + broadcast"]
+        ProjType["session_synopsis/projection.rs<br/>SessionSynopsis<br/>SessionSynopsisProjection<br/><b>NEW</b>"]
     end
 
     subgraph spur_tui["crates/spur-tui"]
-        subgraph appLayer["App layer (app.rs)"]
-            AppPump["NotificationDrain<br/>+ projection.observe(event) <b>NEW</b>"]
-        end
-
-        subgraph projLayer["Projection layer <b>NEW</b>"]
-            Proj["session_synopsis.rs<br/>SessionSynopsisProjection<br/>SessionSynopsis"]
-        end
-
-        subgraph stateLayer["State layer (unchanged)"]
-            SM["session_metadata.rs<br/>title_override · draft · pinned ·<br/>archived · last_opened_at"]
-        end
-
-        subgraph viewsLayer["Views layer"]
-            Picker["views/session_picker.rs<br/>+ resolve_label <b>NEW</b><br/>+ truncate_for_row <b>NEW</b><br/>+ haystack cache <b>NEW</b>"]
-        end
-
-        subgraph componentsLayer["Components layer"]
-            PreviewC["components/session_preview.rs<br/>+ PreviewRow style/wrap <b>NEW</b>"]
-        end
+        App["App.synopsis: SessionSynopsisProjection<br/>+ observe&lpar;event&rpar; in NotificationDrain <b>NEW</b>"]
+        VC["ViewContext.synopsis: &SessionSynopsisProjection <b>NEW</b>"]
+        Picker["views/session_picker.rs<br/>+ resolve_label <b>NEW</b><br/>+ truncate_for_row <b>NEW</b><br/>+ haystack cache <b>NEW</b>"]
+        PreviewC["components/session_preview.rs<br/>+ PreviewRow style/wrap <b>NEW</b>"]
     end
 
-    Funnel -->|broadcast| AppPump
-    AppPump --> Proj
-    Proj -.read-only.-> Picker
-    SM -.read-only.-> Picker
+    Funnel -->|broadcast| App
+    ProjType -.imported.-> App
+    App --> VC
+    VC -.read-only.-> Picker
     Picker --> PreviewC
 
     classDef new fill:#fef3c7,stroke:#d97706,stroke-width:2px
-    class AppPump,Proj,Picker,PreviewC new
+    class ProjType,App,VC,Picker,PreviewC new
 ```
 
-Files touched: 4 in `spur-tui` (`app.rs`, new `session_synopsis.rs`,
-`views/session_picker.rs`, `components/session_preview.rs`). Zero
-changes in `spur-acp` or `spur-core`. **`session_metadata.rs` is
-untouched** — synopsis is not metadata.
+Files touched:
+- **NEW** `crates/spur-core/src/session_synopsis/projection.rs`
+- `crates/spur-core/src/lib.rs` — re-export `SessionSynopsis`,
+  `SessionSynopsisProjection`
+- `crates/spur-tui/src/app.rs` — instantiate + observe wire-up
+- `crates/spur-tui/src/views/mod.rs` — `ViewContext.synopsis`
+- `crates/spur-tui/src/views/session_picker.rs` — consume + render +
+  haystack
+- `crates/spur-tui/src/components/session_preview.rs` — `PreviewRow`
+  extension
 
-### Projection update sequence
+`session_metadata.rs` is **untouched**.
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant ACP as ACP stream
-    participant Orch as Orchestrator
-    participant BC as Broadcast
-    participant App as App.NotificationDrain
-    participant Proj as Projection (HashMap)
-    participant Pick as Picker render
-
-    ACP->>Orch: user_message_chunk("fix auth")
-    Orch->>BC: SpurEventBody::AgentNotification
-    BC->>App: receive (≤8/frame)
-    App->>Proj: observe(event)
-    Proj->>Proj: synopsis[id].first_user_msg = "fix auth"<br/>synopsis[id].last_user_msg = "fix auth"
-
-    Note over App,Proj: No disk write. No flush. No tick.
-
-    ACP->>Orch: user_message_chunk("also bump version")
-    Orch->>BC: AgentNotification
-    BC->>App: receive
-    App->>Proj: observe(event)
-    Proj->>Proj: synopsis[id].last_user_msg = "also bump version"
-
-    Note over Pick: Next render (frame-bound)
-    Pick->>Proj: read synopsis[id] (immutable borrow)
-    Pick->>Pick: resolve_label uses first_user_msg
-```
-
-If the user resumes an old session, the agent replays its history; the
-chunks flow through the same path and the projection catches up
-naturally.
-
-## Data model
-
-New file: `crates/spur-tui/src/session_synopsis.rs`.
+## Data model (in `spur-core`)
 
 ```rust
+// crates/spur-core/src/session_synopsis/projection.rs
+
 use std::collections::HashMap;
 use spur_acp::SessionId;
 
 #[derive(Debug, Clone, Default)]
 pub struct SessionSynopsis {
-    /// User's first non-slash-command message in this session, capped at
-    /// 120 graphemes at write time. None = unknown.
+    /// First non-slash-command user message in this session, raw text.
+    /// Truncation is applied at render time by consumers.
     pub first_user_msg: Option<String>,
-    /// Most recent USER message (not assistant), capped at 120 graphemes.
+    /// Most recent user message, raw text.
     pub last_user_msg: Option<String>,
-    /// RFC 3339 timestamp of last_user_msg.
-    pub last_msg_at: Option<String>,
 }
 
 #[derive(Debug, Default)]
 pub struct SessionSynopsisProjection {
     by_session: HashMap<SessionId, SessionSynopsis>,
-    /// Sessions that received a synopsis update since last picker read;
-    /// the picker uses this to invalidate cached haystack entries.
-    dirty_since_read: std::collections::HashSet<SessionId>,
+    /// Per-session pending-chunk accumulator. Buffered until a flush
+    /// trigger fires (see "Accumulator state machine" below).
+    pending: HashMap<SessionId, String>,
 }
 
 impl SessionSynopsisProjection {
+    pub fn new() -> Self { Self::default() }
+
     /// Called by App's NotificationDrain for every SpurEvent.
     pub fn observe(&mut self, event: &spur_acp::SpurEvent) { /* ... */ }
 
-    /// Read API for the picker.
-    pub fn get(&self, id: &SessionId) -> Option<&SessionSynopsis> { /* ... */ }
-
-    /// Drain the dirty set (picker calls on each render).
-    pub fn drain_dirty(&mut self) -> Vec<SessionId> { /* ... */ }
+    /// Read API for the picker. If a session has no committed
+    /// `last_user_msg` but a non-empty pending buffer, returns a
+    /// snapshot synopsis with the pending text exposed as
+    /// last_user_msg (commit-on-read fallback for abandoned turns).
+    pub fn get(&self, id: &SessionId) -> Option<SessionSynopsis> { /* ... */ }
 }
 ```
 
 Storage rules (write-time):
-- 120-grapheme cap, measured via `unicode-segmentation`.
-- Truncation cuts at first `.`, `?`, `!`, `\n`, or 120 graphemes —
-  whichever first. Trailing `…` appended if cut.
 - Empty / whitespace-only chunks are skipped.
 - Messages whose first non-whitespace character is `/` are skipped from
-  `first_user_msg` so commands like `/vim` or `/clear` never become a
-  permanent row label. They still update `last_user_msg`.
-- All timestamps are RFC 3339.
+  `first_user_msg` (commands like `/vim`, `/clear`). They still update
+  `last_user_msg`.
+- Raw text is stored without grapheme capping. Length-bounding the row
+  label is a render-time concern; the projection trusts ACP's
+  chunk sizing as a natural bound (chunk text is bounded by transport).
 
-`SessionMetadata` / `SessionEntry` are **not modified**. Synopsis is
-derived state and does not belong with persisted user-authored fields
-(`title_override`, `draft`, `pinned`, `archived`, `last_opened_at`).
+Cut from prior drafts:
+- `last_msg_at` — redundant with `session.updated_at` (already shown as
+  `relative_ts` in the row).
+- `dirty_since_read` / `drain_dirty` — replaced by lazy haystack rebuild
+  on filter input change.
+- `backfilled_at` — no backfill in v1.
 
-## Projection update path
+## Accumulator state machine
 
-The projection is a field on `App` (`crates/spur-tui/src/app.rs:222`-
-adjacent struct). In `App::process_spur_event` (existing handler in the
-neighborhood of `app.rs:1388-1393`), call `self.synopsis.observe(event)`
-synchronously alongside the existing event-routing arms.
+Multi-chunk user messages are reassembled into one logical message
+before commit. The schema does not guarantee 1 chunk per message, even
+though Claude Code's replay fixture shows that today.
 
 ```text
-fn observe(&mut self, event: &SpurEvent):
-    let SpurEventBody::AgentNotification { session_id, notification } = event.body else: return
-    let SessionUpdate::user_message_chunk { content } = notification.update else: return
-    let text = content.text.trim()
-    if text.is_empty(): return
+on event:
+  match SpurEventBody:
+    AgentNotification { session, notification }:
+      match notification.update:
+        UserMessageChunk(c):
+          append c.text to pending[session]
+        AgentMessageChunk | AgentThoughtChunk | ToolCall | ToolCallUpdate
+          | Plan | AvailableCommandsUpdate | CurrentModeUpdate | ...:
+          flush_pending(session)
 
-    let s = self.by_session.entry(session_id).or_default()
+    SessionHistory { session, entries }:
+      // Kiro fallback path. entries: Vec<HistoryEntry { role, text }>.
+      drop pending[session]  // history overrides any in-flight buffer
+      let user_entries = entries.iter().filter(|e| e.role == "user")
+      if let Some(first) = user_entries.first():
+          set first_user_msg if not already set
+      if let Some(last) = user_entries.last():
+          set last_user_msg
 
-    if !text.starts_with('/') and s.first_user_msg.is_none():
-        s.first_user_msg = Some(truncate_120(text))
-    s.last_user_msg = Some(truncate_120(text))
-    s.last_msg_at   = Some(now_rfc3339())
-    self.dirty_since_read.insert(session_id.clone())
+    TurnComplete { session }:
+      flush_pending(session)
+
+    BrainRetired { session, .. }
+      | SessionCompleted { session, .. }
+      | SessionAttachRejected { acp_session_id: session, .. }:
+      flush_pending(session)
+
+    _ : // ignore other variants
+
+flush_pending(session):
+  let buf = pending.remove(session).unwrap_or_default()
+  let trimmed = buf.trim()
+  if trimmed.is_empty(): return
+  let s = by_session.entry(session).or_default()
+  if !trimmed.starts_with('/') and s.first_user_msg.is_none():
+      s.first_user_msg = Some(trimmed.to_owned())
+  s.last_user_msg = Some(trimmed.to_owned())
 ```
 
-Assistant chunks are ignored.
+**Commit-on-read fallback.** `get(id)` returns the synthesized synopsis:
 
-**No disk I/O. No flush. No tick. No coalescing.** Observation is O(1)
-amortized HashMap update; runs inline with the existing notification
-drain (capped at ≤8 events/frame per arch §2 channel summary).
+```text
+get(id):
+  let committed = by_session.get(id).cloned().unwrap_or_default()
+  if let Some(buf) = pending.get(id):
+    let trimmed = buf.trim()
+    if !trimmed.is_empty() and committed.last_user_msg.is_none():
+      // abandoned mid-user-turn: surface the pending buffer
+      return Some(SessionSynopsis {
+        first_user_msg: committed.first_user_msg,
+        last_user_msg: Some(trimmed.to_owned()),
+      })
+  if committed == SessionSynopsis::default(): None else Some(committed)
+```
+
+This keeps an abandoned pending buffer visible to the picker without
+prematurely promoting it to the committed map (a later non-User event
+will commit it properly via `flush_pending`).
 
 ## Row composition
 
-Replace `resolved_title()` in `session_picker.rs` (line 521) with
-`resolve_label()`. The picker accesses the projection through
-`ViewContext` (existing pattern — see `views/mod.rs:115-124`).
+Replace `resolved_title()` (`session_picker.rs:521`) with `resolve_label()`:
 
 ```rust
 fn resolve_label(
@@ -290,45 +275,37 @@ fn resolve_label(
     show_cwd: bool,
     label_budget: usize,
 ) -> String {
-    // 1. user-set rename wins
     if let Some(t) = entry.and_then(|e| e.title_override.as_deref())
         .filter(|t| !t.is_empty())
     {
         return truncate_for_row(t, label_budget);
     }
-    // 2. first-user-msg from projection
     if let Some(snippet) = synopsis
         .and_then(|s| s.first_user_msg.as_deref())
         .filter(|s| !s.is_empty())
     {
         return truncate_for_row(snippet, label_budget);
     }
-    // 3. agent-generated title
     if let Some(t) = session.title.as_deref().filter(|t| !t.is_empty()) {
         return truncate_for_row(t, label_budget);
     }
-    // 4. cwd basename
     if show_cwd {
         return format!("{}/", cwd_basename(&session.cwd));
     }
-    // 5. fallback
     "(untitled session)".to_string()
 }
 ```
 
 `label_budget` = `area.width − right_gutter_width − prefix_width`,
-fallback static cap of 60 graphemes for ultrawide terminals.
+fallback static cap of 60 graphemes. `truncate_for_row` cuts at first
+sentence punctuation (`. ? !`), newline, or `label_budget` graphemes
+(via `unicode-segmentation`, already a TUI dep).
 
-`truncate_for_row` cuts at first sentence punctuation (`. ? !`),
-newline, or `label_budget` graphemes.
-
-The list row stays a single line.
+The list row stays one line.
 
 ## Preview pane
 
-`PreviewContent` is **extended**, not replaced. Keep the existing
-`rows: Vec<(String, String)>` and `placeholder: Option<String>`. Add an
-optional per-row style modifier:
+Extend `PreviewContent` (do not replace):
 
 ```rust
 pub struct PreviewRow {
@@ -346,164 +323,161 @@ pub struct PreviewContent {
 
 `From<(String, String)> for PreviewRow` preserves existing call sites.
 
-The picker populates rows in **state-recall-first** order:
+Picker fills in **state-recall-first** order:
 
-1. **Last** — value = `synopsis.last_user_msg`. Single line. Skipped if absent.
-2. **Draft** — value = `entry.draft`, style `Color::Yellow`. Skipped if empty.
+1. **Last** — `synopsis.last_user_msg`, single line.
+2. **Draft** — `entry.draft`, yellow. Skipped if empty.
 3. Blank separator.
-4. **Intent** — value = `synopsis.first_user_msg`, wrapped, dim gray
-   (no italic). Up to 3 wrapped lines. Skipped if absent.
+4. **Intent** — `synopsis.first_user_msg`, wrapped, dim gray (no
+   italic). Up to 3 wrapped lines. Skipped if absent.
 5. Blank separator.
-6. **Footer** — value = `cwd · brain · short_id`, dark gray.
+6. **Footer** — `cwd · brain · short_id`, dark gray.
 
-No timestamp on the `Last` row — the row's relative_ts is already visible.
-
-Preview height changes from 8 to 12 (`preview_height` constant in
-`render_populated()` at line 802). When `P` is off, layout is unchanged.
-
-If terminal is too short for 12 rows, ratatui clips the bottom. No
-graceful-degradation rules.
+Preview height: 12 rows when `P` is on (constant in
+`render_populated()` at line 802). When `P` is off, layout unchanged.
+If terminal is shorter, ratatui clips the bottom — no graceful
+degradation rules.
 
 ## Filter / search
 
 Two changes:
 
-**1. Widen the haystack** to include synopsis:
+**1. Widen haystack** to include synopsis fields:
 ```rust
-let synopsis = ctx.synopsis_projection.get(&session.session_id);
-let label = resolve_label(session, entry, synopsis, false, usize::MAX);
-let first = synopsis.and_then(|s| s.first_user_msg.as_deref()).unwrap_or("");
-let last  = synopsis.and_then(|s| s.last_user_msg.as_deref()).unwrap_or("");
+let synopsis = ctx.synopsis.get(&session.session_id);
+let label = resolve_label(session, entry, synopsis.as_ref(), false, usize::MAX);
+let first = synopsis.as_ref().and_then(|s| s.first_user_msg.as_deref()).unwrap_or("");
+let last  = synopsis.as_ref().and_then(|s| s.last_user_msg.as_deref()).unwrap_or("");
 let haystack = format!("{label} {first} {last} {cwd} {id}");
 ```
 
-**2. Precompute and cache haystacks** on `set_sessions()` and on
-projection updates. Add to `PickerState::Populated`:
+**2. Lazy haystack rebuild.** Add `haystacks: Vec<String>` to
+`PickerState::Populated`. Built on `set_sessions()`. Rebuilt on
+filter-input change (cursor moves and re-renders without filter changes
+do NOT rebuild). Live synopsis updates between filter rebuilds may not
+reflect in the haystack until the next filter keystroke or list refresh
+— acceptable; the row LABEL itself updates immediately because
+`resolve_label` reads the projection at every render.
 
-```rust
-PickerState::Populated {
-    agent: String,
-    sessions: Vec<SessionInfo>,
-    haystacks: Vec<String>,   // NEW
-    cursor: usize,
-    search_focused: bool,
-    filter: String,
-}
-```
+No `drain_dirty`, no per-render invalidation, no interior mutability.
 
-`haystacks[i]` is built in `set_sessions()`. On each render, the picker
-calls `synopsis_projection.drain_dirty()`; for each dirty id that
-matches a visible session, rebuild that one haystack entry. This gives
-us the perf win without coupling the projection to the picker.
-
-`filtered_indices` reads `&haystacks[i]` instead of recomputing.
-
-**Match-source hint:** when a filter is active and the query string
-does not appear (case-insensitive substring) in the rendered row label,
-append a dim suffix:
-
-```
-  > Build fix              codex  2h  019dce0e   ↳ "...auth refactor..."
-```
+**Match-source hint** — cut from v1 (visible noise risk).
 
 ## Action / event additions
 
-None. The projection is read directly via `ViewContext`; no new actions
-or messages.
+None.
 
 ## Performance & invariants
 
-- **Synchronous render:** zero I/O on the render path.
-- **No async tasks** introduced.
-- **No disk writes** introduced.
-- **Single cache layer:** the projection HashMap IS the cache.
-- **Truncation at write time:** stored value capped at 120 graphemes.
-- **Visible-height math unchanged:** all rows remain one line.
-- **Projection update cost:** O(1) amortized HashMap insert per
-  user_message_chunk, runs inside the existing ≤8/frame drain budget.
-- **Filter haystack:** built once per `set_sessions()`, invalidated
-  per-session via the projection's dirty set on render. `filtered_indices`
-  is O(n) scoring instead of O(n × strlen).
+- Synchronous render: zero I/O.
+- No async tasks. No disk writes.
+- Single cache: the projection HashMap.
+- Truncation at render time, not write time. Stored synopsis is the raw
+  user text; rendering caps to `label_budget`.
+- Visible-height math unchanged: rows are one line.
+- Projection update cost: O(1) amortized, runs inside the existing
+  ≤8/frame drain budget.
+- Filter haystack: rebuilt on `set_sessions()` and on filter-input
+  change; not per-render.
 
 ## Error handling
 
-- **Empty / whitespace-only `user_message_chunk`** — skip; no synopsis
-  update.
-- **First message is a slash command** — skip from `first_user_msg`;
-  still update `last_user_msg`.
-- **Unicode-segmentation panic on truncation** — `unicode-segmentation`
-  is panic-safe; unit-test boundary cases.
-- **Render-time budget < 1 grapheme** — `truncate_for_row` returns `…`
-  alone.
-- **`Lagged` on broadcast receiver** — App already logs warn on Lagged
-  per arch Risk #9. Projection misses some events; `first_user_msg` may
-  still be correct (it's the earliest user msg ever observed), but
-  `last_user_msg` may be stale until the next chunk lands. Acceptable
-  pre-launch; future NDJSON replay (Tier 1 #2) closes this gap.
+- Empty / whitespace user_message_chunk → skipped.
+- Slash-command first message → skipped from `first_user_msg`; updates
+  `last_user_msg`.
+- `unicode-segmentation` panic on truncation → unit-test boundary cases.
+- Render `label_budget < 1` → `truncate_for_row` returns `…` alone.
+- `SessionHistory` with empty entries → no-op.
+- `SessionHistory` with no `role == "user"` entries → no-op.
+- Pending buffer with only whitespace → `flush_pending` no-ops (trim
+  empty); buffer is dropped.
 
 ## Risks
 
-| Risk | Likelihood | Mitigation |
-|---|---|---|
-| First user message is a long paste (e.g., a stack trace) and dominates the row | Medium | 120-grapheme cap + sentence-boundary cut keeps the label tight |
-| Different agents emit `user_message_chunk` differently (per character vs per message) | Low | Idempotent re-write of `last_user_msg` is harmless. Plan-writing must verify chunk-vs-message semantics from `crates/spur-acp` |
-| User changes their mind about the first message and wants to "reset" the synopsis | Low | Existing `R` rename flow already overrides via `title_override`, which has top precedence |
-| Projection lost on TUI restart | Medium → Low (pre-launch) | Acceptable for v1: rows fall through to agent title until the user resumes the session (vendor replays history → projection populates). Future: NDJSON replay (arch Tier 1 #2) rehydrates projection at startup |
-| Sessions whose underlying NDJSON has rotated out and were never resumed | Low | Acceptable. User can archive via existing `d` keybind. Sessions reachable via ACP `session/list` still get a row, just without synopsis |
-| Filter widening blows nucleo budget on large session lists | Low | Haystacks precomputed once per session; benchmark at 200 / 500 sessions before merge |
-| Match-source hint adds visible noise on every filter | Medium | Only render when label substring miss; cap hint at one short fragment |
-| Broadcast `Lagged` causes projection drift | Low (pre-launch) | Tier 1 #2 NDJSON replay is the canonical mitigation across all projections including this one. Until then, projection self-corrects on the next live chunk |
+| Risk | Likelihood | Impact | Mitigation |
+|---|---|---|---|
+| Long paste (stack trace) dominates row | Medium | Visible | Sentence-boundary cut + `label_budget` keeps row tight |
+| Different agents stream `user_message_chunk` per character | Medium | Correctness | Accumulator commits on flush boundary; first/last_user_msg get whole assembled message |
+| User changes mind, wants to "reset" synopsis | Low | UX | Existing `R` rename writes `title_override`, top precedence |
+| Projection lost on TUI restart | Medium → Low (pre-launch) | UX | Acceptable v1: rows fall through to agent title until session is resumed (vendor replays history → projection populates). Future NDJSON replay (arch Tier 1 #2) closes |
+| Sessions whose NDJSON has rotated and were never resumed | Low | UX | User archives via `d` |
+| Filter widening blows nucleo budget on >500 sessions | Low | Perf | Haystacks precomputed; benchmark before merge |
+| **Broadcast `Lagged` drops the first `user_message_chunk`** | **Low (pre-launch), real** | **Correctness, user-visible** | **Known v1 degradation: if the first chunk is in a dropped Lagged window, `first_user_msg` stays None for that session in this TUI process; row falls back to agent title silently. NDJSON replay (Tier 1 #2) closes this. Document in release notes** |
+| Kiro session with no jsonl history file | Low | UX | `read_session_history_from_disk` returns empty Vec; no `SessionHistory` event emitted; row falls through to agent title |
+| Mid-user-turn abandoned (no flush trigger fires) | Low | UX | `get()` commit-on-read fallback exposes the pending buffer as `last_user_msg` |
 
 ## Test surface
 
-Unit tests:
+Unit tests (in `spur-core`):
 - `resolve_label` precedence — 5 cases plus empty / whitespace.
-- `truncate_for_row` — sentence boundary, char cap, ellipsis, unicode
-  graphemes, budget < 1.
-- `truncate_120` — same edge cases.
 - `SessionSynopsisProjection::observe`:
-  - First `user_message_chunk` populates both `first_user_msg` and
+  - Single-chunk live message: appends to pending; flushes on next
+    `AgentMessageChunk`; populates first + last.
+  - Multi-chunk live message: accumulates across chunks; flushes once
+    on agent reply; first + last reflect the full assembled text.
+  - Slash-command first message: skipped from `first_user_msg`; updates
     `last_user_msg`.
-  - Second chunk updates only `last_user_msg`.
-  - Slash-command first message updates only `last_user_msg`.
-  - Empty / whitespace chunk is skipped.
-  - Assistant chunks are ignored.
-  - Non-`AgentNotification` events are ignored.
-  - Dirty set tracks updated session ids; `drain_dirty` empties it.
-- Filter haystack includes synopsis fields when projection is non-empty.
-- Match-source hint appears only on label substring miss.
+  - Empty / whitespace chunk: pending unchanged.
+  - Assistant chunks: no-op.
+  - `TurnComplete` flushes pending.
+  - `BrainRetired` / `SessionCompleted` flush pending.
+  - `SessionHistory` with `[user, assistant, user]` entries: first
+    user → `first_user_msg`, last user → `last_user_msg`; assistant
+    entries ignored. Pending buffer for the session is dropped.
+  - `SessionHistory` with empty entries: no-op.
+  - Non-`AgentNotification` / non-`SessionHistory` events: ignored.
+  - Commit-on-read: pending non-empty + no committed last_user_msg →
+    `get()` returns synthesized synopsis with pending exposed.
+
+Unit tests (in `spur-tui`):
+- `truncate_for_row` — sentence boundary, char cap, ellipsis, unicode,
+  budget < 1.
+- Filter haystack includes synopsis fields when projection has data.
+- Haystack rebuilds on `set_sessions()` and filter input.
 
 Snapshot tests (insta):
-- Row render: synopsis present, synopsis absent, `title_override` present.
+- Row render: synopsis present, synopsis absent, `title_override` set.
 - Preview render: full synopsis + draft, synopsis without draft, empty.
 
 Integration test:
-- Pump synthetic `SpurEvent`s through `App::process_spur_event` and
-  assert the picker view's resolved labels reflect the projection.
+- Pump synthetic `SpurEvent`s (UserMessageChunk + AgentMessageChunk +
+  TurnComplete; plus a `SessionHistory` scenario) through
+  `App::process_spur_event`; assert picker labels reflect the
+  projection state.
 
-Manual QA checklist (terminal sizes):
-- 80×24 (minimum standard).
-- 120×40 (normal).
-- 200×60 (ultrawide) — confirm `label_budget` cap of 60.
+Manual QA:
+- 80×24, 120×40, 200×60 terminal sizes.
+- Resume a Claude Code session and confirm `first_user_msg` populates
+  from replay.
+- Resume a kiro session (with prior `~/.kiro/sessions/cli/<id>.jsonl`)
+  and confirm `first_user_msg` populates from `SessionHistory`.
 
 ## Effort estimate
 
 | Phase | LoC | Files |
 |---|---|---|
-| `SessionSynopsis` + `SessionSynopsisProjection` + observe + tests | ~120 | NEW `session_synopsis.rs` |
-| App wire-up (field + observe call in event drain) + ViewContext field | ~30 | `app.rs`, `views/mod.rs` |
-| `resolve_label` + `truncate_for_row` + label_budget plumbing | ~80 | `session_picker.rs` |
-| `PreviewContent` extension + new preview population | ~60 | `session_preview.rs`, `session_picker.rs` |
-| Filter widening + haystack precompute + dirty-set invalidate | ~50 | `session_picker.rs` |
-| Snapshot + integration tests | ~80 | `session_picker.rs` (`#[cfg(test)]`), new fixtures |
+| `SessionSynopsis` + `SessionSynopsisProjection` + `observe` + `get` + state-machine tests | ~180 | NEW `spur-core/src/session_synopsis/projection.rs`, `spur-core/src/lib.rs` re-export |
+| App wire-up (field + observe call) + `ViewContext.synopsis` field + 11+ construction-site updates | ~50 | `app.rs`, `views/mod.rs`, `lib.rs`, all `test_ctx()` defs |
+| `resolve_label` + `truncate_for_row` + label_budget plumbing | ~80 | `views/session_picker.rs` |
+| `PreviewRow` extension + state-first preview population | ~60 | `components/session_preview.rs`, `views/session_picker.rs` |
+| Filter widening + lazy haystack rebuild | ~30 | `views/session_picker.rs` |
+| Snapshot + integration tests | ~80 | `views/session_picker.rs` (`#[cfg(test)]`), new fixtures |
 
-Total: ~420 LoC across 4 files (3 modified + 1 new). One implementation
+Total: ~480 LoC across 6 files (5 modified + 1 new). One implementation
 plan, no parallel-task decomposition needed.
 
-## Open follow-ups (out of scope)
+## Open follow-ups (deferred to v2)
 
-- NDJSON replay on TUI startup to rehydrate projection (arch Tier 1 #2 —
-  benefits all projections including this one; not picker-specific).
-- Per-session cost in the preview footer (`spur-cost` integration).
-- AI-generated semantic summary for very long sessions.
-- Backfill for legacy sessions if/when post-launch demand materializes.
+- **NDJSON replay on TUI startup** (arch Tier 1 #2) — rehydrates ALL
+  projections including this one. Closes the Lagged-drops correctness
+  gap.
+- **Input-side `UserPromptSubmitted` event** with prompt blocks — would
+  capture user intent before agent echo, eliminating dependence on
+  broadcast delivery for live messages. `PromptDispatched` already
+  exists at `events.rs:947` but does not carry prompt blocks; adding a
+  new event variant is a separate event-contract change.
+- **Bot integration** — `spur-bot` instantiates its own
+  `SessionSynopsisProjection`. Type now lives in core, so this is
+  unblocked but out of v1 scope.
+- **Per-session cost in preview footer** (`spur-cost` integration).
+- **AI-generated semantic summary** for very long sessions.
