@@ -29,10 +29,30 @@ impl SessionSynopsisProjection {
         Self::default()
     }
 
-    /// Read API. Returns `None` for unknown sessions.
-    /// (Commit-on-read fallback added in Task 9.)
+    /// Read API. Returns the committed synopsis when present. If a
+    /// session has only a pending buffer (no committed last_user_msg
+    /// yet — abandoned mid-user-turn), exposes the pending text as
+    /// last_user_msg and (when not a slash-command) as first_user_msg.
     pub fn get(&self, id: &SessionId) -> Option<SessionSynopsis> {
-        self.by_session.get(id).cloned()
+        let committed = self.by_session.get(id);
+        let pending_trimmed = self
+            .pending
+            .get(id)
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty());
+
+        match (committed, pending_trimmed) {
+            (Some(c), _) => Some(c.clone()),
+            (None, Some(p)) => Some(SessionSynopsis {
+                first_user_msg: if p.starts_with('/') {
+                    None
+                } else {
+                    Some(p.to_owned())
+                },
+                last_user_msg: Some(p.to_owned()),
+            }),
+            (None, None) => None,
+        }
     }
 
     /// Fold an event into the projection. Idempotent on irrelevant variants.
@@ -184,8 +204,12 @@ mod tests {
         let mut proj = SessionSynopsisProjection::new();
         proj.apply(&user_chunk_event("S1", "fix the auth bug"));
 
-        // Pending — not yet committed.
-        assert!(proj.get(&SessionId("S1".into())).is_none());
+        // Pending — surfaced via commit-on-read fallback (Task 9), but not yet committed.
+        let pending = proj
+            .get(&SessionId("S1".into()))
+            .expect("commit-on-read exposes pending");
+        assert_eq!(pending.last_user_msg.as_deref(), Some("fix the auth bug"));
+        assert!(!proj.by_session.contains_key(&SessionId("S1".into())));
 
         // Agent reply triggers flush.
         proj.apply(&agent_chunk_event("S1", "I'll take a look."));
@@ -193,6 +217,7 @@ mod tests {
         let s = proj.get(&SessionId("S1".into())).expect("synopsis present");
         assert_eq!(s.first_user_msg.as_deref(), Some("fix the auth bug"));
         assert_eq!(s.last_user_msg.as_deref(), Some("fix the auth bug"));
+        assert!(proj.by_session.contains_key(&SessionId("S1".into())));
     }
 
     #[test]
@@ -371,5 +396,42 @@ mod tests {
         }));
 
         assert!(proj.get(&SessionId("S1".into())).is_none());
+    }
+
+    #[test]
+    fn get_exposes_pending_buffer_when_no_committed_last_msg() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&user_chunk_event("S1", "abandoned mid turn"));
+
+        let s = proj
+            .get(&SessionId("S1".into()))
+            .expect("commit-on-read should surface pending");
+        assert_eq!(s.last_user_msg.as_deref(), Some("abandoned mid turn"));
+        assert_eq!(s.first_user_msg.as_deref(), Some("abandoned mid turn"));
+    }
+
+    #[test]
+    fn get_does_not_promote_slash_command_to_first_user_msg_via_read_fallback() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&user_chunk_event("S1", "/clear"));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert!(
+            s.first_user_msg.is_none(),
+            "slash should not become first via read fallback"
+        );
+        assert_eq!(s.last_user_msg.as_deref(), Some("/clear"));
+    }
+
+    #[test]
+    fn get_committed_synopsis_preferred_over_pending() {
+        let mut proj = SessionSynopsisProjection::new();
+        proj.apply(&user_chunk_event("S1", "committed msg"));
+        proj.apply(&agent_chunk_event("S1", "ok"));
+        proj.apply(&user_chunk_event("S1", "in-flight new turn"));
+
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(s.first_user_msg.as_deref(), Some("committed msg"));
+        assert_eq!(s.last_user_msg.as_deref(), Some("committed msg"));
     }
 }
