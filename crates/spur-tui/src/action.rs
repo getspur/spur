@@ -163,6 +163,7 @@ pub enum Action {
     /// highest-priority executor pre-selected (AwaitingReview > Running
     /// > most recent worker). Emitted by Alt+w in SessionDetailView.
     InspectWorkers,
+    OpenInsights,
 }
 
 /// Which permission option the user selected.
@@ -186,4 +187,5 @@ pub enum ViewId {
     PlanInspector(SessionId),
     #[cfg(feature = "markdown")]
     MermaidOverlay(SessionId),
+    Insights,
 }
