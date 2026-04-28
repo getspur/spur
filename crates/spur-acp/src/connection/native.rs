@@ -202,6 +202,10 @@ pub struct NativeAcpConnection {
     /// by the graceful shutdown path and the `Drop` safety net to kill the
     /// entire descendant tree via `killpg`.
     child_pgid: Arc<Mutex<Option<i32>>>,
+    /// Repo root used to resolve `.spur/pgids/<pgid>.toml` for the orphan-
+    /// reaping registry. Defaults to `PathBuf::from(".")` so production
+    /// callers (which run with cwd at the repo root) need no extra wiring.
+    repo_root: PathBuf,
 }
 
 /// Compute the path where the ACP subprocess's stderr should be written.
@@ -276,7 +280,15 @@ impl NativeAcpConnection {
             ext_notification_tx: ext_tx,
             session_notif_tx,
             child_pgid: Arc::new(Mutex::new(None)),
+            repo_root: PathBuf::from("."),
         }
+    }
+
+    /// Override the directory used to resolve `.spur/pgids/`. Production
+    /// callers run with cwd at the repo root so the default is correct;
+    /// tests use this to redirect the registry into a tempdir.
+    pub fn set_repo_root(&mut self, root: PathBuf) {
+        self.repo_root = root;
     }
 
     /// Issue ACP `session/set_model` with a state-gated fallback to
@@ -372,6 +384,10 @@ impl Drop for NativeAcpConnection {
         if let Ok(guard) = self.child_pgid.lock() {
             if let Some(pgid) = *guard {
                 killpg(pgid, "KILL");
+                let registry = crate::orphan_registry::PgidRegistry::new(
+                    self.repo_root.join(".spur").join("pgids"),
+                );
+                let _ = registry.delete(pgid);
             }
         }
     }
@@ -412,6 +428,7 @@ impl AgentConnection for NativeAcpConnection {
         let ext_tx = self.ext_notification_tx.clone();
         let session_notif_tx_for_thread = self.session_notif_tx.clone();
         let child_pgid = self.child_pgid.clone();
+        let repo_root = self.repo_root.clone();
         let handle = std::thread::Builder::new()
             .name(format!("acp-{}", agent_name))
             .spawn(move || {
@@ -424,6 +441,7 @@ impl AgentConnection for NativeAcpConnection {
                     ext_tx,
                     session_notif_tx_for_thread,
                     child_pgid,
+                    repo_root,
                 );
             })
             .map_err(|e| {
@@ -824,6 +842,7 @@ fn acp_thread_main(
     ext_notification_tx: mpsc::UnboundedSender<ExtNotificationPayload>,
     session_notif_tx: tokio::sync::broadcast::Sender<SessionNotification>,
     child_pgid: Arc<Mutex<Option<i32>>>,
+    repo_root: PathBuf,
 ) {
     // Build a single-threaded runtime for this thread.
     let rt = match tokio::runtime::Builder::new_current_thread()
@@ -924,6 +943,30 @@ fn acp_thread_main(
         if let Some(pid) = child.id() {
             if let Ok(mut guard) = child_pgid.lock() {
                 *guard = Some(pid as i32);
+            }
+
+            // Persist a registry record so the next-boot sweep can
+            // reconcile this pgid even if spur dies before reaping it.
+            // ProcessInspector start_time hooks are stubbed here; Task 5
+            // wires real per-OS reads.
+            let registry = crate::orphan_registry::PgidRegistry::new(
+                repo_root.join(".spur").join("pgids"),
+            );
+            let now = chrono::Utc::now().timestamp();
+            let rec = crate::orphan_registry::PgidRecord {
+                spur_pid: std::process::id() as i32,
+                spur_pid_start_time: now, // STUB — T5 wires real inspector
+                agent_name: agent_name.clone(),
+                cmd: format!("{} {}", command, extra_args.join(" ")),
+                pgid: pid as i32,
+                pgid_leader_start_time: now, // STUB — T5 wires real inspector
+                spawned_at: now,
+            };
+            if let Err(e) = registry.write(&rec) {
+                tracing::warn!(
+                    error = %e,
+                    "orphan_registry write failed; sweep cannot reclaim this child"
+                );
             }
         }
 
@@ -1647,6 +1690,15 @@ fn acp_thread_main(
                 }
                 let _ = child.kill().await;
             }
+        }
+        // The pgid (if any) is now reaped via either branch above; clear
+        // its on-disk registry record so the next-boot sweep doesn't trip
+        // over a recycled pid.
+        if let Some(pgid) = pgid {
+            let registry = crate::orphan_registry::PgidRegistry::new(
+                repo_root.join(".spur").join("pgids"),
+            );
+            let _ = registry.delete(pgid);
         }
         // Mark pgid consumed so `Drop` won't re-kill a reaped or recycled
         // group id.
