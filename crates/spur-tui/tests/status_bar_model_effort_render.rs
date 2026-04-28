@@ -1,6 +1,16 @@
 use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+use std::sync::Arc;
+
+use agent_client_protocol::schema::{
+    InitializeResponse, NewSessionResponse, ProtocolVersion, SessionId as AcpSessionId,
+};
+use spur_acp::{
+    AgentKind, SessionConfigId, SessionConfigOption, SessionConfigSelectOption, SessionId,
+    SpurAgentCaps, SpurEvent, SpurEventBody,
+};
 use spur_tui::action::ViewId;
 use spur_tui::components::status_bar::{StatusBar, StatusBarProps};
+use spur_tui::views::{session_detail::SessionDetailView, View};
 
 fn render_status(
     width: u16,
@@ -47,6 +57,85 @@ fn render_status(
     (0..buffer.area.width)
         .map(|x| buffer[(x, 0)].symbol().to_string())
         .collect::<String>()
+}
+
+fn effort_option(current: &str) -> SessionConfigOption {
+    SessionConfigOption::select(
+        SessionConfigId::new("reasoning_effort"),
+        "Reasoning effort",
+        current.to_string(),
+        vec![
+            SessionConfigSelectOption::new("medium", "Medium"),
+            SessionConfigSelectOption::new("high", "High"),
+        ],
+    )
+}
+
+fn caps_with_effort(current: &str) -> Arc<SpurAgentCaps> {
+    let init = InitializeResponse::new(ProtocolVersion::LATEST);
+    let mut new = NewSessionResponse::new(AcpSessionId::new("caps-session"));
+    new.config_options = Some(vec![effort_option(current)]);
+    Arc::new(SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp))
+}
+
+fn render_session_detail(view: &mut SessionDetailView) -> String {
+    static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
+        std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
+
+    let backend = TestBackend::new(160, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let ctx = spur_tui::test_support::test_view_ctx(&LINEAGE);
+
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let mut output = String::new();
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            output.push_str(buffer[(x, y)].symbol());
+        }
+        output.push('\n');
+    }
+    output
+}
+
+#[test]
+fn session_detail_status_bar_uses_live_effort_after_config_refresh() {
+    let tmp = tempfile::tempdir().unwrap();
+    let session = SessionId::new();
+    let mut view = SessionDetailView::new(
+        session.clone(),
+        "codex".into(),
+        "brain".into(),
+        tmp.path().to_path_buf(),
+        spur_tui::test_support::default_agent_config("codex"),
+        Vec::new(),
+    );
+    view.set_spur_agent_caps(Some(caps_with_effort("medium")));
+    view.apply_advertised_commands(&[effort_option("medium")]);
+
+    let initial = render_session_detail(&mut view);
+    assert!(
+        initial.contains("Medium"),
+        "initial status bar should render frozen initialize effort: {initial}"
+    );
+
+    let event = SpurEvent::now(SpurEventBody::CommandRegistryDirty {
+        session,
+        config_options: vec![effort_option("high")],
+    });
+    static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
+        std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
+    let ctx = spur_tui::test_support::test_view_ctx(&LINEAGE);
+    view.handle_spur_event(&event, &ctx);
+
+    let refreshed = render_session_detail(&mut view);
+    assert!(
+        refreshed.contains("High"),
+        "status bar effort must follow live config_options after refresh: {refreshed}"
+    );
 }
 
 #[test]
