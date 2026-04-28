@@ -594,6 +594,7 @@ impl SessionPickerView {
         area: Rect,
         license_badge: Option<&crate::components::status_bar::LicenseBadge>,
         flag_summary: Option<(usize, usize)>,
+        view_hint_override: Option<HintOverride<'_>>,
     ) {
         let lines = vec![
             Line::from(Span::styled(
@@ -641,11 +642,11 @@ impl SessionPickerView {
                 alert_summary: None,
                 license_badge,
                 flag_summary,
-                view_hint_override: Some(HintOverride {
+                view_hint_override: view_hint_override.or(Some(HintOverride {
                     full: footer_hint(&self.state, false, false),
                     compact: Some(footer_hint_compact(&self.state, false, false)),
                     hide_on_overflow: true,
-                }),
+                })),
             },
         );
     }
@@ -1078,7 +1079,7 @@ impl SessionPickerView {
                     alert_summary: None,
                     license_badge,
                     flag_summary,
-                    view_hint_override: Some(HintOverride {
+                    view_hint_override: ctx.transient_hint_override.or(Some(HintOverride {
                         full: footer_hint(
                             &self.state,
                             self.rename_state.is_some(),
@@ -1090,7 +1091,7 @@ impl SessionPickerView {
                             self.confirm_switch.is_some(),
                         )),
                         hide_on_overflow: true,
-                    }),
+                    })),
                 },
             );
         }
@@ -1114,6 +1115,7 @@ impl SessionPickerView {
         message: &str,
         license_badge: Option<&crate::components::status_bar::LicenseBadge>,
         flag_summary: Option<(usize, usize)>,
+        view_hint_override: Option<HintOverride<'_>>,
     ) {
         let lines = vec![
             Line::from(Span::styled(
@@ -1162,11 +1164,11 @@ impl SessionPickerView {
                 alert_summary: None,
                 license_badge,
                 flag_summary,
-                view_hint_override: Some(HintOverride {
+                view_hint_override: view_hint_override.or(Some(HintOverride {
                     full: footer_hint(&self.state, false, false),
                     compact: Some(footer_hint_compact(&self.state, false, false)),
                     hide_on_overflow: true,
-                }),
+                })),
             },
         );
     }
@@ -1533,9 +1535,13 @@ impl View for SessionPickerView {
         };
         let _ = banner_area;
         match &self.state {
-            PickerState::Loading => {
-                self.render_loading(frame, content_area, ctx.license_badge, ctx.flag_summary)
-            }
+            PickerState::Loading => self.render_loading(
+                frame,
+                content_area,
+                ctx.license_badge,
+                ctx.flag_summary,
+                ctx.transient_hint_override,
+            ),
             PickerState::Populated {
                 agent,
                 sessions,
@@ -1562,6 +1568,7 @@ impl View for SessionPickerView {
                 message,
                 ctx.license_badge,
                 ctx.flag_summary,
+                ctx.transient_hint_override,
             ),
         }
     }
@@ -1592,6 +1599,7 @@ mod current_session_shortcut_tests {
             brain_status: &crate::app::BrainStatus::Idle,
             license_badge: None,
             flag_summary: None,
+            transient_hint_override: None,
         }
     }
 
@@ -1802,6 +1810,7 @@ mod preview_render_tests {
             brain_status: &brain_status,
             license_badge: None,
             flag_summary: None,
+            transient_hint_override: None,
         };
 
         let mut metadata = SessionMetadata::default();
