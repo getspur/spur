@@ -834,7 +834,7 @@ impl App {
             Event::Key(key) => {
                 // Quit-confirm dialog takes priority: it captures every key.
                 if self.quit_confirm_visible {
-                    if is_ctrl_c(key) {
+                    if is_quit_chord(key) {
                         self.confirm_quit();
                     } else {
                         match key.code {
@@ -881,10 +881,10 @@ impl App {
                     return;
                 }
 
-                // Ctrl+C is the global quit chord. First press opens the
-                // confirmation prompt; pressing it again while the prompt is
+                // Ctrl+C / Ctrl+Q are the global quit chords. First press opens
+                // the confirmation prompt; pressing it again while the prompt is
                 // visible bypasses confirmation and exits immediately.
-                if is_ctrl_c(key) {
+                if is_quit_chord(key) {
                     self.request_quit();
                     return;
                 }
@@ -2662,8 +2662,9 @@ fn ellipsize_for_width(message: &str, width: u16) -> String {
     text
 }
 
-fn is_ctrl_c(key: KeyEvent) -> bool {
-    key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c'))
+fn is_quit_chord(key: KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('q'))
 }
 
 // ─── Main TUI entry point ──────────────────────────────────────────────
@@ -2708,6 +2709,32 @@ pub async fn run_tui_with_license(
     let mut event_stream = crossterm::event::EventStream::new();
     let mut event_rx = event_rx;
 
+    // Bridge OS termination signals into the event loop so SIGTERM/SIGHUP/SIGQUIT
+    // run the same teardown as Ctrl-C/Ctrl-Q (raw mode off → alt screen exit →
+    // function returns → caller drops Orchestrator). SIGKILL is uncatchable;
+    // the on-startup orphan sweep is the safety net for that case.
+    //
+    // mpsc(1) coalesces duplicate signals via try_send: Err(Full(_)) means a
+    // shutdown is already pending, which is exactly what we want.
+    let (_shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        let mut sighup = signal(SignalKind::hangup()).expect("install SIGHUP handler");
+        let mut sigquit = signal(SignalKind::quit()).expect("install SIGQUIT handler");
+        let tx = _shutdown_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = sigterm.recv() => { let _ = tx.try_send(()); }
+                    _ = sighup.recv()  => { let _ = tx.try_send(()); }
+                    _ = sigquit.recv() => { let _ = tx.try_send(()); }
+                }
+            }
+        });
+    }
+
     loop {
         // Count how many events feed into each render. H1' detection.
         let mut spur_drained: u32 = 0;
@@ -2750,6 +2777,13 @@ pub async fn run_tui_with_license(
                 }
             } => {
                 app.handle_permission_request(perm);
+            }
+            _ = shutdown_rx.recv() => {
+                // SIGTERM / SIGHUP / SIGQUIT: restore the terminal, then exit
+                // the loop so the caller's Orchestrator can drop and run its
+                // own cleanup (killpg + registry unregister).
+                let _ = tui::teardown(&mut terminal);
+                std::process::exit(0);
             }
         }
 
