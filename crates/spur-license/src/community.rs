@@ -34,21 +34,21 @@ impl CommunityProvider {
         // Dev-tier override is compile-gated to debug builds only.
         // It CANNOT leak into release/production binaries.
         //
-        // Only `pro` is honored: the embedded signed policy at
-        // `crates/spur-license/resources/default_policy.json` defines
-        // tier blocks for `community` and `pro` only (see
-        // `2026-04-28-tier-revamp-policy-gap-enterprise-tier.md`). When
-        // `team`/`enterprise` were honored as plan labels with empty
-        // resolved features, every gate denied — masking real bugs.
-        // Any unknown value (including `team`/`enterprise`) falls back
-        // to community with a debug log naming the attempted value.
+        // The embedded signed policy now defines `community`, `pro`,
+        // `team`, and `enterprise` tier blocks (Team and Enterprise
+        // currently mirror Pro entitlements as placeholders until
+        // their feature deltas are specified — Plan E.h hygiene wave
+        // for Team; future tier-design pass for Enterprise). Unknown
+        // values fall back to community with a debug log.
         #[cfg(debug_assertions)]
         let (features, plan) = match std::env::var(DEV_PLAN_ENV).ok() {
             Some(ref v) if v == "pro" => (resolve_features("pro"), Plan::Pro),
+            Some(ref v) if v == "team" => (resolve_features("team"), Plan::Team),
+            Some(ref v) if v == "enterprise" => (resolve_features("enterprise"), Plan::Enterprise),
             Some(v) if !v.is_empty() => {
                 tracing::debug!(
                     requested = %v,
-                    "SPUR_LICENSE_DEV_PLAN value is not embedded in default_policy.json; \
+                    "SPUR_LICENSE_DEV_PLAN value is not a known tier label; \
                      falling back to community"
                 );
                 (resolve_features("community"), Plan::Community)
