@@ -284,6 +284,7 @@ fn plan_inspector_renders_wide_lane_board() {
         brain_status: &BrainStatus::Idle,
         license_badge: None,
         flag_summary: None,
+        transient_hint_override: None,
     };
 
     terminal
@@ -311,6 +312,7 @@ fn plan_inspector_renders_stacked_layout_below_90_cols() {
         brain_status: &BrainStatus::Idle,
         license_badge: None,
         flag_summary: None,
+        transient_hint_override: None,
     };
 
     terminal
@@ -336,6 +338,7 @@ fn plan_inspector_stacked_mode_j_moves_across_stage_boundaries() {
         brain_status: &BrainStatus::Idle,
         license_badge: None,
         flag_summary: None,
+        transient_hint_override: None,
     };
 
     terminal
@@ -368,6 +371,7 @@ fn plan_inspector_stacked_mode_uses_visible_stage_order_when_tasks_are_permuted(
         brain_status: &BrainStatus::Idle,
         license_badge: None,
         flag_summary: None,
+        transient_hint_override: None,
     };
 
     terminal
@@ -404,6 +408,7 @@ fn plan_inspector_alt_p_requests_navigate_back() {
         brain_status: &BrainStatus::Idle,
         license_badge: None,
         flag_summary: None,
+        transient_hint_override: None,
     };
 
     let action = view.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT), &ctx);
@@ -423,6 +428,7 @@ fn plan_inspector_esc_requests_navigate_back() {
         brain_status: &BrainStatus::Idle,
         license_badge: None,
         flag_summary: None,
+        transient_hint_override: None,
     };
 
     let action = view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &ctx);
@@ -444,6 +450,7 @@ fn plan_inspector_prefers_live_executor_state_over_stale_higher_id() {
         brain_status: &BrainStatus::Idle,
         license_badge: None,
         flag_summary: None,
+        transient_hint_override: None,
     };
 
     terminal
@@ -475,6 +482,7 @@ fn plan_inspector_renders_blocked_deps_and_retry_chips() {
         brain_status: &BrainStatus::Idle,
         license_badge: None,
         flag_summary: None,
+        transient_hint_override: None,
     };
 
     terminal
@@ -520,6 +528,7 @@ fn plan_inspector_stacked_mode_shows_meta_chips() {
         brain_status: &BrainStatus::Idle,
         license_badge: None,
         flag_summary: None,
+        transient_hint_override: None,
     };
 
     terminal
