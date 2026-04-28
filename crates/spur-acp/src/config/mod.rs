@@ -378,6 +378,8 @@ pub struct SpurConfig {
     /// configs visually unchanged.
     #[serde(default, skip_serializing_if = "TuiConfig::is_default")]
     pub tui: TuiConfig,
+    #[serde(default)]
+    pub log: LogConfig,
 }
 
 /// Runtime knobs for `delegate_to_worker` / `delegate_parallel` dispatch.
@@ -565,6 +567,50 @@ fn default_worker_heartbeat_timeout_secs() -> u64 {
 
 fn default_worker_heartbeat_initial_grace_secs() -> u64 {
     60
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LogConfig {
+    /// `tracing-subscriber` `EnvFilter` directives. `RUST_LOG` overrides if set.
+    pub level: String,
+
+    /// Per-chunk byte limit for `spur.log.YYYY-MM-DD.<n>`.
+    pub max_file_bytes: u64,
+
+    /// Number of rotated chunks to keep (`MaxFiles` argument to `file-rotate`).
+    /// Active file + max_files = total chunks; total bytes ≤ (max_files+1) × max_file_bytes.
+    pub max_files: usize,
+
+    /// `tracing_appender::non_blocking` channel depth.
+    pub buffered_lines_limit: usize,
+
+    /// Per-chunk byte limit for ACP child stderr files.
+    pub child_stderr_max_bytes: u64,
+
+    /// Number of rotated chunks per child to keep.
+    pub child_stderr_max_files: usize,
+
+    /// Total byte cap for `.spur/events/` ndjson directory.
+    pub events_max_total_bytes: u64,
+
+    /// If false, fall back to direct-FD stderr capture (legacy model, no rotation).
+    pub child_stderr_pipe: bool,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            level: "warn,spur_core::orchestrator=info".to_string(),
+            max_file_bytes: 8_388_608,
+            max_files: 3,
+            buffered_lines_limit: 8_192,
+            child_stderr_max_bytes: 2_621_440,
+            child_stderr_max_files: 3,
+            events_max_total_bytes: 67_108_864,
+            child_stderr_pipe: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -955,5 +1001,29 @@ mod tests {
         )
         .unwrap();
         assert!(cfg.spur.auto_merge_approved_plans);
+    }
+
+    #[test]
+    fn parses_log_section_with_defaults() {
+        let toml_str = r#"
+[log]
+level = "warn,spur_core::orchestrator=info"
+"#;
+        let cfg: SpurConfig = toml::from_str(toml_str).expect("valid config");
+        assert_eq!(cfg.log.level, "warn,spur_core::orchestrator=info");
+        assert_eq!(cfg.log.max_file_bytes, 8_388_608); // 8 MB
+        assert_eq!(cfg.log.max_files, 3);
+        assert_eq!(cfg.log.buffered_lines_limit, 8_192);
+        assert_eq!(cfg.log.child_stderr_max_bytes, 2_621_440); // 2.5 MB
+        assert_eq!(cfg.log.child_stderr_max_files, 3);
+        assert_eq!(cfg.log.events_max_total_bytes, 67_108_864); // 64 MB
+        assert!(cfg.log.child_stderr_pipe);
+    }
+
+    #[test]
+    fn parses_empty_config_uses_log_defaults() {
+        let cfg: SpurConfig = toml::from_str("").expect("empty config valid");
+        assert_eq!(cfg.log.level, "warn,spur_core::orchestrator=info");
+        assert_eq!(cfg.log.max_file_bytes, 8_388_608);
     }
 }
