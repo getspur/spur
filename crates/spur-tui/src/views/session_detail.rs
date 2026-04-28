@@ -2262,6 +2262,12 @@ impl SessionDetailView {
                 (r, p)
             })
             .unwrap_or((0, 0));
+        let caps = self.spur_agent_caps.as_deref();
+        let model_label = caps.and_then(spur_acp::SpurAgentCaps::current_model_label);
+        let effort_label = caps.and_then(spur_acp::SpurAgentCaps::current_effort_label);
+        let usage_supported = caps
+            .map(spur_acp::SpurAgentCaps::usage_supported)
+            .unwrap_or(true);
 
         StatusBar::render(
             frame,
@@ -2273,9 +2279,9 @@ impl SessionDetailView {
                 total_cost: self.cost,
                 elapsed: &elapsed,
                 current_mode: self.current_mode.as_deref(),
-                current_model_label: None,
-                current_effort_label: None,
-                usage_supported: true,
+                current_model_label: model_label.as_deref(),
+                current_effort_label: effort_label.as_deref(),
+                usage_supported,
                 context_used: self.context_used,
                 context_size: self.context_size,
                 stream_in_flight: self.stream_in_flight && !self.cancelling_in_flight,
