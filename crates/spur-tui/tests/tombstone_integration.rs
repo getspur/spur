@@ -205,3 +205,21 @@ fn tombstone_installs_on_pin_with_60s_window() {
     assert!(ts.is_some());
     assert!(matches!(ts.unwrap().kind, TombstoneKind::Reversible { .. }));
 }
+
+#[test]
+fn tombstone_pin_undo_restores_via_inverse() {
+    let mut app = App::new_for_tests();
+    process_action(
+        &mut app,
+        Action::ToggleSessionPin {
+            session_id: "s2".into(),
+        },
+    );
+    process_action(&mut app, Action::NavigateTo(ViewId::SessionPicker));
+    app.handle_undo_for_test();
+    assert!(!app.tombstones_for_test().has(&ViewId::SessionPicker));
+    assert!(matches!(
+        app.last_action_for_test(),
+        Some(Action::ToggleSessionPin { .. })
+    ));
+}
