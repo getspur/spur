@@ -42,6 +42,8 @@ const READ_ONLY_STARTUP_WARNING: &str =
 Edits this session WILL NOT be persisted. Upgrade SPUR to enable writes. (Esc to dismiss)";
 const LEGACY_ARCHIVE_HINT: &str = "d \u{2192} archive renamed to x";
 const LEGACY_CLOSE_HINT: &str = "d \u{2192} close renamed to x";
+const DASHBOARD_TAB_DEPRECATION_HINT: &str =
+    "Tab now cycles panels; press Ctrl+E to cycle examples";
 
 // ─── Supporting types ──────────────────────────────────────────────────
 
@@ -309,6 +311,7 @@ pub struct App {
     pub transient_hint: Option<TransientHint>,
     legacy_archive_hint_shown: bool,
     legacy_issue_close_hint_shown: bool,
+    dashboard_tab_empty_deprecation_shown: bool,
     /// Startup landing decision. Drives initial view and banner state.
     landing: crate::landing::LandingDecision,
     /// Last dispatched Action, for integration tests only.
@@ -471,6 +474,7 @@ impl App {
             transient_hint: None,
             legacy_archive_hint_shown: false,
             legacy_issue_close_hint_shown: false,
+            dashboard_tab_empty_deprecation_shown: false,
             landing,
             #[cfg(any(test, debug_assertions))]
             last_action: None,
@@ -1100,6 +1104,16 @@ impl App {
                         }
                     }
                     return;
+                }
+
+                if !self.dashboard_tab_empty_deprecation_shown
+                    && self.current_view == ViewId::Dashboard
+                    && key.code == KeyCode::Tab
+                    && key.modifiers.is_empty()
+                    && self.dashboard.is_empty_root_input()
+                {
+                    self.flash_hint_short(DASHBOARD_TAB_DEPRECATION_HINT);
+                    self.dashboard_tab_empty_deprecation_shown = true;
                 }
 
                 // Global Ctrl+K opens palette. Plain `:` is a Dashboard Navigate
