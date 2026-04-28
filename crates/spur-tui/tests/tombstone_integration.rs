@@ -439,3 +439,39 @@ fn tombstone_remote_queue_displaced_by_next_review_dispatches_first_immediately(
     assert!(app.user_input_sent_for_test_with_executor("exec-1"));
     assert!(app.tombstones_for_test().has(&ViewId::Dashboard));
 }
+
+#[test]
+fn tombstone_panic_esc_cancels_queued_without_dispatch() {
+    let mut app = App::new_for_tests();
+    app.add_pending_review_for_test("exec-1", 1);
+    process_action(
+        &mut app,
+        Action::SubmitReview {
+            executor_id: "exec-1".into(),
+            attempt_n: 1,
+            decision: ReviewDecision::Approve,
+        },
+    );
+    assert!(app.tombstones_for_test().has(&ViewId::Dashboard));
+    process_action(&mut app, Action::PanicReset);
+    // Tombstone cleared.
+    assert!(!app.tombstones_for_test().has(&ViewId::Dashboard));
+    // SubmitReview was NOT dispatched (no displaced-flush).
+    assert!(!app.user_input_sent_for_test());
+}
+
+#[test]
+fn tombstone_panic_esc_cancels_reversible_too() {
+    let mut app = App::new_for_tests();
+    process_action(
+        &mut app,
+        Action::ToggleSessionArchive {
+            session_id: "s1".into(),
+            via_legacy_key: false,
+        },
+    );
+    assert!(app.tombstones_for_test().has(&ViewId::SessionPicker));
+    process_action(&mut app, Action::PanicReset);
+    // Reversible tombstone is also cleared (already-committed; just removes undo).
+    assert!(!app.tombstones_for_test().has(&ViewId::SessionPicker));
+}
