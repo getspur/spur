@@ -67,7 +67,7 @@ impl FeatureGate {
     }
 
     fn build_community_snapshot(policy: &PolicyResolver) -> EntitlementSnapshot {
-        let features = Self::resolve_feature_keys(policy, "community");
+        let features = apply_test_strip_keys(Self::resolve_feature_keys(policy, "community"));
 
         let quotas = Self::merge_quotas(Tier::Community, policy.document());
         let flags = Self::extract_flags(policy.document());
@@ -91,7 +91,7 @@ impl FeatureGate {
         }
 
         let tier = Tier::from_plan(state.plan);
-        let features: AHashSet<FeatureKey> = if tier == Tier::Community {
+        let resolved: AHashSet<FeatureKey> = if tier == Tier::Community {
             Self::resolve_feature_keys(&self.policy, "community")
         } else {
             state
@@ -100,6 +100,7 @@ impl FeatureGate {
                 .filter_map(|s| resolve_jwt_feature_key(s))
                 .collect()
         };
+        let features = apply_test_strip_keys(resolved);
 
         let quotas = Self::merge_quotas(tier, self.policy.document());
         let flags = Self::extract_flags(self.policy.document());
@@ -214,6 +215,43 @@ fn parse_quota_value(val: &serde_json::Value) -> Option<QuotaValue> {
             }),
         _ => None,
     }
+}
+
+/// Strip the comma-separated feature keys listed in
+/// `SPUR_LICENSE_TEST_STRIP_KEYS` from a freshly-resolved feature set.
+///
+/// **Debug builds only.** The body is `#[cfg(debug_assertions)]`-gated so
+/// the env var has zero effect in release binaries — `cargo install spur`
+/// users can never accidentally trip this hook.
+///
+/// Construction-time semantic: read once when the snapshot is built. A
+/// mid-process `export SPUR_LICENSE_TEST_STRIP_KEYS=…` does NOT take effect
+/// until a new `FeatureGate` is constructed (or `update_state` rebuilds
+/// the snapshot, which is the relevant rebuild trigger). Tests that need
+/// the strip must set the env var BEFORE spawning the binary.
+///
+/// Use only as a denial fixture for binary-level e2e tests (Plan C M0.5
+/// `cli_core_gate_e2e`). Do not rely on it for product behavior.
+fn apply_test_strip_keys(features: AHashSet<FeatureKey>) -> AHashSet<FeatureKey> {
+    #[cfg(debug_assertions)]
+    {
+        if let Ok(csv) = std::env::var("SPUR_LICENSE_TEST_STRIP_KEYS") {
+            let mut features = features;
+            for raw in csv.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                match FeatureKey::from_known(raw) {
+                    Some(key) => {
+                        features.remove(&key);
+                    }
+                    None => tracing::debug!(
+                        unknown_key = raw,
+                        "SPUR_LICENSE_TEST_STRIP_KEYS contains unknown feature key; ignoring"
+                    ),
+                }
+            }
+            return features;
+        }
+    }
+    features
 }
 
 fn resolve_jwt_feature_key(s: &str) -> Option<FeatureKey> {
