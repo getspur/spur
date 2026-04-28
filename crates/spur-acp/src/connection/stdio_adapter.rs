@@ -99,21 +99,22 @@ impl StdioAdapter {
             "StdioAdapter: spawning persistent subprocess"
         );
 
-        let mut child = tokio::process::Command::new(&self.command)
-            .args(&self.extra_args)
+        let mut cmd = tokio::process::Command::new(&self.command);
+        cmd.args(&self.extra_args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| {
-                self.health_status = AgentHealth::Error(format!("Failed to spawn process: {e}"));
-                anyhow::anyhow!(
-                    "StdioAdapter '{}': failed to spawn '{}': {e}",
-                    self.agent_name,
-                    self.command
-                )
-            })?;
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        cmd.process_group(0);
+        let mut child = cmd.spawn().map_err(|e| {
+            self.health_status = AgentHealth::Error(format!("Failed to spawn process: {e}"));
+            anyhow::anyhow!(
+                "StdioAdapter '{}': failed to spawn '{}': {e}",
+                self.agent_name,
+                self.command
+            )
+        })?;
 
         let stdin = child.stdin.take().ok_or_else(|| {
             anyhow::anyhow!(
