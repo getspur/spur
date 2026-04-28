@@ -191,3 +191,17 @@ fn tombstone_archive_undo_restores_via_inverse() {
         Some(Action::ToggleSessionArchive { .. })
     ));
 }
+
+#[test]
+fn tombstone_installs_on_pin_with_60s_window() {
+    let mut app = App::new_for_tests();
+    process_action(
+        &mut app,
+        Action::ToggleSessionPin {
+            session_id: "s2".into(),
+        },
+    );
+    let ts = app.tombstones_for_test().peek(&ViewId::SessionPicker);
+    assert!(ts.is_some());
+    assert!(matches!(ts.unwrap().kind, TombstoneKind::Reversible { .. }));
+}

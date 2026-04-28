@@ -2306,6 +2306,32 @@ impl App {
             }
 
             Action::ToggleSessionPin { session_id } => {
+                if !self.tombstone_undo_replay {
+                    let will_pin = !self
+                        .metadata_store
+                        .entry(&session_id)
+                        .is_some_and(|entry| entry.pinned);
+                    let label = if will_pin {
+                        format!("Pinned '{}'", session_id)
+                    } else {
+                        format!("Unpinned '{}'", session_id)
+                    };
+                    let now = Instant::now();
+                    let inverse = Action::ToggleSessionPin {
+                        session_id: session_id.clone(),
+                    };
+                    self.tombstones.install(Tombstone {
+                        view: ViewId::SessionPicker,
+                        kind: TombstoneKind::Reversible { inverse },
+                        label: label.clone(),
+                        created_at: now,
+                        expires_at: now + Duration::from_secs(60),
+                    });
+                    self.flash_hint(
+                        format!("{} — press u to undo", label),
+                        Duration::from_secs(2),
+                    );
+                }
                 let entry = self.metadata_store.entry_mut(&session_id);
                 entry.pinned = !entry.pinned;
                 self.persist_metadata("pin toggle");
