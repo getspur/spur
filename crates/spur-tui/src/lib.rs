@@ -90,6 +90,11 @@ pub mod test_support {
         app.handle_spur_event(ev);
     }
 
+    /// Query whether a feature key is granted by the App's current feature gate.
+    pub fn feature_enabled(app: &crate::app::App, key: spur_license::FeatureKey) -> bool {
+        app.feature_enabled_for_test(key)
+    }
+
     /// Dispatch an `Action` through the app controller.
     pub fn process_action(app: &mut crate::app::App, action: Action) {
         app.process_action(action);

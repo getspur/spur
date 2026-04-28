@@ -560,6 +560,10 @@ impl App {
         self.license_badge.as_ref()
     }
 
+    pub(crate) fn feature_enabled_for_test(&self, key: spur_license::FeatureKey) -> bool {
+        spur_license::require_feature(&self.feature_gate, key).is_ok()
+    }
+
     /// Test-only accessor: borrow the first message waiting for trace seeding.
     #[doc(hidden)]
     pub fn pending_first_user_message_for_test(&self) -> Option<&str> {
