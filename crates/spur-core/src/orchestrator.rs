@@ -136,6 +136,50 @@ mod session_attach_guard_transfer_tests {
         }
     }
 
+    struct NewSessionConnection {
+        response: Option<agent_client_protocol::schema::NewSessionResponse>,
+    }
+
+    #[async_trait]
+    impl AgentConnection for NewSessionConnection {
+        async fn initialize(
+            &mut self,
+            _request: InitializeRequest,
+        ) -> anyhow::Result<agent_client_protocol::schema::InitializeResponse> {
+            unimplemented!("NewSessionConnection: initialize")
+        }
+
+        async fn new_session(
+            &mut self,
+            _cwd: PathBuf,
+            _mcp_servers: Vec<McpServer>,
+        ) -> anyhow::Result<agent_client_protocol::schema::NewSessionResponse> {
+            self.response
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("new_session called twice"))
+        }
+
+        async fn prompt(
+            &mut self,
+            _request: PromptRequest,
+        ) -> anyhow::Result<Pin<Box<dyn Stream<Item = spur_acp::SessionNotification> + Send>>>
+        {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        async fn cancel(&mut self, _session_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn health(&self) -> AgentHealth {
+            AgentHealth::Ready
+        }
+    }
+
     #[tokio::test]
     async fn retire_active_brain_moves_attach_guard_to_active_connection() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -509,6 +553,64 @@ mod session_attach_guard_transfer_tests {
         );
         assert_eq!(log.set_session_model[0].0, "acp-x");
         assert_eq!(log.set_session_model[0].1, "claude-sonnet-4-7");
+
+        brain.delegation_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn fresh_agent_session_ready_event_carries_caps() {
+        use agent_client_protocol::schema::{ModelId, ModelInfo, NewSessionResponse};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = SpurConfig::default();
+        config.cost.db_path = tmp.path().join("cost.db").display().to_string();
+        config.agents.entries = vec![spur_acp::AgentConfig::with_defaults("codex")];
+        let mut orchestrator = Orchestrator::new(tmp.path().to_path_buf(), config, None).unwrap();
+        let mut event_rx = orchestrator.subscribe();
+
+        let new_session =
+            NewSessionResponse::new(agent_client_protocol::schema::SessionId::new("acp-codex"))
+                .models(agent_client_protocol::schema::SessionModelState::new(
+                    ModelId::new("gpt-5-codex"),
+                    vec![ModelInfo::new(ModelId::new("gpt-5-codex"), "GPT-5 Codex")],
+                ));
+        let init = agent_client_protocol::schema::InitializeResponse::new(ProtocolVersion::LATEST);
+
+        let brain = orchestrator
+            .create_brain_session(
+                Box::new(NewSessionConnection {
+                    response: Some(new_session),
+                }),
+                "codex".to_string(),
+                None,
+                None,
+                false,
+                init,
+            )
+            .await
+            .expect("fresh brain session must be created");
+
+        assert!(
+            brain.spur_agent_caps.is_some(),
+            "fresh BrainSession must cache caps after session/new"
+        );
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut ready_caps = None;
+        while tokio::time::Instant::now() < deadline && ready_caps.is_none() {
+            let remaining = deadline - tokio::time::Instant::now();
+            match tokio::time::timeout(remaining, event_rx.recv()).await {
+                Ok(Ok(ev)) => {
+                    if let SpurEventBody::AgentSessionReady { caps, .. } = ev.body {
+                        ready_caps = caps;
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        let caps = ready_caps.expect("AgentSessionReady must carry caps for fresh sessions");
+        assert!(caps.supports_set_model());
 
         brain.delegation_handle.abort();
     }
