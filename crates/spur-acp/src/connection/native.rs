@@ -2086,7 +2086,7 @@ mod set_session_model_dispatch_tests {
         let init = InitializeResponse::new(ProtocolVersion::LATEST);
         let mut new = NewSessionResponse::new(SessionId::new("test"));
         modify(&mut new);
-        SpurAgentCaps::new(&init, &new)
+        SpurAgentCaps::new(&init, &new, crate::AgentKind::CodexAcp)
     }
 
     fn codex_model_state() -> SessionModelState {
