@@ -9,11 +9,12 @@ license.workspace = true
 [features]
 default = ["markdown"]
 markdown = ["dep:tui-markdown", "dep:ratatui-core", "dep:mermaid-rs-renderer", "dep:image", "dep:ratatui-image", "dep:resvg", "dep:pulldown-cmark"]
-analytics = ["dep:spur-context", "spur-context/duckdb"]
+analytics = ["dep:spur-context", "spur-context/duckdb", "dep:spur-cost", "dep:directories"]
 
 [dependencies]
 spur-acp = { workspace = true }
 spur-context = { workspace = true, optional = true }
+spur-cost = { workspace = true, optional = true }
 spur-core = { workspace = true }
 spur-pm = { workspace = true }
 spur-license = { workspace = true }
@@ -33,6 +34,7 @@ unicode-width = "0.1"
 nucleo-matcher = "0.3"
 ignore = "0.4"
 tui-textarea = "0.7"
+directories = { version = "5", optional = true }
 
 # Markdown + mermaid stack (gated by `markdown` feature)
 tui-markdown = { version = "0.3", optional = true }

@@ -315,6 +315,10 @@ pub struct App {
     live_cost_signal_tx: Option<mpsc::Sender<()>>,
     #[cfg(feature = "analytics")]
     live_cost_handle: Option<JoinHandle<()>>,
+    /// Lazily constructed on first `Action::OpenInsights`. None until the
+    /// user presses Alt+a (or `analytics_engine` is otherwise initialised).
+    #[cfg(feature = "analytics")]
+    insights_view: Option<crate::views::insights::InsightsView>,
     /// Durable plan snapshots keyed by session and plan id.
     plan_projection: PlanProjectionStore,
     synopsis: SessionSynopsisProjection,
@@ -515,6 +519,8 @@ impl App {
             live_cost_signal_tx: None,
             #[cfg(feature = "analytics")]
             live_cost_handle: None,
+            #[cfg(feature = "analytics")]
+            insights_view: None,
             plan_projection: PlanProjectionStore::new(),
             synopsis: SessionSynopsisProjection::new(),
             worker_streams: crate::worker_streams::WorkerStreams::new(),
@@ -1160,6 +1166,45 @@ impl App {
         self.dashboard.set_worker_snapshot(workers);
     }
 
+    /// Lazily open the shared DuckDB analytics cache, materialise per-agent
+    /// views, and construct the InsightsView. Called the first time the user
+    /// presses Alt+a. Cold first run can take several seconds (full JSONL
+    /// scan); warm runs reuse the cache at `~/.spur/cache/cost.duckdb` and
+    /// return in milliseconds. Shares the cache path with `spur cost` so a
+    /// prior CLI invocation primes the data.
+    #[cfg(feature = "analytics")]
+    fn ensure_insights_engine_and_view(&mut self) -> anyhow::Result<()> {
+        use spur_context::{AnalyticsEngine, AsyncEngine};
+
+        if self.insights_view.is_some() {
+            return Ok(());
+        }
+
+        let engine = if let Some(existing) = self.analytics_engine.clone() {
+            existing
+        } else {
+            let cache_dir = directories::BaseDirs::new()
+                .map(|b| b.home_dir().join(".spur").join("cache"))
+                .unwrap_or_else(|| std::path::PathBuf::from(".spur/cache"));
+            std::fs::create_dir_all(&cache_dir)?;
+            let cache_path = cache_dir.join("cost.duckdb");
+
+            let engine = AnalyticsEngine::open(&cache_path)?;
+            engine.initialize()?;
+            engine.create_agent_views()?;
+            engine.load_pricing(&spur_cost::PricingRegistry::with_builtin_prices())?;
+            let _ = engine.refresh_cache()?;
+            engine.use_cached_events()?;
+
+            let async_engine = AsyncEngine::new(engine);
+            self.analytics_engine = Some(async_engine.clone());
+            async_engine
+        };
+
+        self.insights_view = Some(crate::views::insights::InsightsView::new(engine));
+        Ok(())
+    }
+
     #[cfg(feature = "analytics")]
     fn sync_live_cost_active_sessions(&mut self) {
         let active_sessions: std::collections::HashSet<SessionId> = self
@@ -1544,6 +1589,12 @@ impl App {
                         .issue_browser
                         .as_mut()
                         .and_then(|view| view.handle_key(key, &ctx)),
+                    #[cfg(feature = "analytics")]
+                    ViewId::Insights => self
+                        .insights_view
+                        .as_mut()
+                        .and_then(|view| view.handle_key(key, &ctx)),
+                    #[cfg(not(feature = "analytics"))]
                     ViewId::Insights => None,
                     #[cfg(feature = "markdown")]
                     ViewId::MermaidOverlay(_) => {
@@ -2301,6 +2352,16 @@ impl App {
             }
 
             Action::OpenInsights | Action::NavigateTo(ViewId::Insights) => {
+                #[cfg(feature = "analytics")]
+                if self.insights_view.is_none() {
+                    match self.ensure_insights_engine_and_view() {
+                        Ok(()) => {}
+                        Err(e) => {
+                            self.show_user_warning(format!("Analytics unavailable: {e:#}"));
+                            return;
+                        }
+                    }
+                }
                 self.current_view = ViewId::Insights;
                 self.dirty = true;
             }
@@ -3565,6 +3626,13 @@ impl App {
                     view.render(frame, view_area, &ctx);
                 }
             }
+            #[cfg(feature = "analytics")]
+            ViewId::Insights => {
+                if let Some(ref mut view) = self.insights_view {
+                    view.render(frame, view_area, &ctx);
+                }
+            }
+            #[cfg(not(feature = "analytics"))]
             ViewId::Insights => {}
             #[cfg(feature = "markdown")]
             ViewId::MermaidOverlay(ref session) => {
