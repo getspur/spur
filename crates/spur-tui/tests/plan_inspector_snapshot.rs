@@ -3,7 +3,7 @@ use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
 use spur_acp::{
     PlanSnapshot, PlanSnapshotCounts, PlanSnapshotTask, SessionId, SpurEvent, SpurEventBody,
 };
-use spur_core::{ExecutorLineage, PlanProjectionStore};
+use spur_core::{ExecutorLineage, PlanProjectionStore, SessionSynopsisProjection};
 use spur_tui::action::Action;
 use spur_tui::app::BrainStatus;
 use spur_tui::views::plan_inspector::PlanInspectorView;
@@ -276,9 +276,11 @@ fn plan_inspector_renders_wide_lane_board() {
     let mut view = PlanInspectorView::new(SessionId("brain-1".into()));
     let plans = sample_plan_store();
     let lineage = sample_lineage();
+    let synopsis = SessionSynopsisProjection::new();
     let ctx = ViewContext {
         lineage: &lineage,
         plan_projection: &plans,
+        synopsis: &synopsis,
         brain_status: &BrainStatus::Idle,
         license_badge: None,
         flag_summary: None,
@@ -301,9 +303,11 @@ fn plan_inspector_renders_stacked_layout_below_90_cols() {
     let mut view = PlanInspectorView::new(SessionId("brain-1".into()));
     let plans = sample_plan_store();
     let lineage = sample_lineage();
+    let synopsis = SessionSynopsisProjection::new();
     let ctx = ViewContext {
         lineage: &lineage,
         plan_projection: &plans,
+        synopsis: &synopsis,
         brain_status: &BrainStatus::Idle,
         license_badge: None,
         flag_summary: None,
@@ -324,9 +328,11 @@ fn plan_inspector_stacked_mode_j_moves_across_stage_boundaries() {
     let mut view = PlanInspectorView::new(SessionId("brain-1".into()));
     let plans = sample_plan_store();
     let lineage = sample_lineage();
+    let synopsis = SessionSynopsisProjection::new();
     let ctx = ViewContext {
         lineage: &lineage,
         plan_projection: &plans,
+        synopsis: &synopsis,
         brain_status: &BrainStatus::Idle,
         license_badge: None,
         flag_summary: None,
@@ -354,9 +360,11 @@ fn plan_inspector_stacked_mode_uses_visible_stage_order_when_tasks_are_permuted(
     let mut view = PlanInspectorView::new(SessionId("brain-1".into()));
     let plans = out_of_stage_order_plan_store();
     let lineage = sample_lineage();
+    let synopsis = SessionSynopsisProjection::new();
     let ctx = ViewContext {
         lineage: &lineage,
         plan_projection: &plans,
+        synopsis: &synopsis,
         brain_status: &BrainStatus::Idle,
         license_badge: None,
         flag_summary: None,
@@ -388,9 +396,11 @@ fn plan_inspector_alt_p_requests_navigate_back() {
     let mut view = PlanInspectorView::new(SessionId("brain-1".into()));
     let plans = sample_plan_store();
     let lineage = sample_lineage();
+    let synopsis = SessionSynopsisProjection::new();
     let ctx = ViewContext {
         lineage: &lineage,
         plan_projection: &plans,
+        synopsis: &synopsis,
         brain_status: &BrainStatus::Idle,
         license_badge: None,
         flag_summary: None,
@@ -405,9 +415,11 @@ fn plan_inspector_esc_requests_navigate_back() {
     let mut view = PlanInspectorView::new(SessionId("brain-1".into()));
     let plans = sample_plan_store();
     let lineage = sample_lineage();
+    let synopsis = SessionSynopsisProjection::new();
     let ctx = ViewContext {
         lineage: &lineage,
         plan_projection: &plans,
+        synopsis: &synopsis,
         brain_status: &BrainStatus::Idle,
         license_badge: None,
         flag_summary: None,
@@ -424,9 +436,11 @@ fn plan_inspector_prefers_live_executor_state_over_stale_higher_id() {
     let mut view = PlanInspectorView::new(SessionId("brain-1".into()));
     let plans = plan_store_with_selected_task_app();
     let lineage = lineage_with_stale_and_live_executor_for_same_issue();
+    let synopsis = SessionSynopsisProjection::new();
     let ctx = ViewContext {
         lineage: &lineage,
         plan_projection: &plans,
+        synopsis: &synopsis,
         brain_status: &BrainStatus::Idle,
         license_badge: None,
         flag_summary: None,
@@ -453,9 +467,11 @@ fn plan_inspector_renders_blocked_deps_and_retry_chips() {
     let mut view = PlanInspectorView::new(SessionId("brain-1".into()));
     let plans = plan_store_with_blocked_and_retry();
     let lineage = sample_lineage();
+    let synopsis = SessionSynopsisProjection::new();
     let ctx = ViewContext {
         lineage: &lineage,
         plan_projection: &plans,
+        synopsis: &synopsis,
         brain_status: &BrainStatus::Idle,
         license_badge: None,
         flag_summary: None,
@@ -496,9 +512,11 @@ fn plan_inspector_stacked_mode_shows_meta_chips() {
     let mut view = PlanInspectorView::new(SessionId("brain-1".into()));
     let plans = plan_store_with_blocked_and_retry();
     let lineage = sample_lineage();
+    let synopsis = SessionSynopsisProjection::new();
     let ctx = ViewContext {
         lineage: &lineage,
         plan_projection: &plans,
+        synopsis: &synopsis,
         brain_status: &BrainStatus::Idle,
         license_badge: None,
         flag_summary: None,
