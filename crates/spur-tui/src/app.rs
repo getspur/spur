@@ -4192,13 +4192,34 @@ mod license_gate_refresh_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "analytics"))]
 mod insights_navigation_tests {
     use super::*;
 
+    /// `InsightsView::new` spawns a tokio refresh task, so these tests need
+    /// an active runtime. `ensure_insights_engine_and_view` would otherwise
+    /// open a real `~/.spur/cache/cost.duckdb`; we pre-seed the App with an
+    /// in-memory `AsyncEngine` so the constructor takes its fast path.
+    fn boot_test_app() -> (tokio::runtime::Runtime, App) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut app = {
+            let _guard = rt.enter();
+            App::new_for_tests()
+        };
+        let in_memory = spur_context::AnalyticsEngine::open_in_memory().unwrap();
+        in_memory.initialize().unwrap();
+        in_memory.create_agent_views().unwrap();
+        app.analytics_engine = Some(spur_context::AsyncEngine::new(in_memory));
+        (rt, app)
+    }
+
     #[test]
     fn alt_a_opens_insights_view() {
-        let mut app = App::new_for_tests();
+        let (rt, mut app) = boot_test_app();
+        let _guard = rt.enter();
 
         app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT));
 
@@ -4212,9 +4233,9 @@ mod insights_navigation_tests {
     fn macos_option_a_opens_insights_view() {
         use crossterm::event::Event;
 
-        let mut app = App::new_for_tests();
+        let (rt, mut app) = boot_test_app();
+        let _guard = rt.enter();
 
-        // Simulate the raw key Crossterm reports on macOS without meta-key.
         app.handle_crossterm_event(Event::Key(KeyEvent::new(
             KeyCode::Char('å'),
             KeyModifiers::NONE,
