@@ -493,9 +493,11 @@ if let Some(gate_err) = find_gate_error(&anyhow_err) {
 Plan doc preserved as audit trail above; this addendum is the
 canonical reference for Tier 2 / Tier 3 implementers.
 
-**Tier 2 has now landed** (commits f5cf3a87 / af0ae021 / 13fb4740 +
-cleanup commit on top, rebased onto current main): TUI capability-tease
-modal, MVP gate site at `Action::SendMessage`, and the `SPUR_FORCE_TTY`
-test hook that closes follow-up #2 above. See
+**Tier 2 has now landed** (post-rebase commits 620a474d / 0efffeaa /
+c0f59d25 / 10f792a4 on `feat/tier-revamp-c-tier2`): TUI capability-tease
+modal, MVP gate site at `Action::SendMessage`, the `SPUR_FORCE_TTY` test
+hook that closes follow-up #2 above, and the cleanup pass that addressed
+the dual-final-review findings (rebase onto current main, same-tier
+elision in `format_denied_payload`, plus minor doc/test nits). See
 `docs/superpowers/plans/2026-04-28-tier-revamp-plan-c-tier2-tui-upgrade-modal.md`
 for the Tier 2 plan + post-merge addendum.
