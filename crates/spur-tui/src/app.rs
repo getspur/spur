@@ -926,6 +926,42 @@ impl App {
     }
 
     #[cfg(any(test, debug_assertions))]
+    pub fn is_quit_confirm_visible_for_test(&self) -> bool {
+        self.quit_confirm_visible
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn is_collision_modal_visible_for_test(&self) -> bool {
+        self.collision_modal.is_some()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn set_collision_modal_for_test(
+        &mut self,
+        acp_id: impl Into<String>,
+        holder: spur_acp::session_lock::HolderInfo,
+    ) {
+        self.collision_modal = Some(CollisionModalState {
+            acp_id: acp_id.into(),
+            holder,
+        });
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn is_upgrade_modal_visible_for_test(&self) -> bool {
+        self.upgrade_modal.is_some()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn set_upgrade_modal_for_test(
+        &mut self,
+        err: spur_license::FeatureGateError,
+        required_tier: Option<spur_license::Plan>,
+    ) {
+        self.upgrade_modal = Some(UpgradeModalState { err, required_tier });
+    }
+
+    #[cfg(any(test, debug_assertions))]
     pub fn current_view_for_test(&self) -> &ViewId {
         &self.current_view
     }
@@ -1051,6 +1087,21 @@ impl App {
     #[cfg(any(test, debug_assertions))]
     pub fn palette_state_for_test_mut(&mut self) -> &mut crate::components::palette::PaletteState {
         &mut self.palette_state
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn session_picker_for_test(&self) -> Option<&SessionPickerView> {
+        self.session_picker.as_ref()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn set_session_picker_current_session_has_draft_for_test(
+        &mut self,
+        session_id: Option<String>,
+    ) {
+        if let Some(picker) = self.session_picker.as_mut() {
+            picker.set_current_session_has_draft(session_id);
+        }
     }
 
     #[cfg(any(test, debug_assertions))]
@@ -1576,11 +1627,6 @@ impl App {
                     return;
                 }
 
-                if self.is_undo_key(key) && self.handle_undo() {
-                    self.dirty = true;
-                    return;
-                }
-
                 // Quit-confirm dialog takes priority: it captures every key.
                 if self.quit_confirm_visible {
                     if is_quit_chord(key) {
@@ -1672,6 +1718,10 @@ impl App {
 
                 // Help overlay intercepts ? (toggle) and Esc (close) before views.
                 if self.help_visible {
+                    if self.is_undo_key(key) {
+                        self.flash_hint_short("close help to undo");
+                        return;
+                    }
                     match key.code {
                         KeyCode::Char('?') | KeyCode::Esc => {
                             self.help_visible = false;
@@ -1731,6 +1781,14 @@ impl App {
                     && matches!(key.code, KeyCode::Char('a'))
                 {
                     self.process_action(Action::OpenInsights);
+                    return;
+                }
+
+                // === All overlay/modal/help/global-shortcut owners run above this line. ===
+                // === Tombstone undo is the residual key-owner: fires only when no       ===
+                // === narrower visible context wants u/Ctrl+Z.                            ===
+                if self.is_undo_key(key) && self.handle_undo() {
+                    self.dirty = true;
                     return;
                 }
 
@@ -1929,18 +1987,14 @@ impl App {
         if self.picker_or_history_active() {
             return false;
         }
+        if self.view_text_input_active() {
+            return false;
+        }
         if self.pending_permission.is_some() {
             return false;
         }
-        if self.help_visible {
-            self.flash_hint_short("close help to undo");
-            return true;
-        }
         if self.mermaid_render_picker_active() {
             return false;
-        }
-        if self.quit_confirm_visible {
-            return true;
         }
 
         let view = self.current_view.clone();
@@ -1983,6 +2037,15 @@ impl App {
                 .is_some_and(SessionDetailView::completion_active),
             _ => false,
         }
+    }
+
+    fn view_text_input_active(&self) -> bool {
+        matches!(self.current_view, ViewId::SessionPicker)
+            && self.session_picker.as_ref().is_some_and(|picker| {
+                picker.is_rename_active()
+                    || picker.is_search_focused()
+                    || picker.is_confirm_switch_visible()
+            })
     }
 
     fn mermaid_render_picker_active(&self) -> bool {
@@ -4310,6 +4373,7 @@ impl App {
     }
 }
 
+#[cfg(test)]
 mod license_gate_refresh_tests {
     use super::*;
 

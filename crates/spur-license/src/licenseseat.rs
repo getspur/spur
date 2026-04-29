@@ -52,6 +52,7 @@ pub struct LicenseSeatProvider {
     /// Cross-method operation serialization (bd-22q.15). Acquired at
     /// entry of every mutating method; held across SDK + replace_state.
     /// Reads do NOT acquire this lock.
+    #[allow(dead_code)]
     operation_lock: Arc<tokio::sync::Mutex<()>>,
     events_tx: broadcast::Sender<LicenseEvent>,
     refresh_policy: RefreshPolicy,

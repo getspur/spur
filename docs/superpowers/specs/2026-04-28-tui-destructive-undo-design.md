@@ -280,13 +280,19 @@ Bound at the app level so `u` from vim Normal and `Ctrl+Z` from Emacs both route
 | Slash command picker open (`/`-trigger active) | passthrough | same |
 | History shell active (`Up`/`Down` history nav with body shown) | passthrough | history shell consumes |
 | Permission prompt pending (`y/n/a` waiting on agent perm question) | passthrough | permission handler consumes |
+| Command palette open (`Ctrl+K` / Dashboard `:`) | passthrough | palette owns text query; bare `u` types into query, `Ctrl+Z` is swallowed silently |
+| Collision modal open (`collision_modal.is_some()`) | block (no-op) | modal captures visible conflict-resolution flow |
+| Upgrade modal open (`upgrade_modal.is_some()`) | block (no-op) | modal captures visible license-recovery flow |
 | Help overlay open (`?` toggled on) | block (no-op flash `"close help to undo"`) | overlay-modal — explicit don't-route |
 | Mermaid render-picker open | passthrough | render-picker consumes |
 | Quit-confirm modal open | block (no-op) | modal — only `y/n` consumed |
+| SessionPicker rename active | passthrough | rename buffer owns text input; bare `u` appends to buffer |
+| SessionPicker search focused | passthrough | search filter owns text input; bare `u` appends to filter |
+| SessionPicker confirm-switch visible | passthrough | confirm-switch owns the decision context; bare `u` is swallowed without closing |
 | Leader-menu popup open (post-leader-key spec) | block (no-op) | leader sequence active |
 | **None of the above** | consume → tombstone undo | normal path |
 
-The implementation MUST grep for these context-active checks at handler entry and short-circuit BEFORE evicting the tombstone. Order matches quick-fixes T5's session_detail.rs ownership cascade (composer-non-empty > picker > history-shell > view-keys).
+The implementation MUST grep for these context-active checks at handler entry and short-circuit BEFORE evicting the tombstone. Overlay/modal/help/global-shortcut owners run before tombstone undo; SessionPicker text/decision contexts are checked inside the residual undo handler. Order matches quick-fixes T5's session_detail.rs ownership cascade (composer-non-empty > picker > history-shell > view-keys).
 
 ### 4.7 Tombstone tick driver
 

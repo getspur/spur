@@ -191,6 +191,23 @@ impl SessionPickerView {
         self.rename_state.is_some()
     }
 
+    pub(crate) fn is_search_focused(&self) -> bool {
+        matches!(
+            &self.state,
+            PickerState::Populated {
+                search_focused: true,
+                ..
+            }
+        )
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn rename_buffer_for_test(&self) -> Option<&str> {
+        self.rename_state
+            .as_ref()
+            .map(|state| state.buffer.as_str())
+    }
+
     pub fn is_preview_visible(&self) -> bool {
         self.preview_visible
     }
@@ -1245,7 +1262,7 @@ pub(super) fn resolve_label(
 
 impl View for SessionPickerView {
     fn handle_key(&mut self, key: KeyEvent, ctx: &super::ViewContext) -> Option<Action> {
-        // 0. Confirm-switch intercepts all keys until y/Enter commits or anything else cancels.
+        // 0. Confirm-switch intercepts all keys until y/Enter commits or cancel keys dismiss.
         if let Some(ref target) = self.confirm_switch {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
@@ -1258,8 +1275,12 @@ impl View for SessionPickerView {
                     self.confirm_switch = None;
                     return Some(out);
                 }
+                KeyCode::Char('u') if key.modifiers.is_empty() => return None,
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.confirm_switch = None;
+                    return None;
+                }
                 _ => {
-                    // n / N / Esc / anything else cancels.
                     self.confirm_switch = None;
                     return None;
                 }

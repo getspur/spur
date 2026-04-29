@@ -1963,3 +1963,20 @@ if let Some(ts) = self.tombstones.evict(&departing) {
 **Test-support methods** added to `App` behind `#[cfg(any(test, debug_assertions))]` must not be exposed via the public API surface in release builds. All test-support accessor names end in `_for_test` to make this clear. Use `pub(crate)` visibility minimum; these are for integration tests in `crates/spur-tui/tests/`.
 
 **`executing_queued_review` flag safety:** The flag is set to `true` only synchronously within the `tick` loop and reset to `false` immediately after. Since `App` is single-threaded (TUI event loop is `!Send`), there is no concurrency hazard. The flag approach avoids a second `Action` variant for "queued review ready to dispatch" which would add noise to the action enum.
+
+## Retro (bd-3fwr)
+
+bd-3fwr found a two-layer routing gap in the destructive undo cascade. The original tests called `handle_undo_for_test` directly for some overlay cases, which bypassed `App::handle_crossterm_event` and therefore could not catch owner-order bugs where the global `u` / `Ctrl+Z` check ran before narrower visible contexts.
+
+The missing ownership contexts were:
+
+- Command palette open (`Ctrl+K` and Dashboard `:` alias)
+- Collision modal visible
+- Upgrade modal visible
+- SessionPicker rename active
+- SessionPicker search focused
+- SessionPicker confirm-switch visible
+
+The applied hybrid-C fix moved `is_undo_key` to the residual key-owner position in `handle_crossterm_event`, after overlay/modal/help/global-shortcut owners and immediately before view dispatch. `handle_undo` now keeps only residual eligibility gates, including `view_text_input_active()` for SessionPicker rename/search/confirm-switch, and no longer defensively owns help or quit-confirm. Help keeps the explicit `"close help to undo"` flash in its overlay branch.
+
+Going forward, tombstone input-routing regressions should use the `crates/spur-tui/tests/tombstone_input_routing.rs` pattern: drive `App::handle_crossterm_event(Event::Key(...))`, assert the narrower owner behavior, and assert the tombstone slot is still present for every rejected undo case.
