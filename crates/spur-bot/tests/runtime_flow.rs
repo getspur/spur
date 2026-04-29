@@ -318,6 +318,39 @@ async fn new_topic_record_is_persisted_before_first_message() {
 }
 
 #[tokio::test]
+async fn ensure_topic_record_save_failure_does_not_leave_orphan_in_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let blocker = dir.path().join("not-a-directory");
+    std::fs::write(&blocker, b"blocks state parent creation").unwrap();
+    let store = BotStateStore::new(blocker.join("state.json"));
+    let mut runtime = BotRuntime::new(store).unwrap();
+    runtime.restore_topic_binding(
+        0,
+        11,
+        "Existing Topic".into(),
+        "acp-existing".into(),
+        "kimi".into(),
+    );
+
+    let result = runtime
+        .ensure_topic_record(0, 77, "Session 1".into())
+        .await;
+
+    assert!(
+        result.is_err(),
+        "save through file-as-directory parent must fail"
+    );
+    assert!(
+        runtime.thread_record(77).is_none(),
+        "failed persistence must not leave the new topic in memory"
+    );
+    assert!(
+        runtime.thread_record(11).is_some(),
+        "pre-existing in-memory topics must remain untouched"
+    );
+}
+
+#[tokio::test]
 async fn review_callback_becomes_stale_after_topic_rebind() {
     let (mut runtime, handle, mut user_rx) = test_runtime();
     runtime.activate_topic_binding(42, 77, "Topic A".into(), "acp-old".into(), "kimi".into());
