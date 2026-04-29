@@ -37,6 +37,16 @@ pub async fn render_batch_to_thread(
                     })
                     .await;
             }
+            crate::runtime::RuntimeRender::StreamChunk { draft_id, text } => {
+                sender
+                    .queue_draft(crate::telegram::sender::DraftUpdate {
+                        chat_id,
+                        message_thread_id,
+                        draft_id,
+                        text: render_truncated_text(&text),
+                    })
+                    .await;
+            }
             crate::runtime::RuntimeRender::AnswerCallback { query_id, text } => {
                 client.answer_callback(query_id, text).await?;
             }
