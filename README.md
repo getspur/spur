@@ -4,7 +4,7 @@
 
 SPUR is a Rust-native TUI that orchestrates multiple AI coding agents through the [Agent Client Protocol (ACP)](https://github.com/anthropics/agent-client-protocol). A "brain" agent reasons about your task and delegates work to the best-fit worker agent, while SPUR handles the coordination, review loop, and project management integration.
 
-> ⚠️ **Early stage** — v0.1.0. APIs and config format may change.
+> ⚠️ **Early stage** — APIs and config format may change.
 
 ## How It Works
 

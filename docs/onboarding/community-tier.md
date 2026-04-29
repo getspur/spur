@@ -1,17 +1,22 @@
 # spur Community tier
 
-When you install spur with no LicenseSeat configuration, it runs on the **Community** tier — a free tier that includes:
+When you install spur with no LicenseSeat configuration, it runs on the **Community** tier — a free tier that includes the full daily-driver workflow:
 
-| Feature | Available on Community |
-|---|---|
-| `chat` | ✓ |
-| `code_edit` | ✓ |
-| `watch_loop` | ✓ |
-| `advanced_agents` | — Pro |
-| `cloud_sync` | — Pro |
-| `team_sharing` | — Team |
+| Capability | Feature key / quota | Community |
+|---|---|---|
+| Brain-session orchestration with worker delegation | `core_core_brain_session` | ✓ |
+| Single concurrent worker | `core_core_parallel_workers` (cap = 1 via `max_concurrent_workers` quota) | ✓ |
+| Worktree isolation per delegation | `worktree_core_isolation` | ✓ |
+| Manual review gate (approve / reject / modify) | `core_core_review` | ✓ |
+| Session resume from lineage replay | `core_core_session_resume` | ✓ |
+| Full TUI: dashboard, session detail, plan inspector, issue browser | `tui_core_view_*` | ✓ |
+| Ad-hoc CLI runs (`spur run`, `spur exec`, `spur cost`) | `cli_core_run`, `cli_core_exec`, `cli_core_cost`, … | ✓ |
+| Local PM browse and beads-basic integration | `pm_core_browse`, `pm_core_beads_basic` | ✓ |
+| MCP delegate / PR-creation tools | `mcp_core_delegate`, `mcp_core_pr` | ✓ |
 
-The canonical list lives in [`crates/spur-license/resources/default_policy.json`](../../crates/spur-license/resources/default_policy.json) under `tier_policies`. It is signed (Ed25519) and verified at compile time and runtime.
+Pro adds: parallel workers within one orchestrator (`max_concurrent_workers = 10`), durable multi-step plan execution (`mcp_pro_plan_durable`), per-project cost analytics (`cost_pro_per_project_tracking`, `ctx_pro_duckdb_engine`), Telegram remote review (`bot_pro_telegram_solo`, `bot_pro_inline_review`), and automation policies (`core_pro_review_auto_approve`, `skills_pro_custom`).
+
+The canonical feature list lives in [`crates/spur-license/resources/default_policy.json`](../../crates/spur-license/resources/default_policy.json) under `tier_policies`. It is signed (Ed25519) and verified at compile time and runtime — so this table is illustrative; the policy file is authoritative.
 
 ## Single SPUR per repo
 
