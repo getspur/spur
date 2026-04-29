@@ -2050,6 +2050,24 @@ mod tests {
         engine
     }
 
+    /// Regression: re-opening a persistent DB and re-running initialize +
+    /// load_pricing must not crash. Earlier the persistent `pricing` table
+    /// could carry a corrupt PRIMARY KEY index across runs (partial
+    /// checkpoint state from a prior crash), and the next `load_pricing`
+    /// hit `INTERNAL Error: ... duplicate key "gpt-4o"` during commit.
+    #[test]
+    fn initialize_is_idempotent_across_reopens() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("analytics.duckdb");
+        let registry = spur_cost::PricingRegistry::with_builtin_prices();
+
+        for _ in 0..3 {
+            let (engine, _recovered) = AnalyticsEngine::open(&db_path).unwrap();
+            engine.initialize().unwrap();
+            engine.load_pricing(&registry).unwrap();
+        }
+    }
+
     #[test]
     fn open_recovers_corrupt_wal_by_renaming_broken_file() {
         let tmp = TempDir::new().unwrap();
