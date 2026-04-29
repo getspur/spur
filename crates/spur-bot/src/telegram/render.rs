@@ -20,11 +20,15 @@ pub async fn render_batch_to_thread(
 
     for render in renders {
         match render {
-            crate::runtime::RuntimeRender::ServiceMessage { text }
-            | crate::runtime::RuntimeRender::FinalAnswer { text } => {
+            crate::runtime::RuntimeRender::ServiceMessage { text } => {
                 let body = render_truncated_text(&text);
                 client
                     .send_text_to_thread(chat_id, message_thread_id, body)
+                    .await?;
+            }
+            crate::runtime::RuntimeRender::FinalAnswer { text } => {
+                client
+                    .send_text_to_thread(chat_id, message_thread_id, text)
                     .await?;
             }
             crate::runtime::RuntimeRender::WorkingStatus { text } => {

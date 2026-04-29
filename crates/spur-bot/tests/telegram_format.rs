@@ -1,6 +1,7 @@
 use spur_bot::telegram::format::{
-    render_truncated_text, short_button_label, split_for_telegram, truncate_button_label_bytes,
-    truncate_to_utf16_units, TELEGRAM_BUTTON_LABEL_MAX_BYTES, TELEGRAM_TEXT_MAX_UTF16_UNITS,
+    render_truncated_text, short_button_label, split_for_final_answer, split_for_telegram,
+    truncate_button_label_bytes, truncate_to_utf16_units, TELEGRAM_BUTTON_LABEL_MAX_BYTES,
+    TELEGRAM_TEXT_MAX_UTF16_UNITS,
 };
 
 #[test]
@@ -10,6 +11,78 @@ fn split_for_telegram_preserves_unicode_scalar_boundaries() {
 
     assert!(chunks.iter().all(|chunk| chunk.chars().count() <= 256));
     assert_eq!(chunks.concat(), text);
+}
+
+#[test]
+fn split_for_final_answer_keeps_short_text_as_single_chunk() {
+    let text = "short final answer";
+
+    assert_eq!(
+        split_for_final_answer(text, TELEGRAM_TEXT_MAX_UTF16_UNITS),
+        vec![text.to_string()]
+    );
+}
+
+#[test]
+fn split_for_final_answer_splits_on_paragraph_boundary_when_possible() {
+    let max_units = 40;
+    let first_paragraph = "a".repeat(34);
+    let second_paragraph = "b".repeat(20);
+    let text = format!("{first_paragraph}\n\n{second_paragraph}");
+
+    let chunks = split_for_final_answer(&text, max_units);
+
+    assert_eq!(
+        chunks,
+        vec![format!("{first_paragraph}\n\n"), second_paragraph]
+    );
+    assert!(chunks
+        .iter()
+        .all(|chunk| chunk.encode_utf16().count() <= max_units));
+    assert_eq!(chunks.concat(), text);
+}
+
+#[test]
+fn split_for_final_answer_falls_back_to_line_then_word_then_char() {
+    let max_units = 40;
+
+    let line_prefix = "a".repeat(34);
+    let line_suffix = "b".repeat(20);
+    let line_text = format!("{line_prefix}\n{line_suffix}");
+    assert_eq!(
+        split_for_final_answer(&line_text, max_units),
+        vec![format!("{line_prefix}\n"), line_suffix]
+    );
+
+    let word_prefix = "c".repeat(34);
+    let word_suffix = "d".repeat(20);
+    let word_text = format!("{word_prefix} {word_suffix}");
+    assert_eq!(
+        split_for_final_answer(&word_text, max_units),
+        vec![format!("{word_prefix} "), word_suffix]
+    );
+
+    let hard_text = "e".repeat(85);
+    let hard_chunks = split_for_final_answer(&hard_text, max_units);
+    assert_eq!(hard_chunks.concat(), hard_text);
+    assert!(hard_chunks
+        .iter()
+        .all(|chunk| chunk.encode_utf16().count() <= max_units));
+    assert!(hard_chunks.len() > 1);
+}
+
+#[test]
+fn split_for_final_answer_handles_emoji_at_boundary() {
+    let text = format!("{}🙂tail", "a".repeat(TELEGRAM_TEXT_MAX_UTF16_UNITS - 1));
+
+    let chunks = split_for_final_answer(&text, TELEGRAM_TEXT_MAX_UTF16_UNITS);
+
+    assert_eq!(chunks.concat(), text);
+    assert_eq!(chunks[0], "a".repeat(TELEGRAM_TEXT_MAX_UTF16_UNITS - 1));
+    assert!(chunks[1].starts_with('🙂'));
+    assert!(chunks
+        .iter()
+        .all(|chunk| chunk.encode_utf16().count() <= TELEGRAM_TEXT_MAX_UTF16_UNITS));
 }
 
 #[test]
@@ -56,7 +129,9 @@ fn render_truncated_text_budget_invariant_random_lengths() {
     // pulling in a rand dep.
     let mut state: u64 = 0x00fe_edfa_cec0_ffee;
     for _ in 0..200 {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let len = (state >> 33) as usize % 100_001;
         let text: String = std::iter::repeat_n('x', len).collect();
         let out = render_truncated_text(&text);
