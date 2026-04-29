@@ -237,7 +237,19 @@ impl AnalyticsEngine {
             [],
         )?;
         tracing::debug!("materialized {} rows into events_cache", total);
+        let checkpoint_started = std::time::Instant::now();
+        self.checkpoint()?;
+        let elapsed = checkpoint_started.elapsed();
+        tracing::debug!("refresh_cache: post-INSERT checkpoint took {elapsed:?}");
         Ok(total)
+    }
+
+    /// Force DuckDB to flush pending WAL contents into the database file.
+    pub fn checkpoint(&self) -> Result<()> {
+        self.conn
+            .execute_batch("CHECKPOINT;")
+            .context("failed to checkpoint DuckDB")?;
+        Ok(())
     }
 
     /// Point `all_events` (and thus `all_events_with_cost`) at the
@@ -1761,6 +1773,11 @@ impl AnalyticsEngine {
         Ok(0)
     }
 
+    /// Force a checkpoint (stub).
+    pub fn checkpoint(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Use cached events (stub).
     pub fn use_cached_events(&self) -> Result<()> {
         Ok(())
@@ -2069,6 +2086,54 @@ mod tests {
             broken.len(),
             1,
             "expected one renamed broken WAL, got {broken:?}"
+        );
+    }
+
+    #[test]
+    fn refresh_cache_checkpoints_wal_after_insert() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("analytics.duckdb");
+        let wal_path = tmp.path().join("analytics.duckdb.wal");
+        let (engine, recovered) = AnalyticsEngine::open(&db_path).unwrap();
+        assert!(!recovered);
+        engine.initialize().unwrap();
+        for view in [
+            "codex_events",
+            "kiro_events",
+            "opencode_events",
+            "kimi_events",
+            "gemini_events",
+        ] {
+            engine.create_empty_stub(view).unwrap();
+        }
+        engine
+            .conn
+            .execute_batch(
+                "CREATE OR REPLACE VIEW claude_events AS
+                 SELECT TIMESTAMP '2026-04-20 10:00:00' AS timestamp,
+                        'sess-' || i::VARCHAR AS session_id,
+                        'claude' AS agent,
+                        'claude-opus-4' AS model,
+                        'proj' AS project,
+                        1000::BIGINT AS input_tokens,
+                        100::BIGINT AS output_tokens,
+                        0::BIGINT AS cache_read_tokens,
+                        0::BIGINT AS cache_creation_tokens,
+                        0.05::DOUBLE AS cost_usd
+                 FROM range(100) AS t(i);",
+            )
+            .unwrap();
+        engine.rebuild_unified_views().unwrap();
+
+        let materialized = engine.refresh_cache().unwrap();
+
+        assert_eq!(materialized, 100);
+        let wal_size = std::fs::metadata(&wal_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        assert!(
+            wal_size <= 4096,
+            "refresh_cache should checkpoint WAL to <=4096 bytes, got {wal_size}"
         );
     }
 
