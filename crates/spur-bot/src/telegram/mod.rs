@@ -82,7 +82,7 @@ pub async fn run_telegram_bot(
                             for render in &all_renders {
                                 if let crate::runtime::RuntimeRender::CreateTopic { topic_name } = render {
                                     let topic = client.create_forum_topic(chat_id, topic_name.clone()).await?;
-                                    runtime.ensure_topic_record(chat_id, topic.message_thread_id, topic_name.clone())?;
+                                    runtime.ensure_topic_record(chat_id, topic.message_thread_id, topic_name.clone()).await?;
                                     client.send_text_to_thread(
                                         chat_id,
                                         Some(topic.message_thread_id),
@@ -126,7 +126,7 @@ pub async fn run_telegram_bot(
                 }
             }
             Ok(event) = event_rx.recv() => {
-                let (maybe_key, renders) = runtime.handle_spur_event(event)?;
+                let (maybe_key, renders) = runtime.handle_spur_event(event).await?;
                 let mut all_renders = renders;
                 if let Some(ref key) = maybe_key {
                     let pending = runtime.flush_pending(&handle, key).await?;

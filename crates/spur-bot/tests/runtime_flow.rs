@@ -90,7 +90,7 @@ async fn lobby_plain_text_is_rejected() {
 async fn unbound_topic_plain_text_starts_new_session() {
     let (mut runtime, handle, mut user_rx) = test_runtime();
     runtime
-        .ensure_topic_record(42, 77, "Session 1".into())
+        .ensure_topic_record(42, 77, "Session 1".into()).await
         .unwrap();
 
     let renders = runtime
@@ -166,7 +166,7 @@ async fn restore_pending_topic_queues_resume_then_flushes_message() {
     ));
 
     let event = ready_event("session-1", "acp-77", "kimi");
-    runtime.handle_spur_event(event).unwrap();
+    runtime.handle_spur_event(event).await.unwrap();
     let key = spur_bot::state::ThreadKey {
         chat_id: 42,
         message_thread_id: Some(77),
@@ -304,7 +304,7 @@ async fn new_topic_record_is_persisted_before_first_message() {
     // so the Unbound thread survives a restart before the operator sends the
     // first message.
     runtime
-        .ensure_topic_record(42, 500, "Session 1".into())
+        .ensure_topic_record(42, 500, "Session 1".into()).await
         .unwrap();
 
     let reloaded = BotStateStore::new(path).load().unwrap();
@@ -333,7 +333,7 @@ async fn review_callback_becomes_stale_after_topic_rebind() {
                 role: spur_acp::Role::Executor,
                 task_spec: String::new(),
             },
-        ))
+        )).await
         .unwrap();
     let (_key, renders) = runtime
         .handle_spur_event(spur_acp::SpurEvent::now(
@@ -351,7 +351,7 @@ async fn review_callback_becomes_stale_after_topic_rebind() {
                     peer_influence: None,
                 },
             },
-        ))
+        )).await
         .unwrap();
     let token = renders
         .iter()
@@ -406,7 +406,7 @@ async fn review_callback_becomes_stale_after_topic_archived_with_preserved_acp_i
     runtime.activate_topic_binding(42, 77, "Topic A".into(), "acp-shared".into(), "kimi".into());
     // Topic B will take over acp-shared via /resume, forcing Topic A to archive.
     runtime
-        .ensure_topic_record(42, 88, "Topic B".into())
+        .ensure_topic_record(42, 88, "Topic B".into()).await
         .unwrap();
 
     runtime
@@ -419,7 +419,7 @@ async fn review_callback_becomes_stale_after_topic_archived_with_preserved_acp_i
                 role: spur_acp::Role::Executor,
                 task_spec: String::new(),
             },
-        ))
+        )).await
         .unwrap();
     let (_key, renders) = runtime
         .handle_spur_event(spur_acp::SpurEvent::now(
@@ -437,7 +437,7 @@ async fn review_callback_becomes_stale_after_topic_archived_with_preserved_acp_i
                     peer_influence: None,
                 },
             },
-        ))
+        )).await
         .unwrap();
     let token = renders
         .iter()
@@ -486,7 +486,7 @@ async fn permission_callback_becomes_stale_after_topic_archived_with_preserved_a
     let (mut runtime, handle, mut user_rx) = test_runtime();
     runtime.activate_topic_binding(42, 77, "Topic A".into(), "acp-shared".into(), "kimi".into());
     runtime
-        .ensure_topic_record(42, 88, "Topic B".into())
+        .ensure_topic_record(42, 88, "Topic B".into()).await
         .unwrap();
 
     // Permission request whose session_id matches Topic A's live session,
@@ -550,7 +550,7 @@ async fn resume_detaches_other_topic_owning_same_session() {
     let (mut runtime, handle, mut user_rx) = test_runtime();
     runtime.activate_topic_binding(42, 77, "Topic A".into(), "acp-shared".into(), "kimi".into());
     runtime
-        .ensure_topic_record(42, 88, "Topic B".into())
+        .ensure_topic_record(42, 88, "Topic B".into()).await
         .unwrap();
 
     runtime
@@ -575,7 +575,7 @@ async fn resume_detaches_other_topic_owning_same_session() {
 async fn same_topic_does_not_start_two_fresh_sessions_before_ready() {
     let (mut runtime, handle, mut user_rx) = test_runtime();
     runtime
-        .ensure_topic_record(42, 77, "Topic A".into())
+        .ensure_topic_record(42, 77, "Topic A".into()).await
         .unwrap();
 
     // First plain text in Unbound: NewSessionWithMessage.
@@ -624,7 +624,7 @@ async fn same_topic_does_not_start_two_fresh_sessions_before_ready() {
                 fs_unsafe: false,
                 caps: None,
             },
-        ))
+        )).await
         .unwrap();
 
     let key = spur_bot::state::ThreadKey {
@@ -652,7 +652,7 @@ async fn same_topic_does_not_start_two_fresh_sessions_before_ready() {
 async fn stale_fresh_ready_does_not_reactivate_rebound_topic() {
     let (mut runtime, handle, mut user_rx) = test_runtime();
     runtime
-        .ensure_topic_record(42, 77, "Topic A".into())
+        .ensure_topic_record(42, 77, "Topic A".into()).await
         .unwrap();
 
     // Topic 77 kicks off a fresh session.
@@ -684,7 +684,7 @@ async fn stale_fresh_ready_does_not_reactivate_rebound_topic() {
                 fs_unsafe: false,
                 caps: None,
             },
-        ))
+        )).await
         .unwrap();
 
     let record = runtime.thread_record(77).expect("topic 77 present");
@@ -741,7 +741,7 @@ async fn same_topic_resume_supersession_keeps_new_binding_when_old_ready_arrives
                 fs_unsafe: false,
                 caps: None,
             },
-        ))
+        )).await
         .unwrap();
 
     runtime
@@ -755,7 +755,7 @@ async fn same_topic_resume_supersession_keeps_new_binding_when_old_ready_arrives
                 fs_unsafe: false,
                 caps: None,
             },
-        ))
+        )).await
         .unwrap();
 
     let record = runtime.thread_record(77).expect("topic 77 present");
@@ -791,7 +791,7 @@ async fn same_topic_resume_supersession_ignores_old_ready_until_new_ready_arrive
                 fs_unsafe: false,
                 caps: None,
             },
-        ))
+        )).await
         .unwrap();
 
     assert!(
@@ -835,7 +835,7 @@ async fn late_resumed_ready_without_pending_target_is_ignored() {
                 fs_unsafe: false,
                 caps: None,
             },
-        ))
+        )).await
         .unwrap();
 
     assert!(
@@ -863,7 +863,7 @@ async fn late_resumed_ready_without_pending_target_is_ignored() {
 async fn fresh_ready_replaces_existing_live_route_for_same_topic() {
     let (mut runtime, handle, mut user_rx) = test_runtime();
     runtime
-        .ensure_topic_record(42, 77, "Session 1".into())
+        .ensure_topic_record(42, 77, "Session 1".into()).await
         .unwrap();
 
     runtime
@@ -885,7 +885,7 @@ async fn fresh_ready_replaces_existing_live_route_for_same_topic() {
                 fs_unsafe: false,
                 caps: None,
             },
-        ))
+        )).await
         .unwrap();
 
     let (old_key, _) = runtime
@@ -893,7 +893,7 @@ async fn fresh_ready_replaces_existing_live_route_for_same_topic() {
             spur_acp::SpurEventBody::TurnComplete {
                 session: spur_acp::SessionId("spur_acp-X".into()),
             },
-        ))
+        )).await
         .unwrap();
     assert!(
         old_key.is_none(),
@@ -905,7 +905,7 @@ async fn fresh_ready_replaces_existing_live_route_for_same_topic() {
             spur_acp::SpurEventBody::TurnComplete {
                 session: spur_acp::SessionId("spur_Y".into()),
             },
-        ))
+        )).await
         .unwrap();
     assert_eq!(
         new_key,
@@ -921,10 +921,10 @@ async fn fresh_ready_replaces_existing_live_route_for_same_topic() {
 async fn multiple_pending_new_sessions_bind_in_fifo_order() {
     let (mut runtime, handle, mut user_rx) = test_runtime();
     runtime
-        .ensure_topic_record(42, 77, "Topic A".into())
+        .ensure_topic_record(42, 77, "Topic A".into()).await
         .unwrap();
     runtime
-        .ensure_topic_record(42, 88, "Topic B".into())
+        .ensure_topic_record(42, 88, "Topic B".into()).await
         .unwrap();
 
     // Both topics fire NewSessionWithMessage before AgentSessionReady returns.
@@ -950,7 +950,7 @@ async fn multiple_pending_new_sessions_bind_in_fifo_order() {
                 fs_unsafe: false,
                 caps: None,
             },
-        ))
+        )).await
         .unwrap();
     runtime
         .handle_spur_event(spur_acp::SpurEvent::now(
@@ -963,7 +963,7 @@ async fn multiple_pending_new_sessions_bind_in_fifo_order() {
                 fs_unsafe: false,
                 caps: None,
             },
-        ))
+        )).await
         .unwrap();
 
     let a = runtime.thread_record(77).unwrap();
@@ -1033,7 +1033,7 @@ async fn first_plain_message_starts_new_session() {
     let handle = host.handle();
     let mut runtime = BotRuntime::new(store).unwrap();
     runtime
-        .ensure_topic_record(10_001, 77, "Session 1".into())
+        .ensure_topic_record(10_001, 77, "Session 1".into()).await
         .unwrap();
 
     let renders = runtime
@@ -1068,7 +1068,7 @@ async fn agent_session_ready_commits_binding_and_persists() {
     let handle = host.handle();
     let mut runtime = BotRuntime::new(store).unwrap();
     runtime
-        .ensure_topic_record(42, 77, "Session 1".into())
+        .ensure_topic_record(42, 77, "Session 1".into()).await
         .unwrap();
 
     runtime
@@ -1089,7 +1089,7 @@ async fn agent_session_ready_commits_binding_and_persists() {
                 fs_unsafe: false,
                 caps: None,
             },
-        ))
+        )).await
         .unwrap();
 
     let (key, _) = runtime
@@ -1097,7 +1097,7 @@ async fn agent_session_ready_commits_binding_and_persists() {
             spur_acp::SpurEventBody::TurnComplete {
                 session: spur_acp::SessionId("spur_1".into()),
             },
-        ))
+        )).await
         .unwrap();
     assert_eq!(
         key,
@@ -1223,7 +1223,7 @@ async fn review_prompt_resolves_once_and_siblings_go_stale() {
                     peer_influence: None,
                 },
             },
-        ))
+        )).await
         .unwrap();
 
     let buttons = renders
@@ -1297,7 +1297,7 @@ async fn agent_notification_and_turn_complete_renders_final_answer() {
                     )),
                 )),
             },
-        ))
+        )).await
         .unwrap();
     runtime
         .handle_spur_event(spur_acp::SpurEvent::now(
@@ -1310,7 +1310,7 @@ async fn agent_notification_and_turn_complete_renders_final_answer() {
                     )),
                 )),
             },
-        ))
+        )).await
         .unwrap();
 
     // TurnComplete flushes the accumulated text.
@@ -1319,7 +1319,7 @@ async fn agent_notification_and_turn_complete_renders_final_answer() {
             spur_acp::SpurEventBody::TurnComplete {
                 session: session.clone(),
             },
-        ))
+        )).await
         .unwrap();
 
     assert_eq!(renders.len(), 1);
@@ -1333,7 +1333,7 @@ async fn agent_notification_and_turn_complete_renders_final_answer() {
     let (_key, renders) = runtime
         .handle_spur_event(spur_acp::SpurEvent::now(
             spur_acp::SpurEventBody::TurnComplete { session },
-        ))
+        )).await
         .unwrap();
     assert!(renders.is_empty());
 }
@@ -1357,7 +1357,7 @@ async fn brain_error_renders_service_message() {
                     )),
                 )),
             },
-        ))
+        )).await
         .unwrap();
 
     let (_key, renders) = runtime
@@ -1366,7 +1366,7 @@ async fn brain_error_renders_service_message() {
                 session,
                 message: "brain subprocess exited".into(),
             },
-        ))
+        )).await
         .unwrap();
 
     assert!(renders.iter().any(|item| matches!(
@@ -1412,7 +1412,7 @@ async fn restore_pending_plain_text_queues_resume_then_message() {
             },
         },
     );
-    store.save(&persisted).unwrap();
+    store.save(&persisted).await.unwrap();
 
     let mut runtime = BotRuntime::new(store).unwrap();
 
@@ -1447,7 +1447,7 @@ async fn restore_pending_plain_text_queues_resume_then_message() {
                 fs_unsafe: false,
                 caps: None,
             },
-        ))
+        )).await
         .unwrap();
 
     // flush_pending should now forward the queued Message.
