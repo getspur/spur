@@ -945,6 +945,16 @@ pub enum SpurEventBody {
         reason: String,
     },
 
+    /// Reconciler reclaimed an in-flight dispatch whose lease label expired.
+    DispatchLeaseExpired {
+        plan_id: String,
+        task_id: String,
+        issue_id: String,
+        delegation_id: String,
+        expired_at: i64,
+        age_secs: i64,
+    },
+
     /// A continuation reached a terminal non-delivered state.
     ContinuationDropped {
         delegation_id: DelegationId,

@@ -957,6 +957,11 @@ async fn tick_once_persists_failed_completion_when_respond_to_drops() {
     assert!(reconciler.tick_once().await.expect("tick_once"));
     let request = delegation_rx.recv().await.expect("dispatch request");
     let delegation_id = request.id.as_str().to_string();
+    label_issue(
+        dir.path(),
+        &task_id,
+        &labels::lease_expires_at(4_102_444_800),
+    );
     drop(request.respond_to);
 
     task_tracker.close();
@@ -976,6 +981,10 @@ async fn tick_once_persists_failed_completion_when_respond_to_drops() {
         .labels
         .iter()
         .any(|label| label.starts_with("spur:delegation-id:")));
+    assert!(!issue
+        .labels
+        .iter()
+        .any(|label| label.starts_with(labels::LEASE_EXPIRES_AT_PREFIX)));
 
     let projected = spur_mcp::plan::projector::project_plan_from_beads(
         pm.as_ref(),
@@ -1006,6 +1015,227 @@ async fn tick_once_persists_failed_completion_when_respond_to_drops() {
         } if found_delegation_id == &delegation_id
             && result_summary.as_deref() == Some("orchestrator disconnected")
     )));
+}
+
+#[tokio::test]
+async fn tick_once_reclaims_expired_lease_dispatch() {
+    if !br_available() {
+        eprintln!("skipping tick_once_reclaims_expired_lease_dispatch: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected beads pm");
+    let pm = Arc::new(pm);
+    let epic_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Plan 1 Epic",
+            "--priority",
+            "2",
+        ],
+    ));
+    label_issue(dir.path(), &epic_id, &labels::plan_id("plan-lease"));
+    label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
+
+    let task_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Leased Task",
+            "--priority",
+            "2",
+        ],
+    ));
+    let delegation_id = "del-expired";
+    let expired_at = 1;
+    label_issue(dir.path(), &task_id, &labels::plan_id("plan-lease"));
+    label_issue(dir.path(), &task_id, &labels::plan_task_id("t-expired"));
+    label_issue(dir.path(), &task_id, &labels::agent("codex"));
+    label_issue(dir.path(), &task_id, &labels::delegation_id(delegation_id));
+    label_issue(dir.path(), &task_id, &labels::lease_expires_at(expired_at));
+    spur_mcp::plan::emit_dispatch_audit(
+        Some(pm.as_ref()),
+        &Some(task_id.clone()),
+        common::server_builder::pro_feature_gate().as_ref(),
+        "plan-lease",
+        delegation_id,
+        "codex",
+        1,
+    )
+    .await;
+
+    let (delegation_tx, mut delegation_rx) = tokio::sync::mpsc::channel(1);
+    let sink = Arc::new(CaptureSink {
+        events: std::sync::Mutex::new(Vec::new()),
+    });
+    let event_sink: Arc<dyn McpEventSink> = sink.clone();
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        Some(ReconcilerDispatchCtx {
+            delegation_tx,
+            task_tracker: tokio_util::task::TaskTracker::new(),
+            brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
+            event_sink: Some(event_sink),
+            materializer: test_materializer(),
+        }),
+        Some("plan-lease".into()),
+        common::server_builder::pro_feature_gate(),
+    );
+
+    assert!(reconciler.tick_once().await.expect("tick_once"));
+    assert!(
+        delegation_rx.try_recv().is_err(),
+        "expired lease reclamation must not dispatch the stale task"
+    );
+
+    let issue = pm.get_issue(&task_id).await.expect("get issue");
+    assert_eq!(issue.status, pm.closed_status());
+    assert!(!issue
+        .labels
+        .iter()
+        .any(|label| label.starts_with("spur:delegation-id:")));
+    assert!(!issue
+        .labels
+        .iter()
+        .any(|label| label.starts_with(labels::LEASE_EXPIRES_AT_PREFIX)));
+
+    let sentinels = collect_sentinels(&run_br_json(dir.path(), &["comments", "list", &task_id]));
+    assert!(sentinels.iter().any(|audit| matches!(
+        audit,
+        AuditSentinelKind::Completion {
+            delegation_id: found_delegation_id,
+            completion_state: audit_sentinel::CompletionState::Failed,
+            result_summary,
+            ..
+        } if found_delegation_id == delegation_id
+            && result_summary.as_deref() == Some("dispatch lease expired")
+    )));
+    assert!(sentinels.iter().any(|audit| matches!(
+        audit,
+        AuditSentinelKind::DispatchOrphanCleared {
+            delegation_id: found_delegation_id,
+            reason,
+        } if found_delegation_id == delegation_id
+            && reason.contains("dispatch lease expired")
+            && reason.contains(&expired_at.to_string())
+    )));
+
+    let events = sink.events.lock().expect("events lock");
+    assert!(events.iter().any(|event| matches!(
+        &event.body,
+        SpurEventBody::DispatchLeaseExpired {
+            plan_id,
+            task_id: event_task_id,
+            issue_id,
+            delegation_id: event_delegation_id,
+            expired_at: event_expired_at,
+            age_secs,
+        } if plan_id == "plan-lease"
+            && event_task_id == "t-expired"
+            && issue_id == &task_id
+            && event_delegation_id == delegation_id
+            && *event_expired_at == expired_at
+            && *age_secs >= 0
+    )));
+}
+
+#[tokio::test]
+async fn tick_once_does_not_reclaim_live_lease() {
+    if !br_available() {
+        eprintln!("skipping tick_once_does_not_reclaim_live_lease: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected beads pm");
+    let pm = Arc::new(pm);
+    let epic_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Plan 1 Epic",
+            "--priority",
+            "2",
+        ],
+    ));
+    label_issue(dir.path(), &epic_id, &labels::plan_id("plan-live"));
+    label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
+
+    let task_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Live Leased Task",
+            "--priority",
+            "2",
+        ],
+    ));
+    let delegation_id = "del-live";
+    let expires_at = 4_102_444_800;
+    label_issue(dir.path(), &task_id, &labels::plan_id("plan-live"));
+    label_issue(dir.path(), &task_id, &labels::plan_task_id("t-live"));
+    label_issue(dir.path(), &task_id, &labels::agent("codex"));
+    label_issue(dir.path(), &task_id, &labels::delegation_id(delegation_id));
+    label_issue(dir.path(), &task_id, &labels::lease_expires_at(expires_at));
+
+    let (delegation_tx, mut delegation_rx) = tokio::sync::mpsc::channel(1);
+    let sink = Arc::new(CaptureSink {
+        events: std::sync::Mutex::new(Vec::new()),
+    });
+    let event_sink: Arc<dyn McpEventSink> = sink.clone();
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        Some(ReconcilerDispatchCtx {
+            delegation_tx,
+            task_tracker: tokio_util::task::TaskTracker::new(),
+            brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
+            event_sink: Some(event_sink),
+            materializer: test_materializer(),
+        }),
+        Some("plan-live".into()),
+        common::server_builder::pro_feature_gate(),
+    );
+
+    assert!(!reconciler.tick_once().await.expect("tick_once"));
+    assert!(delegation_rx.try_recv().is_err());
+
+    let issue = pm.get_issue(&task_id).await.expect("get issue");
+    assert_eq!(issue.status, "open");
+    assert!(issue.labels.contains(&labels::delegation_id(delegation_id)));
+    assert!(issue.labels.contains(&labels::lease_expires_at(expires_at)));
+
+    let events = sink.events.lock().expect("events lock");
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event.body, SpurEventBody::DispatchLeaseExpired { .. })));
 }
 
 #[tokio::test]
@@ -1878,6 +2108,7 @@ async fn reconciler_cancels_during_tick() {
         base_interval: Duration::from_millis(5),
         idle_ceiling: Duration::from_millis(50),
         backoff_factor: 2,
+        ..Default::default()
     };
     let reconciler = Reconciler::new(
         cfg,
@@ -1961,6 +2192,7 @@ async fn hybrid_fast_forward_matches_polling_projection() {
             base_interval: Duration::from_secs(60),
             idle_ceiling: Duration::from_secs(60),
             backoff_factor: 2,
+            ..Default::default()
         },
         Arc::clone(&pm),
         Arc::clone(&fast_forward),
