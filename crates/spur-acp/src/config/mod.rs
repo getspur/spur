@@ -602,6 +602,10 @@ fn default_worker_heartbeat_initial_grace_secs() -> u64 {
     60
 }
 
+fn default_event_replay_horizon_secs() -> u64 {
+    7 * 86400
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LogConfig {
@@ -630,6 +634,11 @@ pub struct LogConfig {
     /// Total byte cap for `.spur/events/` ndjson directory.
     pub events_max_total_bytes: u64,
 
+    /// How far back to replay NDJSON events on TUI startup, in seconds.
+    /// Default 7 days. Bounds the cost of cold-start projection rehydration.
+    #[serde(default = "default_event_replay_horizon_secs")]
+    pub event_replay_horizon_secs: u64,
+
     /// If false, fall back to direct-FD stderr capture (legacy model, no rotation).
     pub child_stderr_pipe: bool,
 }
@@ -645,6 +654,7 @@ impl Default for LogConfig {
             child_stderr_max_bytes: 2_621_440,
             child_stderr_max_files: 3,
             events_max_total_bytes: 67_108_864,
+            event_replay_horizon_secs: 7 * 86400,
             child_stderr_pipe: true,
         }
     }
@@ -1107,6 +1117,12 @@ level = "warn,spur_core::orchestrator=info"
         assert_eq!(cfg.log.child_stderr_max_files, 3);
         assert_eq!(cfg.log.events_max_total_bytes, 67_108_864); // 64 MB
         assert!(cfg.log.child_stderr_pipe);
+    }
+
+    #[test]
+    fn log_config_default_event_replay_horizon_is_seven_days() {
+        let cfg = LogConfig::default();
+        assert_eq!(cfg.event_replay_horizon_secs, 7 * 86400);
     }
 
     #[test]
