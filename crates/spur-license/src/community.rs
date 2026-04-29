@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
+use crate::licenseseat::LicenseSeatProvider;
 use crate::policy::PolicyResolver;
 use crate::provider::{LicenseProvider, RefreshPolicy};
 use crate::{LicenseError, LicenseEvent, LicenseState, Plan, Result};
@@ -102,6 +103,71 @@ impl LicenseProvider for CommunityProvider {
     }
     async fn deactivate(&self) -> Result<LicenseState> {
         Ok(self.state.clone())
+    }
+}
+
+/// Community-tier surface that delegates `activate` to a baked-in
+/// `LicenseSeatProvider`. Used in Option A release builds (per the
+/// 2026-04-19 plan, Task 14b) when no cached license is present: the
+/// user sees the Community state everywhere, but `spur auth login --key …`
+/// works without any runtime env-var setup because the publishable
+/// credentials are baked into the binary at build time.
+///
+/// On successful activation, the underlying LicenseSeat SDK persists
+/// the license cache to disk; the NEXT process launch comes up as a
+/// bare `LicenseSeatProvider` directly via the `has_cached_license()`
+/// branch in `licenseseat::from_env_or_disabled`.
+pub struct CommunityProviderWithUpgrade {
+    community: CommunityProvider,
+    upgrade_target: Arc<LicenseSeatProvider>,
+}
+
+impl CommunityProviderWithUpgrade {
+    pub fn new(resolver: Arc<PolicyResolver>, upgrade_target: Arc<LicenseSeatProvider>) -> Self {
+        Self {
+            community: CommunityProvider::new(resolver),
+            upgrade_target,
+        }
+    }
+}
+
+#[async_trait]
+impl LicenseProvider for CommunityProviderWithUpgrade {
+    fn current_state(&self) -> LicenseState {
+        // Until activation succeeds + the next launch promotes us via
+        // the cache, we render as Community.
+        self.community.current_state()
+    }
+    fn subscribe(&self) -> broadcast::Receiver<LicenseEvent> {
+        // Subscribe to the community provider's (silent) channel until
+        // upgrade. The activation call delegates to the LicenseSeat SDK
+        // which fires its own events but only after the next launch
+        // promotes the provider.
+        self.community.subscribe()
+    }
+    fn refresh_policy(&self) -> RefreshPolicy {
+        self.community.refresh_policy()
+    }
+    fn requires_heartbeat(&self) -> bool {
+        false
+    }
+    fn has_entitlement(&self, feature: &str) -> bool {
+        self.community.has_entitlement(feature)
+    }
+    async fn activate(&self, key: &str) -> Result<LicenseState> {
+        // Delegate to the baked-in LicenseSeatProvider. On success the
+        // SDK persists a license cache to disk. The next process launch
+        // picks up the cache and promotes to bare LicenseSeatProvider.
+        self.upgrade_target.activate(key).await
+    }
+    async fn validate(&self) -> Result<LicenseState> {
+        self.community.validate().await
+    }
+    async fn heartbeat(&self) -> Result<LicenseState> {
+        self.community.heartbeat().await
+    }
+    async fn deactivate(&self) -> Result<LicenseState> {
+        self.community.deactivate().await
     }
 }
 
