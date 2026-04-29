@@ -78,7 +78,8 @@ pub fn from_env_or_disabled() -> Arc<dyn LicenseProvider> {
 /// protect against torn writes at the snapshot level. Note: the
 /// current `replace_state` silently ignores `RwLock` poisoning
 /// (`if let Ok(...)`), which is a pre-existing correctness bomb
-/// tracked separately. See `bd-22q.16`.
+/// tracked separately. See `bd-3v05` (filed as the spec's
+/// "bd-22q.16" follow-up).
 #[derive(Clone)]
 pub struct LicenseSeatProvider {
     sdk: LicenseSeat,
@@ -544,7 +545,8 @@ mod cross_method_race {
     //! `LicenseSeatProvider`'s mutating methods participate in the
     //! `operation_lock` discipline. They do NOT directly drive the
     //! validate-vs-deactivate race scenario — that requires SDK-mock
-    //! infrastructure deferred to bd-22q.17. Instead, they prove:
+    //! infrastructure deferred to bd-25tg (filed as the spec's
+    //! "bd-22q.17" follow-up). Instead, they prove:
     //!   1. The lock primitive serializes (sanity).
     //!   2. Each of the four mutating methods blocks on an externally-
     //!      held `operation_lock`, proving they acquire it.
