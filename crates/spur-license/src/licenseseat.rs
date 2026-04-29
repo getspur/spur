@@ -590,16 +590,11 @@ mod cross_method_race {
     /// Test 2: activate() acquires operation_lock at entry.
     #[tokio::test(start_paused = true)]
     async fn activate_blocks_on_externally_held_operation_lock() {
-        let provider = LicenseSeatProvider::new(
-            "test-key".to_string(),
-            "test-product".to_string(),
-        );
+        let provider = LicenseSeatProvider::new("test-key".to_string(), "test-product".to_string());
         let external_lock = provider.operation_lock_handle().lock_owned().await;
 
         let provider_clone = provider.clone();
-        let activate_task = tokio::spawn(async move {
-            provider_clone.activate("X").await
-        });
+        let activate_task = tokio::spawn(async move { provider_clone.activate("X").await });
 
         // Yield so activate_task is polled and queues on the lock.
         tokio::task::yield_now().await;
@@ -621,10 +616,7 @@ mod cross_method_race {
     /// Test 3: validate() acquires operation_lock at entry.
     #[tokio::test(start_paused = true)]
     async fn validate_blocks_on_externally_held_operation_lock() {
-        let provider = LicenseSeatProvider::new(
-            "test-key".to_string(),
-            "test-product".to_string(),
-        );
+        let provider = LicenseSeatProvider::new("test-key".to_string(), "test-product".to_string());
         let external_lock = provider.operation_lock_handle().lock_owned().await;
 
         let provider_clone = provider.clone();
@@ -646,10 +638,7 @@ mod cross_method_race {
     /// Test 4: heartbeat() acquires operation_lock at entry.
     #[tokio::test(start_paused = true)]
     async fn heartbeat_blocks_on_externally_held_operation_lock() {
-        let provider = LicenseSeatProvider::new(
-            "test-key".to_string(),
-            "test-product".to_string(),
-        );
+        let provider = LicenseSeatProvider::new("test-key".to_string(), "test-product".to_string());
         let external_lock = provider.operation_lock_handle().lock_owned().await;
 
         let provider_clone = provider.clone();
@@ -671,10 +660,7 @@ mod cross_method_race {
     /// Test 5: deactivate() acquires operation_lock at entry.
     #[tokio::test(start_paused = true)]
     async fn deactivate_blocks_on_externally_held_operation_lock() {
-        let provider = LicenseSeatProvider::new(
-            "test-key".to_string(),
-            "test-product".to_string(),
-        );
+        let provider = LicenseSeatProvider::new("test-key".to_string(), "test-product".to_string());
         let external_lock = provider.operation_lock_handle().lock_owned().await;
 
         let provider_clone = provider.clone();
