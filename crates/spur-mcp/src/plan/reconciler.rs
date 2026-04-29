@@ -453,14 +453,12 @@ impl Reconciler {
                     }
                 };
 
-                let completion_state = crate::plan::completion_state_from_status(&result.status);
-                if let Err(error) = crate::plan::persist_completion_result_and_notify(
+                if let Err(error) = crate::plan::persist_worker_completion_and_notify(
                     pm.as_ref(),
                     &issue_id,
                     feature_gate.as_ref(),
                     &plan_id,
                     &delegation_id_for_completion,
-                    completion_state,
                     &Some(Arc::clone(&fast_forward)),
                     &result,
                     &brain_session_id,
@@ -592,9 +590,8 @@ impl Reconciler {
                     audit,
                     crate::plan::audit_sentinel::AuditSentinelKind::DispatchOrphanCleared {
                         delegation_id: found_delegation_id,
-                        reason,
+                        ..
                     } if found_delegation_id == &delegation_id
-                        && reason.contains("dispatch lease expired")
                 )
             });
             if !orphan_audit_exists {
@@ -621,7 +618,7 @@ impl Reconciler {
                 worker_branch: None,
                 artifact: None,
             };
-            crate::plan::persist_completion_result_and_notify(
+            crate::plan::persist_system_completion_and_notify(
                 self.pm.as_ref(),
                 &summary.id,
                 self.feature_gate.as_ref(),
