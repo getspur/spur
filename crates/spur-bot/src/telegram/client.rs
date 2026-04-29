@@ -198,6 +198,51 @@ impl TelegramClient {
         Ok(())
     }
 
+    pub async fn send_html_to_thread(
+        &self,
+        chat_id: i64,
+        message_thread_id: Option<i32>,
+        html: String,
+        plain_fallback: String,
+    ) -> anyhow::Result<()> {
+        let params = build_send_html_params(chat_id, message_thread_id, html);
+        self.wait_if_paused().await;
+        let result = self.inner.send_message(&params).await;
+        if let Err(err) = &result {
+            self.pause_after_telegram_retry_after(err);
+            if let Some(description) = telegram_html_parse_error_description(err) {
+                let fallback_params =
+                    build_send_text_params(chat_id, message_thread_id, plain_fallback);
+                let fallback_result = self.inner.send_message(&fallback_params).await;
+                if let Err(fallback_err) = &fallback_result {
+                    self.pause_after_telegram_retry_after(fallback_err);
+                }
+                let response = fallback_result?;
+                tracing::warn!(
+                    error_description = %description,
+                    "telegram HTML parse failed; retried with plain text"
+                );
+                let message_id = response.result.message_id;
+                tracing::info!(
+                    chat_id,
+                    message_thread_id = ?normalize_outbound_thread_id(message_thread_id),
+                    message_id,
+                    "telegram sendMessage delivered"
+                );
+                return Ok(());
+            }
+        }
+        let response = result?;
+        let message_id = response.result.message_id;
+        tracing::info!(
+            chat_id,
+            message_thread_id = ?normalize_outbound_thread_id(message_thread_id),
+            message_id,
+            "telegram sendMessage delivered"
+        );
+        Ok(())
+    }
+
     pub async fn answer_callback(&self, query_id: String, text: String) -> anyhow::Result<()> {
         self.inner
             .answer_callback_query(
@@ -287,6 +332,25 @@ fn telegram_retry_after_secs(err: &frankenstein::Error) -> Option<u16> {
     }
 }
 
+fn telegram_html_parse_error_description(err: &frankenstein::Error) -> Option<&str> {
+    match err {
+        frankenstein::Error::Api(response)
+            if response.error_code == 400
+                && is_telegram_html_parse_error_description(&response.description) =>
+        {
+            Some(&response.description)
+        }
+        _ => None,
+    }
+}
+
+fn is_telegram_html_parse_error_description(description: &str) -> bool {
+    let description = description.to_ascii_lowercase();
+    description.contains("can't parse entities")
+        || description.contains("parse entities")
+        || description.contains("find end of the entity")
+}
+
 fn retry_after_jitter() -> Duration {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -310,6 +374,22 @@ pub fn build_send_text_params(
     let builder = frankenstein::methods::SendMessageParams::builder()
         .chat_id(chat_id)
         .text(text);
+    if let Some(thread_id) = normalize_outbound_thread_id(message_thread_id) {
+        builder.message_thread_id(thread_id).build()
+    } else {
+        builder.build()
+    }
+}
+
+pub fn build_send_html_params(
+    chat_id: i64,
+    message_thread_id: Option<i32>,
+    html: String,
+) -> frankenstein::methods::SendMessageParams {
+    let builder = frankenstein::methods::SendMessageParams::builder()
+        .chat_id(chat_id)
+        .text(html)
+        .parse_mode(frankenstein::ParseMode::Html);
     if let Some(thread_id) = normalize_outbound_thread_id(message_thread_id) {
         builder.message_thread_id(thread_id).build()
     } else {
