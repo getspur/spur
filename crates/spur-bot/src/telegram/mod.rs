@@ -39,11 +39,15 @@ pub async fn run_telegram_bot(
         anyhow::bail!("telegram bot does not have topics enabled; enable private topics in BotFather before using thread sessions");
     }
 
-    let poll_cancellation = cancellation.clone();
+    let poll_cancellation_for_loop = cancellation.clone();
+    let poll_cancellation_for_main = cancellation.clone();
     let cfg_poll_timeout = cfg.poll_timeout_secs;
     tokio::spawn(async move {
-        let _ =
-            poll_loop::run_poll_loop(&poll_client, cfg_poll_timeout, poll_cancellation, |batch| {
+        let result = poll_loop::run_poll_loop(
+            &poll_client,
+            cfg_poll_timeout,
+            poll_cancellation_for_loop,
+            |batch| {
                 let update_tx = update_tx.clone();
                 async move {
                     let mut inputs = Vec::new();
@@ -60,8 +64,16 @@ pub async fn run_telegram_bot(
                     }
                     Ok(())
                 }
-            })
-            .await;
+            },
+        )
+        .await;
+        match result {
+            Ok(()) => tracing::info!("telegram poll loop terminated cleanly"),
+            Err(err) => {
+                tracing::error!(error = ?err, "telegram poll loop terminated unexpectedly")
+            }
+        }
+        poll_cancellation_for_main.cancel();
     });
 
     loop {
@@ -159,6 +171,10 @@ pub async fn run_telegram_bot(
                     renders,
                 )
                 .await?;
+            }
+            _ = cancellation.cancelled() => {
+                tracing::info!("cancellation signaled; winding down telegram bot");
+                break;
             }
         }
     }
