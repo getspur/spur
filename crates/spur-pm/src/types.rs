@@ -70,6 +70,8 @@ pub struct IssueFilter {
     pub priority_max: Option<i32>,
     pub issue_type: Option<String>,
     pub text_search: Option<String>,
+    /// Include closed/non-open issues when the backend defaults to open-only.
+    pub include_closed: bool,
     /// None = backend default (typically 50)
     pub limit: Option<usize>,
     /// Optional zero-based offset for paginated scans.
@@ -136,5 +138,6 @@ mod tests {
         let filter = super::IssueFilter::default();
         assert_eq!(filter.offset, None);
         assert_eq!(filter.limit, None);
+        assert!(!filter.include_closed);
     }
 }

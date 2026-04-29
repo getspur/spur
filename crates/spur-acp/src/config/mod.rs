@@ -306,12 +306,28 @@ mod duration_secs_serde {
 }
 
 /// Runtime-level SPUR configuration knobs.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SpurRuntimeConfig {
     /// When true, automatically merge approved plans and create PRs.
     /// Default: false (opt-in).
     pub auto_merge_approved_plans: bool,
+    /// Grace period before startup quarantines stale `spur:plan-pending`
+    /// persisted plan epics. Default: 1 hour.
+    pub plan_pending_grace_secs: u64,
+}
+
+fn default_plan_pending_grace_secs() -> u64 {
+    60 * 60
+}
+
+impl Default for SpurRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            auto_merge_approved_plans: false,
+            plan_pending_grace_secs: default_plan_pending_grace_secs(),
+        }
+    }
 }
 
 /// Global SPUR configuration (from ~/.spur/config.toml + .spur/config.toml).
@@ -1013,6 +1029,7 @@ mod tests {
     fn spur_runtime_defaults_auto_merge_to_false() {
         let cfg: SpurConfig = toml::from_str("").unwrap();
         assert!(!cfg.spur.auto_merge_approved_plans);
+        assert_eq!(cfg.spur.plan_pending_grace_secs, 60 * 60);
     }
 
     #[test]
@@ -1043,10 +1060,12 @@ mod tests {
             r#"
             [spur]
             auto_merge_approved_plans = true
+            plan_pending_grace_secs = 10
             "#,
         )
         .unwrap();
         assert!(cfg.spur.auto_merge_approved_plans);
+        assert_eq!(cfg.spur.plan_pending_grace_secs, 10);
     }
 
     #[test]

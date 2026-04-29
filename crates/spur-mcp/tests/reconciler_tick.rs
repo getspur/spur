@@ -18,8 +18,8 @@
 //! # `observe_ready_via_br_returns_ready_tasks`
 //!
 //! Exercises the br fallback path (`observe_ready_via_br`) directly, bypassing
-//! the bv primary path entirely. Verifies the corrected filter (plan_id only,
-//! no PLAN_COMPLETE) correctly identifies unblocked tasks.
+//! the bv primary path entirely. Verifies the task-level ready query is
+//! followed by the epic activation guard.
 //!
 //! Same fixture as above; calls `observe_ready_via_br()` instead of
 //! `observe_ready()`.
@@ -30,8 +30,8 @@ use std::sync::Arc;
 
 use spur_acp::{BrainSessionId, SessionId, SpurEvent, SpurEventBody};
 use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
-use spur_mcp::plan::labels;
 use spur_mcp::plan::reconciler::{Reconciler, ReconcilerConfig, ReconcilerDispatchCtx};
+use spur_mcp::plan::{labels, PlanTask};
 use spur_mcp::McpEventSink;
 use spur_mcp::{server::DetachedContinuationCtx, McpCallbackServer};
 use tempfile::TempDir;
@@ -124,6 +124,17 @@ fn label_issue(repo: &Path, issue_id: &str, label: &str) {
     run_br(repo, &["label", "add", issue_id, label]);
 }
 
+fn plan_task(task_id: &str) -> PlanTask {
+    PlanTask {
+        task_id: task_id.to_string(),
+        agent: "codex".to_string(),
+        task: format!("Do {task_id}."),
+        depends_on: Vec::new(),
+        issue_id: None,
+        context_files: Vec::new(),
+    }
+}
+
 fn collect_sentinels(list_json: &str) -> Vec<AuditSentinelKind> {
     let items: serde_json::Value =
         serde_json::from_str(list_json).expect("br comments list must be valid JSON");
@@ -171,6 +182,73 @@ impl McpEventSink for CaptureSink {
     fn emit(&self, body: SpurEventBody) {
         self.events.lock().unwrap().push(SpurEvent::now(body));
     }
+}
+
+#[tokio::test]
+async fn tick_once_does_not_dispatch_partial_plan_after_child_create_failure() {
+    if !br_available() {
+        eprintln!(
+            "skipping tick_once_does_not_dispatch_partial_plan_after_child_create_failure: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected beads pm");
+    let pm = Arc::new(pm);
+
+    let tasks = vec![
+        plan_task("t1"),
+        plan_task("t2"),
+        // Slash is illegal in beads labels. `build_epic_subgraph` reaches this
+        // third child create before `br create` rejects spur:plan-task-id:bad/task.
+        plan_task("bad/task"),
+    ];
+    let err = spur_mcp::build_epic_subgraph(
+        pm.as_ref(),
+        common::server_builder::pro_feature_gate().as_ref(),
+        "partial-plan",
+        "Partial Plan",
+        None,
+        &tasks,
+    )
+    .await
+    .expect_err("third child create must fail");
+    assert!(
+        err.contains("failed to create child"),
+        "unexpected build error: {err}"
+    );
+
+    let (delegation_tx, mut delegation_rx) = tokio::sync::mpsc::channel(8);
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        Some(ReconcilerDispatchCtx {
+            delegation_tx,
+            task_tracker: tokio_util::task::TaskTracker::new(),
+            brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
+            event_sink: None,
+            materializer: test_materializer(),
+        }),
+        Some("partial-plan".into()),
+        common::server_builder::pro_feature_gate(),
+    );
+
+    let did_work = tokio::time::timeout(std::time::Duration::from_secs(5), reconciler.tick_once())
+        .await
+        .expect("tick_once must not hang")
+        .expect("tick_once");
+    assert!(!did_work, "partial plan must not produce dispatch work");
+    assert!(
+        delegation_rx.try_recv().is_err(),
+        "partial plan must not enqueue a delegation"
+    );
 }
 
 #[tokio::test]
@@ -289,6 +367,21 @@ async fn observe_ready_summaries_preserve_plan_labels() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
+    let epic_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Plan P1 Epic",
+            "--priority",
+            "2",
+        ],
+    ));
+    label_issue(dir.path(), &epic_id, &labels::plan_id("P1"));
+    label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
+
     let task_json = run_br_json(
         dir.path(),
         &[
@@ -329,9 +422,8 @@ async fn observe_ready_summaries_preserve_plan_labels() {
 /// Exercises the br fallback path directly via `observe_ready_via_br`.
 ///
 /// This test bypasses the bv primary path and calls the br fallback helper
-/// directly. It verifies that the corrected filter (spur:plan-id:<id> only,
-/// no spur:plan-complete) correctly identifies unblocked tasks — tasks never
-/// carry PLAN_COMPLETE, which is an epic-only marker.
+/// directly. It verifies that task-level `br ready` candidates are filtered
+/// through the plan epic's activation labels.
 #[tokio::test]
 async fn observe_ready_via_br_returns_ready_tasks() {
     if !br_available() {

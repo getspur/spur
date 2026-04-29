@@ -554,6 +554,10 @@ impl IssueTracker for BeadsAdapter {
             args.push(label.clone());
         }
 
+        if filter.include_closed {
+            args.push("-a".into());
+        }
+
         if let Some(min) = filter.priority_min {
             args.push("--priority-min".into());
             args.push(min.to_string());

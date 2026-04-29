@@ -103,7 +103,7 @@ async fn build_epic_subgraph_emits_plan_complete_on_epic() {
 
     let epic_id = &subgraph.epic_id;
 
-    // Ask beads for the epic issue and check its labels contain spur:plan-complete.
+    // Ask beads for the epic issue and check activation flipped pending -> complete.
     let list_out = run_br(dir.path(), &["show", epic_id]).expect("br show <epic_id> failed");
 
     // `br show` returns a JSON array; grab the first (and only) element.
@@ -126,5 +126,9 @@ async fn build_epic_subgraph_emits_plan_complete_on_epic() {
         "epic {epic_id} must carry '{}' after successful build_epic_subgraph; got labels: {label_values:?}",
         labels::PLAN_COMPLETE
     );
-    // TODO(v0b): assert marker is ABSENT when mid-loop child-create fails
+    assert!(
+        !label_values.contains(&labels::PLAN_PENDING.to_string()),
+        "epic {epic_id} must not retain '{}' after successful build_epic_subgraph; got labels: {label_values:?}",
+        labels::PLAN_PENDING
+    );
 }
