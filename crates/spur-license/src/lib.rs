@@ -288,14 +288,30 @@ impl SpurLicense {
     }
 
     pub async fn heartbeat(&self) -> Result<LicenseState> {
-        // NOTE: heartbeat-Err handling is added in a follow-up step; for
-        // now this only covers the Ok path. See spec section "Concurrency
-        // notes" for why &new_state is a correctness requirement, not an
-        // optimization (LicenseSeatProvider::current_state() patches
-        // Inactive→Active and would silently break deactivate-via-Ok).
-        let next = self.provider.heartbeat().await?;
-        self.feature_gate.update_state(&next);
-        Ok(next)
+        // Ok-path: refresh from `&next` directly (the value just delivered
+        // from the provider's commit). Err-path: refresh from
+        // `provider.current_state()` because LicenseSeatProvider's
+        // degrade_current writes to provider state BEFORE returning Err,
+        // so current_state() is the canonical post-mutation snapshot.
+        //
+        // SAFETY of current_state() here: degrade_current sets status to
+        // Degraded, which LicenseSeatProvider::current_state()'s
+        // Inactive|ConfigError→Active patching does NOT touch
+        // (licenseseat.rs:148-161). For the Ok-path we use `&next`
+        // because deactivate-via-Ok would otherwise be silently mis-
+        // patched back to Active. See spec "Concurrency notes" for the
+        // full hazard analysis.
+        match self.provider.heartbeat().await {
+            Ok(next) => {
+                self.feature_gate.update_state(&next);
+                Ok(next)
+            }
+            Err(err) => {
+                self.feature_gate
+                    .update_state(&self.provider.current_state());
+                Err(err)
+            }
+        }
     }
 
     pub async fn deactivate(&self) -> Result<LicenseState> {
