@@ -4040,13 +4040,39 @@ pub async fn run_tui_with_license(
     let mut app = App::build_with_license_state(
         user_input_tx,
         start_in_picker_with_preselect,
-        config,
+        config.clone(),
         license_state,
         landing,
     );
     let mut tick_interval = tokio::time::interval(Duration::from_millis(33));
     let mut event_stream = crossterm::event::EventStream::new();
     let mut event_rx = event_rx;
+
+    // === bd-1vnk: rehydrate projections from prior NDJSON before drain begins ===
+    let replay_cfg = spur_core::event_replay::ReplayConfig {
+        replay_horizon: std::time::Duration::from_secs(config.log.event_replay_horizon_secs),
+        ..Default::default()
+    };
+    match spur_core::event_replay::replay_events(&replay_cfg, |ev| {
+        app.lineage.apply(ev);
+        app.plan_projection.apply(ev);
+        app.synopsis.apply(ev);
+    }) {
+        Ok(stats) => tracing::info!(
+            target: "spur.metrics.event_replay",
+            files = stats.files_read,
+            skipped_pid = stats.files_skipped_pid,
+            applied = stats.events_applied,
+            horizon_skipped = stats.events_skipped_horizon,
+            malformed = stats.malformed_lines,
+            elapsed_ms = stats.elapsed.as_millis() as u64,
+        ),
+        Err(e) => tracing::error!(
+            error = %e,
+            "event replay failed; starting with empty projections"
+        ),
+    }
+    // ============================================================================
 
     // Bridge OS termination signals into the event loop so SIGINT/SIGTERM/SIGHUP/SIGQUIT
     // run the same teardown as Ctrl-C/Ctrl-Q (raw mode off → alt screen exit →
@@ -4565,6 +4591,65 @@ mod worker_stream_routing_tests {
             .get("exec-42")
             .expect("trace for spawned executor");
         assert_eq!(trace.entry_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn run_tui_replay_populates_synopsis_from_prior_ndjson() {
+        use std::io::Write;
+
+        // spur-tui does not depend on serial_test; this process-wide CWD
+        // mutation can flake if another parallel test depends on CWD.
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        std::fs::create_dir_all(".spur/events").unwrap();
+
+        // Write a fixture NDJSON file from a "prior" PID.
+        let path = std::path::PathBuf::from(".spur/events/100-1000-0.ndjson");
+        let mut f = std::fs::File::create(&path).unwrap();
+        let ev = wrap_event(SpurEventBody::AgentNotification {
+            session: spur_acp::SessionId("test-sess".into()),
+            notification: Box::new(agent_client_protocol::schema::SessionNotification::new(
+                agent_client_protocol::schema::SessionId::new("test-sess"),
+                agent_client_protocol::schema::SessionUpdate::UserMessageChunk(
+                    agent_client_protocol::schema::ContentChunk::new(
+                        agent_client_protocol::schema::ContentBlock::Text(
+                            agent_client_protocol::schema::TextContent::new("hello replay"),
+                        ),
+                    ),
+                ),
+            )),
+        });
+        writeln!(f, "{}", serde_json::to_string(&ev).unwrap()).unwrap();
+        let flush_ev = wrap_event(SpurEventBody::TurnComplete {
+            session: spur_acp::SessionId("test-sess".into()),
+        });
+        writeln!(f, "{}", serde_json::to_string(&flush_ev).unwrap()).unwrap();
+        drop(f);
+
+        // Build an empty App via the existing test helper and run replay
+        // against it directly, mirroring run_tui_with_license's wiring.
+        let mut app = test_app();
+        let cfg = spur_core::event_replay::ReplayConfig {
+            replay_horizon: std::time::Duration::from_secs(86400 * 365),
+            skip_pid: None, // include all PIDs in this test
+            ..Default::default()
+        };
+        let stats = spur_core::event_replay::replay_events(&cfg, |ev| {
+            app.lineage.apply(ev);
+            app.plan_projection.apply(ev);
+            app.synopsis.apply(ev);
+        })
+        .unwrap();
+
+        assert_eq!(stats.events_applied, 2, "stats: {:?}", stats);
+        let synopsis = app
+            .synopsis
+            .get(&spur_acp::SessionId("test-sess".into()))
+            .expect("replay should populate synopsis for test-sess");
+        assert_eq!(synopsis.last_user_msg.as_deref(), Some("hello replay"));
+
+        std::env::set_current_dir(cwd).unwrap();
     }
 
     #[test]
