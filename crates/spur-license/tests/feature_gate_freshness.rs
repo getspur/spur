@@ -92,3 +92,29 @@ async fn heartbeat_ok_refreshes_cached_gate() {
 
     assert!(cached.has(FeatureKey::BLOB_PRO_NAMESPACE_DELETION));
 }
+
+#[tokio::test]
+async fn validate_err_keeps_gate_unchanged() {
+    use spur_license::LicenseError;
+
+    let (fake, license, _g) = build_license_with_community_seed();
+    let cached = license.feature_gate();
+    // Clone the Arc so we hold a strong reference to the OLD allocation
+    // across the mutation. Arc::ptr_eq compares by allocation identity,
+    // catching any spurious update_state call (value equality would
+    // succeed even on a no-op refresh).
+    let pre_arc = Arc::clone(&*cached.snapshot());
+
+    fake.push_validate_result(Err(LicenseError::Provider(
+        "transient network failure".into(),
+    )));
+    let result = license.validate().await;
+
+    assert!(result.is_err(), "validate must propagate the provider Err");
+    let post_arc = Arc::clone(&*cached.snapshot());
+    assert!(
+        Arc::ptr_eq(&pre_arc, &post_arc),
+        "non-mutating validate-Err must NOT trigger update_state \
+         (Arc::ptr_eq proves no store happened)",
+    );
+}
