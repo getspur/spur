@@ -3,6 +3,7 @@
 
 use std::time::{Duration, Instant};
 
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use spur_core::ReviewDecision;
 use spur_tui::action::{Action, IssueAction, ViewId};
 use spur_tui::app::App;
@@ -153,7 +154,10 @@ fn undo_blocked_by_help_overlay_flashes_close_hint() {
         .install(reversible_tombstone(ViewId::Dashboard));
     process_action(&mut app, Action::ShowHelp);
 
-    app.handle_undo_for_test();
+    app.handle_crossterm_event(Event::Key(KeyEvent::new(
+        KeyCode::Char('u'),
+        KeyModifiers::NONE,
+    )));
 
     assert!(app.tombstones_for_test().has(&ViewId::Dashboard));
     assert!(app.is_help_visible_for_test());
