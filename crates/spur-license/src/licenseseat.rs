@@ -45,6 +45,40 @@ pub fn from_env_or_disabled() -> Arc<dyn LicenseProvider> {
     }
 }
 
+/// Production `LicenseProvider` backed by the `licenseseat` SDK.
+///
+/// # Concurrency
+///
+/// All mutating methods (`activate`, `validate`, `heartbeat`,
+/// `deactivate`) are serialized via `operation_lock`, a fair
+/// (FIFO) `tokio::sync::Mutex` held across the SDK round-trip
+/// AND the subsequent `replace_state`. Two callers commit in the
+/// order they acquire the mutex.
+///
+/// Readers (`current_state`, `current_snapshot`, `subscribe`,
+/// `has_entitlement`) proceed without acquiring this lock and
+/// observe a best-effort snapshot:
+///
+/// - `current_state()` reads `sdk.current_license()` BEFORE the
+///   provider RwLock, so during an in-flight mutator it can
+///   observe SDK-cache-post-mutation mixed with provider-state-
+///   pre-mutation. Eventually consistent on commit.
+/// - `has_entitlement(feature)` reads the SDK cache directly;
+///   not synchronized with provider state.
+/// - The autonomous SDK event bridge (`spawn_sdk_event_bridge`)
+///   reads `state` independently and can forward stale snapshots
+///   on autonomous events. Tracked: `bd-22q.14`.
+///
+/// **Future-implementer advisory**: any new state-mutating path
+/// added to this provider (including bridge hydration in
+/// `bd-22q.14`) MUST acquire `operation_lock` to preserve the
+/// cross-method commit-order guarantee.
+///
+/// The internal `state: Arc<RwLock<LicenseState>>` continues to
+/// protect against torn writes at the snapshot level. Note: the
+/// current `replace_state` silently ignores `RwLock` poisoning
+/// (`if let Ok(...)`), which is a pre-existing correctness bomb
+/// tracked separately. See `bd-22q.16`.
 #[derive(Clone)]
 pub struct LicenseSeatProvider {
     sdk: LicenseSeat,
@@ -52,7 +86,6 @@ pub struct LicenseSeatProvider {
     /// Cross-method operation serialization (bd-22q.15). Acquired at
     /// entry of every mutating method; held across SDK + replace_state.
     /// Reads do NOT acquire this lock.
-    #[allow(dead_code)]
     operation_lock: Arc<tokio::sync::Mutex<()>>,
     events_tx: broadcast::Sender<LicenseEvent>,
     refresh_policy: RefreshPolicy,

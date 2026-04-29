@@ -33,6 +33,26 @@ impl Default for RefreshPolicy {
 /// leave consumers' cached `Arc<FeatureGate>` stale. See
 /// `docs/superpowers/specs/2026-04-29-bd-22q-1-spurlicense-gate-refresh-design.md`
 /// for the full freshness contract.
+///
+/// # Cross-method serialization (advisory)
+///
+/// `LicenseSeatProvider` (the production implementation)
+/// serializes its mutating methods (`activate`, `validate`,
+/// `heartbeat`, `deactivate`) end-to-end via an internal
+/// `tokio::sync::Mutex` to prevent durable over-permissioning
+/// from concurrent SDK calls committing in the wrong order. This
+/// trait does NOT mandate equivalent serialization — implementers
+/// whose backends naturally serialize (e.g., a single in-memory
+/// state guarded by a `RwLock` write that's held across the
+/// equivalent of an SDK round-trip) need no extra mechanism.
+/// However, any production `LicenseProvider` that performs an
+/// asynchronous side-effecting call (network round-trip, IPC,
+/// process spawn) AND mutates its own state on the result MUST
+/// consider whether interleaving with another mutating method
+/// could produce stale-allow over-permissioning, and serialize
+/// accordingly. See
+/// `docs/superpowers/specs/2026-04-29-bd-22q-15-licenseseat-cross-method-serialization-design.md`
+/// for the LicenseSeatProvider design.
 #[async_trait]
 pub trait LicenseProvider: Send + Sync {
     fn current_state(&self) -> LicenseState;
