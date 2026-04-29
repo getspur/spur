@@ -532,6 +532,82 @@ async fn observe_ready_via_br_returns_ready_tasks() {
 }
 
 #[tokio::test]
+async fn observe_ready_via_br_suppresses_tasks_for_closed_complete_epic() {
+    if !br_available() {
+        eprintln!(
+            "skipping observe_ready_via_br_suppresses_tasks_for_closed_complete_epic: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let epic_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Closed Plan P1 Epic",
+            "--priority",
+            "2",
+        ],
+    ));
+    let task_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Task under closed complete epic",
+            "--priority",
+            "2",
+        ],
+    ));
+
+    let plan_label = labels::plan_id("P1");
+    label_issue(dir.path(), &epic_id, &plan_label);
+    label_issue(dir.path(), &task_id, &plan_label);
+    label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected beads pm");
+    let pm = Arc::new(pm);
+    pm.update_issue(
+        &epic_id,
+        spur_pm::IssueUpdate {
+            status: Some(pm.closed_status().to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("close epic");
+
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        None,
+        Some("P1".into()),
+        common::server_builder::pro_feature_gate(),
+    );
+
+    let ready_ids = reconciler
+        .observe_ready_via_br()
+        .await
+        .expect("observe_ready_via_br");
+    assert!(
+        !ready_ids.contains(&task_id),
+        "closed complete epic must not allow task dispatch through br fallback; got: {ready_ids:?}"
+    );
+}
+
+#[tokio::test]
 async fn epic_closes_when_scoped_children_terminal() {
     if !br_available() {
         eprintln!("skipping epic_closes_when_scoped_children_terminal: `br` not on PATH");
