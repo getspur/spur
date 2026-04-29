@@ -721,6 +721,126 @@ async fn tick_once_persists_dispatch_before_queue_send() {
 }
 
 #[tokio::test]
+async fn tick_once_persists_failed_completion_when_respond_to_drops() {
+    if !br_available() {
+        eprintln!(
+            "skipping tick_once_persists_failed_completion_when_respond_to_drops: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected beads pm");
+    let pm = Arc::new(pm);
+    let epic_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Plan 1 Epic",
+            "--priority",
+            "2",
+        ],
+    ));
+    label_issue(dir.path(), &epic_id, &labels::plan_id("plan-1"));
+    label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
+
+    let task_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Ready Task",
+            "--priority",
+            "2",
+        ],
+    ));
+    label_issue(dir.path(), &task_id, &labels::plan_id("plan-1"));
+    label_issue(dir.path(), &task_id, &labels::plan_task_id("t1"));
+    label_issue(dir.path(), &task_id, &labels::agent("codex"));
+
+    let (delegation_tx, mut delegation_rx) = tokio::sync::mpsc::channel(1);
+    let task_tracker = tokio_util::task::TaskTracker::new();
+    let fast_forward = Arc::new(Notify::new());
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::clone(&fast_forward),
+        Some(ReconcilerDispatchCtx {
+            delegation_tx,
+            task_tracker: task_tracker.clone(),
+            brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
+            event_sink: None,
+            materializer: test_materializer(),
+        }),
+        Some("plan-1".into()),
+        common::server_builder::pro_feature_gate(),
+    );
+
+    assert!(reconciler.tick_once().await.expect("tick_once"));
+    let request = delegation_rx.recv().await.expect("dispatch request");
+    let delegation_id = request.id.as_str().to_string();
+    drop(request.respond_to);
+
+    task_tracker.close();
+    tokio::time::timeout(std::time::Duration::from_secs(2), task_tracker.wait())
+        .await
+        .expect("completion task should finish");
+    tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        fast_forward.notified(),
+    )
+    .await
+    .expect("completion should fast-forward the reconciler");
+
+    let issue = pm.get_issue(&task_id).await.expect("get issue");
+    assert_eq!(issue.status, pm.closed_status());
+    assert!(!issue
+        .labels
+        .iter()
+        .any(|label| label.starts_with("spur:delegation-id:")));
+
+    let projected = spur_mcp::plan::projector::project_plan_from_beads(
+        pm.as_ref(),
+        "plan-1",
+        common::server_builder::pro_feature_gate().as_ref(),
+    )
+    .await
+    .expect("project plan");
+    let task = projected
+        .tasks
+        .iter()
+        .find(|task| task.spec.issue_id.as_deref() == Some(task_id.as_str()))
+        .expect("projected task");
+    assert!(matches!(
+        &task.status,
+        spur_mcp::plan::PlanTaskStatus::Failed { error }
+            if error == "orchestrator disconnected"
+    ));
+
+    let sentinels = collect_sentinels(&run_br_json(dir.path(), &["comments", "list", &task_id]));
+    assert!(sentinels.iter().any(|audit| matches!(
+        audit,
+        AuditSentinelKind::Completion {
+            delegation_id: found_delegation_id,
+            completion_state: audit_sentinel::CompletionState::Failed,
+            result_summary,
+            ..
+        } if found_delegation_id == &delegation_id
+            && result_summary.as_deref() == Some("orchestrator disconnected")
+    )));
+}
+
+#[tokio::test]
 async fn tick_once_clears_dispatch_label_when_send_fails() {
     if !br_available() {
         eprintln!("skipping tick_once_clears_dispatch_label_when_send_fails: `br` not on PATH");
