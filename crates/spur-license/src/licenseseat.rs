@@ -659,4 +659,46 @@ mod cross_method_race {
         drop(external_lock);
         let _ = task.await;
     }
+
+    /// Test 6: tokio FIFO discipline regression canary. Uses virtual
+    /// time staggering (NOT tokio::sync::Barrier — barrier release is
+    /// non-deterministic in waker-queue order) to ensure three tasks
+    /// queue on the lock in a known order, then asserts the lock
+    /// releases in that order under FIFO.
+    #[tokio::test(start_paused = true)]
+    async fn fifo_ordering_via_virtual_time_cascade() {
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let order = Arc::new(std::sync::Mutex::new(Vec::<usize>::new()));
+        let holder = lock.clone().lock_owned().await;
+
+        let handles: Vec<_> = (0..3)
+            .map(|i| {
+                let lock = lock.clone();
+                let order = order.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis((i as u64 + 1) * 10)).await;
+                    let _g = lock.lock().await;
+                    order.lock().unwrap().push(i);
+                })
+            })
+            .collect();
+
+        // Yield so all three tasks reach their sleep call.
+        for _ in 0..6 {
+            tokio::task::yield_now().await;
+        }
+        // Advance past the longest sleep so all three tasks are queued.
+        tokio::time::advance(Duration::from_millis(100)).await;
+        for _ in 0..6 {
+            tokio::task::yield_now().await;
+        }
+        // Release; FIFO acquisition begins.
+        drop(holder);
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        assert_eq!(*order.lock().unwrap(), vec![0, 1, 2]);
+    }
 }
