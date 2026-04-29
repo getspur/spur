@@ -53,13 +53,18 @@ fn replay_populates_all_three_projections_from_fixture() {
     let dir = tmp.path();
     let path = dir.join("100-1000-0.ndjson");
 
-    write_ndjson(&path, &[
-        user_chunk("S1", "fix the auth bug"),
-        agent_chunk("S1", "ack"),
-        SpurEvent::now(SpurEventBody::TurnComplete { session: SessionId("S1".into()) }),
-        user_chunk("S2", "deploy to staging"),
-        agent_chunk("S2", "ok"),
-    ]);
+    write_ndjson(
+        &path,
+        &[
+            user_chunk("S1", "fix the auth bug"),
+            agent_chunk("S1", "ack"),
+            SpurEvent::now(SpurEventBody::TurnComplete {
+                session: SessionId("S1".into()),
+            }),
+            user_chunk("S2", "deploy to staging"),
+            agent_chunk("S2", "ok"),
+        ],
+    );
 
     let mut lineage = ExecutorLineage::new();
     let mut plan = PlanProjectionStore::new();
@@ -76,7 +81,8 @@ fn replay_populates_all_three_projections_from_fixture() {
         lineage.apply(ev);
         plan.apply(ev);
         synopsis.apply(ev);
-    }).unwrap();
+    })
+    .unwrap();
 
     assert_eq!(stats.events_applied, 5);
     assert_eq!(stats.malformed_lines, 0);
