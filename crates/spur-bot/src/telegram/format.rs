@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 /// Telegram caps message text at 4096 UTF-16 code units.
@@ -12,6 +14,7 @@ pub fn markdown_to_telegram_html(input: &str) -> String {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_TASKLISTS);
 
     let events: Vec<_> = Parser::new_ext(input, options).collect();
     let mut renderer = TelegramHtmlRenderer::default();
@@ -26,7 +29,6 @@ struct TelegramHtmlRenderer {
     output: String,
     lists: Vec<ListState>,
     links: Vec<bool>,
-    blockquote_depth: usize,
     open_blockquotes: usize,
     in_code_block: bool,
     table: Option<TableState>,
@@ -91,7 +93,6 @@ impl TelegramHtmlRenderer {
                     self.ensure_blank_line();
                 }
                 self.output.push_str("<blockquote>");
-                self.blockquote_depth += 1;
                 self.open_blockquotes += 1;
             }
             Tag::CodeBlock(_) => {
@@ -173,7 +174,6 @@ impl TelegramHtmlRenderer {
             }
             TagEnd::HtmlBlock => self.output.push_str("\n\n"),
             TagEnd::BlockQuote(_) => {
-                self.blockquote_depth = self.blockquote_depth.saturating_sub(1);
                 if self.open_blockquotes > 0 {
                     self.output.push_str("</blockquote>");
                     self.open_blockquotes -= 1;
@@ -244,7 +244,7 @@ impl TelegramHtmlRenderer {
             ListKind::Ordered { next } => {
                 let number = *next;
                 *next += 1;
-                self.output.push_str(&format!("{number}. "));
+                let _ = write!(self.output, "{number}. ");
             }
         }
     }
