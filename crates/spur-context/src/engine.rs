@@ -2050,13 +2050,17 @@ mod tests {
         engine
     }
 
-    /// Regression: re-opening a persistent DB and re-running initialize +
-    /// load_pricing must not crash. Earlier the persistent `pricing` table
-    /// could carry a corrupt PRIMARY KEY index across runs (partial
-    /// checkpoint state from a prior crash), and the next `load_pricing`
-    /// hit `INTERNAL Error: ... duplicate key "gpt-4o"` during commit.
+    /// Idempotency check: re-opening a persistent DB and re-running
+    /// initialize + load_pricing across multiple processes must not
+    /// accumulate state in PK-indexed tables. The motivating bug was a
+    /// FATAL `duplicate key "gpt-4o"` after a prior crash left phantom
+    /// ART entries on `pricing`; this test does NOT reproduce that
+    /// corrupt-index state (DuckDB's ART is hard to corrupt from SQL
+    /// alone) — it only locks in the rebuild contract: schema.sql drops
+    /// pricing+scan_manifest before recreating, so any stale rows from
+    /// the prior open are gone before load_pricing runs.
     #[test]
-    fn initialize_is_idempotent_across_reopens() {
+    fn initialize_rebuilds_pk_indexed_tables_across_reopens() {
         let tmp = TempDir::new().unwrap();
         let db_path = tmp.path().join("analytics.duckdb");
         let registry = spur_cost::PricingRegistry::with_builtin_prices();
@@ -2065,6 +2069,13 @@ mod tests {
             let (engine, _recovered) = AnalyticsEngine::open(&db_path).unwrap();
             engine.initialize().unwrap();
             engine.load_pricing(&registry).unwrap();
+            // After initialize, scan_manifest must be empty — the DROP
+            // wipes any prior entries.
+            let manifest_rows: i64 = engine
+                .conn
+                .query_row("SELECT COUNT(*) FROM scan_manifest", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(manifest_rows, 0);
         }
     }
 
