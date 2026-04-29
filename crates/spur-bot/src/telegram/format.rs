@@ -1,3 +1,5 @@
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+
 /// Telegram caps message text at 4096 UTF-16 code units.
 pub const TELEGRAM_TEXT_MAX_UTF16_UNITS: usize = 4096;
 
@@ -5,6 +7,302 @@ pub const TELEGRAM_TEXT_MAX_UTF16_UNITS: usize = 4096;
 pub const TELEGRAM_BUTTON_LABEL_MAX_BYTES: usize = 64;
 
 const FINAL_ANSWER_SPLIT_BOUNDARY_WINDOW_UTF16_UNITS: usize = 256;
+
+pub fn markdown_to_telegram_html(input: &str) -> String {
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TABLES);
+
+    let events: Vec<_> = Parser::new_ext(input, options).collect();
+    let mut renderer = TelegramHtmlRenderer::default();
+    for (index, event) in events.iter().enumerate() {
+        renderer.render_event(event, events.get(index + 1));
+    }
+    renderer.finish()
+}
+
+#[derive(Default)]
+struct TelegramHtmlRenderer {
+    output: String,
+    lists: Vec<ListState>,
+    links: Vec<bool>,
+    blockquote_depth: usize,
+    open_blockquotes: usize,
+    in_code_block: bool,
+    table: Option<TableState>,
+}
+
+#[derive(Clone, Copy)]
+struct ListState {
+    kind: ListKind,
+}
+
+#[derive(Clone, Copy)]
+enum ListKind {
+    Bullet,
+    Ordered { next: u64 },
+}
+
+#[derive(Default)]
+struct TableState {
+    cells_in_row: usize,
+    in_row: bool,
+}
+
+impl TelegramHtmlRenderer {
+    fn render_event(&mut self, event: &Event<'_>, next: Option<&Event<'_>>) {
+        match event {
+            Event::Start(tag) => self.start_tag(tag),
+            Event::End(tag) => self.end_tag(tag, next),
+            Event::Text(text) => self.push_escaped_text(text),
+            Event::Code(code) => {
+                self.output.push_str("<code>");
+                self.push_escaped_text(code);
+                self.output.push_str("</code>");
+            }
+            Event::Html(html) | Event::InlineHtml(html) => self.push_escaped_text(html),
+            Event::SoftBreak | Event::HardBreak => self.output.push('\n'),
+            Event::Rule => {
+                self.ensure_blank_line();
+                self.output.push_str("───\n\n");
+            }
+            Event::FootnoteReference(label) => {
+                self.output.push('[');
+                self.push_escaped_text(label);
+                self.output.push(']');
+            }
+            Event::TaskListMarker(checked) => {
+                self.output.push_str(if *checked { "[x] " } else { "[ ] " });
+            }
+            Event::InlineMath(math) | Event::DisplayMath(math) => self.push_escaped_text(math),
+        }
+    }
+
+    fn start_tag(&mut self, tag: &Tag<'_>) {
+        match tag {
+            Tag::Paragraph => {
+                if self.lists.is_empty() && self.table.is_none() && self.open_blockquotes == 0 {
+                    self.ensure_blank_line();
+                }
+            }
+            Tag::Heading { .. } | Tag::HtmlBlock => self.ensure_blank_line(),
+            Tag::BlockQuote(_) => {
+                if self.open_blockquotes == 0 {
+                    self.ensure_blank_line();
+                }
+                self.output.push_str("<blockquote>");
+                self.blockquote_depth += 1;
+                self.open_blockquotes += 1;
+            }
+            Tag::CodeBlock(_) => {
+                if self.open_blockquotes > 0 {
+                    for _ in 0..self.open_blockquotes {
+                        self.output.push_str("</blockquote>");
+                    }
+                    self.open_blockquotes = 0;
+                } else {
+                    self.ensure_blank_line();
+                }
+                self.output.push_str("<pre><code>");
+                self.in_code_block = true;
+            }
+            Tag::List(start) => {
+                if self.lists.is_empty() {
+                    self.ensure_blank_line();
+                } else {
+                    self.ensure_line_start();
+                }
+                self.lists.push(ListState {
+                    kind: start.map_or(ListKind::Bullet, |next| ListKind::Ordered { next }),
+                });
+            }
+            Tag::Item => self.start_list_item(),
+            Tag::Emphasis => self.output.push_str("<i>"),
+            Tag::Strong => self.output.push_str("<b>"),
+            Tag::Strikethrough => self.output.push_str("<s>"),
+            Tag::Link { dest_url, .. } => {
+                let has_dest = !dest_url.is_empty();
+                if has_dest {
+                    self.output.push_str("<a href=\"");
+                    push_escaped_attr(&mut self.output, dest_url);
+                    self.output.push_str("\">");
+                }
+                self.links.push(has_dest);
+            }
+            Tag::Image { .. } => {}
+            Tag::Table(_) => {
+                self.ensure_blank_line();
+                self.table = Some(TableState::default());
+            }
+            Tag::TableHead | Tag::TableRow => {
+                if let Some(table) = &mut self.table {
+                    if !self.output.ends_with('\n') && !self.output.is_empty() {
+                        self.output.push('\n');
+                    }
+                    self.output.push_str("| ");
+                    table.cells_in_row = 0;
+                    table.in_row = true;
+                }
+            }
+            Tag::TableCell => {
+                if let Some(table) = &self.table {
+                    if table.cells_in_row > 0 {
+                        self.output.push_str(" | ");
+                    }
+                }
+            }
+            Tag::Superscript
+            | Tag::Subscript
+            | Tag::FootnoteDefinition(_)
+            | Tag::DefinitionList
+            | Tag::DefinitionListTitle
+            | Tag::DefinitionListDefinition
+            | Tag::MetadataBlock(_) => {}
+        }
+    }
+
+    fn end_tag(&mut self, tag: &TagEnd, next: Option<&Event<'_>>) {
+        match tag {
+            TagEnd::Paragraph | TagEnd::Heading(_) => {
+                if self.lists.is_empty()
+                    && self.table.is_none()
+                    && !matches!(next, Some(Event::End(TagEnd::BlockQuote(_))))
+                {
+                    self.output.push_str("\n\n");
+                }
+            }
+            TagEnd::HtmlBlock => self.output.push_str("\n\n"),
+            TagEnd::BlockQuote(_) => {
+                self.blockquote_depth = self.blockquote_depth.saturating_sub(1);
+                if self.open_blockquotes > 0 {
+                    self.output.push_str("</blockquote>");
+                    self.open_blockquotes -= 1;
+                }
+                if self.open_blockquotes == 0 {
+                    self.output.push_str("\n\n");
+                }
+            }
+            TagEnd::CodeBlock => {
+                self.output.push_str("</code></pre>\n\n");
+                self.in_code_block = false;
+            }
+            TagEnd::List(_) => {
+                let _ = self.lists.pop();
+            }
+            TagEnd::Item => {
+                if !self.output.ends_with('\n') {
+                    self.output.push('\n');
+                }
+            }
+            TagEnd::Emphasis => self.output.push_str("</i>"),
+            TagEnd::Strong => self.output.push_str("</b>"),
+            TagEnd::Strikethrough => self.output.push_str("</s>"),
+            TagEnd::Link => {
+                if self.links.pop().unwrap_or(false) {
+                    self.output.push_str("</a>");
+                }
+            }
+            TagEnd::Image => {}
+            TagEnd::Table => {
+                self.table = None;
+            }
+            TagEnd::TableHead | TagEnd::TableRow => {
+                if let Some(table) = &mut self.table {
+                    if table.in_row {
+                        self.output.push_str(" |\n");
+                        table.in_row = false;
+                    }
+                }
+            }
+            TagEnd::TableCell => {
+                if let Some(table) = &mut self.table {
+                    table.cells_in_row += 1;
+                }
+            }
+            TagEnd::Superscript
+            | TagEnd::Subscript
+            | TagEnd::FootnoteDefinition
+            | TagEnd::DefinitionList
+            | TagEnd::DefinitionListTitle
+            | TagEnd::DefinitionListDefinition
+            | TagEnd::MetadataBlock(_) => {}
+        }
+    }
+
+    fn start_list_item(&mut self) {
+        let depth = self.lists.len().saturating_sub(1);
+        self.ensure_line_start();
+        for _ in 0..depth {
+            self.output.push_str("  ");
+        }
+
+        let Some(list) = self.lists.last_mut() else {
+            return;
+        };
+        match &mut list.kind {
+            ListKind::Bullet => self.output.push_str("• "),
+            ListKind::Ordered { next } => {
+                let number = *next;
+                *next += 1;
+                self.output.push_str(&format!("{number}. "));
+            }
+        }
+    }
+
+    fn push_escaped_text(&mut self, text: &str) {
+        push_escaped_text(&mut self.output, text);
+    }
+
+    fn ensure_blank_line(&mut self) {
+        if self.output.is_empty() || self.in_code_block {
+            return;
+        }
+        let trailing_newlines = self
+            .output
+            .chars()
+            .rev()
+            .take_while(|ch| *ch == '\n')
+            .count();
+        match trailing_newlines {
+            0 => self.output.push_str("\n\n"),
+            1 => self.output.push('\n'),
+            _ => {}
+        }
+    }
+
+    fn ensure_line_start(&mut self) {
+        if !self.output.is_empty() && !self.output.ends_with('\n') {
+            self.output.push('\n');
+        }
+    }
+
+    fn finish(self) -> String {
+        self.output.trim_end().to_string()
+    }
+}
+
+fn push_escaped_text(output: &mut String, text: &str) {
+    for ch in text.chars() {
+        match ch {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            _ => output.push(ch),
+        }
+    }
+}
+
+fn push_escaped_attr(output: &mut String, text: &str) {
+    for ch in text.chars() {
+        match ch {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            '"' => output.push_str("&quot;"),
+            _ => output.push(ch),
+        }
+    }
+}
 
 /// Truncate `text` so its UTF-16 code-unit length is at most `max_units`.
 /// Cuts on a char boundary. Returns the kept prefix and the count of dropped

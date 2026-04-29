@@ -16,6 +16,7 @@ uuid = { workspace = true }
 toml = { workspace = true }
 agent-client-protocol = { workspace = true }
 frankenstein = { version = "0.49", features = ["client-reqwest"] }
+pulldown-cmark = { workspace = true }
 spur-acp = { workspace = true }
 spur-core = { workspace = true }
 spur-interactive = { workspace = true }
