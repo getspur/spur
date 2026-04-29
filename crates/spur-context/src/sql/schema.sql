@@ -10,7 +10,15 @@
 -- --------------------------------------------
 -- 1. PRICING TABLE (loaded from Rust registry)
 -- --------------------------------------------
-CREATE TABLE IF NOT EXISTS pricing (
+-- Rebuilt from scratch on every open. The data is fully derived from
+-- spur_cost::PricingRegistry::with_builtin_prices(); persisting it
+-- across runs adds no value but exposes a corruption surface (a
+-- partial-checkpoint state can leave the PRIMARY KEY index with phantom
+-- entries that DELETE cannot reach, causing FATAL on the next
+-- load_pricing). DROP-and-create makes initialize idempotent.
+DROP VIEW IF EXISTS all_events_with_cost;
+DROP TABLE IF EXISTS pricing;
+CREATE TABLE pricing (
     model VARCHAR PRIMARY KEY,
     input_price_per_1m DOUBLE,
     output_price_per_1m DOUBLE,
