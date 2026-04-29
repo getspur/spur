@@ -484,3 +484,64 @@ mod dedup_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod cross_method_race {
+    //! Lock-discipline canaries for bd-22q.15. These tests verify that
+    //! `LicenseSeatProvider`'s mutating methods participate in the
+    //! `operation_lock` discipline. They do NOT directly drive the
+    //! validate-vs-deactivate race scenario — that requires SDK-mock
+    //! infrastructure deferred to bd-22q.17. Instead, they prove:
+    //!   1. The lock primitive serializes (sanity).
+    //!   2. Each of the four mutating methods blocks on an externally-
+    //!      held `operation_lock`, proving they acquire it.
+    //!   3. Under tokio's documented FIFO semantics, lock-acquisition
+    //!      order matches request order.
+    //!
+    //! Spec: docs/superpowers/specs/2026-04-29-bd-22q-15-licenseseat-cross-method-serialization-design.md
+    use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Test 1: tokio::sync::Mutex primitive sanity. Decoupled from
+    /// LicenseSeatProvider; verifies that two clones of an
+    /// `Arc<Mutex<()>>` serialize.
+    #[tokio::test(start_paused = true)]
+    async fn mutex_serializes_concurrent_acquirers() {
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let a = lock.clone().lock_owned().await;
+
+        let lock_clone = lock.clone();
+        let task_b = tokio::spawn(async move {
+            let _g = lock_clone.lock().await;
+            tokio::time::Instant::now()
+        });
+
+        // While A holds, B is queued. Advance virtual time and confirm
+        // B has not yet acquired by polling-once: the spawned task
+        // must remain pending.
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(50)).await;
+        // (No way to directly assert pending without try-join; the
+        //  drop sequence below is the test.)
+
+        let a_release = tokio::time::Instant::now();
+        drop(a);
+        let b_acquire = task_b.await.unwrap();
+        assert!(
+            b_acquire >= a_release,
+            "B should acquire only after A released"
+        );
+    }
+
+    /// Test 2 (STUB — fails to compile until Task 2 adds the accessor).
+    #[tokio::test]
+    async fn activate_blocks_on_externally_held_operation_lock() {
+        let provider = LicenseSeatProvider::new(
+            "test-key".to_string(),
+            "test-product".to_string(),
+        );
+        let _external_lock = provider.operation_lock_handle().lock_owned().await;
+        // Body intentionally left as a stub for Task 1 RED. Task 3 fills it in.
+    }
+}
