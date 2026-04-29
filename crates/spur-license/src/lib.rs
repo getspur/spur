@@ -230,11 +230,26 @@ pub type Result<T> = std::result::Result<T, LicenseError>;
 ///   gate. Consumers that need to react to autonomous events
 ///   should call [`subscribe`] and update their own state on each
 ///   `LicenseEvent`. Tracked: bd-22q.14.
-/// - Concurrent mutations of this facade are serialized only at
-///   the `replace_state` granularity inside the provider, not
-///   across the full SDK round-trip. A `validate`/`deactivate`
-///   race can produce a transient over-permissioning window.
-///   Tracked: bd-22q.15.
+///
+/// # Concurrency
+///
+/// Mutating calls (`activate`, `validate`, `heartbeat`,
+/// `deactivate`) are serialized end-to-end inside the
+/// underlying `LicenseSeatProvider` via an internal
+/// `tokio::sync::Mutex`. Two concurrent calls commit in the
+/// order they acquire the mutex (FIFO under tokio); the cached
+/// `Arc<FeatureGate>` reflects the LATER-committed operation's
+/// state.
+///
+/// Reads (`current_state`, `subscribe`, `has_entitlement`,
+/// `feature_gate`) are unsynchronized with mutations and return
+/// a best-effort snapshot. In particular, `current_state()` may
+/// observe a mix of SDK-cache state (post-mutation) and provider
+/// RwLock state (pre-mutation) during an in-flight mutation
+/// because the SDK mutates its own cache before SPUR's
+/// `replace_state` runs. The mismatch closes on commit. Callers
+/// that require strict coherence should subscribe to
+/// `LicenseEvent`s and react on commit.
 ///
 /// [`feature_gate`]: SpurLicense::feature_gate
 /// [`activate`]: SpurLicense::activate
