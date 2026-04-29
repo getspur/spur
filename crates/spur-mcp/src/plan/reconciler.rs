@@ -424,15 +424,29 @@ impl Reconciler {
             let materializer = Arc::clone(&dispatch.materializer);
             let feature_gate = Arc::clone(&self.feature_gate);
             dispatch.task_tracker.spawn(async move {
-                let Ok(result) = rx.await else {
-                    tracing::warn!(
-                        %plan_id,
-                        %task_id,
-                        %issue_id,
-                        %delegation_id_for_completion,
-                        "reconciler completion receiver dropped before result persisted"
-                    );
-                    return;
+                let result = match rx.await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        tracing::warn!(
+                            %plan_id,
+                            %task_id,
+                            %issue_id,
+                            %delegation_id_for_completion,
+                            "reconciler completion receiver dropped before result persisted"
+                        );
+                        let error = "orchestrator disconnected".to_string();
+                        spur_acp::DelegationResult {
+                            status: spur_acp::DelegationStatus::Failed {
+                                error: error.clone(),
+                            },
+                            diff: None,
+                            diff_summary: None,
+                            summary: Some(error),
+                            estimated_cost_usd: 0.0,
+                            worker_branch: None,
+                            artifact: None,
+                        }
+                    }
                 };
 
                 let completion_state = crate::plan::completion_state_from_status(&result.status);
