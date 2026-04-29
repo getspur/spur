@@ -20,15 +20,18 @@ fn write_fixture(dir: &Path) {
     let per_file = FIXTURE_EVENTS / FILES;
     let mut event_idx = 0u64;
     for f_idx in 0..FILES {
-        let path = dir.join(format!("100-{}-{}.ndjson", 1_000 + (f_idx as u128) * 10, f_idx));
+        let path = dir.join(format!(
+            "100-{}-{}.ndjson",
+            1_000 + (f_idx as u128) * 10,
+            f_idx
+        ));
         let mut f = std::fs::File::create(&path).unwrap();
         for i in 0..per_file {
             if event_idx % MALFORMED_RATIO as u64 == 0 && event_idx > 0 {
                 writeln!(f, "{{not valid json}}").unwrap();
             } else {
                 let ev = SpurEvent {
-                    occurred_at: SystemTime::UNIX_EPOCH
-                        + std::time::Duration::from_secs(event_idx),
+                    occurred_at: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(event_idx),
                     seq: event_idx,
                     body: SpurEventBody::TurnComplete {
                         session: SessionId(format!("s{}", i % 100)),
