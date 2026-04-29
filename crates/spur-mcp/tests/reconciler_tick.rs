@@ -1155,6 +1155,111 @@ async fn tick_once_reclaims_expired_lease_dispatch() {
 }
 
 #[tokio::test]
+async fn worker_success_after_orphan_clear_is_superseded() {
+    if !br_available() {
+        eprintln!("skipping worker_success_after_orphan_clear_is_superseded: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected beads pm");
+    let pm = Arc::new(pm);
+    let adv = pm.advanced().expect("advanced beads");
+
+    let task_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Late Worker Completion",
+            "--priority",
+            "2",
+        ],
+    ));
+    let delegation_id = "del-late-worker";
+    label_issue(dir.path(), &task_id, &labels::plan_id("plan-race"));
+    label_issue(dir.path(), &task_id, &labels::plan_task_id("t-late"));
+    label_issue(dir.path(), &task_id, &labels::agent("codex"));
+    label_issue(dir.path(), &task_id, &labels::delegation_id(delegation_id));
+    pm.update_issue(
+        &task_id,
+        spur_pm::IssueUpdate {
+            status: Some(pm.closed_status().to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("close task");
+    adv.add_comment(
+        &task_id,
+        &audit_sentinel::encode_comment(&AuditSentinelKind::DispatchOrphanCleared {
+            delegation_id: delegation_id.to_string(),
+            reason: "dispatch lease expired at 1 (age 1s)".to_string(),
+        }),
+    )
+    .await
+    .expect("add orphan audit");
+
+    let result = spur_acp::DelegationResult {
+        status: spur_acp::DelegationStatus::Success,
+        diff: None,
+        diff_summary: None,
+        summary: Some("worker completed after reclaim".to_string()),
+        estimated_cost_usd: 0.0,
+        worker_branch: Some("spur/worker-late".to_string()),
+        artifact: None,
+    };
+    spur_mcp::test_support::persist_worker_completion_and_notify(
+        pm.as_ref(),
+        &task_id,
+        common::server_builder::pro_feature_gate().as_ref(),
+        "plan-race",
+        delegation_id,
+        &None,
+        &result,
+        &BrainSessionId::new(SessionId("brain".into())),
+        1,
+        &test_materializer(),
+    )
+    .await
+    .expect("persist worker completion");
+
+    let audits = spur_mcp::plan::projector::collect_sorted_audits(
+        adv.list_comments(&task_id).await.expect("list comments"),
+    );
+    let latest_completion = audits
+        .iter()
+        .rev()
+        .find_map(|audit| match audit {
+            AuditSentinelKind::Completion {
+                delegation_id: found_delegation_id,
+                completion_state,
+                superseded,
+                ..
+            } if found_delegation_id == delegation_id => Some((completion_state, *superseded)),
+            _ => None,
+        })
+        .expect("completion audit");
+    assert_eq!(
+        latest_completion.0,
+        &audit_sentinel::CompletionState::Superseded
+    );
+    assert!(latest_completion.1);
+
+    let issue = pm.get_issue(&task_id).await.expect("get issue");
+    assert_eq!(issue.status, pm.closed_status());
+    assert!(!issue.labels.contains(&labels::READY_FOR_REVIEW.to_string()));
+    assert!(!issue.labels.contains(&labels::delegation_id(delegation_id)));
+}
+
+#[tokio::test]
 async fn tick_once_does_not_reclaim_live_lease() {
     if !br_available() {
         eprintln!("skipping tick_once_does_not_reclaim_live_lease: `br` not on PATH");
@@ -1460,7 +1565,8 @@ async fn resolve_dispatch_orphan_emits_breadcrumb_and_clears_label() {
         AuditSentinelKind::DispatchOrphanCleared {
             delegation_id,
             reason,
-        } if delegation_id == "del-A" && reason == "restart-orphan-cleared"
+        } if delegation_id == "del-A"
+            && reason == spur_mcp::test_support::ORPHAN_CLEAR_REASON_RESTART
     )));
 }
 

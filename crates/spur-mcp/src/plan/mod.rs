@@ -1320,9 +1320,13 @@ fn lease_label_removals(current_labels: &[String], keep_expires_at: Option<i64>)
         .collect()
 }
 
-/// Re-stamp the dispatch lease. Idempotent for repeated calls with the same
-/// timestamp; if a prior remove step failed and multiple lease labels exist,
-/// all old lease labels are stripped while the new one is retained.
+/// Re-stamp the dispatch lease.
+///
+/// The PM label mutation can expose a transient dual-lease window during its
+/// add -> remove sequence: a reader may see both the old and new
+/// `spur:lease-expires-at:*` labels. The GC sweep intentionally folds those
+/// labels with `.max()` so that the newest heartbeat wins during that window.
+/// Repeated calls with the same timestamp are idempotent.
 pub async fn update_dispatch_lease(
     pm: &dyn PmLike,
     issue_id: &str,
@@ -1438,7 +1442,97 @@ pub async fn persist_completion_result(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn persist_completion_result_and_notify(
+pub(crate) async fn persist_worker_completion_and_notify(
+    pm: &dyn PmLike,
+    issue_id: &str,
+    feature_gate: &spur_license::FeatureGate,
+    plan_id: &str,
+    delegation_id: &str,
+    fast_forward: &Option<Arc<tokio::sync::Notify>>,
+    result: &DelegationResult,
+    brain_session_id: &BrainSessionId,
+    attempt: u32,
+    materializer: &crate::outcome_materializer::OutcomeMaterializer,
+) -> anyhow::Result<()> {
+    let completion_state =
+        derive_worker_completion_state(pm, feature_gate, issue_id, delegation_id, &result.status)
+            .await?;
+    persist_completion_inner(
+        pm,
+        issue_id,
+        feature_gate,
+        plan_id,
+        delegation_id,
+        completion_state,
+        fast_forward,
+        result,
+        brain_session_id,
+        attempt,
+        materializer,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn persist_system_completion_and_notify(
+    pm: &dyn PmLike,
+    issue_id: &str,
+    feature_gate: &spur_license::FeatureGate,
+    plan_id: &str,
+    delegation_id: &str,
+    completion_state: crate::plan::audit_sentinel::CompletionState,
+    fast_forward: &Option<Arc<tokio::sync::Notify>>,
+    result: &DelegationResult,
+    brain_session_id: &BrainSessionId,
+    attempt: u32,
+    materializer: &crate::outcome_materializer::OutcomeMaterializer,
+) -> anyhow::Result<()> {
+    persist_completion_inner(
+        pm,
+        issue_id,
+        feature_gate,
+        plan_id,
+        delegation_id,
+        completion_state,
+        fast_forward,
+        result,
+        brain_session_id,
+        attempt,
+        materializer,
+    )
+    .await
+}
+
+async fn derive_worker_completion_state(
+    pm: &dyn PmLike,
+    feature_gate: &spur_license::FeatureGate,
+    issue_id: &str,
+    delegation_id: &str,
+    status: &DelegationStatus,
+) -> anyhow::Result<crate::plan::audit_sentinel::CompletionState> {
+    let baseline = completion_state_from_status(status);
+    let Some(adv) = pm.advanced() else {
+        return Ok(baseline);
+    };
+    if crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        feature_gate,
+    )
+    .is_err()
+    {
+        return Ok(baseline);
+    }
+
+    let audits = crate::plan::projector::collect_sorted_audits(adv.list_comments(issue_id).await?);
+    if completion_is_superseded(delegation_id, &audits) {
+        Ok(crate::plan::audit_sentinel::CompletionState::Superseded)
+    } else {
+        Ok(baseline)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn persist_completion_inner(
     pm: &dyn PmLike,
     issue_id: &str,
     feature_gate: &spur_license::FeatureGate,
@@ -1661,17 +1755,15 @@ pub async fn run_plan(
                 match rx.await {
                     Ok(result) => {
                         // Collect completion data before acquiring lock.
-                        let completion_state = completion_state_from_status(&result.status);
                         if let (Some(pm), Some(issue_id)) =
                             (pm_ref.as_deref(), issue_id_for_completion.as_deref())
                         {
-                            if let Err(error) = persist_completion_result_and_notify(
+                            if let Err(error) = persist_worker_completion_and_notify(
                                 pm,
                                 issue_id,
                                 feature_gate_ref.as_ref(),
                                 &pid,
                                 &delegation_id_for_completion,
-                                completion_state,
                                 &fast_forward_ref,
                                 &result,
                                 &brain_sid_ref,
@@ -3048,13 +3140,43 @@ fn mark_descendants_failed(
 
 // ─── Test support ────────────────────────────────────────────────────
 
-/// Utilities for testing `handle_review_task` with injectable pm backends.
+/// Utilities for integration tests that need crate-internal plan hooks.
 #[doc(hidden)]
 pub mod test_support {
     use super::PmLike;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::Mutex;
+
+    pub const ORPHAN_CLEAR_REASON_RESTART: &str = crate::server::ORPHAN_CLEAR_REASON_RESTART;
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn persist_worker_completion_and_notify(
+        pm: &dyn PmLike,
+        issue_id: &str,
+        feature_gate: &spur_license::FeatureGate,
+        plan_id: &str,
+        delegation_id: &str,
+        fast_forward: &Option<Arc<tokio::sync::Notify>>,
+        result: &spur_acp::DelegationResult,
+        brain_session_id: &spur_acp::BrainSessionId,
+        attempt: u32,
+        materializer: &crate::outcome_materializer::OutcomeMaterializer,
+    ) -> anyhow::Result<()> {
+        super::persist_worker_completion_and_notify(
+            pm,
+            issue_id,
+            feature_gate,
+            plan_id,
+            delegation_id,
+            fast_forward,
+            result,
+            brain_session_id,
+            attempt,
+            materializer,
+        )
+        .await
+    }
 
     /// A `PmLike` implementation whose `update_issue` fires a signal and then
     /// sleeps for a fixed duration.  The signal lets the test observe that
@@ -4029,7 +4151,7 @@ mod tests {
 
         let audits = vec![AuditSentinelKind::DispatchOrphanCleared {
             delegation_id: "del-A".into(),
-            reason: "restart-orphan-cleared".into(),
+            reason: crate::server::ORPHAN_CLEAR_REASON_RESTART.into(),
         }];
 
         assert!(super::completion_is_superseded("del-A", &audits));
@@ -4077,13 +4199,12 @@ mod tests {
             spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-test".into()));
         let materializer = test_materializer();
 
-        super::persist_completion_result_and_notify(
+        super::persist_worker_completion_and_notify(
             &NoopPm,
             "bd-1",
             pro_feature_gate().as_ref(),
             "plan-1",
             "del-A",
-            crate::plan::audit_sentinel::CompletionState::AwaitingReview,
             &Some(Arc::clone(&notify)),
             &result,
             &brain_session_id,
@@ -4159,7 +4280,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persist_completion_result_and_notify_materializes_artifact_uri_in_audit() {
+    async fn persist_worker_completion_and_notify_materializes_artifact_uri_in_audit() {
         let pm = RecordingPm {
             advanced: RecordingAdvanced {
                 comments: std::sync::Mutex::new(vec![]),
@@ -4178,13 +4299,12 @@ mod tests {
         let brain_session_id =
             spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-test".into()));
 
-        super::persist_completion_result_and_notify(
+        super::persist_worker_completion_and_notify(
             &pm,
             "bd-1",
             pro_feature_gate().as_ref(),
             "plan-1",
             "del-A",
-            crate::plan::audit_sentinel::CompletionState::AwaitingReview,
             &None,
             &result,
             &brain_session_id,
