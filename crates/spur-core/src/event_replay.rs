@@ -3,8 +3,13 @@
 //! begins. See `docs/superpowers/specs/2026-04-29-ndjson-replay-startup-rehydration-design.md`.
 
 use std::fs;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use spur_acp::SpurEvent;
+
+const FIRST_N_MALFORMED_VERBOSE: u64 = 8;
 
 /// Caller-supplied replay configuration.
 ///
@@ -78,7 +83,6 @@ fn parse_segment_name(name: &str) -> Option<SegmentName> {
 ///
 /// Returns an empty Vec if the dir does not exist (NotFound is tolerated
 /// for fresh-repo first runs). All other I/O errors propagate.
-#[allow(dead_code)]
 fn collect_ordered_files(
     events_dir: &Path,
     skip_pid: Option<u32>,
@@ -114,6 +118,91 @@ fn collect_ordered_files(
 
     parsed.sort_by_key(|(s, _)| (s.unix_ms, s.rotation_seq, s.pid));
     Ok(parsed.into_iter().map(|(_, p)| p).collect())
+}
+
+/// Stream every event in the NDJSON ring through `on_event`, in
+/// chronological file order, applying horizon and PID filters. Returns
+/// a `ReplayStats` populated with counters and elapsed time.
+///
+/// Malformed JSON lines and lines exceeding `max_line_bytes` are
+/// counted and skipped (first N at warn-level; rest aggregated).
+/// `apply()` panics inside the closure are NOT caught — they propagate.
+pub fn replay_events<F>(config: &ReplayConfig, mut on_event: F) -> std::io::Result<ReplayStats>
+where
+    F: FnMut(&SpurEvent),
+{
+    let start = Instant::now();
+    let mut stats = ReplayStats::default();
+    let cutoff = std::time::SystemTime::now().checked_sub(config.replay_horizon);
+
+    let ordered = collect_ordered_files(&config.events_dir, config.skip_pid, &mut stats)?;
+
+    for path in ordered {
+        let file = match std::fs::File::open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        stats.files_read += 1;
+        let mut reader = BufReader::with_capacity(64 * 1024, file);
+        let mut buf: Vec<u8> = Vec::with_capacity(4096);
+
+        loop {
+            buf.clear();
+            let limit = config.max_line_bytes as u64;
+            let n = (&mut reader).take(limit).read_until(b'\n', &mut buf)?;
+            if n == 0 {
+                break;
+            }
+
+            let terminated = buf.last() == Some(&b'\n');
+            let hit_cap = !terminated && (n as u64) == limit;
+            if hit_cap {
+                stats.malformed_lines += 1;
+                drain_until_newline(&mut reader)?;
+                continue;
+            }
+            let line = if terminated {
+                &buf[..buf.len() - 1]
+            } else {
+                &buf[..]
+            };
+
+            let event: SpurEvent = match serde_json::from_slice(line) {
+                Ok(ev) => ev,
+                Err(e) => {
+                    if stats.malformed_lines < FIRST_N_MALFORMED_VERBOSE {
+                        tracing::warn!(error = %e, ?path, "malformed NDJSON line");
+                    }
+                    stats.malformed_lines += 1;
+                    continue;
+                }
+            };
+
+            if cutoff.is_some_and(|c| event.occurred_at < c) {
+                stats.events_skipped_horizon += 1;
+                continue;
+            }
+
+            on_event(&event);
+            stats.events_applied += 1;
+        }
+    }
+
+    stats.elapsed = start.elapsed();
+    Ok(stats)
+}
+
+/// Consume the underlying reader's buffered bytes up to and including the
+/// next `\n` (or EOF). Used to recover from over-cap lines without losing
+/// the next valid line's bytes that may sit in the same `read()` chunk.
+///
+/// Requires `BufRead` because `Read::read` cannot put bytes back: if `\n`
+/// appears mid-chunk, every byte after it would be silently consumed and
+/// the next `read_until` call would resume from beyond the next event.
+fn drain_until_newline<R: BufRead>(reader: &mut R) -> std::io::Result<()> {
+    let mut discard: Vec<u8> = Vec::new();
+    reader.read_until(b'\n', &mut discard).map(|_| ())
 }
 
 #[cfg(test)]
@@ -255,5 +344,151 @@ mod tests {
             vec!["200-2000-0.ndjson"],
             "directory with matching name must be filtered out"
         );
+    }
+
+    fn write_ndjson(path: &std::path::Path, events: &[spur_acp::domain::events::SpurEvent]) {
+        use std::io::Write;
+        let mut f = std::fs::File::create(path).unwrap();
+        for ev in events {
+            writeln!(f, "{}", serde_json::to_string(ev).unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn replay_events_applies_in_order_skipping_current_pid() {
+        use spur_acp::domain::events::{SpurEvent, SpurEventBody};
+        use spur_acp::SessionId;
+        use std::time::SystemTime;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+
+        // Prior-PID file with two events.
+        let prior_path = dir.join("100-1000-0.ndjson");
+        write_ndjson(
+            &prior_path,
+            &[
+                SpurEvent {
+                    occurred_at: SystemTime::UNIX_EPOCH,
+                    seq: 0,
+                    body: SpurEventBody::TurnComplete {
+                        session: SessionId("s1".into()),
+                    },
+                },
+                SpurEvent {
+                    occurred_at: SystemTime::UNIX_EPOCH,
+                    seq: 1,
+                    body: SpurEventBody::TurnComplete {
+                        session: SessionId("s2".into()),
+                    },
+                },
+            ],
+        );
+
+        // Current-PID file (must be skipped).
+        let mine_path = dir.join("999-9999-0.ndjson");
+        write_ndjson(
+            &mine_path,
+            &[SpurEvent {
+                occurred_at: SystemTime::UNIX_EPOCH,
+                seq: 0,
+                body: SpurEventBody::TurnComplete {
+                    session: SessionId("never_applied".into()),
+                },
+            }],
+        );
+
+        let cfg = ReplayConfig {
+            events_dir: dir.to_path_buf(),
+            replay_horizon: Duration::from_secs(u64::MAX / 2), // effectively unbounded
+            skip_pid: Some(999),
+            max_line_bytes: 1024,
+        };
+
+        let mut applied: Vec<String> = Vec::new();
+        let stats = replay_events(&cfg, |ev| {
+            if let SpurEventBody::TurnComplete { session } = &ev.body {
+                applied.push(session.0.clone());
+            }
+        })
+        .unwrap();
+
+        assert_eq!(applied, vec!["s1", "s2"]);
+        assert_eq!(stats.files_read, 1);
+        assert_eq!(stats.files_skipped_pid, 1);
+        assert_eq!(stats.events_applied, 2);
+        assert_eq!(stats.malformed_lines, 0);
+    }
+
+    #[test]
+    fn replay_events_over_cap_line_does_not_eat_subsequent_events() {
+        use spur_acp::domain::events::{SpurEvent, SpurEventBody};
+        use spur_acp::SessionId;
+        use std::io::Write;
+        use std::time::SystemTime;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let path = dir.join("100-1000-0.ndjson");
+
+        // Build a fixture: valid line, then a long over-cap line, then valid line.
+        // The over-cap line is engineered so the closing `\n` falls EARLY in
+        // a 64 KB read chunk — i.e. there is significant valid content after
+        // the `\n` that the buggy drain_until_newline would silently discard.
+        let valid_a = SpurEvent {
+            occurred_at: SystemTime::UNIX_EPOCH,
+            seq: 0,
+            body: SpurEventBody::TurnComplete {
+                session: SessionId("first".into()),
+            },
+        };
+        let valid_b = SpurEvent {
+            occurred_at: SystemTime::UNIX_EPOCH,
+            seq: 1,
+            body: SpurEventBody::TurnComplete {
+                session: SessionId("after_drain".into()),
+            },
+        };
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "{}", serde_json::to_string(&valid_a).unwrap()).unwrap();
+            // Over-cap line: 4096 'x's + \n. With max_line_bytes=512 this
+            // triggers hit_cap, then drain_until_newline must skip ~3585
+            // bytes within likely a single 64 KB BufReader fill. The
+            // closing \n is followed by valid_b's JSON, all within one
+            // BufReader fill on small files.
+            let huge: Vec<u8> = std::iter::repeat(b'x').take(4096).collect();
+            f.write_all(&huge).unwrap();
+            writeln!(f).unwrap();
+            writeln!(f, "{}", serde_json::to_string(&valid_b).unwrap()).unwrap();
+        }
+
+        let cfg = ReplayConfig {
+            events_dir: dir.to_path_buf(),
+            replay_horizon: Duration::from_secs(u64::MAX / 2),
+            skip_pid: None,
+            max_line_bytes: 512,
+        };
+
+        let mut applied: Vec<String> = Vec::new();
+        let stats = replay_events(&cfg, |ev| {
+            if let SpurEventBody::TurnComplete { session } = &ev.body {
+                applied.push(session.0.clone());
+            }
+        })
+        .unwrap();
+
+        // The bug surface: with the lossy drain, "after_drain" is missing
+        // because drain_until_newline reads a 64 KB chunk, finds the \n
+        // partway in, and returns — silently consuming the JSON line
+        // that followed in the same chunk. After the fix, both valid
+        // events MUST be applied.
+        assert_eq!(
+            applied,
+            vec!["first", "after_drain"],
+            "events after an over-cap line must NOT be lost"
+        );
+        assert_eq!(stats.events_applied, 2);
+        assert_eq!(stats.malformed_lines, 1);
     }
 }
