@@ -27,10 +27,27 @@ pub struct FakeProvider {
     deactivate_calls: AtomicUsize,
 }
 
+/// Outcome shape for a scripted `heartbeat` call.
+///
+/// Plain `Ok`/`Err` results match the same semantics as the other
+/// mutating methods. `DegradedThenErr` mirrors
+/// `LicenseSeatProvider::heartbeat`'s degrade-on-failure path: it
+/// commits a degraded state to the provider's internal state and
+/// broadcasts before returning the error. Used by bd-22q.1's
+/// regression test to drive the heartbeat-Err refresh contract.
+enum ScriptedHeartbeat {
+    Ok(LicenseState),
+    Err(LicenseError),
+    DegradedThenErr {
+        state: LicenseState,
+        err: LicenseError,
+    },
+}
+
 #[derive(Default)]
 struct Script {
     validate: VecDeque<Result<LicenseState>>,
-    heartbeat: VecDeque<Result<LicenseState>>,
+    heartbeat: VecDeque<ScriptedHeartbeat>,
     activate: VecDeque<Result<LicenseState>>,
     deactivate: VecDeque<Result<LicenseState>>,
 }
@@ -66,7 +83,25 @@ impl FakeProvider {
     }
 
     pub fn push_heartbeat_result(&self, r: Result<LicenseState>) {
-        self.script.lock().unwrap().heartbeat.push_back(r);
+        let entry = match r {
+            Ok(s) => ScriptedHeartbeat::Ok(s),
+            Err(e) => ScriptedHeartbeat::Err(e),
+        };
+        self.script.lock().unwrap().heartbeat.push_back(entry);
+    }
+
+    /// Enqueue a scripted heartbeat outcome that commits `state` to
+    /// the provider's internal state (and broadcasts a HeartbeatFailed
+    /// event) before returning `Err(err)`. Mirrors
+    /// `LicenseSeatProvider::heartbeat` degrade-on-failure (`degrade_current`
+    /// + `replace_state` + return Err). Required by bd-22q.1's
+    /// regression test for the heartbeat-Err refresh contract.
+    pub fn push_heartbeat_degraded_err(&self, state: LicenseState, err: LicenseError) {
+        self.script
+            .lock()
+            .unwrap()
+            .heartbeat
+            .push_back(ScriptedHeartbeat::DegradedThenErr { state, err });
     }
 
     pub fn push_activate_result(&self, r: Result<LicenseState>) {
@@ -164,8 +199,17 @@ impl LicenseProvider for FakeProvider {
         self.heartbeat_calls.fetch_add(1, Ordering::Relaxed);
         let scripted = self.script.lock().unwrap().heartbeat.pop_front();
         match scripted {
-            Some(Ok(next)) => Ok(self.commit(next, LicenseEventKind::HeartbeatOk)),
-            Some(Err(e)) => Err(e),
+            Some(ScriptedHeartbeat::Ok(next)) => {
+                Ok(self.commit(next, LicenseEventKind::HeartbeatOk))
+            }
+            Some(ScriptedHeartbeat::Err(e)) => Err(e),
+            Some(ScriptedHeartbeat::DegradedThenErr { state, err }) => {
+                // Commit the degraded state (mutating internal state and
+                // broadcasting), then propagate the error. Mirrors
+                // LicenseSeatProvider::heartbeat's degrade_current path.
+                self.commit(state, LicenseEventKind::HeartbeatFailed);
+                Err(err)
+            }
             None => Ok(self.snapshot()),
         }
     }
