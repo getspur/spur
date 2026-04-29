@@ -6,7 +6,7 @@ use spur_acp::{
     Artifact, DelegationStatus, LifecycleState, ReviewDecision, ReviewKind, ReviewPayload, Role,
     SessionId, SpurEvent, SpurEventBody,
 };
-use spur_core::{ExecutorId, ExecutorLineage};
+use spur_core::{AttemptStatus, ExecutorId, ExecutorLineage};
 
 fn spawn(id: &str, parent: Option<&str>) -> SpurEvent {
     SpurEvent::now(SpurEventBody::ExecutorSpawned {
@@ -299,6 +299,34 @@ fn delegation_completed_success_moves_phase_to_succeeded() {
 
     let n = l.node(&ExecutorId::new("w1")).unwrap();
     assert_eq!(n.phase, LifecycleState::Succeeded);
+}
+
+#[test]
+fn delegation_completed_cancelled_moves_phase_to_cancelled_with_reason() {
+    let mut l = ExecutorLineage::new();
+    l.apply(&SpurEvent::now(SpurEventBody::BrainSpawned {
+        agent: "kiro".into(),
+        session: SessionId("b1".into()),
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::WorkerSpawned {
+        agent: "w".into(),
+        session: SessionId("w1".into()),
+        worktree: PathBuf::from("/tmp/wt"),
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::DelegationCompleted {
+        worker_session: SessionId("w1".into()),
+        status: DelegationStatus::Cancelled {
+            reason: "brain requested cancel".into(),
+        },
+    }));
+
+    let n = l.node(&ExecutorId::new("w1")).unwrap();
+    assert_eq!(n.phase, LifecycleState::Cancelled);
+
+    let a = n.current_attempt().unwrap();
+    assert_eq!(a.status, AttemptStatus::Cancelled);
+    assert!(a.ended_at.is_some());
+    assert_eq!(a.error.as_deref(), Some("brain requested cancel"));
 }
 
 #[test]
