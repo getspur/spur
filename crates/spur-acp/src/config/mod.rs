@@ -936,8 +936,11 @@ mod tests {
             .expect("kimi should be in seed template");
         assert_eq!(
             kimi.effective_args(),
-            vec!["-y".to_string(), "acp".to_string()],
-            "`-y` must precede `acp` (kimi top-level flag)"
+            vec!["-y".to_string(), "--afk".to_string(), "acp".to_string()],
+            "`-y --afk` must precede `acp`: `-y` is the yolo flag, `--afk` \
+             is required on kimi 1.40.0+ because `-y` alone silences \
+             agent_message_chunk in ACP mode (empirically verified via \
+             scripts/simulate_kimi_acp.py)"
         );
         assert!(
             kimi.effective_permissions().skip,
