@@ -107,9 +107,17 @@ impl TelegramClient {
         message_thread_id: Option<i32>,
         text: String,
     ) -> anyhow::Result<()> {
-        self.inner
+        let response = self
+            .inner
             .send_message(&build_send_text_params(chat_id, message_thread_id, text))
             .await?;
+        let message_id = response.result.message_id;
+        tracing::info!(
+            chat_id,
+            message_thread_id = ?normalize_outbound_thread_id(message_thread_id),
+            message_id,
+            "telegram sendMessage delivered"
+        );
         Ok(())
     }
 
@@ -166,7 +174,14 @@ impl TelegramClient {
         } else {
             builder.build()
         };
-        self.inner.send_message(&params).await?;
+        let response = self.inner.send_message(&params).await?;
+        let message_id = response.result.message_id;
+        tracing::info!(
+            chat_id,
+            message_thread_id = ?normalize_outbound_thread_id(message_thread_id),
+            message_id,
+            "telegram sendMessage delivered"
+        );
         Ok(())
     }
 }
@@ -207,7 +222,102 @@ pub fn encode_draft_id(local_id: &str) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{encode_draft_id, TelegramClient};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[derive(Clone, Default)]
+    struct RecordingSubscriber {
+        events: Arc<Mutex<Vec<RecordedEvent>>>,
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordedEvent {
+        fields: HashMap<String, String>,
+    }
+
+    #[derive(Default)]
+    struct RecordingVisitor {
+        fields: HashMap<String, String>,
+    }
+
+    impl RecordingSubscriber {
+        fn new() -> (Self, Arc<Mutex<Vec<RecordedEvent>>>) {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    events: Arc::clone(&events),
+                },
+                events,
+            )
+        }
+    }
+
+    impl tracing::Subscriber for RecordingSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(
+            &self,
+            _span: &tracing::span::Id,
+            _follows: &tracing::span::Id,
+        ) {
+        }
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut visitor = RecordingVisitor::default();
+            event.record(&mut visitor);
+            self.events
+                .lock()
+                .expect("recorded events lock poisoned")
+                .push(RecordedEvent {
+                    fields: visitor.fields,
+                });
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    impl tracing::field::Visit for RecordingVisitor {
+        fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_debug(
+            &mut self,
+            field: &tracing::field::Field,
+            value: &dyn std::fmt::Debug,
+        ) {
+            self.fields
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
 
     #[test]
     fn telegram_client_new_accepts_request_timeout() {
@@ -244,6 +354,100 @@ mod tests {
             elapsed >= request_timeout.saturating_sub(Duration::from_millis(100)),
             "request ended in {elapsed:?}, before the configured timeout"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn send_text_to_thread_logs_successful_delivery_message_id() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind telegram test listener");
+        let addr = listener.local_addr().expect("listener local addr");
+        let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+        let _server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request");
+            let request = read_http_request(&mut stream).await;
+            let _ = request_tx.send(String::from_utf8_lossy(&request).into_owned());
+
+            let body = r#"{"ok":true,"result":{"message_id":321,"message_thread_id":77,"date":0,"chat":{"id":42,"type":"private"},"text":"hello"}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write telegram response");
+        });
+
+        let client = TelegramClient::new_with_url(format!("http://{addr}/"), Duration::from_secs(1))
+            .expect("client with custom api url should build");
+        let (subscriber, events) = RecordingSubscriber::new();
+        let dispatcher = tracing::Dispatch::new(subscriber);
+        let _guard = tracing::dispatcher::set_default(&dispatcher);
+
+        client
+            .send_text_to_thread(42, Some(77), "hello".into())
+            .await
+            .expect("send_text_to_thread should return ok");
+
+        let request = request_rx.await.expect("server should capture request");
+        assert!(request.contains("\"chat_id\":42"));
+        assert!(request.contains("\"message_thread_id\":77"));
+
+        let events = events.lock().expect("recorded events lock poisoned");
+        let event = events
+            .iter()
+            .find(|event| {
+                event
+                    .fields
+                    .values()
+                    .any(|value| value.contains("telegram sendMessage delivered"))
+            })
+            .expect("expected successful sendMessage delivery log");
+        assert_eq!(event.fields.get("chat_id").map(String::as_str), Some("42"));
+        assert_eq!(
+            event.fields.get("message_thread_id").map(String::as_str),
+            Some("Some(77)")
+        );
+        assert_eq!(
+            event.fields.get("message_id").map(String::as_str),
+            Some("321")
+        );
+    }
+
+    async fn read_http_request(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut chunk = [0; 1024];
+        loop {
+            let n = stream.read(&mut chunk).await.expect("read request");
+            if n == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..n]);
+
+            let Some(header_end) = find_header_end(&request) else {
+                continue;
+            };
+            let content_length = content_length(&request[..header_end]).unwrap_or(0);
+            if request.len() >= header_end + 4 + content_length {
+                break;
+            }
+        }
+        request
+    }
+
+    fn find_header_end(request: &[u8]) -> Option<usize> {
+        request
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+    }
+
+    fn content_length(headers: &[u8]) -> Option<usize> {
+        String::from_utf8_lossy(headers)
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, value)| value.trim().parse().ok())
     }
 
     #[test]
