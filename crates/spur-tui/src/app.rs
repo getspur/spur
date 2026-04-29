@@ -1472,6 +1472,33 @@ impl App {
     }
 
     #[cfg(feature = "analytics")]
+    pub async fn shutdown_analytics(&mut self) {
+        self.insights_view.take();
+        self.live_cost_signal_tx.take();
+        if let Some(handle) = self.live_cost_handle.take() {
+            handle.abort();
+        }
+
+        let Some(engine) = self.analytics_engine.clone() else {
+            return;
+        };
+        match timeout(Duration::from_secs(2), engine.run(|e| e.checkpoint())).await {
+            Ok(Ok(())) => {
+                tracing::debug!(target: "spur_tui::insights", "analytics checkpoint completed during shutdown");
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(target: "spur_tui::insights", error = %format!("{error:#}"), "analytics checkpoint failed during shutdown");
+            }
+            Err(_) => {
+                tracing::warn!(target: "spur_tui::insights", "analytics checkpoint timed out during shutdown");
+            }
+        }
+    }
+
+    #[cfg(not(feature = "analytics"))]
+    pub async fn shutdown_analytics(&mut self) {}
+
+    #[cfg(feature = "analytics")]
     fn via_analytics_visible_for_current_view(&self) -> bool {
         let Some(cache) = &self.live_cost_cache else {
             return false;
@@ -3958,7 +3985,7 @@ pub async fn run_tui_with_license(
     let mut event_stream = crossterm::event::EventStream::new();
     let mut event_rx = event_rx;
 
-    // Bridge OS termination signals into the event loop so SIGTERM/SIGHUP/SIGQUIT
+    // Bridge OS termination signals into the event loop so SIGINT/SIGTERM/SIGHUP/SIGQUIT
     // run the same teardown as Ctrl-C/Ctrl-Q (raw mode off → alt screen exit →
     // function returns → caller drops Orchestrator). SIGKILL is uncatchable;
     // the on-startup orphan sweep is the safety net for that case.
@@ -3976,6 +4003,13 @@ pub async fn run_tui_with_license(
         tokio::spawn(async move {
             loop {
                 tokio::select! {
+                    result = tokio::signal::ctrl_c() => {
+                        if let Err(error) = result {
+                            tracing::warn!(%error, "SIGINT handler failed");
+                            return;
+                        }
+                        let _ = tx.try_send(());
+                    }
                     _ = sigterm.recv() => { let _ = tx.try_send(()); }
                     _ = sighup.recv()  => { let _ = tx.try_send(()); }
                     _ = sigquit.recv() => { let _ = tx.try_send(()); }
@@ -4028,7 +4062,7 @@ pub async fn run_tui_with_license(
                 app.handle_permission_request(perm);
             }
             _ = shutdown_rx.recv() => {
-                // SIGTERM / SIGHUP / SIGQUIT: take the same path as a confirmed
+                // SIGINT / SIGTERM / SIGHUP / SIGQUIT: take the same path as a confirmed
                 // Ctrl-Q. confirm_quit() flushes drafts + sets should_quit; the
                 // existing loop break runs the shared tui::teardown and the
                 // function returns so the caller's host.shutdown().await issues
@@ -4098,6 +4132,7 @@ pub async fn run_tui_with_license(
         }
     }
 
+    app.shutdown_analytics().await;
     tui::teardown(&mut terminal)?;
     Ok(())
 }
