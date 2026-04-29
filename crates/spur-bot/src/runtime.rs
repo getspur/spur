@@ -196,8 +196,10 @@ impl BotRuntime {
             chat_id,
             message_thread_id: Some(message_thread_id),
         };
-        let inserted = !self.threads.contains_key(&key);
-        self.threads.entry(key).or_insert(ThreadRecord {
+        if self.threads.contains_key(&key) {
+            return Ok(());
+        }
+        self.threads.insert(key.clone(), ThreadRecord {
             topic_name,
             archived: false,
             binding: BindingState::Unbound,
@@ -206,8 +208,9 @@ impl BotRuntime {
             live_session: None,
             archived_previous: Vec::new(),
         });
-        if inserted {
-            self.state_store.save(&self.persistable_state()).await?;
+        if let Err(err) = self.state_store.save(&self.persistable_state()).await {
+            self.threads.remove(&key);
+            return Err(err);
         }
         Ok(())
     }
