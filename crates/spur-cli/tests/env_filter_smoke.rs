@@ -15,6 +15,9 @@ fn tui_mode_filters_debug_events_by_default() {
         .current_dir(dir.path())
         .output()
         .expect("spawn spur");
-    assert!(output.status.success(), "spur tui --help failed: {output:?}");
+    assert!(
+        output.status.success(),
+        "spur tui --help failed: {output:?}"
+    );
     // Note: this is an early smoke. Full byte-cap verification lands in Task 4.
 }

@@ -125,14 +125,12 @@ edit_mode = "emacs"
     write_seed(&path, initial);
 
     // Snapshot the parsed form before mutation so we can compare per-field.
-    let before: SpurConfig =
-        toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let before: SpurConfig = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(before.tui.edit_mode, EditorMode::Emacs);
 
     update_config(&path, |c| c.tui.edit_mode = EditorMode::Vim).unwrap();
 
-    let after: SpurConfig =
-        toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let after: SpurConfig = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
 
     // The only change.
     assert_eq!(after.tui.edit_mode, EditorMode::Vim);
@@ -144,7 +142,10 @@ edit_mode = "emacs"
         after.failover.cooldown_minutes,
         before.failover.cooldown_minutes
     );
-    assert_eq!(after.worktree.max_concurrent, before.worktree.max_concurrent);
+    assert_eq!(
+        after.worktree.max_concurrent,
+        before.worktree.max_concurrent
+    );
     assert_eq!(
         after.worktree.stale_cleanup_hours,
         before.worktree.stale_cleanup_hours

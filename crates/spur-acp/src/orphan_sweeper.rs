@@ -104,7 +104,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let pgids = dir.path().join("pgids");
         let registry = PgidRegistry::new(&pgids);
-        registry.write(&make_record(8001, 1234, 555, "/bin/test")).unwrap();
+        registry
+            .write(&make_record(8001, 1234, 555, "/bin/test"))
+            .unwrap();
 
         // Owner (1234) is alive with matching start_time; pgid leader (8001)
         // also alive with matching start_time + cmd.
@@ -121,7 +123,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let pgids = dir.path().join("pgids");
         let registry = PgidRegistry::new(&pgids);
-        registry.write(&make_record(8002, 1234, 555, "/bin/test")).unwrap();
+        registry
+            .write(&make_record(8002, 1234, 555, "/bin/test"))
+            .unwrap();
 
         // Owner 1234 is dead (not in inspector). Pgid leader 8002 alive
         // and identity matches.
@@ -143,7 +147,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let pgids = dir.path().join("pgids");
         let registry = PgidRegistry::new(&pgids);
-        registry.write(&make_record(8003, 1234, 555, "/bin/old")).unwrap();
+        registry
+            .write(&make_record(8003, 1234, 555, "/bin/old"))
+            .unwrap();
 
         // Owner dead. Pgid 8003 still alive but has different cmd (recycled).
         let inspector = MockInspector::with_alive(8003, 999, "/bin/different");

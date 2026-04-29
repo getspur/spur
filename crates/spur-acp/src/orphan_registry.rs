@@ -25,7 +25,9 @@ pub struct PgidRegistry {
 
 impl PgidRegistry {
     pub fn new(root: impl AsRef<Path>) -> Self {
-        Self { root: root.as_ref().to_path_buf() }
+        Self {
+            root: root.as_ref().to_path_buf(),
+        }
     }
 
     fn path_for(&self, pgid: i32) -> PathBuf {
@@ -37,8 +39,7 @@ impl PgidRegistry {
             .with_context(|| format!("create {}", self.root.display()))?;
         let path = self.path_for(rec.pgid);
         let body = toml::to_string(rec).context("serialize PgidRecord")?;
-        std::fs::write(&path, body)
-            .with_context(|| format!("write {}", path.display()))?;
+        std::fs::write(&path, body).with_context(|| format!("write {}", path.display()))?;
         Ok(())
     }
 
@@ -115,9 +116,13 @@ mod tests {
         let dir = tempdir().expect("tmpdir");
         let registry = PgidRegistry::new(dir.path());
         let rec = PgidRecord {
-            spur_pid: 1, spur_pid_start_time: 0,
-            agent_name: "a".into(), cmd: "c".into(),
-            pgid: 9001, pgid_leader_start_time: 0, spawned_at: 0,
+            spur_pid: 1,
+            spur_pid_start_time: 0,
+            agent_name: "a".into(),
+            cmd: "c".into(),
+            pgid: 9001,
+            pgid_leader_start_time: 0,
+            spawned_at: 0,
         };
         registry.write(&rec).expect("write");
         registry.delete(rec.pgid).expect("delete");

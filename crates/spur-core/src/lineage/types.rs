@@ -195,9 +195,7 @@ impl ExecutorNode {
             None => return 0,
         };
         let end = match self.phase {
-            LifecycleState::Succeeded
-            | LifecycleState::Failed
-            | LifecycleState::Cancelled => self
+            LifecycleState::Succeeded | LifecycleState::Failed | LifecycleState::Cancelled => self
                 .current_attempt()
                 .and_then(|a| a.ended_at)
                 .unwrap_or_else(SystemTime::now),

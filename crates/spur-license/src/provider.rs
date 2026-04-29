@@ -19,6 +19,20 @@ impl Default for RefreshPolicy {
     }
 }
 
+/// Trait for license backend implementations.
+///
+/// # Err-arm state mutation contract
+///
+/// Implementations are free to mutate internal state on `Err`
+/// returns (e.g., `LicenseSeatProvider::heartbeat` degrades state
+/// to `Degraded` before returning the error). However, any such
+/// Err-mutating arm MUST be paired with a corresponding refresh
+/// inside the matching method on [`crate::SpurLicense`]; the
+/// facade today only refreshes on `heartbeat`-Err. Adding a new
+/// Err-mutating path without updating `SpurLicense` will silently
+/// leave consumers' cached `Arc<FeatureGate>` stale. See
+/// `docs/superpowers/specs/2026-04-29-bd-22q-1-spurlicense-gate-refresh-design.md`
+/// for the full freshness contract.
 #[async_trait]
 pub trait LicenseProvider: Send + Sync {
     fn current_state(&self) -> LicenseState;

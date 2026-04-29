@@ -10,11 +10,7 @@
 //! to a day; SIGUSR1 rebuild is a future enhancement).
 
 use chrono::Utc;
-use file_rotate::{
-    compression::Compression,
-    suffix::AppendCount,
-    ContentLimit, FileRotate,
-};
+use file_rotate::{compression::Compression, suffix::AppendCount, ContentLimit, FileRotate};
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 

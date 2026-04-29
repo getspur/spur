@@ -13,8 +13,8 @@
 //! `AgentCapabilities`.
 
 use agent_client_protocol::schema::{
-    AgentCapabilities, InitializeResponse, NewSessionResponse, SessionConfigOption,
-    SessionConfigKind, SessionConfigSelectOptions, SessionModeState, SessionModelState,
+    AgentCapabilities, InitializeResponse, NewSessionResponse, SessionConfigKind,
+    SessionConfigOption, SessionConfigSelectOptions, SessionModeState, SessionModelState,
 };
 use serde::{Deserialize, Serialize};
 
@@ -206,12 +206,11 @@ mod tests {
         use agent_client_protocol::schema::ModelInfo;
 
         let init = empty_init_response();
-        let new = NewSessionResponse::new(SessionId::new("model-label")).models(
-            SessionModelState::new(
+        let new =
+            NewSessionResponse::new(SessionId::new("model-label")).models(SessionModelState::new(
                 ModelId::new("gpt-5"),
                 vec![ModelInfo::new(ModelId::new("gpt-5"), "GPT-5")],
-            ),
-        );
+            ));
         let caps = SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp);
 
         assert_eq!(caps.current_model_label().as_deref(), Some("GPT-5"));

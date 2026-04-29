@@ -1990,8 +1990,7 @@ mod tests {
     }
 
     fn gemini_fixture_dir() -> std::path::PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/gemini/two_session_synthetic")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gemini/two_session_synthetic")
     }
 
     #[test]
@@ -2309,7 +2308,10 @@ mod tests {
                 "#,
             )
             .unwrap();
-        engine.conn.execute_batch(ALL_EVENTS_WITH_COST_VIEW).unwrap();
+        engine
+            .conn
+            .execute_batch(ALL_EVENTS_WITH_COST_VIEW)
+            .unwrap();
 
         let rows = engine.live_recent_sessions(2).unwrap();
         let session_ids = rows
