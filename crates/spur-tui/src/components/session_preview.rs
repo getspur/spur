@@ -2,7 +2,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
 
@@ -10,18 +10,16 @@ use ratatui::{
 #[derive(Debug, Clone, Default)]
 pub struct PreviewRow {
     pub label: String,
-    pub value: String,
+    pub value_lines: Vec<String>,
     pub value_style: Option<Style>,
-    pub wrap: bool,
 }
 
 impl From<(String, String)> for PreviewRow {
     fn from((label, value): (String, String)) -> Self {
         Self {
             label,
-            value,
+            value_lines: vec![value],
             value_style: None,
-            wrap: false,
         }
     }
 }
@@ -37,6 +35,59 @@ pub struct PreviewContent {
 
 pub struct SessionPreview;
 
+fn build_lines_for_row(row: &PreviewRow) -> Vec<Line<'static>> {
+    let value_style = row
+        .value_style
+        .unwrap_or_else(|| Style::default().fg(Color::White));
+
+    if row.label.is_empty() {
+        if row.value_lines.is_empty() {
+            return vec![Line::from("")];
+        }
+        return row
+            .value_lines
+            .iter()
+            .map(|value| {
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(value.clone(), value_style),
+                ])
+            })
+            .collect();
+    }
+
+    let label = format!("  {}: ", row.label);
+    let continuation = " ".repeat(label.chars().count());
+    let values = if row.value_lines.is_empty() {
+        vec![String::new()]
+    } else {
+        row.value_lines.clone()
+    };
+
+    values
+        .into_iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            if idx == 0 {
+                Line::from(vec![
+                    Span::styled(
+                        label.clone(),
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(value, value_style),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::raw(continuation.clone()),
+                    Span::styled(value, value_style),
+                ])
+            }
+        })
+        .collect()
+}
+
 impl SessionPreview {
     pub fn render(frame: &mut Frame, area: Rect, content: &PreviewContent) {
         let block = Block::default()
@@ -50,42 +101,10 @@ impl SessionPreview {
                 Style::default().fg(Color::DarkGray),
             ))]
         } else {
-            content
-                .rows
-                .iter()
-                .map(|row| {
-                    let value_style = row
-                        .value_style
-                        .unwrap_or_else(|| Style::default().fg(Color::White));
-                    if row.label.is_empty() {
-                        if row.value.is_empty() {
-                            // Both empty: pure blank line as visual separator.
-                            Line::from("")
-                        } else {
-                            // Empty label: render value only with leading indent.
-                            Line::from(vec![
-                                Span::raw("  "),
-                                Span::styled(row.value.clone(), value_style),
-                            ])
-                        }
-                    } else {
-                        Line::from(vec![
-                            Span::styled(
-                                format!("  {}: ", row.label),
-                                Style::default()
-                                    .fg(Color::DarkGray)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled(row.value.clone(), value_style),
-                        ])
-                    }
-                })
-                .collect()
+            content.rows.iter().flat_map(build_lines_for_row).collect()
         };
 
-        let p = Paragraph::new(lines)
-            .block(block)
-            .wrap(Wrap { trim: false });
+        let p = Paragraph::new(lines).block(block);
         frame.render_widget(p, area);
     }
 }
@@ -96,24 +115,22 @@ mod tests {
     use ratatui::style::{Color, Style};
 
     #[test]
-    fn from_tuple_creates_unstyled_unwrapped_row() {
+    fn from_tuple_creates_unstyled_single_line_row() {
         let row: PreviewRow = ("Label".to_string(), "Value".to_string()).into();
         assert_eq!(row.label, "Label");
-        assert_eq!(row.value, "Value");
+        assert_eq!(row.value_lines, vec!["Value"]);
         assert!(row.value_style.is_none());
-        assert!(!row.wrap);
     }
 
     #[test]
-    fn explicit_construction_with_style_and_wrap() {
+    fn explicit_construction_with_style_and_lines() {
         let row = PreviewRow {
             label: "Intent".into(),
-            value: "long wrapped value".into(),
+            value_lines: vec!["long".into(), "wrapped value".into()],
             value_style: Some(Style::default().fg(Color::Gray)),
-            wrap: true,
         };
         assert_eq!(row.label, "Intent");
+        assert_eq!(row.value_lines.len(), 2);
         assert!(row.value_style.is_some());
-        assert!(row.wrap);
     }
 }

@@ -3009,7 +3009,7 @@ impl App {
 
             Action::ToggleShowArchived => {
                 if let Some(ref mut picker) = self.session_picker {
-                    picker.toggle_show_archived();
+                    picker.toggle_show_archived(&self.synopsis);
                 }
                 self.dirty = true;
             }
@@ -5562,31 +5562,105 @@ mod synopsis_wire_tests {
     use agent_client_protocol::schema::{
         ContentBlock, ContentChunk, SessionNotification, SessionUpdate, TextContent,
     };
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use spur_acp::domain::events::{SpurEvent, SpurEventBody};
-    use spur_acp::SessionId;
+    use spur_acp::{SessionId, SessionInfo};
+    use std::path::PathBuf;
+    use tempfile::NamedTempFile;
 
     fn wrap(body: SpurEventBody) -> SpurEvent {
         SpurEvent::now(body)
+    }
+
+    fn user_message(session: &str, text: &str) -> SpurEvent {
+        wrap(SpurEventBody::AgentNotification {
+            session: SessionId(session.into()),
+            notification: Box::new(SessionNotification::new(
+                agent_client_protocol::schema::SessionId::new(session),
+                SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Text(
+                    TextContent::new(text),
+                ))),
+            )),
+        })
+    }
+
+    fn session(id: &str, title: &str) -> SessionInfo {
+        SessionInfo::new(id.to_string(), PathBuf::from("/tmp")).title(title.to_string())
+    }
+
+    fn app_in_picker_with_empty_metadata() -> App {
+        let tmp = NamedTempFile::new().unwrap();
+        let mut app = App::new_for_tests();
+        app.set_metadata_store_for_test(SessionMetadataStore::load(tmp.path()));
+        app.process_action(Action::RequestSessions);
+        app
+    }
+
+    fn type_picker_search(app: &mut App, query: &str) {
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('/'),
+            KeyModifiers::NONE,
+        )));
+        for ch in query.chars() {
+            app.handle_crossterm_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
     }
 
     #[test]
     fn handle_spur_event_applies_to_synopsis_projection() {
         let mut app = App::new_for_tests();
 
-        app.handle_spur_event(wrap(SpurEventBody::AgentNotification {
-            session: SessionId("S1".into()),
-            notification: Box::new(SessionNotification::new(
-                agent_client_protocol::schema::SessionId::new("S1"),
-                SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Text(
-                    TextContent::new("hello world"),
-                ))),
-            )),
-        }));
+        app.handle_spur_event(user_message("S1", "hello world"));
 
         let s = app
             .synopsis()
             .get(&SessionId("S1".into()))
             .expect("commit-on-read fallback");
         assert_eq!(s.last_user_msg.as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn picker_filter_picks_up_late_synopsis_updates_without_refresh() {
+        let mut app = app_in_picker_with_empty_metadata();
+        app.handle_spur_event(wrap(SpurEventBody::SessionsListed {
+            agent: "claude".into(),
+            sessions: vec![session("S1", "Build fix")],
+        }));
+
+        app.handle_spur_event(user_message("S1", "late synopsis needle"));
+        type_picker_search(&mut app, "needle");
+
+        let picker = app.session_picker_for_test().expect("picker open");
+        assert_eq!(
+            picker.visible_session_count(app.synopsis()),
+            1,
+            "filter should see synopsis content applied after SessionsListed"
+        );
+    }
+
+    #[test]
+    fn picker_filter_picks_up_rename_without_refresh() {
+        let mut app = app_in_picker_with_empty_metadata();
+        app.handle_spur_event(wrap(SpurEventBody::SessionsListed {
+            agent: "claude".into(),
+            sessions: vec![session("S1", "Old title")],
+        }));
+
+        app.process_action(Action::RenameSession {
+            session_id: "S1".into(),
+            new_title: "renamed recall needle".into(),
+            original_title: "Old title".into(),
+        });
+        type_picker_search(&mut app, "needle");
+
+        let picker = app.session_picker_for_test().expect("picker open");
+        assert_eq!(
+            picker.visible_session_count(app.synopsis()),
+            1,
+            "filter should see title_override applied after SessionsListed"
+        );
     }
 }
