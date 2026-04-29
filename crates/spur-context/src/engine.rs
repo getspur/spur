@@ -8,6 +8,8 @@ use anyhow::Context;
 use anyhow::Result;
 use chrono::NaiveDate;
 #[cfg(feature = "duckdb")]
+use chrono::Utc;
+#[cfg(feature = "duckdb")]
 use duckdb::{params, Connection};
 #[cfg(feature = "duckdb")]
 use std::env;
@@ -106,10 +108,30 @@ pub struct AnalyticsEngine {
 #[cfg(feature = "duckdb")]
 impl AnalyticsEngine {
     /// Open a persistent DuckDB database.
-    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let conn = Connection::open(path).context("failed to open DuckDB")?;
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<(Self, bool)> {
+        let path = path.as_ref();
+        let conn = match Self::open_connection(path) {
+            Ok(conn) => conn,
+            Err(original_error) => {
+                if !format!("{original_error:#}").contains("Corrupt WAL") {
+                    return Err(original_error);
+                }
+                Self::move_corrupt_wal_aside(path)?;
+                match Self::open_connection(path) {
+                    Ok(conn) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            "recovered DuckDB analytics engine after corrupt WAL"
+                        );
+                        tracing::debug!("opened DuckDB analytics engine");
+                        return Ok((Self { conn }, true));
+                    }
+                    Err(_) => return Err(original_error),
+                }
+            }
+        };
         tracing::debug!("opened DuckDB analytics engine");
-        Ok(Self { conn })
+        Ok((Self { conn }, false))
     }
 
     /// Open an in-memory DuckDB (for testing).
@@ -117,6 +139,24 @@ impl AnalyticsEngine {
         let conn = Connection::open_in_memory().context("failed to open in-memory DuckDB")?;
         tracing::debug!("opened in-memory DuckDB analytics engine");
         Ok(Self { conn })
+    }
+
+    fn open_connection(path: &Path) -> Result<Connection> {
+        Connection::open(path).context("failed to open DuckDB")
+    }
+
+    fn move_corrupt_wal_aside(path: &Path) -> Result<()> {
+        let wal_path = wal_path_for(path);
+        let broken_path = broken_wal_path_for(&wal_path);
+        std::fs::rename(&wal_path, &broken_path).with_context(|| {
+            format!(
+                "failed to rename corrupt DuckDB WAL {} to {}",
+                wal_path.display(),
+                broken_path.display()
+            )
+        })?;
+        gc_broken_wals(path)?;
+        Ok(())
     }
 
     /// Initialize base schema: pricing table + placeholder views.
@@ -1645,6 +1685,52 @@ impl AnalyticsEngine {
     }
 }
 
+#[cfg(feature = "duckdb")]
+fn wal_path_for(path: &Path) -> PathBuf {
+    let mut wal = path.as_os_str().to_os_string();
+    wal.push(".wal");
+    PathBuf::from(wal)
+}
+
+#[cfg(feature = "duckdb")]
+fn broken_wal_path_for(wal_path: &Path) -> PathBuf {
+    let timestamp = Utc::now().format("%Y-%m-%dT%H-%M-%SZ");
+    let mut broken = wal_path.as_os_str().to_os_string();
+    broken.push(format!(".{timestamp}.broken"));
+    PathBuf::from(broken)
+}
+
+#[cfg(feature = "duckdb")]
+fn gc_broken_wals(db_path: &Path) -> Result<()> {
+    let Some(db_name) = db_path.file_name() else {
+        return Ok(());
+    };
+    let parent = db_path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    let prefix = format!("{}.wal.", db_name.to_string_lossy());
+
+    let mut broken_wals = std::fs::read_dir(parent)?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            if name.starts_with(&prefix) && name.ends_with(".broken") {
+                Some((name, entry.path()))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    broken_wals.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path) in broken_wals.into_iter().skip(1) {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
 // ─── Stub (DuckDB disabled) ───────────────────────────────────────────
 
 #[cfg(not(feature = "duckdb"))]
@@ -1656,8 +1742,8 @@ pub struct AnalyticsEngine;
 #[cfg(not(feature = "duckdb"))]
 impl AnalyticsEngine {
     /// Open a persistent DuckDB database (stub).
-    pub fn open<P: AsRef<Path>>(_path: P) -> Result<Self> {
-        Ok(Self)
+    pub fn open<P: AsRef<Path>>(_path: P) -> Result<(Self, bool)> {
+        Ok((Self, false))
     }
 
     /// Open an in-memory DuckDB (stub).
@@ -1921,7 +2007,7 @@ pub struct LiveSnapshot {
 #[cfg(all(test, feature = "duckdb"))]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::io::{Seek, SeekFrom, Write};
     use std::sync::Mutex;
     use tempfile::TempDir;
 
@@ -1935,6 +2021,55 @@ mod tests {
             .load_pricing(&spur_cost::PricingRegistry::with_builtin_prices())
             .unwrap();
         engine
+    }
+
+    #[test]
+    fn open_recovers_corrupt_wal_by_renaming_broken_file() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("analytics.duckdb");
+        let wal_path = tmp.path().join("analytics.duckdb.wal");
+
+        {
+            let (engine, recovered) = AnalyticsEngine::open(&db_path).unwrap();
+            assert!(!recovered);
+            engine
+                .conn
+                .execute_batch(
+                    "PRAGMA disable_checkpoint_on_shutdown;
+                     CREATE TABLE events(id INTEGER);
+                     INSERT INTO events VALUES (1);",
+                )
+                .unwrap();
+        }
+
+        let wal_len = std::fs::metadata(&wal_path).unwrap().len();
+        assert!(wal_len >= 128, "expected DuckDB to leave a WAL behind");
+        let mut wal = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&wal_path)
+            .unwrap();
+        wal.seek(SeekFrom::End(-64)).unwrap();
+        wal.write_all(&[0xA5; 64]).unwrap();
+
+        let (_engine, recovered) = AnalyticsEngine::open(&db_path).unwrap();
+
+        assert!(recovered, "open should report WAL recovery");
+        assert!(
+            !wal_path.exists(),
+            "corrupt WAL should be moved out of the way"
+        );
+        let broken = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .filter_map(|name| name.into_string().ok())
+            .filter(|name| name.starts_with("analytics.duckdb.wal.") && name.ends_with(".broken"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            broken.len(),
+            1,
+            "expected one renamed broken WAL, got {broken:?}"
+        );
     }
 
     /// Regression: `refresh_cache()` must not zero out `events_cache` after
