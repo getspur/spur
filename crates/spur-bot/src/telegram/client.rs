@@ -1,10 +1,60 @@
 use anyhow::Context;
 use frankenstein::AsyncTelegramApi;
-use std::time::Duration;
+use std::{
+    sync::{Arc, RwLock},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use tokio::time::Instant;
+
+const PAUSE_EXTENSION_LOG_THRESHOLD: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
 pub struct TelegramClient {
     inner: frankenstein::client_reqwest::Bot,
+    draft_pause: DraftPauseState,
+}
+
+#[derive(Debug, Clone)]
+struct DraftPauseState {
+    paused_until: Arc<RwLock<Option<Instant>>>,
+}
+
+impl DraftPauseState {
+    fn new() -> Self {
+        Self {
+            paused_until: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    fn paused_until(&self) -> Option<Instant> {
+        *self
+            .paused_until
+            .read()
+            .expect("telegram draft pause lock poisoned")
+    }
+
+    fn is_paused(&self, now: Instant) -> bool {
+        self.paused_until()
+            .is_some_and(|paused_until| now < paused_until)
+    }
+
+    fn pause_until_at_least(&self, candidate: Instant) {
+        let now = Instant::now();
+        let mut paused_until = self
+            .paused_until
+            .write()
+            .expect("telegram draft pause lock poisoned");
+        let previous = *paused_until;
+        if previous.is_none_or(|current| candidate > current) {
+            *paused_until = Some(candidate);
+        }
+        if previous.is_none_or(|current| candidate >= current + PAUSE_EXTENSION_LOG_THRESHOLD) {
+            tracing::info!(
+                secs = candidate.saturating_duration_since(now).as_secs(),
+                "telegram rate limit pause active"
+            );
+        }
+    }
 }
 
 impl TelegramClient {
@@ -26,7 +76,28 @@ impl TelegramClient {
                 .api_url(url)
                 .client(http)
                 .build(),
+            draft_pause: DraftPauseState::new(),
         })
+    }
+
+    pub fn is_paused(&self, now: Instant) -> bool {
+        self.draft_pause.is_paused(now)
+    }
+
+    pub fn pause_until_at_least(&self, candidate: Instant) {
+        self.draft_pause.pause_until_at_least(candidate);
+    }
+
+    pub(crate) async fn wait_if_paused(&self) {
+        loop {
+            let Some(paused_until) = self.draft_pause.paused_until() else {
+                return;
+            };
+            if Instant::now() >= paused_until {
+                return;
+            }
+            tokio::time::sleep_until(paused_until + retry_after_jitter()).await;
+        }
     }
 
     pub async fn delete_webhook(&self) -> anyhow::Result<()> {
@@ -90,10 +161,13 @@ impl TelegramClient {
         if let Some(thread_id) = normalize_outbound_thread_id(message_thread_id) {
             payload["message_thread_id"] = serde_json::json!(thread_id);
         }
-        let _: frankenstein::response::MethodResponse<bool> = self
-            .inner
-            .request("sendMessageDraft", Some(payload))
-            .await?;
+        self.wait_if_paused().await;
+        let result: Result<frankenstein::response::MethodResponse<bool>, frankenstein::Error> =
+            self.inner.request("sendMessageDraft", Some(payload)).await;
+        if let Err(err) = &result {
+            self.pause_after_telegram_retry_after(err);
+        }
+        let _ = result?;
         Ok(())
     }
 
@@ -107,10 +181,13 @@ impl TelegramClient {
         message_thread_id: Option<i32>,
         text: String,
     ) -> anyhow::Result<()> {
-        let response = self
-            .inner
-            .send_message(&build_send_text_params(chat_id, message_thread_id, text))
-            .await?;
+        let params = build_send_text_params(chat_id, message_thread_id, text);
+        self.wait_if_paused().await;
+        let result = self.inner.send_message(&params).await;
+        if let Err(err) = &result {
+            self.pause_after_telegram_retry_after(err);
+        }
+        let response = result?;
         let message_id = response.result.message_id;
         tracing::info!(
             chat_id,
@@ -174,7 +251,12 @@ impl TelegramClient {
         } else {
             builder.build()
         };
-        let response = self.inner.send_message(&params).await?;
+        self.wait_if_paused().await;
+        let result = self.inner.send_message(&params).await;
+        if let Err(err) = &result {
+            self.pause_after_telegram_retry_after(err);
+        }
+        let response = result?;
         let message_id = response.result.message_id;
         tracing::info!(
             chat_id,
@@ -184,6 +266,33 @@ impl TelegramClient {
         );
         Ok(())
     }
+
+    fn pause_after_telegram_retry_after(&self, err: &frankenstein::Error) {
+        if let Some(retry_after_secs) = telegram_retry_after_secs(err) {
+            self.pause_until_at_least(
+                Instant::now()
+                    + Duration::from_secs(u64::from(retry_after_secs))
+                    + retry_after_jitter(),
+            );
+        }
+    }
+}
+
+fn telegram_retry_after_secs(err: &frankenstein::Error) -> Option<u16> {
+    match err {
+        frankenstein::Error::Api(response) if response.error_code == 429 => response
+            .parameters
+            .and_then(|parameters| parameters.retry_after),
+        _ => None,
+    }
+}
+
+fn retry_after_jitter() -> Duration {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.subsec_nanos())
+        .unwrap_or_default();
+    Duration::from_millis(100 + u64::from(nanos % 401))
 }
 
 pub fn normalize_outbound_thread_id(message_thread_id: Option<i32>) -> Option<i32> {
@@ -265,12 +374,7 @@ mod tests {
 
         fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
 
-        fn record_follows_from(
-            &self,
-            _span: &tracing::span::Id,
-            _follows: &tracing::span::Id,
-        ) {
-        }
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
 
         fn event(&self, event: &tracing::Event<'_>) {
             let mut visitor = RecordingVisitor::default();
@@ -309,11 +413,7 @@ mod tests {
                 .insert(field.name().to_string(), value.to_string());
         }
 
-        fn record_debug(
-            &mut self,
-            field: &tracing::field::Field,
-            value: &dyn std::fmt::Debug,
-        ) {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
             self.fields
                 .insert(field.name().to_string(), format!("{value:?}"));
         }
@@ -379,8 +479,9 @@ mod tests {
                 .expect("write telegram response");
         });
 
-        let client = TelegramClient::new_with_url(format!("http://{addr}/"), Duration::from_secs(1))
-            .expect("client with custom api url should build");
+        let client =
+            TelegramClient::new_with_url(format!("http://{addr}/"), Duration::from_secs(1))
+                .expect("client with custom api url should build");
         let (subscriber, events) = RecordingSubscriber::new();
         let dispatcher = tracing::Dispatch::new(subscriber);
         let _guard = tracing::dispatcher::set_default(&dispatcher);
@@ -437,9 +538,7 @@ mod tests {
     }
 
     fn find_header_end(request: &[u8]) -> Option<usize> {
-        request
-            .windows(4)
-            .position(|window| window == b"\r\n\r\n")
+        request.windows(4).position(|window| window == b"\r\n\r\n")
     }
 
     fn content_length(headers: &[u8]) -> Option<usize> {
