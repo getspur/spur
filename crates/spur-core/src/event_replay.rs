@@ -47,6 +47,33 @@ pub struct ReplayStats {
     pub elapsed: Duration,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SegmentName {
+    pid: u32,
+    unix_ms: u128,
+    rotation_seq: u64,
+}
+
+/// Parse `{pid}-{unix_ms}-{rotation_seq}.ndjson`. Returns `None` on
+/// any deviation from the format. Mirrors `event_sink.rs:221-228`.
+#[allow(dead_code)]
+fn parse_segment_name(name: &str) -> Option<SegmentName> {
+    let stem = name.strip_suffix(".ndjson")?;
+    let mut parts = stem.split('-');
+    let pid: u32 = parts.next()?.parse().ok()?;
+    let unix_ms: u128 = parts.next()?.parse().ok()?;
+    let rotation_seq: u64 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(SegmentName {
+        pid,
+        unix_ms,
+        rotation_seq,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,5 +96,28 @@ mod tests {
         assert_eq!(s.events_skipped_horizon, 0);
         assert_eq!(s.malformed_lines, 0);
         assert_eq!(s.elapsed, std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn parse_segment_name_well_formed() {
+        let parsed = parse_segment_name("12345-1714000000123-7.ndjson");
+        assert_eq!(
+            parsed,
+            Some(SegmentName {
+                pid: 12345,
+                unix_ms: 1714000000123,
+                rotation_seq: 7
+            })
+        );
+    }
+
+    #[test]
+    fn parse_segment_name_rejects_garbage() {
+        assert_eq!(parse_segment_name("not-a-segment"), None);
+        assert_eq!(parse_segment_name("12345-foo-7.ndjson"), None);
+        assert_eq!(parse_segment_name("12345-100.ndjson"), None);
+        assert_eq!(parse_segment_name(""), None);
+        assert_eq!(parse_segment_name("12345-100-7.json"), None);
+        assert_eq!(parse_segment_name("12345-100-0-1.ndjson"), None);
     }
 }
