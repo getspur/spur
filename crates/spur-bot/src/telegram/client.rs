@@ -206,11 +206,12 @@ impl TelegramClient {
         plain_fallback: String,
     ) -> anyhow::Result<()> {
         let params = build_send_html_params(chat_id, message_thread_id, html);
+        let parse_mode_was_html = matches!(params.parse_mode, Some(frankenstein::ParseMode::Html));
         self.wait_if_paused().await;
         let result = self.inner.send_message(&params).await;
         if let Err(err) = &result {
             self.pause_after_telegram_retry_after(err);
-            if let Some(description) = telegram_html_parse_error_description(err) {
+            if parse_mode_was_html && is_telegram_400_error(err) {
                 let fallback_params =
                     build_send_text_params(chat_id, message_thread_id, plain_fallback);
                 let fallback_result = self.inner.send_message(&fallback_params).await;
@@ -218,9 +219,13 @@ impl TelegramClient {
                     self.pause_after_telegram_retry_after(fallback_err);
                 }
                 let response = fallback_result?;
+                let error_description = match err {
+                    frankenstein::Error::Api(response) => response.description.as_str(),
+                    _ => "",
+                };
                 tracing::warn!(
-                    error_description = %description,
-                    "telegram HTML parse failed; retried with plain text"
+                    error_description = %error_description,
+                    "telegram HTML send failed; retried with plain text"
                 );
                 let message_id = response.result.message_id;
                 tracing::info!(
@@ -323,6 +328,10 @@ impl TelegramClient {
     }
 }
 
+fn is_telegram_400_error(err: &frankenstein::Error) -> bool {
+    matches!(err, frankenstein::Error::Api(response) if response.error_code == 400)
+}
+
 fn telegram_retry_after_secs(err: &frankenstein::Error) -> Option<u16> {
     match err {
         frankenstein::Error::Api(response) if response.error_code == 429 => response
@@ -330,25 +339,6 @@ fn telegram_retry_after_secs(err: &frankenstein::Error) -> Option<u16> {
             .and_then(|parameters| parameters.retry_after),
         _ => None,
     }
-}
-
-fn telegram_html_parse_error_description(err: &frankenstein::Error) -> Option<&str> {
-    match err {
-        frankenstein::Error::Api(response)
-            if response.error_code == 400
-                && is_telegram_html_parse_error_description(&response.description) =>
-        {
-            Some(&response.description)
-        }
-        _ => None,
-    }
-}
-
-fn is_telegram_html_parse_error_description(description: &str) -> bool {
-    let description = description.to_ascii_lowercase();
-    description.contains("can't parse entities")
-        || description.contains("parse entities")
-        || description.contains("find end of the entity")
 }
 
 fn retry_after_jitter() -> Duration {
