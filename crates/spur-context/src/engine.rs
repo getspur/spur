@@ -148,14 +148,24 @@ impl AnalyticsEngine {
     fn move_corrupt_wal_aside(path: &Path) -> Result<()> {
         let wal_path = wal_path_for(path);
         let broken_path = broken_wal_path_for(&wal_path);
-        std::fs::rename(&wal_path, &broken_path).with_context(|| {
-            format!(
-                "failed to rename corrupt DuckDB WAL {} to {}",
-                wal_path.display(),
-                broken_path.display()
-            )
-        })?;
-        gc_broken_wals(path)?;
+        // Tolerate races where a parallel SPUR process already moved the
+        // WAL: that instance will own the recovery; we fall through and
+        // let DuckDB surface its normal lock error on retry-open.
+        if let Err(error) = std::fs::rename(&wal_path, &broken_path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(anyhow::Error::new(error).context(format!(
+                    "failed to rename corrupt DuckDB WAL {} to {}",
+                    wal_path.display(),
+                    broken_path.display()
+                )));
+            }
+        }
+        if let Err(error) = gc_broken_wals(path) {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                "gc_broken_wals failed; continuing with recovery"
+            );
+        }
         Ok(())
     }
 
