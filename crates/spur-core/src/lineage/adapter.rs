@@ -236,6 +236,11 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
                             fallback
                         )),
                     ),
+                    DelegationStatus::Cancelled { reason } => (
+                        LifecycleState::Cancelled,
+                        AttemptStatus::Cancelled,
+                        Some(reason.clone()),
+                    ),
                     _ => {
                         tracing::warn!(
                             "unknown DelegationStatus variant — projection needs updating"
