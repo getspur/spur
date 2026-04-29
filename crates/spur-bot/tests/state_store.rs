@@ -38,6 +38,27 @@ fn missing_state_file_defaults_cleanly() {
 }
 
 #[test]
+fn corrupt_state_file_returns_error_with_path_and_operation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("state.json");
+    std::fs::write(&path, "{not valid json").unwrap();
+
+    let store = BotStateStore::new(path.clone());
+    let err = store.load().expect_err("corrupt JSON must surface as Err");
+
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("parsing state file"),
+        "expected parse-context phrase in chain, got: {rendered}"
+    );
+    assert!(
+        rendered.contains(&path.display().to_string()),
+        "expected path {} in chain, got: {rendered}",
+        path.display()
+    );
+}
+
+#[test]
 fn legacy_single_binding_loads_without_data_loss() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("state.json");

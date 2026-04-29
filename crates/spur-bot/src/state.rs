@@ -1,3 +1,4 @@
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -84,12 +85,18 @@ impl BotStateStore {
             return Ok(PersistedBotState::default());
         }
 
-        let raw = std::fs::read_to_string(&self.path)?;
+        let raw = std::fs::read_to_string(&self.path)
+            .with_context(|| format!("reading state file {}", self.path.display()))?;
         if let Ok(state) = serde_json::from_str::<PersistedBotState>(&raw) {
             return Ok(state);
         }
 
-        let legacy: LegacyPersistedBotState = serde_json::from_str(&raw)?;
+        let legacy: LegacyPersistedBotState = serde_json::from_str(&raw).with_context(|| {
+            format!(
+                "parsing state file {} (current and legacy schemas both failed)",
+                self.path.display()
+            )
+        })?;
         let mut migrated = PersistedBotState {
             operator_chat_id: legacy.operator_chat_id,
             ..PersistedBotState::default()
@@ -115,9 +122,11 @@ impl BotStateStore {
 
     pub fn save(&self, state: &PersistedBotState) -> anyhow::Result<()> {
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating state parent dir {}", parent.display()))?;
         }
-        std::fs::write(&self.path, serde_json::to_vec_pretty(state)?)?;
+        std::fs::write(&self.path, serde_json::to_vec_pretty(state)?)
+            .with_context(|| format!("writing state file {}", self.path.display()))?;
         Ok(())
     }
 }
