@@ -145,7 +145,12 @@ async fn spawn_writes_pgid_toml_drop_deletes_it() {
     // After spawn, exactly one record must exist.
     let registry = PgidRegistry::new(&pgids);
     let recs = registry.load_all().expect("load");
-    assert_eq!(recs.len(), 1, "expected 1 record after spawn, got {:?}", recs);
+    assert_eq!(
+        recs.len(),
+        1,
+        "expected 1 record after spawn, got {:?}",
+        recs
+    );
     let pgid = recs[0].pgid;
 
     drop(conn); // triggers killpg + .toml delete
@@ -154,6 +159,11 @@ async fn spawn_writes_pgid_toml_drop_deletes_it() {
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     let recs = registry.load_all().expect("load");
-    assert_eq!(recs.len(), 0, "expected 0 records after drop, got {:?}", recs);
+    assert_eq!(
+        recs.len(),
+        0,
+        "expected 0 records after drop, got {:?}",
+        recs
+    );
     let _ = pgid;
 }

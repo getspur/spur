@@ -949,9 +949,8 @@ mod tests {
         // Validator must accept kimi (R3 is a warning, not fatal) and the
         // single error reported must be the expected R3 — proving the
         // mechanism is intentionally L2-only.
-        let errs = crate::config::validate_agent_config(kimi).expect_err(
-            "expected R3 warning since mechanism is L2 auto-approve only",
-        );
+        let errs = crate::config::validate_agent_config(kimi)
+            .expect_err("expected R3 warning since mechanism is L2 auto-approve only");
         assert_eq!(errs.len(), 1, "only R3 should fire: {errs:?}");
         assert!(!errs[0].is_fatal(), "R3 must remain non-fatal");
         assert!(

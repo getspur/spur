@@ -209,6 +209,40 @@ pub enum LicenseError {
 
 pub type Result<T> = std::result::Result<T, LicenseError>;
 
+/// Facade over a [`LicenseProvider`] paired with a shared
+/// `Arc<FeatureGate>`.
+///
+/// # Freshness contract
+///
+/// The `Arc<FeatureGate>` returned by [`feature_gate`] is a shared
+/// entitlement snapshot. Successful mutating calls ([`activate`],
+/// [`validate`], [`heartbeat`], [`deactivate`]) refresh the snapshot
+/// synchronously before returning. If an operation's error path
+/// internally degrades the license state (today, only
+/// `LicenseSeatProvider::heartbeat` degrade-on-failure), the
+/// snapshot is refreshed from [`current_state`] before the error
+/// is returned.
+///
+/// # Out-of-scope (tracked separately)
+///
+/// - Autonomous provider events (server-pushed revocation,
+///   offline-verification re-checks) are NOT yet pumped into this
+///   gate. Consumers that need to react to autonomous events
+///   should call [`subscribe`] and update their own state on each
+///   `LicenseEvent`. Tracked: bd-22q.14.
+/// - Concurrent mutations of this facade are serialized only at
+///   the `replace_state` granularity inside the provider, not
+///   across the full SDK round-trip. A `validate`/`deactivate`
+///   race can produce a transient over-permissioning window.
+///   Tracked: bd-22q.15.
+///
+/// [`feature_gate`]: SpurLicense::feature_gate
+/// [`activate`]: SpurLicense::activate
+/// [`validate`]: SpurLicense::validate
+/// [`heartbeat`]: SpurLicense::heartbeat
+/// [`deactivate`]: SpurLicense::deactivate
+/// [`subscribe`]: SpurLicense::subscribe
+/// [`current_state`]: SpurLicense::current_state
 #[derive(Clone)]
 pub struct SpurLicense {
     provider: Arc<dyn LicenseProvider>,

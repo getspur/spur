@@ -95,7 +95,7 @@ impl FakeProvider {
     /// event) before returning `Err(err)`. Mirrors
     /// `LicenseSeatProvider::heartbeat` degrade-on-failure (`degrade_current`
     /// + `replace_state` + return Err). Required by bd-22q.1's
-    /// regression test for the heartbeat-Err refresh contract.
+    ///   regression test for the heartbeat-Err refresh contract.
     pub fn push_heartbeat_degraded_err(&self, state: LicenseState, err: LicenseError) {
         self.script
             .lock()
