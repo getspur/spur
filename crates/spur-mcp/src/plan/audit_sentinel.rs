@@ -260,7 +260,7 @@ mod tests {
             },
             AuditSentinelKind::DispatchOrphanCleared {
                 delegation_id: "del-A".into(),
-                reason: "restart-orphan-cleared".into(),
+                reason: crate::server::ORPHAN_CLEAR_REASON_RESTART.into(),
             },
             AuditSentinelKind::Completion {
                 delegation_id: "del-A".into(),
@@ -361,7 +361,7 @@ mod tests {
             },
             AuditSentinelKind::DispatchOrphanCleared {
                 delegation_id: "x".into(),
-                reason: "restart-orphan-cleared".into(),
+                reason: crate::server::ORPHAN_CLEAR_REASON_RESTART.into(),
             },
             AuditSentinelKind::Completion {
                 delegation_id: "x".into(),
@@ -522,7 +522,7 @@ mod tests {
         };
         let orphan = AuditSentinelKind::DispatchOrphanCleared {
             delegation_id: "del-A".into(),
-            reason: "restart-orphan-cleared".into(),
+            reason: crate::server::ORPHAN_CLEAR_REASON_RESTART.into(),
         };
 
         let completion_body = encode_comment(&completion);

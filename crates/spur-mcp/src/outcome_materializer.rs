@@ -39,7 +39,7 @@ pub struct OutcomeMaterializer {
     /// can default `attempt` to "latest known". Lives on the materializer
     /// (not the server) so both the direct callback path
     /// (server.rs::build_detached_continuation) and the reconciler path
-    /// (plan/mod.rs::persist_completion_result_and_notify) — the latter
+    /// (plan/mod.rs::persist_completion_inner) — the latter
     /// only has `&OutcomeMaterializer` access — can update the map.
     /// Memory bound: ~40 B per delegation. A long-running brain session
     /// with thousands of completions sits in tens of KB; not pruned.

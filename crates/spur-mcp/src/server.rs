@@ -53,6 +53,7 @@ const DEFAULT_PLAN_PENDING_GRACE: std::time::Duration = std::time::Duration::fro
 /// quarantined by a previous sweep run. Changing this constant will break
 /// resumption of any sweep that was interrupted under the old value.
 const PLAN_PENDING_SWEEP_COMMENT_PREFIX: &str = "SPUR startup sweep quarantined stale pending plan";
+pub(crate) const ORPHAN_CLEAR_REASON_RESTART: &str = "restart-orphan-cleared";
 /// Idle-session watchdog for the streamable-HTTP MCP transport.
 ///
 /// rmcp's `SessionConfig::DEFAULT_KEEP_ALIVE` is 5 min, which is far too short
@@ -1156,7 +1157,7 @@ pub async fn resolve_dispatch_orphan(
         &crate::plan::audit_sentinel::encode_comment(
             &crate::plan::audit_sentinel::AuditSentinelKind::DispatchOrphanCleared {
                 delegation_id: delegation_id.to_string(),
-                reason: "restart-orphan-cleared".into(),
+                reason: ORPHAN_CLEAR_REASON_RESTART.into(),
             },
         ),
     )
