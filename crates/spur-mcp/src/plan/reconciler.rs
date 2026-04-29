@@ -585,6 +585,12 @@ impl Reconciler {
             );
             let (attempt, _) = crate::plan::projector::project_attempt_facts(&audits);
             let orphan_reason = format!("dispatch lease expired at {expires_at} (age {age_secs}s)");
+            // Match on `delegation_id` only, ignoring `reason`. Safe because
+            // delegation IDs are unique per dispatch lifecycle: dispatch mints
+            // a fresh UUID and `clear_dispatch_intent` removes the label, so
+            // any prior `DispatchOrphanCleared` (e.g. `restart-orphan-cleared`
+            // from `resolve_dispatch_orphan`) on this delegation_id makes a
+            // duplicate lease-expired audit redundant.
             let orphan_audit_exists = audits.iter().any(|audit| {
                 matches!(
                     audit,

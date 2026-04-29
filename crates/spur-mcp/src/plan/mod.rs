@@ -1473,6 +1473,20 @@ pub(crate) async fn persist_worker_completion_and_notify(
     .await
 }
 
+/// **SYSTEM PATH ONLY — do not call from worker-completion sites.**
+///
+/// This entry point is for system-authoritative writers (today: only the lease
+/// GC at `reconciler::sweep_expired_dispatch_leases`). It bypasses the
+/// `completion_is_superseded` check that worker callers go through, because
+/// the GC just wrote the very `DispatchOrphanCleared` audit a supersede check
+/// would query — running the check would convert the GC's own authoritative
+/// `Failed` into `Superseded` and prevent the task from closing.
+///
+/// In practice the system-path caller always passes `CompletionState::Failed`
+/// (or `Cancelled`). The signature accepts any `CompletionState` for
+/// flexibility, but worker-path callers MUST use
+/// `persist_worker_completion_and_notify` instead — it derives the state
+/// (including the supersede check) internally.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn persist_system_completion_and_notify(
     pm: &dyn PmLike,
@@ -1503,6 +1517,25 @@ pub(crate) async fn persist_system_completion_and_notify(
     .await
 }
 
+/// Derive the `CompletionState` a worker's late completion should land at,
+/// downgrading to `Superseded` when a `DispatchOrphanCleared` audit already
+/// exists for this `delegation_id` (Race A: GC reclaimed the lease before the
+/// worker's result arrived).
+///
+/// **Graceful unlicensed fallback.** If `pm.advanced()` is `None` (non-beads
+/// backend) or `PM_PRO_BEADS_ADVANCED` is not licensed on the feature gate,
+/// returns `Ok(baseline)` without propagating the gate error. This is the same
+/// "fail-open to baseline" contract used by `issue_has_plan_pending_sweep_comment`
+/// in bd-6okx.2 attempt #3, and is safe today because `resolve_dispatch_orphan`
+/// is gated on the same feature key — an unlicensed system cannot produce
+/// `DispatchOrphanCleared` audits in the first place, so the baseline matches
+/// reality.
+///
+/// Edge case to revisit: if the license is downgraded mid-delegation
+/// (Pro→Free between dispatch and completion), a late worker `Success` could
+/// land without being superseded. Acceptable today because mid-delegation
+/// license downgrade is rare and orphan-clear-on-community-edition is not yet
+/// a supported path.
 async fn derive_worker_completion_state(
     pm: &dyn PmLike,
     feature_gate: &spur_license::FeatureGate,
