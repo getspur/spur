@@ -44,6 +44,7 @@ use crate::tools::{self, DelegationChannel, DelegationRequest};
 /// The 60 s TTL is generous for any residual debug-injection use; the
 /// map is allowed to stay permanently empty in production.
 const COMPLETED_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+const DEFAULT_PLAN_PENDING_GRACE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 /// Idle-session watchdog for the streamable-HTTP MCP transport.
 ///
 /// rmcp's `SessionConfig::DEFAULT_KEEP_ALIVE` is 5 min, which is far too short
@@ -429,6 +430,9 @@ pub struct McpCallbackServer {
     brain_pidfile: Option<spur_pm::pidfile::PidFileGuard>,
     /// v0e: opt-in auto-merge/PR on durable epic completion.
     auto_merge_approved_plans: bool,
+    /// Grace period before startup quarantines stale `spur:plan-pending`
+    /// persisted-plan epics.
+    plan_pending_grace: std::time::Duration,
 }
 
 /// Validate args for `delegate_parallel` beyond what the schema shape
@@ -554,9 +558,10 @@ pub struct EpicSubgraph {
 /// ensure the plan is validated (no cycles) before invoking.
 ///
 /// On failure mid-creation: partial state lands in beads (epic +
-/// whatever children succeeded). Caller should surface the error and
-/// leave cleanup to the brain / human. Transactional rollback is out
-/// of scope for v1 — beads CLI doesn't expose txn primitives.
+/// whatever children succeeded), but the epic keeps `spur:plan-pending`
+/// and never gains `spur:plan-complete`, so the reconciler will not
+/// dispatch the partial graph. Startup sweep quarantines stale pending
+/// graphs after the configured grace period.
 pub async fn build_epic_subgraph(
     pm: &spur_pm::PmService,
     feature_gate: &spur_license::FeatureGate,
@@ -613,23 +618,22 @@ pub async fn build_epic_subgraph(
         task_map.insert(task_id, child_id);
     }
 
-    if let Err(e) = pm
-        .update_issue(
-            &epic_id,
-            spur_pm::types::IssueUpdate {
-                add_labels: vec![crate::plan::labels::PLAN_COMPLETE.to_string()],
-                ..Default::default()
-            },
+    pm.update_issue(
+        &epic_id,
+        spur_pm::types::IssueUpdate {
+            add_labels: vec![crate::plan::labels::PLAN_COMPLETE.to_string()],
+            remove_labels: vec![crate::plan::labels::PLAN_PENDING.to_string()],
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|e| {
+        format!(
+            "failed to activate beads epic '{epic_id}' (add {} / remove {}): {e}",
+            crate::plan::labels::PLAN_COMPLETE,
+            crate::plan::labels::PLAN_PENDING
         )
-        .await
-    {
-        tracing::warn!(
-            target: "spur.audit.emit_failure",
-            kind = "plan_complete_marker",
-            %epic_id,
-            "failed to emit spur:plan-complete marker on epic (graph is complete, marker missing — reconciler will skip): {e}"
-        );
-    }
+    })?;
 
     Ok(EpicSubgraph { epic_id, task_map })
 }
@@ -875,6 +879,17 @@ fn discover_plan_ids(issues: &[spur_pm::IssueSummary]) -> Vec<String> {
         if issue.status != "open" || issue.issue_type.as_deref() != Some("epic") {
             continue;
         }
+        if issue
+            .labels
+            .iter()
+            .any(|label| label == crate::plan::labels::PLAN_PENDING)
+            || !issue
+                .labels
+                .iter()
+                .any(|label| label == crate::plan::labels::PLAN_COMPLETE)
+        {
+            continue;
+        }
         for label in &issue.labels {
             if let Some(plan_id) = crate::plan::labels::parse_plan_id(label) {
                 plan_ids.insert(plan_id.to_string());
@@ -996,6 +1011,13 @@ async fn any_open_epic_lacks_rev1_metadata(
     };
 
     for epic in &epics {
+        if epic
+            .labels
+            .iter()
+            .any(|label| label == crate::plan::labels::PLAN_PENDING)
+        {
+            continue;
+        }
         if let Some(plan_id) = epic
             .labels
             .iter()
@@ -1254,7 +1276,10 @@ pub fn plan_epic_issue_creates(
         title: epic_title.to_string(),
         description: epic_body.map(String::from),
         issue_type: Some("epic".to_string()),
-        labels: vec![crate::plan::labels::plan_id(plan_id)],
+        labels: vec![
+            crate::plan::labels::plan_id(plan_id),
+            crate::plan::labels::PLAN_PENDING.to_string(),
+        ],
         ..Default::default()
     };
 
@@ -1630,6 +1655,7 @@ impl McpCallbackServer {
             repo_root: None,
             brain_pidfile: None,
             auto_merge_approved_plans: false,
+            plan_pending_grace: DEFAULT_PLAN_PENDING_GRACE,
         };
 
         let channel = DelegationChannel { request_rx: req_rx };
@@ -1727,6 +1753,11 @@ impl McpCallbackServer {
     /// v0e: opt-in auto-merge/PR on durable epic completion.
     pub fn set_auto_merge_approved_plans(&mut self, enabled: bool) {
         self.auto_merge_approved_plans = enabled;
+    }
+
+    /// Configure startup quarantine grace for stale `spur:plan-pending` epics.
+    pub fn set_plan_pending_grace(&mut self, grace: std::time::Duration) {
+        self.plan_pending_grace = grace;
     }
 
     /// Spawn `run_plan` for an ephemeral plan (no epic_id). Persisted plans
@@ -2102,6 +2133,9 @@ impl McpCallbackServer {
                 .is_ok()
                 && pm.advanced().is_some()
             {
+                self.sweep_stale_pending_plans_on_startup(Arc::clone(pm))
+                    .await
+                    .context("failed to sweep stale pending plans before startup")?;
                 let has_rev1_metadata =
                     !any_open_epic_lacks_rev1_metadata(pm, self.feature_gate.as_ref()).await?;
                 let mode = if legacy_reclaim_needed(has_rev1_metadata) {
@@ -3090,6 +3124,7 @@ impl McpCallbackServer {
             offset: None,
             labels,
             since: None,
+            include_closed: false,
         };
 
         match pm.list_issues(filter).await {
@@ -4459,6 +4494,172 @@ impl McpCallbackServer {
         }
 
         Ok(())
+    }
+
+    async fn sweep_stale_pending_plans_on_startup(
+        &self,
+        pm: Arc<spur_pm::PmService>,
+    ) -> anyhow::Result<()> {
+        let pending_epics = pm
+            .list_issues(spur_pm::IssueFilter {
+                labels: vec![crate::plan::labels::PLAN_PENDING.to_string()],
+                status: Some("open".to_string()),
+                issue_type: Some("epic".to_string()),
+                limit: Some(1_000),
+                ..Default::default()
+            })
+            .await?;
+        if pending_epics.is_empty() {
+            return Ok(());
+        }
+
+        let now = chrono::Utc::now();
+        let grace = chrono::Duration::from_std(self.plan_pending_grace)
+            .unwrap_or_else(|_| chrono::Duration::hours(1));
+        for summary in pending_epics {
+            let epic = pm.get_issue(&summary.id).await?;
+            let age = now.signed_duration_since(epic.created_at);
+            if age < grace {
+                continue;
+            }
+
+            let age_secs = age.num_seconds();
+            let plan_id = epic
+                .labels
+                .iter()
+                .find_map(|label| crate::plan::labels::parse_plan_id(label))
+                .map(str::to_string);
+            let Some(plan_id_value) = plan_id.as_deref() else {
+                self.emit_plan_pending_sweep_event(
+                    None,
+                    &epic.id,
+                    "skipped",
+                    0,
+                    age_secs,
+                    "pending epic has no spur:plan-id label",
+                );
+                continue;
+            };
+
+            let children = self
+                .list_plan_task_issues_for_pending_sweep(pm.as_ref(), plan_id_value)
+                .await?;
+            if children.iter().any(|child| child.status != "open") {
+                self.emit_plan_pending_sweep_event(
+                    plan_id.clone(),
+                    &epic.id,
+                    "skipped",
+                    children.len() as u32,
+                    age_secs,
+                    "at least one child is not open",
+                );
+                continue;
+            }
+
+            let comment = format!(
+                "SPUR startup sweep quarantined stale pending plan `{}` (epic `{}`): graph stayed `{}` for {}s without flipping to `{}`. Children quarantined: {}.",
+                plan_id_value,
+                epic.id,
+                crate::plan::labels::PLAN_PENDING,
+                age_secs,
+                crate::plan::labels::PLAN_COMPLETE,
+                children.len()
+            );
+            for child in &children {
+                pm.update_issue(
+                    &child.id,
+                    IssueUpdate {
+                        status: Some("cancelled".to_string()),
+                        comment: Some(comment.clone()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to quarantine stale pending-plan child '{}'",
+                        child.id
+                    )
+                })?;
+            }
+            pm.update_issue(
+                &epic.id,
+                IssueUpdate {
+                    status: Some("cancelled".to_string()),
+                    comment: Some(comment),
+                    remove_labels: vec![crate::plan::labels::PLAN_PENDING.to_string()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .with_context(|| {
+                format!("failed to quarantine stale pending-plan epic '{}'", epic.id)
+            })?;
+
+            self.emit_plan_pending_sweep_event(
+                plan_id,
+                &epic.id,
+                "quarantined",
+                children.len() as u32,
+                age_secs,
+                "stale pending plan exceeded grace",
+            );
+        }
+
+        Ok(())
+    }
+
+    async fn list_plan_task_issues_for_pending_sweep(
+        &self,
+        pm: &spur_pm::PmService,
+        plan_id: &str,
+    ) -> anyhow::Result<Vec<spur_pm::Issue>> {
+        let summaries = pm
+            .list_issues(IssueFilter {
+                labels: vec![crate::plan::labels::plan_id(plan_id)],
+                issue_type: Some("task".to_string()),
+                include_closed: true,
+                limit: Some(1_000),
+                ..Default::default()
+            })
+            .await?;
+
+        let mut issues = Vec::with_capacity(summaries.len());
+        for summary in summaries {
+            issues.push(pm.get_issue(&summary.id).await?);
+        }
+        Ok(issues)
+    }
+
+    fn emit_plan_pending_sweep_event(
+        &self,
+        plan_id: Option<String>,
+        epic_id: &str,
+        action: &str,
+        child_count: u32,
+        age_secs: i64,
+        reason: &str,
+    ) {
+        tracing::warn!(
+            target: "spur.plan_pending_sweep",
+            plan_id = plan_id.as_deref().unwrap_or(""),
+            %epic_id,
+            %action,
+            child_count,
+            age_secs,
+            %reason,
+            "startup pending-plan sweep action"
+        );
+        if let Some(sink) = self.event_sink.as_deref() {
+            sink.emit(spur_acp::SpurEventBody::PlanPendingSweep {
+                plan_id,
+                epic_id: epic_id.to_string(),
+                action: action.to_string(),
+                child_count,
+                age_secs,
+                reason: reason.to_string(),
+            });
+        }
     }
 
     async fn reclaim_persisted_plans_on_startup(
@@ -6565,7 +6766,7 @@ mod reconciler_fast_forward_tests {
         ];
 
         let plan_ids = super::discover_plan_ids(&issues);
-        assert_eq!(plan_ids, vec!["plan-1".to_string(), "plan-2".to_string()]);
+        assert_eq!(plan_ids, vec!["plan-1".to_string()]);
     }
 
     #[test]

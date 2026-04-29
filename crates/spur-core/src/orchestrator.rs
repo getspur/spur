@@ -1861,6 +1861,9 @@ impl Orchestrator {
         mcp_server.set_reconciler_enabled(reconciler_enabled, None);
         mcp_server.set_repo_root(self.repo_root.clone());
         mcp_server.set_auto_merge_approved_plans(self.config.spur.auto_merge_approved_plans);
+        mcp_server.set_plan_pending_grace(std::time::Duration::from_secs(
+            self.config.spur.plan_pending_grace_secs,
+        ));
 
         let mcp_server = Arc::new(mcp_server);
         let (mcp_url, mcp_handle) = mcp_server
@@ -3502,6 +3505,9 @@ impl Orchestrator {
         mcp_server.set_reconciler_enabled(reconciler_enabled, None);
         mcp_server.set_repo_root(self.repo_root.clone());
         mcp_server.set_auto_merge_approved_plans(self.config.spur.auto_merge_approved_plans);
+        mcp_server.set_plan_pending_grace(std::time::Duration::from_secs(
+            self.config.spur.plan_pending_grace_secs,
+        ));
 
         let mcp_server = Arc::new(mcp_server);
         let (mcp_url, mcp_handle) = mcp_server
@@ -3760,6 +3766,9 @@ impl Orchestrator {
             self.config.delegation.inline_wait_ms,
         ));
         mcp_server.set_repo_root(self.repo_root.clone());
+        mcp_server.set_plan_pending_grace(std::time::Duration::from_secs(
+            self.config.spur.plan_pending_grace_secs,
+        ));
 
         let mcp_server = Arc::new(mcp_server);
         let (mcp_url, mcp_handle) = mcp_server

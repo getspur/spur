@@ -271,6 +271,9 @@ impl IssueTracker for GitHubAdapter {
             };
             args.push("--state".into());
             args.push(state.to_string());
+        } else if filter.include_closed {
+            args.push("--state".into());
+            args.push("all".into());
         }
 
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
