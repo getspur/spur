@@ -1,7 +1,7 @@
 use spur_bot::state::{BindingState, BotStateStore, PersistedBotState, PersistedThreadRecord};
 
-#[test]
-fn persisted_state_round_trips() {
+#[tokio::test]
+async fn persisted_state_round_trips() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("state.json");
     let store = BotStateStore::new(path.clone());
@@ -21,7 +21,7 @@ fn persisted_state_round_trips() {
         },
     );
 
-    store.save(&expected).unwrap();
+    store.save(&expected).await.unwrap();
     let loaded = store.load().unwrap();
 
     assert_eq!(loaded, expected);
@@ -86,8 +86,8 @@ fn legacy_single_binding_loads_without_data_loss() {
     assert_eq!(only.brain.as_deref(), Some("kimi"));
 }
 
-#[test]
-fn registry_round_trips_archived_and_live_threads() {
+#[tokio::test]
+async fn registry_round_trips_archived_and_live_threads() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("state.json");
     let store = BotStateStore::new(path.clone());
@@ -121,7 +121,7 @@ fn registry_round_trips_archived_and_live_threads() {
         },
     );
 
-    store.save(&state).unwrap();
+    store.save(&state).await.unwrap();
     let loaded = store.load().unwrap();
 
     assert_eq!(loaded, state);

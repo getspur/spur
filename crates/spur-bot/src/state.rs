@@ -120,13 +120,29 @@ impl BotStateStore {
         Ok(migrated)
     }
 
-    pub fn save(&self, state: &PersistedBotState) -> anyhow::Result<()> {
+    pub async fn save(&self, state: &PersistedBotState) -> anyhow::Result<()> {
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)
+            tokio::fs::create_dir_all(parent)
+                .await
                 .with_context(|| format!("creating state parent dir {}", parent.display()))?;
         }
-        std::fs::write(&self.path, serde_json::to_vec_pretty(state)?)
-            .with_context(|| format!("writing state file {}", self.path.display()))?;
+        let json = serde_json::to_vec_pretty(state)?;
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+            let mut tmp = tempfile::NamedTempFile::new_in(dir)
+                .with_context(|| format!("creating temp file in {}", dir.display()))?;
+            std::io::Write::write_all(&mut tmp, &json)
+                .with_context(|| format!("writing state to temp file in {}", dir.display()))?;
+            tmp.as_file()
+                .sync_all()
+                .with_context(|| format!("fsync temp state file in {}", dir.display()))?;
+            tmp.persist(&path)
+                .map_err(|e| anyhow::anyhow!("renaming temp file to {}: {e}", path.display()))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("save task join error: {e}"))??;
         Ok(())
     }
 }
