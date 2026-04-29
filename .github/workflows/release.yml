@@ -112,6 +112,14 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/${{ join(matrix.targets, '-') }}-dist-manifest.json
+      # Option A LicenseSeat bake-in (bd-2j5e.1). Read by `option_env!` in
+      # crates/spur-license/src/build_constants.rs so release builds embed
+      # the publishable credentials from repo secrets rather than the
+      # source-baked default. Lets us rotate `pk_*` without source changes.
+      # Both values are NON-SECRET (Stripe-style publishable convention)
+      # but kept in repo secrets for rotation hygiene.
+      SPUR_BUILD_LICENSESEAT_PUBLISHABLE_KEY: ${{ secrets.SPUR_BUILD_LICENSESEAT_PUBLISHABLE_KEY }}
+      SPUR_BUILD_LICENSESEAT_PRODUCT_SLUG: ${{ secrets.SPUR_BUILD_LICENSESEAT_PRODUCT_SLUG }}
     steps:
       - name: enable windows longpaths
         run: |
@@ -174,6 +182,11 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
+      # Mirror local-artifacts env so any rebuild path under
+      # `dist build --artifacts=global` also picks up the bake-in.
+      # See bd-2j5e.1 for context.
+      SPUR_BUILD_LICENSESEAT_PUBLISHABLE_KEY: ${{ secrets.SPUR_BUILD_LICENSESEAT_PUBLISHABLE_KEY }}
+      SPUR_BUILD_LICENSESEAT_PRODUCT_SLUG: ${{ secrets.SPUR_BUILD_LICENSESEAT_PRODUCT_SLUG }}
     steps:
       - uses: actions/checkout@v6
         with:
