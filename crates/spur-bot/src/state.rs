@@ -1,3 +1,4 @@
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -84,12 +85,18 @@ impl BotStateStore {
             return Ok(PersistedBotState::default());
         }
 
-        let raw = std::fs::read_to_string(&self.path)?;
+        let raw = std::fs::read_to_string(&self.path)
+            .with_context(|| format!("reading state file {}", self.path.display()))?;
         if let Ok(state) = serde_json::from_str::<PersistedBotState>(&raw) {
             return Ok(state);
         }
 
-        let legacy: LegacyPersistedBotState = serde_json::from_str(&raw)?;
+        let legacy: LegacyPersistedBotState = serde_json::from_str(&raw).with_context(|| {
+            format!(
+                "parsing state file {} (current and legacy schemas both failed)",
+                self.path.display()
+            )
+        })?;
         let mut migrated = PersistedBotState {
             operator_chat_id: legacy.operator_chat_id,
             ..PersistedBotState::default()
@@ -113,11 +120,29 @@ impl BotStateStore {
         Ok(migrated)
     }
 
-    pub fn save(&self, state: &PersistedBotState) -> anyhow::Result<()> {
+    pub async fn save(&self, state: &PersistedBotState) -> anyhow::Result<()> {
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("creating state parent dir {}", parent.display()))?;
         }
-        std::fs::write(&self.path, serde_json::to_vec_pretty(state)?)?;
+        let json = serde_json::to_vec_pretty(state)?;
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+            let mut tmp = tempfile::NamedTempFile::new_in(dir)
+                .with_context(|| format!("creating temp file in {}", dir.display()))?;
+            std::io::Write::write_all(&mut tmp, &json)
+                .with_context(|| format!("writing state to temp file in {}", dir.display()))?;
+            tmp.as_file()
+                .sync_all()
+                .with_context(|| format!("fsync temp state file in {}", dir.display()))?;
+            tmp.persist(&path)
+                .map_err(|e| anyhow::anyhow!("renaming temp file to {}: {e}", path.display()))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("save task join error: {e}"))??;
         Ok(())
     }
 }

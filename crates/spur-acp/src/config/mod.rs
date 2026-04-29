@@ -344,6 +344,7 @@ pub struct TelegramBotConfig {
     pub bot_token: Option<String>,
     pub operator_user_id: Option<i64>,
     pub poll_timeout_secs: u64,
+    pub request_timeout_secs: Option<u64>,
     pub draft_streaming: bool,
     pub max_requests_per_second: u32,
 }
@@ -355,6 +356,7 @@ impl Default for TelegramBotConfig {
             bot_token: None,
             operator_user_id: None,
             poll_timeout_secs: 30,
+            request_timeout_secs: None,
             draft_streaming: false,
             max_requests_per_second: 20,
         }

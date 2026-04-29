@@ -20,14 +20,22 @@ impl TelegramSender {
             Self::run_draft_loop(rx, std::time::Duration::from_millis(400), move |update| {
                 let client = client.clone();
                 tokio::spawn(async move {
-                    let _ = client
+                    let draft_id = update.draft_id.clone();
+                    if let Err(err) = client
                         .send_message_draft_to_thread(
                             update.chat_id,
                             update.message_thread_id,
                             &update.draft_id,
                             &update.text,
                         )
-                        .await;
+                        .await
+                    {
+                        tracing::warn!(
+                            error = ?err,
+                            draft_id = %draft_id,
+                            "telegram draft send failed"
+                        );
+                    }
                 });
             })
             .await;
