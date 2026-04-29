@@ -1260,7 +1260,7 @@ pub(super) fn resolve_label(
 
 impl View for SessionPickerView {
     fn handle_key(&mut self, key: KeyEvent, ctx: &super::ViewContext) -> Option<Action> {
-        // 0. Confirm-switch intercepts all keys until y/Enter commits or anything else cancels.
+        // 0. Confirm-switch intercepts all keys until y/Enter commits or cancel keys dismiss.
         if let Some(ref target) = self.confirm_switch {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
@@ -1273,8 +1273,12 @@ impl View for SessionPickerView {
                     self.confirm_switch = None;
                     return Some(out);
                 }
+                KeyCode::Char('u') if key.modifiers.is_empty() => return None,
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.confirm_switch = None;
+                    return None;
+                }
                 _ => {
-                    // n / N / Esc / anything else cancels.
                     self.confirm_switch = None;
                     return None;
                 }
