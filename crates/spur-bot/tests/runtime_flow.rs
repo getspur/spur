@@ -53,7 +53,7 @@ fn test_runtime() -> (
         tokio::spawn(async {}),
     );
     let handle = host.handle();
-    let runtime = BotRuntime::new(store);
+    let runtime = BotRuntime::new(store).unwrap();
     (runtime, handle, user_rx)
 }
 
@@ -125,7 +125,7 @@ async fn unknown_topic_plain_text_auto_registers_and_starts_new_session() {
         tokio::spawn(async {}),
     );
     let handle = host.handle();
-    let mut runtime = BotRuntime::new(store);
+    let mut runtime = BotRuntime::new(store).unwrap();
 
     let renders = runtime
         .handle_chat_text(&handle, 42, Some(777), "hello from a manual topic")
@@ -222,7 +222,7 @@ async fn unknown_topic_resume_auto_registers_and_enters_restore_pending() {
         tokio::spawn(async {}),
     );
     let handle = host.handle();
-    let mut runtime = BotRuntime::new(store);
+    let mut runtime = BotRuntime::new(store).unwrap();
 
     let renders = runtime
         .handle_chat_text(&handle, 42, Some(888), "/resume acp-rebound")
@@ -288,7 +288,7 @@ async fn new_topic_record_is_persisted_before_first_message() {
         tokio::spawn(async {}),
     );
     let handle = host.handle();
-    let mut runtime = BotRuntime::new(store);
+    let mut runtime = BotRuntime::new(store).unwrap();
 
     // /new in the lobby returns CreateTopic and persists the seq bump.
     let renders = runtime
@@ -401,7 +401,7 @@ async fn review_callback_becomes_stale_after_topic_archived_with_preserved_acp_i
         tokio::spawn(async {}),
     );
     let handle = host.handle();
-    let mut runtime = BotRuntime::new(store);
+    let mut runtime = BotRuntime::new(store).unwrap();
     // Topic A owns acp-shared and has a live session spur_acp-shared.
     runtime.activate_topic_binding(42, 77, "Topic A".into(), "acp-shared".into(), "kimi".into());
     // Topic B will take over acp-shared via /resume, forcing Topic A to archive.
@@ -1031,7 +1031,7 @@ async fn first_plain_message_starts_new_session() {
         tokio::spawn(async {}),
     );
     let handle = host.handle();
-    let mut runtime = BotRuntime::new(store);
+    let mut runtime = BotRuntime::new(store).unwrap();
     runtime
         .ensure_topic_record(10_001, 77, "Session 1".into())
         .unwrap();
@@ -1066,7 +1066,7 @@ async fn agent_session_ready_commits_binding_and_persists() {
         tokio::spawn(async {}),
     );
     let handle = host.handle();
-    let mut runtime = BotRuntime::new(store);
+    let mut runtime = BotRuntime::new(store).unwrap();
     runtime
         .ensure_topic_record(42, 77, "Session 1".into())
         .unwrap();
@@ -1135,7 +1135,7 @@ async fn stale_callback_is_reported_cleanly() {
         tokio::spawn(async {}),
     );
     let handle = host.handle();
-    let mut runtime = BotRuntime::new(store);
+    let mut runtime = BotRuntime::new(store).unwrap();
 
     let key = spur_bot::state::ThreadKey::lobby(0);
     let renders = runtime
@@ -1167,7 +1167,7 @@ async fn permission_callback_returns_exact_option_id() {
         tokio::spawn(async {}),
     );
     let handle = host.handle();
-    let mut runtime = BotRuntime::new(store);
+    let mut runtime = BotRuntime::new(store).unwrap();
     let (request, reply_rx) = mk_permission_request();
 
     let (_key, renders) = runtime.handle_permission_request(request).unwrap();
@@ -1205,7 +1205,7 @@ async fn review_prompt_resolves_once_and_siblings_go_stale() {
         tokio::spawn(async {}),
     );
     let handle = host.handle();
-    let mut runtime = BotRuntime::new(store);
+    let mut runtime = BotRuntime::new(store).unwrap();
 
     let (_key, renders) = runtime
         .handle_spur_event(spur_acp::SpurEvent::now(
@@ -1282,7 +1282,7 @@ async fn review_prompt_resolves_once_and_siblings_go_stale() {
 async fn agent_notification_and_turn_complete_renders_final_answer() {
     let dir = tempfile::tempdir().unwrap();
     let store = BotStateStore::new(dir.path().join(".spur/bot/state.json"));
-    let mut runtime = BotRuntime::new(store);
+    let mut runtime = BotRuntime::new(store).unwrap();
     let session = spur_acp::SessionId("spur_1".into());
 
     // Accumulate two chunks.
@@ -1342,7 +1342,7 @@ async fn agent_notification_and_turn_complete_renders_final_answer() {
 async fn brain_error_renders_service_message() {
     let dir = tempfile::tempdir().unwrap();
     let store = BotStateStore::new(dir.path().join(".spur/bot/state.json"));
-    let mut runtime = BotRuntime::new(store);
+    let mut runtime = BotRuntime::new(store).unwrap();
     let session = spur_acp::SessionId("spur_1".into());
 
     // Seed some output so we can verify the buffer is cleared on error.
@@ -1414,7 +1414,7 @@ async fn restore_pending_plain_text_queues_resume_then_message() {
     );
     store.save(&persisted).unwrap();
 
-    let mut runtime = BotRuntime::new(store);
+    let mut runtime = BotRuntime::new(store).unwrap();
 
     // Plain text while RestorePending must trigger ResumeSession, not Message.
     let renders = runtime
