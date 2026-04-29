@@ -44,16 +44,22 @@ pub async fn run_telegram_bot(
     tokio::spawn(async move {
         let _ =
             poll_loop::run_poll_loop(&poll_client, cfg_poll_timeout, poll_cancellation, |batch| {
-                let mut inputs = Vec::new();
-                for update in batch {
-                    if let Some(input) = router::normalize_update(&update, operator_user_id) {
-                        inputs.push(input);
+                let update_tx = update_tx.clone();
+                async move {
+                    let mut inputs = Vec::new();
+                    for update in batch {
+                        if let Some(input) = router::normalize_update(&update, operator_user_id) {
+                            inputs.push(input);
+                        }
                     }
+                    if !inputs.is_empty() {
+                        update_tx
+                            .send(inputs)
+                            .await
+                            .map_err(|_| anyhow::anyhow!("update channel closed"))?;
+                    }
+                    Ok(())
                 }
-                if !inputs.is_empty() {
-                    update_tx.try_send(inputs)?;
-                }
-                Ok(())
             })
             .await;
     });
