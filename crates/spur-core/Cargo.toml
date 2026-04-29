@@ -47,6 +47,7 @@ tracing-test = { version = "0.2", features = ["no-env-filter"] }
 spur-license = { workspace = true, features = ["test-support"] }
 proptest = "1"
 fs4 = "0.13"
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [[test]]
 name = "shutdown_mcp_server_bounded"
@@ -67,3 +68,7 @@ required-features = ["test-support"]
 name = "retry_reflexion"
 path = "tests/retry_reflexion.rs"
 required-features = ["test-support"]
+
+[[bench]]
+name = "event_replay"
+harness = false
