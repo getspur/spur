@@ -6,6 +6,7 @@ use crate::commands::{parse_chat_input, BotCommand, ParsedChatInput};
 use crate::state::{
     BindingState, BotStateStore, PersistedBotState, PersistedThreadRecord, ThreadKey,
 };
+use crate::telegram::format::{split_for_final_answer, TELEGRAM_TEXT_MAX_UTF16_UNITS};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptButton {
@@ -675,7 +676,10 @@ impl BotRuntime {
                     .remove(&session)
                     .filter(|s| !s.trim().is_empty())
                 {
-                    vec![RuntimeRender::FinalAnswer { text }]
+                    split_for_final_answer(&text, TELEGRAM_TEXT_MAX_UTF16_UNITS)
+                        .into_iter()
+                        .map(|text| RuntimeRender::FinalAnswer { text })
+                        .collect()
                 } else {
                     vec![]
                 };
