@@ -491,4 +491,113 @@ mod tests {
         assert_eq!(stats.events_applied, 2);
         assert_eq!(stats.malformed_lines, 1);
     }
+
+    #[test]
+    fn replay_events_skips_malformed_json_continues() {
+        use spur_acp::domain::events::{SpurEvent, SpurEventBody};
+        use spur_acp::SessionId;
+        use std::time::SystemTime;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let path = dir.join("100-1000-0.ndjson");
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&path).unwrap();
+            // Valid line, then garbage, then valid line.
+            let ev1 = SpurEvent {
+                occurred_at: SystemTime::UNIX_EPOCH,
+                seq: 0,
+                body: SpurEventBody::TurnComplete {
+                    session: SessionId("a".into()),
+                },
+            };
+            let ev2 = SpurEvent {
+                occurred_at: SystemTime::UNIX_EPOCH,
+                seq: 1,
+                body: SpurEventBody::TurnComplete {
+                    session: SessionId("b".into()),
+                },
+            };
+            writeln!(f, "{}", serde_json::to_string(&ev1).unwrap()).unwrap();
+            writeln!(f, "{{not valid json}}").unwrap();
+            writeln!(f, "{}", serde_json::to_string(&ev2).unwrap()).unwrap();
+        }
+
+        let cfg = ReplayConfig {
+            events_dir: dir.to_path_buf(),
+            replay_horizon: Duration::from_secs(u64::MAX / 2),
+            skip_pid: None,
+            max_line_bytes: 8 * 1024 * 1024,
+        };
+        let mut count = 0u32;
+        let stats = replay_events(&cfg, |_ev| count += 1).unwrap();
+
+        assert_eq!(count, 2);
+        assert_eq!(stats.events_applied, 2);
+        assert_eq!(stats.malformed_lines, 1);
+    }
+
+    #[test]
+    fn replay_events_horizon_filter_drops_old_events() {
+        use spur_acp::domain::events::{SpurEvent, SpurEventBody};
+        use spur_acp::SessionId;
+        use std::time::SystemTime;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let path = dir.join("100-1000-0.ndjson");
+
+        let now = SystemTime::now();
+        let very_old = now - Duration::from_secs(365 * 86400); // 1 year ago
+        let recent = now - Duration::from_secs(60);
+
+        let old_ev = SpurEvent {
+            occurred_at: very_old,
+            seq: 0,
+            body: SpurEventBody::TurnComplete {
+                session: SessionId("old".into()),
+            },
+        };
+        let new_ev = SpurEvent {
+            occurred_at: recent,
+            seq: 1,
+            body: SpurEventBody::TurnComplete {
+                session: SessionId("new".into()),
+            },
+        };
+        write_ndjson(&path, &[old_ev, new_ev]);
+
+        let cfg = ReplayConfig {
+            events_dir: dir.to_path_buf(),
+            replay_horizon: Duration::from_secs(7 * 86400),
+            skip_pid: None,
+            max_line_bytes: 8 * 1024 * 1024,
+        };
+        let mut sessions: Vec<String> = Vec::new();
+        let stats = replay_events(&cfg, |ev| {
+            if let SpurEventBody::TurnComplete { session } = &ev.body {
+                sessions.push(session.0.clone());
+            }
+        })
+        .unwrap();
+
+        assert_eq!(sessions, vec!["new".to_string()]);
+        assert_eq!(stats.events_applied, 1);
+        assert_eq!(stats.events_skipped_horizon, 1);
+    }
+
+    #[test]
+    fn replay_events_returns_empty_stats_for_missing_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nonexistent = tmp.path().join("does-not-exist");
+        let cfg = ReplayConfig {
+            events_dir: nonexistent,
+            skip_pid: None,
+            ..ReplayConfig::default()
+        };
+        let stats = replay_events(&cfg, |_| {}).unwrap();
+        assert_eq!(stats.files_read, 0);
+        assert_eq!(stats.events_applied, 0);
+    }
 }
