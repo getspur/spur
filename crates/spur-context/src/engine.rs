@@ -23,12 +23,19 @@ use tracing;
 
 #[cfg(feature = "duckdb")]
 const SCHEMA_SQL: &str = include_str!("sql/schema.sql");
+#[cfg(feature = "duckdb")]
 const DAILY_REPORT_SQL: &str = include_str!("sql/daily_report.sql");
+#[cfg(feature = "duckdb")]
 const WEEKLY_REPORT_SQL: &str = include_str!("sql/weekly_report.sql");
+#[cfg(feature = "duckdb")]
 const MONTHLY_REPORT_SQL: &str = include_str!("sql/monthly_report.sql");
+#[cfg(feature = "duckdb")]
 const MODEL_BREAKDOWN_SQL: &str = include_str!("sql/model_breakdown.sql");
+#[cfg(feature = "duckdb")]
 const PROJECT_BREAKDOWN_SQL: &str = include_str!("sql/project_breakdown.sql");
+#[cfg(feature = "duckdb")]
 const SESSION_DETAIL_SQL: &str = include_str!("sql/session_detail.sql");
+#[cfg(feature = "duckdb")]
 const LIVE_SNAPSHOT_SQL: &str = include_str!("sql/live_session_snapshot.sql");
 
 /// Cost-enrichment view.
@@ -1986,6 +1993,7 @@ struct OpenCodeRow {
 
 /// Intermediate row shape used when copying Kimi _usage events from JSONL
 /// into DuckDB via the appender. Not part of the public API.
+#[cfg(feature = "duckdb")]
 #[derive(Debug)]
 struct KimiRow {
     timestamp_ms: i64,

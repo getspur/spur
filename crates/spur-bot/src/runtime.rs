@@ -212,15 +212,18 @@ impl BotRuntime {
         if self.threads.contains_key(&key) {
             return Ok(());
         }
-        self.threads.insert(key.clone(), ThreadRecord {
-            topic_name,
-            archived: false,
-            binding: BindingState::Unbound,
-            acp_session_id: None,
-            brain: None,
-            live_session: None,
-            archived_previous: Vec::new(),
-        });
+        self.threads.insert(
+            key.clone(),
+            ThreadRecord {
+                topic_name,
+                archived: false,
+                binding: BindingState::Unbound,
+                acp_session_id: None,
+                brain: None,
+                live_session: None,
+                archived_previous: Vec::new(),
+            },
+        );
         if let Err(err) = self.state_store.save(&self.persistable_state()).await {
             self.threads.remove(&key);
             return Err(err);

@@ -208,7 +208,9 @@ async fn process_input(
 
             for render in &all_renders {
                 if let crate::runtime::RuntimeRender::CreateTopic { topic_name } = render {
-                    let topic = client.create_forum_topic(chat_id, topic_name.clone()).await?;
+                    let topic = client
+                        .create_forum_topic(chat_id, topic_name.clone())
+                        .await?;
                     runtime
                         .ensure_topic_record(chat_id, topic.message_thread_id, topic_name.clone())
                         .await?;
@@ -249,14 +251,8 @@ async fn process_input(
             let renders = runtime
                 .handle_callback(handle, &key, &query_id, &token)
                 .await?;
-            render::render_batch_to_thread(
-                client,
-                sender,
-                chat_id,
-                message_thread_id,
-                renders,
-            )
-            .await
+            render::render_batch_to_thread(client, sender, chat_id, message_thread_id, renders)
+                .await
         }
     }
 }
@@ -294,14 +290,8 @@ async fn process_permission(
     request: spur_acp::types::PermissionRequest,
 ) -> anyhow::Result<()> {
     let (key, renders) = runtime.handle_permission_request(request)?;
-    render::render_batch_to_thread(
-        client,
-        sender,
-        key.chat_id,
-        key.message_thread_id,
-        renders,
-    )
-    .await
+    render::render_batch_to_thread(client, sender, key.chat_id, key.message_thread_id, renders)
+        .await
 }
 
 #[cfg(test)]

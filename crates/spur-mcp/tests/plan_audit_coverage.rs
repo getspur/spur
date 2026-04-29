@@ -228,7 +228,8 @@ async fn plan_audit_coverage_all_four_sentinels() {
             ..Default::default()
         },
     )
-    .await;
+    .await
+    .expect("emit completion audit");
 
     // ── 4. Approval — via handle_review_task ────────────────────────────────
     let entry = PlanTaskEntry {
@@ -490,6 +491,7 @@ async fn completion_success_writes_ready_for_review_and_completion_audit() {
             result_summary: Some("worker finished cleanly".into()),
             ..Default::default()
         },
+        false,
     )
     .await
     .expect("persist completion");
@@ -559,6 +561,7 @@ async fn completion_failed_closes_issue_and_emits_completion_audit() {
             result_summary: Some("worker failed".into()),
             ..Default::default()
         },
+        false,
     )
     .await
     .expect("persist completion");
@@ -635,6 +638,7 @@ async fn completion_cancelled_closes_issue_and_emits_completion_audit() {
             result_summary: Some("worker cancelled".into()),
             ..Default::default()
         },
+        false,
     )
     .await
     .expect("persist completion");
