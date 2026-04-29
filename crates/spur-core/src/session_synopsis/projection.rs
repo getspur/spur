@@ -65,6 +65,12 @@ impl SessionSynopsisProjection {
     }
 
     /// Fold an event into the projection. Idempotent on irrelevant variants.
+    ///
+    /// **Not idempotent under double-apply on `AgentNotification(UserMessageChunk)`**:
+    /// the chunk text is appended to the pending buffer, so re-applying the same
+    /// chunk doubles the buffer. The replay model in
+    /// `crates/spur-core/src/event_replay.rs` is structurally guarded against
+    /// double-apply via PID-filtered file selection.
     pub fn apply(&mut self, event: &spur_acp::SpurEvent) {
         use agent_client_protocol::schema::SessionUpdate;
         use spur_acp::domain::events::SpurEventBody;
