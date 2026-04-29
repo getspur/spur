@@ -1627,11 +1627,6 @@ impl App {
                     return;
                 }
 
-                if self.is_undo_key(key) && self.handle_undo() {
-                    self.dirty = true;
-                    return;
-                }
-
                 // Quit-confirm dialog takes priority: it captures every key.
                 if self.quit_confirm_visible {
                     if is_quit_chord(key) {
@@ -1723,6 +1718,10 @@ impl App {
 
                 // Help overlay intercepts ? (toggle) and Esc (close) before views.
                 if self.help_visible {
+                    if self.is_undo_key(key) {
+                        self.flash_hint_short("close help to undo");
+                        return;
+                    }
                     match key.code {
                         KeyCode::Char('?') | KeyCode::Esc => {
                             self.help_visible = false;
@@ -1782,6 +1781,14 @@ impl App {
                     && matches!(key.code, KeyCode::Char('a'))
                 {
                     self.process_action(Action::OpenInsights);
+                    return;
+                }
+
+                // === All overlay/modal/help/global-shortcut owners run above this line. ===
+                // === Tombstone undo is the residual key-owner: fires only when no       ===
+                // === narrower visible context wants u/Ctrl+Z.                            ===
+                if self.is_undo_key(key) && self.handle_undo() {
+                    self.dirty = true;
                     return;
                 }
 
