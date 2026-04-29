@@ -160,7 +160,10 @@ fn kill_9_spur_then_reboot_reaps_orphan() {
 
     // Step 4: confirm the orphan is still alive.
     let alive = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pgid), None).is_ok();
-    assert!(alive, "synthetic orphan pgid {pgid} unexpectedly dead before sweep");
+    assert!(
+        alive,
+        "synthetic orphan pgid {pgid} unexpectedly dead before sweep"
+    );
 
     // Step 5: boot spur with `--exit-after-sweep`. The sweep runs
     // unconditionally at the top of `run()` (before the subcommand match),
@@ -174,7 +177,10 @@ fn kill_9_spur_then_reboot_reaps_orphan() {
         .stderr(Stdio::null())
         .status()
         .expect("spawn spur tui --exit-after-sweep");
-    assert!(spur_status.success(), "spur exited non-zero: {spur_status:?}");
+    assert!(
+        spur_status.success(),
+        "spur exited non-zero: {spur_status:?}"
+    );
 
     // Step 6: wait for the child to actually exit. We're its parent, so
     // the kernel keeps the SIGKILL'd child as a zombie in our process

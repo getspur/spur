@@ -51,8 +51,7 @@ fn resolve_target_path(repo_root: &Path, global: bool) -> Result<PathBuf> {
         if !path.exists() {
             std::fs::create_dir_all(path.parent().unwrap())
                 .with_context(|| format!("create {}", path.parent().unwrap().display()))?;
-            std::fs::write(&path, "")
-                .with_context(|| format!("create {}", path.display()))?;
+            std::fs::write(&path, "").with_context(|| format!("create {}", path.display()))?;
         }
         return Ok(path);
     }

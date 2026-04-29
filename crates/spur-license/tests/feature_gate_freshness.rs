@@ -58,7 +58,10 @@ async fn activate_pro_state_refreshes_cached_gate() {
     assert!(!cached.has(FeatureKey::BLOB_PRO_NAMESPACE_DELETION));
 
     fake.push_activate_result(Ok(pro_state()));
-    license.activate("PRO_KEY").await.expect("activate should succeed");
+    license
+        .activate("PRO_KEY")
+        .await
+        .expect("activate should succeed");
 
     assert!(cached.has(FeatureKey::BLOB_PRO_NAMESPACE_DELETION));
 }
@@ -73,7 +76,10 @@ async fn deactivate_refreshes_cached_gate_to_inactive() {
     assert!(cached.has(FeatureKey::BLOB_PRO_NAMESPACE_DELETION));
 
     fake.push_deactivate_result(Ok(LicenseState::inactive("user requested")));
-    license.deactivate().await.expect("deactivate should succeed");
+    license
+        .deactivate()
+        .await
+        .expect("deactivate should succeed");
 
     assert!(
         !cached.has(FeatureKey::BLOB_PRO_NAMESPACE_DELETION),

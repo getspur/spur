@@ -309,8 +309,7 @@ pub struct App {
     #[cfg(feature = "analytics")]
     live_cost_cache: Option<std::sync::Arc<RwLock<LiveCostCache>>>,
     #[cfg(feature = "analytics")]
-    live_cost_active_sessions:
-        Option<std::sync::Arc<RwLock<std::collections::HashSet<SessionId>>>>,
+    live_cost_active_sessions: Option<std::sync::Arc<RwLock<std::collections::HashSet<SessionId>>>>,
     #[cfg(feature = "analytics")]
     live_cost_signal_tx: Option<mpsc::Sender<()>>,
     #[cfg(feature = "analytics")]
@@ -394,7 +393,11 @@ struct InsightsInitState {
 /// by the App's view-render dispatch (the global header/footer rows are
 /// already drawn around it).
 #[cfg(feature = "analytics")]
-fn render_insights_init_placeholder(frame: &mut Frame, area: ratatui::layout::Rect, started_at: Instant) {
+fn render_insights_init_placeholder(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    started_at: Instant,
+) {
     use ratatui::{
         layout::Alignment,
         style::{Color, Modifier, Style},
@@ -425,10 +428,7 @@ fn render_insights_init_placeholder(frame: &mut Frame, area: ratatui::layout::Re
         Line::from(""),
         hint,
     ];
-    frame.render_widget(
-        Paragraph::new(body).alignment(Alignment::Center),
-        area,
-    );
+    frame.render_widget(Paragraph::new(body).alignment(Alignment::Center), area);
 }
 
 /// Cold init pipeline for the analytics engine. Blocks (DuckDB I/O +
@@ -1481,9 +1481,7 @@ impl App {
                         .lineage
                         .node(node_id)
                         .and_then(|node| node.current_attempt())
-                        .is_some_and(|attempt| {
-                            guard.by_session.contains_key(&attempt.session_id)
-                        });
+                        .is_some_and(|attempt| guard.by_session.contains_key(&attempt.session_id));
                 }
                 self.lineage
                     .nodes()

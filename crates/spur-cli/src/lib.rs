@@ -22,16 +22,13 @@ pub fn init_tracing_for_test(
     let log_dir = repo_root.join(".spur").join("logs");
     std::fs::create_dir_all(&log_dir)?;
 
-    let env_filter = tracing_subscriber::EnvFilter::new(
-        "warn,spur_core::orchestrator=info",
-    );
+    let env_filter = tracing_subscriber::EnvFilter::new("warn,spur_core::orchestrator=info");
 
     let rotator = log_writer::build_rotator(&log_dir, 8_388_608, 3);
-    let (non_blocking, guard) =
-        tracing_appender::non_blocking::NonBlockingBuilder::default()
-            .lossy(true)
-            .buffered_lines_limit(8_192)
-            .finish(rotator);
+    let (non_blocking, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+        .lossy(true)
+        .buffered_lines_limit(8_192)
+        .finish(rotator);
 
     tracing_subscriber::registry()
         .with(env_filter)
