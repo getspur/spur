@@ -176,11 +176,11 @@ dispatch = "prompt_text"
 
 
 # ── kimi ──────────────────────────────────────────────────────────
-# `-y` must precede `acp` (kimi top-level flag); covers file tools but not shell — L2 (perm_tx=None → auto_approve) handles the residual. R3 warn is intentional.
+# `-y --afk` must precede `acp`. `-y` covers file tools but not shell exec (L2 perm_tx=None → auto_approve handles residual). `--afk` is required on kimi 1.40.0+ — `-y` alone silences agent_message_chunk in ACP mode. R3 warn is intentional.
 [[agents.entries]]
 name = "kimi"
 command = "kimi"
-args = ["-y", "acp"]
+args = ["-y", "--afk", "acp"]
 transport = "acp"
 kind = "generic"
 role = "both"

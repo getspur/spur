@@ -209,11 +209,13 @@ class AcpClient:
 
 # ── Probe driver ───────────────────────────────────────────────────────────
 
-def run_probe(yolo: bool, prompt: str, timeout: float,
+def run_probe(yolo: bool, afk: bool, prompt: str, timeout: float,
               raw_log_path: Optional[Path], quiet: bool) -> int:
     cmd = ["kimi"]
     if yolo:
         cmd.append("-y")
+    if afk:
+        cmd.append("--afk")
     cmd.append("acp")
 
     print("=" * 72)
@@ -464,7 +466,9 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--yolo", "-y", action="store_true",
-                        help="Spawn `kimi -y acp` (yolo / auto-approve).")
+                        help="Spawn `kimi -y acp` (yolo / auto-approve tool calls).")
+    parser.add_argument("--afk", action="store_true",
+                        help="Spawn with `--afk` (1.40.0+: auto-dismiss AskUserQuestion).")
     parser.add_argument("--prompt", default=DEFAULT_PROMPT,
                         help="Prompt to send (default forces a tool call).")
     parser.add_argument("--timeout", type=float, default=180.0,
@@ -484,6 +488,7 @@ def main() -> int:
 
     return run_probe(
         yolo=args.yolo,
+        afk=args.afk,
         prompt=args.prompt,
         timeout=args.timeout,
         raw_log_path=raw_log_path,
