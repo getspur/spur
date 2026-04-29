@@ -27,7 +27,7 @@ fn write_fixture(dir: &Path) {
         ));
         let mut f = std::fs::File::create(&path).unwrap();
         for i in 0..per_file {
-            if event_idx % MALFORMED_RATIO as u64 == 0 && event_idx > 0 {
+            if event_idx.is_multiple_of(MALFORMED_RATIO as u64) && event_idx > 0 {
                 writeln!(f, "{{not valid json}}").unwrap();
             } else {
                 let ev = SpurEvent {
