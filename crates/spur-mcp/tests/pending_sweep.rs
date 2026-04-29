@@ -246,6 +246,16 @@ async fn startup_sweep_resumes_after_prior_partial_child_quarantine() {
         assert_eq!(child.status, pm.closed_status(), "child {child_id}");
         assert_has_sweep_comment(pm.as_ref(), child_id).await;
     }
+
+    let child_0_sweep_comments = comment_texts(pm.as_ref(), &plan.child_ids[0])
+        .await
+        .into_iter()
+        .filter(|body| body.starts_with(SWEEP_COMMENT_PREFIX))
+        .count();
+    assert_eq!(
+        child_0_sweep_comments, 1,
+        "child 0 must not be re-commented by the resumption sweep"
+    );
 }
 
 #[tokio::test]
