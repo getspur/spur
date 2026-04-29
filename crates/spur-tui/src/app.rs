@@ -4058,10 +4058,29 @@ pub async fn run_tui_with_license(
     let (_shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
-        let mut sighup = signal(SignalKind::hangup()).expect("install SIGHUP handler");
-        let mut sigquit = signal(SignalKind::quit()).expect("install SIGQUIT handler");
+        use tokio::signal::unix::{signal, Signal, SignalKind};
+        // Graceful fallback on signal-registration failure: log + skip the
+        // handler instead of panicking. A panic here would exit AFTER raw
+        // mode + alt screen are entered, leaving the user with a corrupt
+        // terminal (no echo, stuck alt screen). Rare in practice but
+        // possible in sandboxed / fork-restricted / signalfd-disabled
+        // environments. (bd-2j5e.5)
+        fn install(kind: SignalKind, label: &str) -> Option<Signal> {
+            match signal(kind) {
+                Ok(s) => Some(s),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        signal = %label,
+                        "failed to install signal handler; this signal will not gracefully shut down the TUI"
+                    );
+                    None
+                }
+            }
+        }
+        let mut sigterm = install(SignalKind::terminate(), "SIGTERM");
+        let mut sighup = install(SignalKind::hangup(), "SIGHUP");
+        let mut sigquit = install(SignalKind::quit(), "SIGQUIT");
         let tx = _shutdown_tx.clone();
         tokio::spawn(async move {
             loop {
@@ -4073,9 +4092,24 @@ pub async fn run_tui_with_license(
                         }
                         let _ = tx.try_send(());
                     }
-                    _ = sigterm.recv() => { let _ = tx.try_send(()); }
-                    _ = sighup.recv()  => { let _ = tx.try_send(()); }
-                    _ = sigquit.recv() => { let _ = tx.try_send(()); }
+                    _ = async {
+                        match sigterm.as_mut() {
+                            Some(s) => { s.recv().await; }
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => { let _ = tx.try_send(()); }
+                    _ = async {
+                        match sighup.as_mut() {
+                            Some(s) => { s.recv().await; }
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => { let _ = tx.try_send(()); }
+                    _ = async {
+                        match sigquit.as_mut() {
+                            Some(s) => { s.recv().await; }
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => { let _ = tx.try_send(()); }
                 }
             }
         });
