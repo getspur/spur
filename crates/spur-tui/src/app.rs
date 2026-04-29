@@ -4373,6 +4373,7 @@ impl App {
     }
 }
 
+#[cfg(test)]
 mod license_gate_refresh_tests {
     use super::*;
 

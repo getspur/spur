@@ -203,7 +203,9 @@ impl SessionPickerView {
 
     #[cfg(any(test, debug_assertions))]
     pub fn rename_buffer_for_test(&self) -> Option<&str> {
-        self.rename_state.as_ref().map(|state| state.buffer.as_str())
+        self.rename_state
+            .as_ref()
+            .map(|state| state.buffer.as_str())
     }
 
     pub fn is_preview_visible(&self) -> bool {

@@ -57,10 +57,7 @@ fn seeded_picker_app() -> App {
         &mut app,
         SpurEvent::now(SpurEventBody::SessionsListed {
             agent: "codex".into(),
-            sessions: vec![
-                session("session-1", "alpha"),
-                session("session-2", "beta"),
-            ],
+            sessions: vec![session("session-1", "alpha"), session("session-2", "beta")],
         }),
     );
     assert_eq!(app.current_view_for_test(), &ViewId::SessionPicker);
@@ -150,19 +147,17 @@ fn session_picker_confirm_switch_swallows_u() {
     app.set_session_picker_current_session_has_draft_for_test(Some("session-1".into()));
 
     dispatch_key(&mut app, key('n'));
-    assert!(
-        app.session_picker_for_test()
-            .expect("picker should be active")
-            .is_confirm_switch_visible()
-    );
+    assert!(app
+        .session_picker_for_test()
+        .expect("picker should be active")
+        .is_confirm_switch_visible());
 
     dispatch_key(&mut app, key('u'));
 
-    assert!(
-        app.session_picker_for_test()
-            .expect("picker should be active")
-            .is_confirm_switch_visible()
-    );
+    assert!(app
+        .session_picker_for_test()
+        .expect("picker should be active")
+        .is_confirm_switch_visible());
     assert!(app.tombstones_for_test().has(&view));
 }
 
@@ -171,10 +166,7 @@ fn collision_modal_swallows_u() {
     let mut app = App::new_for_tests();
     let view = ViewId::Dashboard;
     install_tombstone(&mut app, view.clone());
-    app.set_collision_modal_for_test(
-        "session-1",
-        spur_acp::session_lock::HolderInfo::default(),
-    );
+    app.set_collision_modal_for_test("session-1", spur_acp::session_lock::HolderInfo::default());
 
     dispatch_key(&mut app, key('u'));
 
@@ -204,11 +196,10 @@ fn help_open_u_flashes_close_help_to_undo() {
 
     dispatch_key(&mut app, key('u'));
 
-    assert!(
-        app.transient_hint_text()
-            .unwrap_or("")
-            .contains("close help to undo")
-    );
+    assert!(app
+        .transient_hint_text()
+        .unwrap_or("")
+        .contains("close help to undo"));
     assert!(app.is_help_visible_for_test());
     assert!(app.tombstones_for_test().has(&view));
 }
