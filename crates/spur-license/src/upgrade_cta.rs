@@ -8,9 +8,10 @@
 //! capability-tease modal, future `spur-mcp` JSON denial response)
 //! can reuse the same formatter without circular crate dependencies.
 //!
-//! Plan C Tier 1 (CLI surface) → Tier 2 (TUI modal surface) →
-//! Tier 3 (trial JWT CTA refinements). All three tiers consume
-//! [`format_upgrade_cta`].
+//! Plan C Tier 1 (CLI surface) → Tier 2 (TUI modal surface).
+//! Both tiers consume [`format_upgrade_cta`]. (The original Plan C
+//! Tier 3 — trial JWT CTA refinements — is wontfix-by-strategy per
+//! the 2026-04-29 no-trial decision; closed as bd-22q.11.)
 
 use crate::policy::PolicyResolver;
 use crate::{FeatureGateError, FeatureKey, Plan};
@@ -45,9 +46,9 @@ pub fn find_gate_error(err: &anyhow::Error) -> Option<&FeatureGateError> {
 /// community-tier baseline before activating.
 /// ```
 ///
-/// Tier-aware copy variants (e.g. trial-expired, tampered-Pro,
-/// Team/Enterprise paths) are deferred to Tier 2 / Tier 3 — they
-/// can branch on `key` and `tier` from the error variant.
+/// Tier-aware copy variants (e.g. tampered-Pro, Team/Enterprise
+/// paths) are deferred — they can branch on `key` and `tier` from
+/// the error variant.
 pub fn format_upgrade_cta(gate_err: &FeatureGateError) -> String {
     let mut out = String::new();
     out.push_str(&format!("Error: {gate_err}\n"));
