@@ -1,3 +1,4 @@
+mod build_constants;
 mod community;
 mod gate;
 mod install_id;
