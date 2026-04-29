@@ -6,6 +6,7 @@ pub mod render;
 pub mod router;
 pub mod sender;
 
+use anyhow::Context;
 use std::time::Duration;
 
 pub async fn run_telegram_bot(
@@ -18,7 +19,8 @@ pub async fn run_telegram_bot(
     let mut event_rx = host.take_event_stream().expect("event stream");
     let mut perm_rx = host.take_permission_stream().expect("permission stream");
     let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(64);
-    let mut runtime = crate::runtime::BotRuntime::new(crate::state::BotStateStore::new(state_path));
+    let mut runtime = crate::runtime::BotRuntime::new(crate::state::BotStateStore::new(state_path))
+        .context("initializing bot runtime")?;
     let client = client::TelegramClient::new(
         cfg.bot_token.as_deref().expect("validated"),
         Duration::from_secs(cfg.request_timeout_secs.unwrap_or(30)),

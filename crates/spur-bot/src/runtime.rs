@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use anyhow::Context;
+
 use crate::commands::{parse_chat_input, BotCommand, ParsedChatInput};
 use crate::state::{
     BindingState, BotStateStore, PersistedBotState, PersistedThreadRecord, ThreadKey,
@@ -118,8 +120,10 @@ pub struct BotRuntime {
 }
 
 impl BotRuntime {
-    pub fn new(state_store: BotStateStore) -> Self {
-        let persisted = state_store.load().unwrap_or_default();
+    pub fn new(state_store: BotStateStore) -> anyhow::Result<Self> {
+        let persisted = state_store
+            .load()
+            .context("loading persisted bot state; refusing to start with empty state")?;
         let mut threads = HashMap::new();
 
         for (thread_id, record) in &persisted.threads {
@@ -152,7 +156,7 @@ impl BotRuntime {
             );
         }
 
-        Self {
+        Ok(Self {
             state_store,
             persisted,
             threads,
@@ -166,7 +170,7 @@ impl BotRuntime {
             pending_new_session_guard: HashSet::new(),
             pending_resume: HashMap::new(),
             executor_sessions: HashMap::new(),
-        }
+        })
     }
 
     pub fn state_store(&self) -> &BotStateStore {
