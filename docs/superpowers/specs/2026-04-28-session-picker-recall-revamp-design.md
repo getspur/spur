@@ -33,6 +33,85 @@ plumbing have landed. Status:
 Remaining specified scope: render-side polish + two bug fixes, ~80–120 LoC
 across `session_picker.rs`, `session_preview.rs`, plus tests.
 
+## Decided approach (post-codex stress-test, 2026-04-29)
+
+After a five-pass review and L9 first-principles MCTS analysis (codex
+stress-tested), both outstanding bugs converge on a single principle:
+
+> **Compute derived view-state at the boundary that owns the budget.**
+> Caches are correctness liabilities — only justify one with profiling
+> evidence AND a written invalidation contract.
+
+The fix is **deletion, not patching**:
+
+- **Bug A (haystack stale)** → drop the haystack cache entirely.
+  Compute haystacks on demand inside `filtered_indices`, which already
+  fires per render (and twice when preview is visible). At ~500
+  sessions × ~200 chars, on-demand cost is ~1–2ms per render — well
+  under the 16ms frame budget. Eliminates the bug class: any future
+  haystack input (cost, tags, brain id) is auto-fresh; rename-flow
+  staleness (codex's wider-blast-radius finding) is fixed for free.
+
+- **Bug B (`PreviewRow.wrap` dead)** → move wrap policy from data to
+  picker. Replace `value: String + wrap: bool` with `value_lines:
+  Vec<String>` (already-expanded). Add a `wrap_value(text, width,
+  max_lines) -> Vec<String>` helper using both `unicode-segmentation`
+  and `unicode-width` (mirror `input_bar_wrap.rs`). Renderer becomes
+  dumb: `flat_map(build_lines_for_row).collect()` into `Paragraph` with
+  no `.wrap(...)`. Delete the `wrap: bool` field.
+
+Both changes also enable proper **visual-row accounting** — the picker
+counts emitted `Line`s at compose time and validates against the
+12-row preview budget. Today's silent clipping becomes a guaranteed
+bound.
+
+### Codex stress-test adjustments (locked-in)
+
+1. **Per-render cost, not per-keystroke.** `filtered_indices` is called
+   during render at `session_picker.rs:754–760` and again at `:970–976`
+   when preview is visible. On-demand haystacks pay 1–2× per render.
+2. **Free-function filter helper.** Reshape `filtered_indices` from
+   `&self` method to a free function with signature
+   `(sessions, pattern, &metadata, &synopsis, show_archived) -> Vec<usize>`
+   to compose with split-borrow patterns at `handle_key:1349–1359`.
+   Thread `&synopsis` through call sites that lack it today:
+   `toggle_show_archived` (`:235–253`), App invocation
+   (`app.rs:3010–3013`), `highlighted_session_id` (`:355–376`),
+   `visible_session_count` / `visible_session_at` (`:498–532`).
+3. **Width-aware wrapping.** `unicode-width` is already a TUI dep
+   (`Cargo.toml:32–33`); `input_bar_wrap.rs:1–5, 100–105` is the
+   canonical width-aware grapheme-walk pattern to mirror.
+4. **Test inversion via App event pump.** The named test at
+   `session_picker.rs:2068–2102` mutates a standalone projection and
+   bypasses the App event path. Drive the inverted test through
+   `App::handle_spur_event` (`app.rs:5573–5590`), or via the new
+   synopsis-aware filter helper directly.
+
+### Revised effort estimate
+
+| Item | LoC |
+|---|---|
+| Drop cache + free-function `filtered_indices` + thread synopsis through call sites | ~50 |
+| `wrap_value` helper (graphemes + width) + compose_preview rewrite | ~25 |
+| Renderer simplification + delete `wrap` field | ~10 |
+| Test inversion via App event pump (or synopsis-aware `visible_session_count`) | ~30 |
+| New unit tests (`wrap_value` boundaries, on-demand fresh haystack) | ~30 |
+| **Total** | **~145 LoC across 2 files + ~5 call-site updates in `app.rs`** |
+
+### Beads
+
+- `bd-evz7` — Epic: Session Picker Recall — derived-state simplification
+- `bd-evz7.1` — Bug A: Drop haystack cache; compute on-demand
+- `bd-evz7.2` — Bug B: Picker-owned wrap; dumb renderer; delete `PreviewRow.wrap`
+
+### Architectural rule for `arch.md`
+
+> **Compute derived view-state at the boundary that owns the budget.**
+> When a view's display depends on data outside its event-handling
+> surface, prefer per-render computation over cached state. Caches are
+> correctness liabilities — only justify one with profiling evidence
+> AND a written invalidation contract.
+
 ## Problem
 
 The session picker (`crates/spur-tui/src/views/session_picker.rs`) lists
@@ -385,11 +464,18 @@ exists on `PreviewRow` (`session_preview.rs:11–16`) and the picker is
 expected to set `wrap: true` for the Intent row. But
 `SessionPreview::render` (`session_preview.rs:56–88`) maps each row to a
 single `Line` and applies one paragraph-level `Wrap { trim: false }` —
-it does not honor the per-row flag. To deliver the spec's "Intent — up
-to 3 wrapped lines" promise, the renderer must either (a) split a
-wrapped row's value into multiple `Line`s pre-render using
-`textwrap`/`unicode-segmentation`, or (b) render each row through its
-own `Paragraph`. Pick (a) for layout simplicity; (b) regresses spacing.
+it does not honor the per-row flag. Codex's deeper finding: the renderer
+has **no visual-row accounting at all**, so neither the "Intent up to 3
+lines" cap nor the 12-row total budget are enforceable today. A long
+first message clips Last/Draft/footer.
+
+**Decided fix** (see §Decided approach, tracked as `bd-evz7.2`):
+move wrap policy from data to picker. Delete `PreviewRow.wrap`. Replace
+`value: String` with `value_lines: Vec<String>` (already-expanded).
+Picker uses a `wrap_value(text, width, max_lines)` helper (graphemes +
+width, mirroring `input_bar_wrap.rs`) and supplies pre-wrapped lines
+with explicit caps per row. Renderer becomes dumb: `flat_map` rows into
+a flat `Vec<Line>`; no `.wrap(...)`.
 
 ## Filter / search
 
@@ -402,21 +488,21 @@ at `session_picker.rs:101, 287`. Shape of the haystack string is
 haystacks are built once on `set_sessions()` (called when
 `SessionsListed` arrives) and never rebuilt when the projection
 mutates. The failing test at `session_picker.rs:2068`
-(`haystack_cache_does_not_pick_up_late_synopsis_updates`) explicitly
-documents this: a session whose synopsis updates after the initial
-`set_sessions()` will not match a synopsis-typed filter until a manual
-`r` refresh re-emits `SessionsListed`. The row LABEL updates correctly
-on every render via `resolve_label`, but the filter haystack does not
-— so a session is visible but unsearchable on its first message until
-the user refreshes.
+(`haystack_cache_does_not_pick_up_late_synopsis_updates`) documents
+this. Codex's wider-blast-radius finding: the same staleness applies
+to **renamed titles** — `set_metadata` (`:214–216`) and rename flows
+(`app.rs:2979–2987, 3588–3589`) mutate inputs without rebuilding the
+cache. So a renamed session is also unsearchable until manual `r`
+refresh.
 
-Fix: when the picker view is mounted and active, rebuild the haystack
-for a session whenever a `SpurEventBody::AgentNotification` containing
-a `UserMessageChunk` (or a flush trigger) is processed for that
-session — i.e. ride the same drain pump the projection rides on,
-keyed by `session_id`. Targeted rebuild, not full-list rebuild. No
-interior mutability; the rebuild path goes through `&mut self` on the
-picker like other state mutations.
+**Decided fix** (see §Decided approach, tracked as `bd-evz7.1`):
+**delete the haystack cache entirely.** Compute haystacks on demand
+inside a free-function `filtered_indices` taking
+`(sessions, pattern, &metadata, &synopsis, show_archived)`. Filter
+fires per render (and twice when preview is visible); on-demand cost
+is ~1–2ms at 500 sessions, well under the 16ms frame budget. This
+eliminates the bug class — any future haystack input is auto-fresh.
+No invalidation hooks, no event subscription, no interior mutability.
 
 **Match-source hint** — cut from v1 (visible noise risk).
 
@@ -461,8 +547,8 @@ None.
 | Sessions whose NDJSON has rotated and were never resumed | Low | UX | User archives via `d` |
 | Filter widening blows nucleo budget on >500 sessions | Low | Perf | Haystacks precomputed; benchmark before merge |
 | **Broadcast `Lagged` during history replay** | **High under fast replay** | **Correctness, user-visible** | Producer side is unthrottled: `EventFunnel` uses non-blocking mpsc + non-blocking broadcast (`event_funnel.rs:34, 120`); replay loop emits per-event at `orchestrator.rs:2341`; bus is `broadcast::channel(4096)` at `:1469`; receiver drains `DRAIN_CAP_PER_FRAME = 8` (`app.rs:4090`). Bound is stream-delivery rate vs ~480 ev/s drain @60fps. For sessions whose replay burst outpaces the drain, the first `user_message_chunk` lands in a Lagged window and `first_user_msg` stays None. Mitigations (pick one before plan-writing): (a) accept and document — fall through to agent title, NDJSON replay (Tier 1 #2) closes; (b) add a per-session `Lagged` recovery path in the projection (replay-aware re-subscribe); (c) chunk-aware throttle on the replay producer. |
-| **`PreviewRow.wrap` field is set but ignored by renderer** | **High (deliverable gap)** | **UX — Intent row never wraps** | Already documented in §Preview pane. Fix in `session_preview.rs:56–88` to honor `row.wrap` per-row, capped at 3 lines. |
-| **Haystack stale on live synopsis updates** | **High (named-test gap)** | **UX — search misses fresh sessions until manual refresh** | Already documented in §Filter / search. Fix: targeted rebuild on `UserMessageChunk` / flush triggers for the affected `session_id`. |
+| **`PreviewRow.wrap` field is set but ignored by renderer** | **High (deliverable gap)** | **UX — Intent uncapped; long first message clips Last/Draft/footer inside the 12-row pane** | Resolved by Decided approach: delete `wrap: bool`; picker pre-wraps via `wrap_value` helper; renderer becomes dumb. Tracked in `bd-evz7.2`. |
+| **Haystack stale on synopsis / metadata / rename mutations** | **High (named-test gap, plus rename blast radius)** | **UX — search misses fresh sessions and renamed titles until manual `r` refresh** | Resolved by Decided approach: delete the cache; on-demand `filtered_indices` (free function with `&synopsis`, `&metadata` params). Tracked in `bd-evz7.1`. |
 | Kiro session with no jsonl history file | Low | UX | `read_session_history_from_disk` returns empty Vec; no `SessionHistory` event emitted; row falls through to agent title |
 | Mid-user-turn abandoned (no flush trigger fires) | Low | UX | `get()` commit-on-read fallback exposes the pending buffer as `last_user_msg` |
 
@@ -514,21 +600,24 @@ Manual QA:
 
 ## Effort estimate
 
-Revised post-territory-audit: the core projection, label resolver,
-preview row struct, haystack store, and 12-row preview pane are all
-already in tree. Remaining work:
+See §Decided approach for the locked-in totals. Revised after the
+post-codex stress-test:
 
-| Phase | LoC | Files |
-|---|---|---|
-| State-first preview composition (last → draft → blank → first → blank → footer) | ~40 | `views/session_picker.rs` (preview building near `:1007`) |
-| Honor `PreviewRow.wrap` — split wrapped row's value into multiple `Line`s, cap at 3 | ~30 | `components/session_preview.rs` |
-| Targeted haystack rebuild on synopsis-mutating events | ~25 | `views/session_picker.rs` |
-| New unit + snapshot tests (wrap honor, haystack rebuild, state-first preview) | ~40 | `views/session_picker.rs` (`#[cfg(test)]`), `components/session_preview.rs` |
-| Optional: `Lagged` mitigation (per-session recovery or producer throttle) | ~30 | `crates/spur-core/src/session_synopsis/projection.rs` or `event_funnel.rs` — choose at plan time |
+| Item | LoC |
+|---|---|
+| Drop cache + free-function `filtered_indices` + thread synopsis through call sites | ~50 |
+| `wrap_value` helper (graphemes + width) + compose_preview rewrite | ~25 |
+| Renderer simplification + delete `wrap` field | ~10 |
+| Test inversion via App event pump (or synopsis-aware `visible_session_count`) | ~30 |
+| New unit tests (`wrap_value` boundaries, on-demand fresh haystack) | ~30 |
+| Optional: `Lagged` mitigation (per-session recovery or producer throttle) | ~30 |
 
-Total (without Lagged mitigation): ~135 LoC across 2 files (+ tests).
-With Lagged mitigation: ~165 LoC across 3 files. One implementation
-plan, no parallel-task decomposition needed.
+Total (without Lagged mitigation): **~145 LoC** across 2 files
+(`session_picker.rs`, `session_preview.rs`) + ~5 call-site updates in
+`app.rs`. With Lagged mitigation: ~175 LoC.
+
+Two parallel work-streams (`bd-evz7.1` haystack, `bd-evz7.2` wrap) that
+share zero state — safe to dispatch concurrently.
 
 ## Open follow-ups (deferred to v2)
 
