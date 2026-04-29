@@ -2036,6 +2036,15 @@ impl App {
         }
     }
 
+    fn view_text_input_active(&self) -> bool {
+        matches!(self.current_view, ViewId::SessionPicker)
+            && self.session_picker.as_ref().is_some_and(|picker| {
+                picker.is_rename_active()
+                    || picker.is_search_focused()
+                    || picker.is_confirm_switch_visible()
+            })
+    }
+
     fn mermaid_render_picker_active(&self) -> bool {
         #[cfg(feature = "markdown")]
         {
