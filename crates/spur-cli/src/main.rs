@@ -1,7 +1,7 @@
 mod commands;
 mod onboarding;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -803,6 +803,42 @@ async fn run() -> Result<()> {
             }
             let initial_license_state =
                 spur_core::license_runtime::to_event_state(license.current_state());
+
+            // Phase A: Community singleton lock. One TUI orchestrator per repo
+            // on Community; Pro removes this limit (Phase B will land cross-
+            // instance state coordination). Lock guard lives for TUI lifetime.
+            let _community_singleton_guard = if matches!(
+                spur_license::Tier::from_plan(license.current_state().plan),
+                spur_license::Tier::Community
+            ) {
+                let lock_path = repo_root.join(".spur").join(".spur-tui.pid");
+                if let Some(parent) = lock_path.parent() {
+                    std::fs::create_dir_all(parent).with_context(|| {
+                        format!("creating singleton-lock parent dir {}", parent.display())
+                    })?;
+                }
+                match spur_pm::pidfile::PidFileGuard::acquire(&lock_path) {
+                    Ok(guard) => Some(guard),
+                    Err(e) => {
+                        eprintln!("Another SPUR TUI is already running on this repo.");
+                        eprintln!();
+                        eprintln!("{e}");
+                        eprintln!();
+                        eprintln!("Community runs one SPUR TUI per repository.");
+                        eprintln!(
+                            "Pro removes this limit and adds parallel workers within one"
+                        );
+                        eprintln!("orchestrator with shared lineage.");
+                        eprintln!();
+                        eprintln!("Activate a license: spur auth login --key <KEY>");
+                        return Ok(());
+                    }
+                }
+            } else {
+                // Pro / Team / Enterprise: no singleton lock. Cross-instance
+                // state coordination ships in Phase B.
+                None
+            };
 
             // Create PmService (optional — returns None if no backend available)
             let pm_service = if pm_service_gate_allows_construction(license.feature_gate().as_ref())

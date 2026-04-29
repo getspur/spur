@@ -13,11 +13,11 @@ When you install spur with no LicenseSeat configuration, it runs on the **Commun
 
 The canonical list lives in [`crates/spur-license/resources/default_policy.json`](../../crates/spur-license/resources/default_policy.json) under `tier_policies`. It is signed (Ed25519) and verified at compile time and runtime.
 
-## Running multiple workflows in parallel
+## Single SPUR per repo
 
-Community runs one worker per spur instance. To work on several things at once for free, open a second terminal and run `spur tui` again — each instance is fully independent. Sessions, lineage, and worktrees are isolated per instance, so multiple instances can run side-by-side on the same machine without colliding.
+Community enforces one SPUR TUI orchestrator per repository at a time. Launching a second `spur tui` in the same repo will exit cleanly with a message identifying the running process. Read-only commands (`spur auth status`, `spur sessions list`) are not affected.
 
-Pro removes this friction by enabling parallel workers within a single instance (up to 10 concurrent), with shared lineage across all of them.
+This keeps Community focused on a single coordinated workflow per project. Pro removes this limit and adds parallel workers within a single orchestrator (up to 10 concurrent) with shared lineage across all of them — the recommended way to run multiple agents simultaneously.
 
 ## Upgrading to Pro
 
