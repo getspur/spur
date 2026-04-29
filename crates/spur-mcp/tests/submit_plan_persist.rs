@@ -7,7 +7,7 @@
 
 use spur_mcp::{build_entries_with_task_map, plan_epic_issue_creates, tools_list};
 // `pub mod plan;` is declared in lib.rs, so spur_mcp::plan::PlanTask is accessible.
-use spur_mcp::plan::PlanTask;
+use spur_mcp::plan::{labels, PlanTask};
 
 mod common;
 
@@ -60,6 +60,11 @@ fn epic_create_carries_plan_id_label_and_epic_type() {
     assert!(
         epic.labels.iter().any(|l| l == "spur:plan-id:plan-xyz"),
         "epic must carry spur:plan-id label; got {:?}",
+        epic.labels,
+    );
+    assert!(
+        epic.labels.iter().any(|l| l == labels::PLAN_PENDING),
+        "epic must start with spur:plan-pending label; got {:?}",
         epic.labels,
     );
 }

@@ -934,6 +934,17 @@ pub enum SpurEventBody {
         plan_id: String,
     },
 
+    /// Startup sweep observed a stale `spur:plan-pending` epic.
+    PlanPendingSweep {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan_id: Option<String>,
+        epic_id: String,
+        action: String,
+        child_count: u32,
+        age_secs: i64,
+        reason: String,
+    },
+
     /// A continuation reached a terminal non-delivered state.
     ContinuationDropped {
         delegation_id: DelegationId,

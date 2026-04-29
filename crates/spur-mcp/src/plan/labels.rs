@@ -63,6 +63,10 @@ pub const REVIEW_REJECTED: &str = "spur:review-rejected";
 /// to avoid observing partially-persisted plan graphs as ready work.
 /// If creation fails mid-loop, the epic will NOT carry this label.
 pub const PLAN_COMPLETE: &str = "spur:plan-complete";
+/// Marker applied to an epic while `build_epic_subgraph` is still creating
+/// children + dependency edges. The reconciler must not dispatch tasks from a
+/// plan while this marker is present.
+pub const PLAN_PENDING: &str = "spur:plan-pending";
 pub const INTEGRATION_PENDING: &str = "spur:integration-pending";
 
 /// Prefix strings for parsing. Use these with `label_value()` or `strip_prefix()`.
@@ -173,6 +177,7 @@ mod tests {
         assert_eq!(READY_FOR_REVIEW, "spur:ready-for-review");
         assert_eq!(REVIEW_REJECTED, "spur:review-rejected");
         assert_eq!(PLAN_COMPLETE, "spur:plan-complete");
+        assert_eq!(PLAN_PENDING, "spur:plan-pending");
         assert_eq!(INTEGRATION_PENDING, "spur:integration-pending");
     }
 
@@ -223,6 +228,7 @@ mod tests {
             signal_processed_label(&uuid::Uuid::nil()),
             READY_FOR_REVIEW.to_string(),
             REVIEW_REJECTED.to_string(),
+            PLAN_PENDING.to_string(),
             INTEGRATION_PENDING.to_string(),
         ] {
             assert!(is_br_legal(&s), "constructor emitted br-illegal label: {s}");

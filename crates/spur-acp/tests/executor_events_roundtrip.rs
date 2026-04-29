@@ -264,3 +264,22 @@ fn plan_ready_to_merge_roundtrips() {
     let round: SpurEvent = serde_json::from_str(&json).unwrap();
     assert!(matches!(round.body, SpurEventBody::PlanReadyToMerge { .. }));
 }
+
+#[test]
+fn plan_pending_sweep_roundtrips() {
+    use spur_acp::{SpurEvent, SpurEventBody};
+
+    let ev = SpurEvent::now(SpurEventBody::PlanPendingSweep {
+        plan_id: Some("p1".into()),
+        epic_id: "bd-epic".into(),
+        action: "quarantined".into(),
+        child_count: 2,
+        age_secs: 3601,
+        reason: "stale pending plan exceeded grace".into(),
+    });
+    let json = serde_json::to_string(&ev).unwrap();
+    let round: SpurEvent = serde_json::from_str(&json).unwrap();
+    assert!(matches!(round.body, SpurEventBody::PlanPendingSweep { .. }));
+    assert!(json.contains("PlanPendingSweep"));
+    assert!(json.contains("quarantined"));
+}

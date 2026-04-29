@@ -2241,6 +2241,25 @@ impl View for DashboardView {
                 });
             }
 
+            SpurEventBody::PlanPendingSweep {
+                plan_id,
+                epic_id,
+                action,
+                child_count,
+                age_secs,
+                reason,
+            } => {
+                let plan = plan_id.as_deref().unwrap_or("unknown");
+                self.activity_log.push(LogEntry {
+                    timestamp: Self::now_stamp(),
+                    prefix: "[plan]".to_string(),
+                    message: format!(
+                        "Pending sweep {action} epic {epic_id} for {plan} ({child_count} children, age {age_secs}s): {reason}"
+                    ),
+                    kind: LogEntryKind::Info,
+                });
+            }
+
             _ => {}
         }
     }

@@ -9,9 +9,8 @@
 //! addendum II in docs/superpowers/plans/2026-04-20-adaptive-plan-repair-v0a.md
 //! for the rationale — upstream AGENTS.md designates bv as the canonical
 //! pick-next-work surface). Fallback: `br ready` via BeadsAdvanced when bv
-//! errors. The bv primary path enforces the `spur:plan-complete` guard; the br
-//! fallback uses `spur:plan-id:<id>` scoping only (degraded-mode semantics —
-//! see `observe_ready_via_br` doc comment).
+//! errors. Ready observation enforces the epic activation guard: a plan must
+//! carry `spur:plan-complete` and must not carry `spur:plan-pending`.
 //!
 //! # Spawn wiring
 //!
@@ -19,7 +18,7 @@
 //! `ReconcilerDispatchCtx`, so persisted plans are reclaimed and dispatched by
 //! the same loop that owns completion writeback.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -828,10 +827,24 @@ impl Reconciler {
 
         let mut hydrated = Vec::with_capacity(summaries.len());
         let mut seen_issue_ids = HashSet::new();
+        let mut plan_activation_cache = HashMap::new();
         for summary in summaries {
             let issue = self.pm.get_issue(&summary.id).await?;
             match issue.issue_type.as_deref() {
                 Some("task") => {
+                    if let Some(plan_id) = issue
+                        .labels
+                        .iter()
+                        .find_map(|label| crate::plan::labels::parse_plan_id(label))
+                        .map(str::to_string)
+                    {
+                        if !self
+                            .plan_allows_dispatch(&plan_id, &mut plan_activation_cache)
+                            .await?
+                        {
+                            continue;
+                        }
+                    }
                     if seen_issue_ids.insert(issue.id.clone()) {
                         hydrated.push(issue_to_summary(issue));
                     }
@@ -841,12 +854,19 @@ impl Reconciler {
                         .labels
                         .iter()
                         .find_map(|label| crate::plan::labels::parse_plan_id(label))
+                        .map(str::to_string)
                     else {
                         continue;
                     };
+                    if !self
+                        .plan_allows_dispatch(&plan_id, &mut plan_activation_cache)
+                        .await?
+                    {
+                        continue;
+                    }
                     let projected = crate::plan::projector::project_plan_from_beads(
                         self.pm.as_ref(),
-                        plan_id,
+                        &plan_id,
                         self.feature_gate.as_ref(),
                     )
                     .await?;
@@ -871,6 +891,52 @@ impl Reconciler {
         Ok(hydrated)
     }
 
+    async fn plan_allows_dispatch(
+        &self,
+        plan_id: &str,
+        cache: &mut HashMap<String, bool>,
+    ) -> anyhow::Result<bool> {
+        if let Some(allowed) = cache.get(plan_id) {
+            return Ok(*allowed);
+        }
+
+        let mut saw_complete = false;
+        let mut saw_pending = false;
+        for summary in self
+            .pm
+            .list_issues(IssueFilter {
+                labels: vec![crate::plan::labels::plan_id(plan_id)],
+                issue_type: Some("epic".to_string()),
+                include_closed: true,
+                limit: Some(100),
+                ..Default::default()
+            })
+            .await?
+        {
+            let epic = self.pm.get_issue(&summary.id).await?;
+            saw_complete |= epic
+                .labels
+                .iter()
+                .any(|label| label == crate::plan::labels::PLAN_COMPLETE);
+            saw_pending |= epic
+                .labels
+                .iter()
+                .any(|label| label == crate::plan::labels::PLAN_PENDING);
+        }
+
+        let allowed = saw_complete && !saw_pending;
+        if !allowed {
+            tracing::debug!(
+                plan_id = %plan_id,
+                saw_complete,
+                saw_pending,
+                "reconciler suppressed ready tasks for inactive plan"
+            );
+        }
+        cache.insert(plan_id.to_string(), allowed);
+        Ok(allowed)
+    }
+
     /// Returns the IDs of ready tasks under the configured plan filter,
     /// preserving the labels from the beads ready summaries.
     pub async fn observe_ready(&self) -> anyhow::Result<Vec<String>> {
@@ -886,19 +952,11 @@ impl Reconciler {
     ///
     /// # Degraded-mode semantics
     ///
-    /// `spur:plan-complete` is an epic-only marker — tasks never carry it, so
-    /// including it in a `ReadyFilter` (which queries tasks, not epics) always
-    /// returns empty. The `bv` primary path is the real guard against observing
-    /// partially-persisted plan graphs; this fallback scopes only by
-    /// `spur:plan-id:<id>` (when `plan_id` is `Some`), accepting that a partial
-    /// plan could leak through in the rare window where bv is unhealthy and the
-    /// caller passed a plan_id that was not fully persisted. This tradeoff is
-    /// acceptable for v0a.2: fallback only triggers on bv failures, and callers
-    /// are expected to target fully-persisted plans.
-    ///
-    /// "Observe all plans" mode (`plan_id` is `None`): no label filter is
-    /// applied; all unblocked tasks are returned. Partial-plan protection is
-    /// entirely absent in this mode — document as v0a.2 limitation.
+    /// `spur:plan-complete` and `spur:plan-pending` are epic-only markers, so
+    /// they cannot be included in the task-level `ReadyFilter`. The fallback
+    /// scopes by `spur:plan-id:<id>` and then hydrates each candidate task's
+    /// plan epic before returning it. Tasks for incomplete or pending plans are
+    /// suppressed.
     pub async fn observe_ready_via_br(&self) -> anyhow::Result<Vec<String>> {
         Ok(self
             .observe_ready_summaries()
