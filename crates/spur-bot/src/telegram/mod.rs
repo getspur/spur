@@ -80,19 +80,7 @@ pub async fn run_telegram_bot(
         tokio::select! {
             maybe_update = update_rx.recv() => {
                 let Some(inputs) = maybe_update else { break; };
-                for input in inputs {
-                    if let Err(err) = process_input(
-                        &mut runtime,
-                        &handle,
-                        &client,
-                        &sender,
-                        input,
-                    )
-                    .await
-                    {
-                        tracing::error!(error = ?err, "transient error handling telegram input");
-                    }
-                }
+                process_input_batch(&mut runtime, &handle, &client, &sender, inputs).await;
             }
             event = event_rx.recv() => {
                 match event {
@@ -143,7 +131,54 @@ pub async fn run_telegram_bot(
         }
     }
 
+    drain_remaining_inputs(&mut update_rx, &mut runtime, &handle, &client, &sender).await;
     host.shutdown().await
+}
+
+async fn process_input_batch(
+    runtime: &mut crate::runtime::BotRuntime,
+    handle: &spur_interactive::InteractiveFrontendHandle,
+    client: &client::TelegramClient,
+    sender: &sender::TelegramSender,
+    inputs: Vec<router::TelegramInput>,
+) {
+    for input in inputs {
+        if let Err(err) = process_input(runtime, handle, client, sender, input).await {
+            tracing::error!(error = ?err, "transient error handling telegram input");
+        }
+    }
+}
+
+async fn drain_remaining_inputs(
+    update_rx: &mut tokio::sync::mpsc::Receiver<Vec<router::TelegramInput>>,
+    runtime: &mut crate::runtime::BotRuntime,
+    handle: &spur_interactive::InteractiveFrontendHandle,
+    client: &client::TelegramClient,
+    sender: &sender::TelegramSender,
+) {
+    let batches = drain_ready_input_batches(update_rx);
+    if !batches.is_empty() {
+        let batch_count = batches.len();
+        let input_count = batches.iter().map(Vec::len).sum::<usize>();
+        tracing::info!(
+            batches = batch_count,
+            inputs = input_count,
+            "draining buffered telegram updates before shutdown"
+        );
+    }
+    for inputs in batches {
+        process_input_batch(runtime, handle, client, sender, inputs).await;
+    }
+}
+
+fn drain_ready_input_batches(
+    update_rx: &mut tokio::sync::mpsc::Receiver<Vec<router::TelegramInput>>,
+) -> Vec<Vec<router::TelegramInput>> {
+    let mut batches = Vec::new();
+    while let Ok(inputs) = update_rx.try_recv() {
+        batches.push(inputs);
+    }
+    batches
 }
 
 async fn process_input(
@@ -267,4 +302,43 @@ async fn process_permission(
         renders,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::router::TelegramInput;
+
+    #[test]
+    fn drain_ready_input_batches_processes_buffered_updates_after_cancellation() {
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let (tx, mut update_rx) = tokio::sync::mpsc::channel(64);
+        let first = TelegramInput::Text {
+            user_id: 1,
+            chat_id: 42,
+            message_thread_id: None,
+            text: "first".into(),
+        };
+        let second = TelegramInput::Text {
+            user_id: 1,
+            chat_id: 42,
+            message_thread_id: Some(77),
+            text: "second".into(),
+        };
+        tx.try_send(vec![first.clone()]).unwrap();
+        tx.try_send(vec![second.clone()]).unwrap();
+
+        cancellation.cancel();
+        assert!(cancellation.is_cancelled());
+
+        let mut processed = Vec::new();
+        for batch in super::drain_ready_input_batches(&mut update_rx) {
+            processed.extend(batch);
+        }
+
+        assert_eq!(processed, vec![first, second]);
+        assert!(matches!(
+            update_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
 }
