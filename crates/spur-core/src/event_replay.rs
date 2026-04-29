@@ -457,7 +457,7 @@ mod tests {
             // bytes within likely a single 64 KB BufReader fill. The
             // closing \n is followed by valid_b's JSON, all within one
             // BufReader fill on small files.
-            let huge: Vec<u8> = std::iter::repeat(b'x').take(4096).collect();
+            let huge: Vec<u8> = std::iter::repeat_n(b'x', 4096).collect();
             f.write_all(&huge).unwrap();
             writeln!(f).unwrap();
             writeln!(f, "{}", serde_json::to_string(&valid_b).unwrap()).unwrap();
