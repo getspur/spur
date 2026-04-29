@@ -45,6 +45,7 @@ use crate::tools::{self, DelegationChannel, DelegationRequest};
 /// map is allowed to stay permanently empty in production.
 const COMPLETED_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 const DEFAULT_PLAN_PENDING_GRACE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+const PLAN_PENDING_SWEEP_COMMENT_PREFIX: &str = "SPUR startup sweep quarantined stale pending plan";
 /// Idle-session watchdog for the streamable-HTTP MCP transport.
 ///
 /// rmcp's `SessionConfig::DEFAULT_KEEP_ALIVE` is 5 min, which is far too short
@@ -4544,20 +4545,30 @@ impl McpCallbackServer {
             let children = self
                 .list_plan_task_issues_for_pending_sweep(pm.as_ref(), plan_id_value)
                 .await?;
-            if children.iter().any(|child| child.status != "open") {
+            let mut blocked_child_id = None;
+            for child in &children {
+                if !self
+                    .pending_sweep_allows_child_status(pm.as_ref(), child)
+                    .await?
+                {
+                    blocked_child_id = Some(child.id.clone());
+                    break;
+                }
+            }
+            if let Some(blocked_child_id) = blocked_child_id {
                 self.emit_plan_pending_sweep_event(
                     plan_id.clone(),
                     &epic.id,
                     "skipped",
                     children.len() as u32,
                     age_secs,
-                    "at least one child is not open",
+                    &format!("child '{blocked_child_id}' is not open or previously quarantined"),
                 );
                 continue;
             }
 
             let comment = format!(
-                "SPUR startup sweep quarantined stale pending plan `{}` (epic `{}`): graph stayed `{}` for {}s without flipping to `{}`. Children quarantined: {}.",
+                "{PLAN_PENDING_SWEEP_COMMENT_PREFIX} `{}` (epic `{}`): graph stayed `{}` for {}s without flipping to `{}`. Children quarantined: {}.",
                 plan_id_value,
                 epic.id,
                 crate::plan::labels::PLAN_PENDING,
@@ -4565,11 +4576,15 @@ impl McpCallbackServer {
                 crate::plan::labels::PLAN_COMPLETE,
                 children.len()
             );
+            let terminal_status = pm.closed_status().to_string();
             for child in &children {
+                if child.status != "open" {
+                    continue;
+                }
                 pm.update_issue(
                     &child.id,
                     IssueUpdate {
-                        status: Some("cancelled".to_string()),
+                        status: Some(terminal_status.clone()),
                         comment: Some(comment.clone()),
                         ..Default::default()
                     },
@@ -4585,7 +4600,7 @@ impl McpCallbackServer {
             pm.update_issue(
                 &epic.id,
                 IssueUpdate {
-                    status: Some("cancelled".to_string()),
+                    status: Some(terminal_status),
                     comment: Some(comment),
                     remove_labels: vec![crate::plan::labels::PLAN_PENDING.to_string()],
                     ..Default::default()
@@ -4607,6 +4622,37 @@ impl McpCallbackServer {
         }
 
         Ok(())
+    }
+
+    async fn pending_sweep_allows_child_status(
+        &self,
+        pm: &spur_pm::PmService,
+        child: &spur_pm::Issue,
+    ) -> anyhow::Result<bool> {
+        if child.status == "open" {
+            return Ok(true);
+        }
+        self.issue_has_plan_pending_sweep_comment(pm, &child.id)
+            .await
+    }
+
+    async fn issue_has_plan_pending_sweep_comment(
+        &self,
+        pm: &spur_pm::PmService,
+        issue_id: &str,
+    ) -> anyhow::Result<bool> {
+        require_feature(
+            FeatureKey::PM_PRO_BEADS_ADVANCED,
+            self.feature_gate.as_ref(),
+        )
+        .map_err(|_| anyhow::anyhow!("not licensed for pending-plan sweep comment lookup"))?;
+        let Some(advanced) = pm.advanced() else {
+            return Ok(false);
+        };
+        let comments = advanced.list_comments(issue_id).await?;
+        Ok(comments
+            .iter()
+            .any(|comment| comment.body.starts_with(PLAN_PENDING_SWEEP_COMMENT_PREFIX)))
     }
 
     async fn list_plan_task_issues_for_pending_sweep(
