@@ -276,19 +276,32 @@ impl SpurLicense {
     }
 
     pub async fn activate(&self, key: &str) -> Result<LicenseState> {
-        self.provider.activate(key).await
+        let next = self.provider.activate(key).await?;
+        self.feature_gate.update_state(&next);
+        Ok(next)
     }
 
     pub async fn validate(&self) -> Result<LicenseState> {
-        self.provider.validate().await
+        let next = self.provider.validate().await?;
+        self.feature_gate.update_state(&next);
+        Ok(next)
     }
 
     pub async fn heartbeat(&self) -> Result<LicenseState> {
-        self.provider.heartbeat().await
+        // NOTE: heartbeat-Err handling is added in a follow-up step; for
+        // now this only covers the Ok path. See spec section "Concurrency
+        // notes" for why &new_state is a correctness requirement, not an
+        // optimization (LicenseSeatProvider::current_state() patches
+        // Inactive→Active and would silently break deactivate-via-Ok).
+        let next = self.provider.heartbeat().await?;
+        self.feature_gate.update_state(&next);
+        Ok(next)
     }
 
     pub async fn deactivate(&self) -> Result<LicenseState> {
-        self.provider.deactivate().await
+        let next = self.provider.deactivate().await?;
+        self.feature_gate.update_state(&next);
+        Ok(next)
     }
 }
 
