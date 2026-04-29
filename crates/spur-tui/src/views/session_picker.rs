@@ -191,6 +191,16 @@ impl SessionPickerView {
         self.rename_state.is_some()
     }
 
+    pub(crate) fn is_search_focused(&self) -> bool {
+        matches!(
+            &self.state,
+            PickerState::Populated {
+                search_focused: true,
+                ..
+            }
+        )
+    }
+
     #[cfg(any(test, debug_assertions))]
     pub fn rename_buffer_for_test(&self) -> Option<&str> {
         self.rename_state.as_ref().map(|state| state.buffer.as_str())
