@@ -319,6 +319,15 @@ pub struct App {
     /// user presses Alt+a (or `analytics_engine` is otherwise initialised).
     #[cfg(feature = "analytics")]
     insights_view: Option<crate::views::insights::InsightsView>,
+    /// In-flight cold-init for the analytics engine. While `Some`, the
+    /// Insights view renders an "indexing logs..." placeholder; the
+    /// `oneshot::Receiver` is polled on tick and resolves to either the
+    /// constructed `AsyncEngine` (success) or an error string (failure).
+    /// Cleared once the outcome is consumed in either branch. Bug A:
+    /// without this the init ran synchronously on the UI thread for ~89s
+    /// on first open, freezing the entire TUI.
+    #[cfg(feature = "analytics")]
+    insights_init: Option<InsightsInitState>,
     /// Durable plan snapshots keyed by session and plan id.
     plan_projection: PlanProjectionStore,
     synopsis: SessionSynopsisProjection,
@@ -366,6 +375,90 @@ pub struct App {
     /// Last dispatched Action, for integration tests only.
     #[cfg(any(test, debug_assertions))]
     last_action: Option<crate::action::Action>,
+}
+
+#[cfg(feature = "analytics")]
+struct InsightsInitState {
+    started_at: Instant,
+    rx: tokio::sync::oneshot::Receiver<anyhow::Result<spur_context::AsyncEngine>>,
+    /// Whole-second elapsed value last shown on the placeholder. Used to
+    /// throttle redraws to 1Hz when init is in flight (instead of forcing
+    /// dirty on every 30Hz tick). Initialized to `u64::MAX` so the first
+    /// drain after a `Some` insertion always paints.
+    last_displayed_second: u64,
+}
+
+/// Render the cold-init placeholder shown when the user has switched to
+/// `ViewId::Insights` but the analytics engine is still being built on
+/// the background `spawn_blocking` worker. Uses the body area provided
+/// by the App's view-render dispatch (the global header/footer rows are
+/// already drawn around it).
+#[cfg(feature = "analytics")]
+fn render_insights_init_placeholder(frame: &mut Frame, area: ratatui::layout::Rect, started_at: Instant) {
+    use ratatui::{
+        layout::Alignment,
+        style::{Color, Modifier, Style},
+        text::{Line, Span},
+        widgets::Paragraph,
+    };
+
+    let elapsed = started_at.elapsed().as_secs();
+    let title = Line::from(Span::styled(
+        "Indexing logs from agent JSONL files…",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ));
+    let progress = Line::from(Span::styled(
+        format!("Elapsed: {elapsed}s   (~90s typical on first open; warm runs are sub-second)"),
+        Style::default().fg(Color::Gray),
+    ));
+    let hint = Line::from(Span::styled(
+        "[Esc] return to Dashboard  (indexing continues in background)",
+        Style::default().fg(Color::DarkGray),
+    ));
+    let body = vec![
+        Line::from(""),
+        title,
+        Line::from(""),
+        progress,
+        Line::from(""),
+        hint,
+    ];
+    frame.render_widget(
+        Paragraph::new(body).alignment(Alignment::Center),
+        area,
+    );
+}
+
+/// Cold init pipeline for the analytics engine. Blocks (DuckDB I/O +
+/// JSONL scan); ALWAYS run inside `tokio::task::spawn_blocking`.
+#[cfg(feature = "analytics")]
+fn build_analytics_engine_blocking() -> anyhow::Result<spur_context::AsyncEngine> {
+    use spur_context::{AnalyticsEngine, AsyncEngine};
+
+    let t0 = std::time::Instant::now();
+    let cache_dir = directories::BaseDirs::new()
+        .map(|b| b.home_dir().join(".spur").join("cache"))
+        .unwrap_or_else(|| std::path::PathBuf::from(".spur/cache"));
+    std::fs::create_dir_all(&cache_dir)?;
+    let cache_path = cache_dir.join("cost.duckdb");
+    tracing::info!(target: "spur_tui::insights", path = %cache_path.display(), "opening DuckDB cache (background)");
+
+    let engine = AnalyticsEngine::open(&cache_path)?;
+    engine.initialize()?;
+    let view_status = engine.create_agent_views()?;
+    engine.load_pricing(&spur_cost::PricingRegistry::with_builtin_prices())?;
+    let materialized = engine.refresh_cache()?;
+    engine.use_cached_events()?;
+    tracing::info!(
+        target: "spur_tui::insights",
+        total_ms = t0.elapsed().as_millis() as u64,
+        materialized_rows = materialized,
+        ?view_status,
+        "analytics engine cold init done"
+    );
+    Ok(AsyncEngine::new(engine))
 }
 
 #[derive(Debug, Clone)]
@@ -521,6 +614,8 @@ impl App {
             live_cost_handle: None,
             #[cfg(feature = "analytics")]
             insights_view: None,
+            #[cfg(feature = "analytics")]
+            insights_init: None,
             plan_projection: PlanProjectionStore::new(),
             synopsis: SessionSynopsisProjection::new(),
             worker_streams: crate::worker_streams::WorkerStreams::new(),
@@ -1167,66 +1262,96 @@ impl App {
     }
 
     /// Lazily open the shared DuckDB analytics cache, materialise per-agent
-    /// views, and construct the InsightsView. Called the first time the user
-    /// presses Alt+a. Cold first run can take several seconds (full JSONL
-    /// scan); warm runs reuse the cache at `~/.spur/cache/cost.duckdb` and
-    /// return in milliseconds. Shares the cache path with `spur cost` so a
-    /// prior CLI invocation primes the data.
+    /// Kick off (or no-op) the analytics-engine cold init.
+    ///
+    /// Returns immediately. If no init is needed (engine already cached
+    /// or insights_view already constructed), nothing happens. Otherwise
+    /// spawns a `spawn_blocking` task that runs the heavy DuckDB pipeline
+    /// (open / initialize / create_agent_views / load_pricing /
+    /// refresh_cache / use_cached_events) on a worker thread and posts
+    /// the resulting `AsyncEngine` (or error) through a `oneshot` that
+    /// the App's tick path drains. While in flight, the Insights view
+    /// renders an "indexing logs..." placeholder.
+    ///
+    /// Cold first run can take ~90s (full JSONL scan across all agent
+    /// homes); warm runs reuse the cache at `~/.spur/cache/cost.duckdb`
+    /// and return in milliseconds. Shares the cache path with `spur cost`
+    /// so a prior CLI invocation primes the data.
     #[cfg(feature = "analytics")]
-    fn ensure_insights_engine_and_view(&mut self) -> anyhow::Result<()> {
-        use spur_context::{AnalyticsEngine, AsyncEngine};
-
-        let t0 = std::time::Instant::now();
-        tracing::info!(target: "spur_tui::insights", "ensure_insights_engine_and_view: enter");
-
-        if self.insights_view.is_some() {
-            tracing::info!(target: "spur_tui::insights", "ensure_insights_engine_and_view: insights_view already exists, returning");
-            return Ok(());
+    fn start_insights_init(&mut self) {
+        if self.insights_view.is_some() || self.insights_init.is_some() {
+            return;
         }
 
-        let engine = if let Some(existing) = self.analytics_engine.clone() {
-            tracing::info!(target: "spur_tui::insights", "ensure_insights_engine_and_view: reusing existing analytics_engine");
-            existing
-        } else {
-            let cache_dir = directories::BaseDirs::new()
-                .map(|b| b.home_dir().join(".spur").join("cache"))
-                .unwrap_or_else(|| std::path::PathBuf::from(".spur/cache"));
-            std::fs::create_dir_all(&cache_dir)?;
-            let cache_path = cache_dir.join("cost.duckdb");
-            tracing::info!(target: "spur_tui::insights", path = %cache_path.display(), "opening DuckDB cache");
+        if let Some(existing) = self.analytics_engine.clone() {
+            // Engine already built (e.g., earlier cold init for the
+            // dashboard's live-cost cache). Construct the view directly.
+            self.insights_view = Some(crate::views::insights::InsightsView::new(existing));
+            return;
+        }
 
-            let step = std::time::Instant::now();
-            let engine = AnalyticsEngine::open(&cache_path)?;
-            tracing::info!(target: "spur_tui::insights", elapsed_ms = step.elapsed().as_millis() as u64, "AnalyticsEngine::open done");
+        tracing::info!(target: "spur_tui::insights", "start_insights_init: dispatching cold init to spawn_blocking");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::task::spawn_blocking(move || {
+            let _ = tx.send(build_analytics_engine_blocking());
+        });
+        self.insights_init = Some(InsightsInitState {
+            started_at: Instant::now(),
+            rx,
+            last_displayed_second: u64::MAX,
+        });
+    }
 
-            let step = std::time::Instant::now();
-            engine.initialize()?;
-            tracing::info!(target: "spur_tui::insights", elapsed_ms = step.elapsed().as_millis() as u64, "engine.initialize done");
-
-            let step = std::time::Instant::now();
-            let view_status = engine.create_agent_views()?;
-            tracing::info!(target: "spur_tui::insights", elapsed_ms = step.elapsed().as_millis() as u64, ?view_status, "engine.create_agent_views done");
-
-            let step = std::time::Instant::now();
-            engine.load_pricing(&spur_cost::PricingRegistry::with_builtin_prices())?;
-            tracing::info!(target: "spur_tui::insights", elapsed_ms = step.elapsed().as_millis() as u64, "engine.load_pricing done");
-
-            let step = std::time::Instant::now();
-            let materialized = engine.refresh_cache()?;
-            tracing::info!(target: "spur_tui::insights", elapsed_ms = step.elapsed().as_millis() as u64, materialized_rows = materialized, "engine.refresh_cache done (UI-thread)");
-
-            let step = std::time::Instant::now();
-            engine.use_cached_events()?;
-            tracing::info!(target: "spur_tui::insights", elapsed_ms = step.elapsed().as_millis() as u64, "engine.use_cached_events done");
-
-            let async_engine = AsyncEngine::new(engine);
-            self.analytics_engine = Some(async_engine.clone());
-            async_engine
+    /// Drain a completed `insights_init` outcome, if any. Called from the
+    /// tick path. On success: caches the engine, constructs the view,
+    /// keeps `current_view = Insights` so the user sees the populated
+    /// dashboard. On failure: surfaces a warning and routes back to
+    /// Dashboard.
+    #[cfg(feature = "analytics")]
+    fn drain_insights_init(&mut self) {
+        let Some(mut state) = self.insights_init.take() else {
+            return;
         };
-
-        self.insights_view = Some(crate::views::insights::InsightsView::new(engine));
-        tracing::info!(target: "spur_tui::insights", total_ms = t0.elapsed().as_millis() as u64, "InsightsView constructed; refresh task spawned");
-        Ok(())
+        match state.rx.try_recv() {
+            Ok(Ok(engine)) => {
+                tracing::info!(target: "spur_tui::insights", elapsed_ms = state.started_at.elapsed().as_millis() as u64, "insights init complete; constructing view");
+                self.analytics_engine = Some(engine.clone());
+                self.insights_view = Some(crate::views::insights::InsightsView::new(engine));
+                self.dirty = true;
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(target: "spur_tui::insights", error = %format!("{e:#}"), "insights init failed");
+                self.show_user_warning(format!("Analytics unavailable: {e:#}"));
+                if matches!(self.current_view, ViewId::Insights) {
+                    self.current_view = ViewId::Dashboard;
+                }
+                self.dirty = true;
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                // Still in flight. Throttle redraws to 1Hz: only mark
+                // dirty when the user is actually viewing the placeholder
+                // AND the displayed whole-second has advanced. Avoids
+                // 30Hz × 90s = ~2700 wasted redraws when the user has
+                // Esc'd back to Dashboard while init continues.
+                let elapsed = state.started_at.elapsed().as_secs();
+                let visible = matches!(self.current_view, ViewId::Insights);
+                if visible && elapsed != state.last_displayed_second {
+                    state.last_displayed_second = elapsed;
+                    self.dirty = true;
+                }
+                self.insights_init = Some(state);
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                tracing::warn!(target: "spur_tui::insights", "insights init worker channel closed without sending result");
+                self.show_user_warning(
+                    "Analytics init worker exited before reporting a result".to_string(),
+                );
+                if matches!(self.current_view, ViewId::Insights) {
+                    self.current_view = ViewId::Dashboard;
+                }
+                self.dirty = true;
+            }
+        }
     }
 
     #[cfg(feature = "analytics")]
@@ -1614,10 +1739,21 @@ impl App {
                         .as_mut()
                         .and_then(|view| view.handle_key(key, &ctx)),
                     #[cfg(feature = "analytics")]
-                    ViewId::Insights => self
-                        .insights_view
-                        .as_mut()
-                        .and_then(|view| view.handle_key(key, &ctx)),
+                    ViewId::Insights => {
+                        if let Some(view) = self.insights_view.as_mut() {
+                            view.handle_key(key, &ctx)
+                        } else if self.insights_init.is_some() {
+                            // Init still running. Allow Esc to bail back
+                            // to Dashboard; the background task continues
+                            // and its result lands on the next tick.
+                            match key.code {
+                                KeyCode::Esc => Some(Action::NavigateBack),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        }
+                    }
                     #[cfg(not(feature = "analytics"))]
                     ViewId::Insights => None,
                     #[cfg(feature = "markdown")]
@@ -2377,15 +2513,7 @@ impl App {
 
             Action::OpenInsights | Action::NavigateTo(ViewId::Insights) => {
                 #[cfg(feature = "analytics")]
-                if self.insights_view.is_none() {
-                    match self.ensure_insights_engine_and_view() {
-                        Ok(()) => {}
-                        Err(e) => {
-                            self.show_user_warning(format!("Analytics unavailable: {e:#}"));
-                            return;
-                        }
-                    }
-                }
+                self.start_insights_init();
                 self.current_view = ViewId::Insights;
                 self.dirty = true;
             }
@@ -3497,6 +3625,9 @@ impl App {
             }
         }
 
+        #[cfg(feature = "analytics")]
+        self.drain_insights_init();
+
         if let Some((_, deadline)) = &self.pending_permission {
             if now >= *deadline {
                 self.pending_permission.take(); // drops reply_tx → auto-deny
@@ -3654,6 +3785,8 @@ impl App {
             ViewId::Insights => {
                 if let Some(ref mut view) = self.insights_view {
                     view.render(frame, view_area, &ctx);
+                } else if let Some(state) = self.insights_init.as_ref() {
+                    render_insights_init_placeholder(frame, view_area, state.started_at);
                 }
             }
             #[cfg(not(feature = "analytics"))]
