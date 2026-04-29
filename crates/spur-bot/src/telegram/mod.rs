@@ -81,96 +81,60 @@ pub async fn run_telegram_bot(
             maybe_update = update_rx.recv() => {
                 let Some(inputs) = maybe_update else { break; };
                 for input in inputs {
-                    match input {
-                        router::TelegramInput::Text {
-                            chat_id,
-                            message_thread_id,
-                            text,
-                            ..
-                        } => {
-                            let renders = runtime
-                                .handle_chat_text(&handle, chat_id, message_thread_id, &text)
-                                .await?;
-                            let mut all_renders = renders;
-                            let key = crate::state::ThreadKey { chat_id, message_thread_id };
-                            let pending = runtime.flush_pending(&handle, &key).await?;
-                            all_renders.extend(pending);
-
-                            // Handle topic creation inline.
-                            for render in &all_renders {
-                                if let crate::runtime::RuntimeRender::CreateTopic { topic_name } = render {
-                                    let topic = client.create_forum_topic(chat_id, topic_name.clone()).await?;
-                                    runtime.ensure_topic_record(chat_id, topic.message_thread_id, topic_name.clone()).await?;
-                                    client.send_text_to_thread(
-                                        chat_id,
-                                        Some(topic.message_thread_id),
-                                        "Send your first message to start the session.".into(),
-                                    ).await?;
-                                }
-                            }
-
-                            let display_renders: Vec<_> = all_renders
-                                .into_iter()
-                                .filter(|r| !matches!(r, crate::runtime::RuntimeRender::CreateTopic { .. }))
-                                .collect();
-                            render::render_batch_to_thread(
-                                &client,
-                                &sender,
-                                chat_id,
-                                message_thread_id,
-                                display_renders,
-                            )
-                            .await?;
-                        }
-                        router::TelegramInput::Callback {
-                            query_id,
-                            token,
-                            chat_id,
-                            message_thread_id,
-                            ..
-                        } => {
-                            let key = crate::state::ThreadKey { chat_id, message_thread_id };
-                            let renders = runtime.handle_callback(&handle, &key, &query_id, &token).await?;
-                            render::render_batch_to_thread(
-                                &client,
-                                &sender,
-                                chat_id,
-                                message_thread_id,
-                                renders,
-                            )
-                            .await?;
-                        }
+                    if let Err(err) = process_input(
+                        &mut runtime,
+                        &handle,
+                        &client,
+                        &sender,
+                        input,
+                    )
+                    .await
+                    {
+                        tracing::error!(error = ?err, "transient error handling telegram input");
                     }
                 }
             }
-            Ok(event) = event_rx.recv() => {
-                let (maybe_key, renders) = runtime.handle_spur_event(event).await?;
-                let mut all_renders = renders;
-                if let Some(ref key) = maybe_key {
-                    let pending = runtime.flush_pending(&handle, key).await?;
-                    all_renders.extend(pending);
-                }
-                if let Some(key) = maybe_key {
-                    render::render_batch_to_thread(
-                        &client,
-                        &sender,
-                        key.chat_id,
-                        key.message_thread_id,
-                        all_renders,
-                    )
-                    .await?;
+            event = event_rx.recv() => {
+                match event {
+                    Ok(event) => {
+                        if let Err(err) = process_spur_event(
+                            &mut runtime,
+                            &handle,
+                            &client,
+                            &sender,
+                            event,
+                        )
+                        .await
+                        {
+                            tracing::error!(
+                                error = ?err,
+                                "transient error handling spur event"
+                            );
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(
+                            skipped = n,
+                            "telegram bot lagged on spur event broadcast"
+                        );
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
             Some(request) = perm_rx.recv() => {
-                let (key, renders) = runtime.handle_permission_request(request)?;
-                render::render_batch_to_thread(
+                if let Err(err) = process_permission(
+                    &mut runtime,
                     &client,
                     &sender,
-                    key.chat_id,
-                    key.message_thread_id,
-                    renders,
+                    request,
                 )
-                .await?;
+                .await
+                {
+                    tracing::error!(
+                        error = ?err,
+                        "transient error handling permission request"
+                    );
+                }
             }
             _ = cancellation.cancelled() => {
                 tracing::info!("cancellation signaled; winding down telegram bot");
@@ -180,4 +144,127 @@ pub async fn run_telegram_bot(
     }
 
     host.shutdown().await
+}
+
+async fn process_input(
+    runtime: &mut crate::runtime::BotRuntime,
+    handle: &spur_interactive::InteractiveFrontendHandle,
+    client: &client::TelegramClient,
+    sender: &sender::TelegramSender,
+    input: router::TelegramInput,
+) -> anyhow::Result<()> {
+    match input {
+        router::TelegramInput::Text {
+            chat_id,
+            message_thread_id,
+            text,
+            ..
+        } => {
+            let renders = runtime
+                .handle_chat_text(handle, chat_id, message_thread_id, &text)
+                .await?;
+            let mut all_renders = renders;
+            let key = crate::state::ThreadKey {
+                chat_id,
+                message_thread_id,
+            };
+            let pending = runtime.flush_pending(handle, &key).await?;
+            all_renders.extend(pending);
+
+            for render in &all_renders {
+                if let crate::runtime::RuntimeRender::CreateTopic { topic_name } = render {
+                    let topic = client.create_forum_topic(chat_id, topic_name.clone()).await?;
+                    runtime
+                        .ensure_topic_record(chat_id, topic.message_thread_id, topic_name.clone())
+                        .await?;
+                    client
+                        .send_text_to_thread(
+                            chat_id,
+                            Some(topic.message_thread_id),
+                            "Send your first message to start the session.".into(),
+                        )
+                        .await?;
+                }
+            }
+
+            let display_renders: Vec<_> = all_renders
+                .into_iter()
+                .filter(|r| !matches!(r, crate::runtime::RuntimeRender::CreateTopic { .. }))
+                .collect();
+            render::render_batch_to_thread(
+                client,
+                sender,
+                chat_id,
+                message_thread_id,
+                display_renders,
+            )
+            .await
+        }
+        router::TelegramInput::Callback {
+            query_id,
+            token,
+            chat_id,
+            message_thread_id,
+            ..
+        } => {
+            let key = crate::state::ThreadKey {
+                chat_id,
+                message_thread_id,
+            };
+            let renders = runtime
+                .handle_callback(handle, &key, &query_id, &token)
+                .await?;
+            render::render_batch_to_thread(
+                client,
+                sender,
+                chat_id,
+                message_thread_id,
+                renders,
+            )
+            .await
+        }
+    }
+}
+
+async fn process_spur_event(
+    runtime: &mut crate::runtime::BotRuntime,
+    handle: &spur_interactive::InteractiveFrontendHandle,
+    client: &client::TelegramClient,
+    sender: &sender::TelegramSender,
+    event: spur_acp::SpurEvent,
+) -> anyhow::Result<()> {
+    let (maybe_key, renders) = runtime.handle_spur_event(event).await?;
+    let mut all_renders = renders;
+    if let Some(ref key) = maybe_key {
+        let pending = runtime.flush_pending(handle, key).await?;
+        all_renders.extend(pending);
+    }
+    if let Some(key) = maybe_key {
+        render::render_batch_to_thread(
+            client,
+            sender,
+            key.chat_id,
+            key.message_thread_id,
+            all_renders,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn process_permission(
+    runtime: &mut crate::runtime::BotRuntime,
+    client: &client::TelegramClient,
+    sender: &sender::TelegramSender,
+    request: spur_acp::types::PermissionRequest,
+) -> anyhow::Result<()> {
+    let (key, renders) = runtime.handle_permission_request(request)?;
+    render::render_batch_to_thread(
+        client,
+        sender,
+        key.chat_id,
+        key.message_thread_id,
+        renders,
+    )
+    .await
 }
