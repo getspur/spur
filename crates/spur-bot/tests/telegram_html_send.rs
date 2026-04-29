@@ -7,7 +7,10 @@ use tokio::time::{timeout, Instant};
 async fn send_html_to_thread_fallback_on_parse_error() {
     assert_html_error_falls_back(
         "400 Bad Request",
-        r#"{"ok":false,"error_code":400,"description":"Bad Request: can't parse entities: Can't find end of the entity"}"#,
+        telegram_error_body(
+            400,
+            "Bad Request: can't parse entities: Can't find end of the entity",
+        ),
     )
     .await;
 }
@@ -16,7 +19,7 @@ async fn send_html_to_thread_fallback_on_parse_error() {
 async fn send_html_to_thread_fallback_on_message_too_long_400() {
     assert_html_error_falls_back(
         "400 Bad Request",
-        r#"{"ok":false,"error_code":400,"description":"Bad Request: message is too long"}"#,
+        telegram_error_body(400, "Bad Request: message is too long"),
     )
     .await;
 }
@@ -25,16 +28,17 @@ async fn send_html_to_thread_fallback_on_message_too_long_400() {
 async fn send_html_to_thread_fallback_on_arbitrary_400_with_html_parse_mode() {
     assert_html_error_falls_back(
         "400 Bad Request",
-        r#"{"ok":false,"error_code":400,"description":"Bad Request: unrelated message"}"#,
+        telegram_error_body(400, "Bad Request: unrelated message"),
     )
     .await;
 }
 
 #[tokio::test]
 async fn send_html_to_thread_does_not_fallback_on_429() {
-    let (result, requests, paused_now, paused_later) = send_html_error_and_capture_optional_retry(
+    let (result, requests, paused_now, paused_later) = send_html_error_and_capture_retry(
         "429 Too Many Requests",
-        r#"{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 7","parameters":{"retry_after":7}}"#,
+        r#"{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 7","parameters":{"retry_after":7}}"#.into(),
+        None,
     )
     .await;
 
@@ -52,9 +56,10 @@ async fn send_html_to_thread_does_not_fallback_on_429() {
 
 #[tokio::test]
 async fn send_html_to_thread_does_not_fallback_on_403() {
-    let (result, requests, paused_now, _) = send_html_error_and_capture_optional_retry(
+    let (result, requests, paused_now, _) = send_html_error_and_capture_retry(
         "403 Forbidden",
-        r#"{"ok":false,"error_code":403,"description":"Forbidden: bot was blocked by the user"}"#,
+        telegram_error_body(403, "Forbidden: bot was blocked by the user"),
+        None,
     )
     .await;
 
@@ -66,36 +71,119 @@ async fn send_html_to_thread_does_not_fallback_on_403() {
     assert!(!paused_now, "403 should not activate client pause");
 }
 
-async fn assert_html_error_falls_back(status: &'static str, body: &'static str) {
+#[tokio::test]
+async fn send_html_to_thread_does_not_fallback_on_500_server_error() {
+    assert_api_error_does_not_fallback(
+        "500 Internal Server Error",
+        telegram_error_body(500, "Internal Server Error"),
+        500,
+        "Internal Server Error",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn send_html_to_thread_does_not_fallback_on_503_service_unavailable() {
+    assert_api_error_does_not_fallback(
+        "503 Service Unavailable",
+        telegram_error_body(503, "Service Unavailable"),
+        503,
+        "Service Unavailable",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn send_html_to_thread_does_not_fallback_on_json_decode_error() {
+    let (result, requests, paused_now, _) = send_html_error_and_capture_retry(
+        "200 OK",
+        r#"{"ok":true,"result":NOT_VALID_JSON"#.into(),
+        None,
+    )
+    .await;
+
+    assert_json_decode_error(result);
+    assert_no_retry(requests, paused_now, "JSON decode errors");
+}
+
+#[tokio::test]
+async fn send_html_to_thread_propagates_fallback_400_after_html_400() {
+    let (result, requests, _, _) = send_html_error_and_capture_retry(
+        "400 Bad Request",
+        telegram_error_body(400, "Bad Request: can't parse entities"),
+        Some((
+            "400 Bad Request",
+            telegram_error_body(400, "Bad Request: chat not found"),
+        )),
+    )
+    .await;
+
+    assert_api_error(result, 400, "Bad Request: chat not found");
+    assert_eq!(requests.len(), 2, "fallback error must not loop");
+    assert!(requests[0].contains("\"parse_mode\":\"HTML\""));
+    assert!(
+        !requests[1].contains("parse_mode"),
+        "fallback request must not set parse_mode: {}",
+        requests[1]
+    );
+}
+
+#[tokio::test]
+async fn send_html_to_thread_falls_back_on_400_with_empty_description() {
+    assert_html_error_falls_back("400 Bad Request", telegram_error_body(400, "")).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn send_html_to_thread_fallback_respects_pause_set_after_first_send() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind telegram test listener");
     let addr = listener.local_addr().expect("listener local addr");
+    let client = TelegramClient::new_with_url(format!("http://{addr}/"), Duration::from_secs(2))
+        .expect("client with custom api url should build");
+    let pauser = client.clone();
     let (request_tx, request_rx) = tokio::sync::oneshot::channel();
     let _server = tokio::spawn(async move {
         let mut requests = Vec::new();
 
         let (mut stream, _) = listener.accept().await.expect("accept first request");
         requests.push(String::from_utf8_lossy(&read_http_request(&mut stream).await).into_owned());
-        write_response(&mut stream, status, body).await;
+        let body = telegram_error_body(400, "Bad Request: can't parse entities");
+        write_response(&mut stream, "400 Bad Request", &body).await;
+        let pause_until = Instant::now() + Duration::from_millis(250);
+        pauser.pause_until_at_least(pause_until);
+        drop(stream);
 
-        let (mut stream, _) = listener.accept().await.expect("accept second request");
+        let (mut stream, _) = listener.accept().await.expect("accept fallback request");
+        let fallback_at = Instant::now();
         requests.push(String::from_utf8_lossy(&read_http_request(&mut stream).await).into_owned());
-        let body = r#"{"ok":true,"result":{"message_id":654,"message_thread_id":77,"date":0,"chat":{"id":42,"type":"private"},"text":"plain fallback"}}"#;
-        write_response(&mut stream, "200 OK", body).await;
+        let body = telegram_message_body(655, "plain fallback");
+        write_response(&mut stream, "200 OK", &body).await;
 
-        let _ = request_tx.send(requests);
+        let _ = request_tx.send((requests, pause_until, fallback_at));
     });
 
-    let client = TelegramClient::new_with_url(format!("http://{addr}/"), Duration::from_secs(1))
-        .expect("client with custom api url should build");
-
     client
-        .send_html_to_thread(42, Some(77), "<b>broken".into(), "plain fallback".into())
+        .send_html_to_thread(42, None, "<b>hello</b>".into(), "plain fallback".into())
         .await
-        .expect("HTML 400 should fall back to plain text");
+        .expect("HTML 400 should fall back to plain text after pause");
 
-    let requests = request_rx.await.expect("server should capture requests");
+    let (requests, pause_until, fallback_at) =
+        request_rx.await.expect("server should capture requests");
+    assert_eq!(requests.len(), 2);
+    assert!(
+        fallback_at >= pause_until,
+        "fallback fired before pause elapsed: {fallback_at:?} < {pause_until:?}"
+    );
+}
+
+async fn assert_html_error_falls_back(status: &'static str, body: String) {
+    let fallback_body = telegram_message_body(654, "plain fallback");
+    let (result, requests, _, _) =
+        send_html_error_and_capture_retry(status, body, Some(("200 OK", fallback_body))).await;
+
+    result.expect("HTML 400 should fall back to plain text");
+
     assert_eq!(requests.len(), 2);
     assert!(requests[0].contains("\"parse_mode\":\"HTML\""));
     assert!(requests[0].contains("\"text\":\"<b>broken\""));
@@ -107,9 +195,10 @@ async fn assert_html_error_falls_back(status: &'static str, body: &'static str) 
     );
 }
 
-async fn send_html_error_and_capture_optional_retry(
+async fn send_html_error_and_capture_retry(
     status: &'static str,
-    body: &'static str,
+    body: String,
+    fallback_response: Option<(&'static str, String)>,
 ) -> (anyhow::Result<()>, Vec<String>, bool, bool) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -121,15 +210,20 @@ async fn send_html_error_and_capture_optional_retry(
 
         let (mut stream, _) = listener.accept().await.expect("accept request");
         requests.push(String::from_utf8_lossy(&read_http_request(&mut stream).await).into_owned());
-        write_response(&mut stream, status, body).await;
+        write_response(&mut stream, status, &body).await;
 
-        if let Ok(Ok((mut stream, _))) =
+        if let Some((fallback_status, fallback_body)) = fallback_response {
+            let (mut stream, _) = listener.accept().await.expect("accept second request");
+            requests
+                .push(String::from_utf8_lossy(&read_http_request(&mut stream).await).into_owned());
+            write_response(&mut stream, fallback_status, &fallback_body).await;
+        } else if let Ok(Ok((mut stream, _))) =
             timeout(Duration::from_millis(200), listener.accept()).await
         {
             requests
                 .push(String::from_utf8_lossy(&read_http_request(&mut stream).await).into_owned());
-            let body = r#"{"ok":true,"result":{"message_id":655,"date":0,"chat":{"id":42,"type":"private"},"text":"plain fallback"}}"#;
-            write_response(&mut stream, "200 OK", body).await;
+            let body = telegram_message_body(655, "plain fallback");
+            write_response(&mut stream, "200 OK", &body).await;
         }
 
         let _ = request_tx.send(requests);
@@ -139,13 +233,63 @@ async fn send_html_error_and_capture_optional_retry(
         .expect("client with custom api url should build");
 
     let result = client
-        .send_html_to_thread(42, None, "<b>hello</b>".into(), "hello".into())
+        .send_html_to_thread(42, None, "<b>broken".into(), "plain fallback".into())
         .await;
 
     let paused_now = client.is_paused(Instant::now());
     let paused_later = client.is_paused(Instant::now() + Duration::from_secs(8));
     let requests = request_rx.await.expect("server should capture requests");
     (result, requests, paused_now, paused_later)
+}
+
+async fn assert_api_error_does_not_fallback(
+    status: &'static str,
+    body: String,
+    error_code: u64,
+    description: &str,
+) {
+    let (result, requests, paused_now, _) =
+        send_html_error_and_capture_retry(status, body, None).await;
+
+    assert_api_error(result, error_code, description);
+    assert_no_retry(requests, paused_now, description);
+}
+
+fn assert_no_retry(requests: Vec<String>, paused_now: bool, reason: &str) {
+    assert_eq!(requests.len(), 1, "{reason} must not retry as plain text");
+    assert!(!paused_now, "{reason} should not activate client pause");
+}
+
+fn assert_api_error(result: anyhow::Result<()>, error_code: u64, description: &str) {
+    let err = result.expect_err("telegram API error should propagate");
+    let telegram_err = err.downcast_ref::<frankenstein::Error>();
+    assert!(
+        matches!(
+            telegram_err,
+            Some(frankenstein::Error::Api(response))
+                if response.error_code == error_code && response.description == description
+        ),
+        "frankenstein API error expected, got {telegram_err:?}"
+    );
+}
+
+fn assert_json_decode_error(result: anyhow::Result<()>) {
+    let err = result.expect_err("telegram JSON decode error should propagate");
+    let telegram_err = err.downcast_ref::<frankenstein::Error>();
+    assert!(
+        matches!(telegram_err, Some(frankenstein::Error::JsonDecode { .. })),
+        "frankenstein JSON decode error expected, got {telegram_err:?}"
+    );
+}
+
+fn telegram_error_body(error_code: u64, description: &str) -> String {
+    format!(r#"{{"ok":false,"error_code":{error_code},"description":"{description}"}}"#)
+}
+
+fn telegram_message_body(message_id: i32, text: &str) -> String {
+    format!(
+        r#"{{"ok":true,"result":{{"message_id":{message_id},"date":0,"chat":{{"id":42,"type":"private"}},"text":"{text}"}}}}"#
+    )
 }
 
 async fn read_http_request(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
