@@ -825,9 +825,7 @@ async fn run() -> Result<()> {
                         eprintln!("{e}");
                         eprintln!();
                         eprintln!("Community runs one SPUR TUI per repository.");
-                        eprintln!(
-                            "Pro removes this limit and adds parallel workers within one"
-                        );
+                        eprintln!("Pro removes this limit and adds parallel workers within one");
                         eprintln!("orchestrator with shared lineage.");
                         eprintln!();
                         eprintln!("Activate a license: spur auth login --key <KEY>");
