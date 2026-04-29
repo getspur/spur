@@ -286,7 +286,7 @@ mod tests {
     fn empty_engine() -> (TempDir, AsyncEngine) {
         let tmp = TempDir::new().unwrap();
         let db_path = tmp.path().join("insights.duckdb");
-        let engine = AnalyticsEngine::open(db_path).unwrap();
+        let (engine, _recovered) = AnalyticsEngine::open(db_path).unwrap();
         (tmp, AsyncEngine::new(engine))
     }
 

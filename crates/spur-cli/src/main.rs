@@ -1387,7 +1387,7 @@ fn run_cost_duckdb(
     std::fs::create_dir_all(&cache_dir)?;
     let cache_path = cache_dir.join("cost.duckdb");
 
-    let engine = AnalyticsEngine::open(&cache_path)?;
+    let (engine, _recovered) = AnalyticsEngine::open(&cache_path)?;
     engine.initialize()?;
     let status = engine.create_agent_views()?;
     engine.load_pricing(&spur_cost::PricingRegistry::with_builtin_prices())?;

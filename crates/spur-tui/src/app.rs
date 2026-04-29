@@ -379,7 +379,7 @@ pub struct App {
 #[cfg(feature = "analytics")]
 struct InsightsInitState {
     started_at: Instant,
-    rx: tokio::sync::oneshot::Receiver<anyhow::Result<spur_context::AsyncEngine>>,
+    rx: tokio::sync::oneshot::Receiver<anyhow::Result<(spur_context::AsyncEngine, bool)>>,
     /// Whole-second elapsed value last shown on the placeholder. Used to
     /// throttle redraws to 1Hz when init is in flight (instead of forcing
     /// dirty on every 30Hz tick). Initialized to `u64::MAX` so the first
@@ -434,7 +434,7 @@ fn render_insights_init_placeholder(
 /// Cold init pipeline for the analytics engine. Blocks (DuckDB I/O +
 /// JSONL scan); ALWAYS run inside `tokio::task::spawn_blocking`.
 #[cfg(feature = "analytics")]
-fn build_analytics_engine_blocking() -> anyhow::Result<spur_context::AsyncEngine> {
+fn build_analytics_engine_blocking() -> anyhow::Result<(spur_context::AsyncEngine, bool)> {
     use spur_context::{AnalyticsEngine, AsyncEngine};
 
     let t0 = std::time::Instant::now();
@@ -445,7 +445,7 @@ fn build_analytics_engine_blocking() -> anyhow::Result<spur_context::AsyncEngine
     let cache_path = cache_dir.join("cost.duckdb");
     tracing::info!(target: "spur_tui::insights", path = %cache_path.display(), "opening DuckDB cache (background)");
 
-    let engine = AnalyticsEngine::open(&cache_path)?;
+    let (engine, recovered) = AnalyticsEngine::open(&cache_path)?;
     engine.initialize()?;
     let view_status = engine.create_agent_views()?;
     engine.load_pricing(&spur_cost::PricingRegistry::with_builtin_prices())?;
@@ -458,7 +458,7 @@ fn build_analytics_engine_blocking() -> anyhow::Result<spur_context::AsyncEngine
         ?view_status,
         "analytics engine cold init done"
     );
-    Ok(AsyncEngine::new(engine))
+    Ok((AsyncEngine::new(engine), recovered))
 }
 
 #[derive(Debug, Clone)]
@@ -1313,10 +1313,16 @@ impl App {
             return;
         };
         match state.rx.try_recv() {
-            Ok(Ok(engine)) => {
+            Ok(Ok((engine, recovered))) => {
                 tracing::info!(target: "spur_tui::insights", elapsed_ms = state.started_at.elapsed().as_millis() as u64, "insights init complete; constructing view");
                 self.analytics_engine = Some(engine.clone());
                 self.insights_view = Some(crate::views::insights::InsightsView::new(engine));
+                if recovered {
+                    self.show_user_warning(
+                        "Analytics WAL was corrupt; renamed to *.broken and re-opened. Last refresh window may be missing."
+                            .to_string(),
+                    );
+                }
                 self.dirty = true;
             }
             Ok(Err(e)) => {
