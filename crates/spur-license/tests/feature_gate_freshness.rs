@@ -118,3 +118,55 @@ async fn validate_err_keeps_gate_unchanged() {
          (Arc::ptr_eq proves no store happened)",
     );
 }
+
+#[tokio::test]
+async fn heartbeat_err_with_degrade_refreshes_cached_gate_to_provider_state() {
+    use spur_license::{LicenseError, LicenseStatus};
+
+    let (fake, license, _g) = build_license_with_community_seed();
+    // Activate Pro first so heartbeat has degraded-Pro state to commit.
+    fake.push_activate_result(Ok(pro_state()));
+    license.activate("PRO_KEY").await.unwrap();
+    let cached = license.feature_gate();
+    assert!(cached.has(FeatureKey::BLOB_PRO_NAMESPACE_DELETION));
+    // Clone the OLD Arc so we hold a strong reference across the
+    // mutation; Arc::ptr_eq below proves a store happened.
+    let pre_arc = Arc::clone(&*cached.snapshot());
+
+    // Build a degraded-Pro state: Pro plan with degraded status.
+    let mut degraded_pro = pro_state();
+    degraded_pro.status = LicenseStatus::Degraded;
+    degraded_pro.status_text = "heartbeat failed".into();
+
+    fake.push_heartbeat_degraded_err(
+        degraded_pro.clone(),
+        LicenseError::Provider("heartbeat failed: simulated".into()),
+    );
+    let result = license.heartbeat().await;
+    assert!(result.is_err(), "heartbeat must propagate the provider Err");
+
+    // 1. A store happened (Arc allocation identity changed).
+    let post_arc = Arc::clone(&*cached.snapshot());
+    assert!(
+        !Arc::ptr_eq(&pre_arc, &post_arc),
+        "heartbeat-Err must trigger update_state on the cached gate",
+    );
+
+    // 2. The new snapshot was sourced from provider.current_state(),
+    //    which after FakeProvider's commit holds `degraded_pro`. Prove
+    //    this by checking the snapshot's source plan is Pro (the
+    //    degraded state's plan), NOT a synthesized fallback.
+    assert_eq!(
+        post_arc.source.plan,
+        Plan::Pro,
+        "gate's snapshot.source.plan must reflect the degraded-Pro state \
+         (proves refresh source was provider.current_state(), not a hardcoded fallback)",
+    );
+
+    // 3. Sanity check: license.current_state() also reports degraded.
+    let live = license.current_state();
+    assert!(
+        matches!(live.status, LicenseStatus::Degraded),
+        "license.current_state() must report Degraded after heartbeat-Err-with-degrade",
+    );
+}
