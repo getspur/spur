@@ -1,10 +1,72 @@
 use spur_bot::telegram::client::TelegramClient;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::time::Instant;
+use tokio::time::{timeout, Instant};
 
 #[tokio::test]
-async fn send_html_to_thread_falls_back_to_plain_on_parse_error() {
+async fn send_html_to_thread_fallback_on_parse_error() {
+    assert_html_error_falls_back(
+        "400 Bad Request",
+        r#"{"ok":false,"error_code":400,"description":"Bad Request: can't parse entities: Can't find end of the entity"}"#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn send_html_to_thread_fallback_on_message_too_long_400() {
+    assert_html_error_falls_back(
+        "400 Bad Request",
+        r#"{"ok":false,"error_code":400,"description":"Bad Request: message is too long"}"#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn send_html_to_thread_fallback_on_arbitrary_400_with_html_parse_mode() {
+    assert_html_error_falls_back(
+        "400 Bad Request",
+        r#"{"ok":false,"error_code":400,"description":"Bad Request: unrelated message"}"#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn send_html_to_thread_does_not_fallback_on_429() {
+    let (result, requests, paused_now, paused_later) = send_html_error_and_capture_optional_retry(
+        "429 Too Many Requests",
+        r#"{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 7","parameters":{"retry_after":7}}"#,
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "429 response should be returned as an error"
+    );
+    assert_eq!(requests.len(), 1, "429 must not retry as plain text");
+    assert!(paused_now, "retry_after 429 should activate client pause");
+    assert!(
+        !paused_later,
+        "client pause should clear after retry_after window"
+    );
+}
+
+#[tokio::test]
+async fn send_html_to_thread_does_not_fallback_on_403() {
+    let (result, requests, paused_now, _) = send_html_error_and_capture_optional_retry(
+        "403 Forbidden",
+        r#"{"ok":false,"error_code":403,"description":"Forbidden: bot was blocked by the user"}"#,
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "403 response should be returned as an error"
+    );
+    assert_eq!(requests.len(), 1, "403 must not retry as plain text");
+    assert!(!paused_now, "403 should not activate client pause");
+}
+
+async fn assert_html_error_falls_back(status: &'static str, body: &'static str) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind telegram test listener");
@@ -15,8 +77,7 @@ async fn send_html_to_thread_falls_back_to_plain_on_parse_error() {
 
         let (mut stream, _) = listener.accept().await.expect("accept first request");
         requests.push(String::from_utf8_lossy(&read_http_request(&mut stream).await).into_owned());
-        let body = r#"{"ok":false,"error_code":400,"description":"Bad Request: can't parse entities: Can't find end of the entity"}"#;
-        write_response(&mut stream, "400 Bad Request", body).await;
+        write_response(&mut stream, status, body).await;
 
         let (mut stream, _) = listener.accept().await.expect("accept second request");
         requests.push(String::from_utf8_lossy(&read_http_request(&mut stream).await).into_owned());
@@ -32,7 +93,7 @@ async fn send_html_to_thread_falls_back_to_plain_on_parse_error() {
     client
         .send_html_to_thread(42, Some(77), "<b>broken".into(), "plain fallback".into())
         .await
-        .expect("parse error should fall back to plain text");
+        .expect("HTML 400 should fall back to plain text");
 
     let requests = request_rx.await.expect("server should capture requests");
     assert_eq!(requests.len(), 2);
@@ -46,18 +107,32 @@ async fn send_html_to_thread_falls_back_to_plain_on_parse_error() {
     );
 }
 
-#[tokio::test]
-async fn send_html_to_thread_respects_rate_limit_pause() {
+async fn send_html_error_and_capture_optional_retry(
+    status: &'static str,
+    body: &'static str,
+) -> (anyhow::Result<()>, Vec<String>, bool, bool) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind telegram test listener");
     let addr = listener.local_addr().expect("listener local addr");
+    let (request_tx, request_rx) = tokio::sync::oneshot::channel();
     let _server = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.expect("accept request");
-        let _request = read_http_request(&mut stream).await;
+        let mut requests = Vec::new();
 
-        let body = r#"{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 7","parameters":{"retry_after":7}}"#;
-        write_response(&mut stream, "429 Too Many Requests", body).await;
+        let (mut stream, _) = listener.accept().await.expect("accept request");
+        requests.push(String::from_utf8_lossy(&read_http_request(&mut stream).await).into_owned());
+        write_response(&mut stream, status, body).await;
+
+        if let Ok(Ok((mut stream, _))) =
+            timeout(Duration::from_millis(200), listener.accept()).await
+        {
+            requests
+                .push(String::from_utf8_lossy(&read_http_request(&mut stream).await).into_owned());
+            let body = r#"{"ok":true,"result":{"message_id":655,"date":0,"chat":{"id":42,"type":"private"},"text":"plain fallback"}}"#;
+            write_response(&mut stream, "200 OK", body).await;
+        }
+
+        let _ = request_tx.send(requests);
     });
 
     let client = TelegramClient::new_with_url(format!("http://{addr}/"), Duration::from_secs(1))
@@ -67,18 +142,10 @@ async fn send_html_to_thread_respects_rate_limit_pause() {
         .send_html_to_thread(42, None, "<b>hello</b>".into(), "hello".into())
         .await;
 
-    assert!(
-        result.is_err(),
-        "429 response should be returned as an error"
-    );
-    assert!(
-        client.is_paused(Instant::now()),
-        "retry_after 429 should activate client pause"
-    );
-    assert!(
-        !client.is_paused(Instant::now() + Duration::from_secs(8)),
-        "client pause should clear after retry_after window"
-    );
+    let paused_now = client.is_paused(Instant::now());
+    let paused_later = client.is_paused(Instant::now() + Duration::from_secs(8));
+    let requests = request_rx.await.expect("server should capture requests");
+    (result, requests, paused_now, paused_later)
 }
 
 async fn read_http_request(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
