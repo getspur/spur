@@ -90,7 +90,12 @@ CREATE TABLE IF NOT EXISTS events_cache (
     cost_usd              DOUBLE
 );
 
-CREATE TABLE IF NOT EXISTS scan_manifest (
+-- Same DROP-on-init pattern as `pricing`: PRIMARY KEY (agent) + DELETE+INSERT
+-- in refresh_cache() (engine.rs) is the same crash class. Empty manifest
+-- forces a one-time JSONL rescan on next refresh — events_cache itself
+-- still persists, so this is bounded recovery, not data loss.
+DROP TABLE IF EXISTS scan_manifest;
+CREATE TABLE scan_manifest (
     agent     VARCHAR PRIMARY KEY,
     loaded_at TIMESTAMP NOT NULL,
     row_count BIGINT NOT NULL DEFAULT 0
