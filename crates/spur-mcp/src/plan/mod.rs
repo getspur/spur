@@ -1020,9 +1020,9 @@ pub async fn emit_completion_audit(
     completion_state: crate::plan::audit_sentinel::CompletionState,
     superseded: bool,
     fields: crate::plan::audit_sentinel::CompletionAuditFields,
-) {
+) -> anyhow::Result<()> {
     let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
-        return;
+        return Ok(());
     };
     if let Err(error) = crate::server::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
@@ -1036,9 +1036,11 @@ pub async fn emit_completion_audit(
             delegation_id = %delegation_id,
             "Completion audit comment emission skipped: {error:?}"
         );
-        return;
+        return Ok(());
     }
-    let Some(adv) = pm.advanced() else { return };
+    let Some(adv) = pm.advanced() else {
+        return Ok(());
+    };
     let kind = crate::plan::audit_sentinel::AuditSentinelKind::Completion {
         delegation_id: delegation_id.to_string(),
         completion_state,
@@ -1048,16 +1050,8 @@ pub async fn emit_completion_audit(
         artifact_uri: fields.artifact_uri,
     };
     let body = crate::plan::audit_sentinel::encode_comment(&kind);
-    if let Err(e) = adv.add_comment(issue_id, &body).await {
-        warn!(
-            target: "spur.audit.emit_failure",
-            kind = "completion",
-            issue_id = %issue_id,
-            plan_id = %plan_id,
-            delegation_id = %delegation_id,
-            "Completion audit comment emission failed: {e}"
-        );
-    }
+    adv.add_comment(issue_id, &body).await?;
+    Ok(())
 }
 
 pub async fn emit_epic_completion_audit(
@@ -1233,6 +1227,7 @@ pub fn dispatch_intent_update(
 }
 
 /// Persist dispatch intent before the worker send happens.
+#[allow(clippy::too_many_arguments)]
 pub async fn persist_dispatch_intent(
     pm: &dyn PmLike,
     issue_id: &str,
@@ -1405,6 +1400,24 @@ pub fn completion_is_superseded(
     })
 }
 
+/// True if a `Completion` audit sentinel already exists for this delegation_id.
+/// Mirrors `completion_is_superseded` shape — both ask "what does PM truth say?"
+pub fn completion_audit_already_emitted(
+    delegation_id: &str,
+    audits: &[crate::plan::audit_sentinel::AuditSentinelKind],
+) -> bool {
+    audits.iter().any(|audit| {
+        matches!(
+            audit,
+            crate::plan::audit_sentinel::AuditSentinelKind::Completion {
+                delegation_id: emitted,
+                ..
+            } if emitted == delegation_id
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn persist_completion_result(
     pm: &dyn PmLike,
     issue_id: &str,
@@ -1413,31 +1426,47 @@ pub async fn persist_completion_result(
     delegation_id: &str,
     completion_state: crate::plan::audit_sentinel::CompletionState,
     fields: crate::plan::audit_sentinel::CompletionAuditFields,
+    already_emitted: bool,
 ) -> anyhow::Result<()> {
-    let update = match completion_state {
-        crate::plan::audit_sentinel::CompletionState::AwaitingReview => completion_success_update(),
-        crate::plan::audit_sentinel::CompletionState::Failed
-        | crate::plan::audit_sentinel::CompletionState::Cancelled => {
+    use crate::plan::audit_sentinel::CompletionState;
+
+    if !already_emitted && completion_state != CompletionState::Superseded {
+        emit_completion_audit(
+            Some(pm),
+            &Some(issue_id.to_string()),
+            feature_gate,
+            plan_id,
+            delegation_id,
+            completion_state,
+            false,
+            fields,
+        )
+        .await?;
+    } else if completion_state == CompletionState::Superseded && !already_emitted {
+        emit_completion_audit(
+            Some(pm),
+            &Some(issue_id.to_string()),
+            feature_gate,
+            plan_id,
+            delegation_id,
+            completion_state,
+            true,
+            fields,
+        )
+        .await?;
+    }
+
+    let current_labels = pm.issue_labels(issue_id).await?;
+    let mut update = match completion_state {
+        CompletionState::AwaitingReview => completion_success_update(),
+        CompletionState::Failed | CompletionState::Cancelled => {
             completion_terminal_update(pm.closed_status())
         }
-        crate::plan::audit_sentinel::CompletionState::Superseded => spur_pm::IssueUpdate::default(),
+        CompletionState::Superseded => spur_pm::IssueUpdate::default(),
     };
-
+    let clear = clear_dispatch_intent_update(delegation_id, &current_labels);
+    update.remove_labels.extend(clear.remove_labels);
     apply_issue_update(pm, issue_id, update).await?;
-    clear_dispatch_intent(pm, issue_id, delegation_id).await?;
-
-    emit_completion_audit(
-        Some(pm),
-        &Some(issue_id.to_string()),
-        feature_gate,
-        plan_id,
-        delegation_id,
-        completion_state,
-        completion_state == crate::plan::audit_sentinel::CompletionState::Superseded,
-        fields,
-    )
-    .await;
-
     Ok(())
 }
 
@@ -1454,9 +1483,13 @@ pub(crate) async fn persist_worker_completion_and_notify(
     attempt: u32,
     materializer: &crate::outcome_materializer::OutcomeMaterializer,
 ) -> anyhow::Result<()> {
-    let completion_state =
+    let (completion_state, audits) =
         derive_worker_completion_state(pm, feature_gate, issue_id, delegation_id, &result.status)
             .await?;
+    let already_emitted = audits
+        .as_deref()
+        .map(|audits| completion_audit_already_emitted(delegation_id, audits))
+        .unwrap_or(false);
     persist_completion_inner(
         pm,
         issue_id,
@@ -1464,6 +1497,7 @@ pub(crate) async fn persist_worker_completion_and_notify(
         plan_id,
         delegation_id,
         completion_state,
+        already_emitted,
         fast_forward,
         result,
         brain_session_id,
@@ -1501,6 +1535,11 @@ pub(crate) async fn persist_system_completion_and_notify(
     attempt: u32,
     materializer: &crate::outcome_materializer::OutcomeMaterializer,
 ) -> anyhow::Result<()> {
+    let audits = read_audits_if_advanced(pm, feature_gate, issue_id).await?;
+    let already_emitted = audits
+        .as_deref()
+        .map(|audits| completion_audit_already_emitted(delegation_id, audits))
+        .unwrap_or(false);
     persist_completion_inner(
         pm,
         issue_id,
@@ -1508,6 +1547,7 @@ pub(crate) async fn persist_system_completion_and_notify(
         plan_id,
         delegation_id,
         completion_state,
+        already_emitted,
         fast_forward,
         result,
         brain_session_id,
@@ -1524,12 +1564,12 @@ pub(crate) async fn persist_system_completion_and_notify(
 ///
 /// **Graceful unlicensed fallback.** If `pm.advanced()` is `None` (non-beads
 /// backend) or `PM_PRO_BEADS_ADVANCED` is not licensed on the feature gate,
-/// returns `Ok(baseline)` without propagating the gate error. This is the same
-/// "fail-open to baseline" contract used by `issue_has_plan_pending_sweep_comment`
-/// in bd-6okx.2 attempt #3, and is safe today because `resolve_dispatch_orphan`
-/// is gated on the same feature key — an unlicensed system cannot produce
-/// `DispatchOrphanCleared` audits in the first place, so the baseline matches
-/// reality.
+/// returns `Ok((baseline, None))` without propagating the gate error. This is
+/// the same "fail-open to baseline" contract used by
+/// `issue_has_plan_pending_sweep_comment` in bd-6okx.2 attempt #3, and is safe
+/// today because `resolve_dispatch_orphan` is gated on the same feature key —
+/// an unlicensed system cannot produce `DispatchOrphanCleared` audits in the
+/// first place, so the baseline matches reality.
 ///
 /// Edge case to revisit: if the license is downgraded mid-delegation
 /// (Pro→Free between dispatch and completion), a late worker `Success` could
@@ -1542,26 +1582,53 @@ async fn derive_worker_completion_state(
     issue_id: &str,
     delegation_id: &str,
     status: &DelegationStatus,
-) -> anyhow::Result<crate::plan::audit_sentinel::CompletionState> {
+) -> anyhow::Result<(
+    crate::plan::audit_sentinel::CompletionState,
+    Option<Vec<crate::plan::audit_sentinel::AuditSentinelKind>>,
+)> {
     let baseline = completion_state_from_status(status);
-    let Some(adv) = pm.advanced() else {
-        return Ok(baseline);
-    };
     if crate::server::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
     )
     .is_err()
     {
-        return Ok(baseline);
+        return Ok((baseline, None));
     }
+    let Some(adv) = pm.advanced() else {
+        return Ok((baseline, None));
+    };
 
     let audits = crate::plan::projector::collect_sorted_audits(adv.list_comments(issue_id).await?);
-    if completion_is_superseded(delegation_id, &audits) {
-        Ok(crate::plan::audit_sentinel::CompletionState::Superseded)
+    let state = if completion_is_superseded(delegation_id, &audits) {
+        crate::plan::audit_sentinel::CompletionState::Superseded
     } else {
-        Ok(baseline)
+        baseline
+    };
+    Ok((state, Some(audits)))
+}
+
+/// Read PM-truth audits for the system path (lease GC, manual close, etc.).
+/// Returns None on unlicensed/no-advanced (matches derive_worker_completion_state shape).
+async fn read_audits_if_advanced(
+    pm: &dyn PmLike,
+    feature_gate: &spur_license::FeatureGate,
+    issue_id: &str,
+) -> anyhow::Result<Option<Vec<crate::plan::audit_sentinel::AuditSentinelKind>>> {
+    if crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        feature_gate,
+    )
+    .is_err()
+    {
+        return Ok(None);
     }
+    let Some(adv) = pm.advanced() else {
+        return Ok(None);
+    };
+    Ok(Some(crate::plan::projector::collect_sorted_audits(
+        adv.list_comments(issue_id).await?,
+    )))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1572,6 +1639,7 @@ async fn persist_completion_inner(
     plan_id: &str,
     delegation_id: &str,
     completion_state: crate::plan::audit_sentinel::CompletionState,
+    already_emitted: bool,
     fast_forward: &Option<Arc<tokio::sync::Notify>>,
     result: &DelegationResult,
     brain_session_id: &BrainSessionId,
@@ -1593,6 +1661,7 @@ async fn persist_completion_inner(
                 result_summary: result.summary.clone(),
                 artifact_uri: None,
             },
+            already_emitted,
         )
         .await?;
         crate::server::notify_fast_forward(fast_forward);
@@ -1637,6 +1706,7 @@ async fn persist_completion_inner(
             result_summary: cont.payload.summary.clone(),
             artifact_uri,
         },
+        already_emitted,
     )
     .await?;
     crate::server::notify_fast_forward(fast_forward);
@@ -3306,6 +3376,12 @@ mod tests {
             features,
         ));
         gate
+    }
+
+    fn community_feature_gate() -> Arc<spur_license::FeatureGate> {
+        Arc::new(spur_license::FeatureGate::new(
+            spur_license::policy::PolicyResolver::embedded(),
+        ))
     }
 
     #[test]
@@ -4985,6 +5061,343 @@ mod tests {
         assert!(
             result.is_err(),
             "emit_epic_completion_audit must return Err when add_comment fails"
+        );
+    }
+
+    // ─── completion writeback audit-first durability contract ───────────
+
+    struct CompletionWritebackAdvanced {
+        comments: std::sync::Mutex<Vec<String>>,
+        fail_add_comment: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl spur_pm::BeadsAdvanced for CompletionWritebackAdvanced {
+        async fn list_ready(
+            &self,
+            _filter: spur_pm::ReadyFilter,
+        ) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
+            Ok(vec![])
+        }
+
+        async fn list_comments(&self, _issue_id: &str) -> anyhow::Result<Vec<spur_pm::Comment>> {
+            Ok(vec![])
+        }
+
+        async fn add_comment(&self, _issue_id: &str, body: &str) -> anyhow::Result<String> {
+            if self.fail_add_comment {
+                anyhow::bail!("comment write failed");
+            }
+            let mut comments = self.comments.lock().expect("comments lock");
+            comments.push(body.to_string());
+            Ok(format!("c{}", comments.len()))
+        }
+
+        async fn remove_dependency(
+            &self,
+            _issue_id: &str,
+            _depends_on_id: &str,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn dep_cycles(&self) -> anyhow::Result<Vec<spur_pm::DependencyCycle>> {
+            Ok(vec![])
+        }
+    }
+
+    struct CompletionWritebackPm {
+        advanced: CompletionWritebackAdvanced,
+        labels: std::sync::Mutex<Vec<String>>,
+        status: std::sync::Mutex<Option<String>>,
+        updates: std::sync::Mutex<Vec<spur_pm::IssueUpdate>>,
+        fail_updates_remaining: std::sync::Mutex<usize>,
+    }
+
+    impl CompletionWritebackPm {
+        fn new(labels: Vec<String>) -> Self {
+            Self {
+                advanced: CompletionWritebackAdvanced {
+                    comments: std::sync::Mutex::new(Vec::new()),
+                    fail_add_comment: false,
+                },
+                labels: std::sync::Mutex::new(labels),
+                status: std::sync::Mutex::new(None),
+                updates: std::sync::Mutex::new(Vec::new()),
+                fail_updates_remaining: std::sync::Mutex::new(0),
+            }
+        }
+
+        fn with_comment_failure(labels: Vec<String>) -> Self {
+            Self {
+                advanced: CompletionWritebackAdvanced {
+                    comments: std::sync::Mutex::new(Vec::new()),
+                    fail_add_comment: true,
+                },
+                ..Self::new(labels)
+            }
+        }
+
+        fn completion_comment_count(&self) -> usize {
+            self.advanced
+                .comments
+                .lock()
+                .expect("comments lock")
+                .iter()
+                .filter(|body| {
+                    matches!(
+                        crate::plan::audit_sentinel::parse_comment(body),
+                        Some(Ok(
+                            crate::plan::audit_sentinel::AuditSentinelKind::Completion { .. }
+                        ))
+                    )
+                })
+                .count()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PmLike for CompletionWritebackPm {
+        async fn update_issue(
+            &self,
+            _id: &str,
+            update: spur_pm::IssueUpdate,
+        ) -> anyhow::Result<()> {
+            self.updates
+                .lock()
+                .expect("updates lock")
+                .push(update.clone());
+
+            {
+                let mut remaining = self
+                    .fail_updates_remaining
+                    .lock()
+                    .expect("fail updates lock");
+                if *remaining > 0 {
+                    *remaining -= 1;
+                    anyhow::bail!("issue update failed");
+                }
+            }
+
+            if let Some(status) = update.status {
+                *self.status.lock().expect("status lock") = Some(status);
+            }
+
+            let mut labels = self.labels.lock().expect("labels lock");
+            for remove in update.remove_labels {
+                labels.retain(|label| label != &remove);
+            }
+            for add in update.add_labels {
+                if !labels.contains(&add) {
+                    labels.push(add);
+                }
+            }
+            Ok(())
+        }
+
+        async fn issue_labels(&self, _id: &str) -> anyhow::Result<Vec<String>> {
+            Ok(self.labels.lock().expect("labels lock").clone())
+        }
+
+        fn closed_status(&self) -> &str {
+            "closed"
+        }
+
+        fn advanced(&self) -> Option<&dyn spur_pm::BeadsAdvanced> {
+            Some(&self.advanced)
+        }
+    }
+
+    fn completion_audit_fields() -> crate::plan::audit_sentinel::CompletionAuditFields {
+        crate::plan::audit_sentinel::CompletionAuditFields {
+            worker_branch: Some("spur/worker-test".to_string()),
+            result_summary: Some("worker done".to_string()),
+            artifact_uri: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn emit_completion_audit_returns_err_when_add_comment_fails() {
+        let pm = CompletionWritebackPm::with_comment_failure(vec![]);
+
+        let result = super::emit_completion_audit(
+            Some(&pm),
+            &Some("bd-1".to_string()),
+            pro_feature_gate().as_ref(),
+            "plan-1",
+            "del-A",
+            crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+            false,
+            completion_audit_fields(),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "emit_completion_audit must return Err when add_comment fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_completion_audit_unlicensed_returns_ok() {
+        let pm = CompletionWritebackPm::new(vec![]);
+
+        let result = super::emit_completion_audit(
+            Some(&pm),
+            &Some("bd-1".to_string()),
+            community_feature_gate().as_ref(),
+            "plan-1",
+            "del-A",
+            crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+            false,
+            completion_audit_fields(),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "unlicensed completion audit fallback must not fail writeback"
+        );
+        assert_eq!(
+            pm.advanced.comments.lock().expect("comments lock").len(),
+            0,
+            "unlicensed fallback must not call add_comment"
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_completion_result_audit_failure_aborts_mutation() {
+        let delegation_label = crate::plan::labels::delegation_id("del-A");
+        let pm = CompletionWritebackPm::with_comment_failure(vec![delegation_label.clone()]);
+
+        let result = super::persist_completion_result(
+            &pm,
+            "bd-1",
+            pro_feature_gate().as_ref(),
+            "plan-1",
+            "del-A",
+            crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+            completion_audit_fields(),
+            false,
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "audit failure must abort completion writeback"
+        );
+        assert!(
+            pm.status.lock().expect("status lock").is_none(),
+            "status must not change after audit failure"
+        );
+        let labels = pm.labels.lock().expect("labels lock");
+        assert!(
+            labels.contains(&delegation_label),
+            "delegation label must remain for retry after audit failure"
+        );
+        assert!(
+            !labels.contains(&crate::plan::labels::READY_FOR_REVIEW.to_string()),
+            "ready-for-review must not be added after audit failure"
+        );
+        assert!(
+            pm.updates.lock().expect("updates lock").is_empty(),
+            "issue mutation must not run after audit failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_completion_result_idempotent_after_audit_success_mutate_failure() {
+        let delegation_label = crate::plan::labels::delegation_id("del-A");
+        let pm = CompletionWritebackPm::new(vec![delegation_label.clone()]);
+        *pm.fail_updates_remaining.lock().expect("fail updates lock") = 1;
+
+        let first = super::persist_completion_result(
+            &pm,
+            "bd-1",
+            pro_feature_gate().as_ref(),
+            "plan-1",
+            "del-A",
+            crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+            completion_audit_fields(),
+            false,
+        )
+        .await;
+
+        assert!(first.is_err(), "first mutation failure must be returned");
+        assert_eq!(
+            pm.completion_comment_count(),
+            1,
+            "first attempt should write one durable completion audit"
+        );
+
+        let retry = super::persist_completion_result(
+            &pm,
+            "bd-1",
+            pro_feature_gate().as_ref(),
+            "plan-1",
+            "del-A",
+            crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+            completion_audit_fields(),
+            true,
+        )
+        .await;
+
+        assert!(
+            retry.is_ok(),
+            "retry must complete after audit was already emitted"
+        );
+        assert_eq!(
+            pm.completion_comment_count(),
+            1,
+            "retry with already_emitted=true must not duplicate completion audit"
+        );
+        let labels = pm.labels.lock().expect("labels lock");
+        assert!(
+            labels.contains(&crate::plan::labels::READY_FOR_REVIEW.to_string()),
+            "retry must re-apply ready-for-review"
+        );
+        assert!(
+            !labels.contains(&delegation_label),
+            "retry must clear delegation label"
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_completion_result_combined_update_clears_lease_and_delegation_label_in_one_pass(
+    ) {
+        let delegation_label = crate::plan::labels::delegation_id("del-A");
+        let lease_label = crate::plan::labels::lease_expires_at(1_777_777_777);
+        let pm = CompletionWritebackPm::new(vec![delegation_label.clone(), lease_label.clone()]);
+
+        super::persist_completion_result(
+            &pm,
+            "bd-1",
+            pro_feature_gate().as_ref(),
+            "plan-1",
+            "del-A",
+            crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+            completion_audit_fields(),
+            false,
+        )
+        .await
+        .expect("persist completion");
+
+        let updates = pm.updates.lock().expect("updates lock");
+        let label_update = updates
+            .iter()
+            .find(|update| {
+                update
+                    .add_labels
+                    .contains(&crate::plan::labels::READY_FOR_REVIEW.to_string())
+            })
+            .expect("ready-for-review label update");
+        assert!(
+            label_update.remove_labels.contains(&delegation_label),
+            "delegation label must be removed in the same IssueUpdate"
+        );
+        assert!(
+            label_update.remove_labels.contains(&lease_label),
+            "lease label must be removed in the same IssueUpdate"
         );
     }
 }
