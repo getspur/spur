@@ -19,6 +19,7 @@ pub mod snapshot;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
@@ -1209,14 +1210,24 @@ pub(crate) async fn emit_rejection_audit(
 
 /// Build the persisted label mutation used when a task is about to be sent
 /// to a worker.
-pub fn dispatch_intent_update(delegation_id: &str) -> spur_pm::IssueUpdate {
+pub fn dispatch_intent_update(
+    delegation_id: &str,
+    lease_expires_at: i64,
+    current_labels: &[String],
+) -> spur_pm::IssueUpdate {
     spur_pm::IssueUpdate {
-        add_labels: vec![crate::plan::labels::delegation_id(delegation_id)],
+        add_labels: vec![
+            crate::plan::labels::delegation_id(delegation_id),
+            crate::plan::labels::lease_expires_at(lease_expires_at),
+        ],
         remove_labels: vec![
             format!("delegation-id:{delegation_id}"),
             crate::plan::labels::READY_FOR_REVIEW.to_string(),
             "ready-for-review".to_string(),
-        ],
+        ]
+        .into_iter()
+        .chain(lease_label_removals(current_labels, Some(lease_expires_at)))
+        .collect(),
         ..Default::default()
     }
 }
@@ -1230,8 +1241,18 @@ pub async fn persist_dispatch_intent(
     delegation_id: &str,
     worker: &str,
     attempt: u32,
+    lease_duration: Duration,
 ) -> anyhow::Result<()> {
-    apply_issue_update(pm, issue_id, dispatch_intent_update(delegation_id)).await?;
+    let lease_expires_at = chrono::Utc::now()
+        .timestamp()
+        .saturating_add(i64::try_from(lease_duration.as_secs()).unwrap_or(i64::MAX));
+    let current_labels = pm.issue_labels(issue_id).await?;
+    apply_issue_update(
+        pm,
+        issue_id,
+        dispatch_intent_update(delegation_id, lease_expires_at, &current_labels),
+    )
+    .await?;
     emit_dispatch_audit(
         Some(pm),
         &Some(issue_id.to_string()),
@@ -1246,20 +1267,29 @@ pub async fn persist_dispatch_intent(
 }
 
 /// Build the compensating mutation when a worker send fails immediately.
-pub fn dispatch_send_failure_update(delegation_id: &str) -> spur_pm::IssueUpdate {
-    let mut update = clear_dispatch_intent_update(delegation_id);
+pub fn dispatch_send_failure_update(
+    delegation_id: &str,
+    current_labels: &[String],
+) -> spur_pm::IssueUpdate {
+    let mut update = clear_dispatch_intent_update(delegation_id, current_labels);
     update.comment =
         Some("Dispatch send failed before worker ownership was established.".to_string());
     update
 }
 
 /// Build the mutation used when dispatch intent is no longer active.
-pub fn clear_dispatch_intent_update(delegation_id: &str) -> spur_pm::IssueUpdate {
+pub fn clear_dispatch_intent_update(
+    delegation_id: &str,
+    current_labels: &[String],
+) -> spur_pm::IssueUpdate {
     spur_pm::IssueUpdate {
         remove_labels: vec![
             crate::plan::labels::delegation_id(delegation_id),
             format!("delegation-id:{delegation_id}"),
-        ],
+        ]
+        .into_iter()
+        .chain(lease_label_removals(current_labels, None))
+        .collect(),
         ..Default::default()
     }
 }
@@ -1270,7 +1300,46 @@ pub async fn clear_dispatch_intent(
     issue_id: &str,
     delegation_id: &str,
 ) -> anyhow::Result<()> {
-    apply_issue_update(pm, issue_id, clear_dispatch_intent_update(delegation_id)).await
+    let current_labels = pm.issue_labels(issue_id).await?;
+    apply_issue_update(
+        pm,
+        issue_id,
+        clear_dispatch_intent_update(delegation_id, &current_labels),
+    )
+    .await
+}
+
+fn lease_label_removals(current_labels: &[String], keep_expires_at: Option<i64>) -> Vec<String> {
+    current_labels
+        .iter()
+        .filter(|label| {
+            crate::plan::labels::parse_lease_expires_at(label)
+                .is_some_and(|expires_at| keep_expires_at.is_none_or(|keep| keep != expires_at))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Re-stamp the dispatch lease. Idempotent for repeated calls with the same
+/// timestamp; if a prior remove step failed and multiple lease labels exist,
+/// all old lease labels are stripped while the new one is retained.
+pub async fn update_dispatch_lease(
+    pm: &dyn PmLike,
+    issue_id: &str,
+    _delegation_id: &str,
+    new_expires_at: i64,
+) -> anyhow::Result<()> {
+    let current_labels = pm.issue_labels(issue_id).await?;
+    apply_issue_update(
+        pm,
+        issue_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![crate::plan::labels::lease_expires_at(new_expires_at)],
+            remove_labels: lease_label_removals(&current_labels, Some(new_expires_at)),
+            ..Default::default()
+        },
+    )
+    .await
 }
 
 pub fn completion_success_update() -> spur_pm::IssueUpdate {
@@ -2442,6 +2511,9 @@ pub async fn review_task(
 #[async_trait::async_trait]
 pub trait PmLike: Send + Sync + 'static {
     async fn update_issue(&self, id: &str, update: spur_pm::IssueUpdate) -> anyhow::Result<()>;
+    async fn issue_labels(&self, _id: &str) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
     fn closed_status(&self) -> &str;
     /// Returns the `BeadsAdvanced` extension surface if the backend is beads.
     /// Returns `None` for non-beads backends (GitHub) and test fakes.
@@ -2454,6 +2526,9 @@ pub trait PmLike: Send + Sync + 'static {
 impl PmLike for spur_pm::PmService {
     async fn update_issue(&self, id: &str, update: spur_pm::IssueUpdate) -> anyhow::Result<()> {
         spur_pm::PmService::update_issue(self, id, update).await
+    }
+    async fn issue_labels(&self, id: &str) -> anyhow::Result<Vec<String>> {
+        Ok(spur_pm::PmService::get_issue(self, id).await?.labels)
     }
     fn closed_status(&self) -> &str {
         spur_pm::PmService::closed_status(self)
@@ -3882,10 +3957,14 @@ mod tests {
 
     #[test]
     fn immediate_send_failure_compensation_removes_dispatch_label() {
-        let update = super::dispatch_send_failure_update("del-A");
+        let labels = vec![crate::plan::labels::lease_expires_at(1_777_777_777)];
+        let update = super::dispatch_send_failure_update("del-A", &labels);
         assert!(update
             .remove_labels
             .contains(&crate::plan::labels::delegation_id("del-A")));
+        assert!(update
+            .remove_labels
+            .contains(&crate::plan::labels::lease_expires_at(1_777_777_777)));
         assert_eq!(
             update.comment.as_deref(),
             Some("Dispatch send failed before worker ownership was established.")
@@ -3894,10 +3973,13 @@ mod tests {
 
     #[test]
     fn persist_dispatch_intent_update_removes_legacy_labels() {
-        let update = super::dispatch_intent_update("del-A");
+        let update = super::dispatch_intent_update("del-A", 1_777_777_777, &[]);
         assert!(update
             .add_labels
             .contains(&crate::plan::labels::delegation_id("del-A")));
+        assert!(update
+            .add_labels
+            .contains(&crate::plan::labels::lease_expires_at(1_777_777_777)));
         assert!(update
             .remove_labels
             .contains(&"delegation-id:del-A".to_string()));
@@ -3907,14 +3989,18 @@ mod tests {
     }
 
     #[test]
-    fn clear_dispatch_intent_removes_both_namespaced_and_legacy_labels() {
-        let update = super::clear_dispatch_intent_update("del-A");
+    fn clear_dispatch_intent_strips_lease_label() {
+        let labels = vec![crate::plan::labels::lease_expires_at(1_777_777_777)];
+        let update = super::clear_dispatch_intent_update("del-A", &labels);
         assert!(update
             .remove_labels
             .contains(&crate::plan::labels::delegation_id("del-A")));
         assert!(update
             .remove_labels
             .contains(&"delegation-id:del-A".to_string()));
+        assert!(update
+            .remove_labels
+            .contains(&crate::plan::labels::lease_expires_at(1_777_777_777)));
     }
 
     #[test]

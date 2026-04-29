@@ -2260,6 +2260,24 @@ impl View for DashboardView {
                 });
             }
 
+            SpurEventBody::DispatchLeaseExpired {
+                plan_id,
+                task_id,
+                issue_id,
+                delegation_id,
+                expired_at,
+                age_secs,
+            } => {
+                self.activity_log.push(LogEntry {
+                    timestamp: Self::now_stamp(),
+                    prefix: "[plan]".to_string(),
+                    message: format!(
+                        "Dispatch lease expired for {plan_id}/{task_id} ({issue_id}, {delegation_id}, expired at {expired_at}, age {age_secs}s)"
+                    ),
+                    kind: LogEntryKind::Error,
+                });
+            }
+
             _ => {}
         }
     }

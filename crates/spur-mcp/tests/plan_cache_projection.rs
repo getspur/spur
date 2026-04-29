@@ -225,6 +225,7 @@ async fn get_plan_status_preserves_in_progress_persisted_children() {
         "del-inflight",
         "codex",
         1,
+        std::time::Duration::from_secs(600),
     )
     .await
     .expect("persist dispatch intent");

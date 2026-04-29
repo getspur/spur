@@ -21,8 +21,9 @@ use spur_acp::registry::AgentRegistry;
 use spur_acp::session_lock::{AcquireOutcome, SessionAttachGuard};
 use spur_acp::types::*;
 use spur_acp::{
-    CancellationControl, DelegationAbortReason, DelegationResult, DelegationStatus, LifecycleState,
-    ReviewKind, ReviewPayload, SpurEvent, SpurEventBody, TimeoutFallback,
+    CancellationControl, DelegationAbortHandle, DelegationAbortReason, DelegationResult,
+    DelegationStatus, LifecycleState, ReviewKind, ReviewPayload, SpurEvent, SpurEventBody,
+    TimeoutFallback,
 };
 use spur_pm::Issue;
 
@@ -1864,6 +1865,9 @@ impl Orchestrator {
         mcp_server.set_plan_pending_grace(std::time::Duration::from_secs(
             self.config.spur.plan_pending_grace_secs,
         ));
+        mcp_server.set_dispatch_lease_duration(std::time::Duration::from_secs(
+            self.config.spur.dispatch_lease_secs,
+        ));
 
         let mcp_server = Arc::new(mcp_server);
         let (mcp_url, mcp_handle) = mcp_server
@@ -1960,6 +1964,8 @@ impl Orchestrator {
                 self.pm_service.clone(),
                 self.cancellation_control.clone(),
                 self.peer_mailbox.clone(),
+                std::time::Duration::from_secs(self.config.spur.dispatch_lease_secs),
+                std::time::Duration::from_secs(self.config.spur.dispatch_lease_heartbeat_secs),
             ));
 
             // Stream brain output. For native (ACP-transport) agents prompt()
@@ -3508,6 +3514,9 @@ impl Orchestrator {
         mcp_server.set_plan_pending_grace(std::time::Duration::from_secs(
             self.config.spur.plan_pending_grace_secs,
         ));
+        mcp_server.set_dispatch_lease_duration(std::time::Duration::from_secs(
+            self.config.spur.dispatch_lease_secs,
+        ));
 
         let mcp_server = Arc::new(mcp_server);
         let (mcp_url, mcp_handle) = mcp_server
@@ -3603,6 +3612,8 @@ impl Orchestrator {
             self.pm_service.clone(),
             self.cancellation_control.clone(),
             self.peer_mailbox.clone(),
+            std::time::Duration::from_secs(self.config.spur.dispatch_lease_secs),
+            std::time::Duration::from_secs(self.config.spur.dispatch_lease_heartbeat_secs),
         ));
 
         // Spawn the vendor-extension notification pump (if the transport
@@ -3769,6 +3780,9 @@ impl Orchestrator {
         mcp_server.set_plan_pending_grace(std::time::Duration::from_secs(
             self.config.spur.plan_pending_grace_secs,
         ));
+        mcp_server.set_dispatch_lease_duration(std::time::Duration::from_secs(
+            self.config.spur.dispatch_lease_secs,
+        ));
 
         let mcp_server = Arc::new(mcp_server);
         let (mcp_url, mcp_handle) = mcp_server
@@ -3934,6 +3948,8 @@ impl Orchestrator {
             self.pm_service.clone(),
             self.cancellation_control.clone(),
             self.peer_mailbox.clone(),
+            std::time::Duration::from_secs(self.config.spur.dispatch_lease_secs),
+            std::time::Duration::from_secs(self.config.spur.dispatch_lease_heartbeat_secs),
         ));
 
         // Pump vendor-extension notifications onto the event stream.
@@ -4631,6 +4647,50 @@ impl Orchestrator {
             .await
     }
 
+    fn maybe_spawn_dispatch_lease_heartbeat(
+        pm_service: Option<Arc<PmService>>,
+        issue_id: Option<String>,
+        delegation_id: String,
+        lease_duration: std::time::Duration,
+        heartbeat_cadence: std::time::Duration,
+        abort_handle: DelegationAbortHandle,
+    ) -> Option<AbortOnDropHandle<()>> {
+        let (Some(pm), Some(issue_id)) = (pm_service, issue_id) else {
+            return None;
+        };
+        let heartbeat_cadence = if heartbeat_cadence.is_zero() {
+            std::cmp::max(lease_duration / 3, std::time::Duration::from_secs(1))
+        } else {
+            heartbeat_cadence
+        };
+        Some(AbortOnDropHandle::new(tokio::spawn(async move {
+            let lease_secs = i64::try_from(lease_duration.as_secs()).unwrap_or(i64::MAX);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = abort_handle.cancelled() => break,
+                    _ = tokio::time::sleep(heartbeat_cadence) => {}
+                }
+
+                let expires_at = chrono::Utc::now().timestamp().saturating_add(lease_secs);
+                if let Err(error) = spur_mcp::plan::update_dispatch_lease(
+                    pm.as_ref(),
+                    &issue_id,
+                    &delegation_id,
+                    expires_at,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        issue_id = %issue_id,
+                        %delegation_id,
+                        "dispatch lease heartbeat failed: {error}"
+                    );
+                }
+            }
+        })))
+    }
+
     /// Replace the cached `config_options` on the active brain session and
     /// emit `CommandRegistryDirty` so spur-tui rebuilds the registry on
     /// the next ensure_cache.
@@ -4668,6 +4728,8 @@ impl Orchestrator {
         pm_service: Option<Arc<PmService>>,
         cancellation_control: CancellationControl,
         peer_mailbox: Option<crate::peer_mailbox::PeerMailboxBundle>,
+        dispatch_lease_duration: std::time::Duration,
+        dispatch_lease_heartbeat: std::time::Duration,
     ) {
         let semaphore = Arc::new(Semaphore::new(max_concurrent.max(1)));
         // Debounce: skip post-delegation refresh if another completed <3s ago.
@@ -4713,6 +4775,8 @@ impl Orchestrator {
             let pm_service = pm_service.clone();
             let last_refresh_at = Arc::clone(&last_refresh_at);
             let peer_mailbox = peer_mailbox.clone();
+            let dispatch_lease_duration = dispatch_lease_duration;
+            let dispatch_lease_heartbeat = dispatch_lease_heartbeat;
 
             // INV-6: register a cancellation token BEFORE spawning so
             // cancel() arriving between dispatch and spawn still works.
@@ -4800,6 +4864,15 @@ impl Orchestrator {
                     }
                 }
 
+                let dispatch_lease_heartbeat_handle = Self::maybe_spawn_dispatch_lease_heartbeat(
+                    pm_service.clone(),
+                    issue_id.clone(),
+                    request_id.clone(),
+                    dispatch_lease_duration,
+                    dispatch_lease_heartbeat,
+                    abort_handle.clone(),
+                );
+
                 // No outer timeout: the review gate's own `review_timeout`
                 // bounds review waits (default 30 min, configurable per
                 // agent). A previous hardcoded 300s outer timeout always
@@ -4871,6 +4944,7 @@ impl Orchestrator {
                         peer_mailbox,
                     ) => r,
                 };
+                drop(dispatch_lease_heartbeat_handle);
                 drop(heartbeat_watchdog_stop);
                 // Always clean up the token entry (avoids stale entries
                 // when the delegation completes normally before cancel fires).

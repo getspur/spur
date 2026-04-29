@@ -283,3 +283,24 @@ fn plan_pending_sweep_roundtrips() {
     assert!(json.contains("PlanPendingSweep"));
     assert!(json.contains("quarantined"));
 }
+
+#[test]
+fn dispatch_lease_expired_roundtrips() {
+    use spur_acp::{SpurEvent, SpurEventBody};
+
+    let ev = SpurEvent::now(SpurEventBody::DispatchLeaseExpired {
+        plan_id: "p1".into(),
+        task_id: "t1".into(),
+        issue_id: "bd-1".into(),
+        delegation_id: "del-A".into(),
+        expired_at: 1_777_777_777,
+        age_secs: 42,
+    });
+    let json = serde_json::to_string(&ev).unwrap();
+    let round: SpurEvent = serde_json::from_str(&json).unwrap();
+    assert!(matches!(
+        round.body,
+        SpurEventBody::DispatchLeaseExpired { .. }
+    ));
+    assert!(json.contains("DispatchLeaseExpired"));
+}

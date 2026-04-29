@@ -315,10 +315,23 @@ pub struct SpurRuntimeConfig {
     /// Grace period before startup quarantines stale `spur:plan-pending`
     /// persisted plan epics. Default: 1 hour.
     pub plan_pending_grace_secs: u64,
+    /// Duration of an in-flight dispatch lease. Default: 10 minutes.
+    pub dispatch_lease_secs: u64,
+    /// Cadence used by the orchestrator to renew dispatch leases.
+    /// Default: 200 seconds (one third of the default lease).
+    pub dispatch_lease_heartbeat_secs: u64,
 }
 
 fn default_plan_pending_grace_secs() -> u64 {
     60 * 60
+}
+
+fn default_dispatch_lease_secs() -> u64 {
+    600
+}
+
+fn default_dispatch_lease_heartbeat_secs() -> u64 {
+    default_dispatch_lease_secs() / 3
 }
 
 impl Default for SpurRuntimeConfig {
@@ -326,6 +339,8 @@ impl Default for SpurRuntimeConfig {
         Self {
             auto_merge_approved_plans: false,
             plan_pending_grace_secs: default_plan_pending_grace_secs(),
+            dispatch_lease_secs: default_dispatch_lease_secs(),
+            dispatch_lease_heartbeat_secs: default_dispatch_lease_heartbeat_secs(),
         }
     }
 }
@@ -1032,6 +1047,8 @@ mod tests {
         let cfg: SpurConfig = toml::from_str("").unwrap();
         assert!(!cfg.spur.auto_merge_approved_plans);
         assert_eq!(cfg.spur.plan_pending_grace_secs, 60 * 60);
+        assert_eq!(cfg.spur.dispatch_lease_secs, 600);
+        assert_eq!(cfg.spur.dispatch_lease_heartbeat_secs, 200);
     }
 
     #[test]
@@ -1063,11 +1080,15 @@ mod tests {
             [spur]
             auto_merge_approved_plans = true
             plan_pending_grace_secs = 10
+            dispatch_lease_secs = 30
+            dispatch_lease_heartbeat_secs = 10
             "#,
         )
         .unwrap();
         assert!(cfg.spur.auto_merge_approved_plans);
         assert_eq!(cfg.spur.plan_pending_grace_secs, 10);
+        assert_eq!(cfg.spur.dispatch_lease_secs, 30);
+        assert_eq!(cfg.spur.dispatch_lease_heartbeat_secs, 10);
     }
 
     #[test]

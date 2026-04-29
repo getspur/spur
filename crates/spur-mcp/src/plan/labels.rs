@@ -42,9 +42,14 @@ pub fn source_issue(issue_id: &str) -> String {
 }
 
 pub const DELEGATION_ID_PREFIX: &str = "spur:delegation-id:";
+pub const LEASE_EXPIRES_AT_PREFIX: &str = "spur:lease-expires-at:";
 
 pub fn delegation_id(delegation_id: &str) -> String {
     format!("{DELEGATION_ID_PREFIX}{delegation_id}")
+}
+
+pub fn lease_expires_at(ts: i64) -> String {
+    format!("{LEASE_EXPIRES_AT_PREFIX}{ts}")
 }
 
 pub fn signal_kind(kind: &str) -> String {
@@ -77,6 +82,10 @@ pub const SOURCE_ISSUE_PREFIX: &str = "spur:source-issue:";
 
 pub fn parse_delegation_id(label: &str) -> Option<&str> {
     label.strip_prefix(DELEGATION_ID_PREFIX)
+}
+
+pub fn parse_lease_expires_at(label: &str) -> Option<i64> {
+    label.strip_prefix(LEASE_EXPIRES_AT_PREFIX)?.parse().ok()
 }
 
 /// Returns `Some(task_id)` if the given label is a `spur:plan-task-id:<id>` label.
@@ -168,6 +177,10 @@ mod tests {
         assert_eq!(agent("codex"), "spur:agent:codex");
         assert_eq!(source_issue("bd-42"), "spur:source-issue:bd-42");
         assert_eq!(delegation_id("del-A"), "spur:delegation-id:del-A");
+        assert_eq!(
+            lease_expires_at(1_777_777_777),
+            "spur:lease-expires-at:1777777777"
+        );
         assert_eq!(signal_kind("scope-drift"), "signal:scope-drift");
         assert_eq!(
             signal_kind_bucket("scope-drift", "high"),
@@ -189,6 +202,15 @@ mod tests {
         assert_eq!(parse_agent(&agent("codex")), Some("codex"));
         assert_eq!(parse_source_issue(&source_issue("bd-42")), Some("bd-42"));
         assert_eq!(parse_delegation_id(&delegation_id("del-A")), Some("del-A"));
+        assert_eq!(
+            parse_lease_expires_at(&lease_expires_at(1_777_777_777)),
+            Some(1_777_777_777)
+        );
+        assert_eq!(
+            parse_lease_expires_at("spur:lease-expires-at:not-a-ts"),
+            None
+        );
+        assert_eq!(parse_lease_expires_at("unrelated"), None);
         assert_eq!(parse_signal_kind("signal:scope-drift"), Some("scope-drift"));
         assert_eq!(parse_signal_kind("signal:scope-drift:high"), None);
     }
@@ -222,6 +244,7 @@ mod tests {
             agent("claude-code-acp"),
             source_issue("bd-42"),
             delegation_id("del-A"),
+            lease_expires_at(1_777_777_777),
             signal_kind("scope-drift"),
             signal_kind_bucket("scope-drift", "high"),
             mutation_id_label(&uuid::Uuid::nil()),
@@ -245,6 +268,16 @@ mod tests {
         assert!(INTEGRATION_PENDING
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':')));
+    }
+
+    #[test]
+    fn lease_expires_at_label_fits_create_time_cap() {
+        let label = lease_expires_at(9_999_999_999);
+        assert!(
+            label.len() <= 50,
+            "lease label exceeds br create cap: {label}"
+        );
+        assert!(is_br_legal(&label), "lease label is br-illegal: {label}");
     }
 
     #[test]
