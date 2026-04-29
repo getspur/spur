@@ -18,6 +18,8 @@ use crate::session_metadata::SessionMetadata;
 
 use super::View;
 
+const PREVIEW_MAX_LINES: u16 = 12;
+
 fn footer_hint(state: &PickerState, rename_active: bool, confirm_active: bool) -> &'static str {
     if confirm_active {
         return "y/Enter confirm \u{00b7} n/Esc cancel";
@@ -901,7 +903,6 @@ impl SessionPickerView {
             lines.push(Line::from(spans));
         }
 
-        let preview_height: u16 = 12;
         // Layout: chunks[1]/[2] (status + footer hint) are kept as two rows
         // ONLY when a state-specific prompt is active (rename or confirm-switch),
         // so that the prompt and its key-hint can coexist on separate rows.
@@ -913,7 +914,7 @@ impl SessionPickerView {
             if needs_footer_row {
                 Layout::vertical([
                     Constraint::Min(4),
-                    Constraint::Length(preview_height),
+                    Constraint::Length(PREVIEW_MAX_LINES),
                     Constraint::Length(1),
                     Constraint::Length(1),
                 ])
@@ -921,7 +922,7 @@ impl SessionPickerView {
             } else {
                 Layout::vertical([
                     Constraint::Min(4),
-                    Constraint::Length(preview_height),
+                    Constraint::Length(PREVIEW_MAX_LINES),
                     Constraint::Length(1),
                 ])
                 .split(area)
@@ -1031,13 +1032,9 @@ impl SessionPickerView {
                         value_style: Some(Style::default().fg(Color::DarkGray)),
                     });
 
-                    debug_assert!(
-                        rows.iter()
-                            .map(|row| row.value_lines.len().max(1))
-                            .sum::<usize>()
-                            <= preview_height as usize,
-                        "session preview rows exceed visual budget"
-                    );
+                    // Bounded by construction: Last <= 1, Draft <= 1, Intent <= 3,
+                    // footer <= 1, plus two blank separators = <= 8 visual lines,
+                    // leaving slack under PREVIEW_MAX_LINES for the preview border.
 
                     PreviewContent {
                         rows,
@@ -1250,7 +1247,7 @@ pub(super) fn wrap_value(text: &str, width: usize, max_lines: usize) -> Vec<Stri
     let mut truncated = false;
 
     while let Some(g) = graphemes.next() {
-        if g == "\n" {
+        if matches!(g, "\n" | "\r\n" | "\r") {
             lines.push(std::mem::take(&mut current));
             current_width = 0;
             if lines.len() == max_lines {
@@ -1261,6 +1258,23 @@ pub(super) fn wrap_value(text: &str, width: usize, max_lines: usize) -> Vec<Stri
         }
 
         let grapheme_width = UnicodeWidthStr::width(g).max(1);
+        if grapheme_width > width {
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+                if lines.len() == max_lines {
+                    truncated = true;
+                    break;
+                }
+            }
+            lines.push(g.to_string());
+            current_width = 0;
+            if lines.len() == max_lines {
+                truncated = graphemes.peek().is_some();
+                break;
+            }
+            continue;
+        }
+
         if current_width > 0 && current_width + grapheme_width > width {
             lines.push(std::mem::take(&mut current));
             current_width = 0;
@@ -1274,7 +1288,11 @@ pub(super) fn wrap_value(text: &str, width: usize, max_lines: usize) -> Vec<Stri
         current_width += grapheme_width;
     }
 
-    if !truncated && (lines.is_empty() || !current.is_empty() || text.ends_with('\n')) {
+    let ended_with_line_break = text.ends_with('\n') || text.ends_with('\r');
+    if !truncated
+        && lines.len() < max_lines
+        && (lines.is_empty() || !current.is_empty() || ended_with_line_break)
+    {
         lines.push(current);
     }
 
@@ -1883,18 +1901,25 @@ mod preview_render_tests {
     use super::*;
     use crate::session_metadata::SessionEntry;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use ratatui::{backend::TestBackend, buffer::Buffer, layout::Rect, Terminal};
+    use ratatui::{backend::TestBackend, buffer::Buffer, layout::Rect, style::Color, Terminal};
     use spur_acp::{HistoryEntry, SessionId, SpurEventBody};
     use std::path::PathBuf;
 
-    fn buffer_text(buf: &Buffer) -> String {
-        let mut out = String::new();
+    fn buffer_rows(buf: &Buffer) -> Vec<String> {
+        let mut rows = Vec::new();
         for y in 0..buf.area.height {
+            let mut row = String::new();
             for x in 0..buf.area.width {
-                out.push_str(buf[(x, y)].symbol());
+                row.push_str(buf[(x, y)].symbol());
             }
-            out.push('\n');
+            rows.push(row);
         }
+        rows
+    }
+
+    fn buffer_text(buf: &Buffer) -> String {
+        let mut out = buffer_rows(buf).join("\n");
+        out.push('\n');
         out
     }
 
@@ -2033,6 +2058,33 @@ mod preview_render_tests {
         assert!(text.contains("Intent: intent intent"));
         assert!(text.contains('…'));
         assert!(text.contains("/work/spur \u{00b7} claude \u{00b7} a1xxxxxx"));
+
+        let rows = buffer_rows(term.backend().buffer());
+        let preview_content_start = rows.len().saturating_sub(1 + PREVIEW_MAX_LINES as usize) + 1;
+        let footer_row = rows
+            .iter()
+            .position(|row| row.contains("/work/spur \u{00b7} claude \u{00b7} a1xxxxxx"))
+            .expect("footer should be visible in preview");
+        let intent_value_rows = (preview_content_start..=footer_row)
+            .filter(|&y| {
+                rows[y].contains("intent")
+                    && (0..term.backend().buffer().area.width)
+                        .any(|x| term.backend().buffer()[(x, y as u16)].fg == Color::Gray)
+            })
+            .count();
+
+        assert_eq!(
+            intent_value_rows, 3,
+            "long intent should emit exactly three styled value lines"
+        );
+        assert!(
+            footer_row >= preview_content_start,
+            "footer must render inside the preview content area"
+        );
+        assert!(
+            footer_row - preview_content_start < PREVIEW_MAX_LINES as usize,
+            "preview content through footer must fit the 12-row budget"
+        );
     }
 }
 
@@ -2134,12 +2186,21 @@ mod wrap_value_tests {
 
         assert_widths(&wrap_value("日本語", 4, 2), 4);
         assert_widths(&wrap_value("🙂🙂🙂", 4, 2), 4);
+        assert_eq!(wrap_value("日本語", 1, 3), vec!["日", "本", "語"]);
     }
 
     #[test]
     fn respects_embedded_newlines() {
         assert_eq!(wrap_value("ab\ncdef", 2, 3), vec!["ab", "cd", "ef"]);
         assert_eq!(wrap_value("ab\ncdefg", 2, 3), vec!["ab", "cd", "e\u{2026}"]);
+        assert_eq!(wrap_value("ab\r\ncd", 2, 3), vec!["ab", "cd"]);
+        assert_eq!(wrap_value("ab\rcd", 2, 3), vec!["ab", "cd"]);
+    }
+
+    #[test]
+    fn trailing_newline_respects_line_budget() {
+        assert_eq!(wrap_value("ab\n", 2, 1), vec!["ab"]);
+        assert_eq!(wrap_value("ab\n", 2, 2), vec!["ab", ""]);
     }
 }
 
