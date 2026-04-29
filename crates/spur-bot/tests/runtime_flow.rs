@@ -1365,6 +1365,90 @@ async fn review_prompt_resolves_once_and_siblings_go_stale() {
 
 // ── Output rendering regression tests ───────────────────────────────────────
 
+fn agent_text_chunk_event(session: &spur_acp::SessionId, text: &str) -> spur_acp::SpurEvent {
+    spur_acp::SpurEvent::now(spur_acp::SpurEventBody::AgentNotification {
+        session: session.clone(),
+        notification: Box::new(spur_acp::SessionNotification::new(
+            session.0.clone(),
+            spur_acp::SessionUpdate::AgentMessageChunk(spur_acp::ContentChunk::new(
+                spur_acp::ContentBlock::Text(spur_acp::TextContent::new(text)),
+            )),
+        )),
+    })
+}
+
+#[tokio::test]
+async fn agent_notification_emits_stream_chunk_for_each_chunk() {
+    let (mut runtime, _handle, _user_rx) = test_runtime();
+    runtime.activate_topic_binding(42, 77, "Session 1".into(), "acp-77".into(), "kimi".into());
+    let session = spur_acp::SessionId("spur_acp-77".into());
+
+    let (first_key, first_renders) = runtime
+        .handle_spur_event(agent_text_chunk_event(&session, "Hello, "))
+        .await
+        .unwrap();
+    assert_eq!(first_key.unwrap().message_thread_id, Some(77));
+    assert!(matches!(
+        first_renders.as_slice(),
+        [RuntimeRender::StreamChunk { draft_id, text }]
+        if draft_id == "stream-spur_acp-77-1" && text == "Hello, "
+    ));
+
+    let (second_key, second_renders) = runtime
+        .handle_spur_event(agent_text_chunk_event(&session, "world!"))
+        .await
+        .unwrap();
+    assert_eq!(second_key.unwrap().message_thread_id, Some(77));
+    assert!(matches!(
+        second_renders.as_slice(),
+        [RuntimeRender::StreamChunk { draft_id, text }]
+        if draft_id == "stream-spur_acp-77-1" && text == "Hello, world!"
+    ));
+}
+
+#[tokio::test]
+async fn turn_complete_then_new_chunk_uses_new_draft_id() {
+    let (mut runtime, _handle, _user_rx) = test_runtime();
+    runtime.activate_topic_binding(42, 77, "Session 1".into(), "acp-77".into(), "kimi".into());
+    let session = spur_acp::SessionId("spur_acp-77".into());
+
+    let (_key, first_renders) = runtime
+        .handle_spur_event(agent_text_chunk_event(&session, "First turn"))
+        .await
+        .unwrap();
+    let first_draft_id = match first_renders.as_slice() {
+        [RuntimeRender::StreamChunk { draft_id, text }] => {
+            assert_eq!(text, "First turn");
+            draft_id.clone()
+        }
+        other => panic!("expected first StreamChunk, got {other:?}"),
+    };
+
+    runtime
+        .handle_spur_event(spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::TurnComplete {
+                session: session.clone(),
+            },
+        )).await
+        .unwrap();
+
+    let (_key, second_renders) = runtime
+        .handle_spur_event(agent_text_chunk_event(&session, "Second turn"))
+        .await
+        .unwrap();
+    let second_draft_id = match second_renders.as_slice() {
+        [RuntimeRender::StreamChunk { draft_id, text }] => {
+            assert_eq!(text, "Second turn");
+            draft_id.clone()
+        }
+        other => panic!("expected second StreamChunk, got {other:?}"),
+    };
+
+    assert_ne!(first_draft_id, second_draft_id);
+    assert_eq!(first_draft_id, "stream-spur_acp-77-1");
+    assert_eq!(second_draft_id, "stream-spur_acp-77-2");
+}
+
 #[tokio::test]
 async fn agent_notification_and_turn_complete_renders_final_answer() {
     let dir = tempfile::tempdir().unwrap();

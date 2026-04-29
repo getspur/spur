@@ -21,6 +21,13 @@ pub enum RuntimeRender {
     WorkingStatus {
         text: String,
     },
+    StreamChunk {
+        /// Stable per-turn key. Use `format!("stream-{session_id}-{turn_seq}")`.
+        /// Different turns get different draft_ids so each turn animates as a
+        /// new draft rather than overwriting the prior turn's final.
+        draft_id: String,
+        text: String,
+    },
     FinalAnswer {
         text: String,
     },
@@ -96,6 +103,10 @@ pub struct BotRuntime {
     /// Accumulates `AgentMessageChunk` text per session so that `TurnComplete`
     /// can emit a single `FinalAnswer`.
     output_buffers: HashMap<spur_acp::SessionId, String>,
+    /// Increments at the start of each ACP turn (when AgentNotification arrives
+    /// for a session whose output_buffer is currently empty), so each turn's
+    /// streaming text uses a distinct draft_id.
+    turn_seqs: HashMap<spur_acp::SessionId, u32>,
     /// Input queued while a persisted session is being restored, keyed by thread.
     pending_inputs: HashMap<ThreadKey, spur_core::InteractiveInput>,
     /// Maps live session to the thread it belongs to.
@@ -164,6 +175,7 @@ impl BotRuntime {
             prompt_groups: HashMap::new(),
             permission_reply_txs: HashMap::new(),
             output_buffers: HashMap::new(),
+            turn_seqs: HashMap::new(),
             pending_inputs: HashMap::new(),
             session_threads: HashMap::new(),
             pending_new_session_keys: VecDeque::new(),
@@ -630,13 +642,30 @@ impl BotRuntime {
                 session,
                 notification,
             } => {
-                if let Some(text) = extract_agent_text(&notification) {
-                    self.output_buffers
-                        .entry(session.clone())
-                        .or_default()
-                        .push_str(&text);
-                }
                 let key = self.session_threads.get(&session).cloned();
+                if let Some(text) = extract_agent_text(&notification) {
+                    if !self.output_buffers.contains_key(&session) {
+                        *self.turn_seqs.entry(session.clone()).or_insert(0) += 1;
+                    }
+
+                    let full_buffered_text = {
+                        let buffer = self.output_buffers.entry(session.clone()).or_default();
+                        buffer.push_str(&text);
+                        buffer.clone()
+                    };
+                    let turn_seq = self.turn_seqs.get(&session).copied().unwrap_or(1);
+
+                    return Ok((
+                        key,
+                        vec![RuntimeRender::StreamChunk {
+                            draft_id: format!(
+                                "stream-{session_id}-{turn_seq}",
+                                session_id = session.0
+                            ),
+                            text: full_buffered_text,
+                        }],
+                    ));
+                }
                 Ok((key, vec![]))
             }
             spur_acp::SpurEventBody::TurnComplete { session } => {
