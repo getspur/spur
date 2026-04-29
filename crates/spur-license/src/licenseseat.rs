@@ -49,6 +49,10 @@ pub fn from_env_or_disabled() -> Arc<dyn LicenseProvider> {
 pub struct LicenseSeatProvider {
     sdk: LicenseSeat,
     state: Arc<RwLock<LicenseState>>,
+    /// Cross-method operation serialization (bd-22q.15). Acquired at
+    /// entry of every mutating method; held across SDK + replace_state.
+    /// Reads do NOT acquire this lock.
+    operation_lock: Arc<tokio::sync::Mutex<()>>,
     events_tx: broadcast::Sender<LicenseEvent>,
     refresh_policy: RefreshPolicy,
 }
@@ -74,6 +78,7 @@ impl LicenseSeatProvider {
         let provider = Self {
             sdk,
             state: Arc::new(RwLock::new(initial_state)),
+            operation_lock: Arc::new(tokio::sync::Mutex::new(())),
             events_tx,
             refresh_policy,
         };
@@ -140,6 +145,16 @@ impl LicenseSeatProvider {
         next.status_text = message.into();
         self.replace_state(next.clone(), kind, Some(next.status_text.clone()));
         next
+    }
+}
+
+#[cfg(test)]
+impl LicenseSeatProvider {
+    /// In-crate-test-only handle to the operation lock for bd-22q.15
+    /// cross_method_race tests. NEVER expose `pub`: external crates
+    /// could acquire the lock and stall production mutations.
+    pub(crate) fn operation_lock_handle(&self) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(&self.operation_lock)
     }
 }
 
