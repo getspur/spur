@@ -1,7 +1,7 @@
 use spur_bot::telegram::format::{
-    render_truncated_text, short_button_label, split_for_final_answer, split_for_telegram,
-    truncate_button_label_bytes, truncate_to_utf16_units, TELEGRAM_BUTTON_LABEL_MAX_BYTES,
-    TELEGRAM_TEXT_MAX_UTF16_UNITS,
+    markdown_to_telegram_html, render_truncated_text, short_button_label, split_for_final_answer,
+    split_for_telegram, truncate_button_label_bytes, truncate_to_utf16_units,
+    TELEGRAM_BUTTON_LABEL_MAX_BYTES, TELEGRAM_TEXT_MAX_UTF16_UNITS,
 };
 
 #[test]
@@ -11,6 +11,106 @@ fn split_for_telegram_preserves_unicode_scalar_boundaries() {
 
     assert!(chunks.iter().all(|chunk| chunk.chars().count() <= 256));
     assert_eq!(chunks.concat(), text);
+}
+
+#[test]
+fn markdown_to_telegram_html_inline_emphasis_strong() {
+    assert_eq!(
+        markdown_to_telegram_html("**bold** *italic* ~~strike~~"),
+        "<b>bold</b> <i>italic</i> <s>strike</s>"
+    );
+}
+
+#[test]
+fn markdown_to_telegram_html_inline_code() {
+    assert_eq!(
+        markdown_to_telegram_html("Use `x < y && z > q`."),
+        "Use <code>x &lt; y &amp;&amp; z &gt; q</code>."
+    );
+}
+
+#[test]
+fn markdown_to_telegram_html_links() {
+    assert_eq!(
+        markdown_to_telegram_html("[label](https://example.test/?q=\"<&>)"),
+        "<a href=\"https://example.test/?q=&quot;&lt;&amp;&gt;\">label</a>"
+    );
+    assert_eq!(markdown_to_telegram_html("[label]()"), "label");
+}
+
+#[test]
+fn markdown_to_telegram_html_fenced_code_block() {
+    let input = "Before\n\n```rust\nfn main() { println!(\"<&>\"); }\n```\n\nAfter";
+
+    assert_eq!(
+        markdown_to_telegram_html(input),
+        "Before\n\n<pre><code>fn main() { println!(\"&lt;&amp;&gt;\"); }\n</code></pre>\n\nAfter"
+    );
+}
+
+#[test]
+fn markdown_to_telegram_html_blockquote() {
+    let input = "> quoted\n>\n> ```\n> code\n> ```\n> after";
+
+    assert_eq!(
+        markdown_to_telegram_html(input),
+        "<blockquote>quoted\n\n</blockquote><pre><code>code\n</code></pre>\n\nafter"
+    );
+}
+
+#[test]
+fn markdown_to_telegram_html_lists_bullets_and_numbered() {
+    let input = "- one\n  - nested\n- two\n\n3. third\n4. fourth";
+
+    assert_eq!(
+        markdown_to_telegram_html(input),
+        "• one\n  • nested\n• two\n\n3. third\n4. fourth"
+    );
+}
+
+#[test]
+fn markdown_to_telegram_html_headings_render_as_plain_paragraphs() {
+    assert_eq!(
+        markdown_to_telegram_html("# Heading\n\nbody"),
+        "Heading\n\nbody"
+    );
+}
+
+#[test]
+fn markdown_to_telegram_html_escapes_raw_html() {
+    assert_eq!(
+        markdown_to_telegram_html("<script>alert('&')</script>"),
+        "&lt;script&gt;alert('&amp;')&lt;/script&gt;"
+    );
+}
+
+#[test]
+fn markdown_to_telegram_html_horizontal_rule() {
+    assert_eq!(markdown_to_telegram_html("---"), "───");
+}
+
+#[test]
+fn markdown_to_telegram_html_tables_render_plain_rows() {
+    let input = "| name | value |\n| --- | --- |\n| a | **b** |\n| c | `d` |";
+
+    assert_eq!(
+        markdown_to_telegram_html(input),
+        "| name | value |\n| a | <b>b</b> |\n| c | <code>d</code> |"
+    );
+}
+
+#[test]
+fn markdown_to_telegram_html_does_not_emit_unsupported_tags() {
+    let output = markdown_to_telegram_html(
+        "# Heading\n\n- item\n\n<table><tr><td>x</td></tr></table>\n\n| a | b |\n| - | - |\n| c | d |",
+    );
+
+    for unsupported in ["<h", "<ul", "<li", "<table", "<p>", "<br>"] {
+        assert!(
+            !output.contains(unsupported),
+            "output contained unsupported tag {unsupported}: {output}"
+        );
+    }
 }
 
 #[test]
