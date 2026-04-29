@@ -45,6 +45,13 @@ use crate::tools::{self, DelegationChannel, DelegationRequest};
 /// map is allowed to stay permanently empty in production.
 const COMPLETED_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 const DEFAULT_PLAN_PENDING_GRACE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+/// Prefix used to mark a comment as a startup-sweep quarantine audit.
+///
+/// **DO NOT RENAME WITHOUT MIGRATION.** This string is durable state: the
+/// startup sweep retry path (`pending_sweep_allows_child_status`) treats the
+/// presence of a comment with this prefix as proof that a child was
+/// quarantined by a previous sweep run. Changing this constant will break
+/// resumption of any sweep that was interrupted under the old value.
 const PLAN_PENDING_SWEEP_COMMENT_PREFIX: &str = "SPUR startup sweep quarantined stale pending plan";
 /// Idle-session watchdog for the streamable-HTTP MCP transport.
 ///
@@ -4545,24 +4552,37 @@ impl McpCallbackServer {
             let children = self
                 .list_plan_task_issues_for_pending_sweep(pm.as_ref(), plan_id_value)
                 .await?;
-            let mut blocked_child_id = None;
+            let mut skip_reason: Option<String> = None;
             for child in &children {
-                if !self
+                match self
                     .pending_sweep_allows_child_status(pm.as_ref(), child)
-                    .await?
+                    .await
                 {
-                    blocked_child_id = Some(child.id.clone());
-                    break;
+                    Ok(true) => {}
+                    Ok(false) => {
+                        skip_reason = Some(format!(
+                            "child '{}' is not open or previously quarantined",
+                            child.id
+                        ));
+                        break;
+                    }
+                    Err(err) => {
+                        skip_reason = Some(format!(
+                            "comment lookup failed for child '{}': {err}",
+                            child.id
+                        ));
+                        break;
+                    }
                 }
             }
-            if let Some(blocked_child_id) = blocked_child_id {
+            if let Some(reason) = skip_reason {
                 self.emit_plan_pending_sweep_event(
                     plan_id.clone(),
                     &epic.id,
                     "skipped",
                     children.len() as u32,
                     age_secs,
-                    &format!("child '{blocked_child_id}' is not open or previously quarantined"),
+                    &reason,
                 );
                 continue;
             }
@@ -4641,11 +4661,14 @@ impl McpCallbackServer {
         pm: &spur_pm::PmService,
         issue_id: &str,
     ) -> anyhow::Result<bool> {
-        require_feature(
+        if require_feature(
             FeatureKey::PM_PRO_BEADS_ADVANCED,
             self.feature_gate.as_ref(),
         )
-        .map_err(|_| anyhow::anyhow!("not licensed for pending-plan sweep comment lookup"))?;
+        .is_err()
+        {
+            return Ok(false);
+        }
         let Some(advanced) = pm.advanced() else {
             return Ok(false);
         };
@@ -6651,6 +6674,60 @@ mod merge_plan_tests {
                 .map(|note| note.contains("Historical attempt"))
                 .unwrap_or(false),
             "historical responses must explain the summary-only contract: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn comment_lookup_returns_false_when_advanced_feature_unlicensed() {
+        use spur_acp::{BrainSessionId, SessionId};
+
+        let dir = TempDir::new().expect("tempdir");
+        let pm = init_beads_pm(dir.path()).await;
+
+        let session_id = BrainSessionId::new(SessionId("comment-lookup-non-pro".into()));
+        let continuation_ctx = super::DetachedContinuationCtx {
+            on_complete: Arc::new(|_, _| Box::pin(async {})),
+        };
+        let outcome_store: Arc<dyn spur_blob_store::OutcomeStore> =
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new());
+        let (server, _channel) = super::McpCallbackServer::new(
+            &session_id,
+            None,
+            None,
+            continuation_ctx,
+            outcome_store,
+            super::community_feature_gate(),
+        );
+
+        let issue_id = pm
+            .create_issue(spur_pm::IssueCreate {
+                title: "non-pro probe".into(),
+                issue_type: Some("task".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("create issue");
+
+        pm.update_issue(
+            &issue_id,
+            spur_pm::IssueUpdate {
+                comment: Some(format!(
+                    "{} `non-pro` quarantine seed.",
+                    super::PLAN_PENDING_SWEEP_COMMENT_PREFIX
+                )),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed prefix comment");
+
+        let result = server
+            .issue_has_plan_pending_sweep_comment(pm.as_ref(), &issue_id)
+            .await
+            .expect("non-pro lookup must not propagate an error");
+        assert!(
+            !result,
+            "non-pro feature gate must yield Ok(false) so the sweep skips conservatively instead of aborting"
         );
     }
 }
