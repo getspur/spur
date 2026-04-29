@@ -198,6 +198,7 @@ impl LicenseProvider for LicenseSeatProvider {
     }
 
     async fn activate(&self, key: &str) -> Result<LicenseState> {
+        let _guard = self.operation_lock.lock().await;
         let response = self
             .sdk
             .activate(key)
@@ -216,6 +217,7 @@ impl LicenseProvider for LicenseSeatProvider {
     }
 
     async fn validate(&self) -> Result<LicenseState> {
+        let _guard = self.operation_lock.lock().await;
         let result = self
             .sdk
             .validate()
@@ -270,6 +272,7 @@ impl LicenseProvider for LicenseSeatProvider {
     }
 
     async fn heartbeat(&self) -> Result<LicenseState> {
+        let _guard = self.operation_lock.lock().await;
         match self.sdk.heartbeat().await {
             Ok(_) => {
                 let mut next = self.current_snapshot();
@@ -291,6 +294,7 @@ impl LicenseProvider for LicenseSeatProvider {
     }
 
     async fn deactivate(&self) -> Result<LicenseState> {
+        let _guard = self.operation_lock.lock().await;
         self.sdk
             .deactivate()
             .await
