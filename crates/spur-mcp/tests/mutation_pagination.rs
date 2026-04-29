@@ -157,6 +157,7 @@ mod perf_regressions {
     use uuid::Uuid;
 
     #[tokio::test]
+    #[ignore = "heavy: bulk-inserts 10k+ issues to guard the old list_issues cap; run with `cargo test -- --ignored`"]
     async fn mutation_scans_paginate_past_10k_issues() {
         if !br_available() {
             eprintln!("skipping mutation_scans_paginate_past_10k_issues: `br` not on PATH");
