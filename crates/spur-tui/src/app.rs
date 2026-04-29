@@ -926,6 +926,42 @@ impl App {
     }
 
     #[cfg(any(test, debug_assertions))]
+    pub fn is_quit_confirm_visible_for_test(&self) -> bool {
+        self.quit_confirm_visible
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn is_collision_modal_visible_for_test(&self) -> bool {
+        self.collision_modal.is_some()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn set_collision_modal_for_test(
+        &mut self,
+        acp_id: impl Into<String>,
+        holder: spur_acp::session_lock::HolderInfo,
+    ) {
+        self.collision_modal = Some(CollisionModalState {
+            acp_id: acp_id.into(),
+            holder,
+        });
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn is_upgrade_modal_visible_for_test(&self) -> bool {
+        self.upgrade_modal.is_some()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn set_upgrade_modal_for_test(
+        &mut self,
+        err: spur_license::FeatureGateError,
+        required_tier: Option<spur_license::Plan>,
+    ) {
+        self.upgrade_modal = Some(UpgradeModalState { err, required_tier });
+    }
+
+    #[cfg(any(test, debug_assertions))]
     pub fn current_view_for_test(&self) -> &ViewId {
         &self.current_view
     }
@@ -1051,6 +1087,21 @@ impl App {
     #[cfg(any(test, debug_assertions))]
     pub fn palette_state_for_test_mut(&mut self) -> &mut crate::components::palette::PaletteState {
         &mut self.palette_state
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn session_picker_for_test(&self) -> Option<&SessionPickerView> {
+        self.session_picker.as_ref()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn set_session_picker_current_session_has_draft_for_test(
+        &mut self,
+        session_id: Option<String>,
+    ) {
+        if let Some(picker) = self.session_picker.as_mut() {
+            picker.set_current_session_has_draft(session_id);
+        }
     }
 
     #[cfg(any(test, debug_assertions))]
