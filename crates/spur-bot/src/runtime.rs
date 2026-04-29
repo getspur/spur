@@ -593,9 +593,14 @@ impl BotRuntime {
                             break;
                         }
                     }
-                    chosen.unwrap_or_else(|| {
-                        ThreadKey::lobby(self.persisted.operator_chat_id.unwrap_or(0))
-                    })
+                    let Some(key) = chosen else {
+                        tracing::warn!(
+                            %acp_session_id,
+                            "AgentSessionReady arrived with no eligible pending topic; dropping"
+                        );
+                        return Ok((None, vec![]));
+                    };
+                    key
                 };
 
                 self.bind_active_session(
