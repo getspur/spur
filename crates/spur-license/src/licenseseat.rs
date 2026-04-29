@@ -29,20 +29,58 @@ pub fn from_env() -> Result<LicenseSeatProvider> {
 }
 
 pub fn from_env_or_disabled() -> Arc<dyn LicenseProvider> {
+    // Provider selection (Option A from 2026-04-19 plan, Task 14b):
+    //
+    //   1. Runtime env vars override (developer / CI override path).
+    //   2. Build-time baked credentials present + cached license on disk:
+    //      use LicenseSeatProvider directly (already-activated user).
+    //   3. Build-time baked credentials present + NO cached license:
+    //      present as Community via CommunityProviderWithUpgrade, which
+    //      delegates `activate()` to a baked LicenseSeatProvider so
+    //      `spur auth login --key …` works on a fresh install with zero
+    //      env vars. After successful activation the SDK persists a
+    //      cached license, and the next process launch promotes to
+    //      LicenseSeatProvider directly via branch (2).
+    //   4. Neither runtime env vars nor baked credentials: pure Community
+    //      (no upgrade path \u2014 unsupported build configuration).
     match (
         std::env::var(LICENSESEAT_API_KEY_ENV),
         std::env::var(LICENSESEAT_PRODUCT_SLUG_ENV),
     ) {
+        // Branch 1: runtime override.
         (Ok(api_key), Ok(product_slug)) => {
-            Arc::new(LicenseSeatProvider::new(api_key, product_slug))
+            return Arc::new(LicenseSeatProvider::new(api_key, product_slug));
         }
-        (Err(std::env::VarError::NotPresent), Err(std::env::VarError::NotPresent)) => Arc::new(
-            crate::CommunityProvider::new(crate::policy::PolicyResolver::embedded()),
-        ),
-        _ => Arc::new(DisabledProvider::new(
-            "incomplete licensing environment configuration",
-        )),
+        // Both unset: fall through to baked-credentials check.
+        (Err(std::env::VarError::NotPresent), Err(std::env::VarError::NotPresent)) => {}
+        // Partial env: loud config error (developer mistake).
+        _ => {
+            return Arc::new(DisabledProvider::new(
+                "incomplete licensing environment configuration",
+            ));
+        }
     }
+
+    // Branches 2 + 3: baked credentials path.
+    if let Some((api_key, product_slug)) = crate::build_constants::baked_credentials() {
+        let seat = LicenseSeatProvider::new(api_key.into(), product_slug.into());
+        if seat.has_cached_license() {
+            // Branch 2: already activated; promote directly.
+            return Arc::new(seat);
+        }
+        // Branch 3: no cache; present as Community but route activation
+        // to the baked LicenseSeatProvider.
+        return Arc::new(crate::community::CommunityProviderWithUpgrade::new(
+            crate::policy::PolicyResolver::embedded(),
+            Arc::new(seat),
+        ));
+    }
+
+    // Branch 4: no baked credentials (developer build of an unconfigured
+    // fork). Pure Community, no upgrade path.
+    Arc::new(crate::CommunityProvider::new(
+        crate::policy::PolicyResolver::embedded(),
+    ))
 }
 
 /// Production `LicenseProvider` backed by the `licenseseat` SDK.
@@ -119,6 +157,14 @@ impl LicenseSeatProvider {
         };
         provider.spawn_sdk_event_bridge();
         provider
+    }
+
+    /// True iff the underlying SDK has a cached license on disk.
+    /// Used by `from_env_or_disabled` to decide whether to expose
+    /// `LicenseSeatProvider` directly (already-activated user) or wrap
+    /// it in `CommunityProviderWithUpgrade` (fresh install).
+    pub fn has_cached_license(&self) -> bool {
+        self.sdk.current_license().is_some()
     }
 
     fn replace_state(&self, next: LicenseState, kind: LicenseEventKind, message: Option<String>) {
