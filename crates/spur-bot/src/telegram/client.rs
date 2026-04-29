@@ -214,6 +214,7 @@ impl TelegramClient {
             if parse_mode_was_html && is_telegram_400_error(err) {
                 let fallback_params =
                     build_send_text_params(chat_id, message_thread_id, plain_fallback);
+                self.wait_if_paused().await;
                 let fallback_result = self.inner.send_message(&fallback_params).await;
                 if let Err(fallback_err) = &fallback_result {
                     self.pause_after_telegram_retry_after(fallback_err);
