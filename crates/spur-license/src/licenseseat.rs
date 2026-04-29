@@ -550,14 +550,109 @@ mod cross_method_race {
         );
     }
 
-    /// Test 2 (STUB — fails to compile until Task 2 adds the accessor).
-    #[tokio::test]
+    /// Test 2: activate() acquires operation_lock at entry.
+    #[tokio::test(start_paused = true)]
     async fn activate_blocks_on_externally_held_operation_lock() {
         let provider = LicenseSeatProvider::new(
             "test-key".to_string(),
             "test-product".to_string(),
         );
-        let _external_lock = provider.operation_lock_handle().lock_owned().await;
-        // Body intentionally left as a stub for Task 1 RED. Task 3 fills it in.
+        let external_lock = provider.operation_lock_handle().lock_owned().await;
+
+        let provider_clone = provider.clone();
+        let activate_task = tokio::spawn(async move {
+            provider_clone.activate("X").await
+        });
+
+        // Yield so activate_task is polled and queues on the lock.
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+
+        // Task should still be pending — operation_lock is held externally.
+        assert!(
+            !activate_task.is_finished(),
+            "activate() must block on externally-held operation_lock"
+        );
+
+        // Release; activate proceeds. We don't care about the outcome
+        // (SDK error is fine); we care that the task UNBLOCKS.
+        drop(external_lock);
+        let _ = activate_task.await;
+    }
+
+    /// Test 3: validate() acquires operation_lock at entry.
+    #[tokio::test(start_paused = true)]
+    async fn validate_blocks_on_externally_held_operation_lock() {
+        let provider = LicenseSeatProvider::new(
+            "test-key".to_string(),
+            "test-product".to_string(),
+        );
+        let external_lock = provider.operation_lock_handle().lock_owned().await;
+
+        let provider_clone = provider.clone();
+        let task = tokio::spawn(async move { provider_clone.validate().await });
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            !task.is_finished(),
+            "validate() must block on externally-held operation_lock"
+        );
+
+        drop(external_lock);
+        let _ = task.await;
+    }
+
+    /// Test 4: heartbeat() acquires operation_lock at entry.
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_blocks_on_externally_held_operation_lock() {
+        let provider = LicenseSeatProvider::new(
+            "test-key".to_string(),
+            "test-product".to_string(),
+        );
+        let external_lock = provider.operation_lock_handle().lock_owned().await;
+
+        let provider_clone = provider.clone();
+        let task = tokio::spawn(async move { provider_clone.heartbeat().await });
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            !task.is_finished(),
+            "heartbeat() must block on externally-held operation_lock"
+        );
+
+        drop(external_lock);
+        let _ = task.await;
+    }
+
+    /// Test 5: deactivate() acquires operation_lock at entry.
+    #[tokio::test(start_paused = true)]
+    async fn deactivate_blocks_on_externally_held_operation_lock() {
+        let provider = LicenseSeatProvider::new(
+            "test-key".to_string(),
+            "test-product".to_string(),
+        );
+        let external_lock = provider.operation_lock_handle().lock_owned().await;
+
+        let provider_clone = provider.clone();
+        let task = tokio::spawn(async move { provider_clone.deactivate().await });
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            !task.is_finished(),
+            "deactivate() must block on externally-held operation_lock"
+        );
+
+        drop(external_lock);
+        let _ = task.await;
     }
 }
