@@ -190,6 +190,7 @@ fn kill_9_spur_then_reboot_reaps_orphan() {
     let mut child = guard.take();
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut reaped = false;
+    let mut wait_error = None;
     while Instant::now() < deadline {
         match child.try_wait() {
             Ok(Some(_status)) => {
@@ -197,13 +198,20 @@ fn kill_9_spur_then_reboot_reaps_orphan() {
                 break;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(e) => panic!("try_wait on orphan child failed: {e}"),
+            Err(e) => {
+                wait_error = Some(e);
+                break;
+            }
         }
     }
     if !reaped {
-        // Don't leak the still-alive child if the assert below fires.
         let _ = child.kill();
-        let _ = child.wait();
+    }
+    let _ = child.wait();
+    if let Some(e) = wait_error {
+        panic!("try_wait on orphan child failed: {e}");
+    }
+    if !reaped {
         panic!("orphan pgid {pgid} not reaped within 2s of spur boot");
     }
 

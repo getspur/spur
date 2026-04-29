@@ -2213,8 +2213,10 @@ impl McpCallbackServer {
                     reconciler_cancel_tx = Some(cancel_tx);
                     info!("spawning plan reconciler (beads backend detected)");
                     let auto_merge = self.auto_merge_approved_plans;
-                    let mut reconciler_config = ReconcilerConfig::default();
-                    reconciler_config.dispatch_lease_duration = self.dispatch_lease_duration;
+                    let reconciler_config = ReconcilerConfig {
+                        dispatch_lease_duration: self.dispatch_lease_duration,
+                        ..Default::default()
+                    };
                     let automation: Option<Arc<dyn crate::plan::reconciler::ReconcilerAutomation>> =
                         Some(Arc::clone(&self)
                             as Arc<dyn crate::plan::reconciler::ReconcilerAutomation>);

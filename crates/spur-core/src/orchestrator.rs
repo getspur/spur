@@ -4775,8 +4775,6 @@ impl Orchestrator {
             let pm_service = pm_service.clone();
             let last_refresh_at = Arc::clone(&last_refresh_at);
             let peer_mailbox = peer_mailbox.clone();
-            let dispatch_lease_duration = dispatch_lease_duration;
-            let dispatch_lease_heartbeat = dispatch_lease_heartbeat;
 
             // INV-6: register a cancellation token BEFORE spawning so
             // cancel() arriving between dispatch and spawn still works.

@@ -20,7 +20,10 @@ fn closed_update_channel_propagates_send_error() {
         text: "after-close".into(),
     }]);
     assert!(
-        matches!(result, Err(tokio::sync::mpsc::error::TrySendError::Closed(_))),
+        matches!(
+            result,
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_))
+        ),
         "closed receiver must surface as TrySendError::Closed"
     );
 }

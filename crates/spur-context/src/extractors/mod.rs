@@ -4,6 +4,7 @@
 //! Kimi (JSONL pre/post pairing, currently inline in `engine.rs`) and
 //! OpenCode (SQLite via rusqlite, currently inline) into this module.
 
+#[cfg(feature = "duckdb")]
 use chrono::{DateTime, Utc};
 
 #[cfg(feature = "duckdb")]
@@ -11,6 +12,7 @@ pub mod gemini;
 
 /// Shape every extractor produces. Matches the per-agent table schema
 /// in `engine.rs` so the appender call site is uniform.
+#[cfg(feature = "duckdb")]
 #[derive(Debug, Clone)]
 pub struct ExtractedRow {
     pub timestamp: DateTime<Utc>,

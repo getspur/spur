@@ -280,6 +280,7 @@ async fn t_v0c_3_completion_success_writes_ready_for_review_and_completion() {
             result_summary: Some("worker finished".into()),
             ..Default::default()
         },
+        false,
     )
     .await
     .expect("persist completion");
@@ -628,6 +629,7 @@ async fn t_v0c_8_orphaned_dispatch_requeues_and_late_completion_is_superseded() 
             result_summary: Some("late completion".into()),
             ..Default::default()
         },
+        false,
     )
     .await
     .expect("persist superseded completion");
