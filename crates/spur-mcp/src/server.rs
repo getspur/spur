@@ -441,6 +441,9 @@ pub struct McpCallbackServer {
     /// Grace period before startup quarantines stale `spur:plan-pending`
     /// persisted-plan epics.
     plan_pending_grace: std::time::Duration,
+    /// Duration written into `spur:lease-expires-at:<ts>` labels for
+    /// reconciler-owned persisted-plan dispatches.
+    dispatch_lease_duration: std::time::Duration,
 }
 
 /// Validate args for `delegate_parallel` beyond what the schema shape
@@ -1664,6 +1667,7 @@ impl McpCallbackServer {
             brain_pidfile: None,
             auto_merge_approved_plans: false,
             plan_pending_grace: DEFAULT_PLAN_PENDING_GRACE,
+            dispatch_lease_duration: std::time::Duration::from_secs(600),
         };
 
         let channel = DelegationChannel { request_rx: req_rx };
@@ -1766,6 +1770,11 @@ impl McpCallbackServer {
     /// Configure startup quarantine grace for stale `spur:plan-pending` epics.
     pub fn set_plan_pending_grace(&mut self, grace: std::time::Duration) {
         self.plan_pending_grace = grace;
+    }
+
+    /// Configure persisted dispatch lease duration for reconciler dispatches.
+    pub fn set_dispatch_lease_duration(&mut self, duration: std::time::Duration) {
+        self.dispatch_lease_duration = duration;
     }
 
     /// Spawn `run_plan` for an ephemeral plan (no epic_id). Persisted plans
@@ -2203,6 +2212,8 @@ impl McpCallbackServer {
                     reconciler_cancel_tx = Some(cancel_tx);
                     info!("spawning plan reconciler (beads backend detected)");
                     let auto_merge = self.auto_merge_approved_plans;
+                    let mut reconciler_config = ReconcilerConfig::default();
+                    reconciler_config.dispatch_lease_duration = self.dispatch_lease_duration;
                     let automation: Option<Arc<dyn crate::plan::reconciler::ReconcilerAutomation>> =
                         Some(Arc::clone(&self)
                             as Arc<dyn crate::plan::reconciler::ReconcilerAutomation>);
@@ -2220,7 +2231,7 @@ impl McpCallbackServer {
                     });
                     let handle = AbortOnDropHandle::new(tokio::spawn(async move {
                         let mut reconciler = Reconciler::new(
-                            ReconcilerConfig::default(),
+                            reconciler_config,
                             pm,
                             fast_forward,
                             Some(dispatch),

@@ -92,6 +92,7 @@ async fn reconciler_shutdown_on_cancel() {
         base_interval: Duration::from_millis(5),
         idle_ceiling: Duration::from_millis(50),
         backoff_factor: 2,
+        ..Default::default()
     };
     let reconciler = Reconciler::new(
         cfg,

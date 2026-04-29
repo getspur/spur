@@ -120,6 +120,7 @@ async fn add_labels_individually(pm: &spur_pm::PmService, issue_id: &str, labels
         "del-A",
         "codex",
         1,
+        std::time::Duration::from_secs(600),
     )
     .await
     .expect("persist dispatch intent");
@@ -394,9 +395,9 @@ async fn epic_completion_audit_round_trips_through_collect_sentinels() {
 }
 
 #[tokio::test]
-async fn persist_dispatch_intent_writes_label_before_send() {
+async fn dispatch_intent_includes_lease_label() {
     if !br_available() {
-        eprintln!("skipping persist_dispatch_intent_writes_label_before_send: `br` not on PATH");
+        eprintln!("skipping dispatch_intent_includes_lease_label: `br` not on PATH");
         return;
     }
 
@@ -422,6 +423,8 @@ async fn persist_dispatch_intent_writes_label_before_send() {
         })
         .await
         .expect("create issue");
+    let stale_lease = spur_mcp::plan::labels::lease_expires_at(1_700_000_000);
+    run_br(dir.path(), &["label", "add", &issue_id, &stale_lease]).expect("add stale lease");
 
     spur_mcp::plan::persist_dispatch_intent(
         &pm,
@@ -431,6 +434,7 @@ async fn persist_dispatch_intent_writes_label_before_send() {
         "del-A",
         "codex",
         1,
+        std::time::Duration::from_secs(600),
     )
     .await
     .expect("persist dispatch intent");
@@ -439,6 +443,10 @@ async fn persist_dispatch_intent_writes_label_before_send() {
     assert!(issue
         .labels
         .contains(&spur_mcp::plan::labels::delegation_id("del-A")));
+    assert!(issue.labels.iter().any(|label| {
+        spur_mcp::plan::labels::parse_lease_expires_at(label).is_some() && label != &stale_lease
+    }));
+    assert!(!issue.labels.contains(&stale_lease));
     assert!(!issue
         .labels
         .contains(&spur_mcp::plan::labels::READY_FOR_REVIEW.to_string()));

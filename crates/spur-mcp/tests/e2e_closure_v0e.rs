@@ -596,6 +596,7 @@ async fn t_v0e_3_fast_forward_matches_polling() {
             base_interval: std::time::Duration::from_secs(60),
             idle_ceiling: std::time::Duration::from_secs(60),
             backoff_factor: 2,
+            ..Default::default()
         },
         Arc::clone(&pm_ff),
         Arc::clone(&fast_forward),
@@ -689,6 +690,7 @@ async fn t_v0e_3_fast_forward_matches_polling() {
             base_interval: std::time::Duration::from_secs(60),
             idle_ceiling: std::time::Duration::from_secs(60),
             backoff_factor: 2,
+            ..Default::default()
         },
         Arc::clone(&pm_term_ff),
         Arc::clone(&term_fast_forward),
