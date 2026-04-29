@@ -14,12 +14,17 @@ pub async fn render_batch_to_thread(
     message_thread_id: Option<i32>,
     renders: Vec<crate::runtime::RuntimeRender>,
 ) -> anyhow::Result<()> {
+    use crate::telegram::format::{
+        render_truncated_text, truncate_button_label_bytes, TELEGRAM_BUTTON_LABEL_MAX_BYTES,
+    };
+
     for render in renders {
         match render {
             crate::runtime::RuntimeRender::ServiceMessage { text }
             | crate::runtime::RuntimeRender::FinalAnswer { text } => {
+                let body = render_truncated_text(&text);
                 client
-                    .send_text_to_thread(chat_id, message_thread_id, text)
+                    .send_text_to_thread(chat_id, message_thread_id, body)
                     .await?;
             }
             crate::runtime::RuntimeRender::WorkingStatus { text } => {
@@ -28,7 +33,7 @@ pub async fn render_batch_to_thread(
                         chat_id,
                         message_thread_id,
                         draft_id: format!("working-{chat_id}-{:?}", message_thread_id),
-                        text,
+                        text: render_truncated_text(&text),
                     })
                     .await;
             }
@@ -37,8 +42,19 @@ pub async fn render_batch_to_thread(
             }
             crate::runtime::RuntimeRender::ReviewPrompt { text, buttons }
             | crate::runtime::RuntimeRender::PermissionPrompt { text, buttons } => {
+                let buttons: Vec<crate::runtime::PromptButton> = buttons
+                    .into_iter()
+                    .map(|b| crate::runtime::PromptButton {
+                        token: b.token,
+                        label: truncate_button_label_bytes(
+                            &b.label,
+                            TELEGRAM_BUTTON_LABEL_MAX_BYTES,
+                        ),
+                    })
+                    .collect();
+                let body = render_truncated_text(&text);
                 client
-                    .send_buttons_to_thread(chat_id, message_thread_id, text, &buttons)
+                    .send_buttons_to_thread(chat_id, message_thread_id, body, &buttons)
                     .await?;
             }
             crate::runtime::RuntimeRender::FinalizePrompt { .. } => {}

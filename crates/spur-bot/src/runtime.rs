@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use anyhow::Context;
+
 use crate::commands::{parse_chat_input, BotCommand, ParsedChatInput};
 use crate::state::{
     BindingState, BotStateStore, PersistedBotState, PersistedThreadRecord, ThreadKey,
@@ -118,8 +120,10 @@ pub struct BotRuntime {
 }
 
 impl BotRuntime {
-    pub fn new(state_store: BotStateStore) -> Self {
-        let persisted = state_store.load().unwrap_or_default();
+    pub fn new(state_store: BotStateStore) -> anyhow::Result<Self> {
+        let persisted = state_store
+            .load()
+            .context("loading persisted bot state; refusing to start with empty state")?;
         let mut threads = HashMap::new();
 
         for (thread_id, record) in &persisted.threads {
@@ -152,7 +156,7 @@ impl BotRuntime {
             );
         }
 
-        Self {
+        Ok(Self {
             state_store,
             persisted,
             threads,
@@ -166,7 +170,7 @@ impl BotRuntime {
             pending_new_session_guard: HashSet::new(),
             pending_resume: HashMap::new(),
             executor_sessions: HashMap::new(),
-        }
+        })
     }
 
     pub fn state_store(&self) -> &BotStateStore {
@@ -182,7 +186,7 @@ impl BotRuntime {
     /// a successful `createForumTopic`; persistence here is what lets the topic
     /// survive a restart that occurs before the operator sends the first
     /// message.
-    pub fn ensure_topic_record(
+    pub async fn ensure_topic_record(
         &mut self,
         chat_id: i64,
         message_thread_id: i32,
@@ -192,8 +196,10 @@ impl BotRuntime {
             chat_id,
             message_thread_id: Some(message_thread_id),
         };
-        let inserted = !self.threads.contains_key(&key);
-        self.threads.entry(key).or_insert(ThreadRecord {
+        if self.threads.contains_key(&key) {
+            return Ok(());
+        }
+        self.threads.insert(key.clone(), ThreadRecord {
             topic_name,
             archived: false,
             binding: BindingState::Unbound,
@@ -202,8 +208,9 @@ impl BotRuntime {
             live_session: None,
             archived_previous: Vec::new(),
         });
-        if inserted {
-            self.state_store.save(&self.persistable_state())?;
+        if let Err(err) = self.state_store.save(&self.persistable_state()).await {
+            self.threads.remove(&key);
+            return Err(err);
         }
         Ok(())
     }
@@ -307,7 +314,7 @@ impl BotRuntime {
         self.threads.get(&key)
     }
 
-    fn ensure_known_topic(&mut self, key: &ThreadKey) -> anyhow::Result<()> {
+    async fn ensure_known_topic(&mut self, key: &ThreadKey) -> anyhow::Result<()> {
         let Some(message_thread_id) = key.message_thread_id else {
             return Ok(());
         };
@@ -319,6 +326,7 @@ impl BotRuntime {
             message_thread_id,
             format!("Topic {message_thread_id}"),
         )
+        .await
     }
 
     pub async fn handle_chat_text(
@@ -329,7 +337,7 @@ impl BotRuntime {
         text: &str,
     ) -> anyhow::Result<Vec<RuntimeRender>> {
         self.persisted.operator_chat_id = Some(chat_id);
-        self.state_store.save(&self.persistable_state())?;
+        self.state_store.save(&self.persistable_state()).await?;
 
         let key = ThreadKey {
             chat_id,
@@ -342,7 +350,7 @@ impl BotRuntime {
                 }])
             }
             ParsedChatInput::PlainText(body) => {
-                self.ensure_known_topic(&key)?;
+                self.ensure_known_topic(&key).await?;
                 let blocks = vec![spur_acp::ContentBlock::Text(spur_acp::TextContent::new(body))];
                 let record = self.threads.get_mut(&key).ok_or_else(|| anyhow::anyhow!("unknown topic"))?;
                 match &record.binding {
@@ -427,7 +435,7 @@ impl BotRuntime {
             BotCommand::New if key.message_thread_id.is_none() => {
                 let topic_name = format!("Session {}", self.persisted.next_topic_seq);
                 self.persisted.next_topic_seq += 1;
-                self.state_store.save(&self.persistable_state())?;
+                self.state_store.save(&self.persistable_state()).await?;
                 Ok(vec![RuntimeRender::CreateTopic { topic_name }])
             }
             BotCommand::New => Ok(vec![RuntimeRender::ServiceMessage {
@@ -442,7 +450,7 @@ impl BotRuntime {
                         text: "Use /resume inside a topic.".into(),
                     }]);
                 }
-                self.ensure_known_topic(&key)?;
+                self.ensure_known_topic(&key).await?;
 
                 // Archive any OTHER topic that currently owns the requested
                 // ACP session. This is the atomicity rule from the spec: no
@@ -502,7 +510,7 @@ impl BotRuntime {
                     })
                     .await?;
                 self.pending_resume.insert(session_id.clone(), key.clone());
-                self.state_store.save(&self.persistable_state())?;
+                self.state_store.save(&self.persistable_state()).await?;
 
                 Ok(vec![RuntimeRender::WorkingStatus {
                     text: format!("Resuming `{session_id}`…"),
@@ -557,7 +565,7 @@ impl BotRuntime {
         }
     }
 
-    pub fn handle_spur_event(
+    pub async fn handle_spur_event(
         &mut self,
         event: spur_acp::SpurEvent,
     ) -> anyhow::Result<(Option<ThreadKey>, Vec<RuntimeRender>)> {
@@ -588,9 +596,14 @@ impl BotRuntime {
                             break;
                         }
                     }
-                    chosen.unwrap_or_else(|| {
-                        ThreadKey::lobby(self.persisted.operator_chat_id.unwrap_or(0))
-                    })
+                    let Some(key) = chosen else {
+                        tracing::warn!(
+                            %acp_session_id,
+                            "AgentSessionReady arrived with no eligible pending topic; dropping"
+                        );
+                        return Ok((None, vec![]));
+                    };
+                    key
                 };
 
                 self.bind_active_session(
@@ -600,7 +613,7 @@ impl BotRuntime {
                     brain.clone(),
                 );
                 self.output_buffers.remove(&session);
-                self.state_store.save(&self.persistable_state())?;
+                self.state_store.save(&self.persistable_state()).await?;
 
                 Ok((
                     Some(key),
