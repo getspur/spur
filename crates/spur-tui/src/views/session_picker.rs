@@ -91,6 +91,92 @@ fn compute_label_budget(area_width: u16, show_cwd: bool, show_brain: bool) -> us
     avail.clamp(8, 60)
 }
 
+fn build_filter_haystack(
+    session: &SessionInfo,
+    metadata: &SessionMetadata,
+    synopsis: &spur_core::SessionSynopsisProjection,
+) -> String {
+    let entry = metadata.sessions.get(session.session_id.0.as_ref());
+    let synopsis_for = synopsis.get(&spur_acp::SessionId(
+        session.session_id.0.as_ref().to_string(),
+    ));
+    let label = resolve_label(session, entry, synopsis_for.as_ref(), false, usize::MAX);
+    let first = synopsis_for
+        .as_ref()
+        .and_then(|s| s.first_user_msg.as_deref())
+        .unwrap_or("");
+    let last = synopsis_for
+        .as_ref()
+        .and_then(|s| s.last_user_msg.as_deref())
+        .unwrap_or("");
+    let cwd = session.cwd.display().to_string();
+    let id = session.session_id.0.as_ref();
+    format!("{label} {first} {last} {cwd} {id}")
+}
+
+fn filtered_indices(
+    sessions: &[SessionInfo],
+    filter: &str,
+    metadata: &SessionMetadata,
+    synopsis: &spur_core::SessionSynopsisProjection,
+    show_archived: bool,
+) -> Vec<usize> {
+    let candidates: Vec<usize> = (0..sessions.len())
+        .filter(|&i| {
+            let archived = metadata
+                .sessions
+                .get(sessions[i].session_id.0.as_ref())
+                .map(|e| e.archived)
+                .unwrap_or(false);
+            if archived {
+                show_archived
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    if filter.is_empty() {
+        let mut all = candidates;
+        all.sort_by(|&a, &b| {
+            let ea = metadata.sessions.get(sessions[a].session_id.0.as_ref());
+            let eb = metadata.sessions.get(sessions[b].session_id.0.as_ref());
+            let pa = ea.map(|e| e.pinned).unwrap_or(false);
+            let pb = eb.map(|e| e.pinned).unwrap_or(false);
+            match (pa, pb) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => {
+                    let ta = sessions[a].updated_at.as_deref().unwrap_or("");
+                    let tb = sessions[b].updated_at.as_deref().unwrap_or("");
+                    tb.cmp(ta)
+                }
+            }
+        });
+        return all;
+    }
+
+    use nucleo_matcher::{
+        pattern::{CaseMatching, Normalization, Pattern},
+        Matcher,
+    };
+    let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
+    let pattern = Pattern::parse(filter, CaseMatching::Ignore, Normalization::Smart);
+    let mut scored: Vec<(u32, usize)> = candidates
+        .into_iter()
+        .filter_map(|i| {
+            let haystack = build_filter_haystack(&sessions[i], metadata, synopsis);
+            let score = pattern.score(
+                nucleo_matcher::Utf32Str::new(&haystack, &mut Vec::new()),
+                &mut matcher,
+            )?;
+            Some((score, i))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.into_iter().map(|(_, i)| i).collect()
+}
+
 // ─── State ────────────────────────────────────────────────────────────
 
 enum PickerState {
@@ -98,7 +184,6 @@ enum PickerState {
     Populated {
         agent: String,
         sessions: Vec<SessionInfo>,
-        haystacks: Vec<String>,
         cursor: usize,
         search_focused: bool,
         filter: String,
@@ -232,23 +317,22 @@ impl SessionPickerView {
         self.metadata = metadata;
     }
 
-    pub fn toggle_show_archived(&mut self) {
-        let prev_highlight = self.highlighted_session_id();
+    pub fn toggle_show_archived(&mut self, synopsis: &spur_core::SessionSynopsisProjection) {
+        let prev_highlight = self.highlighted_session_id(synopsis);
         let prev_cursor_was_new = matches!(&self.state, PickerState::Populated { cursor: 0, .. });
         self.show_archived = !self.show_archived;
         if let PickerState::Populated {
             sessions,
-            haystacks,
             cursor,
             filter,
             ..
         } = &mut self.state
         {
-            let indices = Self::filtered_indices(
+            let indices = filtered_indices(
                 sessions,
-                haystacks,
                 filter,
                 &self.metadata,
+                synopsis,
                 self.show_archived,
             );
             let new_cursor = Self::project_cursor(
@@ -294,23 +378,18 @@ impl SessionPickerView {
         // P2 (cursor preservation by session_id) — only meaningful when we
         // were already Populated. Captured here so it sees the *previous*
         // state before we overwrite it.
-        let prev_highlight = self.highlighted_session_id();
+        let prev_highlight = self.highlighted_session_id(synopsis);
         let prev_cursor_was_new = matches!(&self.state, PickerState::Populated { cursor: 0, .. });
         let prev_filter = match &self.state {
             PickerState::Populated { filter, .. } => filter.clone(),
             _ => String::new(),
         };
 
-        let haystacks: Vec<String> = sessions
-            .iter()
-            .map(|s| self.build_haystack_for(s, synopsis))
-            .collect();
-
-        let indices = Self::filtered_indices(
+        let indices = filtered_indices(
             &sessions,
-            &haystacks,
             &prev_filter,
             &self.metadata,
+            synopsis,
             self.show_archived,
         );
 
@@ -344,7 +423,6 @@ impl SessionPickerView {
         self.state = PickerState::Populated {
             agent,
             sessions,
-            haystacks,
             cursor,
             search_focused: false,
             filter: prev_filter,
@@ -352,10 +430,12 @@ impl SessionPickerView {
         self.scroll_offset.set(0);
     }
 
-    fn highlighted_session_id(&self) -> Option<String> {
+    fn highlighted_session_id(
+        &self,
+        synopsis: &spur_core::SessionSynopsisProjection,
+    ) -> Option<String> {
         let PickerState::Populated {
             sessions,
-            haystacks,
             cursor,
             filter,
             ..
@@ -366,100 +446,15 @@ impl SessionPickerView {
         if *cursor == 0 {
             return None;
         }
-        let indices = Self::filtered_indices(
+        let indices = filtered_indices(
             sessions,
-            haystacks,
             filter,
             &self.metadata,
+            synopsis,
             self.show_archived,
         );
         let real_idx = indices.get(*cursor - 1).copied()?;
         Some(sessions[real_idx].session_id.0.as_ref().to_string())
-    }
-
-    fn build_haystack_for(
-        &self,
-        session: &SessionInfo,
-        synopsis: &spur_core::SessionSynopsisProjection,
-    ) -> String {
-        let entry = self.metadata.sessions.get(session.session_id.0.as_ref());
-        let synopsis_for = synopsis.get(&spur_acp::SessionId(
-            session.session_id.0.as_ref().to_string(),
-        ));
-        let label = resolve_label(session, entry, synopsis_for.as_ref(), false, usize::MAX);
-        let first = synopsis_for
-            .as_ref()
-            .and_then(|s| s.first_user_msg.as_deref())
-            .unwrap_or("");
-        let last = synopsis_for
-            .as_ref()
-            .and_then(|s| s.last_user_msg.as_deref())
-            .unwrap_or("");
-        let cwd = session.cwd.display().to_string();
-        let id = session.session_id.0.as_ref();
-        format!("{label} {first} {last} {cwd} {id}")
-    }
-
-    fn filtered_indices(
-        sessions: &[SessionInfo],
-        haystacks: &[String],
-        filter: &str,
-        metadata: &SessionMetadata,
-        show_archived: bool,
-    ) -> Vec<usize> {
-        let candidates: Vec<usize> = (0..sessions.len())
-            .filter(|&i| {
-                let archived = metadata
-                    .sessions
-                    .get(sessions[i].session_id.0.as_ref())
-                    .map(|e| e.archived)
-                    .unwrap_or(false);
-                if archived {
-                    show_archived
-                } else {
-                    true
-                }
-            })
-            .collect();
-
-        if filter.is_empty() {
-            let mut all = candidates;
-            all.sort_by(|&a, &b| {
-                let ea = metadata.sessions.get(sessions[a].session_id.0.as_ref());
-                let eb = metadata.sessions.get(sessions[b].session_id.0.as_ref());
-                let pa = ea.map(|e| e.pinned).unwrap_or(false);
-                let pb = eb.map(|e| e.pinned).unwrap_or(false);
-                match (pa, pb) {
-                    (true, false) => std::cmp::Ordering::Less,
-                    (false, true) => std::cmp::Ordering::Greater,
-                    _ => {
-                        // recency desc via updated_at (newest first)
-                        let ta = sessions[a].updated_at.as_deref().unwrap_or("");
-                        let tb = sessions[b].updated_at.as_deref().unwrap_or("");
-                        tb.cmp(ta)
-                    }
-                }
-            });
-            return all;
-        }
-        use nucleo_matcher::{
-            pattern::{CaseMatching, Normalization, Pattern},
-            Matcher,
-        };
-        let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
-        let pattern = Pattern::parse(filter, CaseMatching::Ignore, Normalization::Smart);
-        let mut scored: Vec<(u32, usize)> = candidates
-            .into_iter()
-            .filter_map(|i| {
-                let score = pattern.score(
-                    nucleo_matcher::Utf32Str::new(&haystacks[i], &mut Vec::new()),
-                    &mut matcher,
-                )?;
-                Some((score, i))
-            })
-            .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
-        scored.into_iter().map(|(_, i)| i).collect()
     }
 
     fn project_cursor(
@@ -495,18 +490,15 @@ impl SessionPickerView {
         }
     }
 
-    pub fn visible_session_count(&self) -> usize {
+    pub fn visible_session_count(&self, synopsis: &spur_core::SessionSynopsisProjection) -> usize {
         match &self.state {
             PickerState::Populated {
+                sessions, filter, ..
+            } => filtered_indices(
                 sessions,
-                haystacks,
-                filter,
-                ..
-            } => Self::filtered_indices(
-                sessions,
-                haystacks,
                 filter,
                 &self.metadata,
+                synopsis,
                 self.show_archived,
             )
             .len(),
@@ -514,18 +506,19 @@ impl SessionPickerView {
         }
     }
 
-    pub fn visible_session_at(&self, idx: usize) -> Option<&SessionInfo> {
+    pub fn visible_session_at(
+        &self,
+        idx: usize,
+        synopsis: &spur_core::SessionSynopsisProjection,
+    ) -> Option<&SessionInfo> {
         match &self.state {
             PickerState::Populated {
+                sessions, filter, ..
+            } => filtered_indices(
                 sessions,
-                haystacks,
-                filter,
-                ..
-            } => Self::filtered_indices(
-                sessions,
-                haystacks,
                 filter,
                 &self.metadata,
+                synopsis,
                 self.show_archived,
             )
             .get(idx)
@@ -743,7 +736,6 @@ impl SessionPickerView {
         flag_summary: Option<(usize, usize)>,
         agent: &str,
         sessions: &[SessionInfo],
-        haystacks: &[String],
         cursor: usize,
         search_focused: bool,
         filter: &str,
@@ -751,11 +743,11 @@ impl SessionPickerView {
         let show_cwd = Self::cwds_are_heterogeneous(sessions);
         let visible_height = area.height.saturating_sub(4) as usize;
 
-        let indices = Self::filtered_indices(
+        let indices = filtered_indices(
             sessions,
-            haystacks,
             filter,
             &self.metadata,
+            ctx.synopsis,
             self.show_archived,
         );
 
@@ -967,11 +959,11 @@ impl SessionPickerView {
                     ),
                 }
             } else {
-                let indices = Self::filtered_indices(
+                let indices = filtered_indices(
                     sessions,
-                    haystacks,
                     filter,
                     &self.metadata,
+                    ctx.synopsis,
                     self.show_archived,
                 );
                 let real_idx = indices.get(cursor - 1).copied();
@@ -989,6 +981,10 @@ impl SessionPickerView {
                         let raw = session.session_id.0.as_ref();
                         raw[..8.min(raw.len())].to_string()
                     };
+                    let value_width = (chunks[1].width as usize)
+                        .saturating_sub("  Intent: ".len())
+                        .max(1);
+                    let footer_width = (chunks[1].width as usize).saturating_sub(2).max(1);
 
                     let mut rows: Vec<PreviewRow> = Vec::new();
 
@@ -996,9 +992,8 @@ impl SessionPickerView {
                     if let Some(last) = synopsis.as_ref().and_then(|s| s.last_user_msg.clone()) {
                         rows.push(PreviewRow {
                             label: "Last".into(),
-                            value: last,
+                            value_lines: vec![truncate_for_row(&last, value_width)],
                             value_style: None,
-                            wrap: false,
                         });
                     }
 
@@ -1006,9 +1001,8 @@ impl SessionPickerView {
                     if !draft.is_empty() {
                         rows.push(PreviewRow {
                             label: "Draft".into(),
-                            value: draft,
+                            value_lines: vec![truncate_for_row(&draft, value_width)],
                             value_style: Some(Style::default().fg(Color::Yellow)),
-                            wrap: false,
                         });
                     }
 
@@ -1019,9 +1013,8 @@ impl SessionPickerView {
                     if let Some(first) = synopsis.as_ref().and_then(|s| s.first_user_msg.clone()) {
                         rows.push(PreviewRow {
                             label: "Intent".into(),
-                            value: first,
+                            value_lines: wrap_value(&first, value_width, 3),
                             value_style: Some(Style::default().fg(Color::Gray)),
-                            wrap: true,
                         });
                     }
 
@@ -1031,10 +1024,20 @@ impl SessionPickerView {
                     // 6. Footer (cwd · brain · short id)
                     rows.push(PreviewRow {
                         label: "".into(),
-                        value: format!("{cwd} \u{00b7} {brain} \u{00b7} {short_id}"),
+                        value_lines: vec![truncate_for_row(
+                            &format!("{cwd} \u{00b7} {brain} \u{00b7} {short_id}"),
+                            footer_width,
+                        )],
                         value_style: Some(Style::default().fg(Color::DarkGray)),
-                        wrap: false,
                     });
+
+                    debug_assert!(
+                        rows.iter()
+                            .map(|row| row.value_lines.len().max(1))
+                            .sum::<usize>()
+                            <= preview_height as usize,
+                        "session preview rows exceed visual budget"
+                    );
 
                     PreviewContent {
                         rows,
@@ -1229,6 +1232,78 @@ pub(super) fn truncate_for_row(input: &str, budget: usize) -> String {
     out
 }
 
+pub(super) fn wrap_value(text: &str, width: usize, max_lines: usize) -> Vec<String> {
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
+
+    if max_lines == 0 {
+        return Vec::new();
+    }
+    if width == 0 {
+        return vec!["\u{2026}".to_string()];
+    }
+
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    let mut graphemes = text.graphemes(true).peekable();
+    let mut truncated = false;
+
+    while let Some(g) = graphemes.next() {
+        if g == "\n" {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+            if lines.len() == max_lines {
+                truncated = graphemes.peek().is_some();
+                break;
+            }
+            continue;
+        }
+
+        let grapheme_width = UnicodeWidthStr::width(g).max(1);
+        if current_width > 0 && current_width + grapheme_width > width {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+            if lines.len() == max_lines {
+                truncated = true;
+                break;
+            }
+        }
+
+        current.push_str(g);
+        current_width += grapheme_width;
+    }
+
+    if !truncated && (lines.is_empty() || !current.is_empty() || text.ends_with('\n')) {
+        lines.push(current);
+    }
+
+    if truncated {
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
+        let last = lines.last_mut().expect("truncated output has a last line");
+        append_ellipsis(last, width);
+    }
+
+    lines
+}
+
+fn append_ellipsis(line: &mut String, width: usize) {
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
+
+    while !line.is_empty() && UnicodeWidthStr::width(line.as_str()) + 1 > width {
+        let keep_bytes = line
+            .grapheme_indices(true)
+            .next_back()
+            .map(|(idx, _)| idx)
+            .unwrap_or(0);
+        line.truncate(keep_bytes);
+    }
+    line.push('\u{2026}');
+}
+
 /// Resolve which label to render for a session-picker row. Precedence:
 /// title_override > first_user_msg > agent title > cwd basename >
 /// "(untitled session)". Empty strings are skipped at each tier.
@@ -1332,7 +1407,7 @@ impl View for SessionPickerView {
         }
 
         // Compute once — needed by list-mode p/R/d arms before we split-borrow.
-        let hl_session_id = self.highlighted_session_id();
+        let hl_session_id = self.highlighted_session_id(ctx.synopsis);
 
         // Deferred state transitions to apply after the split borrow ends.
         enum Post {
@@ -1360,7 +1435,6 @@ impl View for SessionPickerView {
             match state {
                 PickerState::Populated {
                     sessions,
-                    haystacks,
                     cursor,
                     search_focused,
                     filter,
@@ -1401,11 +1475,11 @@ impl View for SessionPickerView {
                                 None
                             }
                             KeyCode::Down | KeyCode::Char('j') => {
-                                let visible = Self::filtered_indices(
+                                let visible = filtered_indices(
                                     sessions,
-                                    haystacks,
                                     filter,
                                     metadata,
+                                    ctx.synopsis,
                                     *show_archived,
                                 )
                                 .len();
@@ -1436,11 +1510,11 @@ impl View for SessionPickerView {
                                         Some(Action::NewSessionRequested)
                                     }
                                 } else {
-                                    let indices = Self::filtered_indices(
+                                    let indices = filtered_indices(
                                         sessions,
-                                        haystacks,
                                         filter,
                                         metadata,
+                                        ctx.synopsis,
                                         *show_archived,
                                     );
                                     let real_idx = indices.get(*cursor - 1).copied()?;
@@ -1598,7 +1672,6 @@ impl View for SessionPickerView {
             PickerState::Populated {
                 agent,
                 sessions,
-                haystacks,
                 cursor,
                 search_focused,
                 filter,
@@ -1610,7 +1683,6 @@ impl View for SessionPickerView {
                 ctx.flag_summary,
                 agent,
                 sessions,
-                haystacks,
                 *cursor,
                 *search_focused,
                 filter,
@@ -1896,6 +1968,72 @@ mod preview_render_tests {
         assert!(!text.contains("Session: a1xxxxxx"));
         assert!(!text.contains("CWD: /work/spur"));
     }
+
+    #[test]
+    fn preview_caps_long_intent_and_keeps_footer_visible() {
+        let mut synopsis = spur_core::SessionSynopsisProjection::new();
+        synopsis.apply(&SpurEvent::now(SpurEventBody::SessionHistory {
+            session: SessionId("a1xxxxxx".into()),
+            entries: vec![
+                HistoryEntry {
+                    role: "user".into(),
+                    text: "intent ".repeat(120),
+                },
+                HistoryEntry {
+                    role: "assistant".into(),
+                    text: "ack".into(),
+                },
+                HistoryEntry {
+                    role: "user".into(),
+                    text: "latest request".into(),
+                },
+            ],
+        }));
+
+        let lineage = spur_core::lineage::projection::ExecutorLineage::new();
+        let plan_projection = spur_core::PlanProjectionStore::new();
+        let brain_status = crate::app::BrainStatus::Idle;
+        let ctx = crate::views::ViewContext {
+            lineage: &lineage,
+            plan_projection: &plan_projection,
+            synopsis: &synopsis,
+            brain_status: &brain_status,
+            license_badge: None,
+            flag_summary: None,
+            tombstone: None,
+            transient_hint_override: None,
+        };
+
+        let mut metadata = SessionMetadata::default();
+        metadata
+            .sessions
+            .entry("a1xxxxxx".into())
+            .or_default()
+            .brain_name = Some("claude".into());
+
+        let mut picker = SessionPickerView::new();
+        picker.set_metadata(metadata);
+        picker.set_sessions(
+            "claude".into(),
+            vec![SessionInfo::new(
+                "a1xxxxxx".to_string(),
+                PathBuf::from("/work/spur"),
+            )],
+            ctx.synopsis,
+        );
+        let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE), &ctx);
+
+        let backend = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|frame| picker.render(frame, Rect::new(0, 0, 80, 24), &ctx))
+            .unwrap();
+
+        let text = buffer_text(term.backend().buffer());
+        assert!(text.contains("Last: latest request"));
+        assert!(text.contains("Intent: intent intent"));
+        assert!(text.contains('…'));
+        assert!(text.contains("/work/spur \u{00b7} claude \u{00b7} a1xxxxxx"));
+    }
 }
 
 #[cfg(test)]
@@ -1944,6 +2082,64 @@ mod truncate_tests {
     #[test]
     fn strips_leading_whitespace() {
         assert_eq!(truncate_for_row("   hello", 10), "hello");
+    }
+}
+
+#[cfg(test)]
+mod wrap_value_tests {
+    use super::wrap_value;
+    use unicode_width::UnicodeWidthStr;
+
+    fn assert_widths(lines: &[String], width: usize) {
+        for line in lines {
+            assert!(
+                UnicodeWidthStr::width(line.as_str()) <= width,
+                "{line:?} exceeds width {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn returns_no_lines_when_max_lines_is_zero() {
+        assert_eq!(wrap_value("anything", 5, 0), Vec::<String>::new());
+    }
+
+    #[test]
+    fn handles_single_line_boundaries() {
+        assert_eq!(wrap_value("abcde", 5, 1), vec!["abcde"]);
+        assert_eq!(wrap_value("abcdef", 5, 1), vec!["abcd\u{2026}"]);
+        assert_eq!(wrap_value("abcdef", 6, 1), vec!["abcdef"]);
+    }
+
+    #[test]
+    fn caps_at_three_lines_and_marks_only_truncated_text() {
+        assert_eq!(
+            wrap_value("abcdefghijkl", 4, 3),
+            vec!["abcd", "efgh", "ijkl"]
+        );
+        assert_eq!(
+            wrap_value("abcdefghijklm", 4, 3),
+            vec!["abcd", "efgh", "ijk\u{2026}"]
+        );
+    }
+
+    #[test]
+    fn respects_wide_chars_combining_marks_and_emoji() {
+        assert_eq!(wrap_value("日本語", 4, 1), vec!["日\u{2026}"]);
+        assert_eq!(
+            wrap_value("e\u{301}e\u{301}e\u{301}", 2, 1),
+            vec!["e\u{301}\u{2026}"]
+        );
+        assert_eq!(wrap_value("🙂🙂🙂", 4, 1), vec!["🙂\u{2026}"]);
+
+        assert_widths(&wrap_value("日本語", 4, 2), 4);
+        assert_widths(&wrap_value("🙂🙂🙂", 4, 2), 4);
+    }
+
+    #[test]
+    fn respects_embedded_newlines() {
+        assert_eq!(wrap_value("ab\ncdef", 2, 3), vec!["ab", "cd", "ef"]);
+        assert_eq!(wrap_value("ab\ncdefg", 2, 3), vec!["ab", "cd", "e\u{2026}"]);
     }
 }
 
@@ -2070,14 +2266,7 @@ mod filter_haystack_tests {
             },
         );
 
-        let picker = SessionPickerView::new();
-        let haystacks: Vec<String> = sessions
-            .iter()
-            .map(|session| picker.build_haystack_for(session, &synopsis))
-            .collect();
-
-        let indices =
-            SessionPickerView::filtered_indices(&sessions, &haystacks, "auth", &metadata, false);
+        let indices = filtered_indices(&sessions, "auth", &metadata, &synopsis, false);
         assert_eq!(
             indices,
             vec![0],
@@ -2086,7 +2275,7 @@ mod filter_haystack_tests {
     }
 
     #[test]
-    fn haystack_cache_does_not_pick_up_late_synopsis_updates() {
+    fn haystack_picks_up_late_synopsis_updates_without_refresh() {
         let mut picker = SessionPickerView::new();
         let sessions = vec![make_session("S1", Some("Build fix"))];
         let mut synopsis = SessionSynopsisProjection::new();
@@ -2110,16 +2299,16 @@ mod filter_haystack_tests {
 
         set_filter(&mut picker, "alpha");
         assert_eq!(
-            picker.visible_session_count(),
-            1,
-            "should still find session by cached 'alpha' haystack"
+            picker.visible_session_count(&synopsis),
+            0,
+            "old synopsis content should not remain cached"
         );
 
         set_filter(&mut picker, "beta");
         assert_eq!(
-            picker.visible_session_count(),
-            0,
-            "should not find session by late 'beta' synopsis update"
+            picker.visible_session_count(&synopsis),
+            1,
+            "should find session by late 'beta' synopsis update"
         );
     }
 }
