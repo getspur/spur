@@ -43,7 +43,7 @@ mermaid-rs-renderer = { version = "0.2.2", default-features = false, features = 
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 ratatui-image = { version = "9", default-features = false, features = ["tokio"], optional = true }
 resvg = { version = "0.46", optional = true }
-pulldown-cmark = { version = "0.13", default-features = false, optional = true }
+pulldown-cmark = { workspace = true, optional = true }
 
 [dev-dependencies]
 spur-core = { path = "../spur-core", features = ["test-helpers"] }

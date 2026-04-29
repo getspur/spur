@@ -4734,6 +4734,7 @@ dependencies = [
  "agent-client-protocol",
  "anyhow",
  "frankenstein",
+ "pulldown-cmark",
  "serde",
  "serde_json",
  "spur-acp",
