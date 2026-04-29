@@ -1,7 +1,7 @@
 # bd-22q.15 — `LicenseSeatProvider` Cross-Method Operation Serialization
 
-**Status:** Approved 2026-04-29 (codex/kimi reviews folded in;
-gemini clarity review pending against committed copy).
+**Status:** Approved 2026-04-29 (codex/kimi/gemini triple review
+folded in).
 **Beads:** `bd-22q.15` (P2, 6-8h estimate, parent epic `bd-22q`).
 **Origin:** Filed from kimi adversarial review of `bd-22q.1` spec
 (`spur://continuation/2aef1302-678a-42c5-bf79-c17430c7e648`). Closes
@@ -91,7 +91,7 @@ the provider layer, not at the facade.
   reads `state` lock, optionally patches `Inactive | ConfigError →
   Active` when `sdk.current_license().is_some()`. Read-only with
   respect to provider state.
-- `crates/spur-license/src/lib.rs:312–340` (post `bd-22q.1`) — facade
+- `crates/spur-license/src/lib.rs:312–355` (post `bd-22q.1`) — facade
   methods on `SpurLicense` already serialize gate refresh after
   provider returns; they rely on the provider's commit being the
   authoritative final state. The fix here ensures the provider's
@@ -414,12 +414,15 @@ returns nothing); we do not introduce one for this change.
   next `current_state()` read regardless of whether a mutating
   method is in flight.
 
-## Doc-comment updates
+## Doc-comment contract
 
 ### `SpurLicense` (lib.rs:212–245)
 
-Replace the `bd-22q.15` paragraph in `# Out-of-scope (tracked
-separately)` with a `# Concurrency` section:
+In the existing doc-comment's `# Out-of-scope (tracked separately)`
+section, **delete only the `bd-22q.15` bullet** (lines 233–237 of
+the current `lib.rs`), leaving the `bd-22q.14` bullet intact. Then
+**append a new `# Concurrency` section** below the
+`# Out-of-scope (tracked separately)` block:
 
 ```rust
 /// # Concurrency
@@ -485,6 +488,33 @@ guarantee:
 /// tracked separately. See `bd-22q.16`.
 ```
 
+### `LicenseProvider` trait advisory (provider.rs:22–35)
+
+The existing advisory after `bd-22q.1` documents Err-arm state
+mutation. Append a new paragraph (light-touch, non-mandating):
+
+```rust
+/// # Cross-method serialization (advisory)
+///
+/// `LicenseSeatProvider` (the production implementation)
+/// serializes its mutating methods (`activate`, `validate`,
+/// `heartbeat`, `deactivate`) end-to-end via an internal
+/// `tokio::sync::Mutex` to prevent durable over-permissioning
+/// from concurrent SDK calls committing in the wrong order. This
+/// trait does NOT mandate equivalent serialization — implementers
+/// whose backends naturally serialize (e.g., a single in-memory
+/// state guarded by a `RwLock` write that's held across the
+/// equivalent of an SDK round-trip) need no extra mechanism.
+/// However, any production `LicenseProvider` that performs an
+/// asynchronous side-effecting call (network round-trip, IPC,
+/// process spawn) AND mutates its own state on the result MUST
+/// consider whether interleaving with another mutating method
+/// could produce stale-allow over-permissioning, and serialize
+/// accordingly. See
+/// `docs/superpowers/specs/2026-04-29-bd-22q-15-licenseseat-cross-method-serialization-design.md`
+/// for the LicenseSeatProvider design.
+```
+
 ## Test plan
 
 ### New unit tests in `crates/spur-license/src/licenseseat.rs` (in-crate test module)
@@ -529,18 +559,29 @@ impl LicenseSeatProvider {
 Tests:
 
 1. **`mutex_serializes_concurrent_acquirers`** — primitive sanity.
-   Two `Arc<tokio::sync::Mutex<()>>` clones; task A holds + sleeps
-   100ms with `tokio::time::pause()` for determinism; task B
-   acquires; assert B's acquisition happens-after A's release via
-   instrumented `Instant`. Regression canary for tokio FIFO.
+   Constructs two `Arc<tokio::sync::Mutex<()>>` clones DIRECTLY
+   (does NOT instantiate `LicenseSeatProvider`; this is a
+   tokio-primitive sanity test, not a provider-integration test).
+   Task A holds + advances 100ms of virtual time via
+   `#[tokio::test(start_paused = true)]`; task B acquires; assert
+   B's acquisition happens-after A's release. Regression canary
+   for tokio FIFO behavior. **Decoupled from `operation_lock_handle`
+   accessor** — this test compiles and passes BEFORE Task 2 adds
+   the field. Therefore Task 1's RED-GREEN cycle is the COMPILE
+   failure of `LicenseSeatProvider::operation_lock_handle()`
+   reference in tests 2–6, not this primitive test.
 
 2. **`activate_blocks_on_externally_held_operation_lock`** — proves
    `activate` acquires the lock at entry. Construct `LicenseSeatProvider`
-   with a non-routable API key (SDK calls fast-fail). Acquire the
-   lock via `operation_lock_handle()`. Spawn `provider.activate("X")`.
-   Use `tokio::time::timeout(100ms, ...)` to assert pending. Release
-   the lock. Assert the task completes (with whatever SDK error;
-   irrelevant — assertion is on the lock-blocking timing).
+   with dummy credentials (the test ASSERTS BLOCKING BEFORE the
+   SDK call would even be attempted, so SDK reachability does not
+   affect the test outcome — even a slow TCP timeout would not
+   flip the test result). Acquire the lock via
+   `operation_lock_handle()`. Spawn `provider.activate("X")`. Use
+   `tokio::time::timeout(100ms, ...)` to assert pending. Release
+   the external lock. Assert the task completes (with whatever
+   error the SDK eventually returns; irrelevant — the assertion is
+   on the lock-acquire blocking BEFORE SDK invocation).
 
 3. **`validate_blocks_on_externally_held_operation_lock`** — same
    shape for `validate`.
@@ -555,17 +596,50 @@ Tests:
    not be caught here, but the doc-comment on the struct + the
    trait-level advisory cover the soft-enforcement story.
 
-6. **`fifo_ordering_via_explicit_barriers`** — barrier-coordinated
-   FIFO check (replaces the timing-only test that kimi flagged as
-   coincidence-prone). Acquire the lock externally. Spawn three
-   tasks in a known order: each first awaits a `tokio::sync::Barrier`
-   (with N=4 including the test itself), then attempts to acquire
-   the lock. Drop the barrier so all three tasks race to the lock
-   simultaneously after the holder releases. Record acquisition
-   order via shared `Mutex<Vec<usize>>`. Assert: under tokio's
-   documented FIFO, recorded order matches spawn order. **Without
-   the barrier**, the spawn-order assumption is invalid (spawn order
-   ≠ acquisition-attempt order under the tokio scheduler).
+6. **`fifo_ordering_via_virtual_time_cascade`** — deterministic FIFO
+   check using tokio's virtual-time scheduler. **Why not a `Barrier`:**
+   `tokio::sync::Barrier::wait()` releases all waiters
+   simultaneously, but the runtime's waker queue then schedules them
+   in arbitrary order — the tasks do NOT hit `lock().await` in
+   spawn order. A barrier-based test would assert FIFO and
+   intermittently fail in CI under scheduler reorder. **Correct
+   approach:**
+
+   ```rust
+   #[tokio::test(start_paused = true)]
+   async fn fifo_ordering_via_virtual_time_cascade() {
+       let lock = Arc::new(tokio::sync::Mutex::new(()));
+       let order = Arc::new(std::sync::Mutex::new(Vec::<usize>::new()));
+       let holder = lock.clone().lock_owned().await;
+
+       // Each task sleeps a distinct virtual duration BEFORE requesting
+       // the lock. Under `start_paused = true`, virtual time advances
+       // only via explicit `tokio::time::advance` or natural awaits, so
+       // request order is deterministic.
+       let handles: Vec<_> = (0..3).map(|i| {
+           let lock = lock.clone();
+           let order = order.clone();
+           tokio::spawn(async move {
+               tokio::time::sleep(Duration::from_millis((i as u64 + 1) * 10)).await;
+               let _g = lock.lock().await;
+               order.lock().unwrap().push(i);
+           })
+       }).collect();
+
+       // Yield so all three tasks reach their sleep.
+       tokio::task::yield_now().await;
+       // Advance virtual time past the longest sleep so all three are queued.
+       tokio::time::advance(Duration::from_millis(100)).await;
+       drop(holder);  // Release; FIFO acquisition begins.
+
+       for h in handles { h.await.unwrap(); }
+       assert_eq!(*order.lock().unwrap(), vec![0, 1, 2]);
+   }
+   ```
+
+   **Acceptance:** the order vector equals `[0, 1, 2]` deterministically.
+   **Regression detector:** if tokio's FIFO discipline weakens or this
+   crate switches to an unfair mutex variant, this test fails.
 
 ### Existing tests — must not regress
 
@@ -597,19 +671,20 @@ visibility. This deliberately blocks any external-crate acquisition
 of the lock: only this crate's own `#[cfg(test)] mod cross_method_race`
 can call it. `test-support`-gated FakeProvider work is unaffected.
 
-## Implementation tasks (TDD)
+## Implementation tasks
 
 The implementation plan (writing-plans output) will decompose this
 into six tasks, in order:
 
 1. **Task 1 — failing primitive sanity test.** Add
    `#[cfg(test)] mod cross_method_race { ... }` inside
-   `src/licenseseat.rs` containing only
-   `mutex_serializes_concurrent_acquirers`. Test references
-   `LicenseSeatProvider::operation_lock_handle()` which doesn't
-   exist yet — **compile fails** (RED). The test BODY will pass
-   once compilation succeeds (it's a primitive sanity test on
-   tokio Mutex itself). Commit RED.
+   `src/licenseseat.rs` containing the
+   `mutex_serializes_concurrent_acquirers` test AND a stub for
+   `activate_blocks_on_externally_held_operation_lock` that
+   references `LicenseSeatProvider::operation_lock_handle()`.
+   The stub causes **compile failure** (accessor doesn't exist
+   yet — RED). The primitive sanity test body itself doesn't need
+   the accessor and would pass on its own. Commit RED.
 
 2. **Task 2 — add `operation_lock` field + `pub(crate)` accessor.**
    Add `operation_lock: Arc<tokio::sync::Mutex<()>>` field; add
@@ -631,14 +706,14 @@ into six tasks, in order:
    of each of the four mutating methods. Tests pass. Commit GREEN.
 
 5. **Task 5 — failing FIFO test + GREEN with already-acquired lock.**
-   Add `fifo_ordering_via_explicit_barriers` using
-   `tokio::sync::Barrier`. The test exercises ordering across
-   all four mutating methods; with Task 4 already in place, this
-   test will likely pass on first run (tokio FIFO is correct).
-   The RED-GREEN cycle here is more "verify the discipline, lock
-   in the canary" than "drive an implementation change". Commit
-   GREEN. **Document this as a regression canary** in a comment
-   atop the test.
+   Add `fifo_ordering_via_virtual_time_cascade` using
+   `#[tokio::test(start_paused = true)]` + virtual-time-staggered
+   sleeps (NOT `tokio::sync::Barrier` — see Test plan note). With
+   Task 4 already in place, this test passes on first run (tokio
+   FIFO is correct under virtual time). The RED-GREEN cycle here
+   is more "verify the discipline, lock in the canary" than
+   "drive an implementation change". Commit GREEN. **Document this
+   as a regression canary** in a comment atop the test.
 
 6. **Task 6 — doc-comment updates + full-suite check.** Update
    doc-comments per the "Doc-comment updates" section
@@ -660,7 +735,7 @@ into six tasks, in order:
 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
-| `tokio::sync::Mutex` is not actually FIFO and our ordering claim is wrong | Very Low | `fifo_ordering_via_explicit_barriers` test (with `tokio::sync::Barrier` coordination) serves as a regression canary if tokio's discipline changes upstream. Cargo.lock pins tokio 1.51.1 (`tokio-1.51.1/src/sync/mutex.rs:20` documents fair acquisition). |
+| `tokio::sync::Mutex` is not actually FIFO and our ordering claim is wrong | Very Low | `fifo_ordering_via_virtual_time_cascade` test (with `#[tokio::test(start_paused = true)]` + staggered virtual-time sleeps) serves as a regression canary if tokio's discipline changes upstream. Cargo.lock pins tokio 1.51.1 (`tokio-1.51.1/src/sync/mutex.rs:20` documents fair acquisition). |
 | Lock contention causes user-visible latency (UI freeze) | Very Low | Mutex is held only across SDK round-trip. Realistic contention requires a user-initiated mutation overlapping a scheduled refresh — both rare, both already async. UI never blocks on these calls today. |
 | Hanging-validate blocks user-initiated deactivate for SDK timeout duration (~30s on flaky connection) | Low | Documented in "Residual hazards" #3. UX SLA accepted for `bd-22q.15` scope. Future hardening: wrap each SDK call in `tokio::time::timeout` if user reports surface this. |
 | Mutex held across panic in SDK call leaves the lock un-released | Very Low | `tokio::sync::Mutex` is panic-safe; the guard's `Drop` releases the lock even if the task panics. (Unlike `std::sync::Mutex`, there is no poisoning concept.) |
@@ -689,18 +764,16 @@ into six tasks, in order:
   `validate_blocks_on_externally_held_operation_lock`,
   `heartbeat_blocks_on_externally_held_operation_lock`,
   `deactivate_blocks_on_externally_held_operation_lock`,
-  `fifo_ordering_via_explicit_barriers`. All pass.
+  `fifo_ordering_via_virtual_time_cascade`. All pass.
 - [ ] Doc-comment on `SpurLicense` (`lib.rs:212–245`) is updated:
   the `bd-22q.15` paragraph in `# Out-of-scope` is replaced with
   the new `# Concurrency` section.
 - [ ] Doc-comment on `LicenseSeatProvider` struct documents the
   serialization guarantee AND the residual hazards (read-path
   best-effort semantics, bridge bd-22q.14 advisory).
-- [ ] `LicenseProvider` trait advisory updated to mention the
-  operation_lock discipline (light touch — the trait does not
-  mandate the lock; only documents that `LicenseSeatProvider` uses
-  one and that future implementers should consider analogous
-  serialization).
+- [ ] `LicenseProvider` trait advisory (`provider.rs:22–35`)
+  extended with the operation_lock paragraph below. Light-touch
+  language only — the trait does NOT mandate the lock.
 - [ ] No regression in: `tests/community_smoke.rs`,
   `tests/fake_provider.rs`, `tests/invariants.rs`,
   `tests/licenseseat_probe.rs`,
@@ -758,3 +831,6 @@ into six tasks, in order:
 - Codex first-principles design review: `spur://continuation/db064024-1b6b-4d0c-9079-ab92cc725ffd`
 - Kimi adversarial review (covers same kimi that surfaced the
   original race): `spur://continuation/c224e5de-dc17-4e35-995c-fff3c7fc487d`
+- Gemini clarity/precision review (caught the unsound
+  Barrier-based FIFO test design + citation drift):
+  `spur://continuation/8f29dcb3-67c7-4f94-a371-cadb953c815e`
