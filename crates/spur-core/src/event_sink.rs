@@ -214,7 +214,7 @@ fn enforce_event_cap(dir: &Path, cap_bytes: u64, protected: &Path) -> std::io::R
     Ok(deleted)
 }
 
-fn events_dir() -> PathBuf {
+pub(crate) fn events_dir() -> PathBuf {
     PathBuf::from(".spur/events")
 }
 

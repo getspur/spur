@@ -8,6 +8,7 @@ pub mod scheduler;
 pub use scheduler::{BrainScheduler, ScheduledAction};
 
 pub mod event_funnel;
+pub mod event_replay;
 pub mod event_sink;
 pub mod license_runtime;
 pub mod lineage;
