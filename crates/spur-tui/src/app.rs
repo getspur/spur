@@ -4132,8 +4132,10 @@ pub async fn run_tui_with_license(
         }
     }
 
-    app.shutdown_analytics().await;
+    // Restore terminal first so the user regains control immediately,
+    // even if the best-effort analytics checkpoint hits its 2s timeout.
     tui::teardown(&mut terminal)?;
+    app.shutdown_analytics().await;
     Ok(())
 }
 
