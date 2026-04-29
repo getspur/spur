@@ -914,10 +914,11 @@ impl Reconciler {
             .await?
         {
             let epic = self.pm.get_issue(&summary.id).await?;
-            saw_complete |= epic
-                .labels
-                .iter()
-                .any(|label| label == crate::plan::labels::PLAN_COMPLETE);
+            saw_complete |= epic.status == "open"
+                && epic
+                    .labels
+                    .iter()
+                    .any(|label| label == crate::plan::labels::PLAN_COMPLETE);
             saw_pending |= epic
                 .labels
                 .iter()
