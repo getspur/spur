@@ -15,10 +15,21 @@
 //!
 //! ## Idempotency
 //!
-//! Every event arm is idempotent — applying the same event twice produces
-//! the same state as applying it once. Exception: `SpurEventBody::CostUpdate`
-//! is deliberately additive (two updates accumulate). Tests enforce both
-//! invariants.
+//! Most state-mutation arms are idempotent — applying the same event twice
+//! produces the same state as applying it once. The exceptions are:
+//!
+//! - `SpurEventBody::CostUpdate` (additive: `cost_usd += ...` at
+//!   `adapter.rs:287`),
+//! - `WorkerNotification(ToolCall)` (counter: `tool_call_count += 1` at :289),
+//! - `WorkerFileTouched(Write)` (counter: `files_touched_count += 1` at :322).
+//!
+//! `crates/spur-core/tests/lineage_integration.rs:317` covers the spawn/phase
+//! arms; counter arms are intentionally not idempotency-tested.
+//!
+//! The replay model in `crates/spur-core/src/event_replay.rs` is structurally
+//! guarded against double-apply via PID-filtered file selection: the current
+//! process's events arrive via the live broadcast subscription; prior
+//! processes' events are applied exactly once to fresh empty projections.
 
 use std::collections::{HashMap, VecDeque};
 
