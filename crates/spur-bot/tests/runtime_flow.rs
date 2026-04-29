@@ -860,6 +860,60 @@ async fn late_resumed_ready_without_pending_target_is_ignored() {
 }
 
 #[tokio::test]
+async fn late_fresh_ready_without_pending_target_is_dropped() {
+    let (mut runtime, handle, mut user_rx) = test_runtime();
+    runtime
+        .ensure_topic_record(42, 77, "Topic A".into()).await
+        .unwrap();
+
+    runtime
+        .handle_chat_text(&handle, 42, Some(77), "hello")
+        .await
+        .unwrap();
+    let _ = user_rx.recv().await.unwrap();
+
+    runtime
+        .handle_chat_text(&handle, 42, Some(77), "/resume acp-existing")
+        .await
+        .unwrap();
+    let _ = user_rx.recv().await.unwrap();
+
+    let (key, renders) = runtime
+        .handle_spur_event(spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::AgentSessionReady {
+                session: spur_acp::SessionId("spur_fresh".into()),
+                acp_session_id: "acp-fresh".into(),
+                brain: "kimi".into(),
+                resumed: false,
+                cancel_mode: spur_acp::CancelMode::AcpSoft,
+                fs_unsafe: false,
+                caps: None,
+            },
+        ))
+        .await
+        .unwrap();
+
+    assert!(
+        key.is_none(),
+        "late fresh AgentSessionReady with no eligible pending topic must not route anywhere"
+    );
+    assert!(
+        renders.is_empty(),
+        "late fresh AgentSessionReady with no eligible pending topic must not render"
+    );
+
+    let record = runtime.thread_record(77).expect("topic 77 present");
+    assert!(
+        matches!(
+            &record.binding,
+            BindingState::RestorePending { acp_session_id, .. } if acp_session_id == "acp-existing"
+        ),
+        "topic 77's /resume binding must remain intact; binding was {:?}",
+        record.binding
+    );
+}
+
+#[tokio::test]
 async fn fresh_ready_replaces_existing_live_route_for_same_topic() {
     let (mut runtime, handle, mut user_rx) = test_runtime();
     runtime
