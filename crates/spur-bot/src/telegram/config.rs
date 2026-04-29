@@ -31,6 +31,12 @@ pub fn validate(cfg: &spur_acp::config::TelegramBotConfig) -> anyhow::Result<()>
         cfg.poll_timeout_secs > 0,
         "bot.telegram.poll_timeout_secs must be greater than 0"
     );
+    if let Some(request_timeout_secs) = cfg.request_timeout_secs {
+        anyhow::ensure!(
+            request_timeout_secs > 0,
+            "bot.telegram.request_timeout_secs must be greater than 0"
+        );
+    }
     anyhow::ensure!(
         cfg.max_requests_per_second > 0,
         "bot.telegram.max_requests_per_second must be greater than 0"

@@ -53,7 +53,7 @@ fn test_runtime() -> (
         tokio::spawn(async {}),
     );
     let handle = host.handle();
-    let runtime = BotRuntime::new(store);
+    let runtime = BotRuntime::new(store).unwrap();
     (runtime, handle, user_rx)
 }
 
@@ -90,7 +90,7 @@ async fn lobby_plain_text_is_rejected() {
 async fn unbound_topic_plain_text_starts_new_session() {
     let (mut runtime, handle, mut user_rx) = test_runtime();
     runtime
-        .ensure_topic_record(42, 77, "Session 1".into())
+        .ensure_topic_record(42, 77, "Session 1".into()).await
         .unwrap();
 
     let renders = runtime
@@ -125,7 +125,7 @@ async fn unknown_topic_plain_text_auto_registers_and_starts_new_session() {
         tokio::spawn(async {}),
     );
     let handle = host.handle();
-    let mut runtime = BotRuntime::new(store);
+    let mut runtime = BotRuntime::new(store).unwrap();
 
     let renders = runtime
         .handle_chat_text(&handle, 42, Some(777), "hello from a manual topic")
@@ -166,7 +166,7 @@ async fn restore_pending_topic_queues_resume_then_flushes_message() {
     ));
 
     let event = ready_event("session-1", "acp-77", "kimi");
-    runtime.handle_spur_event(event).unwrap();
+    runtime.handle_spur_event(event).await.unwrap();
     let key = spur_bot::state::ThreadKey {
         chat_id: 42,
         message_thread_id: Some(77),
@@ -222,7 +222,7 @@ async fn unknown_topic_resume_auto_registers_and_enters_restore_pending() {
         tokio::spawn(async {}),
     );
     let handle = host.handle();
-    let mut runtime = BotRuntime::new(store);
+    let mut runtime = BotRuntime::new(store).unwrap();
 
     let renders = runtime
         .handle_chat_text(&handle, 42, Some(888), "/resume acp-rebound")
@@ -288,7 +288,7 @@ async fn new_topic_record_is_persisted_before_first_message() {
         tokio::spawn(async {}),
     );
     let handle = host.handle();
-    let mut runtime = BotRuntime::new(store);
+    let mut runtime = BotRuntime::new(store).unwrap();
 
     // /new in the lobby returns CreateTopic and persists the seq bump.
     let renders = runtime
@@ -304,7 +304,7 @@ async fn new_topic_record_is_persisted_before_first_message() {
     // so the Unbound thread survives a restart before the operator sends the
     // first message.
     runtime
-        .ensure_topic_record(42, 500, "Session 1".into())
+        .ensure_topic_record(42, 500, "Session 1".into()).await
         .unwrap();
 
     let reloaded = BotStateStore::new(path).load().unwrap();
@@ -315,6 +315,39 @@ async fn new_topic_record_is_persisted_before_first_message() {
     assert_eq!(record.topic_name, "Session 1");
     assert!(!record.archived);
     assert!(matches!(record.binding_state, BindingState::Unbound));
+}
+
+#[tokio::test]
+async fn ensure_topic_record_save_failure_does_not_leave_orphan_in_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let blocker = dir.path().join("not-a-directory");
+    std::fs::write(&blocker, b"blocks state parent creation").unwrap();
+    let store = BotStateStore::new(blocker.join("state.json"));
+    let mut runtime = BotRuntime::new(store).unwrap();
+    runtime.restore_topic_binding(
+        0,
+        11,
+        "Existing Topic".into(),
+        "acp-existing".into(),
+        "kimi".into(),
+    );
+
+    let result = runtime
+        .ensure_topic_record(0, 77, "Session 1".into())
+        .await;
+
+    assert!(
+        result.is_err(),
+        "save through file-as-directory parent must fail"
+    );
+    assert!(
+        runtime.thread_record(77).is_none(),
+        "failed persistence must not leave the new topic in memory"
+    );
+    assert!(
+        runtime.thread_record(11).is_some(),
+        "pre-existing in-memory topics must remain untouched"
+    );
 }
 
 #[tokio::test]
@@ -333,7 +366,7 @@ async fn review_callback_becomes_stale_after_topic_rebind() {
                 role: spur_acp::Role::Executor,
                 task_spec: String::new(),
             },
-        ))
+        )).await
         .unwrap();
     let (_key, renders) = runtime
         .handle_spur_event(spur_acp::SpurEvent::now(
@@ -351,7 +384,7 @@ async fn review_callback_becomes_stale_after_topic_rebind() {
                     peer_influence: None,
                 },
             },
-        ))
+        )).await
         .unwrap();
     let token = renders
         .iter()
@@ -401,12 +434,12 @@ async fn review_callback_becomes_stale_after_topic_archived_with_preserved_acp_i
         tokio::spawn(async {}),
     );
     let handle = host.handle();
-    let mut runtime = BotRuntime::new(store);
+    let mut runtime = BotRuntime::new(store).unwrap();
     // Topic A owns acp-shared and has a live session spur_acp-shared.
     runtime.activate_topic_binding(42, 77, "Topic A".into(), "acp-shared".into(), "kimi".into());
     // Topic B will take over acp-shared via /resume, forcing Topic A to archive.
     runtime
-        .ensure_topic_record(42, 88, "Topic B".into())
+        .ensure_topic_record(42, 88, "Topic B".into()).await
         .unwrap();
 
     runtime
@@ -419,7 +452,7 @@ async fn review_callback_becomes_stale_after_topic_archived_with_preserved_acp_i
                 role: spur_acp::Role::Executor,
                 task_spec: String::new(),
             },
-        ))
+        )).await
         .unwrap();
     let (_key, renders) = runtime
         .handle_spur_event(spur_acp::SpurEvent::now(
@@ -437,7 +470,7 @@ async fn review_callback_becomes_stale_after_topic_archived_with_preserved_acp_i
                     peer_influence: None,
                 },
             },
-        ))
+        )).await
         .unwrap();
     let token = renders
         .iter()
@@ -486,7 +519,7 @@ async fn permission_callback_becomes_stale_after_topic_archived_with_preserved_a
     let (mut runtime, handle, mut user_rx) = test_runtime();
     runtime.activate_topic_binding(42, 77, "Topic A".into(), "acp-shared".into(), "kimi".into());
     runtime
-        .ensure_topic_record(42, 88, "Topic B".into())
+        .ensure_topic_record(42, 88, "Topic B".into()).await
         .unwrap();
 
     // Permission request whose session_id matches Topic A's live session,
@@ -550,7 +583,7 @@ async fn resume_detaches_other_topic_owning_same_session() {
     let (mut runtime, handle, mut user_rx) = test_runtime();
     runtime.activate_topic_binding(42, 77, "Topic A".into(), "acp-shared".into(), "kimi".into());
     runtime
-        .ensure_topic_record(42, 88, "Topic B".into())
+        .ensure_topic_record(42, 88, "Topic B".into()).await
         .unwrap();
 
     runtime
@@ -575,7 +608,7 @@ async fn resume_detaches_other_topic_owning_same_session() {
 async fn same_topic_does_not_start_two_fresh_sessions_before_ready() {
     let (mut runtime, handle, mut user_rx) = test_runtime();
     runtime
-        .ensure_topic_record(42, 77, "Topic A".into())
+        .ensure_topic_record(42, 77, "Topic A".into()).await
         .unwrap();
 
     // First plain text in Unbound: NewSessionWithMessage.
@@ -624,7 +657,7 @@ async fn same_topic_does_not_start_two_fresh_sessions_before_ready() {
                 fs_unsafe: false,
                 caps: None,
             },
-        ))
+        )).await
         .unwrap();
 
     let key = spur_bot::state::ThreadKey {
@@ -652,7 +685,7 @@ async fn same_topic_does_not_start_two_fresh_sessions_before_ready() {
 async fn stale_fresh_ready_does_not_reactivate_rebound_topic() {
     let (mut runtime, handle, mut user_rx) = test_runtime();
     runtime
-        .ensure_topic_record(42, 77, "Topic A".into())
+        .ensure_topic_record(42, 77, "Topic A".into()).await
         .unwrap();
 
     // Topic 77 kicks off a fresh session.
@@ -684,7 +717,7 @@ async fn stale_fresh_ready_does_not_reactivate_rebound_topic() {
                 fs_unsafe: false,
                 caps: None,
             },
-        ))
+        )).await
         .unwrap();
 
     let record = runtime.thread_record(77).expect("topic 77 present");
@@ -741,7 +774,7 @@ async fn same_topic_resume_supersession_keeps_new_binding_when_old_ready_arrives
                 fs_unsafe: false,
                 caps: None,
             },
-        ))
+        )).await
         .unwrap();
 
     runtime
@@ -755,7 +788,7 @@ async fn same_topic_resume_supersession_keeps_new_binding_when_old_ready_arrives
                 fs_unsafe: false,
                 caps: None,
             },
-        ))
+        )).await
         .unwrap();
 
     let record = runtime.thread_record(77).expect("topic 77 present");
@@ -791,7 +824,7 @@ async fn same_topic_resume_supersession_ignores_old_ready_until_new_ready_arrive
                 fs_unsafe: false,
                 caps: None,
             },
-        ))
+        )).await
         .unwrap();
 
     assert!(
@@ -835,7 +868,7 @@ async fn late_resumed_ready_without_pending_target_is_ignored() {
                 fs_unsafe: false,
                 caps: None,
             },
-        ))
+        )).await
         .unwrap();
 
     assert!(
@@ -860,10 +893,64 @@ async fn late_resumed_ready_without_pending_target_is_ignored() {
 }
 
 #[tokio::test]
+async fn late_fresh_ready_without_pending_target_is_dropped() {
+    let (mut runtime, handle, mut user_rx) = test_runtime();
+    runtime
+        .ensure_topic_record(42, 77, "Topic A".into()).await
+        .unwrap();
+
+    runtime
+        .handle_chat_text(&handle, 42, Some(77), "hello")
+        .await
+        .unwrap();
+    let _ = user_rx.recv().await.unwrap();
+
+    runtime
+        .handle_chat_text(&handle, 42, Some(77), "/resume acp-existing")
+        .await
+        .unwrap();
+    let _ = user_rx.recv().await.unwrap();
+
+    let (key, renders) = runtime
+        .handle_spur_event(spur_acp::SpurEvent::now(
+            spur_acp::SpurEventBody::AgentSessionReady {
+                session: spur_acp::SessionId("spur_fresh".into()),
+                acp_session_id: "acp-fresh".into(),
+                brain: "kimi".into(),
+                resumed: false,
+                cancel_mode: spur_acp::CancelMode::AcpSoft,
+                fs_unsafe: false,
+                caps: None,
+            },
+        ))
+        .await
+        .unwrap();
+
+    assert!(
+        key.is_none(),
+        "late fresh AgentSessionReady with no eligible pending topic must not route anywhere"
+    );
+    assert!(
+        renders.is_empty(),
+        "late fresh AgentSessionReady with no eligible pending topic must not render"
+    );
+
+    let record = runtime.thread_record(77).expect("topic 77 present");
+    assert!(
+        matches!(
+            &record.binding,
+            BindingState::RestorePending { acp_session_id, .. } if acp_session_id == "acp-existing"
+        ),
+        "topic 77's /resume binding must remain intact; binding was {:?}",
+        record.binding
+    );
+}
+
+#[tokio::test]
 async fn fresh_ready_replaces_existing_live_route_for_same_topic() {
     let (mut runtime, handle, mut user_rx) = test_runtime();
     runtime
-        .ensure_topic_record(42, 77, "Session 1".into())
+        .ensure_topic_record(42, 77, "Session 1".into()).await
         .unwrap();
 
     runtime
@@ -885,7 +972,7 @@ async fn fresh_ready_replaces_existing_live_route_for_same_topic() {
                 fs_unsafe: false,
                 caps: None,
             },
-        ))
+        )).await
         .unwrap();
 
     let (old_key, _) = runtime
@@ -893,7 +980,7 @@ async fn fresh_ready_replaces_existing_live_route_for_same_topic() {
             spur_acp::SpurEventBody::TurnComplete {
                 session: spur_acp::SessionId("spur_acp-X".into()),
             },
-        ))
+        )).await
         .unwrap();
     assert!(
         old_key.is_none(),
@@ -905,7 +992,7 @@ async fn fresh_ready_replaces_existing_live_route_for_same_topic() {
             spur_acp::SpurEventBody::TurnComplete {
                 session: spur_acp::SessionId("spur_Y".into()),
             },
-        ))
+        )).await
         .unwrap();
     assert_eq!(
         new_key,
@@ -921,10 +1008,10 @@ async fn fresh_ready_replaces_existing_live_route_for_same_topic() {
 async fn multiple_pending_new_sessions_bind_in_fifo_order() {
     let (mut runtime, handle, mut user_rx) = test_runtime();
     runtime
-        .ensure_topic_record(42, 77, "Topic A".into())
+        .ensure_topic_record(42, 77, "Topic A".into()).await
         .unwrap();
     runtime
-        .ensure_topic_record(42, 88, "Topic B".into())
+        .ensure_topic_record(42, 88, "Topic B".into()).await
         .unwrap();
 
     // Both topics fire NewSessionWithMessage before AgentSessionReady returns.
@@ -950,7 +1037,7 @@ async fn multiple_pending_new_sessions_bind_in_fifo_order() {
                 fs_unsafe: false,
                 caps: None,
             },
-        ))
+        )).await
         .unwrap();
     runtime
         .handle_spur_event(spur_acp::SpurEvent::now(
@@ -963,7 +1050,7 @@ async fn multiple_pending_new_sessions_bind_in_fifo_order() {
                 fs_unsafe: false,
                 caps: None,
             },
-        ))
+        )).await
         .unwrap();
 
     let a = runtime.thread_record(77).unwrap();
@@ -1031,9 +1118,9 @@ async fn first_plain_message_starts_new_session() {
         tokio::spawn(async {}),
     );
     let handle = host.handle();
-    let mut runtime = BotRuntime::new(store);
+    let mut runtime = BotRuntime::new(store).unwrap();
     runtime
-        .ensure_topic_record(10_001, 77, "Session 1".into())
+        .ensure_topic_record(10_001, 77, "Session 1".into()).await
         .unwrap();
 
     let renders = runtime
@@ -1066,9 +1153,9 @@ async fn agent_session_ready_commits_binding_and_persists() {
         tokio::spawn(async {}),
     );
     let handle = host.handle();
-    let mut runtime = BotRuntime::new(store);
+    let mut runtime = BotRuntime::new(store).unwrap();
     runtime
-        .ensure_topic_record(42, 77, "Session 1".into())
+        .ensure_topic_record(42, 77, "Session 1".into()).await
         .unwrap();
 
     runtime
@@ -1089,7 +1176,7 @@ async fn agent_session_ready_commits_binding_and_persists() {
                 fs_unsafe: false,
                 caps: None,
             },
-        ))
+        )).await
         .unwrap();
 
     let (key, _) = runtime
@@ -1097,7 +1184,7 @@ async fn agent_session_ready_commits_binding_and_persists() {
             spur_acp::SpurEventBody::TurnComplete {
                 session: spur_acp::SessionId("spur_1".into()),
             },
-        ))
+        )).await
         .unwrap();
     assert_eq!(
         key,
@@ -1135,7 +1222,7 @@ async fn stale_callback_is_reported_cleanly() {
         tokio::spawn(async {}),
     );
     let handle = host.handle();
-    let mut runtime = BotRuntime::new(store);
+    let mut runtime = BotRuntime::new(store).unwrap();
 
     let key = spur_bot::state::ThreadKey::lobby(0);
     let renders = runtime
@@ -1167,7 +1254,7 @@ async fn permission_callback_returns_exact_option_id() {
         tokio::spawn(async {}),
     );
     let handle = host.handle();
-    let mut runtime = BotRuntime::new(store);
+    let mut runtime = BotRuntime::new(store).unwrap();
     let (request, reply_rx) = mk_permission_request();
 
     let (_key, renders) = runtime.handle_permission_request(request).unwrap();
@@ -1205,7 +1292,7 @@ async fn review_prompt_resolves_once_and_siblings_go_stale() {
         tokio::spawn(async {}),
     );
     let handle = host.handle();
-    let mut runtime = BotRuntime::new(store);
+    let mut runtime = BotRuntime::new(store).unwrap();
 
     let (_key, renders) = runtime
         .handle_spur_event(spur_acp::SpurEvent::now(
@@ -1223,7 +1310,7 @@ async fn review_prompt_resolves_once_and_siblings_go_stale() {
                     peer_influence: None,
                 },
             },
-        ))
+        )).await
         .unwrap();
 
     let buttons = renders
@@ -1282,7 +1369,7 @@ async fn review_prompt_resolves_once_and_siblings_go_stale() {
 async fn agent_notification_and_turn_complete_renders_final_answer() {
     let dir = tempfile::tempdir().unwrap();
     let store = BotStateStore::new(dir.path().join(".spur/bot/state.json"));
-    let mut runtime = BotRuntime::new(store);
+    let mut runtime = BotRuntime::new(store).unwrap();
     let session = spur_acp::SessionId("spur_1".into());
 
     // Accumulate two chunks.
@@ -1297,7 +1384,7 @@ async fn agent_notification_and_turn_complete_renders_final_answer() {
                     )),
                 )),
             },
-        ))
+        )).await
         .unwrap();
     runtime
         .handle_spur_event(spur_acp::SpurEvent::now(
@@ -1310,7 +1397,7 @@ async fn agent_notification_and_turn_complete_renders_final_answer() {
                     )),
                 )),
             },
-        ))
+        )).await
         .unwrap();
 
     // TurnComplete flushes the accumulated text.
@@ -1319,7 +1406,7 @@ async fn agent_notification_and_turn_complete_renders_final_answer() {
             spur_acp::SpurEventBody::TurnComplete {
                 session: session.clone(),
             },
-        ))
+        )).await
         .unwrap();
 
     assert_eq!(renders.len(), 1);
@@ -1333,7 +1420,7 @@ async fn agent_notification_and_turn_complete_renders_final_answer() {
     let (_key, renders) = runtime
         .handle_spur_event(spur_acp::SpurEvent::now(
             spur_acp::SpurEventBody::TurnComplete { session },
-        ))
+        )).await
         .unwrap();
     assert!(renders.is_empty());
 }
@@ -1342,7 +1429,7 @@ async fn agent_notification_and_turn_complete_renders_final_answer() {
 async fn brain_error_renders_service_message() {
     let dir = tempfile::tempdir().unwrap();
     let store = BotStateStore::new(dir.path().join(".spur/bot/state.json"));
-    let mut runtime = BotRuntime::new(store);
+    let mut runtime = BotRuntime::new(store).unwrap();
     let session = spur_acp::SessionId("spur_1".into());
 
     // Seed some output so we can verify the buffer is cleared on error.
@@ -1357,7 +1444,7 @@ async fn brain_error_renders_service_message() {
                     )),
                 )),
             },
-        ))
+        )).await
         .unwrap();
 
     let (_key, renders) = runtime
@@ -1366,7 +1453,7 @@ async fn brain_error_renders_service_message() {
                 session,
                 message: "brain subprocess exited".into(),
             },
-        ))
+        )).await
         .unwrap();
 
     assert!(renders.iter().any(|item| matches!(
@@ -1412,9 +1499,9 @@ async fn restore_pending_plain_text_queues_resume_then_message() {
             },
         },
     );
-    store.save(&persisted).unwrap();
+    store.save(&persisted).await.unwrap();
 
-    let mut runtime = BotRuntime::new(store);
+    let mut runtime = BotRuntime::new(store).unwrap();
 
     // Plain text while RestorePending must trigger ResumeSession, not Message.
     let renders = runtime
@@ -1447,7 +1534,7 @@ async fn restore_pending_plain_text_queues_resume_then_message() {
                 fs_unsafe: false,
                 caps: None,
             },
-        ))
+        )).await
         .unwrap();
 
     // flush_pending should now forward the queued Message.

@@ -1,4 +1,6 @@
+use anyhow::Context;
 use frankenstein::AsyncTelegramApi;
+use std::time::Duration;
 
 #[derive(Clone)]
 pub struct TelegramClient {
@@ -6,10 +8,25 @@ pub struct TelegramClient {
 }
 
 impl TelegramClient {
-    pub fn new(token: &str) -> Self {
-        Self {
-            inner: frankenstein::client_reqwest::Bot::new(token),
-        }
+    pub fn new(token: &str, request_timeout: Duration) -> anyhow::Result<Self> {
+        Self::new_with_url(
+            format!("{}{}", frankenstein::BASE_API_URL, token),
+            request_timeout,
+        )
+    }
+
+    pub fn new_with_url(url: String, request_timeout: Duration) -> anyhow::Result<Self> {
+        let http = frankenstein::reqwest::ClientBuilder::new()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(request_timeout)
+            .build()
+            .context("building reqwest client for telegram bot")?;
+        Ok(Self {
+            inner: frankenstein::client_reqwest::Bot::builder()
+                .api_url(url)
+                .client(http)
+                .build(),
+        })
     }
 
     pub async fn delete_webhook(&self) -> anyhow::Result<()> {
@@ -189,7 +206,45 @@ pub fn encode_draft_id(local_id: &str) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::encode_draft_id;
+    use super::{encode_draft_id, TelegramClient};
+    use std::time::Duration;
+
+    #[test]
+    fn telegram_client_new_accepts_request_timeout() {
+        let _client = TelegramClient::new("TEST_TOKEN", Duration::from_millis(250))
+            .expect("client with custom timeout should build");
+    }
+
+    #[tokio::test]
+    async fn hanging_tcp_listener_times_out_via_request_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind hanging telegram test listener");
+        let addr = listener.local_addr().expect("listener local addr");
+        let _server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept request");
+            std::future::pending::<()>().await;
+            drop(stream);
+        });
+
+        let request_timeout = Duration::from_millis(500);
+        let client = TelegramClient::new_with_url(format!("http://{addr}/"), request_timeout)
+            .expect("client with custom api url should build");
+
+        let started = tokio::time::Instant::now();
+        let result = client.get_me().await;
+        let elapsed = started.elapsed();
+
+        assert!(result.is_err(), "hanging request should time out");
+        assert!(
+            elapsed <= request_timeout + Duration::from_secs(1),
+            "request took {elapsed:?}, expected at most request timeout plus slack"
+        );
+        assert!(
+            elapsed >= request_timeout.saturating_sub(Duration::from_millis(100)),
+            "request ended in {elapsed:?}, before the configured timeout"
+        );
+    }
 
     #[test]
     fn draft_id_encoding_is_deterministic() {
