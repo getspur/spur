@@ -1980,18 +1980,14 @@ impl App {
         if self.picker_or_history_active() {
             return false;
         }
+        if self.view_text_input_active() {
+            return false;
+        }
         if self.pending_permission.is_some() {
             return false;
         }
-        if self.help_visible {
-            self.flash_hint_short("close help to undo");
-            return true;
-        }
         if self.mermaid_render_picker_active() {
             return false;
-        }
-        if self.quit_confirm_visible {
-            return true;
         }
 
         let view = self.current_view.clone();
