@@ -1017,6 +1017,19 @@ impl SessionPickerView {
                             value_lines: wrap_value(&first, value_width, 3),
                             value_style: Some(Style::default().fg(Color::Gray)),
                         });
+                    } else {
+                        rows.push(PreviewRow {
+                            label: String::new(),
+                            value_lines: vec![truncate_for_row(
+                                "(resume to load message history)",
+                                footer_width,
+                            )],
+                            value_style: Some(
+                                Style::default()
+                                    .fg(Color::DarkGray)
+                                    .add_modifier(Modifier::ITALIC),
+                            ),
+                        });
                     }
 
                     // 5. Blank separator
@@ -1032,9 +1045,10 @@ impl SessionPickerView {
                         value_style: Some(Style::default().fg(Color::DarkGray)),
                     });
 
-                    // Bounded by construction: Last <= 1, Draft <= 1, Intent <= 3,
-                    // footer <= 1, plus two blank separators = <= 8 visual lines,
-                    // leaving slack under PREVIEW_MAX_LINES for the preview border.
+                    // Bounded by construction: Last <= 1, Draft <= 1, then
+                    // either Intent <= 3 or placeholder <= 1, footer <= 1,
+                    // plus two blank separators = <= 8 visual lines, leaving
+                    // slack under PREVIEW_MAX_LINES for the preview border.
 
                     PreviewContent {
                         rows,
@@ -1992,6 +2006,248 @@ mod preview_render_tests {
         assert!(text.contains("/work/spur \u{00b7} claude \u{00b7} a1xxxxxx"));
         assert!(!text.contains("Session: a1xxxxxx"));
         assert!(!text.contains("CWD: /work/spur"));
+    }
+
+    #[test]
+    fn preview_renders_empty_state_placeholder_when_synopsis_missing() {
+        let synopsis = spur_core::SessionSynopsisProjection::new();
+        let lineage = spur_core::lineage::projection::ExecutorLineage::new();
+        let plan_projection = spur_core::PlanProjectionStore::new();
+        let brain_status = crate::app::BrainStatus::Idle;
+        let ctx = crate::views::ViewContext {
+            lineage: &lineage,
+            plan_projection: &plan_projection,
+            synopsis: &synopsis,
+            brain_status: &brain_status,
+            license_badge: None,
+            flag_summary: None,
+            tombstone: None,
+            transient_hint_override: None,
+        };
+
+        let mut metadata = SessionMetadata::default();
+        metadata.sessions.insert(
+            "a1xxxxxx".into(),
+            SessionEntry {
+                brain_name: Some("claude".into()),
+                ..SessionEntry::default()
+            },
+        );
+
+        let mut picker = SessionPickerView::new();
+        picker.set_metadata(metadata);
+        picker.set_sessions(
+            "claude".into(),
+            vec![SessionInfo::new(
+                "a1xxxxxx".to_string(),
+                PathBuf::from("/work/spur"),
+            )],
+            ctx.synopsis,
+        );
+        let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE), &ctx);
+
+        let backend = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|frame| picker.render(frame, Rect::new(0, 0, 80, 24), &ctx))
+            .unwrap();
+
+        let rows = buffer_rows(term.backend().buffer());
+        let text = buffer_text(term.backend().buffer());
+        assert!(text.contains("(resume to load message history)"));
+        assert!(!text.contains("Intent:"));
+        assert!(!text.contains("Last:"));
+        assert!(text.contains("/work/spur \u{00b7} claude \u{00b7} a1xxxxxx"));
+        let preview_border_row = rows
+            .iter()
+            .position(|row| row.contains(" Preview "))
+            .expect("preview border should be visible");
+        let placeholder_row = rows
+            .iter()
+            .enumerate()
+            .skip(preview_border_row + 1)
+            .find_map(|(y, row)| {
+                row.contains("(resume to load message history)")
+                    .then_some(y)
+            })
+            .expect("placeholder should be visible in preview");
+        let placeholder_col = rows[placeholder_row]
+            .find("(resume to load message history)")
+            .expect("placeholder column should be visible");
+        let placeholder_cell = term
+            .backend()
+            .buffer()
+            .cell((placeholder_col as u16, placeholder_row as u16))
+            .expect("placeholder cell should be in bounds");
+        assert_eq!(placeholder_cell.style().fg, Some(Color::DarkGray));
+        assert!(placeholder_cell
+            .style()
+            .add_modifier
+            .contains(Modifier::ITALIC));
+        let footer_row = rows
+            .iter()
+            .enumerate()
+            .skip(preview_border_row + 1)
+            .find_map(|(y, row)| {
+                row.contains("/work/spur \u{00b7} claude \u{00b7} a1xxxxxx")
+                    .then_some(y)
+            })
+            .expect("footer should be visible in preview");
+        assert!(
+            rows[preview_border_row + 1..=footer_row]
+                .windows(2)
+                .all(|pair| !(pair[0].trim().is_empty() && pair[1].trim().is_empty())),
+            "preview should not render adjacent all-blank rows"
+        );
+    }
+
+    #[test]
+    fn preview_combines_draft_and_empty_state_when_synopsis_missing() {
+        let synopsis = spur_core::SessionSynopsisProjection::new();
+        let lineage = spur_core::lineage::projection::ExecutorLineage::new();
+        let plan_projection = spur_core::PlanProjectionStore::new();
+        let brain_status = crate::app::BrainStatus::Idle;
+        let ctx = crate::views::ViewContext {
+            lineage: &lineage,
+            plan_projection: &plan_projection,
+            synopsis: &synopsis,
+            brain_status: &brain_status,
+            license_badge: None,
+            flag_summary: None,
+            tombstone: None,
+            transient_hint_override: None,
+        };
+
+        let mut metadata = SessionMetadata::default();
+        metadata.sessions.insert(
+            "a1xxxxxx".into(),
+            SessionEntry {
+                draft: "unsent edit".into(),
+                brain_name: Some("claude".into()),
+                ..SessionEntry::default()
+            },
+        );
+
+        let mut picker = SessionPickerView::new();
+        picker.set_metadata(metadata);
+        picker.set_sessions(
+            "claude".into(),
+            vec![SessionInfo::new(
+                "a1xxxxxx".to_string(),
+                PathBuf::from("/work/spur"),
+            )],
+            ctx.synopsis,
+        );
+        let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE), &ctx);
+
+        let backend = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|frame| picker.render(frame, Rect::new(0, 0, 80, 24), &ctx))
+            .unwrap();
+
+        let rows = buffer_rows(term.backend().buffer());
+        let text = buffer_text(term.backend().buffer());
+        assert!(text.contains("Draft: unsent edit"));
+        assert!(text.contains("(resume to load message history)"));
+
+        let draft_row = rows
+            .iter()
+            .position(|row| row.contains("Draft: unsent edit"))
+            .expect("draft should be visible in preview");
+        let placeholder_row = rows
+            .iter()
+            .position(|row| row.contains("(resume to load message history)"))
+            .expect("placeholder should be visible in preview");
+        assert!(
+            draft_row < placeholder_row,
+            "draft should render above the empty-state placeholder"
+        );
+    }
+
+    #[test]
+    fn preview_renders_placeholder_for_slash_only_history() {
+        let mut synopsis = spur_core::SessionSynopsisProjection::new();
+        synopsis.apply(&SpurEvent::now(SpurEventBody::SessionHistory {
+            session: SessionId("a1xxxxxx".into()),
+            entries: vec![
+                HistoryEntry {
+                    role: "user".into(),
+                    text: "/clear".into(),
+                },
+                HistoryEntry {
+                    role: "assistant".into(),
+                    text: "cleared".into(),
+                },
+                HistoryEntry {
+                    role: "user".into(),
+                    text: "/help".into(),
+                },
+            ],
+        }));
+
+        let lineage = spur_core::lineage::projection::ExecutorLineage::new();
+        let plan_projection = spur_core::PlanProjectionStore::new();
+        let brain_status = crate::app::BrainStatus::Idle;
+        let ctx = crate::views::ViewContext {
+            lineage: &lineage,
+            plan_projection: &plan_projection,
+            synopsis: &synopsis,
+            brain_status: &brain_status,
+            license_badge: None,
+            flag_summary: None,
+            tombstone: None,
+            transient_hint_override: None,
+        };
+
+        let mut metadata = SessionMetadata::default();
+        metadata.sessions.insert(
+            "a1xxxxxx".into(),
+            SessionEntry {
+                brain_name: Some("claude".into()),
+                ..SessionEntry::default()
+            },
+        );
+
+        let mut picker = SessionPickerView::new();
+        picker.set_metadata(metadata);
+        picker.set_sessions(
+            "claude".into(),
+            vec![SessionInfo::new(
+                "a1xxxxxx".to_string(),
+                PathBuf::from("/work/spur"),
+            )],
+            ctx.synopsis,
+        );
+        let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE), &ctx);
+
+        let backend = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|frame| picker.render(frame, Rect::new(0, 0, 80, 24), &ctx))
+            .unwrap();
+
+        let rows = buffer_rows(term.backend().buffer());
+        let text = buffer_text(term.backend().buffer());
+        assert!(text.contains("Last: /help"));
+        assert!(text.contains("(resume to load message history)"));
+
+        let preview_border_row = rows
+            .iter()
+            .position(|row| row.contains(" Preview "))
+            .expect("preview border should be visible");
+        let footer_row = rows
+            .iter()
+            .enumerate()
+            .skip(preview_border_row + 1)
+            .find_map(|(y, row)| {
+                row.contains("/work/spur \u{00b7} claude \u{00b7} a1xxxxxx")
+                    .then_some(y)
+            })
+            .expect("footer should be visible in preview");
+        assert!(
+            rows[preview_border_row + 1..=footer_row]
+                .windows(2)
+                .all(|pair| !(pair[0].trim().is_empty() && pair[1].trim().is_empty())),
+            "preview should not render adjacent all-blank rows"
+        );
     }
 
     #[test]
