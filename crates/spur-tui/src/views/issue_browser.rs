@@ -85,9 +85,16 @@ impl IssueBrowserView {
         &self.tracked_issues
     }
 
+    pub fn seed_issues(&mut self, issues: Vec<spur_pm::IssueSummary>) {
+        self.tracked_issues = issues;
+        if !self.tracked_issues.is_empty() {
+            self.issues_panel.select_first();
+        }
+    }
+
     #[cfg(any(test, debug_assertions))]
     pub fn set_issues_for_test(&mut self, issues: Vec<spur_pm::IssueSummary>) {
-        self.tracked_issues = issues;
+        self.seed_issues(issues);
     }
 
     pub fn issue_detail_visible(&self) -> bool {
@@ -123,6 +130,7 @@ impl IssueBrowserView {
             KeyCode::Char('q') if key.modifiers.is_empty() => Some(Action::Quit),
             KeyCode::Char('?') if key.modifiers.is_empty() => Some(Action::ShowHelp),
             KeyCode::Char('s') if key.modifiers.is_empty() => Some(Action::RequestSessions),
+            KeyCode::Char('r') if key.modifiers.is_empty() => Some(Action::RefreshIssues),
 
             // Navigation
             KeyCode::Char('j') | KeyCode::Down if key.modifiers.is_empty() => {
@@ -251,7 +259,7 @@ impl IssueBrowserView {
                 .border_style(Style::default().fg(Color::DarkGray));
             let inner = block.inner(chunks[0]);
             frame.render_widget(block, chunks[0]);
-            let msg = Paragraph::new("No issues tracked. Press 'r' to refresh.")
+            let msg = Paragraph::new("No issues loaded. Press 'r' to refresh.")
                 .style(Style::default().fg(Color::DarkGray));
             frame.render_widget(msg, inner);
         } else {
