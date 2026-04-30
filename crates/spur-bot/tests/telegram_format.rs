@@ -308,6 +308,45 @@ fn html_escape_expansion_is_budgeted_after_rendering() {
 }
 
 #[test]
+fn golden_llm_outputs_match_expected_chunks() {
+    for (name, input, expected) in [
+        (
+            "llm-output-1",
+            include_str!("telegram_format/golden/llm-output-1.md"),
+            include_str!("telegram_format/golden/llm-output-1.expected.json"),
+        ),
+        (
+            "llm-output-2",
+            include_str!("telegram_format/golden/llm-output-2.md"),
+            include_str!("telegram_format/golden/llm-output-2.expected.json"),
+        ),
+        (
+            "llm-output-3",
+            include_str!("telegram_format/golden/llm-output-3.md"),
+            include_str!("telegram_format/golden/llm-output-3.expected.json"),
+        ),
+        (
+            "llm-output-4",
+            include_str!("telegram_format/golden/llm-output-4.md"),
+            include_str!("telegram_format/golden/llm-output-4.expected.json"),
+        ),
+        (
+            "llm-output-5",
+            include_str!("telegram_format/golden/llm-output-5.md"),
+            include_str!("telegram_format/golden/llm-output-5.expected.json"),
+        ),
+        (
+            "llm-output-6",
+            include_str!("telegram_format/golden/llm-output-6.md"),
+            include_str!("telegram_format/golden/llm-output-6.expected.json"),
+        ),
+    ] {
+        let actual = serde_json::to_string_pretty(&rendered_chunks(input)).unwrap();
+        assert_eq!(actual.trim(), expected.trim(), "{name}");
+    }
+}
+
+#[test]
 fn split_for_final_answer_keeps_short_text_as_single_chunk() {
     let text = "short final answer";
 
