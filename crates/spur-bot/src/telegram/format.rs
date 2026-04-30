@@ -170,7 +170,7 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
     fn collect_table_row(&mut self, first: Event<'a>) -> Vec<Event<'a>> {
         let is_head = matches!(&first, Event::Start(Tag::TableHead));
         let mut events = vec![first];
-        while let Some(event) = self.events.next() {
+        for event in self.events.by_ref() {
             let is_end = matches!(
                 (&event, is_head),
                 (Event::End(TagEnd::TableHead), true) | (Event::End(TagEnd::TableRow), false)
