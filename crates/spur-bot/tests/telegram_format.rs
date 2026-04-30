@@ -1,8 +1,37 @@
 use spur_bot::telegram::format::{
-    markdown_to_telegram_html, render_truncated_text, short_button_label, split_for_final_answer,
+    markdown_to_telegram_chunks, render_truncated_text, short_button_label, split_for_final_answer,
     split_for_telegram, truncate_button_label_bytes, truncate_to_utf16_units,
     TELEGRAM_BUTTON_LABEL_MAX_BYTES, TELEGRAM_TEXT_MAX_UTF16_UNITS,
 };
+
+fn single_html(input: &str) -> String {
+    let chunks = markdown_to_telegram_chunks(input);
+    assert_eq!(chunks.len(), 1, "short input rendered as {chunks:?}");
+    chunks[0].html.clone()
+}
+
+fn rendered_chunks(input: &str) -> Vec<spur_bot::telegram::format::Chunk> {
+    markdown_to_telegram_chunks(input)
+}
+
+fn assert_no_partial_entities(chunks: &[spur_bot::telegram::format::Chunk]) {
+    for chunk in chunks {
+        for partial in ["&", "&a", "&am", "&amp", "&l", "&lt", "&g", "&gt"] {
+            assert!(
+                !chunk.html.ends_with(partial),
+                "chunk ended with partial entity {partial:?}: {}",
+                chunk.html
+            );
+        }
+        for partial in ["amp;", "mp;", "p;", "lt;", "t;", "gt;"] {
+            assert!(
+                !chunk.html.starts_with(partial),
+                "chunk started with partial entity {partial:?}: {}",
+                chunk.html
+            );
+        }
+    }
+}
 
 #[test]
 fn split_for_telegram_preserves_unicode_scalar_boundaries() {
@@ -16,7 +45,7 @@ fn split_for_telegram_preserves_unicode_scalar_boundaries() {
 #[test]
 fn markdown_to_telegram_html_inline_emphasis_strong() {
     assert_eq!(
-        markdown_to_telegram_html("**bold** *italic* ~~strike~~"),
+        single_html("**bold** *italic* ~~strike~~"),
         "<b>bold</b> <i>italic</i> <s>strike</s>"
     );
 }
@@ -24,7 +53,7 @@ fn markdown_to_telegram_html_inline_emphasis_strong() {
 #[test]
 fn markdown_to_telegram_html_inline_code() {
     assert_eq!(
-        markdown_to_telegram_html("Use `x < y && z > q`."),
+        single_html("Use `x < y && z > q`."),
         "Use <code>x &lt; y &amp;&amp; z &gt; q</code>."
     );
 }
@@ -32,10 +61,10 @@ fn markdown_to_telegram_html_inline_code() {
 #[test]
 fn markdown_to_telegram_html_links() {
     assert_eq!(
-        markdown_to_telegram_html("[label](https://example.test/?q=\"<&>)"),
+        single_html("[label](https://example.test/?q=\"<&>)"),
         "<a href=\"https://example.test/?q=&quot;&lt;&amp;&gt;\">label</a>"
     );
-    assert_eq!(markdown_to_telegram_html("[label]()"), "label");
+    assert_eq!(single_html("[label]()"), "label");
 }
 
 #[test]
@@ -43,18 +72,18 @@ fn markdown_to_telegram_html_fenced_code_block() {
     let input = "Before\n\n```rust\nfn main() { println!(\"<&>\"); }\n```\n\nAfter";
 
     assert_eq!(
-        markdown_to_telegram_html(input),
+        single_html(input),
         "Before\n\n<pre><code>fn main() { println!(\"&lt;&amp;&gt;\"); }\n</code></pre>\n\nAfter"
     );
 }
 
 #[test]
-fn markdown_to_telegram_html_blockquote() {
+fn blockquote_with_code_re_opens_after_code_block() {
     let input = "> quoted\n>\n> ```\n> code\n> ```\n> after";
 
     assert_eq!(
-        markdown_to_telegram_html(input),
-        "<blockquote>quoted\n\n</blockquote><pre><code>code\n</code></pre>\n\nafter"
+        single_html(input),
+        "<blockquote>quoted\n\n</blockquote><pre><code>code\n</code></pre>\n\n<blockquote>after\n\n</blockquote>"
     );
 }
 
@@ -63,30 +92,27 @@ fn markdown_to_telegram_html_lists_bullets_and_numbered() {
     let input = "- one\n  - nested\n- two\n\n3. third\n4. fourth";
 
     assert_eq!(
-        markdown_to_telegram_html(input),
+        single_html(input),
         "• one\n  • nested\n• two\n\n3. third\n4. fourth"
     );
 }
 
 #[test]
 fn markdown_to_telegram_html_headings_render_as_plain_paragraphs() {
-    assert_eq!(
-        markdown_to_telegram_html("# Heading\n\nbody"),
-        "Heading\n\nbody"
-    );
+    assert_eq!(single_html("# Heading\n\nbody"), "Heading\n\nbody");
 }
 
 #[test]
 fn markdown_to_telegram_html_escapes_raw_html() {
     assert_eq!(
-        markdown_to_telegram_html("<script>alert('&')</script>"),
+        single_html("<script>alert('&')</script>"),
         "&lt;script&gt;alert('&amp;')&lt;/script&gt;"
     );
 }
 
 #[test]
 fn markdown_to_telegram_html_horizontal_rule() {
-    assert_eq!(markdown_to_telegram_html("---"), "───");
+    assert_eq!(single_html("---"), "───");
 }
 
 #[test]
@@ -94,14 +120,14 @@ fn markdown_to_telegram_html_tables_render_plain_rows() {
     let input = "| name | value |\n| --- | --- |\n| a | **b** |\n| c | `d` |";
 
     assert_eq!(
-        markdown_to_telegram_html(input),
+        single_html(input),
         "| name | value |\n| a | <b>b</b> |\n| c | <code>d</code> |"
     );
 }
 
 #[test]
 fn markdown_to_telegram_html_does_not_emit_unsupported_tags() {
-    let output = markdown_to_telegram_html(
+    let output = single_html(
         "# Heading\n\n- item\n\n<table><tr><td>x</td></tr></table>\n\n| a | b |\n| - | - |\n| c | d |",
     );
 
@@ -111,6 +137,174 @@ fn markdown_to_telegram_html_does_not_emit_unsupported_tags() {
             "output contained unsupported tag {unsupported}: {output}"
         );
     }
+}
+
+#[test]
+fn tasklists_enabled_renders_checkboxes() {
+    assert_eq!(
+        single_html("- [x] done\n- [ ] todo"),
+        "• [x] done\n• [ ] todo"
+    );
+}
+
+#[test]
+fn entity_aware_split_never_slices_mid_amp() {
+    let input = "&".repeat(1_200);
+    let chunks = rendered_chunks(&input);
+
+    assert!(chunks.len() > 1);
+    assert_no_partial_entities(&chunks);
+    assert!(chunks
+        .iter()
+        .all(|chunk| chunk.html.encode_utf16().count() <= TELEGRAM_TEXT_MAX_UTF16_UNITS));
+}
+
+#[test]
+fn inline_link_overflow_falls_back_to_plain_url() {
+    let href = format!("https://example.test/{}", "a".repeat(4_200));
+    let input = format!("[label]({href})");
+    let chunks = rendered_chunks(&input);
+    let html = chunks
+        .iter()
+        .map(|chunk| chunk.html.as_str())
+        .collect::<String>();
+
+    assert!(!html.contains("<a href="));
+    assert!(html.contains("label (https://example.test/"));
+    assert!(chunks
+        .iter()
+        .all(|chunk| chunk.html.encode_utf16().count() <= TELEGRAM_TEXT_MAX_UTF16_UNITS));
+}
+
+#[test]
+fn inline_code_overflow_falls_back_to_escaped_text() {
+    let input = format!("`{}`", "<&>".repeat(1_400));
+    let chunks = rendered_chunks(&input);
+    let html = chunks
+        .iter()
+        .map(|chunk| chunk.html.as_str())
+        .collect::<String>();
+
+    assert!(!html.contains("<code>"));
+    assert!(html.contains("&lt;&amp;&gt;"));
+    assert_no_partial_entities(&chunks);
+}
+
+#[test]
+fn oversized_fenced_block_splits_at_line_boundary() {
+    let input = format!("```rust\n{}```", "let value = 1;\n".repeat(400));
+    let chunks = rendered_chunks(&input);
+
+    assert!(chunks.len() > 1);
+    assert!(chunks
+        .iter()
+        .all(|chunk| chunk.html.starts_with("<pre><code>")));
+    assert!(chunks
+        .iter()
+        .all(|chunk| chunk.html.contains("</code></pre>")));
+    assert!(chunks
+        .iter()
+        .all(|chunk| chunk.html.encode_utf16().count() <= TELEGRAM_TEXT_MAX_UTF16_UNITS));
+}
+
+#[test]
+fn oversized_fenced_block_single_line_falls_to_char_boundary() {
+    let input = format!("```\n{}\n```", "<".repeat(2_000));
+    let chunks = rendered_chunks(&input);
+
+    assert!(chunks.len() > 1);
+    assert_no_partial_entities(&chunks);
+    assert!(chunks
+        .iter()
+        .all(|chunk| chunk.html.encode_utf16().count() <= TELEGRAM_TEXT_MAX_UTF16_UNITS));
+}
+
+#[test]
+fn nested_blockquote_with_code_re_opens_full_depth() {
+    let input = "> outer\n> > inner\n> > ```\n> > code\n> > ```\n> > after";
+    let html = single_html(input);
+
+    assert!(html.contains(
+        "</blockquote></blockquote><pre><code>code\n</code></pre>\n\n<blockquote><blockquote>after"
+    ));
+}
+
+#[test]
+fn tag_depth_cap_degrades_to_plain_at_excess() {
+    let input = ">>>>>>>>>> deeply quoted";
+    let html = single_html(input);
+
+    assert!(html.matches("<blockquote>").count() <= 8);
+    assert!(html.contains("deeply quoted"));
+}
+
+#[test]
+fn table_cell_overflow_emits_pipe_row() {
+    let href = format!("https://example.test/{}", "a".repeat(4_100));
+    let input = format!("| name | value |\n| --- | --- |\n| a | [label]({href}) |");
+    let chunks = rendered_chunks(&input);
+    let html = chunks
+        .iter()
+        .map(|chunk| chunk.html.as_str())
+        .collect::<String>();
+
+    assert!(html.contains("| a | label (https://example.test/"));
+    assert!(!html.contains("<table"));
+    assert!(!html.contains("<a href="));
+}
+
+#[test]
+fn dynamic_reserve_accounts_for_open_block_depth() {
+    let input = format!("> > {}", "&".repeat(1_100));
+    let chunks = rendered_chunks(&input);
+
+    assert!(chunks.len() > 1);
+    assert_no_partial_entities(&chunks);
+    assert!(chunks.iter().all(|chunk| {
+        chunk.html.matches("<blockquote>").count() == chunk.html.matches("</blockquote>").count()
+            && chunk.html.encode_utf16().count() <= TELEGRAM_TEXT_MAX_UTF16_UNITS
+    }));
+}
+
+#[test]
+fn numbered_list_continuation_resumes_at_correct_index() {
+    let input = format!("3. first\n4. {}\n5. third", "second ".repeat(900));
+    let chunks = rendered_chunks(&input);
+    let html = chunks
+        .iter()
+        .map(|chunk| chunk.html.as_str())
+        .collect::<String>();
+
+    assert!(chunks.len() > 1);
+    assert!(html.contains("3. first"));
+    assert!(html.contains("4. second"));
+    assert!(html.contains("5. third"));
+    assert!(!html.contains("1. third"));
+}
+
+#[test]
+fn non_table_pipe_text_renders_as_text() {
+    assert_eq!(
+        single_html("alpha | beta\nnot a table"),
+        "alpha | beta\nnot a table"
+    );
+}
+
+#[test]
+fn plain_projection_strips_markdown_for_links_and_code() {
+    let chunks = rendered_chunks("[label](https://example.test) and `code`");
+
+    assert_eq!(chunks[0].plain, "label and code");
+}
+
+#[test]
+fn html_escape_expansion_is_budgeted_after_rendering() {
+    let chunks = rendered_chunks(&"<>&".repeat(1_200));
+
+    assert!(chunks.len() > 1);
+    assert!(chunks
+        .iter()
+        .all(|chunk| chunk.html.encode_utf16().count() <= TELEGRAM_TEXT_MAX_UTF16_UNITS));
 }
 
 #[test]

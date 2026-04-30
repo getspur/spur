@@ -1,6 +1,7 @@
 use std::fmt::Write as _;
 
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+use serde::Serialize;
 
 /// Telegram caps message text at 4096 UTF-16 code units.
 pub const TELEGRAM_TEXT_MAX_UTF16_UNITS: usize = 4096;
@@ -10,275 +11,828 @@ pub const TELEGRAM_BUTTON_LABEL_MAX_BYTES: usize = 64;
 
 const FINAL_ANSWER_SPLIT_BOUNDARY_WINDOW_UTF16_UNITS: usize = 256;
 
-pub fn markdown_to_telegram_html(input: &str) -> String {
-    let mut options = Options::empty();
-    options.insert(Options::ENABLE_STRIKETHROUGH);
-    options.insert(Options::ENABLE_TABLES);
-    options.insert(Options::ENABLE_TASKLISTS);
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Chunk {
+    pub html: String,
+    pub plain: String,
+}
 
-    let events: Vec<_> = Parser::new_ext(input, options).collect();
-    let mut renderer = TelegramHtmlRenderer::default();
-    for (index, event) in events.iter().enumerate() {
-        renderer.render_event(event, events.get(index + 1));
+#[derive(Debug, Clone, Copy)]
+pub struct ChunkBudget {
+    pub max_units: usize,
+    pub min_safety_floor: usize,
+    pub max_nesting_depth: u8,
+}
+
+impl Default for ChunkBudget {
+    fn default() -> Self {
+        Self {
+            max_units: TELEGRAM_TEXT_MAX_UTF16_UNITS,
+            min_safety_floor: 32,
+            max_nesting_depth: 8,
+        }
     }
-    renderer.finish()
+}
+
+pub struct ChunkedHtmlRenderer<'a, I: Iterator<Item = Event<'a>>> {
+    events: I,
+    state: RendererState,
+    budget: ChunkBudget,
+    chunks: Vec<Chunk>,
 }
 
 #[derive(Default)]
-struct TelegramHtmlRenderer {
-    output: String,
-    lists: Vec<ListState>,
-    links: Vec<bool>,
-    open_blockquotes: usize,
-    in_code_block: bool,
-    table: Option<TableState>,
+struct RendererState {
+    current_html: String,
+    current_plain: String,
+    open_blocks: Vec<BlockContext>,
+    open_inlines: Vec<InlineContext>,
+    list_stack: Vec<ListContext>,
+    table_state: Option<TableState>,
+    suspended_blockquotes: u8,
+    suppressed_depth: usize,
+    link_frames: Vec<(bool, usize)>,
 }
 
-#[derive(Clone, Copy)]
-struct ListState {
+#[derive(Clone)]
+enum BlockContext {
+    BlockQuote,
+    PreCode { lang: Option<String> },
+}
+
+#[derive(Clone)]
+enum InlineContext {
+    Bold,
+    Italic,
+    Strike,
+    Code,
+    Link { href: String },
+}
+
+#[derive(Clone)]
+struct ListContext {
     kind: ListKind,
+    next_number: u64,
+    item_continuation: bool,
 }
 
 #[derive(Clone, Copy)]
 enum ListKind {
     Bullet,
-    Ordered { next: u64 },
+    Numbered,
 }
 
 #[derive(Default)]
 struct TableState {
-    cells_in_row: usize,
+    in_header: bool,
+    column_count: u8,
+    current_cell_index: u8,
     in_row: bool,
 }
 
-impl TelegramHtmlRenderer {
-    fn render_event(&mut self, event: &Event<'_>, next: Option<&Event<'_>>) {
-        match event {
-            Event::Start(tag) => self.start_tag(tag),
-            Event::End(tag) => self.end_tag(tag, next),
-            Event::Text(text) => self.push_escaped_text(text),
-            Event::Code(code) => {
-                self.output.push_str("<code>");
-                self.push_escaped_text(code);
-                self.output.push_str("</code>");
+pub fn markdown_to_telegram_chunks(input: &str) -> Vec<Chunk> {
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_TASKLISTS);
+
+    let parser = Parser::new_ext(input, options);
+    ChunkedHtmlRenderer::new(parser, ChunkBudget::default()).into_chunks()
+}
+
+/// Legacy single-string renderer. Prefer `markdown_to_telegram_chunks` for
+/// Telegram sends so chunk boundaries are computed after HTML escaping.
+pub fn markdown_to_telegram_html(input: &str) -> String {
+    markdown_to_telegram_chunks(input)
+        .into_iter()
+        .map(|chunk| chunk.html)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
+    pub fn new(events: I, budget: ChunkBudget) -> Self {
+        Self {
+            events,
+            state: RendererState::default(),
+            budget,
+            chunks: Vec::new(),
+        }
+    }
+
+    pub fn into_chunks(mut self) -> Vec<Chunk> {
+        while let Some(event) = self.events.next() {
+            let cost = self.event_cost(&event);
+            let reserve = self.dynamic_reserve();
+            if self.state.current_html_units() + cost + reserve > self.budget.max_units
+                && self.state.at_safe_flush_point()
+            {
+                self.flush_chunk();
             }
-            Event::Html(html) | Event::InlineHtml(html) => self.push_escaped_text(html),
-            Event::SoftBreak | Event::HardBreak => self.output.push('\n'),
+            self.apply_event(event);
+        }
+        self.finalize();
+        self.chunks
+    }
+
+    fn event_cost(&self, event: &Event<'_>) -> usize {
+        match event {
+            Event::Start(Tag::Link { dest_url, .. }) => 11 + escaped_attr_units(dest_url),
+            Event::Start(Tag::BlockQuote(_)) => 12,
+            Event::Start(Tag::CodeBlock(_)) => self.state.open_blockquote_count() * 13 + 11,
+            Event::Start(Tag::TableHead | Tag::TableRow | Tag::TableCell) => 3,
+            Event::Start(Tag::Image { .. }) => 0,
+            Event::Start(_) => 8,
+            Event::End(TagEnd::BlockQuote(_) | TagEnd::CodeBlock) => 15,
+            Event::End(TagEnd::List(_) | TagEnd::Image | TagEnd::Table | TagEnd::TableCell) => 0,
+            Event::End(_) => 8,
+            Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
+                escaped_text_units(text)
+            }
+            Event::Code(code) => 13 + escaped_text_units(code),
+            Event::InlineMath(math) | Event::DisplayMath(math) => escaped_text_units(math),
+            Event::SoftBreak | Event::HardBreak => 1,
+            Event::Rule => 5,
+            Event::FootnoteReference(label) => escaped_text_units(label) + 2,
+            Event::TaskListMarker(_) => 4,
+        }
+    }
+
+    fn dynamic_reserve(&self) -> usize {
+        let inline_close: usize = self
+            .state
+            .open_inlines
+            .iter()
+            .rev()
+            .map(|inline| close_inline_tag(inline).len())
+            .sum();
+        let block_close: usize = self
+            .state
+            .open_blocks
+            .iter()
+            .rev()
+            .map(close_block_cost)
+            .sum();
+        let list_prefix = self.state.list_stack.len().saturating_mul(4);
+        self.budget
+            .min_safety_floor
+            .max(inline_close + block_close + list_prefix)
+    }
+
+    fn apply_event(&mut self, event: Event<'_>) {
+        if self.state.is_suppressing() {
+            self.apply_suppressed_event(event);
+            return;
+        }
+
+        match event {
+            Event::Start(tag) => self.start_tag(&tag),
+            Event::End(tag) => self.end_tag(&tag),
+            Event::Text(text) => self.push_escaped_text_budgeted(&text),
+            Event::Code(code) => {
+                self.push_inline_code(&code);
+            }
+            Event::Html(html) | Event::InlineHtml(html) => self.push_escaped_text_budgeted(&html),
+            Event::SoftBreak | Event::HardBreak => self.push_text_literal("\n"),
             Event::Rule => {
                 self.ensure_blank_line();
-                self.output.push_str("───\n\n");
+                self.push_text_literal("───\n\n");
             }
             Event::FootnoteReference(label) => {
-                self.output.push('[');
-                self.push_escaped_text(label);
-                self.output.push(']');
+                self.push_text_literal("[");
+                self.push_escaped_text_budgeted(&label);
+                self.push_text_literal("]");
             }
             Event::TaskListMarker(checked) => {
-                self.output.push_str(if *checked { "[x] " } else { "[ ] " });
+                self.push_text_literal(if checked { "[x] " } else { "[ ] " });
             }
-            Event::InlineMath(math) | Event::DisplayMath(math) => self.push_escaped_text(math),
+            Event::InlineMath(math) | Event::DisplayMath(math) => {
+                self.push_escaped_text_budgeted(&math);
+            }
         }
     }
 
     fn start_tag(&mut self, tag: &Tag<'_>) {
+        if self.would_exceed_depth(tag) {
+            self.state.suppressed_depth = 1;
+            return;
+        }
+
         match tag {
             Tag::Paragraph => {
-                if self.lists.is_empty() && self.table.is_none() && self.open_blockquotes == 0 {
+                if self.state.list_stack.is_empty()
+                    && self.state.table_state.is_none()
+                    && self.state.open_blockquote_count() == 0
+                {
                     self.ensure_blank_line();
                 }
             }
             Tag::Heading { .. } | Tag::HtmlBlock => self.ensure_blank_line(),
             Tag::BlockQuote(_) => {
-                if self.open_blockquotes == 0 {
+                if self.state.open_blockquote_count() == 0 {
                     self.ensure_blank_line();
                 }
-                self.output.push_str("<blockquote>");
-                self.open_blockquotes += 1;
+                self.push_html_literal("<blockquote>");
+                self.state.open_blocks.push(BlockContext::BlockQuote);
             }
-            Tag::CodeBlock(_) => {
-                if self.open_blockquotes > 0 {
-                    for _ in 0..self.open_blockquotes {
-                        self.output.push_str("</blockquote>");
-                    }
-                    self.open_blockquotes = 0;
-                } else {
-                    self.ensure_blank_line();
-                }
-                self.output.push_str("<pre><code>");
-                self.in_code_block = true;
-            }
+            Tag::CodeBlock(kind) => self.start_code_block(kind),
             Tag::List(start) => {
-                if self.lists.is_empty() {
+                if self.state.list_stack.is_empty() {
                     self.ensure_blank_line();
                 } else {
                     self.ensure_line_start();
                 }
-                self.lists.push(ListState {
-                    kind: start.map_or(ListKind::Bullet, |next| ListKind::Ordered { next }),
+                self.state.list_stack.push(ListContext {
+                    kind: start.map_or(ListKind::Bullet, |_| ListKind::Numbered),
+                    next_number: start.unwrap_or(1),
+                    item_continuation: false,
                 });
             }
             Tag::Item => self.start_list_item(),
-            Tag::Emphasis => self.output.push_str("<i>"),
-            Tag::Strong => self.output.push_str("<b>"),
-            Tag::Strikethrough => self.output.push_str("<s>"),
+            Tag::Emphasis => self.open_inline(InlineContext::Italic),
+            Tag::Strong => self.open_inline(InlineContext::Bold),
+            Tag::Strikethrough => self.open_inline(InlineContext::Strike),
             Tag::Link { dest_url, .. } => {
-                let has_dest = !dest_url.is_empty();
-                if has_dest {
-                    self.output.push_str("<a href=\"");
-                    push_escaped_attr(&mut self.output, dest_url);
-                    self.output.push_str("\">");
-                }
-                self.links.push(has_dest);
+                self.start_link(dest_url);
             }
             Tag::Image { .. } => {}
             Tag::Table(_) => {
                 self.ensure_blank_line();
-                self.table = Some(TableState::default());
+                self.state.table_state = Some(TableState::default());
             }
             Tag::TableHead | Tag::TableRow => {
-                if let Some(table) = &mut self.table {
-                    if !self.output.ends_with('\n') && !self.output.is_empty() {
-                        self.output.push('\n');
-                    }
-                    self.output.push_str("| ");
-                    table.cells_in_row = 0;
+                if let Some(table) = &mut self.state.table_state {
+                    table.in_header = matches!(tag, Tag::TableHead);
+                    table.current_cell_index = 0;
                     table.in_row = true;
                 }
+                self.ensure_line_start();
+                self.push_text_literal("| ");
             }
             Tag::TableCell => {
-                if let Some(table) = &self.table {
-                    if table.cells_in_row > 0 {
-                        self.output.push_str(" | ");
+                let needs_separator = self
+                    .state
+                    .table_state
+                    .as_ref()
+                    .is_some_and(|table| table.current_cell_index > 0);
+                if needs_separator {
+                    self.push_text_literal(" | ");
+                }
+                if let Some(table) = &mut self.state.table_state {
+                    table.current_cell_index = table.current_cell_index.saturating_add(1);
+                    if table.in_header {
+                        table.column_count = table.column_count.max(table.current_cell_index);
                     }
                 }
             }
-            Tag::Superscript
-            | Tag::Subscript
-            | Tag::FootnoteDefinition(_)
-            | Tag::DefinitionList
-            | Tag::DefinitionListTitle
-            | Tag::DefinitionListDefinition
-            | Tag::MetadataBlock(_) => {}
+            _ => {}
         }
     }
 
-    fn end_tag(&mut self, tag: &TagEnd, next: Option<&Event<'_>>) {
+    fn end_tag(&mut self, tag: &TagEnd) {
         match tag {
             TagEnd::Paragraph | TagEnd::Heading(_) => {
-                if self.lists.is_empty()
-                    && self.table.is_none()
-                    && !matches!(next, Some(Event::End(TagEnd::BlockQuote(_))))
+                if self.state.list_stack.is_empty()
+                    && self.state.table_state.is_none()
+                    && !self.state.in_code_block()
                 {
-                    self.output.push_str("\n\n");
+                    self.push_text_literal("\n\n");
                 }
             }
-            TagEnd::HtmlBlock => self.output.push_str("\n\n"),
+            TagEnd::HtmlBlock => self.push_text_literal("\n\n"),
             TagEnd::BlockQuote(_) => {
-                if self.open_blockquotes > 0 {
-                    self.output.push_str("</blockquote>");
-                    self.open_blockquotes -= 1;
+                if self.pop_blockquote() {
+                    self.push_html_literal("</blockquote>");
                 }
-                if self.open_blockquotes == 0 {
-                    self.output.push_str("\n\n");
+                if self.state.open_blockquote_count() == 0 {
+                    self.push_text_literal("\n\n");
                 }
             }
             TagEnd::CodeBlock => {
-                self.output.push_str("</code></pre>\n\n");
-                self.in_code_block = false;
+                self.end_code_block();
             }
             TagEnd::List(_) => {
-                let _ = self.lists.pop();
+                let _ = self.state.list_stack.pop();
             }
             TagEnd::Item => {
-                if !self.output.ends_with('\n') {
-                    self.output.push('\n');
+                if !self.state.current_html.ends_with('\n') {
+                    self.push_text_literal("\n");
+                }
+                if let Some(list) = self.state.list_stack.last_mut() {
+                    list.item_continuation = false;
                 }
             }
-            TagEnd::Emphasis => self.output.push_str("</i>"),
-            TagEnd::Strong => self.output.push_str("</b>"),
-            TagEnd::Strikethrough => self.output.push_str("</s>"),
-            TagEnd::Link => {
-                if self.links.pop().unwrap_or(false) {
-                    self.output.push_str("</a>");
-                }
-            }
+            TagEnd::Emphasis => self.close_inline(TagEnd::Emphasis),
+            TagEnd::Strong => self.close_inline(TagEnd::Strong),
+            TagEnd::Strikethrough => self.close_inline(TagEnd::Strikethrough),
+            TagEnd::Link => self.end_link(),
             TagEnd::Image => {}
             TagEnd::Table => {
-                self.table = None;
+                self.state.table_state = None;
             }
             TagEnd::TableHead | TagEnd::TableRow => {
-                if let Some(table) = &mut self.table {
-                    if table.in_row {
-                        self.output.push_str(" |\n");
-                        table.in_row = false;
-                    }
+                if self
+                    .state
+                    .table_state
+                    .as_ref()
+                    .is_some_and(|table| table.in_row)
+                {
+                    self.push_text_literal(" |\n");
+                }
+                if let Some(table) = &mut self.state.table_state {
+                    table.in_row = false;
+                    table.in_header = false;
                 }
             }
-            TagEnd::TableCell => {
-                if let Some(table) = &mut self.table {
-                    table.cells_in_row += 1;
-                }
-            }
-            TagEnd::Superscript
-            | TagEnd::Subscript
-            | TagEnd::FootnoteDefinition
-            | TagEnd::DefinitionList
-            | TagEnd::DefinitionListTitle
-            | TagEnd::DefinitionListDefinition
-            | TagEnd::MetadataBlock(_) => {}
+            TagEnd::TableCell => {}
+            _ => {}
         }
     }
 
     fn start_list_item(&mut self) {
-        let depth = self.lists.len().saturating_sub(1);
+        let depth = self.state.list_stack.len().saturating_sub(1);
         self.ensure_line_start();
         for _ in 0..depth {
-            self.output.push_str("  ");
+            self.push_text_literal("  ");
         }
 
-        let Some(list) = self.lists.last_mut() else {
+        let Some(list) = self.state.list_stack.last_mut() else {
             return;
         };
-        match &mut list.kind {
-            ListKind::Bullet => self.output.push_str("• "),
-            ListKind::Ordered { next } => {
-                let number = *next;
-                *next += 1;
-                let _ = write!(self.output, "{number}. ");
+        let prefix = match list.kind {
+            ListKind::Bullet => "• ".to_string(),
+            ListKind::Numbered => {
+                let number = list.next_number;
+                list.next_number += 1;
+                let mut prefix = String::new();
+                let _ = write!(prefix, "{number}. ");
+                prefix
             }
-        }
-    }
-
-    fn push_escaped_text(&mut self, text: &str) {
-        push_escaped_text(&mut self.output, text);
+        };
+        list.item_continuation = true;
+        self.push_text_literal(&prefix);
     }
 
     fn ensure_blank_line(&mut self) {
-        if self.output.is_empty() || self.in_code_block {
+        if self.state.current_html.is_empty() || self.state.in_code_block() {
             return;
         }
         let trailing_newlines = self
-            .output
+            .state
+            .current_html
             .chars()
             .rev()
             .take_while(|ch| *ch == '\n')
             .count();
         match trailing_newlines {
-            0 => self.output.push_str("\n\n"),
-            1 => self.output.push('\n'),
+            0 => self.push_text_literal("\n\n"),
+            1 => self.push_text_literal("\n"),
             _ => {}
         }
     }
 
     fn ensure_line_start(&mut self) {
-        if !self.output.is_empty() && !self.output.ends_with('\n') {
-            self.output.push('\n');
+        if !self.state.current_html.is_empty() && !self.state.current_html.ends_with('\n') {
+            self.push_text_literal("\n");
         }
     }
 
-    fn finish(self) -> String {
-        self.output.trim_end().to_string()
+    fn start_code_block(&mut self, kind: &CodeBlockKind<'_>) {
+        let suspended = self.suspend_open_blockquotes();
+        if suspended == 0 {
+            self.ensure_blank_line();
+        }
+        self.push_html_literal("<pre><code>");
+        self.state.open_blocks.push(BlockContext::PreCode {
+            lang: match kind {
+                CodeBlockKind::Fenced(lang) if !lang.is_empty() => Some(lang.to_string()),
+                _ => None,
+            },
+        });
     }
+
+    fn end_code_block(&mut self) {
+        if self.pop_pre_code() {
+            self.push_html_literal("</code></pre>");
+        }
+        self.push_text_literal("\n\n");
+        let suspended = self.state.suspended_blockquotes;
+        self.state.suspended_blockquotes = 0;
+        for _ in 0..suspended {
+            self.push_html_literal("<blockquote>");
+            self.state.open_blocks.push(BlockContext::BlockQuote);
+        }
+    }
+
+    fn start_link(&mut self, dest_url: &str) {
+        let href = dest_url.to_string();
+        let tagged = !href.is_empty()
+            && 15 + escaped_attr_units(&href) + self.dynamic_reserve() <= self.budget.max_units;
+        if tagged {
+            self.push_html_literal("<a href=\"");
+            push_escaped_attr(&mut self.state.current_html, &href);
+            self.push_html_literal("\">");
+        }
+        self.state.open_inlines.push(InlineContext::Link { href });
+        self.state
+            .link_frames
+            .push((tagged, self.state.current_plain.len()));
+    }
+
+    fn end_link(&mut self) {
+        let Some(InlineContext::Link { href }) = self.state.open_inlines.pop() else {
+            return;
+        };
+        let (tagged, plain_start) = self
+            .state
+            .link_frames
+            .pop()
+            .unwrap_or((false, self.state.current_plain.len()));
+        if tagged {
+            self.push_html_literal("</a>");
+        } else if !href.is_empty() {
+            let suffix = if self.state.current_plain.len() == plain_start {
+                format!("({href})")
+            } else {
+                format!(" ({href})")
+            };
+            self.push_escaped_text_budgeted(&suffix);
+        }
+    }
+
+    fn open_inline(&mut self, inline: InlineContext) {
+        self.push_html_literal(open_inline_tag(&inline));
+        self.state.open_inlines.push(inline);
+    }
+
+    fn close_inline(&mut self, tag: TagEnd) {
+        let Some(inline) = self.state.open_inlines.pop() else {
+            return;
+        };
+        let matches = matches!(
+            (&inline, tag),
+            (InlineContext::Italic, TagEnd::Emphasis)
+                | (InlineContext::Bold, TagEnd::Strong)
+                | (InlineContext::Strike, TagEnd::Strikethrough)
+        );
+        if matches {
+            self.push_html_literal(close_inline_tag(&inline));
+        }
+    }
+
+    fn push_inline_code(&mut self, code: &str) {
+        let tagged_cost = 13 + escaped_text_units(code);
+        if tagged_cost + self.dynamic_reserve() > self.budget.max_units {
+            self.push_escaped_text_budgeted(code);
+            return;
+        }
+        if self.state.current_html_units() + tagged_cost + self.dynamic_reserve()
+            > self.budget.max_units
+            && self.state.at_safe_flush_point()
+        {
+            self.flush_chunk();
+        }
+        if self.state.current_html_units() + tagged_cost + self.dynamic_reserve()
+            > self.budget.max_units
+        {
+            self.push_escaped_text_budgeted(code);
+            return;
+        }
+
+        self.state.open_inlines.push(InlineContext::Code);
+        self.push_html_literal("<code>");
+        push_escaped_text(&mut self.state.current_html, code);
+        self.state.current_plain.push_str(code);
+        self.push_html_literal("</code>");
+        let _ = self.state.open_inlines.pop();
+    }
+
+    fn push_escaped_text_budgeted(&mut self, text: &str) {
+        let mut remaining = text;
+        while !remaining.is_empty() {
+            let reserve = self.dynamic_reserve();
+            if self.state.current_html_units() + escaped_text_units(remaining) + reserve
+                <= self.budget.max_units
+            {
+                self.push_escaped_text_raw(remaining);
+                break;
+            }
+
+            if self
+                .state
+                .table_state
+                .as_ref()
+                .is_some_and(|table| table.in_row)
+                && !self.state.in_code_block()
+            {
+                self.push_escaped_text_raw(remaining);
+                break;
+            }
+
+            let available = self
+                .budget
+                .max_units
+                .saturating_sub(self.state.current_html_units() + reserve);
+            if available == 0 {
+                self.flush_chunk();
+                continue;
+            }
+            let split_at = best_escaped_text_split(remaining, available);
+            let (head, tail) = remaining.split_at(split_at);
+            self.push_escaped_text_raw(head);
+            remaining = tail;
+            if !remaining.is_empty() {
+                self.flush_chunk();
+            }
+        }
+    }
+
+    fn push_escaped_text_raw(&mut self, text: &str) {
+        push_escaped_text(&mut self.state.current_html, text);
+        self.state.current_plain.push_str(text);
+    }
+
+    fn push_html_literal(&mut self, text: &str) {
+        self.state.current_html.push_str(text);
+    }
+
+    fn push_text_literal(&mut self, text: &str) {
+        self.state.current_html.push_str(text);
+        self.state.current_plain.push_str(text);
+    }
+
+    fn flush_chunk(&mut self) {
+        if self.state.current_html.is_empty() && self.state.current_plain.is_empty() {
+            return;
+        }
+
+        self.close_open_inlines_for_flush();
+        let blocks = self.state.open_blocks.clone();
+        for block in blocks.iter().rev() {
+            self.state.current_html.push_str(close_block_tag(block));
+        }
+
+        let html = chunk_text(&self.state.current_html);
+        let plain = chunk_text(&self.state.current_plain);
+        if !html.is_empty() || !plain.is_empty() {
+            self.chunks.push(Chunk { html, plain });
+        }
+
+        self.state.current_html.clear();
+        self.state.current_plain.clear();
+        self.state.open_blocks.clear();
+        for block in blocks {
+            self.state.current_html.push_str(open_block_tag(&block));
+            self.state.open_blocks.push(block);
+        }
+        if let Some(list) = self.state.list_stack.last() {
+            if list.item_continuation {
+                let depth = self.state.list_stack.len().saturating_sub(1);
+                for _ in 0..depth {
+                    self.push_text_literal("  ");
+                }
+            }
+        }
+    }
+
+    fn close_open_inlines_for_flush(&mut self) {
+        while let Some(inline) = self.state.open_inlines.pop() {
+            match &inline {
+                InlineContext::Link { .. } => {
+                    if self.state.link_frames.pop().is_some_and(|frame| frame.0) {
+                        self.state.current_html.push_str("</a>");
+                    }
+                }
+                _ => self.state.current_html.push_str(close_inline_tag(&inline)),
+            }
+        }
+        self.state.link_frames.clear();
+    }
+
+    fn finalize(&mut self) {
+        self.close_open_inlines_for_flush();
+        let blocks = self.state.open_blocks.clone();
+        for block in blocks.iter().rev() {
+            self.state.current_html.push_str(close_block_tag(block));
+        }
+        self.state.open_blocks.clear();
+
+        let html = chunk_text(&self.state.current_html);
+        let plain = chunk_text(&self.state.current_plain);
+        if !html.is_empty() || !plain.is_empty() {
+            self.chunks.push(Chunk { html, plain });
+        }
+    }
+
+    fn apply_suppressed_event(&mut self, event: Event<'_>) {
+        match event {
+            Event::Start(_) => self.state.suppressed_depth += 1,
+            Event::End(_) => {
+                self.state.suppressed_depth = self.state.suppressed_depth.saturating_sub(1);
+            }
+            Event::Text(text)
+            | Event::Code(text)
+            | Event::Html(text)
+            | Event::InlineHtml(text)
+            | Event::InlineMath(text)
+            | Event::DisplayMath(text) => self.push_escaped_text_budgeted(&text),
+            Event::SoftBreak | Event::HardBreak => self.push_text_literal("\n"),
+            Event::Rule => self.push_text_literal("───\n\n"),
+            Event::FootnoteReference(label) => self.push_escaped_text_budgeted(&label),
+            Event::TaskListMarker(checked) => {
+                self.push_text_literal(if checked { "[x] " } else { "[ ] " });
+            }
+        }
+    }
+
+    fn would_exceed_depth(&self, tag: &Tag<'_>) -> bool {
+        let adds_depth = matches!(
+            tag,
+            Tag::BlockQuote(_)
+                | Tag::CodeBlock(_)
+                | Tag::List(_)
+                | Tag::Emphasis
+                | Tag::Strong
+                | Tag::Strikethrough
+                | Tag::Link { .. }
+        );
+        adds_depth && self.state.nesting_depth() + 1 > self.budget.max_nesting_depth as usize
+    }
+
+    fn suspend_open_blockquotes(&mut self) -> u8 {
+        let count = self.state.open_blockquote_count().min(u8::MAX as usize) as u8;
+        if count == 0 {
+            return 0;
+        }
+        for _ in 0..count {
+            self.push_html_literal("</blockquote>");
+        }
+        self.state
+            .open_blocks
+            .retain(|block| !matches!(block, BlockContext::BlockQuote));
+        self.state.suspended_blockquotes = self.state.suspended_blockquotes.saturating_add(count);
+        count
+    }
+
+    fn pop_blockquote(&mut self) -> bool {
+        if let Some(index) = self
+            .state
+            .open_blocks
+            .iter()
+            .rposition(|block| matches!(block, BlockContext::BlockQuote))
+        {
+            let _ = self.state.open_blocks.remove(index);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn pop_pre_code(&mut self) -> bool {
+        if let Some(index) = self
+            .state
+            .open_blocks
+            .iter()
+            .rposition(|block| matches!(block, BlockContext::PreCode { .. }))
+        {
+            let _ = self.state.open_blocks.remove(index);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl RendererState {
+    fn current_html_units(&self) -> usize {
+        utf16_units(&self.current_html)
+    }
+
+    fn at_safe_flush_point(&self) -> bool {
+        self.open_inlines.is_empty() && !self.table_state.as_ref().is_some_and(|table| table.in_row)
+    }
+
+    fn in_code_block(&self) -> bool {
+        self.open_blocks
+            .iter()
+            .any(|block| matches!(block, BlockContext::PreCode { .. }))
+    }
+
+    fn open_blockquote_count(&self) -> usize {
+        self.open_blocks
+            .iter()
+            .filter(|block| matches!(block, BlockContext::BlockQuote))
+            .count()
+    }
+
+    fn nesting_depth(&self) -> usize {
+        self.open_blocks.len() + self.open_inlines.len() + self.list_stack.len()
+    }
+
+    fn is_suppressing(&self) -> bool {
+        self.suppressed_depth > 0
+    }
+}
+
+fn open_inline_tag(inline: &InlineContext) -> &'static str {
+    match inline {
+        InlineContext::Bold => "<b>",
+        InlineContext::Italic => "<i>",
+        InlineContext::Strike => "<s>",
+        InlineContext::Code => "<code>",
+        InlineContext::Link { .. } => "",
+    }
+}
+
+fn close_inline_tag(inline: &InlineContext) -> &'static str {
+    match inline {
+        InlineContext::Bold => "</b>",
+        InlineContext::Italic => "</i>",
+        InlineContext::Strike => "</s>",
+        InlineContext::Code => "</code>",
+        InlineContext::Link { .. } => "</a>",
+    }
+}
+
+fn open_block_tag(block: &BlockContext) -> &'static str {
+    match block {
+        BlockContext::BlockQuote => "<blockquote>",
+        BlockContext::PreCode { lang } => {
+            let _ = lang.as_deref();
+            "<pre><code>"
+        }
+    }
+}
+
+fn close_block_tag(block: &BlockContext) -> &'static str {
+    match block {
+        BlockContext::BlockQuote => "</blockquote>",
+        BlockContext::PreCode { .. } => "</code></pre>",
+    }
+}
+
+fn close_block_cost(block: &BlockContext) -> usize {
+    close_block_tag(block).len()
+}
+
+fn best_escaped_text_split(text: &str, max_units: usize) -> usize {
+    let mut units = 0usize;
+    let mut hard_split = 0usize;
+    for (idx, ch) in text.char_indices() {
+        let cost = escaped_text_char_units(ch);
+        if units + cost > max_units {
+            break;
+        }
+        units += cost;
+        hard_split = idx + ch.len_utf8();
+    }
+    if hard_split == 0 {
+        return text.chars().next().map(char::len_utf8).unwrap_or(0);
+    }
+
+    let prefix = &text[..hard_split];
+    if let Some((idx, _)) = prefix.match_indices('\n').last() {
+        return idx + 1;
+    }
+    if let Some((idx, ch)) = prefix
+        .char_indices()
+        .rev()
+        .find(|(idx, ch)| *idx > 0 && ch.is_whitespace())
+    {
+        return idx + ch.len_utf8();
+    }
+    hard_split
+}
+
+fn escaped_text_units(text: &str) -> usize {
+    text.chars().map(escaped_text_char_units).sum()
+}
+
+fn escaped_text_char_units(ch: char) -> usize {
+    match ch {
+        '&' => 5,
+        '<' | '>' => 4,
+        _ => ch.len_utf16(),
+    }
+}
+
+fn escaped_attr_units(text: &str) -> usize {
+    text.chars()
+        .map(|ch| match ch {
+            '&' => 5,
+            '<' | '>' => 4,
+            '"' => 6,
+            _ => ch.len_utf16(),
+        })
+        .sum()
+}
+
+fn utf16_units(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+fn chunk_text(text: &str) -> String {
+    text.trim_end_matches('\n').to_string()
 }
 
 fn push_escaped_text(output: &mut String, text: &str) {
