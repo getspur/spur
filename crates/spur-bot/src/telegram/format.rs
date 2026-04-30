@@ -1,4 +1,4 @@
-use std::fmt::Write as _;
+use std::{fmt::Write as _, ops::Range};
 
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use serde::Serialize;
@@ -51,12 +51,13 @@ struct RendererState {
     table_state: Option<TableState>,
     suspended_blockquotes: u8,
     suppressed_depth: usize,
+    plain_code_ranges: Vec<Range<usize>>,
 }
 
 #[derive(Clone)]
 enum BlockContext {
     BlockQuote,
-    PreCode { lang: Option<String> },
+    PreCode,
 }
 
 #[derive(Clone)]
@@ -80,6 +81,11 @@ enum InlineContext {
         html_start: usize,
         plain_start: usize,
     },
+    Image {
+        dest_url: String,
+        html_start: usize,
+        plain_start: usize,
+    },
 }
 
 enum InlineKind {
@@ -92,6 +98,7 @@ enum InlineKind {
 struct ListContext {
     kind: ListKind,
     next_number: u64,
+    current_number: Option<u64>,
     item_continuation: bool,
 }
 
@@ -213,7 +220,10 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
             Event::Start(Tag::TableHead | Tag::TableRow | Tag::TableCell) => 3,
             Event::Start(Tag::Image { .. }) => 0,
             Event::Start(_) => 8,
-            Event::End(TagEnd::BlockQuote(_) | TagEnd::CodeBlock) => 15,
+            Event::End(TagEnd::BlockQuote(_)) => 15,
+            Event::End(TagEnd::CodeBlock) => {
+                15 + 12 * usize::from(self.state.suspended_blockquotes)
+            }
             Event::End(TagEnd::List(_) | TagEnd::Image | TagEnd::Table | TagEnd::TableCell) => 0,
             Event::End(_) => 8,
             Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
@@ -317,6 +327,7 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
                 self.state.list_stack.push(ListContext {
                     kind: start.map_or(ListKind::Bullet, |_| ListKind::Numbered),
                     next_number: start.unwrap_or(1),
+                    current_number: None,
                     item_continuation: false,
                 });
             }
@@ -327,7 +338,7 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
             Tag::Link { dest_url, .. } => {
                 self.start_link(dest_url);
             }
-            Tag::Image { .. } => {}
+            Tag::Image { dest_url, .. } => self.start_image(dest_url),
             Tag::Table(_) => {
                 self.ensure_blank_line();
                 self.state.table_state = Some(TableState::default());
@@ -398,13 +409,14 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
                 }
                 if let Some(list) = self.state.list_stack.last_mut() {
                     list.item_continuation = false;
+                    list.current_number = None;
                 }
             }
             TagEnd::Emphasis => self.close_inline(TagEnd::Emphasis),
             TagEnd::Strong => self.close_inline(TagEnd::Strong),
             TagEnd::Strikethrough => self.close_inline(TagEnd::Strikethrough),
             TagEnd::Link => self.end_link(),
-            TagEnd::Image => {}
+            TagEnd::Image => self.end_image(),
             TagEnd::Table => {
                 self.state.table_state = None;
             }
@@ -442,6 +454,7 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
             ListKind::Numbered => {
                 let number = list.next_number;
                 list.next_number += 1;
+                list.current_number = Some(number);
                 let mut prefix = String::new();
                 let _ = write!(prefix, "{number}. ");
                 prefix
@@ -475,18 +488,13 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
         }
     }
 
-    fn start_code_block(&mut self, kind: &CodeBlockKind<'_>) {
+    fn start_code_block(&mut self, _kind: &CodeBlockKind<'_>) {
         let suspended = self.suspend_open_blockquotes();
         if suspended == 0 {
             self.ensure_blank_line();
         }
         self.push_html_literal("<pre><code>");
-        self.state.open_blocks.push(BlockContext::PreCode {
-            lang: match kind {
-                CodeBlockKind::Fenced(lang) if !lang.is_empty() => Some(lang.to_string()),
-                _ => None,
-            },
-        });
+        self.state.open_blocks.push(BlockContext::PreCode);
     }
 
     fn end_code_block(&mut self) {
@@ -541,6 +549,35 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
             };
             self.push_escaped_text_budgeted(&suffix);
         }
+    }
+
+    fn start_image(&mut self, dest_url: &str) {
+        self.state.open_inlines.push(InlineContext::Image {
+            dest_url: dest_url.to_string(),
+            html_start: self.state.current_html.len(),
+            plain_start: self.state.current_plain.len(),
+        });
+    }
+
+    fn end_image(&mut self) {
+        let Some(InlineContext::Image {
+            dest_url,
+            html_start,
+            plain_start,
+        }) = self.state.open_inlines.pop()
+        else {
+            return;
+        };
+        let alt = self.state.current_plain[plain_start..].trim().to_string();
+        self.state.current_html.truncate(html_start);
+        self.state.current_plain.truncate(plain_start);
+
+        let projection = if alt.is_empty() {
+            format!("({dest_url})")
+        } else {
+            format!("[image: {alt}] ({dest_url})")
+        };
+        self.push_escaped_text_budgeted(&projection);
     }
 
     fn open_inline(&mut self, kind: InlineKind) {
@@ -609,7 +646,11 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
         self.state.open_inlines.push(InlineContext::Code);
         self.push_html_literal("<code>");
         push_escaped_text(&mut self.state.current_html, code);
+        let plain_start = self.state.current_plain.len();
         self.state.current_plain.push_str(code);
+        self.state
+            .plain_code_ranges
+            .push(plain_start..self.state.current_plain.len());
         self.push_html_literal("</code>");
         let _ = self.state.open_inlines.pop();
     }
@@ -661,7 +702,15 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
 
     fn push_escaped_text_raw(&mut self, text: &str) {
         push_escaped_text(&mut self.state.current_html, text);
-        self.state.current_plain.push_str(text);
+        if self.state.in_code_block() {
+            let plain_start = self.state.current_plain.len();
+            self.state.current_plain.push_str(text);
+            self.state
+                .plain_code_ranges
+                .push(plain_start..self.state.current_plain.len());
+        } else {
+            push_plain_projection_text(&mut self.state.current_plain, text);
+        }
     }
 
     fn degrade_open_inline_run_to_plain(&mut self, pending: &str) {
@@ -705,24 +754,47 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
         }
 
         let html = chunk_text(&self.state.current_html);
-        let plain = plain_chunk_text(&self.state.current_plain);
+        let plain = plain_chunk_text(&self.state.current_plain, &self.state.plain_code_ranges);
         if !html.is_empty() || !plain.is_empty() {
             self.chunks.push(Chunk { html, plain });
         }
 
         self.state.current_html.clear();
         self.state.current_plain.clear();
+        self.state.plain_code_ranges.clear();
         self.state.open_blocks.clear();
         for block in blocks {
             self.state.current_html.push_str(open_block_tag(&block));
             self.state.open_blocks.push(block);
         }
-        if let Some(list) = self.state.list_stack.last() {
-            if list.item_continuation {
-                let depth = self.state.list_stack.len().saturating_sub(1);
-                for _ in 0..depth {
-                    self.push_text_literal("  ");
-                }
+        if self
+            .state
+            .list_stack
+            .last()
+            .is_some_and(|list| list.item_continuation)
+        {
+            let depth = self.state.list_stack.len().saturating_sub(1);
+            let prefix = self.list_continuation_prefix();
+            for _ in 0..depth {
+                self.push_text_literal("  ");
+            }
+            self.push_text_literal(&prefix);
+        }
+    }
+
+    fn list_continuation_prefix(&self) -> String {
+        let Some(list) = self.state.list_stack.last() else {
+            return String::new();
+        };
+        match list.kind {
+            ListKind::Bullet => "• ".to_string(),
+            ListKind::Numbered => {
+                let number = list
+                    .current_number
+                    .unwrap_or_else(|| list.next_number.saturating_sub(1));
+                let mut prefix = String::new();
+                let _ = write!(prefix, "{number}. ");
+                prefix
             }
         }
     }
@@ -749,7 +821,7 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
         self.state.open_blocks.clear();
 
         let html = chunk_text(&self.state.current_html);
-        let plain = plain_chunk_text(&self.state.current_plain);
+        let plain = plain_chunk_text(&self.state.current_plain, &self.state.plain_code_ranges);
         if !html.is_empty() || !plain.is_empty() {
             self.chunks.push(Chunk { html, plain });
         }
@@ -806,13 +878,13 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
     }
 
     fn pop_blockquote(&mut self) -> bool {
-        if let Some(index) = self
+        if self
             .state
             .open_blocks
-            .iter()
-            .rposition(|block| matches!(block, BlockContext::BlockQuote))
+            .last()
+            .is_some_and(|block| matches!(block, BlockContext::BlockQuote))
         {
-            let _ = self.state.open_blocks.remove(index);
+            let _ = self.state.open_blocks.pop();
             true
         } else {
             false
@@ -820,13 +892,13 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
     }
 
     fn pop_pre_code(&mut self) -> bool {
-        if let Some(index) = self
+        if self
             .state
             .open_blocks
-            .iter()
-            .rposition(|block| matches!(block, BlockContext::PreCode { .. }))
+            .last()
+            .is_some_and(|block| matches!(block, BlockContext::PreCode))
         {
-            let _ = self.state.open_blocks.remove(index);
+            let _ = self.state.open_blocks.pop();
             true
         } else {
             false
@@ -952,7 +1024,7 @@ impl RendererState {
     fn in_code_block(&self) -> bool {
         self.open_blocks
             .iter()
-            .any(|block| matches!(block, BlockContext::PreCode { .. }))
+            .any(|block| matches!(block, BlockContext::PreCode))
     }
 
     fn open_blockquote_count(&self) -> usize {
@@ -990,6 +1062,11 @@ impl RendererState {
                     html_start,
                     plain_start,
                     ..
+                }
+                | InlineContext::Image {
+                    html_start,
+                    plain_start,
+                    ..
                 } => Some((*html_start, *plain_start)),
                 InlineContext::Code => None,
             })
@@ -1011,20 +1088,21 @@ fn close_inline_tag(inline: &InlineContext) -> &'static str {
         InlineContext::Strike { .. } => "</s>",
         InlineContext::Code => "</code>",
         InlineContext::Link { .. } => "</a>",
+        InlineContext::Image { .. } => "",
     }
 }
 
 fn open_block_tag(block: &BlockContext) -> &'static str {
     match block {
         BlockContext::BlockQuote => "<blockquote>",
-        BlockContext::PreCode { lang } => lang.as_deref().map_or("<pre><code>", |_| "<pre><code>"),
+        BlockContext::PreCode => "<pre><code>",
     }
 }
 
 fn close_block_tag(block: &BlockContext) -> &'static str {
     match block {
         BlockContext::BlockQuote => "</blockquote>",
-        BlockContext::PreCode { .. } => "</code></pre>",
+        BlockContext::PreCode => "</code></pre>",
     }
 }
 
@@ -1084,8 +1162,33 @@ fn chunk_text(text: &str) -> String {
     text.trim_end_matches('\n').to_string()
 }
 
-fn plain_chunk_text(text: &str) -> String {
-    chunk_text(text).replace("```", "").replace("**", "")
+fn plain_chunk_text(text: &str, code_ranges: &[Range<usize>]) -> String {
+    let text = chunk_text(text);
+    if code_ranges.is_empty() {
+        return scrub_plain_markers(&text);
+    }
+
+    let mut output = String::new();
+    let mut cursor = 0usize;
+    for range in code_ranges {
+        let start = range.start.min(text.len());
+        let end = range.end.min(text.len());
+        if cursor < start {
+            output.push_str(&scrub_plain_markers(&text[cursor..start]));
+        }
+        if start < end {
+            output.push_str(&text[start..end]);
+        }
+        cursor = cursor.max(end);
+    }
+    if cursor < text.len() {
+        output.push_str(&scrub_plain_markers(&text[cursor..]));
+    }
+    output
+}
+
+fn scrub_plain_markers(text: &str) -> String {
+    text.replace("```", "").replace("**", "")
 }
 
 fn push_escaped_text(output: &mut String, text: &str) {
@@ -1097,6 +1200,10 @@ fn push_escaped_text(output: &mut String, text: &str) {
             _ => output.push(ch),
         }
     }
+}
+
+fn push_plain_projection_text(output: &mut String, text: &str) {
+    output.push_str(&text.replace("```", "").replace("**", ""));
 }
 
 fn push_escaped_attr(output: &mut String, text: &str) {

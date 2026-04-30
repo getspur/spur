@@ -1,8 +1,9 @@
 use proptest::prelude::*;
+use pulldown_cmark::{Options, Parser};
 use spur_bot::telegram::format::{
     markdown_to_telegram_chunks, render_truncated_text, short_button_label, split_for_final_answer,
-    split_for_telegram, truncate_button_label_bytes, truncate_to_utf16_units,
-    TELEGRAM_BUTTON_LABEL_MAX_BYTES, TELEGRAM_TEXT_MAX_UTF16_UNITS,
+    split_for_telegram, truncate_button_label_bytes, truncate_to_utf16_units, Chunk, ChunkBudget,
+    ChunkedHtmlRenderer, TELEGRAM_BUTTON_LABEL_MAX_BYTES, TELEGRAM_TEXT_MAX_UTF16_UNITS,
 };
 
 fn single_html(input: &str) -> String {
@@ -13,6 +14,22 @@ fn single_html(input: &str) -> String {
 
 fn rendered_chunks(input: &str) -> Vec<spur_bot::telegram::format::Chunk> {
     markdown_to_telegram_chunks(input)
+}
+
+fn rendered_chunks_with_budget(input: &str, max_units: usize) -> Vec<Chunk> {
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_TASKLISTS);
+    ChunkedHtmlRenderer::new(
+        Parser::new_ext(input, options),
+        ChunkBudget {
+            max_units,
+            min_safety_floor: 0,
+            max_nesting_depth: 8,
+        },
+    )
+    .into_chunks()
 }
 
 fn assert_no_partial_entities(chunks: &[spur_bot::telegram::format::Chunk]) {
@@ -140,6 +157,20 @@ fn markdown_to_telegram_html_links() {
 }
 
 #[test]
+fn image_url_preserved_as_plain_text_projection() {
+    let chunks = rendered_chunks("![diagram](https://example.test/image.png)");
+
+    assert_eq!(
+        chunks[0].plain,
+        "[image: diagram] (https://example.test/image.png)"
+    );
+    assert_eq!(
+        chunks[0].html,
+        "[image: diagram] (https://example.test/image.png)"
+    );
+}
+
+#[test]
 fn markdown_to_telegram_html_fenced_code_block() {
     let input = "Before\n\n```rust\nfn main() { println!(\"<&>\"); }\n```\n\nAfter";
 
@@ -147,6 +178,13 @@ fn markdown_to_telegram_html_fenced_code_block() {
         single_html(input),
         "Before\n\n<pre><code>fn main() { println!(\"&lt;&amp;&gt;\"); }\n</code></pre>\n\nAfter"
     );
+}
+
+#[test]
+fn plain_projection_preserves_double_asterisk_inside_code_block() {
+    let chunks = rendered_chunks("```\nlet x = \"**bold**\"\n```");
+
+    assert!(chunks[0].plain.contains("**bold**"), "{chunks:?}");
 }
 
 #[test]
@@ -327,6 +365,18 @@ fn nested_blockquote_with_code_re_opens_full_depth() {
 }
 
 #[test]
+fn nested_blockquote_code_end_cost_accounts_for_suspended_count() {
+    let code = "x".repeat(70);
+    let input = format!("> > > ```\n> > > {code}\n> > > ```\n> > > after");
+    let chunks = rendered_chunks_with_budget(&input, 128);
+
+    assert!(chunks.len() > 1);
+    assert!(chunks.iter().all(|chunk| {
+        chunk.html.encode_utf16().count() <= 128 && is_telegram_html_balanced(&chunk.html)
+    }));
+}
+
+#[test]
 fn tag_depth_cap_degrades_to_plain_at_excess() {
     let input = ">>>>>>>>>> deeply quoted";
     let html = single_html(input);
@@ -402,6 +452,22 @@ fn numbered_list_continuation_resumes_at_correct_index() {
     assert!(html.contains("4. second"));
     assert!(html.contains("5. third"));
     assert!(!html.contains("1. third"));
+}
+
+#[test]
+fn numbered_list_split_across_chunks_resumes_with_correct_index() {
+    let input = format!("3. first\n4. {}\n5. third", "second ".repeat(900));
+    let chunks = rendered_chunks(&input);
+    let continuation = chunks
+        .iter()
+        .skip(1)
+        .find(|chunk| chunk.plain.contains("second"))
+        .expect("long numbered item should continue into another chunk");
+
+    assert!(
+        continuation.plain.starts_with("4. "),
+        "continuation chunk lost list prefix: {chunks:?}"
+    );
 }
 
 #[test]

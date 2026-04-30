@@ -43,7 +43,9 @@ async fn send_html_to_thread_retries_on_429_after_pause() {
 
     result.expect("429 retry should resend the same HTML request and succeed");
     assert_eq!(requests.len(), 2, "429 should retry the same send once");
-    assert!(requests.iter().all(|request| request.contains("\"parse_mode\":\"HTML\"")));
+    assert!(requests
+        .iter()
+        .all(|request| request.contains("\"parse_mode\":\"HTML\"")));
     assert!(requests
         .iter()
         .all(|request| request.contains("\"text\":\"<b>broken\"")));
@@ -65,7 +67,9 @@ async fn send_html_to_thread_propagates_429_after_3_retries() {
         "429 should stop after three total send attempts"
     );
     assert!(
-        requests.iter().all(|request| request.contains("\"parse_mode\":\"HTML\"")),
+        requests
+            .iter()
+            .all(|request| request.contains("\"parse_mode\":\"HTML\"")),
         "429 retry must not switch to plain fallback: {requests:?}"
     );
     assert!(paused_now, "retry_after 429 should activate client pause");
