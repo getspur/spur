@@ -7,6 +7,7 @@ use std::{
 use tokio::time::Instant;
 
 const PAUSE_EXTENSION_LOG_THRESHOLD: Duration = Duration::from_secs(1);
+const HTML_SEND_MAX_429_ATTEMPTS: usize = 3;
 
 #[derive(Clone)]
 pub struct TelegramClient {
@@ -207,11 +208,30 @@ impl TelegramClient {
     ) -> anyhow::Result<()> {
         let params = build_send_html_params(chat_id, message_thread_id, html);
         let parse_mode_was_html = matches!(params.parse_mode, Some(frankenstein::ParseMode::Html));
-        self.wait_if_paused().await;
-        let result = self.inner.send_message(&params).await;
-        if let Err(err) = &result {
-            self.pause_after_telegram_retry_after(err);
-            if parse_mode_was_html && is_telegram_400_error(err) {
+
+        for attempt in 1..=HTML_SEND_MAX_429_ATTEMPTS {
+            self.wait_if_paused().await;
+            let err = match self.inner.send_message(&params).await {
+                Ok(response) => {
+                    let message_id = response.result.message_id;
+                    tracing::info!(
+                        chat_id,
+                        message_thread_id = ?normalize_outbound_thread_id(message_thread_id),
+                        message_id,
+                        "telegram sendMessage delivered"
+                    );
+                    return Ok(());
+                }
+                Err(err) => err,
+            };
+
+            self.pause_after_telegram_retry_after(&err);
+            if is_telegram_429_error(&err) && attempt < HTML_SEND_MAX_429_ATTEMPTS {
+                self.wait_if_paused().await;
+                continue;
+            }
+
+            if parse_mode_was_html && is_telegram_400_error(&err) {
                 let fallback_params =
                     build_send_text_params(chat_id, message_thread_id, plain_fallback);
                 self.wait_if_paused().await;
@@ -220,7 +240,7 @@ impl TelegramClient {
                     self.pause_after_telegram_retry_after(fallback_err);
                 }
                 let response = fallback_result?;
-                let error_description = match err {
+                let error_description = match &err {
                     frankenstein::Error::Api(response) => response.description.as_str(),
                     _ => "",
                 };
@@ -237,16 +257,11 @@ impl TelegramClient {
                 );
                 return Ok(());
             }
+
+            return Err(err.into());
         }
-        let response = result?;
-        let message_id = response.result.message_id;
-        tracing::info!(
-            chat_id,
-            message_thread_id = ?normalize_outbound_thread_id(message_thread_id),
-            message_id,
-            "telegram sendMessage delivered"
-        );
-        Ok(())
+
+        unreachable!("bounded HTML send retry loop always returns")
     }
 
     pub async fn answer_callback(&self, query_id: String, text: String) -> anyhow::Result<()> {
@@ -331,6 +346,10 @@ impl TelegramClient {
 
 fn is_telegram_400_error(err: &frankenstein::Error) -> bool {
     matches!(err, frankenstein::Error::Api(response) if response.error_code == 400)
+}
+
+fn is_telegram_429_error(err: &frankenstein::Error) -> bool {
+    matches!(err, frankenstein::Error::Api(response) if response.error_code == 429)
 }
 
 fn telegram_retry_after_secs(err: &frankenstein::Error) -> Option<u16> {
