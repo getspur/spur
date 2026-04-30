@@ -787,7 +787,7 @@ fn best_escaped_text_split(text: &str, max_units: usize) -> usize {
     }
 
     let prefix = &text[..hard_split];
-    if let Some((idx, _)) = prefix.match_indices('\n').last() {
+    if let Some((idx, _)) = prefix.match_indices('\n').next_back() {
         return idx + 1;
     }
     if let Some((idx, ch)) = prefix
