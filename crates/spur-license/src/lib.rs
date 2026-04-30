@@ -77,7 +77,10 @@ impl Plan {
             "starter_ltd" | "starter-ltd" => Self::StarterLtd,
             "builder_ltd" | "builder-ltd" => Self::BuilderLtd,
             "founder_ltd" | "founder-ltd" => Self::FounderLtd,
-            "pro" => Self::Pro,
+            // `personal-lifetime` is the LicenseSeat-side name for the
+            // one-time Pro purchase plan. Treat it as a `Pro` alias so
+            // tier resolution lands on `Tier::Pro` and Pro quotas apply.
+            "pro" | "personal_lifetime" | "personal-lifetime" => Self::Pro,
             "team" => Self::Team,
             "enterprise" => Self::Enterprise,
             _ => Self::Unknown,
@@ -378,6 +381,12 @@ mod tests {
     #[test]
     fn unknown_plan_maps_to_unknown() {
         assert_eq!(Plan::from_key("mystery"), Plan::Unknown);
+    }
+
+    #[test]
+    fn personal_lifetime_aliases_to_pro() {
+        assert_eq!(Plan::from_key("personal-lifetime"), Plan::Pro);
+        assert_eq!(Plan::from_key("personal_lifetime"), Plan::Pro);
     }
 
     #[test]
