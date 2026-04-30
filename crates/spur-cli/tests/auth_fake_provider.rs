@@ -1,11 +1,11 @@
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use spur_cli::commands::auth::{run_with_license, AuthCommands, OutputFormat};
 use spur_license::policy::PolicyResolver;
 use spur_license::test_support::FakeProvider;
-use spur_license::FeatureGate;
-use spur_license::{FeatureKey, LicenseState, Plan, SpurLicense};
+use spur_license::{
+    EntitlementSnapshot, FeatureGate, FeatureKey, LicenseState, Plan, SpurLicense,
+};
 
 fn test_feature_gate() -> Arc<FeatureGate> {
     Arc::new(FeatureGate::new(PolicyResolver::embedded()))
@@ -108,20 +108,26 @@ async fn login_fails_on_config_error_state() {
 // to fall back to the embedded community policy where the key IS
 // granted, and re-login succeeds from there.
 
-fn empty_pro_gate() -> Arc<FeatureGate> {
+/// Build a `FeatureGate` whose snapshot has zero entitlements. Pro/Team/
+/// Enterprise tiers inherit the Community baseline from the signed policy
+/// (`@inherit:community`), so an empty JWT alone is no longer enough to
+/// strip a key — we have to inject a hand-crafted empty snapshot. The
+/// binary-level analog is `SPUR_LICENSE_TEST_STRIP_KEYS` exercised by
+/// `cli_core_gate_e2e::spur_auth_login_exits_nonzero_*`.
+fn stripped_gate() -> Arc<FeatureGate> {
     let g = FeatureGate::new(PolicyResolver::embedded());
-    g.update_state(&LicenseState::active_validated(Plan::Pro, BTreeSet::new()));
+    g.set_snapshot_for_test(EntitlementSnapshot::default());
     Arc::new(g)
 }
 
 #[tokio::test]
-async fn login_blocked_by_empty_pro_gate_returns_typed_error() {
+async fn login_blocked_by_stripped_gate_returns_typed_error() {
     let fake = Arc::new(FakeProvider::new(LicenseState::inactive("fresh")));
     fake.push_activate_result(Ok(LicenseState::active_validated(
         Plan::Pro,
         Default::default(),
     )));
-    let license = SpurLicense::from_provider(fake.clone(), empty_pro_gate());
+    let license = SpurLicense::from_provider(fake.clone(), stripped_gate());
 
     let err = run_with_license(
         AuthCommands::Login {
@@ -146,9 +152,9 @@ async fn login_blocked_by_empty_pro_gate_returns_typed_error() {
 }
 
 #[tokio::test]
-async fn logout_passes_through_empty_pro_gate() {
+async fn logout_passes_through_stripped_gate() {
     let fake = Arc::new(FakeProvider::new(LicenseState::active_cached()));
-    let license = SpurLicense::from_provider(fake.clone(), empty_pro_gate());
+    let license = SpurLicense::from_provider(fake.clone(), stripped_gate());
     run_with_license(
         AuthCommands::Logout {
             format: OutputFormat::Plain,
@@ -161,10 +167,10 @@ async fn logout_passes_through_empty_pro_gate() {
 }
 
 #[tokio::test]
-async fn refresh_passes_through_empty_pro_gate() {
+async fn refresh_passes_through_stripped_gate() {
     let fake = Arc::new(FakeProvider::new(LicenseState::active_cached()));
     fake.push_validate_result(Ok(LicenseState::active_cached()));
-    let license = SpurLicense::from_provider(fake.clone(), empty_pro_gate());
+    let license = SpurLicense::from_provider(fake.clone(), stripped_gate());
     run_with_license(
         AuthCommands::Refresh {
             format: OutputFormat::Plain,
@@ -177,9 +183,9 @@ async fn refresh_passes_through_empty_pro_gate() {
 }
 
 #[tokio::test]
-async fn status_passes_through_empty_pro_gate() {
+async fn status_passes_through_stripped_gate() {
     let fake = Arc::new(FakeProvider::new(LicenseState::active_cached()));
-    let license = SpurLicense::from_provider(fake, empty_pro_gate());
+    let license = SpurLicense::from_provider(fake, stripped_gate());
     run_with_license(
         AuthCommands::Status {
             format: OutputFormat::Plain,

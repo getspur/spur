@@ -51,23 +51,34 @@ fn embedded_community_policy_grants_all_8_m0_cli_core_keys() {
 }
 
 #[test]
-fn empty_pro_gate_blocks_all_8_m0_cli_core_keys() {
+fn empty_pro_gate_still_inherits_all_8_m0_cli_core_keys_from_community() {
+    // Pro/Team/Enterprise inherit the Community baseline via the policy's
+    // `@inherit:community` directive. Even when the license-server JWT
+    // returns zero entitlements (the `BTreeSet::new()` fixture below),
+    // every CLI command gated on a community key — including
+    // `cli_core_tui` — must still dispatch. Otherwise activating a Pro
+    // license would *remove* daily-driver functionality that the Free
+    // tier already had, which is the regression spotted by
+    // `spur tui --brain claude-code` returning
+    // `feature 'cli_core_tui' is not available on tier 'Pro'`.
+    //
+    // Tampered-policy denial is still exercised at the binary level by
+    // `cli_core_gate_e2e` via `SPUR_LICENSE_TEST_STRIP_KEYS`; that path
+    // strips keys *after* policy resolution, which is the correct shape
+    // for adversarial tampering.
     let gate = empty_pro_gate();
     for &key in M0_GATED_KEYS {
-        let err = require_feature(&gate, key).expect_err(&format!(
-            "tampered policy that strips {} must block dispatch",
+        assert!(
+            gate.has(key),
+            "Pro tier must inherit {} from the Community baseline even \
+             when the license JWT carries no entitlements",
             key.as_str(),
-        ));
-        // Verify the typed contract Plan D D.6 will rely on.
-        // External crate + `#[non_exhaustive]` ⇒ pattern is refutable;
-        // use `let ... else` form.
-        let spur_license::FeatureGateError::Denied {
-            key: returned_key, ..
-        } = err
-        else {
-            panic!("expected Denied, got {err:?}");
-        };
-        assert_eq!(returned_key, key);
+        );
+        assert!(
+            require_feature(&gate, key).is_ok(),
+            "require_feature must accept {} on Pro tier via @inherit:community",
+            key.as_str(),
+        );
     }
 }
 
