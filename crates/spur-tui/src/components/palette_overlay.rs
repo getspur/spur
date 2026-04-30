@@ -61,11 +61,13 @@ impl<'a> PaletteOverlay<'a> {
         // Partition ranked results by kind. Track each row's global index
         // (its position in iter_ranked) so we can apply the REVERSED
         // selection highlight to the row at state.cursor().
+        let mut views: Vec<(usize, &PaletteResult)> = Vec::new();
         let mut commands: Vec<(usize, &PaletteResult)> = Vec::new();
         let mut sessions: Vec<(usize, &PaletteResult)> = Vec::new();
         let mut workers: Vec<(usize, &PaletteResult)> = Vec::new();
         for (i, r) in self.state.iter_ranked().enumerate() {
             match r.kind {
+                PaletteKind::View => views.push((i, r)),
                 PaletteKind::Command => commands.push((i, r)),
                 PaletteKind::Session => sessions.push((i, r)),
                 PaletteKind::Worker => workers.push((i, r)),
@@ -87,10 +89,15 @@ impl<'a> PaletteOverlay<'a> {
         // entirely (see `if rows.is_empty() { return }` in render_section).
         const TRACE_ROW: u16 = 1;
         const PER_KIND_MAX: u16 = 5;
-        let kinds_with_data: u16 = [commands.is_empty(), sessions.is_empty(), workers.is_empty()]
-            .iter()
-            .filter(|empty| !*empty)
-            .count() as u16;
+        let kinds_with_data: u16 = [
+            views.is_empty(),
+            commands.is_empty(),
+            sessions.is_empty(),
+            workers.is_empty(),
+        ]
+        .iter()
+        .filter(|empty| !*empty)
+        .count() as u16;
 
         let header_rows = kinds_with_data;
         let available_for_data = area.height.saturating_sub(TRACE_ROW + header_rows);
@@ -161,6 +168,7 @@ impl<'a> PaletteOverlay<'a> {
             };
         }
 
+        render_section!("VIEWS", views);
         render_section!("COMMANDS", commands);
         render_section!("SESSIONS", sessions);
         render_section!("WORKERS", workers);
@@ -190,6 +198,7 @@ impl<'a> PaletteOverlay<'a> {
 
 fn badge_for(kind: &PaletteKind) -> &'static str {
     match kind {
+        PaletteKind::View => "@",
         PaletteKind::Command => ">",
         PaletteKind::Session => "$",
         PaletteKind::Worker => "!",

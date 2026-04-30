@@ -6,6 +6,9 @@ fn mk(kind: PaletteKind, label: &str) -> PaletteResult {
         label: label.into(),
         subtitle: String::new(),
         payload: match kind {
+            PaletteKind::View => PalettePayload::View {
+                action: spur_tui::action::Action::NavigateTo(spur_tui::action::ViewId::Dashboard),
+            },
             PaletteKind::Command => PalettePayload::Command { name: label.into() },
             PaletteKind::Session => PalettePayload::Session {
                 session_id: label.into(),

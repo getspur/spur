@@ -9,8 +9,50 @@ pub trait PaletteSource {
     fn collect(&self) -> Vec<PaletteResult>;
 }
 
+use crate::action::{Action, ViewId};
 use crate::commands::registry::CommandRegistry;
 use crate::components::palette::{PaletteKind, PalettePayload};
+
+pub struct ViewSource;
+
+impl PaletteSource for ViewSource {
+    fn collect(&self) -> Vec<PaletteResult> {
+        vec![
+            PaletteResult {
+                kind: PaletteKind::View,
+                label: "Dashboard".into(),
+                subtitle: "view · switch to dashboard".into(),
+                payload: PalettePayload::View {
+                    action: Action::NavigateTo(ViewId::Dashboard),
+                },
+            },
+            PaletteResult {
+                kind: PaletteKind::View,
+                label: "Issues".into(),
+                subtitle: "view · open issue browser".into(),
+                payload: PalettePayload::View {
+                    action: Action::NavigateTo(ViewId::IssueBrowser),
+                },
+            },
+            PaletteResult {
+                kind: PaletteKind::View,
+                label: "Sessions".into(),
+                subtitle: "view · open session picker".into(),
+                payload: PalettePayload::View {
+                    action: Action::RequestSessions,
+                },
+            },
+            PaletteResult {
+                kind: PaletteKind::View,
+                label: "Insights".into(),
+                subtitle: "view · open insights".into(),
+                payload: PalettePayload::View {
+                    action: Action::OpenInsights,
+                },
+            },
+        ]
+    }
+}
 
 pub struct CommandSource<'a> {
     registry: &'a CommandRegistry,
