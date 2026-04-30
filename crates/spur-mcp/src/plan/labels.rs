@@ -29,8 +29,17 @@ pub fn plan_id(plan_id: &str) -> String {
     format!("spur:plan-id:{plan_id}")
 }
 
+/// Token used to encode the `.` character (which the br label validator
+/// rejects) inside `spur:plan-task-id:<id>` values. Beads issue IDs are
+/// hierarchical (`bd-2dww.7`) once an issue gets a child, so plan-task-id
+/// labels MUST round-trip through this encoding to remain br-legal while
+/// preserving the original task_id for downstream consumers (projector,
+/// reconciler).
+const PLAN_TASK_ID_DOT_ENCODED: &str = "_dot_";
+
 pub fn plan_task_id(task_id: &str) -> String {
-    format!("spur:plan-task-id:{task_id}")
+    let encoded = task_id.replace('.', PLAN_TASK_ID_DOT_ENCODED);
+    format!("spur:plan-task-id:{encoded}")
 }
 
 pub fn agent(agent_name: &str) -> String {
@@ -89,8 +98,12 @@ pub fn parse_lease_expires_at(label: &str) -> Option<i64> {
 }
 
 /// Returns `Some(task_id)` if the given label is a `spur:plan-task-id:<id>` label.
-pub fn parse_plan_task_id(label: &str) -> Option<&str> {
-    label.strip_prefix(PLAN_TASK_ID_PREFIX)
+/// Reverses the dot-encoding applied by `plan_task_id` so hierarchical beads
+/// IDs (`bd-2dww.7`) round-trip through the br label validator.
+pub fn parse_plan_task_id(label: &str) -> Option<String> {
+    label
+        .strip_prefix(PLAN_TASK_ID_PREFIX)
+        .map(|s| s.replace(PLAN_TASK_ID_DOT_ENCODED, "."))
 }
 
 /// Returns `Some(plan_id)` if the given label is a `spur:plan-id:<id>` label.
@@ -196,7 +209,10 @@ mod tests {
 
     #[test]
     fn parsers_invert_constructors() {
-        assert_eq!(parse_plan_task_id(&plan_task_id("T1")), Some("T1"));
+        assert_eq!(
+            parse_plan_task_id(&plan_task_id("T1")),
+            Some("T1".to_string())
+        );
         assert_eq!(parse_plan_task_id("unrelated"), None);
         assert_eq!(parse_plan_id(&plan_id("P1")), Some("P1"));
         assert_eq!(parse_agent(&agent("codex")), Some("codex"));
@@ -325,6 +341,27 @@ mod tests {
             assert!(is_br_legal(child_label));
         }
         assert!(is_br_legal(&p));
+    }
+
+    /// Regression for `execute_epic("bd-2dww")`: hierarchical beads issue IDs
+    /// like `bd-2dww.7` contain a `.` which the `br 0.1.14` label validator
+    /// rejects (`Validation failed: label: only alphanumeric, dash, underscore,
+    /// and colon allowed`). `plan_task_id` must emit a br-legal label AND
+    /// `parse_plan_task_id` must return the original `bd-2dww.7` so downstream
+    /// code (projector, reconciler) can still round-trip the task identity.
+    #[test]
+    fn plan_task_id_label_round_trips_hierarchical_beads_ids() {
+        let task_id = "bd-2dww.7";
+        let label = plan_task_id(task_id);
+        assert!(
+            is_br_legal(&label),
+            "plan_task_id emitted br-illegal label for hierarchical id: {label}"
+        );
+        assert_eq!(
+            parse_plan_task_id(&label).as_deref(),
+            Some(task_id),
+            "round-trip failed for hierarchical id"
+        );
     }
 
     #[test]
