@@ -29,6 +29,7 @@ const EXPECTED: &[&str] = &[
     "submit_plan",
     "execute_epic",
     "get_plan_status",
+    "get_reconciler_status",
     "get_task_diff",
     "review_task",
     "report_signal",

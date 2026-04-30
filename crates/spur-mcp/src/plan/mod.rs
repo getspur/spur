@@ -9,6 +9,7 @@ pub mod audit_sentinel;
 pub mod labels;
 pub mod mutation;
 pub mod mutation_executor;
+pub mod outcomes;
 pub mod projector;
 pub mod proposers;
 pub mod reconciler;

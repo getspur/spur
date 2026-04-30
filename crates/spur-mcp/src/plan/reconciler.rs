@@ -20,12 +20,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use tokio::sync::Notify;
 use tokio_util::task::TaskTracker;
 
 use crate::plan::audit_sentinel::AuditSentinelKind;
+use crate::plan::outcomes::{
+    DispatchOutcome, NoReadyReason, OutcomeLogDecision, OutcomeStore, SkipReason, StuckTask,
+};
 use spur_pm::{IssueFilter, PmService, ReadyFilter};
 
 pub(crate) fn beads_journal_path(repo_root: &std::path::Path) -> std::path::PathBuf {
@@ -74,6 +77,69 @@ fn issue_to_summary(issue: spur_pm::Issue) -> spur_pm::IssueSummary {
         issue_type: issue.issue_type,
         assignee: issue.assignee,
     }
+}
+
+fn task_id_from_labels_or_issue(labels: &[String], issue_id: &str) -> String {
+    labels
+        .iter()
+        .find_map(|label| crate::plan::labels::parse_plan_task_id(label))
+        .unwrap_or_else(|| issue_id.to_string())
+}
+
+fn unresolved_blocker_issue_ids(
+    projected: &crate::plan::PlanState,
+    task: &crate::plan::PlanTaskEntry,
+) -> Vec<String> {
+    let by_task_id = projected
+        .tasks
+        .iter()
+        .map(|entry| (entry.spec.task_id.as_str(), entry))
+        .collect::<HashMap<_, _>>();
+    let by_issue_id = projected
+        .tasks
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .spec
+                .issue_id
+                .as_deref()
+                .map(|issue_id| (issue_id, entry))
+        })
+        .collect::<HashMap<_, _>>();
+
+    let mut blockers = task
+        .spec
+        .depends_on
+        .iter()
+        .filter_map(|dependency| {
+            let dependency_entry = by_task_id
+                .get(dependency.as_str())
+                .or_else(|| by_issue_id.get(dependency.as_str()));
+            match dependency_entry {
+                Some(entry)
+                    if matches!(
+                        entry.status,
+                        crate::plan::PlanTaskStatus::Approved { .. }
+                            | crate::plan::PlanTaskStatus::Cancelled { .. }
+                            | crate::plan::PlanTaskStatus::Superseded { .. }
+                    ) =>
+                {
+                    None
+                }
+                Some(entry) => Some(
+                    entry
+                        .spec
+                        .issue_id
+                        .clone()
+                        .unwrap_or_else(|| entry.spec.task_id.clone()),
+                ),
+                None => Some(dependency.clone()),
+            }
+        })
+        .collect::<Vec<_>>();
+    blockers.sort();
+    blockers.dedup();
+    blockers
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,6 +240,38 @@ impl Default for ReconcilerConfig {
     }
 }
 
+pub trait Clock: Send + Sync {
+    fn now(&self) -> SystemTime;
+}
+
+#[derive(Debug, Default)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> SystemTime {
+        SystemTime::now()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanDispatchState {
+    Allowed,
+    PlanMissingCompleteEpic,
+    EpicNotOpen { epic_id: String },
+    PlanHasPendingEpic { epic_id: String },
+}
+
+impl PlanDispatchState {
+    fn skip_reason(&self) -> Option<SkipReason> {
+        match self {
+            Self::Allowed => None,
+            Self::PlanMissingCompleteEpic => Some(SkipReason::PlanMissingCompleteEpic),
+            Self::EpicNotOpen { .. } => Some(SkipReason::EpicNotOpen),
+            Self::PlanHasPendingEpic { .. } => Some(SkipReason::PlanHasPendingEpic),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait ReconcilerAutomation: Send + Sync {
     async fn merge_plan(&self, plan_id: &str) -> anyhow::Result<crate::plan::PlanMergeState>;
@@ -207,6 +305,8 @@ pub struct Reconciler {
     automation: Option<Arc<dyn ReconcilerAutomation>>,
     journal_wake: Option<Arc<Notify>>,
     feature_gate: Arc<spur_license::FeatureGate>,
+    outcomes: Arc<tokio::sync::Mutex<OutcomeStore>>,
+    clock: Arc<dyn Clock>,
 }
 
 impl Reconciler {
@@ -228,7 +328,21 @@ impl Reconciler {
             automation: None,
             journal_wake: None,
             feature_gate,
+            outcomes: Arc::new(tokio::sync::Mutex::new(OutcomeStore::default())),
+            clock: Arc::new(SystemClock),
         }
+    }
+
+    pub fn set_outcomes(&mut self, outcomes: Arc<tokio::sync::Mutex<OutcomeStore>>) {
+        self.outcomes = outcomes;
+    }
+
+    pub fn outcomes(&self) -> Arc<tokio::sync::Mutex<OutcomeStore>> {
+        Arc::clone(&self.outcomes)
+    }
+
+    pub fn set_clock(&mut self, clock: Arc<dyn Clock>) {
+        self.clock = clock;
     }
 
     pub fn set_journal_wake(&mut self, notify: Arc<Notify>) {
@@ -241,6 +355,94 @@ impl Reconciler {
 
     pub fn set_automation(&mut self, automation: Arc<dyn ReconcilerAutomation>) {
         self.automation = Some(automation);
+    }
+
+    fn now(&self) -> SystemTime {
+        self.clock.now()
+    }
+
+    async fn mark_tick(&self) {
+        let now = self.now();
+        self.outcomes.lock().await.mark_tick(now);
+    }
+
+    async fn record_outcome(&self, plan_id: Option<&str>, outcome: DispatchOutcome) {
+        self.outcomes.lock().await.record_outcome(plan_id, outcome);
+    }
+
+    async fn record_no_ready(&self, plan_id: Option<&str>) {
+        let now = self.now();
+        let outcome = DispatchOutcome::NoReadyTasks {
+            plan_id: plan_id.unwrap_or("*").to_string(),
+            reason: NoReadyReason::NoMatchingRows,
+            timestamp: now,
+        };
+        self.record_outcome(plan_id, outcome).await;
+    }
+
+    async fn record_no_dispatch_context(&self, ready_count: usize) {
+        let now = self.now();
+        self.outcomes.lock().await.record_no_dispatch_context(
+            self.plan_id.as_deref(),
+            ready_count,
+            now,
+        );
+    }
+
+    async fn record_dispatched(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+        agent: &str,
+        delegation_id: &str,
+        agent_fallback: bool,
+    ) {
+        let now = self.now();
+        self.outcomes.lock().await.record_dispatched(
+            plan_id,
+            task_id,
+            agent,
+            delegation_id,
+            agent_fallback,
+            now,
+        );
+    }
+
+    async fn record_skipped(&self, plan_id: Option<&str>, task_id: &str, reason: SkipReason) {
+        let now = self.now();
+        let reason_for_log = reason.clone();
+        let decision = self
+            .outcomes
+            .lock()
+            .await
+            .record_skipped(plan_id, task_id, reason, now);
+        self.log_skip_decision(plan_id, task_id, &reason_for_log, decision);
+    }
+
+    fn log_skip_decision(
+        &self,
+        plan_id: Option<&str>,
+        task_id: &str,
+        reason: &SkipReason,
+        decision: OutcomeLogDecision,
+    ) {
+        if decision.state_changed {
+            tracing::info!(
+                plan_id = plan_id.unwrap_or(""),
+                %task_id,
+                ?reason,
+                "reconciler skip reason changed"
+            );
+        }
+        if let Some(StuckTask { stuck_since, .. }) = decision.stuck_warn {
+            tracing::warn!(
+                plan_id = plan_id.unwrap_or(""),
+                %task_id,
+                ?reason,
+                ?stuck_since,
+                "reconciler task stuck on skip reason"
+            );
+        }
     }
 
     async fn emit_snapshot_for_plan(&self, plan_id: &str) {
@@ -321,12 +523,16 @@ impl Reconciler {
     }
 
     pub async fn tick_once(&self) -> anyhow::Result<bool> {
+        self.mark_tick().await;
         let mut did_work = self.reconcile_terminal_epics().await?;
 
         let Some(dispatch) = &self.dispatch else {
             let ready_ids = self.observe_ready().await?;
             for id in &ready_ids {
                 tracing::debug!(%id, "reconciler observed ready task");
+            }
+            if !ready_ids.is_empty() {
+                self.record_no_dispatch_context(ready_ids.len()).await;
             }
             return Ok(did_work || !ready_ids.is_empty());
         };
@@ -341,6 +547,8 @@ impl Reconciler {
                 .iter()
                 .find_map(|label| crate::plan::labels::parse_plan_id(label))
             else {
+                self.record_skipped(None, &summary.id, SkipReason::MissingPlanId)
+                    .await;
                 continue;
             };
 
@@ -366,14 +574,31 @@ impl Reconciler {
                 .iter()
                 .find(|task| task.spec.issue_id.as_deref() == Some(summary.id.as_str()))
             else {
+                self.record_skipped(
+                    Some(plan_id),
+                    &summary.id,
+                    SkipReason::TaskMissingFromProjection,
+                )
+                .await;
                 continue;
             };
             if !matches!(task.status, crate::plan::PlanTaskStatus::Ready) {
+                let blocked_by = unresolved_blocker_issue_ids(&projected, task);
+                self.record_skipped(
+                    Some(plan_id),
+                    &task.spec.task_id,
+                    SkipReason::TaskStatusNotReady { blocked_by },
+                )
+                .await;
                 continue;
             }
 
             let delegation_id = uuid::Uuid::new_v4().to_string();
             let task_attempt = task.attempt;
+            let agent_fallback = !summary
+                .labels
+                .iter()
+                .any(|label| crate::plan::labels::parse_agent(label).is_some());
             crate::plan::persist_dispatch_intent(
                 self.pm.as_ref(),
                 &summary.id,
@@ -402,6 +627,14 @@ impl Reconciler {
             };
 
             if let Err(error) = dispatch.delegation_tx.send(request).await {
+                self.record_skipped(
+                    Some(plan_id),
+                    &task.spec.task_id,
+                    SkipReason::DispatchSendFailed {
+                        msg: error.to_string(),
+                    },
+                )
+                .await;
                 crate::plan::clear_dispatch_intent(self.pm.as_ref(), &summary.id, &delegation_id)
                     .await?;
                 let mut update = crate::plan::dispatch_send_failure_update(&delegation_id, &[]);
@@ -415,6 +648,14 @@ impl Reconciler {
                 continue;
             }
 
+            self.record_dispatched(
+                plan_id,
+                &task.spec.task_id,
+                &task.spec.agent,
+                &delegation_id,
+                agent_fallback,
+            )
+            .await;
             self.emit_snapshot_for_plan(plan_id).await;
 
             let pm = Arc::clone(&self.pm);
@@ -554,6 +795,13 @@ impl Reconciler {
                 .filter_map(|label| crate::plan::labels::parse_lease_expires_at(label))
                 .max()
             else {
+                let plan_id = summary
+                    .labels
+                    .iter()
+                    .find_map(|label| crate::plan::labels::parse_plan_id(label));
+                let task_id = task_id_from_labels_or_issue(&summary.labels, &summary.id);
+                self.record_skipped(plan_id, &task_id, SkipReason::MissingDispatchLeaseExpiry)
+                    .await;
                 continue;
             };
             if now <= expires_at {
@@ -718,6 +966,8 @@ impl Reconciler {
                 .iter()
                 .find_map(|label| crate::plan::labels::parse_plan_id(label))
             else {
+                self.record_skipped(None, &epic.id, SkipReason::MissingPlanId)
+                    .await;
                 continue;
             };
 
@@ -755,6 +1005,8 @@ impl Reconciler {
                 .collect::<Vec<_>>();
 
             let Some(outcome) = classify_epic_completion(&children, &closed_status) else {
+                // Intentional no-op: non-terminal epics emit no outcome.
+                // Terminal classification is computed elsewhere; absence here is normal.
                 continue;
             };
 
@@ -1003,6 +1255,8 @@ impl Reconciler {
                     .iter()
                     .find_map(|label| crate::plan::labels::parse_plan_id(label))
                 else {
+                    self.record_skipped(None, &epic.id, SkipReason::MissingPlanId)
+                        .await;
                     continue;
                 };
                 for summary in adv
@@ -1021,6 +1275,7 @@ impl Reconciler {
             }
             summaries
         };
+        let had_ready_summaries = !summaries.is_empty();
 
         let mut hydrated = Vec::with_capacity(summaries.len());
         let mut seen_issue_ids = HashSet::new();
@@ -1035,10 +1290,12 @@ impl Reconciler {
                         .find_map(|label| crate::plan::labels::parse_plan_id(label))
                         .map(str::to_string)
                     {
-                        if !self
+                        let dispatch_state = self
                             .plan_allows_dispatch(&plan_id, &mut plan_activation_cache)
-                            .await?
-                        {
+                            .await?;
+                        if let Some(reason) = dispatch_state.skip_reason() {
+                            let task_id = task_id_from_labels_or_issue(&issue.labels, &issue.id);
+                            self.record_skipped(Some(&plan_id), &task_id, reason).await;
                             continue;
                         }
                     }
@@ -1053,12 +1310,15 @@ impl Reconciler {
                         .find_map(|label| crate::plan::labels::parse_plan_id(label))
                         .map(str::to_string)
                     else {
+                        self.record_skipped(None, &issue.id, SkipReason::MissingPlanId)
+                            .await;
                         continue;
                     };
-                    if !self
+                    let dispatch_state = self
                         .plan_allows_dispatch(&plan_id, &mut plan_activation_cache)
-                        .await?
-                    {
+                        .await?;
+                    if let Some(reason) = dispatch_state.skip_reason() {
+                        self.record_skipped(Some(&plan_id), &issue.id, reason).await;
                         continue;
                     }
                     let projected = crate::plan::projector::project_plan_from_beads(
@@ -1067,38 +1327,76 @@ impl Reconciler {
                         self.feature_gate.as_ref(),
                     )
                     .await?;
-                    for task in projected.tasks {
+                    for task in &projected.tasks {
                         if !matches!(task.status, crate::plan::PlanTaskStatus::Ready) {
+                            let blocked_by = unresolved_blocker_issue_ids(&projected, task);
+                            self.record_skipped(
+                                Some(&plan_id),
+                                &task.spec.task_id,
+                                SkipReason::TaskStatusNotReady { blocked_by },
+                            )
+                            .await;
                             continue;
                         }
                         let Some(issue_id) = task.spec.issue_id.as_ref() else {
+                            self.record_skipped(
+                                Some(&plan_id),
+                                &task.spec.task_id,
+                                SkipReason::MissingIssueId,
+                            )
+                            .await;
                             continue;
                         };
                         if !seen_issue_ids.insert(issue_id.clone()) {
+                            self.record_skipped(
+                                Some(&plan_id),
+                                &task.spec.task_id,
+                                SkipReason::DuplicateIssueId,
+                            )
+                            .await;
                             continue;
                         }
                         let task_issue = self.pm.get_issue(issue_id).await?;
                         hydrated.push(issue_to_summary(task_issue));
                     }
                 }
-                _ => {}
+                _ => {
+                    let plan_id = issue
+                        .labels
+                        .iter()
+                        .find_map(|label| crate::plan::labels::parse_plan_id(label));
+                    let task_id = task_id_from_labels_or_issue(&issue.labels, &issue.id);
+                    self.record_skipped(
+                        plan_id,
+                        &task_id,
+                        SkipReason::UnsupportedReadyIssueType {
+                            issue_type: issue.issue_type.clone(),
+                        },
+                    )
+                    .await;
+                }
             }
+        }
+
+        if !had_ready_summaries {
+            self.record_no_ready(self.plan_id.as_deref()).await;
         }
 
         Ok(hydrated)
     }
 
-    async fn plan_allows_dispatch(
+    pub async fn plan_allows_dispatch(
         &self,
         plan_id: &str,
-        cache: &mut HashMap<String, bool>,
-    ) -> anyhow::Result<bool> {
-        if let Some(allowed) = cache.get(plan_id) {
-            return Ok(*allowed);
+        cache: &mut HashMap<String, PlanDispatchState>,
+    ) -> anyhow::Result<PlanDispatchState> {
+        if let Some(state) = cache.get(plan_id) {
+            return Ok(state.clone());
         }
 
-        let mut saw_complete = false;
-        let mut saw_pending = false;
+        let mut open_complete_epic = None;
+        let mut closed_complete_epic = None;
+        let mut pending_epic = None;
         for summary in self
             .pm
             .list_issues(IssueFilter {
@@ -1111,28 +1409,45 @@ impl Reconciler {
             .await?
         {
             let epic = self.pm.get_issue(&summary.id).await?;
-            saw_complete |= epic.status == "open"
+            if pending_epic.is_none()
                 && epic
                     .labels
                     .iter()
-                    .any(|label| label == crate::plan::labels::PLAN_COMPLETE);
-            saw_pending |= epic
+                    .any(|label| label == crate::plan::labels::PLAN_PENDING)
+            {
+                pending_epic = Some(epic.id.clone());
+            }
+            if epic
                 .labels
                 .iter()
-                .any(|label| label == crate::plan::labels::PLAN_PENDING);
+                .any(|label| label == crate::plan::labels::PLAN_COMPLETE)
+            {
+                if epic.status == "open" {
+                    open_complete_epic = Some(epic.id.clone());
+                } else if closed_complete_epic.is_none() {
+                    closed_complete_epic = Some(epic.id.clone());
+                }
+            }
         }
 
-        let allowed = saw_complete && !saw_pending;
-        if !allowed {
+        let state = if let Some(epic_id) = pending_epic {
+            PlanDispatchState::PlanHasPendingEpic { epic_id }
+        } else if open_complete_epic.is_some() {
+            PlanDispatchState::Allowed
+        } else if let Some(epic_id) = closed_complete_epic {
+            PlanDispatchState::EpicNotOpen { epic_id }
+        } else {
+            PlanDispatchState::PlanMissingCompleteEpic
+        };
+        if !matches!(state, PlanDispatchState::Allowed) {
             tracing::debug!(
                 plan_id = %plan_id,
-                saw_complete,
-                saw_pending,
+                ?state,
                 "reconciler suppressed ready tasks for inactive plan"
             );
         }
-        cache.insert(plan_id.to_string(), allowed);
-        Ok(allowed)
+        cache.insert(plan_id.to_string(), state.clone());
+        Ok(state)
     }
 
     /// Returns the IDs of ready tasks under the configured plan filter,
