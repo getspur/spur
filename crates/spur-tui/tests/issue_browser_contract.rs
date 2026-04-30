@@ -2,6 +2,7 @@
 
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::{backend::TestBackend, Terminal};
 use spur_acp::{IssueDetailEvent, IssueSummaryEvent, SpurEvent, SpurEventBody};
 use spur_core::ExecutorLineage;
 use spur_tui::action::{Action, IssueAction, ViewId};
@@ -14,6 +15,18 @@ fn test_ctx() -> ViewContext<'static> {
     spur_tui::test_support::test_view_ctx(&LINEAGE)
 }
 
+fn rendered_buffer_text(terminal: &Terminal<TestBackend>) -> String {
+    let buf = terminal.backend().buffer();
+    let mut rendered = String::new();
+    for y in 0..buf.area.height {
+        for x in 0..buf.area.width {
+            rendered.push_str(buf[(x, y)].symbol());
+        }
+        rendered.push('\n');
+    }
+    rendered
+}
+
 fn sample_summary(id: &str, title: &str, status: &str) -> IssueSummaryEvent {
     IssueSummaryEvent {
         id: id.into(),
@@ -22,6 +35,20 @@ fn sample_summary(id: &str, title: &str, status: &str) -> IssueSummaryEvent {
         status: status.into(),
         priority: None,
         issue_type: None,
+        assignee: None,
+    }
+}
+
+fn sample_pm_summary(id: &str, title: &str) -> spur_pm::IssueSummary {
+    spur_pm::IssueSummary {
+        id: id.into(),
+        source: spur_pm::PmSource::Beads,
+        title: title.into(),
+        status: "open".into(),
+        labels: Vec::new(),
+        url: String::new(),
+        priority: Some(1),
+        issue_type: Some("bug".into()),
         assignee: None,
     }
 }
@@ -54,6 +81,32 @@ fn sample_detail_event(id: &str) -> IssueDetailEvent {
         created_at: now,
         updated_at: now,
     }
+}
+
+#[test]
+fn seed_issues_renders_seeded_rows() {
+    let mut view = IssueBrowserView::new();
+    view.seed_issues(vec![sample_pm_summary(
+        "bd-1809",
+        "IssueBrowser starts populated",
+    )]);
+
+    let backend = TestBackend::new(100, 12);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let ctx = test_ctx();
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+
+    let rendered = rendered_buffer_text(&terminal);
+    assert!(
+        rendered.contains("bd-1809"),
+        "seeded issue id should render, rendered:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("IssueBrowser starts populated"),
+        "seeded issue title should render, rendered:\n{rendered}"
+    );
 }
 
 #[test]

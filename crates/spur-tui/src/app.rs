@@ -2605,11 +2605,20 @@ impl App {
             }
 
             Action::NavigateTo(ViewId::IssueBrowser) => {
-                if self.issue_browser.is_none() {
-                    self.issue_browser = Some(IssueBrowserView::new());
+                let just_created = self.issue_browser.is_none();
+                if just_created {
+                    let mut view = IssueBrowserView::new();
+                    view.seed_issues(self.dashboard.tracked_issues().to_vec());
+                    self.issue_browser = Some(view);
                 }
                 self.current_view = ViewId::IssueBrowser;
                 self.dirty = true;
+                if just_created {
+                    // Background refresh - guarantees user sees fresh data after the
+                    // dashboard's startup snapshot. No-op when pm_service is None
+                    // (orchestrator returns an error which is logged, not surfaced).
+                    self.process_action(Action::RefreshIssues);
+                }
             }
 
             Action::OpenInsights | Action::NavigateTo(ViewId::Insights) => {
@@ -4440,6 +4449,58 @@ impl App {
     /// `SessionMetadataStore::load`.
     pub fn new_for_tests() -> Self {
         App::new(None, false)
+    }
+}
+
+#[cfg(test)]
+mod issue_browser_navigation_tests {
+    use super::*;
+
+    fn issue_summary(id: &str, title: &str) -> spur_acp::IssueSummaryEvent {
+        spur_acp::IssueSummaryEvent {
+            id: id.into(),
+            source: "beads".into(),
+            title: title.into(),
+            status: "open".into(),
+            priority: Some(1),
+            issue_type: Some("bug".into()),
+            assignee: None,
+        }
+    }
+
+    #[test]
+    fn navigate_to_issue_browser_seeds_from_dashboard_cache_and_refreshes_once() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut app = App::new(Some(tx), false);
+
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::IssuesLoaded {
+            issues: vec![issue_summary("bd-1809", "IssueBrowser starts populated")],
+        }));
+
+        app.process_action(Action::NavigateTo(ViewId::IssueBrowser));
+
+        let tracked = app
+            .issue_browser
+            .as_ref()
+            .expect("navigation should lazily create IssueBrowser")
+            .tracked_issues();
+        assert_eq!(tracked.len(), 1);
+        assert_eq!(tracked[0].id, "bd-1809");
+        assert_eq!(tracked[0].title, "IssueBrowser starts populated");
+
+        match rx.try_recv() {
+            Ok(UserInput::RefreshIssues) => {}
+            Ok(_) => panic!("expected first IssueBrowser navigation to request RefreshIssues"),
+            Err(err) => panic!("expected RefreshIssues after first navigation, got {err}"),
+        }
+
+        app.process_action(Action::NavigateTo(ViewId::Dashboard));
+        app.process_action(Action::NavigateTo(ViewId::IssueBrowser));
+
+        assert!(
+            rx.try_recv().is_err(),
+            "existing IssueBrowser should not request another refresh on navigation"
+        );
     }
 }
 

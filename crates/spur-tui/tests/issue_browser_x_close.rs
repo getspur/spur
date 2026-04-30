@@ -21,9 +21,14 @@ fn sample_summary(id: &str) -> IssueSummaryEvent {
 }
 
 fn seeded_issue_browser_app() -> (App, mpsc::Receiver<UserInput>) {
-    let (mut app, rx) = spur_tui::test_support::app_with_user_input_tx();
+    let (mut app, mut rx) = spur_tui::test_support::app_with_user_input_tx();
     spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
     assert_eq!(*app.current_view(), ViewId::IssueBrowser);
+    match rx.try_recv() {
+        Ok(UserInput::RefreshIssues) => {}
+        Ok(_) => panic!("expected first IssueBrowser navigation to request RefreshIssues"),
+        Err(err) => panic!("expected RefreshIssues after first navigation, got {err}"),
+    }
     spur_tui::test_support::push_event(
         &mut app,
         SpurEvent::now(SpurEventBody::IssuesLoaded {
