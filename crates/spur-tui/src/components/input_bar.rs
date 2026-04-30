@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -13,6 +14,7 @@ use spur_acp::config::EditorMode;
 use tui_textarea::{CursorMove, Input, Key, TextArea};
 
 use crate::components::completion_trigger::IntentEvent;
+use crate::components::paste_burst::{CharDecision, EnterDecision, PasteBurst};
 use crate::components::spinner;
 use crate::input_history::{InputHistoryEntry, InputStateSnapshot, HISTORY_CAP};
 
@@ -117,6 +119,15 @@ pub enum HandleOutcome {
     Key(IntentEvent),
 }
 
+/// The result of `InputBar::tick`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TickOutcome {
+    /// Nothing user-visible changed.
+    Idle,
+    /// An idle paste burst was flushed through `insert_paste`.
+    FlushedPaste,
+}
+
 /// A text input widget for chatting with the brain agent, built on tui-textarea.
 pub struct InputBar {
     /// The underlying textarea widget.
@@ -131,6 +142,10 @@ pub struct InputBar {
     pastes: BTreeMap<usize, String>,
     /// Monotonic paste counter (per-session). Never decrements.
     next_paste_id: usize,
+    /// Fallback detector for terminals that deliver paste as rapid key events.
+    paste_burst: PasteBurst,
+    /// Runtime gate for the fallback paste-burst detector.
+    paste_burst_enabled: bool,
     /// Line cache: byte offset where each line starts.
     line_cache: Vec<usize>,
     /// Status label shown before the prompt.
@@ -167,6 +182,31 @@ const BORDER_OVERHEAD_ROWS: u16 = 2; // Borders::TOP | Borders::BOTTOM
 const BORDER_OVERHEAD_COLS: u16 = 0; // no left/right side borders
 const PASTE_STORE_CAP: usize = 50;
 
+#[cfg(test)]
+fn default_paste_burst_enabled() -> bool {
+    false
+}
+
+#[cfg(all(not(test), debug_assertions))]
+fn default_paste_burst_enabled() -> bool {
+    !running_as_cargo_test_binary()
+}
+
+#[cfg(all(not(test), debug_assertions))]
+fn running_as_cargo_test_binary() -> bool {
+    std::env::args().next().is_some_and(|arg| {
+        std::path::Path::new(&arg)
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .is_some_and(|name| name == "deps")
+    })
+}
+
+#[cfg(all(not(test), not(debug_assertions)))]
+fn default_paste_burst_enabled() -> bool {
+    true
+}
+
 impl InputBar {
     pub fn new() -> Self {
         let mut textarea = TextArea::default();
@@ -181,6 +221,8 @@ impl InputBar {
             protected_ranges: Vec::new(),
             pastes: BTreeMap::new(),
             next_paste_id: 1,
+            paste_burst: PasteBurst::default(),
+            paste_burst_enabled: default_paste_burst_enabled(),
             line_cache: vec![0],
             status: None,
             activity: ActivityKind::Idle,
@@ -264,6 +306,61 @@ impl InputBar {
             EditMode::Emacs => self.handle_emacs_input(key, input),
             EditMode::Vim(mode) => self.handle_vim_input(key, input, mode),
         }
+    }
+
+    fn capture_paste_burst_char(&mut self, c: char, key: KeyEvent) -> Option<IntentEvent> {
+        if !self.paste_burst_enabled || !Self::is_plain_paste_burst_key(key) {
+            self.paste_burst.clear();
+            return None;
+        }
+        let now = Instant::now();
+        if self.paste_burst_context_suppressed()
+            && !self.paste_burst.is_active()
+            && !self.paste_burst.is_fast_continuation(now)
+        {
+            self.flush_paste_burst_now();
+            return None;
+        }
+        match self.paste_burst.on_char(c, now) {
+            CharDecision::PassThrough | CharDecision::Armed => None,
+            CharDecision::Buffered => Some(IntentEvent::NoOp),
+            CharDecision::Flushed(text) => {
+                self.insert_paste(&text);
+                Some(IntentEvent::Pasted)
+            }
+        }
+    }
+
+    fn capture_paste_burst_enter(&mut self, key: KeyEvent) -> Option<HandleOutcome> {
+        if !self.paste_burst_enabled
+            || !Self::is_plain_paste_burst_key(key)
+            || (self.paste_burst_context_suppressed() && !self.paste_burst.is_active())
+        {
+            self.flush_paste_burst_now();
+            return None;
+        }
+
+        match self.paste_burst.on_enter(Instant::now()) {
+            EnterDecision::Submit => None,
+            EnterDecision::BufferNewline => Some(HandleOutcome::Key(IntentEvent::NoOp)),
+            EnterDecision::Flushed(text) => {
+                self.insert_paste(&text);
+                Some(HandleOutcome::Key(IntentEvent::Pasted))
+            }
+            EnterDecision::InsertNewline => {
+                self.textarea.insert_newline();
+                self.rebuild_line_cache();
+                Some(HandleOutcome::Key(IntentEvent::TypedChar('\n')))
+            }
+        }
+    }
+
+    fn is_plain_paste_burst_key(key: KeyEvent) -> bool {
+        !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT)
+    }
+
+    fn paste_burst_context_suppressed(&self) -> bool {
+        matches!(self.text().as_bytes().first(), Some(b'/'))
     }
 
     fn keyevent_to_input(&self, key: KeyEvent) -> Input {
@@ -388,6 +485,9 @@ impl InputBar {
                 return HandleOutcome::Key(IntentEvent::DeletedChar);
             }
             KeyCode::Char(c) => {
+                if let Some(intent) = self.capture_paste_burst_char(c, key) {
+                    return HandleOutcome::Key(intent);
+                }
                 self.insert_char_with_protected_check(c);
                 return HandleOutcome::Key(IntentEvent::TypedChar(c));
             }
@@ -397,6 +497,9 @@ impl InputBar {
                 return HandleOutcome::Key(IntentEvent::TypedChar('\n'));
             }
             KeyCode::Enter => {
+                if let Some(outcome) = self.capture_paste_burst_enter(key) {
+                    return outcome;
+                }
                 return match self.submit() {
                     Some((t, interrupt)) => HandleOutcome::Submit(t, interrupt),
                     None => HandleOutcome::Key(IntentEvent::NoOp),
@@ -929,10 +1032,16 @@ impl InputBar {
                 return HandleOutcome::Key(IntentEvent::MovedCursor);
             }
             KeyCode::Char(c) => {
+                if let Some(intent) = self.capture_paste_burst_char(c, key) {
+                    return HandleOutcome::Key(intent);
+                }
                 self.insert_char_with_protected_check(c);
                 return HandleOutcome::Key(IntentEvent::TypedChar(c));
             }
             KeyCode::Enter => {
+                if let Some(outcome) = self.capture_paste_burst_enter(key) {
+                    return outcome;
+                }
                 return match self.submit() {
                     Some((t, interrupt)) => HandleOutcome::Submit(t, interrupt),
                     None => HandleOutcome::Key(IntentEvent::NoOp),
@@ -1240,6 +1349,7 @@ impl InputBar {
 
     /// Insert a protected atom at the cursor.
     pub fn insert_atom(&mut self, text: impl AsRef<str>, uri: String, name: String) {
+        self.paste_burst.clear();
         if let Some(idx) = self.range_at_cursor() {
             self.delete_range(idx);
         }
@@ -1357,6 +1467,7 @@ impl InputBar {
         self.last_inner_width.set(last_w);
         self.goal_vcol = None;
         self.activity = ActivityKind::Idle;
+        self.paste_burst.clear();
         self.set_mode(mode);
     }
 
@@ -1408,11 +1519,13 @@ impl InputBar {
 
     /// Replace text and cursor wholesale.
     pub fn set_text(&mut self, text: String, cursor: usize) {
+        self.paste_burst.clear();
         self.restore_snapshot(&InputStateSnapshot::from_text(text), cursor);
     }
 
     /// Replace text, protected ranges, and cursor wholesale.
     pub fn set_state(&mut self, snapshot: InputStateSnapshot, cursor: usize) {
+        self.paste_burst.clear();
         self.restore_snapshot(&snapshot, cursor);
     }
 
@@ -1459,18 +1572,68 @@ impl InputBar {
         self.status.is_some()
     }
 
-    /// Advance the animation counter when the current activity is active.
+    /// Advance the animation counter and flush any idle paste burst.
     /// Called from the view's `tick()` loop.
-    pub fn tick(&self) {
+    pub fn tick(&mut self) -> TickOutcome {
         if self.activity.is_active() {
             self.tick_counter
                 .set(self.tick_counter.get().wrapping_add(1));
+        }
+        if self.flush_paste_burst_if_due() {
+            TickOutcome::FlushedPaste
+        } else {
+            TickOutcome::Idle
         }
     }
 
     /// True when the status label is in an animated activity state.
     pub fn has_active_animation(&self) -> bool {
         self.activity.is_active()
+    }
+
+    pub(crate) fn paste_burst_active(&self) -> bool {
+        self.paste_burst.is_active()
+    }
+
+    /// Set the paste-burst fallback kill switch.
+    pub fn set_disable_paste_burst(&mut self, disabled: bool) {
+        if disabled {
+            self.paste_burst_enabled = false;
+            self.paste_burst.clear();
+        } else {
+            self.paste_burst_enabled = default_paste_burst_enabled();
+        }
+    }
+
+    /// Test-only: opt in or out of paste-burst fallback detection.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub(crate) fn enable_paste_burst_for_test(&mut self, enabled: bool) {
+        self.paste_burst_enabled = enabled;
+        if !enabled {
+            self.paste_burst.clear();
+        }
+    }
+
+    /// Flush a completed paste burst through the normal paste insertion path.
+    pub fn flush_paste_burst_if_due(&mut self) -> bool {
+        if !self.paste_burst_enabled {
+            return false;
+        }
+        let Some(text) = self.paste_burst.flush_if_idle(Instant::now()) else {
+            return false;
+        };
+        self.insert_paste(&text);
+        true
+    }
+
+    fn flush_paste_burst_now(&mut self) -> bool {
+        let Some(text) = self.paste_burst.flush_now() else {
+            self.paste_burst.clear();
+            return false;
+        };
+        self.insert_paste(&text);
+        true
     }
 
     /// Replace the in-memory history with persisted entries (e.g. loaded

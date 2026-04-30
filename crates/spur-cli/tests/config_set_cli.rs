@@ -56,6 +56,19 @@ edit_mode = "vim"
 }
 
 #[test]
+fn config_set_tui_disable_paste_burst_true_writes_file() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path().to_path_buf();
+    seed_repo_config(&repo, "");
+
+    config_set::run(&repo, "tui.disable_paste_burst", "true", false).unwrap();
+    let cfg: SpurConfig =
+        toml::from_str(&fs::read_to_string(repo.join(".spur").join("config.toml")).unwrap())
+            .unwrap();
+    assert!(cfg.tui.disable_paste_burst);
+}
+
+#[test]
 fn config_set_invalid_value_errors_clearly() {
     let dir = tempdir().unwrap();
     let repo = dir.path().to_path_buf();
@@ -80,7 +93,7 @@ fn config_set_unknown_key_errors_clearly() {
         .expect_err("unknown key must error");
     let msg = format!("{err:#}");
     assert!(
-        msg.contains("tui.edit_mode"),
+        msg.contains("tui.edit_mode") && msg.contains("tui.disable_paste_burst"),
         "error must list supported keys; got: {msg}"
     );
 }

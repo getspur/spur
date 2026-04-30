@@ -664,6 +664,8 @@ impl App {
         // composer until they toggled. SessionDetail is None at boot and
         // receives the mode on instantiation, so it does not need syncing here.
         app.dashboard.set_edit_mode(app.edit_mode);
+        app.dashboard
+            .set_disable_paste_burst(app.config.tui.disable_paste_burst);
 
         // Apply landing-specific setup
         if let crate::landing::LandingDecision::SetupRequired = &app.landing {
@@ -2381,6 +2383,7 @@ impl App {
                 // Sync edit mode to newly created session detail view.
                 if let Some(ref mut detail) = self.session_detail {
                     detail.set_edit_mode(self.edit_mode);
+                    detail.set_disable_paste_burst(self.config.tui.disable_paste_burst);
                 }
 
                 // Auto-navigate from Dashboard or SessionPicker
@@ -3735,7 +3738,7 @@ impl App {
         match self.current_view {
             ViewId::Dashboard => {
                 self.dashboard.tick();
-                let flushed_batch = self.dashboard.tick_and_report_flush();
+                let flushed_batch_or_paste = self.dashboard.tick_and_report_flush();
                 // Mark dirty when executors are actively running (spinners animate)
                 use spur_core::LifecycleState;
                 let has_active = self.lineage.nodes().any(|n| {
@@ -3746,7 +3749,10 @@ impl App {
                             | LifecycleState::Resuming
                     )
                 });
-                if has_active || flushed_batch || self.dashboard.input_bar_has_active_animation() {
+                if has_active
+                    || flushed_batch_or_paste
+                    || self.dashboard.input_bar_has_active_animation()
+                {
                     self.dirty = true;
                 }
             }
