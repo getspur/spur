@@ -15,24 +15,25 @@ pub async fn render_batch_to_thread(
     renders: Vec<crate::runtime::RuntimeRender>,
 ) -> anyhow::Result<()> {
     use crate::telegram::format::{
-        markdown_to_telegram_html, render_truncated_text, truncate_button_label_bytes,
+        markdown_to_telegram_chunks, render_truncated_text, truncate_button_label_bytes,
         TELEGRAM_BUTTON_LABEL_MAX_BYTES,
     };
 
     for render in renders {
         match render {
             crate::runtime::RuntimeRender::ServiceMessage { text } => {
-                let body = render_truncated_text(&text);
-                let html = markdown_to_telegram_html(&body);
-                client
-                    .send_html_to_thread(chat_id, message_thread_id, html, body)
-                    .await?;
+                for chunk in markdown_to_telegram_chunks(&text) {
+                    client
+                        .send_html_to_thread(chat_id, message_thread_id, chunk.html, chunk.plain)
+                        .await?;
+                }
             }
             crate::runtime::RuntimeRender::FinalAnswer { text } => {
-                let html = markdown_to_telegram_html(&text);
-                client
-                    .send_html_to_thread(chat_id, message_thread_id, html, text)
-                    .await?;
+                for chunk in markdown_to_telegram_chunks(&text) {
+                    client
+                        .send_html_to_thread(chat_id, message_thread_id, chunk.html, chunk.plain)
+                        .await?;
+                }
             }
             crate::runtime::RuntimeRender::WorkingStatus { text } => {
                 sender
