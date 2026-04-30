@@ -216,13 +216,13 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
         match event {
             Event::Start(Tag::Link { dest_url, .. }) => 11 + escaped_attr_units(dest_url),
             Event::Start(Tag::BlockQuote(_)) => 12,
-            Event::Start(Tag::CodeBlock(_)) => self.state.open_blockquote_count() * 13 + 11,
+            Event::Start(Tag::CodeBlock(_)) => self.state.open_blockquote_count() * 13 + 13,
             Event::Start(Tag::TableHead | Tag::TableRow | Tag::TableCell) => 3,
             Event::Start(Tag::Image { .. }) => 0,
             Event::Start(_) => 8,
             Event::End(TagEnd::BlockQuote(_)) => 15,
             Event::End(TagEnd::CodeBlock) => {
-                15 + 12 * usize::from(self.state.suspended_blockquotes)
+                17 + 12 * usize::from(self.state.suspended_blockquotes)
             }
             Event::End(TagEnd::List(_) | TagEnd::Image | TagEnd::Table | TagEnd::TableCell) => 0,
             Event::End(_) => 8,
@@ -343,21 +343,6 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
                 self.ensure_blank_line();
                 self.state.table_state = Some(TableState::default());
             }
-            Tag::TableHead | Tag::TableRow => {
-                if self.state.current_html_units() + self.dynamic_reserve() + 2048
-                    > self.budget.max_units
-                    && self.state.at_safe_flush_point()
-                {
-                    self.flush_chunk();
-                }
-                if let Some(table) = &mut self.state.table_state {
-                    table.in_header = matches!(tag, Tag::TableHead);
-                    table.current_cell_index = 0;
-                    table.in_row = true;
-                }
-                self.ensure_line_start();
-                self.push_text_literal("| ");
-            }
             Tag::TableCell => {
                 let needs_separator = self
                     .state
@@ -419,20 +404,6 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
             TagEnd::Image => self.end_image(),
             TagEnd::Table => {
                 self.state.table_state = None;
-            }
-            TagEnd::TableHead | TagEnd::TableRow => {
-                if self
-                    .state
-                    .table_state
-                    .as_ref()
-                    .is_some_and(|table| table.in_row)
-                {
-                    self.push_text_literal(" |\n");
-                }
-                if let Some(table) = &mut self.state.table_state {
-                    table.in_row = false;
-                    table.in_header = false;
-                }
             }
             TagEnd::TableCell => {}
             _ => {}
@@ -1214,7 +1185,10 @@ fn plain_chunk_text(text: &str, code_ranges: &[Range<usize>]) -> String {
 }
 
 fn scrub_plain_markers(text: &str) -> String {
-    text.replace("```", "").replace("**", "")
+    text.replace("```", "")
+        .replace("**", "")
+        .replace("~~", "")
+        .replace("__", "")
 }
 
 fn push_escaped_text(output: &mut String, text: &str) {
@@ -1229,7 +1203,7 @@ fn push_escaped_text(output: &mut String, text: &str) {
 }
 
 fn push_plain_projection_text(output: &mut String, text: &str) {
-    output.push_str(&text.replace("```", "").replace("**", ""));
+    output.push_str(&scrub_plain_markers(text));
 }
 
 fn push_escaped_attr(output: &mut String, text: &str) {

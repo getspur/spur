@@ -200,6 +200,19 @@ fn plain_projection_preserves_double_asterisk_inside_code_block() {
 }
 
 #[test]
+fn plain_projection_strips_double_tilde_outside_code() {
+    for input in ["~~strike~~", r"\~\~strike\~\~", r"\_\_strong\_\_"] {
+        let plain = rendered_chunks(input)
+            .into_iter()
+            .map(|chunk| chunk.plain)
+            .collect::<String>();
+
+        assert!(!plain.contains("~~"), "{plain:?}");
+        assert!(!plain.contains("__"), "{plain:?}");
+    }
+}
+
+#[test]
 fn blockquote_with_code_re_opens_after_code_block() {
     let input = "> quoted\n>\n> ```\n> code\n> ```\n> after";
 
@@ -509,13 +522,15 @@ fn html_escape_expansion_is_budgeted_after_rendering() {
 
 #[test]
 fn malformed_markdown_markers_do_not_leak_to_plain_projection() {
-    let chunks = rendered_chunks("** ** ** ~~strike~~ and `code <&>`\n\n");
+    let chunks = rendered_chunks("** ** ** ~~strike~~ \\_\\_strong\\_\\_ and `code <&>`\n\n");
     let plain = chunks
         .iter()
         .map(|chunk| chunk.plain.as_str())
         .collect::<String>();
 
     assert!(!plain.contains("**"));
+    assert!(!plain.contains("~~"));
+    assert!(!plain.contains("__"));
 }
 
 #[test]
@@ -601,6 +616,7 @@ proptest! {
         for chunk in rendered_chunks(&input) {
             prop_assert!(!chunk.plain.contains("**"), "{}", chunk.plain);
             prop_assert!(!chunk.plain.contains("```"), "{}", chunk.plain);
+            prop_assert!(!chunk.plain.contains("~~"), "{}", chunk.plain);
             prop_assert!(!has_markdown_link_marker(&chunk.plain), "{}", chunk.plain);
         }
     }
