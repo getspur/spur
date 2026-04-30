@@ -171,7 +171,7 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
             .open_blocks
             .iter()
             .rev()
-            .map(close_block_cost)
+            .map(|block| close_block_tag(block).len())
             .sum();
         let list_prefix = self.state.list_stack.len().saturating_mul(4);
         let table_close = self
@@ -204,11 +204,7 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
                 self.ensure_blank_line();
                 self.push_text_literal("───\n\n");
             }
-            Event::FootnoteReference(label) => {
-                self.push_text_literal("[");
-                self.push_escaped_text_budgeted(&label);
-                self.push_text_literal("]");
-            }
+            Event::FootnoteReference(label) => self.push_escaped_text_budgeted(&label),
             Event::TaskListMarker(checked) => {
                 self.push_text_literal(if checked { "[x] " } else { "[ ] " });
             }
@@ -519,7 +515,7 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
         self.state.open_inlines.push(InlineContext::Code);
         self.push_html_literal("<code>");
         push_escaped_text(&mut self.state.current_html, code);
-        push_plain_text(&mut self.state.current_plain, code);
+        self.state.current_plain.push_str(code);
         self.push_html_literal("</code>");
         let _ = self.state.open_inlines.pop();
     }
@@ -566,7 +562,7 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
 
     fn push_escaped_text_raw(&mut self, text: &str) {
         push_escaped_text(&mut self.state.current_html, text);
-        push_plain_text(&mut self.state.current_plain, text);
+        self.state.current_plain.push_str(text);
     }
 
     fn push_html_literal(&mut self, text: &str) {
@@ -722,7 +718,7 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
 
 impl RendererState {
     fn current_html_units(&self) -> usize {
-        utf16_units(&self.current_html)
+        self.current_html.encode_utf16().count()
     }
 
     fn at_safe_flush_point(&self) -> bool {
@@ -764,10 +760,7 @@ fn close_inline_tag(inline: &InlineContext) -> &'static str {
 fn open_block_tag(block: &BlockContext) -> &'static str {
     match block {
         BlockContext::BlockQuote => "<blockquote>",
-        BlockContext::PreCode { lang } => {
-            let _ = lang.as_deref();
-            "<pre><code>"
-        }
+        BlockContext::PreCode { lang } => lang.as_deref().map_or("<pre><code>", |_| "<pre><code>"),
     }
 }
 
@@ -776,10 +769,6 @@ fn close_block_tag(block: &BlockContext) -> &'static str {
         BlockContext::BlockQuote => "</blockquote>",
         BlockContext::PreCode { .. } => "</code></pre>",
     }
-}
-
-fn close_block_cost(block: &BlockContext) -> usize {
-    close_block_tag(block).len()
 }
 
 fn best_escaped_text_split(text: &str, max_units: usize) -> usize {
@@ -834,10 +823,6 @@ fn escaped_attr_units(text: &str) -> usize {
         .sum()
 }
 
-fn utf16_units(text: &str) -> usize {
-    text.encode_utf16().count()
-}
-
 fn chunk_text(text: &str) -> String {
     text.trim_end_matches('\n').to_string()
 }
@@ -855,10 +840,6 @@ fn push_escaped_text(output: &mut String, text: &str) {
             _ => output.push(ch),
         }
     }
-}
-
-fn push_plain_text(output: &mut String, text: &str) {
-    output.push_str(text);
 }
 
 fn push_escaped_attr(output: &mut String, text: &str) {
