@@ -987,7 +987,10 @@ impl Reconciler {
         let summaries = adv
             .list_ready(ReadyFilter {
                 labels_all: labels,
-                limit: Some(50),
+                // Short-term: raised from 50 to absorb plan tasks that sort
+                // below higher-priority backlog items. Real fix is a
+                // plan-aware query — see bd-1z60.
+                limit: Some(1000),
                 ..Default::default()
             })
             .await?;
