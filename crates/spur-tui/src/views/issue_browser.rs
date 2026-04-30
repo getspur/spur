@@ -151,26 +151,34 @@ impl IssueBrowserView {
                 None
             }
 
-            // Enter — toggle detail
-            KeyCode::Enter if key.modifiers.is_empty() => match &self.issue_focus {
-                IssueFocus::Loaded { .. } => {
-                    self.issue_focus = IssueFocus::None;
-                    None
-                }
-                _ => {
-                    if let Some(id) = self
-                        .issues_panel
-                        .selected_id(&self.tracked_issues)
-                        .map(String::from)
+            // Enter — fetch detail for the selected row, or close if already
+            // viewing that same row's detail. If the list is empty, fall back
+            // to closing any open detail so the pane never lingers without a
+            // corresponding row.
+            KeyCode::Enter if key.modifiers.is_empty() => {
+                let selected = self
+                    .issues_panel
+                    .selected_id(&self.tracked_issues)
+                    .map(String::from);
+                match (&self.issue_focus, selected) {
+                    (IssueFocus::Loaded { id: loaded_id, issue: _ }, Some(sel))
+                        if loaded_id == &sel =>
                     {
-                        self.issue_focus = IssueFocus::Loading { id: id.clone() };
-                        self.issue_detail_pane.reset();
-                        Some(Action::Issue(IssueAction::ViewDetail { id }))
-                    } else {
+                        self.issue_focus = IssueFocus::None;
                         None
                     }
+                    (_, Some(sel)) => {
+                        self.issue_focus = IssueFocus::Loading { id: sel.clone() };
+                        self.issue_detail_pane.reset();
+                        Some(Action::Issue(IssueAction::ViewDetail { id: sel }))
+                    }
+                    (IssueFocus::Loaded { .. }, None) => {
+                        self.issue_focus = IssueFocus::None;
+                        None
+                    }
+                    (_, None) => None,
                 }
-            },
+            }
 
             // Status actions
             KeyCode::Char('o') if key.modifiers.is_empty() => self.update_status("open", false),
