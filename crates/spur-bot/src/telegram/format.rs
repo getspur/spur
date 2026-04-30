@@ -51,7 +51,6 @@ struct RendererState {
     table_state: Option<TableState>,
     suspended_blockquotes: u8,
     suppressed_depth: usize,
-    link_frames: Vec<(bool, usize)>,
 }
 
 #[derive(Clone)]
@@ -62,11 +61,31 @@ enum BlockContext {
 
 #[derive(Clone)]
 enum InlineContext {
+    Bold {
+        html_start: usize,
+        plain_start: usize,
+    },
+    Italic {
+        html_start: usize,
+        plain_start: usize,
+    },
+    Strike {
+        html_start: usize,
+        plain_start: usize,
+    },
+    Code,
+    Link {
+        href: String,
+        tagged: bool,
+        html_start: usize,
+        plain_start: usize,
+    },
+}
+
+enum InlineKind {
     Bold,
     Italic,
     Strike,
-    Code,
-    Link { href: String },
 }
 
 #[derive(Clone)]
@@ -251,9 +270,9 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
                 });
             }
             Tag::Item => self.start_list_item(),
-            Tag::Emphasis => self.open_inline(InlineContext::Italic),
-            Tag::Strong => self.open_inline(InlineContext::Bold),
-            Tag::Strikethrough => self.open_inline(InlineContext::Strike),
+            Tag::Emphasis => self.open_inline(InlineKind::Italic),
+            Tag::Strong => self.open_inline(InlineKind::Bold),
+            Tag::Strikethrough => self.open_inline(InlineKind::Strike),
             Tag::Link { dest_url, .. } => {
                 self.start_link(dest_url);
             }
@@ -434,6 +453,8 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
 
     fn start_link(&mut self, dest_url: &str) {
         let href = dest_url.to_string();
+        let html_start = self.state.current_html.len();
+        let plain_start = self.state.current_plain.len();
         let tagged = !href.is_empty()
             && 15 + escaped_attr_units(&href) + self.dynamic_reserve() <= self.budget.max_units;
         if tagged {
@@ -441,21 +462,24 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
             push_escaped_attr(&mut self.state.current_html, &href);
             self.push_html_literal("\">");
         }
-        self.state.open_inlines.push(InlineContext::Link { href });
-        self.state
-            .link_frames
-            .push((tagged, self.state.current_plain.len()));
+        self.state.open_inlines.push(InlineContext::Link {
+            href,
+            tagged,
+            html_start,
+            plain_start,
+        });
     }
 
     fn end_link(&mut self) {
-        let Some(InlineContext::Link { href }) = self.state.open_inlines.pop() else {
+        let Some(InlineContext::Link {
+            href,
+            tagged,
+            plain_start,
+            ..
+        }) = self.state.open_inlines.pop()
+        else {
             return;
         };
-        let (tagged, plain_start) = self
-            .state
-            .link_frames
-            .pop()
-            .unwrap_or((false, self.state.current_plain.len()));
         if tagged {
             self.push_html_literal("</a>");
         } else if !href.is_empty() {
@@ -468,13 +492,32 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
         }
     }
 
-    fn open_inline(&mut self, inline: InlineContext) {
-        self.push_html_literal(match inline {
-            InlineContext::Bold => "<b>",
-            InlineContext::Italic => "<i>",
-            InlineContext::Strike => "<s>",
-            _ => "",
-        });
+    fn open_inline(&mut self, kind: InlineKind) {
+        let html_start = self.state.current_html.len();
+        let plain_start = self.state.current_plain.len();
+        let inline = match kind {
+            InlineKind::Bold => {
+                self.push_html_literal("<b>");
+                InlineContext::Bold {
+                    html_start,
+                    plain_start,
+                }
+            }
+            InlineKind::Italic => {
+                self.push_html_literal("<i>");
+                InlineContext::Italic {
+                    html_start,
+                    plain_start,
+                }
+            }
+            InlineKind::Strike => {
+                self.push_html_literal("<s>");
+                InlineContext::Strike {
+                    html_start,
+                    plain_start,
+                }
+            }
+        };
         self.state.open_inlines.push(inline);
     }
 
@@ -484,9 +527,9 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
         };
         let matches = matches!(
             (&inline, tag),
-            (InlineContext::Italic, TagEnd::Emphasis)
-                | (InlineContext::Bold, TagEnd::Strong)
-                | (InlineContext::Strike, TagEnd::Strikethrough)
+            (InlineContext::Italic { .. }, TagEnd::Emphasis)
+                | (InlineContext::Bold { .. }, TagEnd::Strong)
+                | (InlineContext::Strike { .. }, TagEnd::Strikethrough)
         );
         if matches {
             self.push_html_literal(close_inline_tag(&inline));
@@ -542,6 +585,11 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
                 break;
             }
 
+            if !self.state.open_inlines.is_empty() {
+                self.degrade_open_inline_run_to_plain(remaining);
+                break;
+            }
+
             let available = self
                 .budget
                 .max_units
@@ -563,6 +611,26 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
     fn push_escaped_text_raw(&mut self, text: &str) {
         push_escaped_text(&mut self.state.current_html, text);
         self.state.current_plain.push_str(text);
+    }
+
+    fn degrade_open_inline_run_to_plain(&mut self, pending: &str) {
+        let Some((html_start, plain_start)) = self.state.open_inline_run_start() else {
+            return;
+        };
+        let mut plain = self.state.current_plain[plain_start..].to_string();
+        plain.push_str(pending);
+        if let Some(href) = self.state.open_inline_link_href() {
+            if plain.is_empty() {
+                let _ = write!(plain, "({href})");
+            } else {
+                let _ = write!(plain, " ({href})");
+            }
+        }
+
+        self.state.current_html.truncate(html_start);
+        self.state.current_plain.truncate(plain_start);
+        self.state.open_inlines.clear();
+        self.push_escaped_text_budgeted(&plain);
     }
 
     fn push_html_literal(&mut self, text: &str) {
@@ -611,15 +679,14 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
     fn close_open_inlines_for_flush(&mut self) {
         while let Some(inline) = self.state.open_inlines.pop() {
             match &inline {
-                InlineContext::Link { .. } => {
-                    if self.state.link_frames.pop().is_some_and(|frame| frame.0) {
+                InlineContext::Link { tagged, .. } => {
+                    if *tagged {
                         self.state.current_html.push_str("</a>");
                     }
                 }
                 _ => self.state.current_html.push_str(close_inline_tag(&inline)),
             }
         }
-        self.state.link_frames.clear();
     }
 
     fn finalize(&mut self) {
@@ -745,13 +812,46 @@ impl RendererState {
     fn is_suppressing(&self) -> bool {
         self.suppressed_depth > 0
     }
+
+    fn open_inline_run_start(&self) -> Option<(usize, usize)> {
+        self.open_inlines
+            .iter()
+            .filter_map(|inline| match inline {
+                InlineContext::Bold {
+                    html_start,
+                    plain_start,
+                }
+                | InlineContext::Italic {
+                    html_start,
+                    plain_start,
+                }
+                | InlineContext::Strike {
+                    html_start,
+                    plain_start,
+                }
+                | InlineContext::Link {
+                    html_start,
+                    plain_start,
+                    ..
+                } => Some((*html_start, *plain_start)),
+                InlineContext::Code => None,
+            })
+            .min_by_key(|(html_start, plain_start)| (*html_start, *plain_start))
+    }
+
+    fn open_inline_link_href(&self) -> Option<String> {
+        self.open_inlines.iter().find_map(|inline| match inline {
+            InlineContext::Link { href, .. } if !href.is_empty() => Some(href.clone()),
+            _ => None,
+        })
+    }
 }
 
 fn close_inline_tag(inline: &InlineContext) -> &'static str {
     match inline {
-        InlineContext::Bold => "</b>",
-        InlineContext::Italic => "</i>",
-        InlineContext::Strike => "</s>",
+        InlineContext::Bold { .. } => "</b>",
+        InlineContext::Italic { .. } => "</i>",
+        InlineContext::Strike { .. } => "</s>",
         InlineContext::Code => "</code>",
         InlineContext::Link { .. } => "</a>",
     }
