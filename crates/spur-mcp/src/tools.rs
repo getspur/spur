@@ -549,6 +549,17 @@ fn get_plan_status_def() -> ToolDefinition {
     }
 }
 
+fn get_reconciler_status_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "get_reconciler_status".into(),
+        description: "Get the reconciler's in-memory observability state across all plans, including recent dispatch outcomes, stuck tasks, and last tick time.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {}
+        }),
+    }
+}
+
 pub fn get_task_diff_def() -> ToolDefinition {
     ToolDefinition {
         name: "get_task_diff".to_string(),
@@ -692,6 +703,7 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         submit_plan_def(),
         execute_epic_def(),
         get_plan_status_def(),
+        get_reconciler_status_def(),
         get_task_diff_def(),
         review_task_def(),
         report_signal_def(),

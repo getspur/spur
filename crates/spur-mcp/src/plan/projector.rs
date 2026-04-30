@@ -143,13 +143,16 @@ fn task_id_for_issue(issue: &spur_pm::Issue) -> String {
         .unwrap_or_else(|| issue.id.clone())
 }
 
-fn agent_for_issue(issue: &spur_pm::Issue) -> String {
-    issue
+fn agent_for_issue(issue: &spur_pm::Issue) -> (String, bool) {
+    if let Some(agent) = issue
         .labels
         .iter()
         .find_map(|label| crate::plan::labels::parse_agent(label))
-        .unwrap_or("codex")
-        .to_string()
+    {
+        (agent.to_string(), false)
+    } else {
+        ("codex".to_string(), true)
+    }
 }
 
 fn superseded_status(issue: &spur_pm::Issue) -> Option<PlanTaskStatus> {
@@ -441,10 +444,12 @@ pub async fn project_plan_from_beads(
             })
             .collect();
 
+        let (agent, _agent_fallback) = agent_for_issue(&projected_task.issue);
+
         entries.push(PlanTaskEntry {
             spec: PlanTask {
                 task_id: projected_task.task_id,
-                agent: agent_for_issue(&projected_task.issue),
+                agent,
                 task: projected_task.issue.body.clone(),
                 depends_on,
                 issue_id: Some(projected_task.issue.id.clone()),

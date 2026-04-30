@@ -395,6 +395,9 @@ pub struct McpCallbackServer {
     /// Active execution plans submitted via `submit_plan`.
     active_plans:
         Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<crate::plan::PlanState>>>>>,
+    /// Ephemeral reconciler outcome buffers. MUST NOT be persisted to beads;
+    /// durable plan state is reconstructed from beads on restart.
+    reconciler_outcomes: Arc<tokio::sync::Mutex<crate::plan::outcomes::OutcomeStore>>,
     /// Phase 2.5 idempotency guard: maps `epic_id → plan_id` for the
     /// currently-active plan (if any). A sentinel `"__pending__"` value is
     /// used briefly during the PmService fetch to prevent concurrent
@@ -1667,6 +1670,9 @@ impl McpCallbackServer {
             event_sink,
             feature_gate,
             active_plans: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            reconciler_outcomes: Arc::new(tokio::sync::Mutex::new(
+                crate::plan::outcomes::OutcomeStore::default(),
+            )),
             plan_registry: Arc::new(tokio::sync::Mutex::new(crate::plan::PlanRegistry::default())),
             cancellation_control: None,
             continuation_ctx: Arc::new(continuation_ctx),
@@ -2236,6 +2242,7 @@ impl McpCallbackServer {
                             as Arc<dyn crate::plan::reconciler::ReconcilerAutomation>);
                     let repo_root = self.repo_root.clone();
                     let feature_gate = Arc::clone(&self.feature_gate);
+                    let reconciler_outcomes = Arc::clone(&self.reconciler_outcomes);
                     let journal_notify = Arc::new(tokio::sync::Notify::new());
                     let journal_handle = repo_root.map(|root| {
                         let path = crate::plan::reconciler::beads_journal_path(&root);
@@ -2255,6 +2262,7 @@ impl McpCallbackServer {
                             None, // plan_id: observe all plans when None
                             feature_gate,
                         );
+                        reconciler.set_outcomes(reconciler_outcomes);
                         reconciler.set_auto_merge_approved_plans(auto_merge);
                         reconciler.set_journal_wake(journal_notify);
                         if let Some(a) = automation {
@@ -2462,6 +2470,7 @@ impl McpCallbackServer {
             "submit_plan" => self.handle_submit_plan(id, arguments).await,
             "execute_epic" => self.handle_execute_epic(id, arguments).await,
             "get_plan_status" => self.handle_get_plan_status(id, arguments).await,
+            "get_reconciler_status" => self.handle_get_reconciler_status(id).await,
             "get_task_diff" => match self.handle_get_task_diff(&arguments).await {
                 Ok(text) => JsonRpcResponse::success(
                     id,
@@ -4214,8 +4223,34 @@ impl McpCallbackServer {
         };
 
         let state = plan_state.lock().await;
-        let status = crate::plan::build_plan_status(&plan_id, &state);
+        let mut status = crate::plan::build_plan_status(&plan_id, &state);
+        let outcomes = self.reconciler_outcomes.lock().await;
+        if let serde_json::Value::Object(ref mut fields) = status {
+            fields.insert(
+                "recent_outcomes".into(),
+                serde_json::json!(outcomes.recent_outcomes(&plan_id)),
+            );
+            fields.insert(
+                "stuck_tasks".into(),
+                serde_json::json!(outcomes.stuck_tasks_for_plan(&plan_id)),
+            );
+        }
         let text = serde_json::to_string_pretty(&status).unwrap_or_else(|_| status.to_string());
+
+        JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
+    }
+
+    async fn handle_get_reconciler_status(&self, id: Value) -> JsonRpcResponse {
+        let status = self.reconciler_outcomes.lock().await.reconciler_status();
+        let text = match serde_json::to_string_pretty(&status) {
+            Ok(text) => text,
+            Err(error) => {
+                return JsonRpcResponse::internal_error(
+                    id,
+                    format!("failed to serialize reconciler status: {error}"),
+                )
+            }
+        };
 
         JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
     }
