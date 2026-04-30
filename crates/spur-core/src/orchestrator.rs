@@ -623,6 +623,58 @@ mod session_attach_guard_transfer_tests {
 
         brain.delegation_handle.abort();
     }
+
+    /// bd-3rvt: smoke-test that `apply_mcp_server_settings` runs cleanly and
+    /// leaves the server in a startable state. The three init paths
+    /// (`run_adhoc`, `create_brain_session`, `load_brain_session`) all rely
+    /// on this helper to wire reconciler enablement; if the helper panics or
+    /// puts the server in an unusable state this test catches it.
+    #[tokio::test]
+    async fn apply_mcp_server_settings_is_callable_and_idempotent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = SpurConfig::default();
+        config.cost.db_path = tmp.path().join("cost.db").display().to_string();
+        let orchestrator = Orchestrator::new(tmp.path().to_path_buf(), config, None).unwrap();
+
+        let spur_session_id = SessionId("apply-settings-test".to_string());
+        let brain_session_id: spur_acp::BrainSessionId = spur_session_id.clone().into();
+        let cont_ctx = orchestrator.build_continuation_ctx(spur_session_id);
+        let (mut server, _channel) = McpCallbackServer::new(
+            &brain_session_id,
+            orchestrator.pm_service.clone(),
+            None,
+            cont_ctx,
+            orchestrator.outcome_store.clone(),
+            orchestrator.mcp_feature_gate(),
+        );
+
+        // First call wires the orchestrator-derived settings.
+        orchestrator.apply_mcp_server_settings(&mut server);
+        // Second call must be safe — same args, same effect.
+        orchestrator.apply_mcp_server_settings(&mut server);
+
+        // With `pm_service = None`, the reconciler stays disabled and `start`
+        // does not attempt pidfile acquisition, so we can verify the server
+        // is in a valid state by spinning it up briefly.
+        let server = Arc::new(server);
+        let (_url, handle) = server.clone().start().await.expect("start succeeds");
+        drop(handle);
+    }
+
+    /// bd-3rvt: full integration coverage — load a persisted brain session
+    /// whose plan has ≥1 ready task, drive one reconciler tick, and assert
+    /// `dispatched > 0`. Ignored because it needs a beads DB fixture with a
+    /// pre-seeded epic + ready tasks plus an ACP transport stub for
+    /// `load_brain_session`. See bd-3rvt for the fixture spec.
+    #[tokio::test]
+    #[ignore = "requires beads DB fixture + ACP transport stub; see bd-3rvt"]
+    async fn load_brain_session_dispatches_ready_tasks() {
+        // Fixture path expected: tests/fixtures/bd-3rvt/persisted-plan.beads
+        // (a beads DB with one open epic and ≥1 ready child task carrying
+        // `spur:plan-id:*`). With the helper now applied in
+        // `load_brain_session`, the reconciler must dispatch on the first
+        // tick. Without the fix, `dispatched` stays at 0 indefinitely.
+    }
 }
 
 /// Format a worker task string with an optional `## Relevant Files`
@@ -1708,6 +1760,34 @@ impl Orchestrator {
         }
     }
 
+    /// Apply orchestrator-derived MCP callback-server settings.
+    ///
+    /// Shared by all three brain-session init paths (`run_adhoc`,
+    /// `create_brain_session`, `load_brain_session`). Omitting any setter —
+    /// notably `set_reconciler_enabled` — leaves the reconciler in
+    /// observe-only mode so persisted plans silently never dispatch (bd-3rvt).
+    fn apply_mcp_server_settings(&self, mcp_server: &mut McpCallbackServer) {
+        // v0a.3: enable reconciler for beads backends only (not github).
+        // Reconciler is observation-only in v0a; dispatch lands in v0b.
+        let reconciler_enabled = self
+            .pm_service
+            .as_ref()
+            .map(|pm| pm.source_str() == "beads")
+            .unwrap_or(false);
+        if reconciler_enabled {
+            info!("reconciler enabled (beads backend)");
+        }
+        mcp_server.set_reconciler_enabled(reconciler_enabled, None);
+        mcp_server.set_repo_root(self.repo_root.clone());
+        mcp_server.set_auto_merge_approved_plans(self.config.spur.auto_merge_approved_plans);
+        mcp_server.set_plan_pending_grace(std::time::Duration::from_secs(
+            self.config.spur.plan_pending_grace_secs,
+        ));
+        mcp_server.set_dispatch_lease_duration(std::time::Duration::from_secs(
+            self.config.spur.dispatch_lease_secs,
+        ));
+    }
+
     /// Subscribe to orchestrator events (for TUI, logging, etc.).
     pub fn subscribe(&self) -> broadcast::Receiver<SpurEvent> {
         self.event_tx.subscribe()
@@ -1849,25 +1929,7 @@ impl Orchestrator {
         mcp_server.set_inline_wait(std::time::Duration::from_millis(
             self.config.delegation.inline_wait_ms,
         ));
-        // v0a.3: enable reconciler for beads backends only (not github).
-        // Reconciler is observation-only in v0a; dispatch lands in v0b.
-        let reconciler_enabled = self
-            .pm_service
-            .as_ref()
-            .map(|pm| pm.source_str() == "beads")
-            .unwrap_or(false);
-        if reconciler_enabled {
-            info!("reconciler enabled (beads backend)");
-        }
-        mcp_server.set_reconciler_enabled(reconciler_enabled, None);
-        mcp_server.set_repo_root(self.repo_root.clone());
-        mcp_server.set_auto_merge_approved_plans(self.config.spur.auto_merge_approved_plans);
-        mcp_server.set_plan_pending_grace(std::time::Duration::from_secs(
-            self.config.spur.plan_pending_grace_secs,
-        ));
-        mcp_server.set_dispatch_lease_duration(std::time::Duration::from_secs(
-            self.config.spur.dispatch_lease_secs,
-        ));
+        self.apply_mcp_server_settings(&mut mcp_server);
 
         let mcp_server = Arc::new(mcp_server);
         let (mcp_url, mcp_handle) = mcp_server
@@ -3498,25 +3560,7 @@ impl Orchestrator {
         mcp_server.set_inline_wait(std::time::Duration::from_millis(
             self.config.delegation.inline_wait_ms,
         ));
-        // v0a.3: enable reconciler for beads backends only (not github).
-        // Reconciler is observation-only in v0a; dispatch lands in v0b.
-        let reconciler_enabled = self
-            .pm_service
-            .as_ref()
-            .map(|pm| pm.source_str() == "beads")
-            .unwrap_or(false);
-        if reconciler_enabled {
-            info!("reconciler enabled (beads backend)");
-        }
-        mcp_server.set_reconciler_enabled(reconciler_enabled, None);
-        mcp_server.set_repo_root(self.repo_root.clone());
-        mcp_server.set_auto_merge_approved_plans(self.config.spur.auto_merge_approved_plans);
-        mcp_server.set_plan_pending_grace(std::time::Duration::from_secs(
-            self.config.spur.plan_pending_grace_secs,
-        ));
-        mcp_server.set_dispatch_lease_duration(std::time::Duration::from_secs(
-            self.config.spur.dispatch_lease_secs,
-        ));
+        self.apply_mcp_server_settings(&mut mcp_server);
 
         let mcp_server = Arc::new(mcp_server);
         let (mcp_url, mcp_handle) = mcp_server
@@ -3776,13 +3820,8 @@ impl Orchestrator {
         mcp_server.set_inline_wait(std::time::Duration::from_millis(
             self.config.delegation.inline_wait_ms,
         ));
-        mcp_server.set_repo_root(self.repo_root.clone());
-        mcp_server.set_plan_pending_grace(std::time::Duration::from_secs(
-            self.config.spur.plan_pending_grace_secs,
-        ));
-        mcp_server.set_dispatch_lease_duration(std::time::Duration::from_secs(
-            self.config.spur.dispatch_lease_secs,
-        ));
+        // bd-3rvt: missing here meant resumed sessions silently never dispatched.
+        self.apply_mcp_server_settings(&mut mcp_server);
 
         let mcp_server = Arc::new(mcp_server);
         let (mcp_url, mcp_handle) = mcp_server
