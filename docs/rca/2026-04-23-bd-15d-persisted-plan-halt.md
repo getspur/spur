@@ -330,3 +330,8 @@ The incident is now reduced to two concrete truths:
 - one narrowed runtime gap: reconciler did not dispatch a ready root task even though Beads still surfaced it as ready
 
 That is the map-territory-correct state of the problem.
+
+---
+
+Fixed in: bd-3rvt
+
