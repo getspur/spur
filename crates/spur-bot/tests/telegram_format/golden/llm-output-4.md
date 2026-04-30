@@ -1,0 +1,32 @@
+| row | value | note |
+| --- | --- | --- |
+| 01 | alpha | value <&> 01 |
+| 02 | alpha | value <&> 02 |
+| 03 | alpha | value <&> 03 |
+| 04 | alpha | value <&> 04 |
+| 05 | alpha | value <&> 05 |
+| 06 | alpha | value <&> 06 |
+| 07 | alpha | value <&> 07 |
+| 08 | alpha | value <&> 08 |
+| 09 | alpha | value <&> 09 |
+| 10 | alpha | value <&> 10 |
+| 11 | alpha | value <&> 11 |
+| 12 | alpha | value <&> 12 |
+| 13 | alpha | value <&> 13 |
+| 14 | alpha | value <&> 14 |
+| 15 | alpha | value <&> 15 |
+| 16 | alpha | value <&> 16 |
+| 17 | alpha | value <&> 17 |
+| 18 | alpha | value <&> 18 |
+| 19 | alpha | value <&> 19 |
+| 20 | alpha | value <&> 20 |
+| 21 | alpha | value <&> 21 |
+| 22 | alpha | value <&> 22 |
+| 23 | alpha | value <&> 23 |
+| 24 | alpha | value <&> 24 |
+| 25 | alpha | value <&> 25 |
+| 26 | alpha | value <&> 26 |
+| 27 | alpha | value <&> 27 |
+| 28 | alpha | value <&> 28 |
+| 29 | alpha | value <&> 29 |
+| 30 | alpha | value <&> 30 |

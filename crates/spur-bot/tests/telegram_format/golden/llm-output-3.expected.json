@@ -1,0 +1,6 @@
+[
+  {
+    "html": "<blockquote>level one\n\n<blockquote>level two\n\n<blockquote>level three before code\n\n</blockquote></blockquote></blockquote><pre><code>code under nested quotes &lt;&amp;&gt;\n</code></pre>\n\n<blockquote><blockquote><blockquote>level three after code\nlevel two after nested section\nlevel one after nested section\n\n</blockquote></blockquote></blockquote>\n\nThe blockquote code block must suspend all quote tags before <code>&lt;pre&gt;&lt;code&gt;</code> and\nthen reopen the full depth for the prose that follows.",
+    "plain": "level one\n\nlevel two\n\nlevel three before code\n\ncode under nested quotes <&>\n\n\nlevel three after code\nlevel two after nested section\nlevel one after nested section\n\n\n\nThe blockquote code block must suspend all quote tags before <pre><code> and\nthen reopen the full depth for the prose that follows."
+  }
+]
