@@ -1,10 +1,12 @@
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
+use std::time::{Duration, UNIX_EPOCH};
 
 use spur_acp::{BrainSessionId, SessionId, SpurEvent, SpurEventBody};
 use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind, EpicCompletionOutcome};
 use spur_mcp::plan::labels;
+use spur_mcp::plan::outcomes::{DispatchOutcome, OutcomeStore};
 use spur_mcp::plan::reconciler::{Reconciler, ReconcilerConfig, ReconcilerDispatchCtx};
 use spur_mcp::McpEventSink;
 use tempfile::TempDir;
@@ -299,6 +301,149 @@ async fn t_v0d_2_all_approved_epic_still_yields_plan_ready_to_merge() {
         .count();
     assert_eq!(completed_events, 1, "expected one PlanCompleted event");
     assert_eq!(ready_events, 1, "expected one PlanReadyToMerge event");
+}
+
+#[tokio::test]
+async fn three_task_plan_drops_plan_outcomes_on_epic_close_but_retains_global_ring() {
+    if !br_available() {
+        eprintln!("skipping three_task_plan_drops_plan_outcomes_on_epic_close_but_retains_global_ring: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let epic_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Three Task Epic",
+            "--priority",
+            "2",
+        ],
+    ));
+    let task_ids = ["A", "B", "C"].map(|suffix| {
+        parse_id_from_create(&run_br_json(
+            dir.path(),
+            &[
+                "create",
+                "--type",
+                "task",
+                "--title",
+                &format!("Task {suffix}"),
+                "--priority",
+                "2",
+            ],
+        ))
+    });
+
+    let plan_id = "P-prune";
+    let plan_label = labels::plan_id(plan_id);
+    label_issue(dir.path(), &epic_id, &plan_label);
+    label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
+    for (index, task_id) in task_ids.iter().enumerate() {
+        label_issue(dir.path(), task_id, &plan_label);
+        label_issue(
+            dir.path(),
+            task_id,
+            &labels::plan_task_id(&format!("t{index}")),
+        );
+        label_issue(dir.path(), task_id, &labels::agent("codex"));
+    }
+
+    let pm = beads_pm(dir.path()).await;
+    let outcomes = Arc::new(tokio::sync::Mutex::new(OutcomeStore::default()));
+    outcomes
+        .lock()
+        .await
+        .record_no_dispatch_context(None, 3, UNIX_EPOCH);
+
+    let (delegation_tx, mut delegation_rx) = tokio::sync::mpsc::channel(3);
+    let task_tracker = tokio_util::task::TaskTracker::new();
+    let mut reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        Some(ReconcilerDispatchCtx {
+            delegation_tx,
+            task_tracker: task_tracker.clone(),
+            brain_session_id: BrainSessionId::new(SessionId("brain".into())),
+            event_sink: None,
+            materializer: test_materializer(),
+        }),
+        Some(plan_id.into()),
+        common::server_builder::pro_feature_gate(),
+    );
+    reconciler.set_outcomes(Arc::clone(&outcomes));
+
+    assert!(reconciler.tick_once().await.expect("dispatch tick"));
+    let mut requests = Vec::new();
+    for _ in 0..3 {
+        requests.push(
+            tokio::time::timeout(Duration::from_secs(2), delegation_rx.recv())
+                .await
+                .expect("dispatch request should arrive")
+                .expect("dispatch request"),
+        );
+    }
+    {
+        let outcomes = outcomes.lock().await;
+        let buffer = outcomes
+            .outcomes_by_plan
+            .get(plan_id)
+            .expect("plan outcome buffer after dispatch");
+        assert_eq!(buffer.latest_per_task.len(), 3);
+        assert_eq!(outcomes.outcomes_global.snapshot().len(), 1);
+    }
+
+    for request in requests {
+        request
+            .respond_to
+            .send(spur_acp::DelegationResult {
+                status: spur_acp::DelegationStatus::Success,
+                diff: None,
+                diff_summary: None,
+                summary: Some("done".into()),
+                estimated_cost_usd: 0.0,
+                worker_branch: Some("spur/worker-prune-test".into()),
+                artifact: None,
+            })
+            .expect("send worker result");
+    }
+    task_tracker.close();
+    tokio::time::timeout(Duration::from_secs(2), task_tracker.wait())
+        .await
+        .expect("completion tasks should finish");
+
+    for task_id in &task_ids {
+        pm.update_issue(
+            task_id,
+            spur_pm::IssueUpdate {
+                status: Some(pm.closed_status().to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("close approved child task");
+    }
+
+    assert!(reconciler.tick_once().await.expect("epic closure tick"));
+    let epic = pm.get_issue(&epic_id).await.expect("get epic");
+    assert_eq!(epic.status, pm.closed_status());
+
+    let outcomes = outcomes.lock().await;
+    assert_eq!(outcomes.outcomes_by_plan.len(), 0);
+    assert!(matches!(
+        outcomes.outcomes_global.snapshot().as_slice(),
+        [DispatchOutcome::NoDispatchContext {
+            plan_id: None,
+            ready_count: 3,
+            ..
+        }]
+    ));
 }
 
 #[tokio::test]

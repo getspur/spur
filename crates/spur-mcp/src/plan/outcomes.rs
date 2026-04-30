@@ -236,6 +236,16 @@ impl OutcomeStore {
         }
     }
 
+    pub fn prune_task(&mut self, plan_id: &str, task_id: &str) {
+        if let Some(buffer) = self.outcomes_by_plan.get_mut(plan_id) {
+            buffer.latest_per_task.remove(task_id);
+        }
+    }
+
+    pub fn drop_plan(&mut self, plan_id: &str) {
+        self.outcomes_by_plan.remove(plan_id);
+    }
+
     pub fn record_no_ready(
         &mut self,
         plan_id: &str,
@@ -747,6 +757,77 @@ mod tests {
 
         assert_eq!(store.reconciler_status().recent_outcomes.len(), 1);
         assert!(store.recent_outcomes("P1").is_empty());
+    }
+
+    #[test]
+    fn prune_task_is_noop_for_absent_plan_or_task() {
+        let mut store = OutcomeStore::default();
+        store.record_dispatched("P1", "task-1", "codex", "del-1", false, ts(1));
+        store.record_no_dispatch_context(None, 1, ts(2));
+
+        store.prune_task("missing-plan", "task-1");
+        store.prune_task("P1", "missing-task");
+
+        assert!(matches!(
+            store
+                .outcomes_by_plan
+                .get("P1")
+                .and_then(|buffer| buffer.latest("task-1")),
+            Some(DispatchOutcome::Dispatched { .. })
+        ));
+        assert_eq!(store.outcomes_global.snapshot().len(), 1);
+    }
+
+    #[test]
+    fn prune_task_removes_only_that_task_from_that_plan() {
+        let mut store = OutcomeStore::default();
+        store.record_dispatched("P1", "task-1", "codex", "del-1", false, ts(1));
+        store.record_dispatched("P1", "task-2", "codex", "del-2", false, ts(2));
+        store.record_dispatched("P2", "task-1", "codex", "del-3", false, ts(3));
+        store.record_no_dispatch_context(None, 1, ts(4));
+
+        store.prune_task("P1", "task-1");
+
+        let p1 = store.outcomes_by_plan.get("P1").expect("P1 buffer");
+        assert!(p1.latest("task-1").is_none());
+        assert!(matches!(
+            p1.latest("task-2"),
+            Some(DispatchOutcome::Dispatched { .. })
+        ));
+        assert!(matches!(
+            store
+                .outcomes_by_plan
+                .get("P2")
+                .and_then(|buffer| buffer.latest("task-1")),
+            Some(DispatchOutcome::Dispatched { .. })
+        ));
+        assert_eq!(store.outcomes_global.snapshot().len(), 1);
+    }
+
+    #[test]
+    fn drop_plan_is_noop_for_absent_plan() {
+        let mut store = OutcomeStore::default();
+        store.record_dispatched("P1", "task-1", "codex", "del-1", false, ts(1));
+        store.record_no_dispatch_context(None, 1, ts(2));
+
+        store.drop_plan("missing-plan");
+
+        assert!(store.outcomes_by_plan.contains_key("P1"));
+        assert_eq!(store.outcomes_global.snapshot().len(), 1);
+    }
+
+    #[test]
+    fn drop_plan_removes_only_that_plan_and_preserves_global() {
+        let mut store = OutcomeStore::default();
+        store.record_dispatched("P1", "task-1", "codex", "del-1", false, ts(1));
+        store.record_dispatched("P2", "task-1", "codex", "del-2", false, ts(2));
+        store.record_no_dispatch_context(None, 1, ts(3));
+
+        store.drop_plan("P1");
+
+        assert!(!store.outcomes_by_plan.contains_key("P1"));
+        assert!(store.outcomes_by_plan.contains_key("P2"));
+        assert_eq!(store.outcomes_global.snapshot().len(), 1);
     }
 
     #[test]
