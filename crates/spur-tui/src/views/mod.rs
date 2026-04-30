@@ -121,6 +121,19 @@ fn macos_option_char(ch: char) -> Option<char> {
         '≈' => Some('x'),
         '¥' => Some('y'),
         'Ω' => Some('z'),
+        // Option+digit on macOS US-QWERTY: ¡™£¢∞§¶•ªº.
+        // Only 1..4 are wired to global shortcuts today; the rest are
+        // reserved so future Alt+digit bindings work without a revisit.
+        '¡' => Some('1'),
+        '™' => Some('2'),
+        '£' => Some('3'),
+        '¢' => Some('4'),
+        '∞' => Some('5'),
+        '§' => Some('6'),
+        '¶' => Some('7'),
+        '•' => Some('8'),
+        'ª' => Some('9'),
+        'º' => Some('0'),
         _ => None,
     }
 }
