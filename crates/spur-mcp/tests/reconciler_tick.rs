@@ -30,7 +30,9 @@ use std::sync::Arc;
 
 use spur_acp::{BrainSessionId, SessionId, SpurEvent, SpurEventBody};
 use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
-use spur_mcp::plan::reconciler::{Reconciler, ReconcilerConfig, ReconcilerDispatchCtx};
+use spur_mcp::plan::reconciler::{
+    PlanDispatchState, Reconciler, ReconcilerConfig, ReconcilerDispatchCtx,
+};
 use spur_mcp::plan::{labels, PlanTask};
 use spur_mcp::McpEventSink;
 use spur_mcp::{server::DetachedContinuationCtx, McpCallbackServer};
@@ -417,6 +419,80 @@ async fn observe_ready_summaries_preserve_plan_labels() {
     assert!(summaries.iter().any(|summary| {
         summary.id == task_id && summary.labels.contains(&labels::plan_id("P1"))
     }));
+}
+
+#[tokio::test]
+async fn pending_label_on_closed_epic_blocks_dispatch() {
+    if !br_available() {
+        eprintln!("skipping pending_label_on_closed_epic_blocks_dispatch: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let complete_epic_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Complete Epic",
+            "--priority",
+            "2",
+        ],
+    ));
+    let pending_epic_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Closed Pending Epic",
+            "--priority",
+            "2",
+        ],
+    ));
+
+    let plan_label = labels::plan_id("P1");
+    label_issue(dir.path(), &complete_epic_id, &plan_label);
+    label_issue(dir.path(), &complete_epic_id, labels::PLAN_COMPLETE);
+    label_issue(dir.path(), &pending_epic_id, &plan_label);
+    label_issue(dir.path(), &pending_epic_id, labels::PLAN_PENDING);
+    run_br(
+        dir.path(),
+        &["update", &pending_epic_id, "--status", "closed"],
+    );
+
+    let pm = Arc::new(
+        spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+            .await
+            .expect("PmService::try_new failed")
+            .expect("expected Some(PmService)"),
+    );
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        pm,
+        Arc::new(Notify::new()),
+        None,
+        Some("P1".into()),
+        common::server_builder::pro_feature_gate(),
+    );
+    let mut cache = std::collections::HashMap::new();
+
+    let state = reconciler
+        .plan_allows_dispatch("P1", &mut cache)
+        .await
+        .expect("plan_allows_dispatch");
+
+    assert_eq!(
+        state,
+        PlanDispatchState::PlanHasPendingEpic {
+            epic_id: pending_epic_id
+        }
+    );
 }
 
 #[tokio::test]
