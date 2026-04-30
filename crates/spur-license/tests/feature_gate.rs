@@ -1,9 +1,8 @@
 use spur_license::policy::{PolicyResolver, TierPolicy};
 use spur_license::{
-    require_feature, FeatureGate, FeatureGateError, FeatureKey, FlagKey, InstallId, LicenseState,
-    Plan, QuotaKey, QuotaValue, Tier,
+    require_feature, EntitlementSnapshot, FeatureGate, FeatureGateError, FeatureKey, FlagKey,
+    InstallId, QuotaKey, QuotaValue, Tier,
 };
-use std::collections::BTreeSet;
 
 #[test]
 fn community_has_core_features() {
@@ -200,13 +199,19 @@ fn require_feature_passes_when_key_present_in_community_tier() {
 
 #[test]
 fn require_feature_returns_typed_error_with_key_when_absent() {
+    // Default snapshot = inactive license = empty feature set, so any
+    // require_feature call genuinely denies. (We can't use an
+    // `active_validated(Pro, empty)` state here anymore: post-fix, the
+    // policy's `@inherit:community` directive grants Community features
+    // to Pro automatically, so an empty JWT no longer strips
+    // pm_pro_beads_advanced — and even pm_pro_beads_advanced itself is
+    // listed in the Pro policy and therefore granted.)
     let policy = PolicyResolver::embedded();
     let gate = FeatureGate::new_with_install_id(policy, InstallId::from_uuid(uuid::Uuid::nil()));
-    let state = LicenseState::active_validated(Plan::Pro, BTreeSet::new());
-    gate.update_state(&state);
+    gate.set_snapshot_for_test(EntitlementSnapshot::default());
 
     let err = require_feature(&gate, FeatureKey::PM_PRO_BEADS_ADVANCED)
-        .expect_err("empty Pro state must reject pm_pro_beads_advanced");
+        .expect_err("default snapshot must reject pm_pro_beads_advanced");
     // `#[non_exhaustive]` makes irrefutable destructuring impossible in
     // external crates; use `let ... else` form.
     let FeatureGateError::Denied { key, .. } = err else {
@@ -219,8 +224,7 @@ fn require_feature_returns_typed_error_with_key_when_absent() {
 fn feature_gate_error_display_names_the_key_and_tier() {
     let policy = PolicyResolver::embedded();
     let gate = FeatureGate::new_with_install_id(policy, InstallId::from_uuid(uuid::Uuid::nil()));
-    let state = LicenseState::active_validated(Plan::Pro, BTreeSet::new());
-    gate.update_state(&state);
+    gate.set_snapshot_for_test(EntitlementSnapshot::default());
 
     let err = require_feature(&gate, FeatureKey::CLI_CORE_RUN).unwrap_err();
     let msg = err.to_string();

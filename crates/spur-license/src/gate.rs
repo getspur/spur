@@ -66,6 +66,19 @@ impl FeatureGate {
         self.snapshot.store(Arc::new(new_snapshot));
     }
 
+    /// Replace the active snapshot with a hand-crafted one. Test-only.
+    ///
+    /// Used by in-process tests that need to simulate a tampered license
+    /// state (e.g. an active Pro tier with a single key stripped) without
+    /// going through `update_state`, which always resolves the policy's
+    /// `@inherit:community` directive and would re-grant the stripped key.
+    /// The binary-level analog uses `SPUR_LICENSE_TEST_STRIP_KEYS` (see
+    /// `apply_test_strip_keys`).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_snapshot_for_test(&self, snapshot: EntitlementSnapshot) {
+        self.snapshot.store(Arc::new(snapshot));
+    }
+
     fn build_community_snapshot(policy: &PolicyResolver) -> EntitlementSnapshot {
         let features = apply_test_strip_keys(Self::resolve_feature_keys(policy, "community"));
 
@@ -91,15 +104,23 @@ impl FeatureGate {
         }
 
         let tier = Tier::from_plan(state.plan);
-        let resolved: AHashSet<FeatureKey> = if tier == Tier::Community {
-            Self::resolve_feature_keys(&self.policy, "community")
-        } else {
-            state
-                .features
-                .iter()
-                .filter_map(|s| resolve_jwt_feature_key(s))
-                .collect()
-        };
+        // The signed policy is the canonical source for what each tier
+        // grants — it carries the `@inherit:community` directive that lets
+        // Pro/Team/Enterprise reuse the Community baseline (cli_core_tui,
+        // cli_core_run, …). The license-server JWT only ships tier-specific
+        // entitlements, so building a Pro snapshot from JWT alone silently
+        // dropped all inherited Community features. Resolve the policy
+        // tier first, then union JWT entitlements for forward-compat.
+        let mut resolved: AHashSet<FeatureKey> =
+            Self::resolve_feature_keys(&self.policy, &tier.label().to_lowercase());
+        if tier != Tier::Community {
+            resolved.extend(
+                state
+                    .features
+                    .iter()
+                    .filter_map(|s| resolve_jwt_feature_key(s)),
+            );
+        }
         let features = apply_test_strip_keys(resolved);
 
         let quotas = Self::merge_quotas(tier, self.policy.document());
