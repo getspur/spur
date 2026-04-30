@@ -1922,6 +1922,94 @@ async fn execute_epic_reprojects_persisted_non_terminal_state_before_starting_fr
     );
 }
 
+/// Regression for bd-19od: when a child task already carries the correct
+/// `spur:agent:<name>` label, `execute_epic` must NOT strip it. The previous
+/// implementation pushed the same string to both `add_labels` and
+/// `remove_labels`; beads processes adds first, then removes, so the agent
+/// label was wiped — causing the next dispatch tick to error with
+/// `no agent for task; set spur:agent:<name>` and fall back to the hardcoded
+/// `"codex"` default in projector.rs.
+#[tokio::test]
+async fn execute_epic_preserves_pre_existing_agent_label_on_child_task() {
+    if !br_available() {
+        eprintln!(
+            "skipping execute_epic_preserves_pre_existing_agent_label_on_child_task: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let epic_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Preserve Agent Label",
+            "--priority",
+            "2",
+        ],
+    ));
+    let task_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Preserve Agent Label Child",
+            "--priority",
+            "2",
+        ],
+    ));
+    run_br(dir.path(), &["dep", "add", &task_id, &epic_id]);
+    label_issue(dir.path(), &task_id, &labels::agent("claude-code"));
+
+    let pre = run_br_json(dir.path(), &["show", &task_id]);
+    assert!(
+        pre.contains(&labels::agent("claude-code")),
+        "precondition: child must carry spur:agent:claude-code before execute_epic; got {pre}"
+    );
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected Some(PmService)");
+    let pm = Arc::new(pm);
+    let brain_sid = BrainSessionId::new(SessionId::new());
+    let (mut server, _channel) = McpCallbackServer::new(
+        &brain_sid,
+        Some(Arc::clone(&pm)),
+        None,
+        test_continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        common::server_builder::pro_feature_gate(),
+    );
+    server.set_workers(vec![spur_mcp::WorkerInfo {
+        name: "claude-code".into(),
+        ..Default::default()
+    }]);
+
+    let response = server
+        .__test_call_execute_epic(&epic_id, Some("claude-code"))
+        .await;
+    assert!(
+        response.get("error").is_none(),
+        "execute_epic should succeed: {response}"
+    );
+
+    let task = pm.get_issue(&task_id).await.expect("get task");
+    let agent_label = labels::agent("claude-code");
+    assert!(
+        task.labels.iter().any(|l| l == &agent_label),
+        "child task must retain its pre-existing agent label after execute_epic; got labels={:?}",
+        task.labels
+    );
+}
+
 #[tokio::test]
 async fn execute_epic_rolls_back_epic_scope_when_task_scope_persist_fails() {
     if !br_available() {
