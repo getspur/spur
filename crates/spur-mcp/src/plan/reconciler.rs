@@ -142,6 +142,33 @@ fn unresolved_blocker_issue_ids(
     blockers
 }
 
+async fn prune_projected_terminal_task_outcomes(
+    outcomes: &Arc<tokio::sync::Mutex<OutcomeStore>>,
+    plan_id: &str,
+    tasks: &[crate::plan::PlanTaskEntry],
+) {
+    let terminal_task_ids = tasks
+        .iter()
+        .filter(|task| task.status.is_terminal())
+        .map(|task| task.spec.task_id.clone())
+        .collect::<Vec<_>>();
+    if terminal_task_ids.is_empty() {
+        return;
+    }
+
+    let mut outcomes = outcomes.lock().await;
+    for task_id in terminal_task_ids {
+        outcomes.prune_task(plan_id, &task_id);
+    }
+}
+
+fn child_summary_may_have_terminal_projection(
+    child: &spur_pm::IssueSummary,
+    closed_status: &str,
+) -> bool {
+    child.status == closed_status || matches!(child.status.as_str(), "failed" | "cancelled")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ProjectedEpicCompletion {
     audit_outcome: crate::plan::audit_sentinel::EpicCompletionOutcome,
@@ -445,6 +472,20 @@ impl Reconciler {
         }
     }
 
+    async fn project_plan_from_beads(
+        &self,
+        plan_id: &str,
+    ) -> anyhow::Result<crate::plan::PlanState> {
+        let projected = crate::plan::projector::project_plan_from_beads(
+            self.pm.as_ref(),
+            plan_id,
+            self.feature_gate.as_ref(),
+        )
+        .await?;
+        prune_projected_terminal_task_outcomes(&self.outcomes, plan_id, &projected.tasks).await;
+        Ok(projected)
+    }
+
     async fn emit_snapshot_for_plan(&self, plan_id: &str) {
         let Some(sink) = self
             .dispatch
@@ -454,13 +495,7 @@ impl Reconciler {
             return;
         };
 
-        match crate::plan::projector::project_plan_from_beads(
-            self.pm.as_ref(),
-            plan_id,
-            self.feature_gate.as_ref(),
-        )
-        .await
-        {
+        match self.project_plan_from_beads(plan_id).await {
             Ok(projected) => crate::plan::snapshot::emit_plan_snapshot(Some(sink), &projected),
             Err(error) => tracing::warn!(%plan_id, "failed to project plan snapshot: {error}"),
         }
@@ -552,13 +587,7 @@ impl Reconciler {
                 continue;
             };
 
-            let projected = match crate::plan::projector::project_plan_from_beads(
-                self.pm.as_ref(),
-                plan_id,
-                self.feature_gate.as_ref(),
-            )
-            .await
-            {
+            let projected = match self.project_plan_from_beads(plan_id).await {
                 Ok(projected) => projected,
                 Err(error) => {
                     tracing::warn!(
@@ -668,6 +697,7 @@ impl Reconciler {
             let brain_session_id = dispatch.brain_session_id.clone();
             let materializer = Arc::clone(&dispatch.materializer);
             let feature_gate = Arc::clone(&self.feature_gate);
+            let outcomes = Arc::clone(&self.outcomes);
             dispatch.task_tracker.spawn(async move {
                 let result = match rx.await {
                     Ok(result) => result,
@@ -717,23 +747,29 @@ impl Reconciler {
                     );
                 }
 
-                if let Some(sink) = event_sink.as_deref() {
-                    match crate::plan::projector::project_plan_from_beads(
-                        pm.as_ref(),
-                        &plan_id,
-                        feature_gate.as_ref(),
-                    )
-                    .await
-                    {
-                        Ok(projected) => {
-                            crate::plan::snapshot::emit_plan_snapshot(Some(sink), &projected)
+                match crate::plan::projector::project_plan_from_beads(
+                    pm.as_ref(),
+                    &plan_id,
+                    feature_gate.as_ref(),
+                )
+                .await
+                {
+                    Ok(projected) => {
+                        prune_projected_terminal_task_outcomes(
+                            &outcomes,
+                            &plan_id,
+                            &projected.tasks,
+                        )
+                        .await;
+                        if let Some(sink) = event_sink.as_deref() {
+                            crate::plan::snapshot::emit_plan_snapshot(Some(sink), &projected);
                         }
-                        Err(error) => tracing::warn!(
-                            %plan_id,
-                            %task_id,
-                            "failed to project plan snapshot after completion: {error}"
-                        ),
                     }
+                    Err(error) => tracing::warn!(
+                        %plan_id,
+                        %task_id,
+                        "failed to project plan snapshot after completion: {error}"
+                    ),
                 }
             });
 
@@ -1004,6 +1040,19 @@ impl Reconciler {
                 .filter(|summary| summary.id != epic.id)
                 .collect::<Vec<_>>();
 
+            if children
+                .iter()
+                .any(|child| child_summary_may_have_terminal_projection(child, &closed_status))
+            {
+                if let Err(error) = self.project_plan_from_beads(plan_id).await {
+                    tracing::warn!(
+                        %plan_id,
+                        epic_id = %epic.id,
+                        "failed to project terminal child statuses for outcome pruning: {error}"
+                    );
+                }
+            }
+
             let Some(outcome) = classify_epic_completion(&children, &closed_status) else {
                 // Intentional no-op: non-terminal epics emit no outcome.
                 // Terminal classification is computed elsewhere; absence here is normal.
@@ -1024,6 +1073,7 @@ impl Reconciler {
             });
 
             if epic.status == closed_status {
+                self.outcomes.lock().await.drop_plan(plan_id);
                 if !outcome.add_integration_pending
                     && epic
                         .labels
@@ -1171,6 +1221,7 @@ impl Reconciler {
             }
 
             self.pm.update_issue(&epic.id, update).await?;
+            self.outcomes.lock().await.drop_plan(plan_id);
             if !has_epic_completion {
                 if let Err(error) = crate::plan::emit_epic_completion_audit(
                     adv,
@@ -1230,6 +1281,15 @@ impl Reconciler {
         };
 
         let summaries = if let Some(plan_id) = self.plan_id.as_deref() {
+            let mut plan_activation_cache = HashMap::new();
+            if matches!(
+                self.plan_allows_dispatch(plan_id, &mut plan_activation_cache)
+                    .await?,
+                PlanDispatchState::EpicNotOpen { .. }
+            ) {
+                self.outcomes.lock().await.drop_plan(plan_id);
+                return Ok(Vec::new());
+            }
             adv.list_ready(ReadyFilter {
                 labels_all: vec![crate::plan::labels::plan_id(plan_id)],
                 // Limit is per plan; global reconcilers enumerate plans first.
@@ -1321,12 +1381,7 @@ impl Reconciler {
                         self.record_skipped(Some(&plan_id), &issue.id, reason).await;
                         continue;
                     }
-                    let projected = crate::plan::projector::project_plan_from_beads(
-                        self.pm.as_ref(),
-                        &plan_id,
-                        self.feature_gate.as_ref(),
-                    )
-                    .await?;
+                    let projected = self.project_plan_from_beads(&plan_id).await?;
                     for task in &projected.tasks {
                         if !matches!(task.status, crate::plan::PlanTaskStatus::Ready) {
                             let blocked_by = unresolved_blocker_issue_ids(&projected, task);
