@@ -348,6 +348,31 @@ fn table_cell_overflow_emits_pipe_row() {
     assert!(html.contains("| a | label (https://example.test/"));
     assert!(!html.contains("<table"));
     assert!(!html.contains("<a href="));
+    assert!(chunks
+        .iter()
+        .all(|chunk| chunk.html.encode_utf16().count() <= TELEGRAM_TEXT_MAX_UTF16_UNITS));
+}
+
+#[test]
+fn table_cell_with_5k_chars_falls_back_to_plain_pipe_row() {
+    let cell = "a".repeat(5_000);
+    let input = format!("| name | value |\n| --- | --- |\n| a | {cell} |");
+    let chunks = rendered_chunks(&input);
+    let html = chunks
+        .iter()
+        .map(|chunk| chunk.html.as_str())
+        .collect::<String>();
+    let plain = chunks
+        .iter()
+        .map(|chunk| chunk.plain.as_str())
+        .collect::<String>();
+
+    assert!(chunks.len() > 1);
+    assert!(plain.contains(&format!("| a | {cell} |")));
+    assert!(!html.contains("<table"));
+    assert!(chunks
+        .iter()
+        .all(|chunk| chunk.html.encode_utf16().count() <= TELEGRAM_TEXT_MAX_UTF16_UNITS));
 }
 
 #[test]
