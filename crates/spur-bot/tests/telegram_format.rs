@@ -171,6 +171,18 @@ fn image_url_preserved_as_plain_text_projection() {
 }
 
 #[test]
+fn image_alt_overflow_preserves_url_as_plain_projection() {
+    let alt = "a".repeat(5_000);
+    let chunks = rendered_chunks(&format!("![{alt}](http://example.com/image.png)"));
+    let plain = chunks
+        .iter()
+        .map(|chunk| chunk.plain.as_str())
+        .collect::<String>();
+
+    assert!(plain.contains("(http://example.com/image.png)"), "{chunks:?}");
+}
+
+#[test]
 fn markdown_to_telegram_html_fenced_code_block() {
     let input = "Before\n\n```rust\nfn main() { println!(\"<&>\"); }\n```\n\nAfter";
 

@@ -719,7 +719,9 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
         };
         let mut plain = self.state.current_plain[plain_start..].to_string();
         plain.push_str(pending);
-        if let Some(href) = self.state.open_inline_link_href() {
+        if let Some(projection) = self.state.open_inline_image_projection(pending) {
+            plain = projection;
+        } else if let Some(href) = self.state.open_inline_link_href() {
             if plain.is_empty() {
                 let _ = write!(plain, "({href})");
             } else {
@@ -729,6 +731,9 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
 
         self.state.current_html.truncate(html_start);
         self.state.current_plain.truncate(plain_start);
+        self.state
+            .plain_code_ranges
+            .retain(|range| range.end <= plain_start);
         self.state.open_inlines.clear();
         self.push_escaped_text_budgeted(&plain);
     }
@@ -1073,9 +1078,30 @@ impl RendererState {
             .min_by_key(|(html_start, plain_start)| (*html_start, *plain_start))
     }
 
-    fn open_inline_link_href(&self) -> Option<String> {
+    fn open_inline_image_projection(&self, pending: &str) -> Option<String> {
+        self.open_inlines.iter().rev().find_map(|inline| {
+            let InlineContext::Image {
+                dest_url,
+                plain_start,
+                ..
+            } = inline
+            else {
+                return None;
+            };
+            let mut alt = self.current_plain[*plain_start..].to_string();
+            alt.push_str(pending);
+            let alt = alt.trim();
+            Some(if alt.is_empty() {
+                format!("({dest_url})")
+            } else {
+                format!("[image: {alt}] ({dest_url})")
+            })
+        })
+    }
+
+    fn open_inline_link_href(&self) -> Option<&str> {
         self.open_inlines.iter().find_map(|inline| match inline {
-            InlineContext::Link { href, .. } if !href.is_empty() => Some(href.clone()),
+            InlineContext::Link { href, .. } if !href.is_empty() => Some(href.as_str()),
             _ => None,
         })
     }
