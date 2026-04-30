@@ -204,6 +204,92 @@ fn enter_while_loaded_closes_detail() {
 }
 
 #[test]
+fn enter_after_navigating_to_different_issue_fetches_new_detail() {
+    // Regression: after a detail is Loaded, navigating to a different row and
+    // pressing Enter should immediately fetch the new issue (one press), not
+    // first close the old detail and require a second Enter.
+    let mut view = IssueBrowserView::default();
+    seed_issues(&mut view);
+
+    // Open detail for issue-1
+    view.handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &test_ctx(),
+    );
+    view.handle_spur_event(
+        &SpurEvent::now(SpurEventBody::IssueDetailFetched {
+            requested_id: "issue-1".into(),
+            issue: sample_detail_event("issue-1"),
+        }),
+        &test_ctx(),
+    );
+    assert!(view.issue_detail_visible());
+
+    // Navigate down to issue-2
+    view.handle_key(
+        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+        &test_ctx(),
+    );
+
+    // Single Enter should fetch issue-2, not just close the existing detail
+    let action = view.handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &test_ctx(),
+    );
+    assert!(
+        matches!(
+            action,
+            Some(Action::Issue(IssueAction::ViewDetail { ref id })) if id == "issue-2"
+        ),
+        "expected ViewDetail(issue-2) on first Enter after navigation, got {:?}",
+        action
+    );
+    // Focus must transition out of Loaded into Loading{issue-2}; otherwise the
+    // pane would still render issue-1's content while the action targets issue-2.
+    assert!(
+        !view.issue_detail_visible(),
+        "focus should leave Loaded(issue-1) and enter Loading(issue-2) on Enter"
+    );
+}
+
+#[test]
+fn enter_with_empty_tracked_list_still_closes_loaded_detail() {
+    // Edge case: a Loaded detail can outlive its source row if `IssuesLoaded`
+    // arrives with an empty list. Pressing Enter must still close the orphan
+    // detail rather than no-op, so the pane never lingers without a row.
+    let mut view = IssueBrowserView::default();
+    seed_issues(&mut view);
+    view.handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &test_ctx(),
+    );
+    view.handle_spur_event(
+        &SpurEvent::now(SpurEventBody::IssueDetailFetched {
+            requested_id: "issue-1".into(),
+            issue: sample_detail_event("issue-1"),
+        }),
+        &test_ctx(),
+    );
+    assert!(view.issue_detail_visible());
+
+    // List drops to empty while detail is still showing
+    view.handle_spur_event(
+        &SpurEvent::now(SpurEventBody::IssuesLoaded { issues: vec![] }),
+        &test_ctx(),
+    );
+
+    let action = view.handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &test_ctx(),
+    );
+    assert!(action.is_none());
+    assert!(
+        !view.issue_detail_visible(),
+        "Enter on empty list must close orphan Loaded detail"
+    );
+}
+
+#[test]
 fn status_keys_emit_update_actions() {
     let mut view = IssueBrowserView::default();
     seed_issues(&mut view);
