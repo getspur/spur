@@ -27,7 +27,7 @@ use crate::components::help_overlay::HelpOverlay;
 use crate::components::input_bar::EditMode;
 use crate::components::palette::PaletteIntent;
 use crate::components::palette_sources::{
-    CommandSource, PaletteSource, SessionSource, WorkerSource,
+    CommandSource, PaletteSource, SessionSource, ViewSource, WorkerSource,
 };
 use crate::components::quit_confirm::QuitConfirmDialog;
 use crate::components::status_bar::{HintOverride, LicenseBadge, LicenseBadgeTone};
@@ -1001,7 +1001,7 @@ impl App {
         tracing::debug!(target: "palette", "open_palette: start");
         self.palette_state.reset();
 
-        // Load sources: Commands, Sessions, Workers. (Trace deferred — see U3c.)
+        // Load sources: Views, Commands, Sessions, Workers. (Trace deferred — see U3c.)
         // CommandRegistry is not Clone; borrow from the active session_detail
         // or fall back to a fresh empty one (SpurLocal commands are still
         // included unconditionally via registry's ensure_cache).
@@ -1022,10 +1022,12 @@ impl App {
                     &owned_fallback
                 }
             };
+        let view_src = ViewSource;
         let cmd_src = CommandSource::new(cmd_registry);
         let sess_src = SessionSource::from_metadata(self.metadata_store.metadata());
         let worker_src = WorkerSource::from_lineage(&self.lineage);
 
+        let view_batch = view_src.collect();
         let cmd_batch = cmd_src.collect();
         let sess_batch = sess_src.collect();
         let worker_batch = worker_src.collect();
@@ -1040,7 +1042,7 @@ impl App {
             trace_dispatch_deferred,
             "open_palette: sources collected"
         );
-        let batches = vec![cmd_batch, sess_batch, worker_batch];
+        let batches = vec![view_batch, cmd_batch, sess_batch, worker_batch];
         // Trace source is intentionally skipped until trace-dispatch lands;
         // see docs/superpowers/specs/2026-04-20-palette-end-to-end-integration-design.md (U3c).
         // TODO(palette-trace-dispatch): re-add a TraceSource batch here when
@@ -1200,6 +1202,7 @@ impl App {
         use crate::commands::submit_router::{route, SubmitDecision};
         use crate::components::palette::PalettePayload;
         match result.payload {
+            PalettePayload::View { action } => Some(action),
             PalettePayload::Session { session_id } => Some(Action::ResumeSession { session_id }),
             PalettePayload::Worker { session_id } => {
                 Some(Action::NavigateTo(ViewId::SessionDetail(session_id)))

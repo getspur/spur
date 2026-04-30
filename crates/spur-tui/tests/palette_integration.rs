@@ -87,6 +87,59 @@ fn open_palette_surfaces_session_command_registry_entries() {
 }
 
 #[test]
+fn open_palette_surfaces_view_entries_and_sessions_requests_picker() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use spur_tui::action::Action;
+    use spur_tui::components::palette::PaletteKind;
+
+    let mut app = spur_tui::app::App::new_for_palette_test();
+    app.try_open_palette_for_test();
+
+    let labels: Vec<&str> = app
+        .palette_state_for_test()
+        .iter_ranked()
+        .map(|r| r.label.as_str())
+        .collect();
+    for expected in ["Dashboard", "Issues", "Sessions", "Insights"] {
+        assert!(
+            labels.contains(&expected),
+            "expected {expected} view entry in palette; got: {labels:?}"
+        );
+    }
+    let view_labels: Vec<&str> = app
+        .palette_state_for_test()
+        .iter_ranked()
+        .filter(|r| r.kind == PaletteKind::View)
+        .map(|r| r.label.as_str())
+        .collect();
+    assert_eq!(
+        view_labels,
+        vec!["Dashboard", "Issues", "Sessions", "Insights"]
+    );
+
+    app.palette_state_for_test_mut().set_query("iss");
+    let selected = app
+        .palette_state_for_test()
+        .selected()
+        .expect("iss should match a palette entry");
+    assert_eq!(selected.label, "Issues");
+
+    app.palette_state_for_test_mut().set_query("ses");
+    let selected = app
+        .palette_state_for_test()
+        .selected()
+        .expect("ses should match a palette entry");
+    assert_eq!(selected.label, "Sessions");
+
+    app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(
+        matches!(app.last_action_for_test(), Some(Action::RequestSessions)),
+        "Sessions palette entry must request picker setup; got {:?}",
+        app.last_action_for_test()
+    );
+}
+
+#[test]
 fn accept_spur_local_command_emits_concrete_action() {
     // Why seed a dynamic /anything command? It exercises the Some(view)
     // arm of result_to_action's borrow-shim. We then query /help to

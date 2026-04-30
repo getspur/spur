@@ -11,6 +11,7 @@ const SUBTITLE_WEIGHT: f32 = 0.7;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaletteKind {
+    View,
     Command,
     Session,
     Worker,
@@ -19,6 +20,7 @@ pub enum PaletteKind {
 
 #[derive(Debug, Clone)]
 pub enum PalettePayload {
+    View { action: crate::action::Action },
     Command { name: String },
     Session { session_id: String },
     Worker { session_id: spur_acp::SessionId },
