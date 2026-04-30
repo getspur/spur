@@ -35,7 +35,13 @@ fn assert_no_partial_entities(chunks: &[spur_bot::telegram::format::Chunk]) {
 }
 
 fn markdown_text() -> impl Strategy<Value = String> {
-    "[a-zA-Z0-9 <>&.,_:/=-]{0,160}".prop_map(|s| s)
+    let short = "[a-zA-Z0-9 <>&.,_:/=-]{0,160}".prop_map(|s| s);
+    let long = prop_oneof![
+        Just("a".repeat(5_000)),
+        Just("<&>".repeat(1_700)),
+        Just("word ".repeat(1_000)),
+    ];
+    prop_oneof![9 => short, 1 => long]
 }
 
 fn any_markdown() -> impl Strategy<Value = String> {
