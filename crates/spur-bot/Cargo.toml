@@ -23,4 +23,5 @@ spur-interactive = { workspace = true }
 tempfile = "3"
 
 [dev-dependencies]
+proptest = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
