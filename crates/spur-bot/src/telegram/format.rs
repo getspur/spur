@@ -141,6 +141,12 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
 
     pub fn into_chunks(mut self) -> Vec<Chunk> {
         while let Some(event) = self.events.next() {
+            if matches!(&event, Event::Start(Tag::TableHead | Tag::TableRow)) {
+                let row_events = self.collect_table_row(event);
+                self.apply_table_row(row_events);
+                continue;
+            }
+
             let cost = self.event_cost(&event);
             let reserve = self.dynamic_reserve();
             if self.state.current_html_units() + cost + reserve > self.budget.max_units
@@ -152,6 +158,51 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
         }
         self.finalize();
         self.chunks
+    }
+
+    fn collect_table_row(&mut self, first: Event<'a>) -> Vec<Event<'a>> {
+        let is_head = matches!(&first, Event::Start(Tag::TableHead));
+        let mut events = vec![first];
+        while let Some(event) = self.events.next() {
+            let is_end = matches!(
+                (&event, is_head),
+                (Event::End(TagEnd::TableHead), true) | (Event::End(TagEnd::TableRow), false)
+            );
+            events.push(event);
+            if is_end {
+                break;
+            }
+        }
+        events
+    }
+
+    fn apply_table_row(&mut self, events: Vec<Event<'a>>) {
+        let row = render_table_row(&events);
+        self.ensure_line_start();
+
+        let reserve = self.dynamic_reserve();
+        if self.state.current_html_units() + row.html_units() + reserve > self.budget.max_units
+            && self.state.at_safe_flush_point()
+        {
+            self.flush_chunk();
+            self.ensure_line_start();
+        }
+
+        if row.html_units() + self.dynamic_reserve() > self.budget.max_units {
+            self.push_escaped_text_budgeted(&row.plain);
+        } else {
+            self.state.current_html.push_str(&row.html);
+            self.state.current_plain.push_str(&row.plain);
+        }
+
+        if let Some(table) = &mut self.state.table_state {
+            if row.is_header {
+                table.column_count = table.column_count.max(row.column_count);
+            }
+            table.in_header = false;
+            table.in_row = false;
+            table.current_cell_index = 0;
+        }
     }
 
     fn event_cost(&self, event: &Event<'_>) -> usize {
@@ -780,6 +831,112 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
         } else {
             false
         }
+    }
+}
+
+struct RenderedTableRow {
+    html: String,
+    plain: String,
+    column_count: u8,
+    is_header: bool,
+}
+
+impl RenderedTableRow {
+    fn html_units(&self) -> usize {
+        self.html.encode_utf16().count()
+    }
+}
+
+fn render_table_row(events: &[Event<'_>]) -> RenderedTableRow {
+    let mut html = String::new();
+    let mut plain = String::new();
+    let mut column_count = 0u8;
+    let mut is_header = false;
+    let mut links: Vec<(String, usize)> = Vec::new();
+
+    for event in events {
+        match event {
+            Event::Start(Tag::TableHead) => {
+                is_header = true;
+                html.push_str("| ");
+                plain.push_str("| ");
+            }
+            Event::Start(Tag::TableRow) => {
+                html.push_str("| ");
+                plain.push_str("| ");
+            }
+            Event::Start(Tag::TableCell) => {
+                if column_count > 0 {
+                    html.push_str(" | ");
+                    plain.push_str(" | ");
+                }
+                column_count = column_count.saturating_add(1);
+            }
+            Event::Start(Tag::Strong) => html.push_str("<b>"),
+            Event::Start(Tag::Emphasis) => html.push_str("<i>"),
+            Event::Start(Tag::Strikethrough) => html.push_str("<s>"),
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                let href = dest_url.to_string();
+                if !href.is_empty() {
+                    html.push_str("<a href=\"");
+                    push_escaped_attr(&mut html, &href);
+                    html.push_str("\">");
+                }
+                links.push((href, plain.len()));
+            }
+            Event::End(TagEnd::TableHead | TagEnd::TableRow) => {
+                html.push_str(" |\n");
+                plain.push_str(" |\n");
+            }
+            Event::End(TagEnd::Strong) => html.push_str("</b>"),
+            Event::End(TagEnd::Emphasis) => html.push_str("</i>"),
+            Event::End(TagEnd::Strikethrough) => html.push_str("</s>"),
+            Event::End(TagEnd::Link) => {
+                if let Some((href, plain_start)) = links.pop() {
+                    if !href.is_empty() {
+                        html.push_str("</a>");
+                        if plain.len() == plain_start {
+                            let _ = write!(plain, "({href})");
+                        } else {
+                            let _ = write!(plain, " ({href})");
+                        }
+                    }
+                }
+            }
+            Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
+                push_escaped_text(&mut html, text);
+                plain.push_str(text);
+            }
+            Event::Code(code) => {
+                html.push_str("<code>");
+                push_escaped_text(&mut html, code);
+                html.push_str("</code>");
+                plain.push_str(code);
+            }
+            Event::SoftBreak | Event::HardBreak => {
+                html.push('\n');
+                plain.push('\n');
+            }
+            Event::FootnoteReference(label)
+            | Event::InlineMath(label)
+            | Event::DisplayMath(label) => {
+                push_escaped_text(&mut html, label);
+                plain.push_str(label);
+            }
+            Event::TaskListMarker(checked) => {
+                let marker = if *checked { "[x] " } else { "[ ] " };
+                html.push_str(marker);
+                plain.push_str(marker);
+            }
+            Event::Rule | Event::Start(_) | Event::End(_) => {}
+        }
+    }
+
+    RenderedTableRow {
+        html,
+        plain,
+        column_count,
+        is_header,
     }
 }
 
