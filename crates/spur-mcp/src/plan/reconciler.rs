@@ -969,7 +969,6 @@ impl Reconciler {
     }
 
     pub async fn observe_ready_summaries(&self) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
-        let label_filter = self.plan_id.as_deref().map(crate::plan::labels::plan_id);
         crate::server::require_feature(
             spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
             self.feature_gate.as_ref(),
@@ -979,21 +978,50 @@ impl Reconciler {
             anyhow::bail!("reconciler: no advanced (beads) backend available");
         };
 
-        let mut labels = Vec::new();
-        if let Some(plan_id_label) = label_filter {
-            labels.push(plan_id_label);
-        }
-
-        let summaries = adv
-            .list_ready(ReadyFilter {
-                labels_all: labels,
-                // Short-term: raised from 50 to absorb plan tasks that sort
-                // below higher-priority backlog items. Real fix is a
-                // plan-aware query — see bd-1z60.
+        let summaries = if let Some(plan_id) = self.plan_id.as_deref() {
+            adv.list_ready(ReadyFilter {
+                labels_all: vec![crate::plan::labels::plan_id(plan_id)],
+                // Limit is per plan; global reconcilers enumerate plans first.
                 limit: Some(1000),
                 ..Default::default()
             })
-            .await?;
+            .await?
+        } else {
+            let epics = self
+                .pm
+                .list_issues(IssueFilter {
+                    labels: vec![crate::plan::labels::PLAN_COMPLETE.to_string()],
+                    issue_type: Some("epic".into()),
+                    limit: Some(10_000),
+                    ..Default::default()
+                })
+                .await?;
+            let mut summaries = Vec::new();
+            let mut seen_summary_ids = HashSet::new();
+            for epic in epics {
+                let Some(plan_id) = epic
+                    .labels
+                    .iter()
+                    .find_map(|label| crate::plan::labels::parse_plan_id(label))
+                else {
+                    continue;
+                };
+                for summary in adv
+                    .list_ready(ReadyFilter {
+                        labels_all: vec![crate::plan::labels::plan_id(plan_id)],
+                        // Limit is per plan; global reconcilers enumerate plans first.
+                        limit: Some(1000),
+                        ..Default::default()
+                    })
+                    .await?
+                {
+                    if seen_summary_ids.insert(summary.id.clone()) {
+                        summaries.push(summary);
+                    }
+                }
+            }
+            summaries
+        };
 
         let mut hydrated = Vec::with_capacity(summaries.len());
         let mut seen_issue_ids = HashSet::new();
