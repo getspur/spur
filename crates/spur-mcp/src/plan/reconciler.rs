@@ -577,8 +577,7 @@ impl Reconciler {
                 .labels
                 .iter()
                 .find_map(|label| crate::plan::labels::parse_plan_task_id(label))
-                .unwrap_or(summary.id.as_str())
-                .to_string();
+                .unwrap_or_else(|| summary.id.clone());
             let age_secs = now.saturating_sub(expires_at);
             let audits = crate::plan::projector::collect_sorted_audits(
                 adv.list_comments(&summary.id).await?,

@@ -140,8 +140,7 @@ fn task_id_for_issue(issue: &spur_pm::Issue) -> String {
         .labels
         .iter()
         .find_map(|label| crate::plan::labels::parse_plan_task_id(label))
-        .unwrap_or(issue.id.as_str())
-        .to_string()
+        .unwrap_or_else(|| issue.id.clone())
 }
 
 fn agent_for_issue(issue: &spur_pm::Issue) -> String {
