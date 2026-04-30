@@ -787,6 +787,10 @@ impl SessionDetailView {
         self.input_bar.set_mode(mode);
     }
 
+    pub fn set_disable_paste_burst(&mut self, disabled: bool) {
+        self.input_bar.set_disable_paste_burst(disabled);
+    }
+
     pub(crate) fn input_bar_active_non_empty(&self) -> bool {
         !self.input_bar.is_empty()
     }
@@ -1281,7 +1285,11 @@ impl SessionDetailView {
                     true
                 };
                 if shell_consumes {
-                    KeyOwner::Picker
+                    if self.input_bar.paste_burst_active() && matches!(key.code, KeyCode::Enter) {
+                        KeyOwner::Composer
+                    } else {
+                        KeyOwner::Picker
+                    }
                 } else {
                     // Trigger-driven shell doesn't consume this editing key;
                     // fall through to Composer so input_bar receives it and
@@ -1997,7 +2005,12 @@ impl View for SessionDetailView {
 
     fn tick(&mut self) {
         self.react_trace.tick();
-        self.input_bar.tick();
+        if matches!(
+            self.input_bar.tick(),
+            crate::components::input_bar::TickOutcome::FlushedPaste
+        ) {
+            self.dispatch_intent(crate::components::completion_trigger::IntentEvent::Pasted);
+        }
         if let Some(ref mut banner) = self.resume_banner {
             banner.tick();
         }

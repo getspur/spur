@@ -1,6 +1,6 @@
 //! Implementation of `spur config set <key> <value> [--global]`.
 //!
-//! Today the only supported key is `tui.edit_mode` (values: `vim`, `emacs`).
+//! Supported keys include `tui.edit_mode` and `tui.disable_paste_burst`.
 //! Future keys are added by extending the match in `run` with one arm each.
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -21,7 +21,20 @@ pub fn run(repo_root: &Path, key: &str, value: &str, global: bool) -> Result<()>
             println!("Takes effect on next `spur tui` invocation.");
             Ok(())
         }
-        _ => bail!("unknown key '{key}'. Supported keys: tui.edit_mode"),
+        "tui.disable_paste_burst" => {
+            let disabled = parse_bool(value)?;
+            update_config(&target, |c| {
+                c.tui.disable_paste_burst = disabled;
+            })
+            .with_context(|| format!("update {}", target.display()))?;
+            println!(
+                "Set tui.disable_paste_burst = {disabled} in {}",
+                target.display()
+            );
+            println!("Takes effect on next `spur tui` invocation.");
+            Ok(())
+        }
+        _ => bail!("unknown key '{key}'. Supported keys: tui.edit_mode, tui.disable_paste_burst"),
     }
 }
 
@@ -30,6 +43,16 @@ fn parse_editor_mode(s: &str) -> Result<EditorMode> {
         "vim" => Ok(EditorMode::Vim),
         "emacs" => Ok(EditorMode::Emacs),
         other => bail!("invalid value '{other}' for tui.edit_mode. Expected: vim, emacs."),
+    }
+}
+
+fn parse_bool(s: &str) -> Result<bool> {
+    match s {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => {
+            bail!("invalid value '{other}' for tui.disable_paste_burst. Expected: true, false.")
+        }
     }
 }
 

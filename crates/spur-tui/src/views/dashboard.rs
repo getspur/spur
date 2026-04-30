@@ -415,6 +415,16 @@ impl DashboardView {
         self.input_bar.set_mode(mode);
     }
 
+    pub fn set_disable_paste_burst(&mut self, disabled: bool) {
+        self.input_bar.set_disable_paste_burst(disabled);
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn enable_paste_burst_for_test(&mut self, enabled: bool) {
+        self.input_bar.enable_paste_burst_for_test(enabled);
+    }
+
     /// Seed the InputBar with global input history (loaded from metadata).
     pub fn seed_input_history(&mut self, entries: Vec<InputHistoryEntry>) {
         self.input_bar.seed_history(entries);
@@ -1025,6 +1035,9 @@ impl DashboardView {
                 true
             };
             if shell_consumes {
+                if self.input_bar.paste_burst_active() && matches!(key.code, KeyCode::Enter) {
+                    return KeyOwner::Composer;
+                }
                 return KeyOwner::Picker;
             }
         }
@@ -2311,7 +2324,24 @@ impl DashboardView {
     /// Tick + flush batched text. Returns true iff at least one batch was
     /// flushed to the activity log (so the caller can mark the TUI dirty).
     pub fn tick_and_report_flush(&mut self) -> bool {
-        self.input_bar.tick();
+        let flushed_paste_burst = matches!(
+            self.input_bar.tick(),
+            crate::components::input_bar::TickOutcome::FlushedPaste
+        );
+        if flushed_paste_burst {
+            let env = crate::components::input_completion::CompletionEnv {
+                command_registry: &self.command_registry,
+                mention_registry: &self.mention_registry,
+                cwd: &self.cwd,
+                scope: crate::mentions::CompletionScope::PreSession,
+                session_config_options: &[],
+            };
+            self.completion.dispatch(
+                crate::components::completion_trigger::IntentEvent::Pasted,
+                &mut self.input_bar,
+                &env,
+            );
+        }
         self.agents_tree.tick();
 
         // Flush text batches older than 500ms
@@ -2323,7 +2353,7 @@ impl DashboardView {
             .filter(|(_, (_, ts))| now.duration_since(*ts) > threshold)
             .map(|(k, _)| k.clone())
             .collect();
-        let flushed_any = !expired.is_empty();
+        let flushed_any = flushed_paste_burst || !expired.is_empty();
 
         for session_id in expired {
             if let Some((text, _)) = self.text_batch.remove(&session_id) {

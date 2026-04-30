@@ -446,12 +446,13 @@ pub enum EditorMode {
 }
 
 /// TUI presentation preferences. New fields land here without schema churn.
-/// Today contains only `edit_mode`; future additions (mouse, density,
-/// keymap) extend this struct.
+/// Future additions (mouse, density, keymap) extend this struct.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TuiConfig {
     pub edit_mode: EditorMode,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub disable_paste_burst: bool,
 }
 
 impl TuiConfig {
@@ -461,6 +462,10 @@ impl TuiConfig {
     pub fn is_default(&self) -> bool {
         *self == TuiConfig::default()
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
