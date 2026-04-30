@@ -33,6 +33,20 @@ fn roundtrip_tui_edit_mode_vim_preserves_value() {
 }
 
 #[test]
+fn roundtrip_tui_disable_paste_burst_preserves_value() {
+    let toml = r#"
+        [tui]
+        disable_paste_burst = true
+    "#;
+    let cfg: SpurConfig = toml::from_str(toml).expect("must parse");
+    assert!(cfg.tui.disable_paste_burst);
+
+    let serialized = toml::to_string_pretty(&cfg).expect("must serialize");
+    let cfg2: SpurConfig = toml::from_str(&serialized).expect("must reparse");
+    assert!(cfg2.tui.disable_paste_burst);
+}
+
+#[test]
 fn default_tui_config_is_skipped_on_serialize() {
     // Default TuiConfig must NOT emit a [tui] block — keeps existing user
     // configs visually unchanged after a round-trip through `spur init`.
