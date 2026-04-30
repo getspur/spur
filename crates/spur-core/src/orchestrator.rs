@@ -9429,17 +9429,19 @@ mod beads_startup_warning_tests {
 
     use spur_acp::config::{BeadsPmConfig, SpurConfig};
     use spur_license::policy::PolicyResolver;
-    use spur_license::{FeatureGate, LicenseState, Plan};
+    use spur_license::{EntitlementSnapshot, FeatureGate, LicenseState, Plan};
 
     fn community_gate() -> Arc<FeatureGate> {
         Arc::new(FeatureGate::new(PolicyResolver::embedded()))
     }
 
     fn gate_without_beads_basic() -> Arc<FeatureGate> {
+        // Pro/Team/Enterprise inherit Community via the policy's
+        // `@inherit:community` directive, so feeding an empty JWT no
+        // longer strips pm_core_beads_basic. Inject a hand-crafted
+        // empty snapshot to genuinely simulate the missing entitlement.
         let gate = Arc::new(FeatureGate::new(PolicyResolver::embedded()));
-        let mut features = BTreeSet::new();
-        features.insert("core_core_brain_session".to_string());
-        gate.update_state(&LicenseState::active_validated(Plan::Pro, features));
+        gate.set_snapshot_for_test(EntitlementSnapshot::default());
         gate
     }
 
