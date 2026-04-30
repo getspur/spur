@@ -174,9 +174,15 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
             .map(close_block_cost)
             .sum();
         let list_prefix = self.state.list_stack.len().saturating_mul(4);
+        let table_close = self
+            .state
+            .table_state
+            .as_ref()
+            .filter(|table| table.in_row)
+            .map_or(0, |_| 16);
         self.budget
             .min_safety_floor
-            .max(inline_close + block_close + list_prefix)
+            .max(inline_close + block_close + list_prefix + table_close + 16)
     }
 
     fn apply_event(&mut self, event: Event<'_>) {
@@ -261,6 +267,12 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
                 self.state.table_state = Some(TableState::default());
             }
             Tag::TableHead | Tag::TableRow => {
+                if self.state.current_html_units() + self.dynamic_reserve() + 2048
+                    > self.budget.max_units
+                    && self.state.at_safe_flush_point()
+                {
+                    self.flush_chunk();
+                }
                 if let Some(table) = &mut self.state.table_state {
                     table.in_header = matches!(tag, Tag::TableHead);
                     table.current_cell_index = 0;
@@ -461,7 +473,12 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
     }
 
     fn open_inline(&mut self, inline: InlineContext) {
-        self.push_html_literal(open_inline_tag(&inline));
+        self.push_html_literal(match inline {
+            InlineContext::Bold => "<b>",
+            InlineContext::Italic => "<i>",
+            InlineContext::Strike => "<s>",
+            _ => "",
+        });
         self.state.open_inlines.push(inline);
     }
 
@@ -502,7 +519,7 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
         self.state.open_inlines.push(InlineContext::Code);
         self.push_html_literal("<code>");
         push_escaped_text(&mut self.state.current_html, code);
-        self.state.current_plain.push_str(code);
+        push_plain_text(&mut self.state.current_plain, code);
         self.push_html_literal("</code>");
         let _ = self.state.open_inlines.pop();
     }
@@ -549,7 +566,7 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
 
     fn push_escaped_text_raw(&mut self, text: &str) {
         push_escaped_text(&mut self.state.current_html, text);
-        self.state.current_plain.push_str(text);
+        push_plain_text(&mut self.state.current_plain, text);
     }
 
     fn push_html_literal(&mut self, text: &str) {
@@ -573,7 +590,7 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
         }
 
         let html = chunk_text(&self.state.current_html);
-        let plain = chunk_text(&self.state.current_plain);
+        let plain = plain_chunk_text(&self.state.current_plain);
         if !html.is_empty() || !plain.is_empty() {
             self.chunks.push(Chunk { html, plain });
         }
@@ -618,7 +635,7 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
         self.state.open_blocks.clear();
 
         let html = chunk_text(&self.state.current_html);
-        let plain = chunk_text(&self.state.current_plain);
+        let plain = plain_chunk_text(&self.state.current_plain);
         if !html.is_empty() || !plain.is_empty() {
             self.chunks.push(Chunk { html, plain });
         }
@@ -734,16 +751,6 @@ impl RendererState {
     }
 }
 
-fn open_inline_tag(inline: &InlineContext) -> &'static str {
-    match inline {
-        InlineContext::Bold => "<b>",
-        InlineContext::Italic => "<i>",
-        InlineContext::Strike => "<s>",
-        InlineContext::Code => "<code>",
-        InlineContext::Link { .. } => "",
-    }
-}
-
 fn close_inline_tag(inline: &InlineContext) -> &'static str {
     match inline {
         InlineContext::Bold => "</b>",
@@ -835,6 +842,10 @@ fn chunk_text(text: &str) -> String {
     text.trim_end_matches('\n').to_string()
 }
 
+fn plain_chunk_text(text: &str) -> String {
+    chunk_text(text).replace("```", "").replace("**", "")
+}
+
 fn push_escaped_text(output: &mut String, text: &str) {
     for ch in text.chars() {
         match ch {
@@ -844,6 +855,10 @@ fn push_escaped_text(output: &mut String, text: &str) {
             _ => output.push(ch),
         }
     }
+}
+
+fn push_plain_text(output: &mut String, text: &str) {
+    output.push_str(text);
 }
 
 fn push_escaped_attr(output: &mut String, text: &str) {

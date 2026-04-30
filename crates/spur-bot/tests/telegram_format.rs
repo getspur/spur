@@ -1,3 +1,4 @@
+use proptest::prelude::*;
 use spur_bot::telegram::format::{
     markdown_to_telegram_chunks, render_truncated_text, short_button_label, split_for_final_answer,
     split_for_telegram, truncate_button_label_bytes, truncate_to_utf16_units,
@@ -31,6 +32,71 @@ fn assert_no_partial_entities(chunks: &[spur_bot::telegram::format::Chunk]) {
             );
         }
     }
+}
+
+fn markdown_text() -> impl Strategy<Value = String> {
+    "[a-zA-Z0-9 <>&.,_:/=-]{0,160}".prop_map(|s| s)
+}
+
+fn any_markdown() -> impl Strategy<Value = String> {
+    let paragraph = markdown_text().prop_map(|s| format!("{s}\n\n"));
+    let inline = (markdown_text(), markdown_text())
+        .prop_map(|(a, b)| format!("**{a}** *{b}* ~~strike~~ and `code <&>`\n\n"));
+    let link = (markdown_text(), "[a-z]{1,16}")
+        .prop_map(|(label, path)| format!("[{label}](https://example.test/{path}?q=<&>)\n\n"));
+    let code = markdown_text()
+        .prop_map(|s| format!("```rust\nfn main() {{ println!(\"{s}\"); }}\n```\n\n"));
+    let list = (markdown_text(), markdown_text()).prop_map(|(a, b)| format!("- {a}\n- {b}\n\n"));
+    let quote = (1usize..=6, markdown_text()).prop_map(|(depth, s)| {
+        let prefix = ">".repeat(depth);
+        format!("{prefix} {s}\n\n")
+    });
+    let table = (markdown_text(), markdown_text())
+        .prop_map(|(a, b)| format!("| name | value |\n| --- | --- |\n| {a} | {b} |\n\n"));
+
+    prop::collection::vec(
+        prop_oneof![paragraph, inline, link, code, list, quote, table],
+        0..64,
+    )
+    .prop_map(|parts| parts.concat())
+}
+
+fn is_telegram_html_balanced(html: &str) -> bool {
+    let mut stack = Vec::new();
+    let mut rest = html;
+    while let Some(offset) = rest.find('<') {
+        rest = &rest[offset..];
+        if let Some(tag) = ["b", "i", "s", "code", "pre", "blockquote"]
+            .iter()
+            .find(|tag| rest.starts_with(&format!("<{tag}>")))
+        {
+            stack.push(*tag);
+            rest = &rest[tag.len() + 2..];
+        } else if rest.starts_with("<a href=\"") {
+            let Some(end) = rest.find("\">") else {
+                return false;
+            };
+            stack.push("a");
+            rest = &rest[end + 2..];
+        } else if let Some(tag) = ["b", "i", "s", "code", "pre", "a", "blockquote"]
+            .iter()
+            .find(|tag| rest.starts_with(&format!("</{tag}>")))
+        {
+            if stack.pop() != Some(*tag) {
+                return false;
+            }
+            rest = &rest[tag.len() + 3..];
+        } else {
+            return false;
+        }
+    }
+    stack.is_empty()
+}
+
+fn has_markdown_link_marker(plain: &str) -> bool {
+    plain
+        .match_indices("](")
+        .any(|(idx, _)| plain[..idx].rfind('[').is_some())
 }
 
 #[test]
@@ -308,6 +374,32 @@ fn html_escape_expansion_is_budgeted_after_rendering() {
 }
 
 #[test]
+fn malformed_markdown_markers_do_not_leak_to_plain_projection() {
+    let chunks = rendered_chunks("** ** ** ~~strike~~ and `code <&>`\n\n");
+    let plain = chunks
+        .iter()
+        .map(|chunk| chunk.plain.as_str())
+        .collect::<String>();
+
+    assert!(!plain.contains("**"));
+}
+
+#[test]
+fn table_row_flushes_before_overflowing_current_chunk() {
+    let input = format!(
+        "{}\n\n| name | value |\n| --- | --- |\n| a | {} |",
+        "&".repeat(700),
+        "<&>".repeat(120)
+    );
+    let chunks = rendered_chunks(&input);
+
+    assert!(chunks.len() > 1);
+    assert!(chunks
+        .iter()
+        .all(|chunk| chunk.html.encode_utf16().count() <= TELEGRAM_TEXT_MAX_UTF16_UNITS));
+}
+
+#[test]
 fn golden_llm_outputs_match_expected_chunks() {
     for (name, input, expected) in [
         (
@@ -343,6 +435,40 @@ fn golden_llm_outputs_match_expected_chunks() {
     ] {
         let actual = serde_json::to_string_pretty(&rendered_chunks(input)).unwrap();
         assert_eq!(actual.trim(), expected.trim(), "{name}");
+    }
+}
+
+proptest! {
+    #[test]
+    fn no_chunk_exceeds_telegram_limit(input in any_markdown()) {
+        for chunk in rendered_chunks(&input) {
+            prop_assert!(
+                chunk.html.encode_utf16().count() <= TELEGRAM_TEXT_MAX_UTF16_UNITS,
+                "html chunk exceeded limit: {}",
+                chunk.html.encode_utf16().count()
+            );
+            prop_assert!(
+                chunk.plain.encode_utf16().count() <= TELEGRAM_TEXT_MAX_UTF16_UNITS,
+                "plain chunk exceeded limit: {}",
+                chunk.plain.encode_utf16().count()
+            );
+        }
+    }
+
+    #[test]
+    fn html_chunks_have_balanced_tags(input in any_markdown()) {
+        for chunk in rendered_chunks(&input) {
+            prop_assert!(is_telegram_html_balanced(&chunk.html), "{}", chunk.html);
+        }
+    }
+
+    #[test]
+    fn plain_projection_strips_markdown_markers(input in any_markdown()) {
+        for chunk in rendered_chunks(&input) {
+            prop_assert!(!chunk.plain.contains("**"), "{}", chunk.plain);
+            prop_assert!(!chunk.plain.contains("```"), "{}", chunk.plain);
+            prop_assert!(!has_markdown_link_marker(&chunk.plain), "{}", chunk.plain);
+        }
     }
 }
 
