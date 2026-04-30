@@ -263,6 +263,31 @@ fn inline_code_overflow_falls_back_to_escaped_text() {
 }
 
 #[test]
+fn long_bold_span_split_across_chunks_falls_back_to_plain() {
+    let text = "a".repeat(5_000);
+    let chunks = rendered_chunks(&format!("**{text}**"));
+    let html = chunks
+        .iter()
+        .map(|chunk| chunk.html.as_str())
+        .collect::<String>();
+    let plain = chunks
+        .iter()
+        .map(|chunk| chunk.plain.as_str())
+        .collect::<String>();
+
+    assert!(chunks.len() > 1);
+    assert!(chunks
+        .iter()
+        .all(|chunk| is_telegram_html_balanced(&chunk.html)));
+    assert!(chunks
+        .iter()
+        .all(|chunk| chunk.html.encode_utf16().count() <= TELEGRAM_TEXT_MAX_UTF16_UNITS));
+    assert!(!html.contains("<b>"));
+    assert!(!html.contains("</b>"));
+    assert_eq!(plain, text);
+}
+
+#[test]
 fn oversized_fenced_block_splits_at_line_boundary() {
     let input = format!("```rust\n{}```", "let value = 1;\n".repeat(400));
     let chunks = rendered_chunks(&input);
