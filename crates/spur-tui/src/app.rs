@@ -1788,10 +1788,13 @@ impl App {
 
                 if key.modifiers.contains(KeyModifiers::ALT) {
                     if let KeyCode::Char(ch) = key.code {
+                        // Alt+3 dispatches RequestSessions (not NavigateTo)
+                        // because the bare NavigateTo(SessionPicker) arm
+                        // doesn't construct the picker or fire ListSessions.
                         let action = match ch {
                             '1' => Some(Action::NavigateTo(ViewId::Dashboard)),
                             '2' => Some(Action::NavigateTo(ViewId::IssueBrowser)),
-                            '3' => Some(Action::NavigateTo(ViewId::SessionPicker)),
+                            '3' => Some(Action::RequestSessions),
                             '4' => Some(Action::OpenInsights),
                             _ => None,
                         };
@@ -2603,6 +2606,7 @@ impl App {
 
             Action::NavigateTo(ViewId::Dashboard) => {
                 self.current_view = ViewId::Dashboard;
+                self.dirty = true;
                 // session_detail kept alive (same as NavigateBack)
             }
 
