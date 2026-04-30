@@ -158,7 +158,26 @@ impl LicenseProvider for CommunityProviderWithUpgrade {
         // Delegate to the baked-in LicenseSeatProvider. On success the
         // SDK persists a license cache to disk. The next process launch
         // picks up the cache and promotes to bare LicenseSeatProvider.
-        self.upgrade_target.activate(key).await
+        let activated = self.upgrade_target.activate(key).await?;
+        // The activation response only carries `plan_key` — its
+        // `features` set is empty. Without a follow-up validate the
+        // in-process FeatureGate would stay on Community entitlements
+        // until the next process restart (when `hydrate_from_cached`
+        // reads `active_entitlements` off disk). Best-effort validate
+        // closes that gap. If it fails (e.g. transient network), the
+        // activation already succeeded server-side and the cache is on
+        // disk, so the next launch hydrates fully — return the
+        // partial-but-active activation state.
+        match self.upgrade_target.validate().await {
+            Ok(validated) => Ok(validated),
+            Err(err) => {
+                tracing::debug!(
+                    error = %err,
+                    "post-activate validate failed; entitlements will load on next launch"
+                );
+                Ok(activated)
+            }
+        }
     }
     async fn validate(&self) -> Result<LicenseState> {
         self.community.validate().await
