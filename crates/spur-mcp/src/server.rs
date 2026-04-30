@@ -948,6 +948,10 @@ fn replace_execution_labels(
     plan_id: &str,
     agent_name: &str,
 ) -> spur_pm::IssueUpdate {
+    let add_labels = vec![
+        crate::plan::labels::plan_id(plan_id),
+        crate::plan::labels::agent(agent_name),
+    ];
     let mut remove_labels = Vec::new();
     for label in &issue.labels {
         if crate::plan::labels::parse_plan_id(label).is_some()
@@ -956,12 +960,10 @@ fn replace_execution_labels(
             remove_labels.push(label.clone());
         }
     }
+    filter_remove_labels(&mut remove_labels, &add_labels);
 
     spur_pm::IssueUpdate {
-        add_labels: vec![
-            crate::plan::labels::plan_id(plan_id),
-            crate::plan::labels::agent(agent_name),
-        ],
+        add_labels,
         remove_labels,
         ..Default::default()
     }
@@ -982,7 +984,19 @@ fn replace_task_execution_labels(
             update.remove_labels.push(label.clone());
         }
     }
+    filter_remove_labels(&mut update.remove_labels, &update.add_labels);
     update
+}
+
+/// Drop any label from `remove_labels` that also appears in `add_labels`.
+///
+/// The beads CLI processes adds before removes, so an "add X then remove X"
+/// pair on the same issue would strip a label we just (idempotently) added.
+/// Filter the no-op pair out before issuing the update.
+fn filter_remove_labels(remove_labels: &mut Vec<String>, add_labels: &[String]) {
+    let add_set: std::collections::HashSet<&str> =
+        add_labels.iter().map(String::as_str).collect();
+    remove_labels.retain(|label| !add_set.contains(label.as_str()));
 }
 
 fn invert_label_update(update: &spur_pm::IssueUpdate) -> spur_pm::IssueUpdate {
@@ -6970,6 +6984,66 @@ mod reconciler_fast_forward_tests {
         assert!(update
             .remove_labels
             .contains(&crate::plan::labels::agent("old-agent")));
+    }
+
+    /// Regression for bd-19od: when an issue already carries the correct
+    /// `spur:agent:<name>` and/or `spur:plan-id:<id>` label, the same string
+    /// must NOT appear in both `add_labels` and `remove_labels`. The beads
+    /// CLI processes adds before removes, so the duplicate would strip the
+    /// label we just (idempotently) added.
+    #[test]
+    fn execution_label_replacement_does_not_strip_already_correct_agent_label() {
+        let issue = spur_pm::Issue {
+            id: "bd-1".into(),
+            source: spur_pm::PmSource::Beads,
+            title: "Task".into(),
+            body: "Body".into(),
+            status: "open".into(),
+            labels: vec![
+                crate::plan::labels::plan_id("plan-1"),
+                crate::plan::labels::agent("claude-code"),
+            ],
+            assignee: None,
+            url: "beads://bd-1".into(),
+            priority: Some(2),
+            issue_type: Some("task".into()),
+            blocked_by: Vec::new(),
+            due_at: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        let update = super::replace_execution_labels(&issue, "plan-1", "claude-code");
+        let agent_label = crate::plan::labels::agent("claude-code");
+        let plan_label = crate::plan::labels::plan_id("plan-1");
+        assert!(
+            update.add_labels.contains(&agent_label),
+            "add_labels must include the target agent label: {:?}",
+            update.add_labels
+        );
+        assert!(
+            !update.remove_labels.contains(&agent_label),
+            "remove_labels must NOT contain the agent label that we are also adding: {:?}",
+            update.remove_labels
+        );
+        assert!(
+            !update.remove_labels.contains(&plan_label),
+            "remove_labels must NOT contain the plan-id label that we are also adding: {:?}",
+            update.remove_labels
+        );
+
+        let task_update =
+            super::replace_task_execution_labels(&issue, "plan-1", "t1", "claude-code");
+        assert!(
+            !task_update.remove_labels.contains(&agent_label),
+            "replace_task_execution_labels must also filter the agent label: {:?}",
+            task_update.remove_labels
+        );
+        assert!(
+            !task_update.remove_labels.contains(&plan_label),
+            "replace_task_execution_labels must also filter the plan-id label: {:?}",
+            task_update.remove_labels
+        );
     }
 
     #[tokio::test]
