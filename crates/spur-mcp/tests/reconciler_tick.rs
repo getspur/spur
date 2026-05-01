@@ -28,7 +28,9 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
-use spur_acp::{BrainSessionId, SessionId, SpurEvent, SpurEventBody};
+use spur_acp::{
+    BrainSessionId, DelegationResult, DelegationStatus, SessionId, SpurEvent, SpurEventBody,
+};
 use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
 use spur_mcp::plan::reconciler::{
     PlanDispatchState, Reconciler, ReconcilerConfig, ReconcilerDispatchCtx,
@@ -113,17 +115,27 @@ fn run_git(repo: &Path, args: &[&str]) {
     }
 }
 
-fn current_git_head() -> String {
+fn git_rev_parse(repo: &Path, spec: &str) -> String {
     let out = Command::new("git")
-        .args(["rev-parse", "HEAD"])
+        .args(["rev-parse", spec])
+        .current_dir(repo)
         .output()
-        .expect("git rev-parse HEAD");
+        .expect("git rev-parse");
     assert!(
         out.status.success(),
-        "git rev-parse HEAD failed: {}",
+        "git rev-parse {spec} failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn init_git_repo(repo: &Path) {
+    run_git(repo, &["init"]);
+    run_git(repo, &["config", "user.email", "test@example.com"]);
+    run_git(repo, &["config", "user.name", "SPUR Test"]);
+    std::fs::write(repo.join("README.md"), "base\n").expect("write README");
+    run_git(repo, &["add", "README.md"]);
+    run_git(repo, &["commit", "-m", "base"]);
 }
 
 /// Extract the `"id"` field from a JSON object returned by `br create --json`.
@@ -298,6 +310,10 @@ async fn tick_once_dispatches_ready_task_with_approved_dep_overlay() {
     }
 
     let dir = TempDir::new().expect("tempdir");
+    init_git_repo(dir.path());
+    let worker_branch = "spur-test-t1-worker";
+    run_git(dir.path(), &["branch", worker_branch]);
+    let worker_oid = git_rev_parse(dir.path(), worker_branch);
     run_br(dir.path(), &["init"]);
 
     let pm = Arc::new(
@@ -318,6 +334,7 @@ async fn tick_once_dispatches_ready_task_with_approved_dep_overlay() {
     .await
     .expect("build_epic_subgraph");
     let task_1_issue = subgraph.task_map["T1"].clone();
+    let task_2_issue = subgraph.task_map["T2"].clone();
 
     let adv = pm.advanced().expect("beads backend");
     spur_mcp::emit_plan_submit_audit(
@@ -346,7 +363,7 @@ async fn tick_once_dispatches_ready_task_with_approved_dep_overlay() {
             delegation_id: "del-t1".to_string(),
             completion_state: audit_sentinel::CompletionState::AwaitingReview,
             superseded: false,
-            worker_branch: Some("HEAD".to_string()),
+            worker_branch: Some(worker_branch.to_string()),
             result_summary: Some("T1 complete".to_string()),
             artifact_uri: None,
             dispatched_base_oid: Some("t1-dispatched-base".to_string()),
@@ -373,13 +390,17 @@ async fn tick_once_dispatches_ready_task_with_approved_dep_overlay() {
     .expect("close approved T1");
 
     let (delegation_tx, mut delegation_rx) = tokio::sync::mpsc::channel(1);
+    let task_tracker = tokio_util::task::TaskTracker::new();
     let reconciler = Reconciler::new(
-        ReconcilerConfig::default(),
+        ReconcilerConfig {
+            repo_root: dir.path().to_path_buf(),
+            ..Default::default()
+        },
         Arc::clone(&pm),
         Arc::new(Notify::new()),
         Some(ReconcilerDispatchCtx {
             delegation_tx,
-            task_tracker: tokio_util::task::TaskTracker::new(),
+            task_tracker: task_tracker.clone(),
             brain_session_id: BrainSessionId::new(SessionId("brain".to_string())),
             event_sink: None,
             materializer: test_materializer(),
@@ -397,8 +418,19 @@ async fn tick_once_dispatches_ready_task_with_approved_dep_overlay() {
 
     assert!(
         request.dispatched_base_oid_tx.is_some(),
-        "reconciler must pass dispatched_base_oid oneshot to orchestrator"
+        "reconciler must pass dispatched_base_oid watch sender to orchestrator"
     );
+    let dispatched_base_oid_tx = request
+        .dispatched_base_oid_tx
+        .clone()
+        .expect("dispatched_base_oid sender");
+    let retry_dispatched_base_oid_tx = dispatched_base_oid_tx.clone();
+    dispatched_base_oid_tx
+        .send(Some("attempt-1-base".to_string()))
+        .expect("first base oid send");
+    retry_dispatched_base_oid_tx
+        .send(Some("attempt-2-base".to_string()))
+        .expect("retry base oid send");
     let base = request.base.expect("plan dispatch must pass BaseSpec");
     match base {
         BaseSpec::WithOverlay { base, overlays } => {
@@ -409,10 +441,43 @@ async fn tick_once_dispatches_ready_task_with_approved_dep_overlay() {
             assert_eq!(overlays.len(), 1);
             assert_eq!(overlays[0].source_task_id, "T1");
             assert_eq!(overlays[0].base_oid, "t1-dispatched-base");
-            assert_eq!(overlays[0].tip_oid, current_git_head());
+            assert_eq!(overlays[0].tip_oid, worker_oid);
         }
         other => panic!("expected WithOverlay BaseSpec, got {other:?}"),
     }
+
+    request
+        .respond_to
+        .send(DelegationResult {
+            status: DelegationStatus::Success,
+            diff: None,
+            diff_summary: None,
+            summary: Some("T2 complete".to_string()),
+            estimated_cost_usd: 0.0,
+            worker_branch: Some("spur/worker-t2".to_string()),
+            artifact: None,
+        })
+        .expect("send delegation result");
+    task_tracker.close();
+    task_tracker.wait().await;
+
+    let sentinels = collect_sentinels(&run_br_json(
+        dir.path(),
+        &["comments", "list", &task_2_issue],
+    ));
+    let completion_base = sentinels.iter().find_map(|sentinel| match sentinel {
+        AuditSentinelKind::Completion {
+            delegation_id,
+            dispatched_base_oid,
+            ..
+        } if delegation_id != "del-t1" => dispatched_base_oid.as_deref(),
+        _ => None,
+    });
+    assert_eq!(
+        completion_base,
+        Some("attempt-2-base"),
+        "completion audit must persist the successful retry attempt's dispatched base"
+    );
 }
 
 #[tokio::test]

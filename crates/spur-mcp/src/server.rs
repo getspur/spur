@@ -2252,26 +2252,29 @@ impl McpCallbackServer {
                     reconciler_cancel_tx = Some(cancel_tx);
                     info!("spawning plan reconciler (beads backend detected)");
                     let auto_merge = self.auto_merge_approved_plans;
+                    let repo_root = repo_root
+                        .clone()
+                        .expect("repo_root must be set when spawning beads reconciler");
                     let reconciler_config = ReconcilerConfig {
                         dispatch_lease_duration: self.dispatch_lease_duration,
+                        repo_root: repo_root.clone(),
                         ..Default::default()
                     };
                     let automation: Option<Arc<dyn crate::plan::reconciler::ReconcilerAutomation>> =
                         Some(Arc::clone(&self)
                             as Arc<dyn crate::plan::reconciler::ReconcilerAutomation>);
-                    let repo_root = self.repo_root.clone();
                     let feature_gate = Arc::clone(&self.feature_gate);
                     let reconciler_outcomes = Arc::clone(&self.reconciler_outcomes);
                     let journal_notify = Arc::new(tokio::sync::Notify::new());
-                    let journal_handle = repo_root.map(|root| {
-                        let path = crate::plan::reconciler::beads_journal_path(&root);
+                    let journal_handle = {
+                        let path = crate::plan::reconciler::beads_journal_path(&repo_root);
                         tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
                             crate::plan::reconciler::monitor_journal_appends(
                                 path,
                                 Arc::clone(&journal_notify),
                             ),
                         ))
-                    });
+                    };
                     let handle = AbortOnDropHandle::new(tokio::spawn(async move {
                         let mut reconciler = Reconciler::new(
                             reconciler_config,

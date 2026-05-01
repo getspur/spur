@@ -19,6 +19,7 @@
 //! the same loop that owns completion writeback.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -146,9 +147,10 @@ fn is_hex_oid(spec: &str) -> bool {
     spec.len() == 40 && spec.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
-async fn git_rev_parse(spec: &str) -> anyhow::Result<String> {
+async fn git_rev_parse(repo_root: &Path, spec: &str) -> anyhow::Result<String> {
     let output = tokio::process::Command::new("git")
         .args(["rev-parse", spec])
+        .current_dir(repo_root)
         .output()
         .await
         .map_err(|error| anyhow::anyhow!("failed to execute git rev-parse {spec}: {error}"))?;
@@ -171,6 +173,7 @@ async fn git_rev_parse(spec: &str) -> anyhow::Result<String> {
 async fn plan_dispatch_base_spec(
     plan_state: &crate::plan::PlanState,
     task_id: &str,
+    repo_root: &Path,
 ) -> anyhow::Result<crate::tools::BaseSpec> {
     let dep_closure = plan_state.approved_dep_closure(task_id);
     let mut overlays = Vec::with_capacity(dep_closure.len());
@@ -188,7 +191,7 @@ async fn plan_dispatch_base_spec(
                 dep.spec.task_id
             )
         })?;
-        let tip_oid = git_rev_parse(worker_branch).await?;
+        let tip_oid = git_rev_parse(repo_root, worker_branch).await?;
         overlays.push(crate::tools::OverlayCommit {
             source_task_id: dep.spec.task_id.clone(),
             base_oid,
@@ -319,6 +322,7 @@ pub struct ReconcilerConfig {
     pub idle_ceiling: Duration,
     pub backoff_factor: u32,
     pub dispatch_lease_duration: Duration,
+    pub repo_root: PathBuf,
 }
 
 impl Default for ReconcilerConfig {
@@ -328,6 +332,7 @@ impl Default for ReconcilerConfig {
             idle_ceiling: Duration::from_secs(30),
             backoff_factor: 2,
             dispatch_lease_duration: Duration::from_secs(600),
+            repo_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         }
     }
 }
@@ -693,7 +698,9 @@ impl Reconciler {
                 .labels
                 .iter()
                 .any(|label| crate::plan::labels::parse_agent(label).is_some());
-            let base_spec = plan_dispatch_base_spec(&projected, &task.spec.task_id).await?;
+            let base_spec =
+                plan_dispatch_base_spec(&projected, &task.spec.task_id, &self.config.repo_root)
+                    .await?;
             crate::plan::persist_dispatch_intent(
                 self.pm.as_ref(),
                 &summary.id,
@@ -708,7 +715,7 @@ impl Reconciler {
 
             let (respond_to, rx) = tokio::sync::oneshot::channel();
             let (dispatched_base_oid_tx, dispatched_base_oid_rx) =
-                tokio::sync::oneshot::channel();
+                tokio::sync::watch::channel(None);
             let request = crate::tools::DelegationRequest {
                 id: delegation_id.clone().into(),
                 agent: task.spec.agent.clone(),
@@ -793,7 +800,7 @@ impl Reconciler {
                         }
                     }
                 };
-                let dispatched_base_oid = dispatched_base_oid_rx.await.ok();
+                let dispatched_base_oid = dispatched_base_oid_rx.borrow().clone();
 
                 if let Err(error) = crate::plan::persist_worker_completion_and_notify(
                     pm.as_ref(),
