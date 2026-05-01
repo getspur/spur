@@ -22,8 +22,8 @@ use spur_acp::session_lock::{AcquireOutcome, SessionAttachGuard};
 use spur_acp::types::*;
 use spur_acp::{
     CancellationControl, DelegationAbortHandle, DelegationAbortReason, DelegationResult,
-    DelegationStatus, LifecycleState, ReviewKind, ReviewPayload, SpurEvent, SpurEventBody,
-    TimeoutFallback,
+    DelegationStatus, GraphEdgeEvent, GraphNodeEvent, LifecycleState, ReviewKind, ReviewPayload,
+    SpurEvent, SpurEventBody, TimeoutFallback,
 };
 use spur_pm::Issue;
 
@@ -1339,6 +1339,98 @@ fn graph_edge_to_event(edge: &spur_pm::graph::GraphEdge) -> spur_acp::GraphEdgeE
         from: edge.from.clone(),
         to: edge.to.clone(),
         edge_type: edge.edge_type.clone(),
+    }
+}
+
+fn dependency_graph_to_event_parts(
+    graph: spur_pm::graph::DependencyGraph,
+) -> (Vec<GraphNodeEvent>, Vec<GraphEdgeEvent>) {
+    let Some(adjacency) = graph.adjacency else {
+        return (Vec::new(), Vec::new());
+    };
+
+    let nodes = adjacency
+        .nodes
+        .iter()
+        .map(graph_node_to_event)
+        .collect();
+    let edges = adjacency
+        .edges
+        .unwrap_or_default()
+        .iter()
+        .map(graph_edge_to_event)
+        .collect();
+    (nodes, edges)
+}
+
+#[async_trait::async_trait]
+trait IssueGraphPm {
+    fn analyzer_available(&self) -> bool;
+
+    async fn issue_subgraph_json(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<spur_pm::graph::DependencyGraph>;
+}
+
+#[async_trait::async_trait]
+impl IssueGraphPm for spur_pm::PmService {
+    fn analyzer_available(&self) -> bool {
+        self.analyzer().is_some()
+    }
+
+    async fn issue_subgraph_json(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<spur_pm::graph::DependencyGraph> {
+        self.analyzer()
+            .ok_or_else(|| {
+                anyhow::anyhow!("bv unavailable; install bv to view dependency graph")
+            })?
+            .subgraph(id, Some(2), Some("json"))
+            .await
+    }
+}
+
+async fn handle_get_issue_graph<P: IssueGraphPm + ?Sized>(
+    pm: Option<&P>,
+    funnel: &crate::event_funnel::FunnelHandle,
+    id: String,
+) {
+    let Some(pm) = pm else {
+        funnel.emit(SpurEventBody::IssueCommandError {
+            operation: "GetIssueGraph".into(),
+            error: "No issue tracker configured".into(),
+            id: Some(id),
+        });
+        return;
+    };
+
+    if !pm.analyzer_available() {
+        funnel.emit(SpurEventBody::IssueCommandError {
+            operation: "GetIssueGraph".into(),
+            error: "bv unavailable; install bv to view dependency graph".into(),
+            id: Some(id),
+        });
+        return;
+    }
+
+    match pm.issue_subgraph_json(&id).await {
+        Ok(graph) => {
+            let (nodes, edges) = dependency_graph_to_event_parts(graph);
+            funnel.emit(SpurEventBody::IssueSubgraphLoaded {
+                requested_id: id,
+                nodes,
+                edges,
+            });
+        }
+        Err(e) => {
+            funnel.emit(SpurEventBody::IssueCommandError {
+                operation: "GetIssueGraph".into(),
+                error: e.to_string(),
+                id: Some(id),
+            });
+        }
     }
 }
 
@@ -2711,57 +2803,12 @@ impl Orchestrator {
 
                     // ── GetIssueGraph ────────────────────────────────────
                     InteractiveInput::GetIssueGraph { id } => {
-                        if let Some(pm) = &self.pm_service {
-                            if let Some(bv) = pm.analyzer() {
-                                let req_id = id.clone();
-                                match bv.subgraph(&id, Some(2), Some("json")).await {
-                                    Ok(graph) => {
-                                        let (nodes, edges) =
-                                            if let Some(adjacency) = graph.adjacency {
-                                                let nodes = adjacency
-                                                    .nodes
-                                                    .iter()
-                                                    .map(graph_node_to_event)
-                                                    .collect();
-                                                let edges = adjacency
-                                                    .edges
-                                                    .unwrap_or_default()
-                                                    .iter()
-                                                    .map(graph_edge_to_event)
-                                                    .collect();
-                                                (nodes, edges)
-                                            } else {
-                                                (Vec::new(), Vec::new())
-                                            };
-                                        self.funnel.emit(SpurEventBody::IssueSubgraphLoaded {
-                                            requested_id: id,
-                                            nodes,
-                                            edges,
-                                        });
-                                    }
-                                    Err(e) => {
-                                        self.funnel.emit(SpurEventBody::IssueCommandError {
-                                            operation: "GetIssueGraph".into(),
-                                            error: e.to_string(),
-                                            id: Some(req_id),
-                                        });
-                                    }
-                                }
-                            } else {
-                                self.funnel.emit(SpurEventBody::IssueCommandError {
-                                    operation: "GetIssueGraph".into(),
-                                    error: "Graph analysis unavailable: bv is not configured"
-                                        .into(),
-                                    id: Some(id),
-                                });
-                            }
-                        } else {
-                            self.funnel.emit(SpurEventBody::IssueCommandError {
-                                operation: "GetIssueGraph".into(),
-                                error: "No issue tracker configured".into(),
-                                id: Some(id),
-                            });
-                        }
+                        handle_get_issue_graph(
+                            self.pm_service.as_deref(),
+                            &self.funnel,
+                            id,
+                        )
+                        .await;
                     }
 
                     // ── UpdateIssue ───────────────────────────────────────
@@ -7458,6 +7505,203 @@ pub mod test_support {
                 }
             })
             .await
+    }
+}
+
+#[cfg(test)]
+mod issue_graph_handler_tests {
+    use super::{handle_get_issue_graph, IssueGraphPm};
+    use async_trait::async_trait;
+    use spur_acp::SpurEventBody;
+    use spur_pm::graph::{AdjacencyData, DependencyGraph, GraphEdge, GraphNode};
+    use std::sync::Mutex;
+    use std::time::Duration;
+    use tokio::sync::mpsc::UnboundedReceiver;
+
+    struct FakePmService {
+        analyzer_available: bool,
+        result: Mutex<Option<Result<DependencyGraph, String>>>,
+        requested_ids: Mutex<Vec<String>>,
+    }
+
+    impl FakePmService {
+        fn with_graph(graph: DependencyGraph) -> Self {
+            Self {
+                analyzer_available: true,
+                result: Mutex::new(Some(Ok(graph))),
+                requested_ids: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn unavailable() -> Self {
+            Self {
+                analyzer_available: false,
+                result: Mutex::new(None),
+                requested_ids: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn failing(message: &str) -> Self {
+            Self {
+                analyzer_available: true,
+                result: Mutex::new(Some(Err(message.to_string()))),
+                requested_ids: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn requested_ids(&self) -> Vec<String> {
+            self.requested_ids.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl IssueGraphPm for FakePmService {
+        fn analyzer_available(&self) -> bool {
+            self.analyzer_available
+        }
+
+        async fn issue_subgraph_json(&self, id: &str) -> anyhow::Result<DependencyGraph> {
+            self.requested_ids.lock().unwrap().push(id.to_string());
+            match self.result.lock().unwrap().take().expect("fake result") {
+                Ok(graph) => Ok(graph),
+                Err(message) => Err(anyhow::anyhow!(message)),
+            }
+        }
+    }
+
+    fn dependency_graph() -> DependencyGraph {
+        DependencyGraph {
+            format: Some("json".into()),
+            graph: None,
+            nodes: 2,
+            edges: 1,
+            data_hash: Some("hash".into()),
+            adjacency: Some(AdjacencyData {
+                nodes: vec![
+                    GraphNode {
+                        id: "bd-root".into(),
+                        title: Some("Root issue".into()),
+                        status: Some("open".into()),
+                        priority: Some(1),
+                        labels: vec!["feature".into()],
+                        pagerank: Some(0.5),
+                    },
+                    GraphNode {
+                        id: "bd-child".into(),
+                        title: Some("Child issue".into()),
+                        status: Some("blocked".into()),
+                        priority: Some(2),
+                        labels: vec!["backend".into()],
+                        pagerank: None,
+                    },
+                ],
+                edges: Some(vec![GraphEdge {
+                    from: "bd-root".into(),
+                    to: "bd-child".into(),
+                    edge_type: Some("depends_on".into()),
+                }]),
+            }),
+            raw: serde_json::Value::Null,
+        }
+    }
+
+    async fn next_event(events: &mut UnboundedReceiver<SpurEventBody>) -> SpurEventBody {
+        tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("event timeout")
+            .expect("event channel closed")
+    }
+
+    #[tokio::test]
+    async fn get_issue_graph_emits_issue_subgraph_loaded() {
+        let fake = FakePmService::with_graph(dependency_graph());
+        let (funnel, mut events) = crate::event_funnel::test_channel();
+
+        handle_get_issue_graph(Some(&fake), &funnel, "bd-root".into()).await;
+
+        assert_eq!(fake.requested_ids(), vec!["bd-root"]);
+        match next_event(&mut events).await {
+            SpurEventBody::IssueSubgraphLoaded {
+                requested_id,
+                nodes,
+                edges,
+            } => {
+                assert_eq!(requested_id, "bd-root");
+                assert_eq!(nodes.len(), 2);
+                assert_eq!(nodes[0].id, "bd-root");
+                assert_eq!(nodes[0].title.as_deref(), Some("Root issue"));
+                assert_eq!(nodes[0].labels, vec!["feature"]);
+                assert_eq!(edges.len(), 1);
+                assert_eq!(edges[0].from, "bd-root");
+                assert_eq!(edges[0].to, "bd-child");
+                assert_eq!(edges[0].edge_type.as_deref(), Some("depends_on"));
+            }
+            other => panic!("expected IssueSubgraphLoaded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_issue_graph_emits_command_error_when_bv_unavailable() {
+        let fake = FakePmService::unavailable();
+        let (funnel, mut events) = crate::event_funnel::test_channel();
+
+        handle_get_issue_graph(Some(&fake), &funnel, "bd-root".into()).await;
+
+        assert!(fake.requested_ids().is_empty());
+        match next_event(&mut events).await {
+            SpurEventBody::IssueCommandError {
+                operation,
+                error,
+                id,
+            } => {
+                assert_eq!(operation, "GetIssueGraph");
+                assert_eq!(error, "bv unavailable; install bv to view dependency graph");
+                assert_eq!(id, Some("bd-root".into()));
+            }
+            other => panic!("expected IssueCommandError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_issue_graph_emits_command_error_when_subgraph_fails() {
+        let fake = FakePmService::failing("bv failed");
+        let (funnel, mut events) = crate::event_funnel::test_channel();
+
+        handle_get_issue_graph(Some(&fake), &funnel, "bd-root".into()).await;
+
+        assert_eq!(fake.requested_ids(), vec!["bd-root"]);
+        match next_event(&mut events).await {
+            SpurEventBody::IssueCommandError {
+                operation,
+                error,
+                id,
+            } => {
+                assert_eq!(operation, "GetIssueGraph");
+                assert_eq!(error, "bv failed");
+                assert_eq!(id, Some("bd-root".into()));
+            }
+            other => panic!("expected IssueCommandError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_issue_graph_emits_command_error_when_pm_missing() {
+        let (funnel, mut events) = crate::event_funnel::test_channel();
+
+        handle_get_issue_graph(None::<&FakePmService>, &funnel, "bd-root".into()).await;
+
+        match next_event(&mut events).await {
+            SpurEventBody::IssueCommandError {
+                operation,
+                error,
+                id,
+            } => {
+                assert_eq!(operation, "GetIssueGraph");
+                assert_eq!(error, "No issue tracker configured");
+                assert_eq!(id, Some("bd-root".into()));
+            }
+            other => panic!("expected IssueCommandError, got {other:?}"),
+        }
     }
 }
 
