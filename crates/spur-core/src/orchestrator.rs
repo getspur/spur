@@ -6442,7 +6442,12 @@ async fn run_one_worker_attempt(
         .unwrap_or_else(|| snapshot_branch.clone());
 
     let worktree_info = worktrees
-        .create_worktree(&worker_session, ctx.agent, &base_branch)
+        .create_worktree_v2(
+            ctx.brain_session_id,
+            &worker_session,
+            ctx.agent,
+            &base_branch,
+        )
         .await
         .map_err(|e| AttemptSetupError::WorktreeFailed(e.to_string()))?;
 
