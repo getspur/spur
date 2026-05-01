@@ -551,6 +551,7 @@ pub fn parse_parallel_tasks(
             delegation_plan,
             issue_id,
             base: None,
+            dispatched_base_oid_tx: None,
             attempt_tracker: new_attempt_tracker(),
         });
     }
@@ -2549,6 +2550,7 @@ impl McpCallbackServer {
             delegation_plan,
             issue_id,
             base: None,
+            dispatched_base_oid_tx: None,
             attempt_tracker: Arc::clone(&attempt_tracker),
         };
 

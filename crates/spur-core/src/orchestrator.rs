@@ -4957,6 +4957,7 @@ impl Orchestrator {
                 delegation_plan,
                 issue_id,
                 base,
+                dispatched_base_oid_tx,
                 attempt_tracker,
             } = request;
             // Phase 4: `DelegationRequest.id` is now a typed `DelegationId`
@@ -5149,6 +5150,7 @@ impl Orchestrator {
                         attempt_tracker,
                         peer_mailbox,
                         base,
+                        dispatched_base_oid_tx,
                     ) => r,
                 };
                 drop(dispatch_lease_heartbeat_handle);
@@ -5269,6 +5271,7 @@ impl Orchestrator {
         attempt_tracker: Arc<std::sync::atomic::AtomicU32>,
         peer_mailbox: Option<crate::peer_mailbox::PeerMailboxBundle>,
         base: Option<BaseSpec>,
+        mut dispatched_base_oid_tx: Option<tokio::sync::oneshot::Sender<String>>,
     ) -> (DelegationResult, Option<ExecutorId>) {
         // Shadow `original_task` with the Relevant Files-prepended form
         // so retry loops at orchestrator.rs:3013 reuse the formatted
@@ -5365,7 +5368,7 @@ impl Orchestrator {
                     peer_mailbox: peer_mailbox.as_ref(),
                     ack_tx: ack_tx.clone(),
                     base: base.clone(),
-                    dispatched_base_oid_tx: None,
+                    dispatched_base_oid_tx: dispatched_base_oid_tx.take(),
                 },
                 &mut worktrees,
                 &funnel,

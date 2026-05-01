@@ -34,6 +34,7 @@ use spur_mcp::plan::reconciler::{
     PlanDispatchState, Reconciler, ReconcilerConfig, ReconcilerDispatchCtx,
 };
 use spur_mcp::plan::{labels, PlanTask};
+use spur_mcp::tools::BaseSpec;
 use spur_mcp::McpEventSink;
 use spur_mcp::{server::DetachedContinuationCtx, McpCallbackServer};
 use tempfile::TempDir;
@@ -112,6 +113,19 @@ fn run_git(repo: &Path, args: &[&str]) {
     }
 }
 
+fn current_git_head() -> String {
+    let out = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("git rev-parse HEAD");
+    assert!(
+        out.status.success(),
+        "git rev-parse HEAD failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
 /// Extract the `"id"` field from a JSON object returned by `br create --json`.
 fn parse_id_from_create(json: &str) -> String {
     let v: serde_json::Value = serde_json::from_str(json).expect("br create output not JSON");
@@ -168,6 +182,27 @@ fn extract_submit_plan_task_issue_id(response: &serde_json::Value, task_id: &str
         .get(task_id)
         .cloned()
         .unwrap_or_else(|| panic!("submit_plan task_map must include '{task_id}'"))
+}
+
+fn dependent_plan_tasks() -> Vec<PlanTask> {
+    vec![
+        PlanTask {
+            task_id: "T1".to_string(),
+            agent: "codex".to_string(),
+            task: "Build dependency output.".to_string(),
+            depends_on: Vec::new(),
+            issue_id: None,
+            context_files: Vec::new(),
+        },
+        PlanTask {
+            task_id: "T2".to_string(),
+            agent: "codex".to_string(),
+            task: "Use dependency output.".to_string(),
+            depends_on: vec!["T1".to_string()],
+            issue_id: None,
+            context_files: Vec::new(),
+        },
+    ]
 }
 
 fn test_continuation_ctx() -> DetachedContinuationCtx {
@@ -251,6 +286,133 @@ async fn tick_once_does_not_dispatch_partial_plan_after_child_create_failure() {
         delegation_rx.try_recv().is_err(),
         "partial plan must not enqueue a delegation"
     );
+}
+
+#[tokio::test]
+async fn tick_once_dispatches_ready_task_with_approved_dep_overlay() {
+    if !br_available() {
+        eprintln!(
+            "skipping tick_once_dispatches_ready_task_with_approved_dep_overlay: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let pm = Arc::new(
+        spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+            .await
+            .expect("PmService::try_new failed")
+            .expect("expected beads pm"),
+    );
+    let feature_gate = common::server_builder::pro_feature_gate();
+    let subgraph = spur_mcp::build_epic_subgraph(
+        pm.as_ref(),
+        feature_gate.as_ref(),
+        "overlay-plan",
+        "Overlay Plan",
+        None,
+        &dependent_plan_tasks(),
+    )
+    .await
+    .expect("build_epic_subgraph");
+    let task_1_issue = subgraph.task_map["T1"].clone();
+
+    let adv = pm.advanced().expect("beads backend");
+    spur_mcp::emit_plan_submit_audit(
+        adv,
+        "overlay-plan",
+        &subgraph,
+        Some("spur/plan-base-overlay"),
+        Some("base-snapshot-oid"),
+        None,
+        Some(&SessionId("brain".to_string())),
+    )
+    .await;
+    adv.add_comment(
+        &task_1_issue,
+        &audit_sentinel::encode_comment(&AuditSentinelKind::Dispatch {
+            delegation_id: "del-t1".to_string(),
+            worker: "codex".to_string(),
+            attempt: 1,
+        }),
+    )
+    .await
+    .expect("dispatch audit");
+    adv.add_comment(
+        &task_1_issue,
+        &audit_sentinel::encode_comment(&AuditSentinelKind::Completion {
+            delegation_id: "del-t1".to_string(),
+            completion_state: audit_sentinel::CompletionState::AwaitingReview,
+            superseded: false,
+            worker_branch: Some("HEAD".to_string()),
+            result_summary: Some("T1 complete".to_string()),
+            artifact_uri: None,
+            dispatched_base_oid: Some("t1-dispatched-base".to_string()),
+        }),
+    )
+    .await
+    .expect("completion audit");
+    adv.add_comment(
+        &task_1_issue,
+        &audit_sentinel::encode_comment(&AuditSentinelKind::Approval {
+            delegation_id: "del-t1".to_string(),
+        }),
+    )
+    .await
+    .expect("approval audit");
+    pm.update_issue(
+        &task_1_issue,
+        spur_pm::IssueUpdate {
+            status: Some(pm.closed_status().to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("close approved T1");
+
+    let (delegation_tx, mut delegation_rx) = tokio::sync::mpsc::channel(1);
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        Some(ReconcilerDispatchCtx {
+            delegation_tx,
+            task_tracker: tokio_util::task::TaskTracker::new(),
+            brain_session_id: BrainSessionId::new(SessionId("brain".to_string())),
+            event_sink: None,
+            materializer: test_materializer(),
+        }),
+        Some("overlay-plan".to_string()),
+        feature_gate,
+    );
+
+    let did_work = reconciler.tick_once().await.expect("tick_once");
+    assert!(did_work, "T2 should be dispatched");
+    let request = tokio::time::timeout(std::time::Duration::from_secs(5), delegation_rx.recv())
+        .await
+        .expect("delegation request timeout")
+        .expect("delegation request");
+
+    assert!(
+        request.dispatched_base_oid_tx.is_some(),
+        "reconciler must pass dispatched_base_oid oneshot to orchestrator"
+    );
+    let base = request.base.expect("plan dispatch must pass BaseSpec");
+    match base {
+        BaseSpec::WithOverlay { base, overlays } => {
+            assert!(matches!(
+                base,
+                spur_mcp::tools::BaseTarget::Branch { name } if name == "spur/plan-base-overlay"
+            ));
+            assert_eq!(overlays.len(), 1);
+            assert_eq!(overlays[0].source_task_id, "T1");
+            assert_eq!(overlays[0].base_oid, "t1-dispatched-base");
+            assert_eq!(overlays[0].tip_oid, current_git_head());
+        }
+        other => panic!("expected WithOverlay BaseSpec, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -1395,6 +1557,7 @@ async fn worker_success_after_orphan_clear_is_superseded() {
         &BrainSessionId::new(SessionId("brain".into())),
         1,
         &test_materializer(),
+        None,
     )
     .await
     .expect("persist worker completion");
