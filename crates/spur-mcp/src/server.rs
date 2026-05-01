@@ -27,6 +27,7 @@ use tracing::{debug, error, info};
 use spur_acp::*;
 use spur_license::FeatureKey;
 use spur_pm::{pidfile::PidFileGuard, IssueFilter, IssueUpdate, PmService, PrParams};
+use spur_worktree::manager::WorktreeError;
 use spur_worktree::WorktreeManager;
 
 use crate::outcome_materializer::OutcomeMaterializer;
@@ -2097,6 +2098,12 @@ impl McpCallbackServer {
         serde_json::to_value(&response).expect("serialize JsonRpcResponse")
     }
 
+    /// Test-only: install a plan state directly into the in-memory cache.
+    #[doc(hidden)]
+    pub async fn __test_install_plan(&self, state: crate::plan::PlanState) {
+        self.install_projected_plan(state, false).await;
+    }
+
     /// Test-only: mutate a cached plan entry into an impossible state so
     /// persisted read paths can prove they refresh from durable projection
     /// instead of trusting `active_plans`.
@@ -2515,6 +2522,7 @@ impl McpCallbackServer {
                 ),
                 Err(e) => JsonRpcResponse::internal_error(id, e),
             },
+            "preview_task_base" => self.handle_preview_task_base(id, arguments).await,
             "review_task" => match self.handle_review_task(&arguments).await {
                 Ok(text) => JsonRpcResponse::success(
                     id,
@@ -4506,6 +4514,192 @@ impl McpCallbackServer {
         }
 
         serde_json::to_string_pretty(&serde_json::Value::Object(resp)).map_err(|e| e.to_string())
+    }
+
+    async fn preview_task_base_impl(
+        &self,
+        input: crate::tool_schemas::PreviewTaskBaseInput,
+    ) -> anyhow::Result<crate::tool_schemas::PreviewTaskBaseOutput> {
+        let repo_root = self
+            .repo_root
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Repository root not configured"))?;
+        let plan_arc = self
+            .load_or_project_plan(&input.plan_id)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+
+        let (base_ref, overlay_sources) = {
+            let state = plan_arc.lock().await;
+            if !state
+                .tasks
+                .iter()
+                .any(|entry| entry.spec.task_id == input.task_id)
+            {
+                anyhow::bail!(
+                    "Unknown task_id '{}' in plan '{}'",
+                    input.task_id,
+                    input.plan_id
+                );
+            }
+
+            let mut overlay_sources = Vec::new();
+            for dep in state.approved_dep_closure(&input.task_id) {
+                let base_oid = dep.dispatched_base_oid.clone().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "approved dependency {} is missing dispatched_base_oid",
+                        dep.spec.task_id
+                    )
+                })?;
+                let worker_branch = dep.worker_branch.clone().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "approved dependency {} is missing worker_branch",
+                        dep.spec.task_id
+                    )
+                })?;
+                overlay_sources.push((dep.spec.task_id.clone(), base_oid, worker_branch));
+            }
+
+            let base_ref = state
+                .base_snapshot_branch
+                .clone()
+                .or_else(|| state.base_snapshot_oid.clone())
+                .unwrap_or_else(|| "HEAD".to_string());
+
+            (base_ref, overlay_sources)
+        };
+
+        let mut overlays = Vec::with_capacity(overlay_sources.len());
+        for (source_task_id, base_oid, worker_branch) in overlay_sources {
+            let tip_oid = run_git_capture(
+                &repo_root,
+                None,
+                &["rev-parse", "--verify", worker_branch.as_str()],
+            )
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "failed to resolve worker branch '{}' for dependency {}: {}",
+                    worker_branch,
+                    source_task_id,
+                    error
+                )
+            })?;
+            overlays.push(crate::tools::OverlayCommit {
+                source_task_id,
+                base_oid,
+                tip_oid,
+            });
+        }
+
+        let preview_id = uuid::Uuid::new_v4().simple().to_string();
+        let throwaway_path = repo_root.join(".spur/worktrees/preview").join(&preview_id);
+        if let Some(parent) = throwaway_path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "failed to create preview worktree parent {}",
+                    parent.display()
+                )
+            })?;
+        }
+        let throwaway_branch = format!("spur/preview-{preview_id}");
+        let manager = WorktreeManager::new(repo_root);
+
+        if let Err(error) = manager
+            .create_worktree_at(&throwaway_path, &throwaway_branch, &base_ref)
+            .await
+        {
+            let _ = manager.remove_worktree_at(&throwaway_path).await;
+            let _ = manager.delete_branch(&throwaway_branch).await;
+            return Err(error);
+        }
+
+        let overlay_args = overlays
+            .iter()
+            .map(|overlay| {
+                (
+                    overlay.source_task_id.clone(),
+                    overlay.base_oid.clone(),
+                    overlay.tip_oid.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let preview_result = match manager.apply_overlays(&throwaway_path, &overlay_args).await {
+            Ok(()) => match manager.resolve_head(&throwaway_path).await {
+                Ok(head) => Ok(crate::tool_schemas::PreviewTaskBaseOutput {
+                    overlays,
+                    predicted_base_oid: Some(head),
+                    conflict: None,
+                }),
+                Err(error) => Err(error.context("failed to resolve preview HEAD")),
+            },
+            Err(WorktreeError::OverlayConflict {
+                source_task_id,
+                files,
+            }) => Ok(crate::tool_schemas::PreviewTaskBaseOutput {
+                overlays,
+                predicted_base_oid: None,
+                conflict: Some(crate::tool_schemas::PreviewConflict {
+                    dep_task_id: source_task_id,
+                    files,
+                }),
+            }),
+            Err(other) => Err(anyhow::anyhow!("preview overlay failed: {other}")),
+        };
+
+        let mut cleanup_errors = Vec::new();
+        if let Err(error) = manager.remove_worktree_at(&throwaway_path).await {
+            cleanup_errors.push(error.to_string());
+        }
+        if let Err(error) = manager.delete_branch(&throwaway_branch).await {
+            cleanup_errors.push(error.to_string());
+        }
+
+        match (preview_result, cleanup_errors.is_empty()) {
+            (Ok(output), true) => Ok(output),
+            (Ok(_), false) => anyhow::bail!(
+                "preview cleanup failed after successful dry-run: {}",
+                cleanup_errors.join("; ")
+            ),
+            (Err(error), true) => Err(error),
+            (Err(error), false) => anyhow::bail!(
+                "{error}; preview cleanup also failed: {}",
+                cleanup_errors.join("; ")
+            ),
+        }
+    }
+
+    async fn handle_preview_task_base(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let input: crate::tool_schemas::PreviewTaskBaseInput = match serde_json::from_value(args) {
+            Ok(input) => input,
+            Err(error) => return JsonRpcResponse::invalid_params(id, error.to_string()),
+        };
+
+        match self.preview_task_base_impl(input).await {
+            Ok(output) => match serde_json::to_string_pretty(&output) {
+                Ok(text) => JsonRpcResponse::success(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }] }),
+                ),
+                Err(error) => JsonRpcResponse::internal_error(
+                    id,
+                    format!("failed to serialize preview_task_base response: {error}"),
+                ),
+            },
+            Err(error) => {
+                let message = error.to_string();
+                if message.starts_with("unknown plan")
+                    || message.starts_with("Unknown task_id")
+                    || message.contains("Unknown plan_id")
+                {
+                    JsonRpcResponse::invalid_params(id, message)
+                } else {
+                    JsonRpcResponse::internal_error(id, message)
+                }
+            }
+        }
     }
 
     async fn handle_review_task(&self, args: &serde_json::Value) -> Result<String, String> {

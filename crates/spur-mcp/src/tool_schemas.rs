@@ -49,3 +49,24 @@ pub struct DelegateParallelInput {
     /// List of tasks to delegate in parallel. Each task carries its own context_files, issue_id, and delegation_plan.
     pub tasks: Vec<DelegateParallelTaskInput>,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PreviewTaskBaseInput {
+    pub plan_id: String,
+    pub task_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct PreviewTaskBaseOutput {
+    pub overlays: Vec<crate::tools::OverlayCommit>,
+    /// HEAD after overlays applied, if clean. None if conflict.
+    pub predicted_base_oid: Option<String>,
+    pub conflict: Option<PreviewConflict>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct PreviewConflict {
+    pub dep_task_id: String,
+    pub files: Vec<String>,
+}
