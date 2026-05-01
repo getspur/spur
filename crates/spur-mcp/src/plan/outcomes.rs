@@ -240,10 +240,13 @@ impl OutcomeStore {
         if let Some(buffer) = self.outcomes_by_plan.get_mut(plan_id) {
             buffer.latest_per_task.remove(task_id);
         }
+        self.skip_observations
+            .remove(&(plan_id.to_string(), task_id.to_string()));
     }
 
     pub fn drop_plan(&mut self, plan_id: &str) {
         self.outcomes_by_plan.remove(plan_id);
+        self.skip_observations.retain(|(p, _), _| p != plan_id);
     }
 
     pub fn record_no_ready(
@@ -405,6 +408,10 @@ impl OutcomeStore {
             stuck_tasks: self.stuck_tasks(),
             last_tick_at: self.last_tick_at,
         }
+    }
+
+    pub fn skip_observations_len(&self) -> usize {
+        self.skip_observations.len()
     }
 }
 
@@ -828,6 +835,40 @@ mod tests {
         assert!(!store.outcomes_by_plan.contains_key("P1"));
         assert!(store.outcomes_by_plan.contains_key("P2"));
         assert_eq!(store.outcomes_global.snapshot().len(), 1);
+    }
+
+    #[test]
+    fn prune_task_removes_skip_observation_for_target_task_only() {
+        let mut store = OutcomeStore::default();
+        store.record_skipped(Some("P1"), "task-1", SkipReason::MissingIssueId, ts(1));
+        store.record_skipped(Some("P1"), "task-2", SkipReason::DuplicateIssueId, ts(2));
+
+        store.prune_task("P1", "task-1");
+
+        assert!(!store
+            .skip_observations
+            .contains_key(&("P1".to_string(), "task-1".to_string())));
+        assert!(store
+            .skip_observations
+            .contains_key(&("P1".to_string(), "task-2".to_string())));
+    }
+
+    #[test]
+    fn drop_plan_clears_all_skip_observations_for_plan_only() {
+        let mut store = OutcomeStore::default();
+        store.record_skipped(Some("P1"), "task-1", SkipReason::MissingIssueId, ts(1));
+        store.record_skipped(Some("P1"), "task-2", SkipReason::DuplicateIssueId, ts(2));
+        store.record_skipped(Some("P2"), "task-1", SkipReason::MissingIssueId, ts(3));
+
+        store.drop_plan("P1");
+
+        assert!(!store
+            .skip_observations
+            .keys()
+            .any(|(plan, _)| plan == "P1"));
+        assert!(store
+            .skip_observations
+            .contains_key(&("P2".to_string(), "task-1".to_string())));
     }
 
     #[test]
