@@ -1097,6 +1097,9 @@ fn tui_input_to_interactive(input: spur_tui::UserInput) -> spur_core::Interactiv
         spur_tui::UserInput::GetIssueDetail { id } => {
             spur_core::InteractiveInput::GetIssueDetail { id }
         }
+        spur_tui::UserInput::GetIssueGraph { id } => {
+            spur_core::InteractiveInput::GetIssueGraph { id }
+        }
         spur_tui::UserInput::UpdateIssue { id, update } => {
             spur_core::InteractiveInput::UpdateIssue { id, update }
         }
