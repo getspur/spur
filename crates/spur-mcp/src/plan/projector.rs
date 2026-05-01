@@ -461,6 +461,7 @@ pub async fn project_plan_from_beads(
             attempt,
             history: Vec::new(),
             last_delegation_id,
+            dispatched_base_oid: None,
         });
     }
 
@@ -701,6 +702,7 @@ mod tests {
                 attempt: 1,
                 history: Vec::new(),
                 last_delegation_id: Some("del-a".into()),
+                dispatched_base_oid: None,
             },
             PlanTaskEntry {
                 spec: PlanTask {
@@ -717,6 +719,7 @@ mod tests {
                 attempt: 1,
                 history: Vec::new(),
                 last_delegation_id: None,
+                dispatched_base_oid: None,
             },
         ];
 

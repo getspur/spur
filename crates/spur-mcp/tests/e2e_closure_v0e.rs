@@ -508,6 +508,7 @@ async fn t_v0e_1_no_persisted_direct_dispatch() {
             attempt: 1,
             history: vec![],
             last_delegation_id: None,
+            dispatched_base_oid: None,
         }],
     };
     let plan_arc = Arc::new(tokio::sync::Mutex::new(state));

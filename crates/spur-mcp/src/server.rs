@@ -847,6 +847,7 @@ async fn reconstruct_historical_attempts(
             diff_summary: None,
             summary: record.summary,
             feedback: record.feedback,
+            dispatched_base_oid: None,
         })
         .collect();
     history.sort_by_key(|record| record.attempt);
@@ -1377,6 +1378,7 @@ pub fn build_entries_with_task_map(
                 attempt: 1,
                 history: Vec::new(),
                 last_delegation_id: None,
+                dispatched_base_oid: None,
             }
         })
         .collect()
@@ -4010,6 +4012,7 @@ impl McpCallbackServer {
                 attempt: 1,
                 history: Vec::new(),
                 last_delegation_id: None,
+                dispatched_base_oid: None,
             })
             .collect();
 
@@ -7132,6 +7135,7 @@ mod reconciler_fast_forward_tests {
                 attempt: 1,
                 history: Vec::new(),
                 last_delegation_id: None,
+                dispatched_base_oid: None,
             }],
             brain_session_id: session_id.clone(),
             base_snapshot_branch: Some("refs/heads/main".into()),
@@ -7252,6 +7256,7 @@ mod reconciler_fast_forward_tests {
                 attempt: 1,
                 history: Vec::new(),
                 last_delegation_id: None,
+                dispatched_base_oid: None,
             }],
             brain_session_id: session_id.clone(),
             base_snapshot_branch: None,
@@ -7277,6 +7282,7 @@ mod reconciler_fast_forward_tests {
                     attempt: 1,
                     history: Vec::new(),
                     last_delegation_id: None,
+                    dispatched_base_oid: None,
                 },
                 crate::plan::PlanTaskEntry {
                     spec: crate::plan::PlanTask {
@@ -7293,6 +7299,7 @@ mod reconciler_fast_forward_tests {
                     attempt: 1,
                     history: Vec::new(),
                     last_delegation_id: None,
+                    dispatched_base_oid: None,
                 },
             ],
             brain_session_id: session_id,
