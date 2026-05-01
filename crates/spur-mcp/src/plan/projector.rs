@@ -51,7 +51,13 @@ pub fn project_attempt_facts(audits: &[AuditSentinelKind]) -> (u32, Option<Strin
 
 pub fn latest_completion_facts(
     audits: &[AuditSentinelKind],
-) -> Option<(CompletionState, Option<String>, Option<String>, bool)> {
+) -> Option<(
+    CompletionState,
+    Option<String>,
+    Option<String>,
+    bool,
+    Option<String>,
+)> {
     let mut latest = None;
 
     for audit in audits {
@@ -60,6 +66,7 @@ pub fn latest_completion_facts(
             worker_branch,
             result_summary,
             superseded,
+            dispatched_base_oid,
             ..
         } = audit
         {
@@ -68,6 +75,7 @@ pub fn latest_completion_facts(
                 worker_branch.clone(),
                 result_summary.clone(),
                 *superseded,
+                dispatched_base_oid.clone(),
             ));
         }
     }
@@ -200,7 +208,7 @@ pub fn project_status_for_issue(
 
     if has_ready_for_review_label_compat(&issue.labels) {
         let summary =
-            latest_completion_facts(audits).and_then(|(_, _, result_summary, _)| result_summary);
+            latest_completion_facts(audits).and_then(|(_, _, result_summary, _, _)| result_summary);
         return PlanTaskStatus::AwaitingReview { summary };
     }
 
@@ -219,7 +227,7 @@ pub fn project_closed_status(
         match audit {
             AuditSentinelKind::Approval { .. } => {
                 let summary = latest_completion_facts(audits)
-                    .and_then(|(_, _, result_summary, _)| result_summary);
+                    .and_then(|(_, _, result_summary, _, _)| result_summary);
                 return PlanTaskStatus::Approved { summary };
             }
             AuditSentinelKind::Rejection { feedback, .. } => {
@@ -264,7 +272,7 @@ pub fn project_closed_status(
         PlanTaskStatus::Rejected { feedback: None }
     } else {
         let summary =
-            latest_completion_facts(audits).and_then(|(_, _, result_summary, _)| result_summary);
+            latest_completion_facts(audits).and_then(|(_, _, result_summary, _, _)| result_summary);
         PlanTaskStatus::Approved { summary }
     }
 }
@@ -425,6 +433,11 @@ pub async fn project_plan_from_beads(
     for projected_task in projected_tasks {
         let (attempt, last_delegation_id) = project_attempt_facts(&projected_task.audits);
         let completion = latest_completion_facts(&projected_task.audits);
+        let (worker_branch, dispatched_base_oid) = completion
+            .map(|(_, worker_branch, _, _, dispatched_base_oid)| {
+                (worker_branch, dispatched_base_oid)
+            })
+            .unwrap_or((None, None));
         let status = project_status_for_issue(
             &projected_task.issue,
             &projected_task.audits,
@@ -457,11 +470,11 @@ pub async fn project_plan_from_beads(
             },
             status,
             result: None,
-            worker_branch: completion.and_then(|(_, worker_branch, _, _)| worker_branch),
+            worker_branch,
             attempt,
             history: Vec::new(),
             last_delegation_id,
-            dispatched_base_oid: None,
+            dispatched_base_oid,
         });
     }
 
@@ -602,6 +615,7 @@ mod tests {
             worker_branch: Some("feat/task".into()),
             result_summary: Some("3 files changed".into()),
             artifact_uri: None,
+            dispatched_base_oid: Some("base-oid".into()),
         }];
 
         let facts = super::latest_completion_facts(&audits).expect("completion facts");
@@ -609,6 +623,7 @@ mod tests {
         assert_eq!(facts.1.as_deref(), Some("feat/task"));
         assert_eq!(facts.2.as_deref(), Some("3 files changed"));
         assert!(!facts.3);
+        assert_eq!(facts.4.as_deref(), Some("base-oid"));
     }
 
     #[test]
@@ -641,6 +656,7 @@ mod tests {
             worker_branch: Some("feat/task".into()),
             result_summary: Some("looks good".into()),
             artifact_uri: None,
+            dispatched_base_oid: None,
         }];
 
         let status = super::project_status_for_issue(&issue, &audits, true, "closed");
@@ -678,6 +694,7 @@ mod tests {
             worker_branch: None,
             result_summary: Some("cargo test failed".into()),
             artifact_uri: None,
+            dispatched_base_oid: None,
         }];
 
         let status = super::project_closed_status(&issue, &audits);

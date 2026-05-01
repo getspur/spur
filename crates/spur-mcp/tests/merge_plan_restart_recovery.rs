@@ -194,6 +194,7 @@ async fn t_v0d_3_merge_plan_works_after_restart_on_persisted_plan() {
             worker_branch: Some("spur/worker-a".into()),
             result_summary: Some("worker branch ready".into()),
             artifact_uri: None,
+            dispatched_base_oid: None,
         }),
     )
     .await
