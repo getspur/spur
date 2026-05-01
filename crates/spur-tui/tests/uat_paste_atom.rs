@@ -42,6 +42,7 @@ fn action_kind(action: &UserInput) -> &'static str {
         UserInput::CancelStream { .. } => "CancelStream",
         UserInput::RefreshIssues => "RefreshIssues",
         UserInput::GetIssueDetail { .. } => "GetIssueDetail",
+        UserInput::GetIssueGraph { .. } => "GetIssueGraph",
         UserInput::UpdateIssue { .. } => "UpdateIssue",
         UserInput::SetSessionConfigOption { .. } => "SetSessionConfigOption",
         UserInput::SetSessionModel { .. } => "SetSessionModel",

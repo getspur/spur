@@ -16,6 +16,7 @@ pub mod input_bar;
 pub mod input_bar_wrap;
 pub mod input_completion;
 pub mod issue_detail_pane;
+pub mod issue_graph_pane;
 pub mod issues_panel;
 pub mod keyhint;
 pub mod line_wrap;

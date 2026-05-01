@@ -1142,6 +1142,10 @@ pub enum InteractiveInput {
     GetIssueDetail {
         id: String,
     },
+    /// Fetch an issue dependency subgraph and emit IssueSubgraphLoaded.
+    GetIssueGraph {
+        id: String,
+    },
     /// Update an issue and emit IssueUpdated.
     UpdateIssue {
         id: String,
@@ -1316,6 +1320,25 @@ fn issue_to_detail_event(issue: &spur_pm::Issue) -> spur_acp::IssueDetailEvent {
         due_at: issue.due_at,
         created_at: issue.created_at,
         updated_at: issue.updated_at,
+    }
+}
+
+fn graph_node_to_event(node: &spur_pm::graph::GraphNode) -> spur_acp::GraphNodeEvent {
+    spur_acp::GraphNodeEvent {
+        id: node.id.clone(),
+        title: node.title.clone(),
+        status: node.status.clone(),
+        priority: node.priority,
+        labels: node.labels.clone(),
+        pagerank: node.pagerank,
+    }
+}
+
+fn graph_edge_to_event(edge: &spur_pm::graph::GraphEdge) -> spur_acp::GraphEdgeEvent {
+    spur_acp::GraphEdgeEvent {
+        from: edge.from.clone(),
+        to: edge.to.clone(),
+        edge_type: edge.edge_type.clone(),
     }
 }
 
@@ -2676,6 +2699,57 @@ impl Orchestrator {
                         } else {
                             self.funnel.emit(SpurEventBody::IssueCommandError {
                                 operation: "GetIssueDetail".into(),
+                                error: "No issue tracker configured".into(),
+                            });
+                        }
+                    }
+
+                    // ── GetIssueGraph ────────────────────────────────────
+                    InteractiveInput::GetIssueGraph { id } => {
+                        if let Some(pm) = &self.pm_service {
+                            if let Some(bv) = pm.analyzer() {
+                                match bv.subgraph(&id, Some(2), Some("json")).await {
+                                    Ok(graph) => {
+                                        let (nodes, edges) =
+                                            if let Some(adjacency) = graph.adjacency {
+                                                let nodes = adjacency
+                                                    .nodes
+                                                    .iter()
+                                                    .map(graph_node_to_event)
+                                                    .collect();
+                                                let edges = adjacency
+                                                    .edges
+                                                    .unwrap_or_default()
+                                                    .iter()
+                                                    .map(graph_edge_to_event)
+                                                    .collect();
+                                                (nodes, edges)
+                                            } else {
+                                                (Vec::new(), Vec::new())
+                                            };
+                                        self.funnel.emit(SpurEventBody::IssueSubgraphLoaded {
+                                            requested_id: id,
+                                            nodes,
+                                            edges,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        self.funnel.emit(SpurEventBody::IssueCommandError {
+                                            operation: "GetIssueGraph".into(),
+                                            error: e.to_string(),
+                                        });
+                                    }
+                                }
+                            } else {
+                                self.funnel.emit(SpurEventBody::IssueCommandError {
+                                    operation: "GetIssueGraph".into(),
+                                    error: "Graph analysis unavailable: bv is not configured"
+                                        .into(),
+                                });
+                            }
+                        } else {
+                            self.funnel.emit(SpurEventBody::IssueCommandError {
+                                operation: "GetIssueGraph".into(),
                                 error: "No issue tracker configured".into(),
                             });
                         }

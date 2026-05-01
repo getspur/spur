@@ -216,6 +216,33 @@ pub struct IssueDetailEvent {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Issue graph node carried in `IssueSubgraphLoaded`.
+/// Mirrors `spur_pm::graph::GraphNode` without taking a direct dependency on spur-pm.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphNodeEvent {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pagerank: Option<f64>,
+}
+
+/// Issue graph edge carried in `IssueSubgraphLoaded`.
+/// Mirrors `spur_pm::graph::GraphEdge` without taking a direct dependency on spur-pm.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphEdgeEvent {
+    pub from: String,
+    pub to: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_type: Option<String>,
+}
+
 /// Canonical durable plan state rendered by the plan inspector UI.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PlanSnapshot {
@@ -679,6 +706,15 @@ pub enum SpurEventBody {
         requested_id: String,
         /// Full issue data from PmService.
         issue: IssueDetailEvent,
+    },
+
+    /// Response to a TUI request for the dependency subgraph around one issue.
+    IssueSubgraphLoaded {
+        /// The ID that was requested — TUI checks this against graph loading
+        /// state and current selection to discard stale responses.
+        requested_id: String,
+        nodes: Vec<GraphNodeEvent>,
+        edges: Vec<GraphEdgeEvent>,
     },
 
     /// Feedback for a failed issue operation initiated from TUI.

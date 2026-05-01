@@ -20,8 +20,9 @@ pub use delegation::{
     TimeoutFallback,
 };
 pub use events::{
-    HistoryEntry, IssueDetailEvent, IssueSummaryEvent, LicenseBindingMode, LicensePlan,
-    LicenseStateEvent, LicenseStatusEvent, LicenseSubjectKind, SpurEvent, SpurEventBody,
+    GraphEdgeEvent, GraphNodeEvent, HistoryEntry, IssueDetailEvent, IssueSummaryEvent,
+    LicenseBindingMode, LicensePlan, LicenseStateEvent, LicenseStatusEvent, LicenseSubjectKind,
+    SpurEvent, SpurEventBody,
 };
 pub use outcome::{BackendTag, OutcomeKey, OutcomeRef};
 pub use peer_message::{

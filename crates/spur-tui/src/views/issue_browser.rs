@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -5,15 +7,21 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
-use spur_acp::SpurEvent;
+use spur_acp::{GraphEdgeEvent, GraphNodeEvent, SpurEvent};
 
 use crate::action::{Action, IssueAction, ViewId};
 use crate::components::issue_detail_pane::IssueDetailPane;
+use crate::components::issue_graph_pane::IssueGraphPane;
 use crate::components::issues_panel::IssuesPanel;
 use crate::components::status_bar::{HintOverride, StatusBar, StatusBarProps};
 use crate::components::tombstone::Tombstone;
 
 use super::View;
+
+const TEXT_STATUS_HINT: &str =
+    "[Text] j/k: Nav  v: Graph Mode  E: Execute Epic  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
+const GRAPH_STATUS_HINT: &str =
+    "[Graph] j/k: Nav  v: Text Mode  E: Execute Epic  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
 
 // ── Issue focus state machine ───────────────────────────────────────────
 
@@ -27,6 +35,12 @@ pub enum IssueFocus {
         id: String,
         issue: Box<spur_pm::Issue>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailMode {
+    Text,
+    Graph,
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -63,6 +77,11 @@ pub struct IssueBrowserView {
     issues_panel: IssuesPanel,
     issue_detail_pane: IssueDetailPane,
     issue_focus: IssueFocus,
+    detail_mode: DetailMode,
+    graph_pane: IssueGraphPane,
+    graph_cache: HashMap<String, (Vec<GraphNodeEvent>, Vec<GraphEdgeEvent>)>,
+    graph_loading: Option<String>,
+    graph_error: Option<String>,
 }
 
 impl Default for IssueBrowserView {
@@ -78,6 +97,11 @@ impl IssueBrowserView {
             issues_panel: IssuesPanel::new(),
             issue_detail_pane: IssueDetailPane::new(),
             issue_focus: IssueFocus::None,
+            detail_mode: DetailMode::Text,
+            graph_pane: IssueGraphPane::new(),
+            graph_cache: HashMap::new(),
+            graph_loading: None,
+            graph_error: None,
         }
     }
 
@@ -86,6 +110,7 @@ impl IssueBrowserView {
     }
 
     pub fn seed_issues(&mut self, issues: Vec<spur_pm::IssueSummary>) {
+        self.invalidate_graph_cache();
         self.tracked_issues = issues;
         if !self.tracked_issues.is_empty() {
             self.issues_panel.select_first();
@@ -102,15 +127,91 @@ impl IssueBrowserView {
     }
 
     pub fn scroll_issue_detail_up_by(&mut self, lines: u16) {
-        self.issue_detail_pane.scroll_up_by(lines);
+        match self.detail_mode {
+            DetailMode::Text => self.issue_detail_pane.scroll_up_by(lines),
+            DetailMode::Graph => self.graph_pane.scroll_up_by(lines),
+        }
     }
 
     pub fn scroll_issue_detail_down_by(&mut self, lines: u16) {
-        self.issue_detail_pane.scroll_down_by(lines);
+        match self.detail_mode {
+            DetailMode::Text => self.issue_detail_pane.scroll_down_by(lines),
+            DetailMode::Graph => self.graph_pane.scroll_down_by(lines),
+        }
     }
 
     pub fn issues_panel_mut(&mut self) -> &mut IssuesPanel {
         &mut self.issues_panel
+    }
+
+    fn selected_issue_id(&self) -> Option<String> {
+        self.issues_panel
+            .selected_id(&self.tracked_issues)
+            .map(String::from)
+    }
+
+    pub(crate) fn invalidate_graph_cache(&mut self) {
+        self.graph_cache.clear();
+        self.graph_loading = None;
+        self.graph_error = None;
+    }
+
+    fn request_selected_detail(&mut self) -> Option<Action> {
+        let selected = self.selected_issue_id();
+        match (&self.issue_focus, selected) {
+            (
+                IssueFocus::Loaded {
+                    id: loaded_id,
+                    issue: _,
+                },
+                Some(sel),
+            ) if loaded_id == &sel => {
+                self.issue_focus = IssueFocus::None;
+                self.detail_mode = DetailMode::Text;
+                None
+            }
+            (_, Some(sel)) => {
+                self.issue_focus = IssueFocus::Loading { id: sel.clone() };
+                self.detail_mode = DetailMode::Text;
+                self.issue_detail_pane.reset();
+                self.graph_error = None;
+                Some(Action::Issue(IssueAction::ViewDetail { id: sel }))
+            }
+            (IssueFocus::Loaded { .. }, None) => {
+                self.issue_focus = IssueFocus::None;
+                self.detail_mode = DetailMode::Text;
+                None
+            }
+            (_, None) => None,
+        }
+    }
+
+    fn toggle_detail_mode(&mut self) -> Option<Action> {
+        match &self.issue_focus {
+            IssueFocus::Loaded { id, .. } => match self.detail_mode {
+                DetailMode::Text => {
+                    self.detail_mode = DetailMode::Graph;
+                    self.graph_pane.reset();
+                    self.graph_error = None;
+                    if self.graph_cache.contains_key(id) {
+                        self.graph_loading = None;
+                        None
+                    } else if self.graph_loading.as_deref() == Some(id.as_str()) {
+                        None
+                    } else {
+                        let id = id.clone();
+                        self.graph_loading = Some(id.clone());
+                        Some(Action::GetIssueGraph { id })
+                    }
+                }
+                DetailMode::Graph => {
+                    self.detail_mode = DetailMode::Text;
+                    None
+                }
+            },
+            IssueFocus::None => self.request_selected_detail(),
+            IssueFocus::Loading { .. } => None,
+        }
     }
 
     // ── Key handling ────────────────────────────────────────────────────
@@ -122,6 +223,7 @@ impl IssueBrowserView {
             KeyCode::Esc => {
                 if matches!(self.issue_focus, IssueFocus::Loaded { .. }) {
                     self.issue_focus = IssueFocus::None;
+                    self.detail_mode = DetailMode::Text;
                     None
                 } else {
                     Some(Action::NavigateTo(ViewId::Dashboard))
@@ -130,7 +232,11 @@ impl IssueBrowserView {
             KeyCode::Char('q') if key.modifiers.is_empty() => Some(Action::Quit),
             KeyCode::Char('?') if key.modifiers.is_empty() => Some(Action::ShowHelp),
             KeyCode::Char('s') if key.modifiers.is_empty() => Some(Action::RequestSessions),
-            KeyCode::Char('r') if key.modifiers.is_empty() => Some(Action::RefreshIssues),
+            KeyCode::Char('r') if key.modifiers.is_empty() => {
+                self.invalidate_graph_cache();
+                Some(Action::RefreshIssues)
+            }
+            KeyCode::Char('v') if key.modifiers.is_empty() => self.toggle_detail_mode(),
 
             // Navigation
             KeyCode::Char('j') | KeyCode::Down if key.modifiers.is_empty() => {
@@ -155,30 +261,7 @@ impl IssueBrowserView {
             // viewing that same row's detail. If the list is empty, fall back
             // to closing any open detail so the pane never lingers without a
             // corresponding row.
-            KeyCode::Enter if key.modifiers.is_empty() => {
-                let selected = self
-                    .issues_panel
-                    .selected_id(&self.tracked_issues)
-                    .map(String::from);
-                match (&self.issue_focus, selected) {
-                    (IssueFocus::Loaded { id: loaded_id, issue: _ }, Some(sel))
-                        if loaded_id == &sel =>
-                    {
-                        self.issue_focus = IssueFocus::None;
-                        None
-                    }
-                    (_, Some(sel)) => {
-                        self.issue_focus = IssueFocus::Loading { id: sel.clone() };
-                        self.issue_detail_pane.reset();
-                        Some(Action::Issue(IssueAction::ViewDetail { id: sel }))
-                    }
-                    (IssueFocus::Loaded { .. }, None) => {
-                        self.issue_focus = IssueFocus::None;
-                        None
-                    }
-                    (_, None) => None,
-                }
-            }
+            KeyCode::Enter if key.modifiers.is_empty() => self.request_selected_detail(),
 
             // Status actions
             KeyCode::Char('o') if key.modifiers.is_empty() => self.update_status("open", false),
@@ -201,11 +284,11 @@ impl IssueBrowserView {
 
             // Detail scroll (when loaded)
             KeyCode::PageUp if matches!(self.issue_focus, IssueFocus::Loaded { .. }) => {
-                self.issue_detail_pane.scroll_up_by(10);
+                self.scroll_issue_detail_up_by(10);
                 Some(Action::ScrollUp)
             }
             KeyCode::PageDown if matches!(self.issue_focus, IssueFocus::Loaded { .. }) => {
-                self.issue_detail_pane.scroll_down_by(10);
+                self.scroll_issue_detail_down_by(10);
                 Some(Action::ScrollDown)
             }
 
@@ -280,9 +363,27 @@ impl IssueBrowserView {
             IssueFocus::Loading { id } => {
                 IssueDetailPane::render_loading(id, frame, chunks[1]);
             }
-            IssueFocus::Loaded { issue, .. } => {
-                self.issue_detail_pane.render(issue, frame, chunks[1]);
-            }
+            IssueFocus::Loaded { id, issue } => match self.detail_mode {
+                DetailMode::Text => {
+                    self.issue_detail_pane.render(issue, frame, chunks[1]);
+                }
+                DetailMode::Graph => {
+                    if let Some(error) = self.graph_error.as_deref() {
+                        IssueGraphPane::render_error(id, error, frame, chunks[1]);
+                    } else if let Some((nodes, edges)) = self.graph_cache.get(id) {
+                        self.graph_pane.render(id, nodes, edges, frame, chunks[1]);
+                    } else if self.graph_loading.as_deref() == Some(id.as_str()) {
+                        IssueGraphPane::render_loading(id, frame, chunks[1]);
+                    } else {
+                        IssueGraphPane::render_error(
+                            id,
+                            "Graph not loaded; switch to Text then Graph to reload",
+                            frame,
+                            chunks[1],
+                        );
+                    }
+                }
+            },
             IssueFocus::None => {
                 let block = Block::default()
                     .title(" Issue Detail ")
@@ -303,6 +404,12 @@ impl IssueBrowserView {
         }
 
         // ── Status bar ────────────────────────────────────────────────────
+        let mode_hint = match self.detail_mode {
+            DetailMode::Text => TEXT_STATUS_HINT,
+            DetailMode::Graph => GRAPH_STATUS_HINT,
+        };
+        let status_hint = view_hint_override.or(Some(HintOverride::from_full(mode_hint)));
+
         StatusBar::render(
             frame,
             chunks[2],
@@ -325,7 +432,7 @@ impl IssueBrowserView {
                 alert_summary: None,
                 license_badge: None,
                 flag_summary: None,
-                view_hint_override,
+                view_hint_override: status_hint,
             },
         );
     }
@@ -339,6 +446,7 @@ impl View for IssueBrowserView {
     fn handle_spur_event(&mut self, event: &SpurEvent, _ctx: &super::ViewContext) {
         match &event.body {
             spur_acp::SpurEventBody::IssuesLoaded { issues } => {
+                self.invalidate_graph_cache();
                 self.tracked_issues = issues
                     .iter()
                     .map(|i| spur_pm::IssueSummary {
@@ -413,12 +521,36 @@ impl View for IssueBrowserView {
                             id: requested_id.clone(),
                             issue: Box::new(pm_issue),
                         };
+                        self.detail_mode = DetailMode::Text;
                     }
                 }
             }
 
-            spur_acp::SpurEventBody::IssueCommandError { .. } => {
-                if matches!(self.issue_focus, IssueFocus::Loading { .. }) {
+            spur_acp::SpurEventBody::IssueSubgraphLoaded {
+                requested_id,
+                nodes,
+                edges,
+            } => {
+                let matches_loading = self.graph_loading.as_deref() == Some(requested_id.as_str());
+                let matches_selected = self
+                    .issues_panel
+                    .selected_id(&self.tracked_issues)
+                    .is_some_and(|id| id == requested_id.as_str());
+                if !matches_loading && !matches_selected {
+                    return;
+                }
+
+                self.graph_cache
+                    .insert(requested_id.clone(), (nodes.clone(), edges.clone()));
+                self.graph_loading = None;
+                self.graph_error = None;
+            }
+
+            spur_acp::SpurEventBody::IssueCommandError { error, .. } => {
+                if self.graph_loading.is_some() {
+                    self.graph_error = Some(error.clone());
+                    self.graph_loading = None;
+                } else if matches!(self.issue_focus, IssueFocus::Loading { .. }) {
                     self.issue_focus = IssueFocus::None;
                 }
             }

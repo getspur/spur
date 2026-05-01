@@ -122,6 +122,10 @@ pub enum UserInput {
     GetIssueDetail {
         id: String,
     },
+    /// Request the dependency subgraph around an issue from the PM backend.
+    GetIssueGraph {
+        id: String,
+    },
     /// Update an issue's status/assignee/labels via PM backend.
     UpdateIssue {
         id: String,
@@ -3419,8 +3423,16 @@ impl App {
 
             // Issue actions — wired to the PM backend; IssuesPanel not yet implemented.
             Action::RefreshIssues => {
+                if let Some(ref mut browser) = self.issue_browser {
+                    browser.invalidate_graph_cache();
+                }
                 if let Some(ref tx) = self.user_input_tx {
                     let _ = tx.try_send(UserInput::RefreshIssues);
+                }
+            }
+            Action::GetIssueGraph { id } => {
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::GetIssueGraph { id });
                 }
             }
             Action::Issue(issue_action) => {
