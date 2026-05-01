@@ -53,6 +53,7 @@ async fn approve_does_not_enqueue_new_dispatches() {
                 attempt: 1,
                 history: vec![],
                 last_delegation_id: None,
+                dispatched_base_oid: None,
             },
             PlanTaskEntry {
                 spec: PlanTask {
@@ -69,6 +70,7 @@ async fn approve_does_not_enqueue_new_dispatches() {
                 attempt: 1,
                 history: vec![],
                 last_delegation_id: None,
+                dispatched_base_oid: None,
             },
             PlanTaskEntry {
                 spec: PlanTask {
@@ -85,6 +87,7 @@ async fn approve_does_not_enqueue_new_dispatches() {
                 attempt: 1,
                 history: vec![],
                 last_delegation_id: None,
+                dispatched_base_oid: None,
             },
         ],
     };
@@ -150,6 +153,7 @@ async fn test_delegation_cancelled_result_does_not_cascade() {
                 attempt: 1,
                 history: vec![],
                 last_delegation_id: None,
+                dispatched_base_oid: None,
             },
             PlanTaskEntry {
                 spec: PlanTask {
@@ -166,6 +170,7 @@ async fn test_delegation_cancelled_result_does_not_cascade() {
                 attempt: 1,
                 history: vec![],
                 last_delegation_id: None,
+                dispatched_base_oid: None,
             },
         ],
     };
@@ -269,6 +274,7 @@ async fn test_plan_ready_to_merge_blocked_by_cancelled_and_count() {
                 attempt: 1,
                 history: vec![],
                 last_delegation_id: None,
+                dispatched_base_oid: None,
             },
             PlanTaskEntry {
                 spec: PlanTask {
@@ -285,6 +291,7 @@ async fn test_plan_ready_to_merge_blocked_by_cancelled_and_count() {
                 attempt: 1,
                 history: vec![],
                 last_delegation_id: None,
+                dispatched_base_oid: None,
             },
         ],
     };

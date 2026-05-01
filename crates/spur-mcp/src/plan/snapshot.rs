@@ -303,6 +303,7 @@ mod tests {
             attempt: 1,
             history: Vec::new(),
             last_delegation_id: None,
+            dispatched_base_oid: None,
         }
     }
 
