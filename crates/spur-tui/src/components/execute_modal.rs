@@ -1,0 +1,135 @@
+use ratatui::{
+    layout::{Alignment, Rect},
+    style::{Color, Modifier, Style},
+    symbols::border,
+    text::{Line, Span},
+    widgets::{Block, Borders, Clear, Paragraph},
+    Frame,
+};
+
+const MODAL_WIDTH: u16 = 60;
+const CONFIRM_HEIGHT: u16 = 8;
+const ALREADY_EXECUTING_HEIGHT: u16 = 6;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecuteModal {
+    pub epic_id: String,
+    pub epic_title: String,
+    pub variant: ExecuteModalVariant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecuteModalVariant {
+    Confirm,
+    AlreadyExecuting { plan_id: String },
+}
+
+impl ExecuteModal {
+    pub fn render(&self, frame: &mut Frame, area: Rect) {
+        let height = match self.variant {
+            ExecuteModalVariant::Confirm => CONFIRM_HEIGHT,
+            ExecuteModalVariant::AlreadyExecuting { .. } => ALREADY_EXECUTING_HEIGHT,
+        };
+        let popup = centered_rect(area, MODAL_WIDTH, height);
+
+        frame.render_widget(Clear, popup);
+
+        let (title, border_color) = match self.variant {
+            ExecuteModalVariant::Confirm => (" Execute Epic ", Color::Green),
+            ExecuteModalVariant::AlreadyExecuting { .. } => (" Already Executing ", Color::Yellow),
+        };
+        let block = Block::default()
+            .title(Span::styled(
+                title,
+                Style::default()
+                    .fg(border_color)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .title_alignment(Alignment::Left)
+            .borders(Borders::ALL)
+            .border_set(border::ROUNDED)
+            .border_style(Style::default().fg(border_color));
+
+        frame.render_widget(Paragraph::new(self.lines(popup.width)).block(block), popup);
+    }
+
+    fn lines(&self, popup_width: u16) -> Vec<Line<'static>> {
+        match &self.variant {
+            ExecuteModalVariant::Confirm => vec![
+                Line::from(Span::styled(
+                    format!("  {} — {}", self.epic_id, self.epic_title),
+                    Style::default().fg(Color::White),
+                )),
+                Line::from(""),
+                Line::from("  This sends a prompt asking the brain to call"),
+                Line::from(format!("  execute_epic(epic_id=\"{}\").", self.epic_id)),
+                Line::from(""),
+                action_line(
+                    "[Enter]",
+                    "confirm",
+                    "[Esc]",
+                    "cancel",
+                    popup_width,
+                    Color::Green,
+                ),
+            ],
+            ExecuteModalVariant::AlreadyExecuting { plan_id } => vec![
+                Line::from(format!("  Epic {} is already executing.", self.epic_id)),
+                Line::from(format!("  Plan-id: {plan_id}")),
+                Line::from(""),
+                action_line(
+                    "[s]",
+                    "View session",
+                    "[Esc]",
+                    "cancel",
+                    popup_width,
+                    Color::Cyan,
+                ),
+            ],
+        }
+    }
+}
+
+fn action_line(
+    left_key: &'static str,
+    left_label: &'static str,
+    right_key: &'static str,
+    right_label: &'static str,
+    popup_width: u16,
+    primary_color: Color,
+) -> Line<'static> {
+    let left_width = 1 + left_key.len() + 1 + left_label.len();
+    let right_width = right_key.len() + 1 + right_label.len();
+    let content_width = popup_width.saturating_sub(2) as usize;
+    let gap = content_width
+        .saturating_sub(left_width + right_width)
+        .max(1);
+
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled(
+            left_key,
+            Style::default()
+                .fg(primary_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(" {left_label}{}", " ".repeat(gap))),
+        Span::styled(
+            right_key,
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(" {right_label}")),
+    ])
+}
+
+fn centered_rect(outer: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(outer.width);
+    let height = height.min(outer.height);
+
+    Rect {
+        x: outer.x + outer.width.saturating_sub(width) / 2,
+        y: outer.y + outer.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
