@@ -182,6 +182,10 @@ fn graph_toggle_flow_fetches_renders_uses_cache_and_closes() {
         "rendered:\n{closed}"
     );
     assert!(!closed.contains("Body for issue-1"), "rendered:\n{closed}");
+    assert!(
+        !closed.contains("[Text]") && !closed.contains("[Graph]"),
+        "list-only state must not show detail-mode status hint:\n{closed}"
+    );
 }
 
 #[test]
