@@ -10,6 +10,7 @@ use ratatui::{
 use spur_acp::{GraphEdgeEvent, GraphNodeEvent, SpurEvent};
 
 use crate::action::{Action, IssueAction, ViewId};
+use crate::components::execute_modal::{ExecuteModal, ExecuteModalVariant};
 use crate::components::issue_detail_pane::IssueDetailPane;
 use crate::components::issue_graph_pane::IssueGraphPane;
 use crate::components::issues_panel::IssuesPanel;
@@ -19,9 +20,24 @@ use crate::components::tombstone::Tombstone;
 use super::View;
 
 const TEXT_STATUS_HINT: &str =
+    "[Text] j/k: Nav  v: Graph Mode  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
+const TEXT_STATUS_HINT_COMPACT: &str = "[Text] j/k: Nav  v: Graph  Esc: Close";
+const TEXT_STATUS_HINT_EPIC: &str =
     "[Text] j/k: Nav  v: Graph Mode  E: Execute Epic  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
+const TEXT_STATUS_HINT_EPIC_COMPACT: &str = "[Text] j/k: Nav  E: Execute Epic  v: Graph";
 const GRAPH_STATUS_HINT: &str =
+    "[Graph] j/k: Nav  v: Text Mode  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
+const GRAPH_STATUS_HINT_COMPACT: &str = "[Graph] j/k: Nav  v: Text  Esc: Close";
+const GRAPH_STATUS_HINT_EPIC: &str =
     "[Graph] j/k: Nav  v: Text Mode  E: Execute Epic  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
+const GRAPH_STATUS_HINT_EPIC_COMPACT: &str = "[Graph] j/k: Nav  E: Execute Epic  v: Text";
+const LIST_STATUS_HINT: &str =
+    "[List] j/k: Nav  Enter: Open Detail  v: View Graph  W: Work  r: Refresh  q: Quit";
+const LIST_STATUS_HINT_COMPACT: &str = "[List] j/k: Nav  Enter: Detail  W: Work  r: Refresh";
+const LIST_STATUS_HINT_EPIC: &str =
+    "[List] j/k: Nav  Enter: Open Detail  v: View Graph  E: Execute Epic  W: Work  r: Refresh  q: Quit";
+const LIST_STATUS_HINT_EPIC_COMPACT: &str =
+    "[List] j/k: Nav  Enter: Detail  E: Execute Epic  W: Work";
 
 // ── Issue focus state machine ───────────────────────────────────────────
 
@@ -82,6 +98,7 @@ pub struct IssueBrowserView {
     graph_cache: HashMap<String, (Vec<GraphNodeEvent>, Vec<GraphEdgeEvent>)>,
     graph_loading: Option<String>,
     graph_error: Option<String>,
+    execute_modal: Option<ExecuteModal>,
 }
 
 impl Default for IssueBrowserView {
@@ -102,6 +119,7 @@ impl IssueBrowserView {
             graph_cache: HashMap::new(),
             graph_loading: None,
             graph_error: None,
+            execute_modal: None,
         }
     }
 
@@ -148,6 +166,26 @@ impl IssueBrowserView {
         self.issues_panel
             .selected_id(&self.tracked_issues)
             .map(String::from)
+    }
+
+    fn selected_issue(&self) -> Option<&spur_pm::IssueSummary> {
+        let selected_id = self.issues_panel.selected_id(&self.tracked_issues)?;
+        self.tracked_issues
+            .iter()
+            .find(|issue| issue.id == selected_id)
+    }
+
+    fn selected_issue_is_epic(&self) -> bool {
+        self.selected_issue()
+            .is_some_and(|issue| issue.issue_type.as_deref() == Some("epic"))
+    }
+
+    fn hint_override(full: &'static str, compact: &'static str) -> HintOverride<'static> {
+        HintOverride {
+            full,
+            compact: Some(compact),
+            hide_on_overflow: false,
+        }
     }
 
     pub(crate) fn invalidate_graph_cache(&mut self) {
@@ -214,10 +252,44 @@ impl IssueBrowserView {
         }
     }
 
+    fn open_execute_modal(&mut self) -> Option<Action> {
+        let issue = self.selected_issue()?;
+        if issue.issue_type.as_deref() != Some("epic") {
+            return Some(Action::FlashHint {
+                message: format!(
+                    "Cannot execute: {} is not an epic. Use 'W' to WorkOn a task.",
+                    issue.id
+                ),
+            });
+        }
+
+        self.execute_modal = Some(ExecuteModal {
+            epic_id: issue.id.clone(),
+            epic_title: issue.title.clone(),
+            variant: ExecuteModalVariant::Confirm,
+        });
+        None
+    }
+
     // ── Key handling ────────────────────────────────────────────────────
 
     fn handle_key_inner(&mut self, key: KeyEvent) -> Option<Action> {
         let key = super::normalize_macos_option(key);
+
+        if let Some(modal) = self.execute_modal.as_ref() {
+            return match key.code {
+                KeyCode::Enter => {
+                    let id = modal.epic_id.clone();
+                    self.execute_modal = None;
+                    Some(Action::Issue(IssueAction::ExecuteEpic { id }))
+                }
+                KeyCode::Esc => {
+                    self.execute_modal = None;
+                    None
+                }
+                _ => None,
+            };
+        }
 
         match key.code {
             KeyCode::Esc => {
@@ -281,6 +353,7 @@ impl IssueBrowserView {
                 };
                 id.map(|id| Action::Issue(IssueAction::WorkOn { id }))
             }
+            KeyCode::Char('E') if key.modifiers.is_empty() => self.open_execute_modal(),
 
             // Detail scroll (when loaded)
             KeyCode::PageUp if matches!(self.issue_focus, IssueFocus::Loaded { .. }) => {
@@ -404,14 +477,35 @@ impl IssueBrowserView {
         }
 
         // ── Status bar ────────────────────────────────────────────────────
+        let has_execute = self.selected_issue_is_epic();
         let mode_hint = match self.issue_focus {
-            IssueFocus::Loaded { .. } | IssueFocus::Loading { .. } => Some(match self.detail_mode {
-                DetailMode::Text => TEXT_STATUS_HINT,
-                DetailMode::Graph => GRAPH_STATUS_HINT,
-            }),
+            IssueFocus::Loaded { .. } | IssueFocus::Loading { .. } => {
+                Some(match self.detail_mode {
+                    DetailMode::Text if has_execute => {
+                        Self::hint_override(TEXT_STATUS_HINT_EPIC, TEXT_STATUS_HINT_EPIC_COMPACT)
+                    }
+                    DetailMode::Text => {
+                        Self::hint_override(TEXT_STATUS_HINT, TEXT_STATUS_HINT_COMPACT)
+                    }
+                    DetailMode::Graph if has_execute => {
+                        Self::hint_override(GRAPH_STATUS_HINT_EPIC, GRAPH_STATUS_HINT_EPIC_COMPACT)
+                    }
+                    DetailMode::Graph => {
+                        Self::hint_override(GRAPH_STATUS_HINT, GRAPH_STATUS_HINT_COMPACT)
+                    }
+                })
+            }
+            IssueFocus::None if issue_count > 0 && has_execute => Some(Self::hint_override(
+                LIST_STATUS_HINT_EPIC,
+                LIST_STATUS_HINT_EPIC_COMPACT,
+            )),
+            IssueFocus::None if issue_count > 0 => Some(Self::hint_override(
+                LIST_STATUS_HINT,
+                LIST_STATUS_HINT_COMPACT,
+            )),
             IssueFocus::None => None,
         };
-        let status_hint = view_hint_override.or(mode_hint.map(HintOverride::from_full));
+        let status_hint = view_hint_override.or(mode_hint);
 
         StatusBar::render(
             frame,
@@ -438,6 +532,10 @@ impl IssueBrowserView {
                 view_hint_override: status_hint,
             },
         );
+
+        if let Some(modal) = self.execute_modal.as_ref() {
+            modal.render(frame, chunks[1]);
+        }
     }
 }
 

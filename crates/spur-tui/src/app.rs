@@ -3435,6 +3435,9 @@ impl App {
                     let _ = tx.try_send(UserInput::GetIssueGraph { id });
                 }
             }
+            Action::FlashHint { message } => {
+                self.flash_hint_short(message);
+            }
             Action::Issue(issue_action) => {
                 match issue_action {
                     crate::action::IssueAction::ViewDetail { id } => {
@@ -3530,6 +3533,60 @@ impl App {
                                 id, id,
                             )
                         };
+
+                        let blocks = vec![spur_acp::ContentBlock::Text(
+                            spur_acp::TextContent::new(prompt),
+                        )];
+
+                        if self.session_detail.is_some() {
+                            self.process_action(Action::SendMessage {
+                                session: spur_acp::SessionId(String::new()),
+                                blocks,
+                                interrupt: false,
+                            });
+                        } else {
+                            self.process_action(Action::NewSessionWithMessage {
+                                blocks,
+                                interrupt: false,
+                            });
+                        }
+                    }
+                    crate::action::IssueAction::ExecuteEpic { id } => {
+                        let issue = self
+                            .dashboard
+                            .tracked_issues()
+                            .iter()
+                            .find(|issue| issue.id == id);
+
+                        if let Some(issue) = issue {
+                            if issue.issue_type.as_deref() != Some("epic") {
+                                self.flash_hint_short(format!(
+                                    "Cannot execute: {} is not an epic. Use 'W' to WorkOn a task.",
+                                    id
+                                ));
+                                return;
+                            }
+                        }
+
+                        let (title, status, pri) = issue
+                            .map(|issue| {
+                                (
+                                    issue.title.clone(),
+                                    issue.status.clone(),
+                                    issue
+                                        .priority
+                                        .map(|p| format!("P{}", p))
+                                        .unwrap_or_default(),
+                                )
+                            })
+                            .unwrap_or_else(|| (String::new(), "unknown".into(), String::new()));
+                        let prompt = format!(
+                            "Execute this epic using the execute_epic MCP tool.\n\n\
+                             Epic: {} \u{2014} {}\n\
+                             Type: epic | Status: {} | Priority: {}\n\n\
+                             Call execute_epic with epic_id=\"{}\".",
+                            id, title, status, pri, id,
+                        );
 
                         let blocks = vec![spur_acp::ContentBlock::Text(
                             spur_acp::TextContent::new(prompt),

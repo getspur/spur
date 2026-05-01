@@ -64,11 +64,8 @@ fn seeded_issue_browser_app(
 
 #[test]
 fn e_on_epic_opens_modal_and_enter_dispatches_active_session_prompt() {
-    let (mut app, mut rx, mut terminal) = seeded_issue_browser_app(vec![summary(
-        "bd-epic",
-        "Launch migration",
-        Some("epic"),
-    )]);
+    let (mut app, mut rx, mut terminal) =
+        seeded_issue_browser_app(vec![summary("bd-epic", "Launch migration", Some("epic"))]);
     spur_tui::test_support::process_action(
         &mut app,
         Action::ResumeSession {
@@ -162,7 +159,7 @@ fn esc_in_execute_modal_dismisses_without_dispatch() {
     app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     let dismissed = render_text(&mut app, &mut terminal);
     assert!(
-        !dismissed.contains("Execute Epic"),
+        !dismissed.contains("This sends a prompt asking the brain to call"),
         "modal should be dismissed:\n{dismissed}"
     );
     assert!(
