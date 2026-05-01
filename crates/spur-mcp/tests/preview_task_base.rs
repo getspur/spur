@@ -198,6 +198,82 @@ async fn preview_task_base_returns_overlays_and_base_oid_when_clean() {
 }
 
 #[tokio::test]
+async fn preview_task_base_skips_approved_deps_without_dispatched_base_oid() {
+    let dir = init_repo().await;
+    let base_oid = git(dir.path(), &["rev-parse", "HEAD"]).await;
+    git(
+        dir.path(),
+        &["branch", "spur/brain-snapshot-preview-skip-legacy", "HEAD"],
+    )
+    .await;
+    git(
+        dir.path(),
+        &["branch", "spur/worker-preview-skip-legacy-t1", "HEAD"],
+    )
+    .await;
+    let t2_tip = commit_worker_file(
+        dir.path(),
+        "spur/worker-preview-skip-legacy-t2",
+        &base_oid,
+        "bar.rs",
+        "// t2\n",
+    )
+    .await;
+
+    let server = test_server(dir.path());
+    server
+        .__test_install_plan(plan_state(
+            "preview-skip-legacy",
+            "spur/brain-snapshot-preview-skip-legacy",
+            &base_oid,
+            vec![
+                task_entry(
+                    "T1",
+                    Vec::new(),
+                    PlanTaskStatus::Approved {
+                        summary: Some("legacy t1 approved".into()),
+                    },
+                    Some("spur/worker-preview-skip-legacy-t1"),
+                    None,
+                ),
+                task_entry(
+                    "T2",
+                    Vec::new(),
+                    PlanTaskStatus::Approved {
+                        summary: Some("t2 approved".into()),
+                    },
+                    Some("spur/worker-preview-skip-legacy-t2"),
+                    Some(&base_oid),
+                ),
+                task_entry("T3", vec!["T1", "T2"], PlanTaskStatus::Pending, None, None),
+            ],
+        ))
+        .await;
+
+    let response = server
+        .__test_call_tool(
+            "preview_task_base",
+            json!({
+                "plan_id": "preview-skip-legacy",
+                "task_id": "T3",
+            }),
+        )
+        .await;
+    let output: Value = serde_json::from_str(&tool_text(&response)).expect("preview JSON");
+
+    assert_eq!(output["overlays"].as_array().expect("overlays").len(), 1);
+    assert_eq!(output["overlays"][0]["source_task_id"], "T2");
+    assert_eq!(output["overlays"][0]["base_oid"], base_oid);
+    assert_eq!(output["overlays"][0]["tip_oid"], t2_tip);
+    assert!(
+        output["predicted_base_oid"].as_str().is_some(),
+        "clean preview should return predicted base oid: {output}"
+    );
+    assert!(output["conflict"].is_null());
+    assert_no_preview_refs(dir.path()).await;
+}
+
+#[tokio::test]
 async fn preview_task_base_reports_conflict_when_overlays_collide() {
     let dir = init_repo().await;
     std::fs::write(dir.path().join("foo.rs"), "base\n").expect("write shared file");
