@@ -68,6 +68,58 @@ pub enum MergeResult {
     Conflict { files: Vec<String> },
 }
 
+#[derive(Debug)]
+pub enum WorktreeError {
+    Anyhow(anyhow::Error),
+    OverlayConflict {
+        source_task_id: String,
+        files: Vec<String>,
+    },
+    /// Cherry-pick failed for a non-conflict reason (empty range, invalid OID,
+    /// hook rejection, GPG failure, etc.). The underlying git error is preserved
+    /// for forensics. Distinct from OverlayConflict so callers can route
+    /// non-conflict failures to a different remediation path.
+    CherryPickFailed {
+        source_task_id: String,
+        range: String,
+        error: String,
+    },
+}
+
+impl std::fmt::Display for WorktreeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Anyhow(e) => write!(f, "{e}"),
+            Self::OverlayConflict {
+                source_task_id,
+                files,
+            } => {
+                write!(
+                    f,
+                    "overlay cherry-pick conflict applying {source_task_id}: {} files",
+                    files.len()
+                )
+            }
+            Self::CherryPickFailed {
+                source_task_id,
+                range,
+                error,
+            } => write!(
+                f,
+                "overlay cherry-pick failed applying {source_task_id} ({range}): {error}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for WorktreeError {}
+
+impl From<anyhow::Error> for WorktreeError {
+    fn from(e: anyhow::Error) -> Self {
+        Self::Anyhow(e)
+    }
+}
+
 impl WorktreeManager {
     pub fn new(repo_root: PathBuf) -> Self {
         Self {
@@ -106,6 +158,73 @@ impl WorktreeManager {
                 stderr,
             ))
         }
+    }
+
+    /// Apply a chain of overlay cherry-picks to a worker worktree.
+    ///
+    /// Each overlay is `(source_task_id, base_oid, tip_oid)`. Runs
+    /// `git cherry-pick base_oid..tip_oid` in `worktree_path` for each.
+    /// On conflict: abort cherry-pick, return structured error with the
+    /// conflicting task id and file list.
+    ///
+    /// `worktree_path` MUST be an isolated worktree exclusively owned by the
+    /// caller during this method's execution. The method mutates the worktree's
+    /// working tree, index, and HEAD; concurrent invocations on the same path
+    /// will corrupt the cherry-pick state.
+    pub async fn apply_overlays(
+        &self,
+        worktree_path: &Path,
+        overlays: &[(String, String, String)],
+    ) -> Result<(), WorktreeError> {
+        for (source_task_id, base_oid, tip_oid) in overlays {
+            let range = format!("{base_oid}..{tip_oid}");
+            let pick_result = self
+                .run_git(&["cherry-pick", &range], Some(worktree_path))
+                .await;
+
+            if let Err(e) = pick_result {
+                let error = format!("{e}");
+                let conflict_files = self
+                    .run_git(
+                        &["diff", "--name-only", "--diff-filter=U"],
+                        Some(worktree_path),
+                    )
+                    .await
+                    .unwrap_or_default()
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                let cherry_pick_head_exists = worktree_path.join(".git/CHERRY_PICK_HEAD").exists();
+                let is_conflict = !conflict_files.is_empty() || cherry_pick_head_exists;
+
+                if let Err(abort_err) = self
+                    .run_git(&["cherry-pick", "--abort"], Some(worktree_path))
+                    .await
+                {
+                    tracing::warn!(
+                        worktree = %worktree_path.display(),
+                        error = %abort_err,
+                        "cherry-pick --abort failed; worktree may be in conflicted state"
+                    );
+                }
+
+                if is_conflict {
+                    return Err(WorktreeError::OverlayConflict {
+                        source_task_id: source_task_id.clone(),
+                        files: conflict_files,
+                    });
+                }
+
+                return Err(WorktreeError::CherryPickFailed {
+                    source_task_id: source_task_id.clone(),
+                    range,
+                    error,
+                });
+            }
+        }
+
+        Ok(())
     }
 
     /// Snapshot the brain's current state (including uncommitted changes) onto a
@@ -657,6 +776,165 @@ impl WorktreeManager {
                 created_at: std::time::Instant::now(),
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod overlay_tests {
+    use super::*;
+    use std::process::Command as StdCommand;
+    use tempfile::TempDir;
+
+    fn run_git(repo: &std::path::Path, args: &[&str]) -> String {
+        let out = StdCommand::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn init_repo() -> TempDir {
+        let dir = TempDir::new().unwrap();
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "t@t"]);
+        run_git(dir.path(), &["config", "user.name", "t"]);
+        std::fs::write(dir.path().join("README"), "init\n").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-q", "-m", "init"]);
+        dir
+    }
+
+    #[tokio::test]
+    async fn apply_overlays_clean_cherry_picks() {
+        let dir = init_repo();
+        let main_oid = run_git(dir.path(), &["rev-parse", "HEAD"]);
+
+        run_git(dir.path(), &["checkout", "-q", "-B", "task1", "main"]);
+        std::fs::write(dir.path().join("foo.rs"), "// foo\n").unwrap();
+        run_git(dir.path(), &["add", "foo.rs"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "task1"]);
+        let task1_tip = run_git(dir.path(), &["rev-parse", "HEAD"]);
+
+        run_git(dir.path(), &["checkout", "-q", "main"]);
+        let worker_path = dir.path().join("worker_wt");
+        run_git(
+            dir.path(),
+            &[
+                "worktree",
+                "add",
+                worker_path.to_str().unwrap(),
+                "-b",
+                "worker1",
+                "main",
+            ],
+        );
+
+        let mgr = WorktreeManager::new(dir.path().to_path_buf());
+        mgr.apply_overlays(&worker_path, &[("task1".into(), main_oid, task1_tip)])
+            .await
+            .expect("clean cherry-pick should succeed");
+
+        assert!(
+            worker_path.join("foo.rs").exists(),
+            "overlay should have brought foo.rs into worker worktree"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_overlays_returns_overlay_conflict_on_conflict() {
+        let dir = init_repo();
+
+        std::fs::write(dir.path().join("foo.rs"), "shared\n").unwrap();
+        run_git(dir.path(), &["add", "foo.rs"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "shared base"]);
+        let base_oid = run_git(dir.path(), &["rev-parse", "HEAD"]);
+
+        run_git(dir.path(), &["checkout", "-q", "-B", "task1", &base_oid]);
+        std::fs::write(dir.path().join("foo.rs"), "task1 version\n").unwrap();
+        run_git(dir.path(), &["add", "foo.rs"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "task1"]);
+
+        run_git(dir.path(), &["checkout", "-q", "-B", "task2", &base_oid]);
+        std::fs::write(dir.path().join("foo.rs"), "task2 version\n").unwrap();
+        run_git(dir.path(), &["add", "foo.rs"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "task2"]);
+        let task2_tip = run_git(dir.path(), &["rev-parse", "HEAD"]);
+
+        run_git(dir.path(), &["checkout", "-q", "main"]);
+        let worker_path = dir.path().join("worker_wt");
+        run_git(
+            dir.path(),
+            &[
+                "worktree",
+                "add",
+                worker_path.to_str().unwrap(),
+                "-b",
+                "worker1",
+                "task1",
+            ],
+        );
+
+        let mgr = WorktreeManager::new(dir.path().to_path_buf());
+        let result = mgr
+            .apply_overlays(&worker_path, &[("task2".into(), base_oid, task2_tip)])
+            .await;
+        match result {
+            Err(WorktreeError::OverlayConflict {
+                source_task_id,
+                files,
+            }) => {
+                assert_eq!(source_task_id, "task2");
+                assert!(
+                    files.iter().any(|f| f == "foo.rs"),
+                    "expected foo.rs in conflict files: {files:?}"
+                );
+            }
+            other => panic!("expected OverlayConflict, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_overlays_returns_cherry_pick_failed_on_empty_range() {
+        let dir = init_repo();
+        let main_oid = run_git(dir.path(), &["rev-parse", "HEAD"]);
+
+        run_git(dir.path(), &["checkout", "-q", "main"]);
+        let worker_path = dir.path().join("worker_wt");
+        run_git(
+            dir.path(),
+            &[
+                "worktree",
+                "add",
+                worker_path.to_str().unwrap(),
+                "-b",
+                "worker1",
+                "main",
+            ],
+        );
+
+        let mgr = WorktreeManager::new(dir.path().to_path_buf());
+        let result = mgr
+            .apply_overlays(
+                &worker_path,
+                &[("task1".into(), main_oid.clone(), main_oid)],
+            )
+            .await;
+        match result {
+            Err(WorktreeError::CherryPickFailed { source_task_id, .. }) => {
+                assert_eq!(source_task_id, "task1");
+            }
+            Err(WorktreeError::OverlayConflict { .. }) => {
+                panic!("empty range must NOT be classified as OverlayConflict");
+            }
+            other => panic!("expected CherryPickFailed, got {other:?}"),
+        }
     }
 }
 
