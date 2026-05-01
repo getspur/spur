@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use spur_acp::session_liveness::{SessionLivenessProbe, SessionLivenessProbeResult};
-use spur_acp::{session_liveness::SelfHeldSet, BrainSessionId};
+use spur_acp::{session_liveness::SelfHeldSet, BrainSessionId, SessionId};
 use spur_worktree::manager::parse_v2_branch;
 use tokio::process::Command;
 use tokio::task::JoinHandle;
@@ -110,38 +110,31 @@ impl WorktreeAuthority {
         let mut last_seen = self.last_seen_alive.lock().await;
 
         for (path, branch) in entries {
-            if !branch.starts_with("refs/heads/spur/worker/v2/") {
-                report.skipped_unknown_owner += 1;
-                continue;
-            }
             let trimmed = branch.trim_start_matches("refs/heads/");
-            let owner = match parse_v2_branch(trimmed) {
-                Some(o) => o,
+            let brain_session_id = match owned_branch_brain_session_id(trimmed) {
+                Some(id) => id,
                 None => {
                     report.skipped_unknown_owner += 1;
                     continue;
                 }
             };
             report.probed += 1;
-            let result = SessionLivenessProbe::probe(
-                &self.repo_root,
-                &owner.brain_session_id,
-                &self.self_held,
-            );
+            let result =
+                SessionLivenessProbe::probe(&self.repo_root, &brain_session_id, &self.self_held);
             match result {
                 SessionLivenessProbeResult::Self_ => {
-                    last_seen.insert(owner.brain_session_id.clone(), now);
+                    last_seen.insert(brain_session_id.clone(), now);
                     report.skipped_self += 1;
                 }
                 SessionLivenessProbeResult::Live => {
-                    last_seen.insert(owner.brain_session_id.clone(), now);
+                    last_seen.insert(brain_session_id.clone(), now);
                     report.skipped_live += 1;
                 }
                 SessionLivenessProbeResult::FsUnsafe => {
                     report.skipped_fs_unsafe += 1;
                 }
                 SessionLivenessProbeResult::Missing => {
-                    if self.is_quarantine_expired(&owner.brain_session_id, now, &last_seen) {
+                    if self.is_quarantine_expired(&brain_session_id, now, &last_seen) {
                         if let Err(e) = self.sweep_one(&path, trimmed).await {
                             warn!(error=%e, path=%path.display(), "sweep_one (missing lock) failed");
                             report.remove_failures += 1;
@@ -153,7 +146,7 @@ impl WorktreeAuthority {
                     }
                 }
                 SessionLivenessProbeResult::DeadAcquired(guard) => {
-                    if self.is_quarantine_expired(&owner.brain_session_id, now, &last_seen) {
+                    if self.is_quarantine_expired(&brain_session_id, now, &last_seen) {
                         if let Err(e) = self.sweep_one(&path, trimmed).await {
                             warn!(error=%e, path=%path.display(), "sweep_one failed");
                             report.remove_failures += 1;
@@ -343,6 +336,71 @@ impl WorktreeAuthority {
     }
 }
 
+/// Return the brain-session key used to probe a worker branch owned by Spur.
+///
+/// v2 branches encode both brain and worker sessions, so this returns the
+/// real `brain_session_id`. For legacy G-strict-created branches this delegates
+/// to `legacy_worker_branch_session_id` and wraps the worker session id as a
+/// `BrainSessionId`. That wrap is a known Phase-1 type lie retained only so
+/// `WorktreeAuthority` can use the existing `SessionLivenessProbe` API.
+///
+/// Legacy ownership therefore intentionally inverts the old I-7 invariant
+/// ("authority MUST NOT auto-sweep pre-v2 branches"). Unknown or malformed
+/// branches are still skipped; recognized legacy branches may be reclaimed
+/// aggressively until Phase 2 migrates them to v2 names.
+fn owned_branch_brain_session_id(branch: &str) -> Option<BrainSessionId> {
+    if let Some(owner) = parse_v2_branch(branch) {
+        return Some(owner.brain_session_id);
+    }
+    legacy_worker_branch_session_id(branch).map(BrainSessionId::new)
+}
+
+/// Recognize G-strict-created legacy worker branches for `WorktreeAuthority` ownership.
+///
+/// Returns the worker's session id, which `owned_branch_brain_session_id` wraps
+/// as a `BrainSessionId`. **This is a known semantic mismatch**: in v2 branches,
+/// the trailing UUID is `worker_session_id` separate from `brain_session_id`;
+/// legacy branches encode only `worker_session_id`. We wrap it as
+/// `BrainSessionId` purely so the existing `SessionLivenessProbe` API can run.
+///
+/// Trade-off accepted for Phase 1 of bd-1dwm:
+/// - The probe always reports `Missing` for legacy branches (no brain lock at
+///   that UUID). This means `Self_` protection never fires for in-flight
+///   legacy workers; an orchestrator's periodic sweep could reclaim its own
+///   worker's worktree. Risk is low because the default sweep interval
+///   (15 min) typically exceeds task duration, but the race is real.
+/// - The previous WorktreeAuthority invariant I-7 ("MUST NOT auto-sweep pre-v2
+///   branches") is INVERTED here. We accept the inversion because legacy
+///   branches were already leaking GC entirely; aggressive (if semantically
+///   imprecise) reclamation is strictly better than the leak.
+///
+/// Phase 2 follow-up: migrate G-strict-created branches to the v2 naming scheme
+/// (`spur/worker/v2/{agent}/{brain_session}/{worker_session}`) so the authority
+/// can probe correctly without a session-id type lie.
+fn legacy_worker_branch_session_id(branch: &str) -> Option<SessionId> {
+    const UUID_LEN: usize = 36;
+
+    let rest = branch.strip_prefix("spur/worker-")?;
+    if rest.len() <= UUID_LEN {
+        return None;
+    }
+
+    let (agent_with_separator, session_id) = rest.split_at(rest.len() - UUID_LEN);
+    if agent_with_separator.strip_suffix('-')?.is_empty() || !is_uuid(session_id) {
+        return None;
+    }
+
+    Some(SessionId(session_id.to_string()))
+}
+
+fn is_uuid(s: &str) -> bool {
+    s.len() == 36
+        && s.chars().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => c == '-',
+            _ => c.is_ascii_hexdigit(),
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,6 +437,51 @@ mod tests {
             AuthorityError::Io(_) => {}
             AuthorityError::Git(s) => panic!("expected Io variant, got Git({s})"),
         }
+    }
+
+    #[test]
+    fn owned_branch_brain_session_id_rejects_malformed_uuid() {
+        // Legacy prefix + non-UUID trailing -> should NOT be recognized.
+        assert_eq!(
+            owned_branch_brain_session_id("spur/worker-codex-not-a-uuid"),
+            None
+        );
+        assert_eq!(
+            owned_branch_brain_session_id("spur/worker-codex-deadbeef"),
+            None
+        );
+        // Too short.
+        assert_eq!(
+            owned_branch_brain_session_id("spur/worker-codex-12345678"),
+            None
+        );
+        // Right length but bad chars.
+        assert_eq!(
+            owned_branch_brain_session_id("spur/worker-codex-zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz"),
+            None
+        );
+        // Right format but missing agent.
+        assert_eq!(
+            owned_branch_brain_session_id("spur/worker--550e8400-e29b-41d4-a716-446655440000"),
+            None
+        );
+        // Non-spur prefix.
+        assert_eq!(
+            owned_branch_brain_session_id(
+                "dependabot/worker-x-550e8400-e29b-41d4-a716-446655440000"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn owned_branch_brain_session_id_accepts_v2_and_legacy_branches() {
+        let brain = "550e8400-e29b-41d4-a716-446655440000";
+        let v2 = format!("spur/worker/v2/codex/{brain}/deadbeef-1111-2222-3333-444455556666");
+        let legacy = format!("spur/worker-claude-code-{brain}");
+
+        assert_eq!(owned_branch_brain_session_id(&v2), Some(id(brain)));
+        assert_eq!(owned_branch_brain_session_id(&legacy), Some(id(brain)));
     }
 
     #[tokio::test]
@@ -435,13 +538,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sweep_skips_legacy_worker_branches() {
+    async fn sweep_reclaims_legacy_g_strict_worker_branch_when_session_lock_missing() {
         let td = TempDir::new().unwrap();
-        let _ = seed_repo_with_worktree(
-            &td,
-            "spur/worker-legacy-deadbeef-1111-2222-3333-444455556666",
-        )
-        .await;
+        let brain = "550e8400-e29b-41d4-a716-446655440000";
+        let branch = format!("spur/worker-codex-{brain}");
+        let _ = seed_repo_with_worktree(&td, &branch).await;
         let (funnel, _rx) = event_funnel::test_channel();
         let auth = WorktreeAuthority::new(
             td.path().to_path_buf(),
@@ -450,6 +551,27 @@ mod tests {
             AuthorityConfig {
                 quarantine_grace: Duration::ZERO,
                 ..AuthorityConfig::default()
+            },
+        );
+        let r = auth.sweep_once().await.expect("sweep ok");
+        assert_eq!(r.skipped_unknown_owner, 0);
+        assert_eq!(r.probed, 1);
+        assert_eq!(r.swept, 1);
+    }
+
+    #[tokio::test]
+    async fn sweep_skips_unrecognized_branches() {
+        let td = TempDir::new().unwrap();
+        let _ =
+            seed_repo_with_worktree(&td, "external/foo-deadbeef-1111-2222-3333-444455556666").await;
+        let (funnel, _rx) = event_funnel::test_channel();
+        let auth = WorktreeAuthority::new(
+            td.path().to_path_buf(),
+            SelfHeldSet::new(),
+            funnel,
+            AuthorityConfig {
+                quarantine_grace: Duration::from_millis(1),
+                ..Default::default()
             },
         );
         let r = auth.sweep_once().await.expect("sweep ok");
