@@ -971,7 +971,8 @@ pub async fn derive_epic_plan(
             let Some(issue_id) = task.issue_id.as_deref() else {
                 continue;
             };
-            let audits = crate::plan::projector::collect_sorted_audits(
+            let audits = crate::plan::projector::collect_sorted_audits_for_issue(
+                issue_id,
                 adv.list_comments(issue_id)
                     .await
                     .map_err(|e| format!("failed to list comments for task '{issue_id}': {e}"))?,
@@ -1860,7 +1861,10 @@ async fn derive_worker_completion_state(
         return Ok((baseline, None));
     };
 
-    let audits = crate::plan::projector::collect_sorted_audits(adv.list_comments(issue_id).await?);
+    let audits = crate::plan::projector::collect_sorted_audits_for_issue(
+        issue_id,
+        adv.list_comments(issue_id).await?,
+    );
     let state = if completion_is_superseded(delegation_id, &audits) {
         crate::plan::audit_sentinel::CompletionState::Superseded
     } else {
@@ -1887,9 +1891,12 @@ async fn read_audits_if_advanced(
     let Some(adv) = pm.advanced() else {
         return Ok(None);
     };
-    Ok(Some(crate::plan::projector::collect_sorted_audits(
-        adv.list_comments(issue_id).await?,
-    )))
+    Ok(Some(
+        crate::plan::projector::collect_sorted_audits_for_issue(
+            issue_id,
+            adv.list_comments(issue_id).await?,
+        ),
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]

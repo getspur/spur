@@ -1067,7 +1067,8 @@ impl Reconciler {
                 .find_map(|label| crate::plan::labels::parse_plan_task_id(label))
                 .unwrap_or_else(|| summary.id.clone());
             let age_secs = now.saturating_sub(expires_at);
-            let audits = crate::plan::projector::collect_sorted_audits(
+            let audits = crate::plan::projector::collect_sorted_audits_for_issue(
+                &summary.id,
                 adv.list_comments(&summary.id).await?,
             );
             let (attempt, _) = crate::plan::projector::project_attempt_facts(&audits);
@@ -1264,8 +1265,10 @@ impl Reconciler {
                 continue;
             };
 
-            let mut audits =
-                crate::plan::projector::collect_sorted_audits(adv.list_comments(&epic.id).await?);
+            let mut audits = crate::plan::projector::collect_sorted_audits_for_issue(
+                &epic.id,
+                adv.list_comments(&epic.id).await?,
+            );
             let has_epic_completion = audits.iter().any(|audit| {
                 matches!(
                     audit,

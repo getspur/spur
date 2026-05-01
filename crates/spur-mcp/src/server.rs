@@ -722,7 +722,7 @@ async fn read_persisted_plan_bootstrap(
         .list_comments(epic_id)
         .await
         .map_err(|e| format!("failed to load comments for epic '{epic_id}': {e}"))?;
-    let audits = crate::plan::projector::collect_sorted_audits(comments);
+    let audits = crate::plan::projector::collect_sorted_audits_for_issue(epic_id, comments);
 
     audits
         .into_iter()
@@ -763,7 +763,7 @@ async fn read_latest_task_completion(
         .list_comments(issue_id)
         .await
         .map_err(|e| format!("failed to load comments for task '{issue_id}': {e}"))?;
-    let audits = crate::plan::projector::collect_sorted_audits(comments);
+    let audits = crate::plan::projector::collect_sorted_audits_for_issue(issue_id, comments);
 
     Ok(audits.into_iter().rev().find_map(|audit| match audit {
         crate::plan::audit_sentinel::AuditSentinelKind::Completion {
@@ -801,7 +801,7 @@ async fn reconstruct_historical_attempts(
         .list_comments(issue_id)
         .await
         .map_err(|e| format!("failed to load comments for task '{issue_id}': {e}"))?;
-    let audits = crate::plan::projector::collect_sorted_audits(comments);
+    let audits = crate::plan::projector::collect_sorted_audits_for_issue(issue_id, comments);
 
     let mut attempts_by_delegation: std::collections::HashMap<String, AttemptAccumulator> =
         std::collections::HashMap::new();
@@ -1056,7 +1056,8 @@ async fn any_open_epic_lacks_rev1_metadata(
             .find_map(|l| crate::plan::labels::parse_plan_id(l))
         {
             let comments = adv.list_comments(&epic.id).await?;
-            let audits = crate::plan::projector::collect_sorted_audits(comments);
+            let audits =
+                crate::plan::projector::collect_sorted_audits_for_issue(&epic.id, comments);
             let has_rev1_metadata = audits.iter().any(|audit| {
                 matches!(
                     audit,
@@ -1087,7 +1088,10 @@ pub async fn compensate_mutation_orphans(
     let adv = pm
         .advanced()
         .ok_or_else(|| anyhow::anyhow!("mutation recovery requires beads backend"))?;
-    let audits = crate::plan::projector::collect_sorted_audits(adv.list_comments(task_id).await?);
+    let audits = crate::plan::projector::collect_sorted_audits_for_issue(
+        task_id,
+        adv.list_comments(task_id).await?,
+    );
 
     for mutation_id in mutation_orphan_ids(&audits) {
         if let Ok(uuid) = uuid::Uuid::parse_str(&mutation_id) {
@@ -1164,7 +1168,10 @@ pub async fn resolve_dispatch_orphan(
     let adv = pm
         .advanced()
         .ok_or_else(|| anyhow::anyhow!("dispatch recovery requires beads backend"))?;
-    let audits = crate::plan::projector::collect_sorted_audits(adv.list_comments(task_id).await?);
+    let audits = crate::plan::projector::collect_sorted_audits_for_issue(
+        task_id,
+        adv.list_comments(task_id).await?,
+    );
     if audits.iter().any(|audit| matches!(
         audit,
         crate::plan::audit_sentinel::AuditSentinelKind::Completion { delegation_id: did, .. } if did == delegation_id

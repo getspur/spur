@@ -108,14 +108,16 @@ pub async fn apply_mutation(
                         parent_agent
                     );
                 }
-                let parent_context_files =
-                    super::projector::latest_task_spec(&super::projector::collect_sorted_audits(
+                let parent_context_files = super::projector::latest_task_spec(
+                    &super::projector::collect_sorted_audits_for_issue(
+                        parent,
                         adv.list_comments(parent)
                             .await
                             .with_context(|| format!("list comments for parent issue {parent}"))?,
-                    ))
-                    .map(|(_, context_files)| context_files)
-                    .unwrap_or_default();
+                    ),
+                )
+                .map(|(_, context_files)| context_files)
+                .unwrap_or_default();
                 let original_downstreams = downstream_issue_ids(pm.as_ref(), parent).await?;
 
                 let mut child_ids: Vec<String> = Vec::with_capacity(children.len());
