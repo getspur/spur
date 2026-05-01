@@ -9,6 +9,8 @@ use std::time::SystemTime;
 
 use spur_core::{ExecutorLineage, ExecutorNode, LifecycleState, TrackedPlan, TrackedTask};
 
+const BLOCKED_ON_SETUP_CONFLICT_STATUS: &str = "blocked_on_setup_conflict";
+
 pub fn render_stage_board(
     frame: &mut Frame,
     area: Rect,
@@ -178,6 +180,7 @@ fn status_badge(status: &str) -> &str {
         "failed" => "[ERR]",
         "cancelled" => "[SKP]",
         "superseded" => "[SUP]",
+        BLOCKED_ON_SETUP_CONFLICT_STATUS => " BLOCKED ",
         _ => "[???]",
     }
 }
@@ -195,6 +198,10 @@ fn status_style(status: &str) -> Style {
             .fg(Color::Green)
             .add_modifier(Modifier::BOLD),
         "rejected" | "failed" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        BLOCKED_ON_SETUP_CONFLICT_STATUS => Style::default()
+            .fg(Color::White)
+            .bg(Color::Red)
+            .add_modifier(Modifier::BOLD),
         "cancelled" => Style::default().fg(Color::Magenta),
         "superseded" => Style::default().fg(Color::Yellow),
         _ => Style::default(),
@@ -224,6 +231,10 @@ fn task_meta_chips<'a>(task: &TrackedTask, lineage: &ExecutorLineage) -> Vec<Spa
         chips.push(Span::styled(label, Style::default().fg(Color::Red)));
     }
 
+    if let Some(label) = setup_conflict_label(task) {
+        chips.push(Span::styled(label, Style::default().fg(Color::Red)));
+    }
+
     // Dependency hint
     if !task.depends_on.is_empty() {
         let label = if task.depends_on.len() == 1 {
@@ -245,6 +256,60 @@ fn task_meta_chips<'a>(task: &TrackedTask, lineage: &ExecutorLineage) -> Vec<Spa
     chips
 }
 
+fn setup_conflict_label(task: &TrackedTask) -> Option<String> {
+    if task.status != BLOCKED_ON_SETUP_CONFLICT_STATUS {
+        return None;
+    }
+
+    let dep_task_id = task
+        .summary
+        .as_deref()
+        .and_then(setup_conflict_dep_task_id)
+        .unwrap_or("dependency");
+    let file_count = setup_conflict_file_count(task);
+    let noun = if file_count == 1 { "file" } else { "files" };
+    let verb = if file_count == 1 {
+        "conflicts"
+    } else {
+        "conflict"
+    };
+
+    Some(format!("{file_count} {noun} {verb} with {dep_task_id}"))
+}
+
+fn setup_conflict_dep_task_id(summary: &str) -> Option<&str> {
+    summary
+        .strip_prefix("Setup overlay conflict applying ")
+        .and_then(|rest| rest.split_once(':'))
+        .map(|(dep_task_id, _)| dep_task_id.trim())
+        .filter(|dep_task_id| !dep_task_id.is_empty())
+}
+
+fn setup_conflict_file_count(task: &TrackedTask) -> usize {
+    task.error
+        .as_deref()
+        .map(|files| {
+            files
+                .split(',')
+                .filter(|file| !file.trim().is_empty())
+                .count()
+        })
+        .filter(|count| *count > 0)
+        .or_else(|| {
+            task.summary
+                .as_deref()
+                .and_then(setup_conflict_file_count_from_summary)
+        })
+        .unwrap_or(0)
+}
+
+fn setup_conflict_file_count_from_summary(summary: &str) -> Option<usize> {
+    summary
+        .rsplit_once(':')
+        .and_then(|(_, count)| count.split_whitespace().next())
+        .and_then(|count| count.parse().ok())
+}
+
 fn is_live_phase(phase: LifecycleState) -> bool {
     !matches!(
         phase,
@@ -261,5 +326,111 @@ fn phase_label(phase: LifecycleState) -> &'static str {
         LifecycleState::Succeeded => "done",
         LifecycleState::Failed => "fail",
         LifecycleState::Cancelled => "stop",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::{backend::TestBackend, style::Style, Terminal};
+    use spur_acp::{PlanSnapshotCounts, SessionId};
+    use spur_core::{ExecutorLineage, TrackedPlan, TrackedTask};
+
+    use super::render_stage_board;
+
+    fn task(task_id: &str, status: &str) -> TrackedTask {
+        TrackedTask {
+            task_id: task_id.into(),
+            task_name: format!("{task_id} task"),
+            agent: "codex".into(),
+            issue_id: Some(format!("bd-1dwm.{task_id}")),
+            status: status.into(),
+            attempt: 1,
+            max_attempts: 3,
+            depends_on: Vec::new(),
+            blocked_by: Vec::new(),
+            unblocks: Vec::new(),
+            summary: None,
+            feedback: None,
+            error: None,
+            worker_branch: None,
+            delegation_id: None,
+            diff_summary: None,
+            mutation_id: None,
+            superseded_by: Vec::new(),
+            next_action: "wait".into(),
+            stage_idx: 0,
+        }
+    }
+
+    fn rendered_buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        let buf = terminal.backend().buffer();
+        let mut rendered = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                rendered.push_str(buf[(x, y)].symbol());
+            }
+            rendered.push('\n');
+        }
+        rendered
+    }
+
+    fn style_for_cell_run(terminal: &Terminal<TestBackend>, needle: &str) -> Option<Style> {
+        let buf = terminal.backend().buffer();
+        for y in 0..buf.area.height {
+            let mut row = String::new();
+            let mut cell_x_by_byte = Vec::new();
+            for x in 0..buf.area.width {
+                cell_x_by_byte.push((row.len(), x));
+                row.push_str(buf[(x, y)].symbol());
+            }
+            if let Some(start) = row.find(needle) {
+                let x = cell_x_by_byte
+                    .iter()
+                    .find_map(|(byte_idx, x)| (*byte_idx == start).then_some(*x))?;
+                return Some(buf[(x, y)].style());
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn plan_stage_board_renders_blocked_on_setup_conflict_distinct_from_failed() {
+        let mut blocked = task("T2", "blocked_on_setup_conflict");
+        blocked.summary = Some("Setup overlay conflict applying T1: 2 file(s)".into());
+        blocked.error = Some("crates/spur-core/src/lib.rs, crates/spur-tui/src/lib.rs".into());
+
+        let mut failed = task("T3", "failed");
+        failed.error = Some("worker failed".into());
+
+        let plan = TrackedPlan {
+            session_id: SessionId("brain-1".into()),
+            plan_id: "bd-1dwm".into(),
+            status: "running".into(),
+            progress: "0/2 reviewed".into(),
+            next_action: "inspect".into(),
+            ready_to_merge: false,
+            counts: PlanSnapshotCounts::default(),
+            tasks: vec![blocked, failed],
+            updated_at: std::time::SystemTime::UNIX_EPOCH,
+        };
+        let lineage = ExecutorLineage::new();
+        let backend = TestBackend::new(140, 8);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+
+        terminal
+            .draw(|frame| render_stage_board(frame, frame.area(), &plan, "T2", 0, &lineage))
+            .expect("render stage board");
+
+        let rendered = rendered_buffer_text(&terminal);
+        assert!(rendered.contains("BLOCKED"), "rendered: {rendered}");
+        assert!(
+            rendered.contains("2 files conflict with T1"),
+            "rendered: {rendered}"
+        );
+        assert!(rendered.contains("[ERR]"), "rendered: {rendered}");
+
+        let blocked_style = style_for_cell_run(&terminal, "BLOCKED").expect("blocked style");
+        let failed_style = style_for_cell_run(&terminal, "[ERR]").expect("failed style");
+        assert_ne!(blocked_style, failed_style);
     }
 }
