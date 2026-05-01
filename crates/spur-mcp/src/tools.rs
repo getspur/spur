@@ -1,12 +1,68 @@
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use spur_acp::{DelegationId, DelegationResult};
 use tokio::sync::oneshot;
 
 // ─── Request/Response types for orchestrator communication ────────────
+
+/// Where a worker's worktree should be based, before any overlays.
+///
+/// Non-recursive sum type. Used as the inner `base` of `BaseSpec::WithOverlay`
+/// to enforce that overlay chains cannot nest.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BaseTarget {
+    /// Snapshot from the orchestrator's repo_root HEAD (legacy default).
+    RepoMain,
+    /// Branch by name.
+    Branch { name: String },
+    /// Pinned commit OID.
+    Commit { oid: String },
+}
+
+/// Where a worker's worktree should be based.
+///
+/// Optional on `DelegateToWorkerInput` for backwards compatibility:
+/// callers that omit `base` get the legacy behavior (snapshot from
+/// repo_root HEAD, equivalent to `BaseSpec::RepoMain`).
+///
+/// Flat (non-recursive) by design: overlay chains nest at most one level
+/// (overlay-on-base, never overlay-on-overlay). See spec Open Questions:
+/// "Recommendation: flatten; nesting offers no operational benefit and
+/// adds parsing complexity." This eliminates JSON-schema `$ref` recursion
+/// that breaks MCP tool-calling in many LLM clients.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BaseSpec {
+    /// Snapshot from the orchestrator's repo_root HEAD (legacy default).
+    RepoMain,
+    /// Branch by name.
+    Branch { name: String },
+    /// Pinned commit OID.
+    Commit { oid: String },
+    /// Apply cherry-pick overlays on top of a non-overlay base.
+    WithOverlay {
+        base: BaseTarget,
+        overlays: Vec<OverlayCommit>,
+    },
+}
+
+/// One overlay commit range to cherry-pick onto a base.
+///
+/// `base_oid..tip_oid` is the exclusive-of-base range.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema)]
+pub struct OverlayCommit {
+    /// The plan task whose work this overlay represents (audit / signal context).
+    pub source_task_id: String,
+    /// Inclusive lower bound (exclusive of base in cherry-pick range).
+    pub base_oid: String,
+    /// Inclusive upper bound.
+    pub tip_oid: String,
+}
 
 /// A delegation request sent from the MCP server to the orchestrator.
 ///
@@ -36,6 +92,11 @@ pub struct DelegationRequest {
     pub delegation_plan: Option<spur_acp::DelegationPlan>,
     /// Optional beads issue ID to auto-track for this delegation.
     pub issue_id: Option<String>,
+    /// Where to base the worker's worktree. None means legacy RepoMain behavior.
+    ///
+    /// Plan-engine dispatches will pass Some(WithOverlay { .. }) once bd-1dwm
+    /// dispatch wiring lands; ad-hoc brain dispatches may omit it.
+    pub base: Option<BaseSpec>,
     /// Shared attempt tracker. Orchestrator updates this as review-loop
     /// retries advance so detached continuations can report the final
     /// 1-based worker attempt that produced the result.
@@ -45,6 +106,64 @@ pub struct DelegationRequest {
 /// Channel the orchestrator holds to receive requests from the MCP server.
 pub struct DelegationChannel {
     pub request_rx: tokio::sync::mpsc::Receiver<DelegationRequest>,
+}
+
+#[cfg(test)]
+mod base_spec_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_delegate_input_without_base_deserializes_as_none() {
+        let json = serde_json::json!({
+            "agent": "claude",
+            "task": "do a thing",
+        });
+        let parsed: crate::tool_schemas::DelegateToWorkerInput =
+            serde_json::from_value(json).expect("legacy input must parse");
+        assert!(parsed.base.is_none(), "missing base must default to None");
+    }
+
+    #[test]
+    fn delegate_input_with_base_repo_main_deserializes() {
+        let json = serde_json::json!({
+            "agent": "claude",
+            "task": "do a thing",
+            "base": { "kind": "repo_main" },
+        });
+        let parsed: crate::tool_schemas::DelegateToWorkerInput =
+            serde_json::from_value(json).unwrap();
+        assert!(matches!(parsed.base, Some(BaseSpec::RepoMain)));
+    }
+
+    #[test]
+    fn delegate_input_with_overlay_deserializes() {
+        let json = serde_json::json!({
+            "agent": "claude",
+            "task": "do a thing",
+            "base": {
+                "kind": "with_overlay",
+                "base": { "kind": "branch", "name": "spur/plan-base-xyz" },
+                "overlays": [
+                    { "source_task_id": "T1", "base_oid": "aaa", "tip_oid": "bbb" }
+                ]
+            }
+        });
+        let parsed: crate::tool_schemas::DelegateToWorkerInput =
+            serde_json::from_value(json).unwrap();
+        match parsed.base {
+            Some(BaseSpec::WithOverlay {
+                ref base,
+                ref overlays,
+            }) => {
+                assert!(
+                    matches!(base, BaseTarget::Branch { name } if name == "spur/plan-base-xyz")
+                );
+                assert_eq!(overlays.len(), 1);
+                assert_eq!(overlays[0].source_task_id, "T1");
+            }
+            _ => panic!("expected WithOverlay, got {:?}", parsed.base),
+        }
+    }
 }
 
 // ─── Tool definition ──────────────────────────────────────────────────

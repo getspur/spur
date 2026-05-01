@@ -550,6 +550,7 @@ pub fn parse_parallel_tasks(
             brain_session_id: brain_session_id.clone(),
             delegation_plan,
             issue_id,
+            base: None,
             attempt_tracker: new_attempt_tracker(),
         });
     }
@@ -2536,6 +2537,7 @@ impl McpCallbackServer {
             brain_session_id: self.brain_session_id.clone(),
             delegation_plan,
             issue_id,
+            base: None,
             attempt_tracker: Arc::clone(&attempt_tracker),
         };
 
