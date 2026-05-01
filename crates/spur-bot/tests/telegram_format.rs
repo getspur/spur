@@ -179,7 +179,10 @@ fn image_alt_overflow_preserves_url_as_plain_projection() {
         .map(|chunk| chunk.plain.as_str())
         .collect::<String>();
 
-    assert!(plain.contains("(http://example.com/image.png)"), "{chunks:?}");
+    assert!(
+        plain.contains("(http://example.com/image.png)"),
+        "{chunks:?}"
+    );
 }
 
 #[test]
