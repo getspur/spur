@@ -238,6 +238,37 @@ fn plan_snapshot_updated_rejects_malformed_payload() {
 }
 
 #[test]
+fn issue_subgraph_loaded_roundtrips() {
+    use spur_acp::{GraphEdgeEvent, GraphNodeEvent, SpurEvent, SpurEventBody};
+
+    let ev = SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
+        requested_id: "bd-1".into(),
+        nodes: vec![GraphNodeEvent {
+            id: "bd-1".into(),
+            title: Some("Root issue".into()),
+            status: Some("open".into()),
+            priority: Some(1),
+            labels: vec!["epic".into()],
+            pagerank: Some(0.9),
+        }],
+        edges: vec![GraphEdgeEvent {
+            from: "bd-1".into(),
+            to: "bd-2".into(),
+            edge_type: Some("blocks".into()),
+        }],
+    });
+
+    let json = serde_json::to_string(&ev).unwrap();
+    let round: SpurEvent = serde_json::from_str(&json).unwrap();
+    assert!(matches!(
+        round.body,
+        SpurEventBody::IssueSubgraphLoaded { .. }
+    ));
+    assert!(json.contains("IssueSubgraphLoaded"));
+    assert!(json.contains("Root issue"));
+}
+
+#[test]
 fn plan_completed_roundtrips() {
     use spur_acp::{SpurEvent, SpurEventBody};
 

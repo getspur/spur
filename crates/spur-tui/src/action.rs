@@ -180,6 +180,10 @@ pub enum Action {
     },
     /// Refresh the tracked issues list from the PM backend.
     RefreshIssues,
+    /// Fetch the dependency subgraph for an issue from the PM backend.
+    GetIssueGraph {
+        id: String,
+    },
     /// An issue-related action from the IssuesPanel or slash commands.
     Issue(IssueAction),
     /// Navigate to Dashboard with Agents panel focused and the
