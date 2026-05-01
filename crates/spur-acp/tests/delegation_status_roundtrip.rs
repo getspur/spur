@@ -1,4 +1,4 @@
-use spur_acp::{DelegationStatus, TimeoutFallback};
+use spur_acp::{AttemptSetupError, DelegationStatus, TimeoutFallback};
 use std::time::Duration;
 
 fn roundtrip(status: &DelegationStatus) {
@@ -36,6 +36,12 @@ fn every_variant_round_trips() {
     roundtrip(&DelegationStatus::TimedOut {
         waited_for: Duration::from_secs(60),
         fallback: TimeoutFallback::Abandon,
+    });
+    roundtrip(&DelegationStatus::SetupFailed {
+        error: AttemptSetupError::OverlayConflict {
+            source_task_id: "T1".into(),
+            files: vec!["foo.rs".into()],
+        },
     });
 }
 

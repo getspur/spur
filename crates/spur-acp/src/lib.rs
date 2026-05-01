@@ -40,11 +40,11 @@ pub use crate::domain::events::{
     Role,
 };
 pub use domain::{
-    ArtifactKind, CancelOutcome, CancellationControl, DelegationAbortHandle, DelegationAbortReason,
-    DelegationId, DelegationPlan, DelegationResult, DelegationStatus, GraphEdgeEvent,
-    GraphNodeEvent, HistoryEntry, IssueDetailEvent, IssueSummaryEvent, LicenseBindingMode,
-    LicensePlan, LicenseStateEvent, LicenseStatusEvent, LicenseSubjectKind, PlanCandidate,
-    PlanSubtask, SpurEvent, SpurEventBody, TimeoutFallback, WorkerArtifact,
+    ArtifactKind, AttemptSetupError, CancelOutcome, CancellationControl, DelegationAbortHandle,
+    DelegationAbortReason, DelegationId, DelegationPlan, DelegationResult, DelegationStatus,
+    GraphEdgeEvent, GraphNodeEvent, HistoryEntry, IssueDetailEvent, IssueSummaryEvent,
+    LicenseBindingMode, LicensePlan, LicenseStateEvent, LicenseStatusEvent, LicenseSubjectKind,
+    PlanCandidate, PlanSubtask, SpurEvent, SpurEventBody, TimeoutFallback, WorkerArtifact,
 };
 
 // Re-export all remaining types for backward compatibility
