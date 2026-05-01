@@ -4920,6 +4920,7 @@ impl Orchestrator {
                 brain_session_id,
                 delegation_plan,
                 issue_id,
+                base: _,
                 attempt_tracker,
             } = request;
             // Phase 4: `DelegationRequest.id` is now a typed `DelegationId`

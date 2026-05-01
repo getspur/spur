@@ -1815,6 +1815,7 @@ pub async fn run_plan(
                 brain_session_id: brain_sid.clone(),
                 delegation_plan: None,
                 issue_id: task_spec.issue_id.clone(),
+                base: None,
                 attempt_tracker: Arc::new(std::sync::atomic::AtomicU32::new(task_attempt)),
             };
 
