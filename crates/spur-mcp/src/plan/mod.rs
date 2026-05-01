@@ -2642,7 +2642,10 @@ pub async fn review_task(
                     .and_then(|r| r.summary.clone())
                     .or_else(|| summary.clone()),
                 feedback: fb.to_string(),
-                dispatched_base_oid: None,
+                // Preserve the rejected attempt's dispatched_base_oid for forensics.
+                // `.take()` moves the value into history and clears entry so the next
+                // attempt starts fresh; T9 will populate it on re-dispatch.
+                dispatched_base_oid: entry.dispatched_base_oid.take(),
             };
             entry.history.push(current_record);
             entry.result = None;
@@ -3015,7 +3018,10 @@ fn apply_decision_and_extract(
                     .and_then(|r| r.summary.clone())
                     .or_else(|| summary.clone()),
                 feedback: fb.to_string(),
-                dispatched_base_oid: None,
+                // Preserve the rejected attempt's dispatched_base_oid for forensics.
+                // `.take()` moves the value into history and clears entry so the next
+                // attempt starts fresh; T9 will populate it on re-dispatch.
+                dispatched_base_oid: entry.dispatched_base_oid.take(),
             };
             entry.history.push(current_record);
             entry.result = None;
