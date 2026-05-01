@@ -4,9 +4,101 @@
 use std::time::Duration;
 
 use spur_acp::session_liveness::SelfHeldSet;
+use spur_acp::{BrainSessionId, SessionId};
 use spur_core::event_funnel;
 use spur_core::{AuthorityConfig, WorktreeAuthority};
+use spur_worktree::WorktreeManager;
 use tempfile::TempDir;
+
+async fn git(dir: &std::path::Path, args: &[&str]) {
+    let output = tokio::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .await
+        .expect("spawn git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+async fn seed_repo(td: &TempDir) {
+    git(td.path(), &["init", "-q", "-b", "main"]).await;
+    git(td.path(), &["config", "user.email", "t@t"]).await;
+    git(td.path(), &["config", "user.name", "t"]).await;
+    tokio::fs::write(td.path().join("a"), b"x").await.unwrap();
+    git(td.path(), &["add", "a"]).await;
+    git(td.path(), &["commit", "-q", "-m", "base"]).await;
+}
+
+fn brain_id(s: &str) -> BrainSessionId {
+    BrainSessionId::new(SessionId(s.into()))
+}
+
+fn authority(
+    td: &TempDir,
+    self_held: SelfHeldSet,
+    quarantine_grace: Duration,
+) -> WorktreeAuthority {
+    let (funnel, _rx) = event_funnel::test_channel();
+    WorktreeAuthority::new(
+        td.path().to_path_buf(),
+        self_held,
+        funnel,
+        AuthorityConfig {
+            quarantine_grace,
+            ..AuthorityConfig::default()
+        },
+    )
+}
+
+#[tokio::test]
+async fn v2_worker_survives_authority_sweep_when_session_alive() {
+    let td = TempDir::new().unwrap();
+    seed_repo(&td).await;
+
+    let brain = brain_id("550e8400-e29b-41d4-a716-446655440000");
+    let worker = SessionId("deadbeef-1111-2222-3333-444455556666".into());
+    let mut manager = WorktreeManager::new(td.path().to_path_buf());
+    let info = manager
+        .create_worktree_v2(&brain, &worker, "codex", "main")
+        .await
+        .expect("create v2 worktree");
+
+    let self_held = SelfHeldSet::new();
+    self_held.insert(brain);
+    let auth = authority(&td, self_held, Duration::ZERO);
+    let report = auth.sweep_once().await.expect("sweep");
+
+    assert_eq!(report.skipped_self, 1);
+    assert_eq!(report.swept, 0);
+    assert!(info.path.exists(), "active v2 worktree must survive");
+}
+
+#[tokio::test]
+async fn orchestrator_restart_does_not_wipe_in_flight_v2_workers() {
+    let td = TempDir::new().unwrap();
+    seed_repo(&td).await;
+
+    let brain = brain_id("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+    let worker = SessionId("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb".into());
+    let mut manager = WorktreeManager::new(td.path().to_path_buf());
+    let info = manager
+        .create_worktree_v2(&brain, &worker, "codex", "main")
+        .await
+        .expect("create v2 worktree");
+
+    let restarted_self_held = SelfHeldSet::new();
+    restarted_self_held.insert(brain);
+    let restarted_auth = authority(&td, restarted_self_held, Duration::ZERO);
+    let report = restarted_auth.sweep_once().await.expect("sweep");
+
+    assert_eq!(report.skipped_self, 1);
+    assert_eq!(report.swept, 0);
+    assert!(info.path.exists(), "restarted brain must retain v2 worker");
+}
 
 #[tokio::test]
 async fn self_held_session_prevents_sweep_during_active_use() {
