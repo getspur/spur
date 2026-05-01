@@ -1062,6 +1062,7 @@ pub async fn emit_completion_audit(
         worker_branch: fields.worker_branch,
         result_summary: fields.result_summary,
         artifact_uri: fields.artifact_uri,
+        dispatched_base_oid: fields.dispatched_base_oid,
     };
     let body = crate::plan::audit_sentinel::encode_comment(&kind);
     adv.add_comment(issue_id, &body).await?;
@@ -1674,6 +1675,7 @@ async fn persist_completion_inner(
                 worker_branch: result.worker_branch.clone(),
                 result_summary: result.summary.clone(),
                 artifact_uri: None,
+                dispatched_base_oid: None,
             },
             already_emitted,
         )
@@ -1719,6 +1721,7 @@ async fn persist_completion_inner(
             worker_branch: result.worker_branch.clone(),
             result_summary: cont.payload.summary.clone(),
             artifact_uri,
+            dispatched_base_oid: None,
         },
         already_emitted,
     )
@@ -5285,6 +5288,7 @@ mod tests {
             worker_branch: Some("spur/worker-test".to_string()),
             result_summary: Some("worker done".to_string()),
             artifact_uri: None,
+            dispatched_base_oid: None,
         }
     }
 
@@ -5334,6 +5338,51 @@ mod tests {
             pm.advanced.comments.lock().expect("comments lock").len(),
             0,
             "unlicensed fallback must not call add_comment"
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_completion_audit_populates_dispatched_base_oid() {
+        let pm = CompletionWritebackPm::new(vec![]);
+        let entry = PlanTaskEntry {
+            spec: PlanTask {
+                task_id: "T1".into(),
+                agent: "codex".into(),
+                task: "Do T1".into(),
+                depends_on: Vec::new(),
+                issue_id: Some("bd-1".into()),
+                context_files: Vec::new(),
+            },
+            status: PlanTaskStatus::AwaitingReview { summary: None },
+            result: None,
+            worker_branch: Some("spur/worker-test".to_string()),
+            attempt: 1,
+            history: Vec::new(),
+            last_delegation_id: Some("del-A".to_string()),
+            dispatched_base_oid: Some("real-oid".to_string()),
+        };
+
+        super::emit_completion_audit(
+            Some(&pm),
+            &entry.spec.issue_id,
+            pro_feature_gate().as_ref(),
+            "plan-1",
+            entry.last_delegation_id.as_deref().unwrap(),
+            crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+            false,
+            crate::plan::audit_sentinel::CompletionAuditFields {
+                dispatched_base_oid: entry.dispatched_base_oid.clone(),
+                ..completion_audit_fields()
+            },
+        )
+        .await
+        .expect("emit completion audit");
+
+        let comments = pm.advanced.comments.lock().expect("comments lock");
+        let body = comments.first().expect("completion audit comment");
+        assert!(
+            body.contains("\"dispatched_base_oid\":\"real-oid\""),
+            "completion audit body should carry dispatched_base_oid: {body}"
         );
     }
 

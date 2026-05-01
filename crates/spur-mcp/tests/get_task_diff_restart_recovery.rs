@@ -184,6 +184,7 @@ async fn t_v0d_4_get_task_diff_works_after_restart_for_latest_attempt() {
             worker_branch: Some("spur/worker-a".into()),
             result_summary: Some("worker branch ready".into()),
             artifact_uri: None,
+            dispatched_base_oid: None,
         }),
     )
     .await

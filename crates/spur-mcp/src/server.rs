@@ -6155,6 +6155,7 @@ mod merge_plan_tests {
                 worker_branch: Some("spur/worker-a".into()),
                 result_summary: Some("worker branch ready".into()),
                 artifact_uri: None,
+                dispatched_base_oid: None,
             }),
         )
         .await
@@ -6350,6 +6351,7 @@ mod merge_plan_tests {
                 worker_branch: Some("spur/worker-a1".into()),
                 result_summary: Some("attempt 1 summary".into()),
                 artifact_uri: None,
+                dispatched_base_oid: None,
             },
             AuditSentinelKind::Rejection {
                 delegation_id: "del-1".into(),
@@ -6367,6 +6369,7 @@ mod merge_plan_tests {
                 worker_branch: Some("spur/worker-a2".into()),
                 result_summary: Some("attempt 2 summary".into()),
                 artifact_uri: None,
+                dispatched_base_oid: None,
             },
             AuditSentinelKind::Approval {
                 delegation_id: "del-2".into(),
