@@ -125,6 +125,21 @@ fn extract_overlays(spec: &BaseSpec) -> Vec<(String, String, String)> {
     }
 }
 
+fn emit_dispatch_overlay_applied(
+    funnel: &crate::event_funnel::FunnelHandle,
+    request_id: &str,
+    base: Option<&BaseSpec>,
+    dispatched_base_oid: &str,
+    overlays: &[(String, String, String)],
+) {
+    funnel.emit(SpurEventBody::DispatchOverlayApplied {
+        request_id: request_id.to_string(),
+        base_spec: serde_json::to_value(base).unwrap_or(serde_json::Value::Null),
+        dispatched_base_oid: dispatched_base_oid.to_string(),
+        overlay_task_ids: overlays.iter().map(|(id, _, _)| id.clone()).collect(),
+    });
+}
+
 #[cfg(test)]
 mod session_attach_guard_transfer_tests {
     use super::*;
@@ -6422,8 +6437,15 @@ async fn run_one_worker_attempt(
         }
     };
     if let Some(tx) = &ctx.dispatched_base_oid_tx {
-        let _ = tx.send(Some(dispatched_base_oid));
+        let _ = tx.send(Some(dispatched_base_oid.clone()));
     }
+    emit_dispatch_overlay_applied(
+        funnel,
+        ctx.request_id,
+        ctx.base.as_ref(),
+        &dispatched_base_oid,
+        &overlays,
+    );
 
     // 2. Spawn worker agent in worktree via AgentConnection.
     // Workers never receive a permission_tx, so L2 auto-approve is
@@ -8977,7 +8999,7 @@ mod build_diff_summary_tests {
 
 #[cfg(test)]
 mod base_spec_dispatch_tests {
-    use super::{extract_overlays, resolve_base_branch};
+    use super::{emit_dispatch_overlay_applied, extract_overlays, resolve_base_branch};
     use spur_mcp::tools::{BaseSpec, BaseTarget, OverlayCommit};
 
     #[test]
@@ -9032,6 +9054,57 @@ mod base_spec_dispatch_tests {
         assert_eq!(overlays.len(), 2);
         assert_eq!(overlays[0].0, "T1");
         assert_eq!(overlays[1].0, "T2");
+    }
+
+    #[tokio::test]
+    async fn dispatch_overlay_applied_event_includes_base_and_overlay_ids() {
+        let spec = BaseSpec::WithOverlay {
+            base: BaseTarget::Branch {
+                name: "spur/plan-base".into(),
+            },
+            overlays: vec![
+                OverlayCommit {
+                    source_task_id: "T1".into(),
+                    base_oid: "a".into(),
+                    tip_oid: "b".into(),
+                },
+                OverlayCommit {
+                    source_task_id: "T2".into(),
+                    base_oid: "b".into(),
+                    tip_oid: "c".into(),
+                },
+            ],
+        };
+        let overlays = extract_overlays(&spec);
+        let (funnel, mut events) = crate::event_funnel::test_channel();
+
+        emit_dispatch_overlay_applied(
+            &funnel,
+            "req-1",
+            Some(&spec),
+            "overlay-head",
+            &overlays,
+        );
+
+        match tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+            .await
+            .expect("event timeout")
+            .expect("event channel closed")
+        {
+            spur_acp::SpurEventBody::DispatchOverlayApplied {
+                request_id,
+                base_spec,
+                dispatched_base_oid,
+                overlay_task_ids,
+            } => {
+                assert_eq!(request_id, "req-1");
+                assert_eq!(base_spec["kind"], "with_overlay");
+                assert_eq!(base_spec["overlays"][0]["source_task_id"], "T1");
+                assert_eq!(dispatched_base_oid, "overlay-head");
+                assert_eq!(overlay_task_ids, vec!["T1", "T2"]);
+            }
+            other => panic!("expected DispatchOverlayApplied, got {other:?}"),
+        }
     }
 }
 

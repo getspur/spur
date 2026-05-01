@@ -643,6 +643,15 @@ pub enum SpurEventBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         issue_id: Option<String>,
     },
+    /// Emitted after the worker worktree base has been finalized and before
+    /// agent initialization, so lineage can explain which BaseSpec and overlay
+    /// closure a dispatch attempt saw.
+    DispatchOverlayApplied {
+        request_id: String,
+        base_spec: serde_json::Value,
+        dispatched_base_oid: String,
+        overlay_task_ids: Vec<String>,
+    },
     /// Emitted immediately after the orchestrator spawns an executor
     /// for a brain delegation. Lets the brain-side session_detail
     /// view correlate its `DelegationRequested` trace entry with the
@@ -1308,6 +1317,50 @@ mod delegation_requested_tests {
                 delegation_plan, ..
             } => {
                 assert!(delegation_plan.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod dispatch_overlay_applied_tests {
+    use super::*;
+
+    #[test]
+    fn dispatch_overlay_applied_event_roundtrips_opaque_base_spec() {
+        let base_spec = serde_json::json!({
+            "kind": "with_overlay",
+            "base": { "kind": "branch", "name": "spur/plan-base" },
+            "overlays": [
+                {
+                    "source_task_id": "T1",
+                    "base_oid": "abc123",
+                    "tip_oid": "def456"
+                }
+            ]
+        });
+        let body = SpurEventBody::DispatchOverlayApplied {
+            request_id: "req-1".into(),
+            base_spec: base_spec.clone(),
+            dispatched_base_oid: "overlay-head".into(),
+            overlay_task_ids: vec!["T1".into()],
+        };
+
+        let json = serde_json::to_string(&body).unwrap();
+        let back: SpurEventBody = serde_json::from_str(&json).unwrap();
+
+        match back {
+            SpurEventBody::DispatchOverlayApplied {
+                request_id,
+                base_spec: parsed_base_spec,
+                dispatched_base_oid,
+                overlay_task_ids,
+            } => {
+                assert_eq!(request_id, "req-1");
+                assert_eq!(parsed_base_spec, base_spec);
+                assert_eq!(dispatched_base_oid, "overlay-head");
+                assert_eq!(overlay_task_ids, vec!["T1"]);
             }
             _ => panic!("wrong variant"),
         }
