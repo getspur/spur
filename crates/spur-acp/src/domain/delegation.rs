@@ -124,6 +124,51 @@ pub enum DelegationStatus {
     Cancelled {
         reason: String,
     },
+    /// Worker setup failed before the worker process could run.
+    SetupFailed {
+        error: AttemptSetupError,
+    },
+}
+
+/// Structured setup-level failure for a delegation attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum AttemptSetupError {
+    SnapshotFailed {
+        error: String,
+    },
+    WorktreeFailed {
+        error: String,
+    },
+    InitFailed {
+        error: String,
+    },
+    SessionFailed {
+        error: String,
+    },
+    OverlayConflict {
+        source_task_id: String,
+        files: Vec<String>,
+    },
+}
+
+impl std::fmt::Display for AttemptSetupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SnapshotFailed { error } => write!(f, "Failed to snapshot brain state: {error}"),
+            Self::WorktreeFailed { error } => write!(f, "Failed to create worktree: {error}"),
+            Self::InitFailed { error } => write!(f, "Failed to initialize worker: {error}"),
+            Self::SessionFailed { error } => write!(f, "Failed to create worker session: {error}"),
+            Self::OverlayConflict {
+                source_task_id,
+                files,
+            } => write!(
+                f,
+                "overlay conflict applying {source_task_id}: {} files",
+                files.len()
+            ),
+        }
+    }
 }
 
 /// Policy for what to apply when a review gate's timeout fires.

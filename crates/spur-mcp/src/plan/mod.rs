@@ -76,6 +76,14 @@ pub enum PlanTaskStatus {
         mutation_id: String,
         by: Vec<String>,
     },
+    /// Setup-time overlay conflict: dispatch could not start because
+    /// applying an approved dependency's overlay onto the worker worktree
+    /// produced a merge conflict. This is not terminal; the brain can resolve
+    /// the upstream conflict and retry.
+    BlockedOnSetupConflict {
+        dep_task_id: String,
+        files: Vec<String>,
+    },
 }
 
 impl PlanTaskStatus {
@@ -341,6 +349,15 @@ impl PlanState {
                     hasher.update(b"\0");
                     for child in by {
                         hasher.update(child.as_bytes());
+                        hasher.update(b"\0");
+                    }
+                }
+                PlanTaskStatus::BlockedOnSetupConflict { dep_task_id, files } => {
+                    hasher.update(b"\x09");
+                    hasher.update(dep_task_id.as_bytes());
+                    hasher.update(b"\0");
+                    for file in files {
+                        hasher.update(file.as_bytes());
                         hasher.update(b"\0");
                     }
                 }
@@ -2161,6 +2178,25 @@ pub async fn run_plan(
                                         reason: reason.clone(),
                                     };
                                 }
+                                DelegationStatus::SetupFailed {
+                                    error:
+                                        spur_acp::AttemptSetupError::OverlayConflict {
+                                            source_task_id,
+                                            files,
+                                        },
+                                } => {
+                                    warn!(plan_id = %pid, task_id = %tid, "Plan task blocked on setup overlay conflict");
+                                    entry.status = PlanTaskStatus::BlockedOnSetupConflict {
+                                        dep_task_id: source_task_id.clone(),
+                                        files: files.clone(),
+                                    };
+                                }
+                                DelegationStatus::SetupFailed { error } => {
+                                    warn!(plan_id = %pid, task_id = %tid, "Plan task setup failed: {error}");
+                                    entry.status = PlanTaskStatus::Failed {
+                                        error: error.to_string(),
+                                    };
+                                }
                                 other => {
                                     warn!(plan_id = %pid, task_id = %tid, "Plan task ended: {other:?}");
                                     entry.status = PlanTaskStatus::Failed {
@@ -2283,7 +2319,8 @@ pub async fn run_plan(
                 | PlanTaskStatus::Rejected { .. }
                 | PlanTaskStatus::Failed { .. }
                 | PlanTaskStatus::Cancelled { .. }
-                | PlanTaskStatus::Superseded { .. } => {}
+                | PlanTaskStatus::Superseded { .. }
+                | PlanTaskStatus::BlockedOnSetupConflict { .. } => {}
             }
         }
     }
@@ -2352,6 +2389,7 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
     let mut n_rejected = 0usize;
     let mut n_failed = 0usize;
     let mut n_cancelled = 0usize;
+    let mut n_blocked_on_setup_conflict = 0usize;
 
     for t in &state.tasks {
         match &t.status {
@@ -2366,10 +2404,12 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
             // v0b: Superseded is a terminal "no outcome" state — fold with
             // cancelled for aggregate metrics. Lineage tracked via `by`.
             PlanTaskStatus::Superseded { .. } => n_cancelled += 1,
+            PlanTaskStatus::BlockedOnSetupConflict { .. } => n_blocked_on_setup_conflict += 1,
         }
     }
 
-    let all_workers_done = n_dispatched == 0 && n_pending == 0 && n_ready == 0;
+    let all_workers_done =
+        n_dispatched == 0 && n_pending == 0 && n_ready == 0 && n_blocked_on_setup_conflict == 0;
     let ready_to_merge = all_workers_done
         && n_awaiting_review == 0
         && n_rejected == 0
@@ -2377,7 +2417,9 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
         && n_cancelled == 0
         && n_approved == total;
 
-    let overall = if n_dispatched > 0 || n_pending > 0 || n_ready > 0 {
+    let overall = if n_blocked_on_setup_conflict > 0 {
+        "blocked_on_setup_conflict"
+    } else if n_dispatched > 0 || n_pending > 0 || n_ready > 0 {
         "running"
     } else if n_awaiting_review > 0 {
         "awaiting_review"
@@ -2510,6 +2552,11 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
                     obj["mutation_id"] = mutation_id.clone().into();
                     obj["superseded_by"] = serde_json::json!(by);
                 }
+                PlanTaskStatus::BlockedOnSetupConflict { dep_task_id, files } => {
+                    obj["status"] = "blocked_on_setup_conflict".into();
+                    obj["dep_task_id"] = dep_task_id.clone().into();
+                    obj["files"] = serde_json::json!(files);
+                }
             }
             obj
         })
@@ -2576,6 +2623,9 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
             ),
             PlanMergeState::Failed { error } => format!("merge_plan failed: {error}"),
         },
+        "blocked_on_setup_conflict" => {
+            "Resolve the setup overlay conflict, then retry the blocked task.".to_string()
+        }
         "has_failures" => "Some tasks failed. Use get_task_diff to inspect failures.".to_string(),
         "has_rejections" => "Some tasks rejected. Revise the plan or re-submit.".to_string(),
         "failed" => "All tasks failed. Use get_task_diff to inspect errors.".to_string(),
@@ -2586,7 +2636,7 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
         "plan_id": plan_id,
         "status": overall,
         "progress": format!(
-            "{reviewed}/{total} reviewed, {n_dispatched} running, {n_pending} pending, {n_failed} failed"
+            "{reviewed}/{total} reviewed, {n_dispatched} running, {n_pending} pending, {n_blocked_on_setup_conflict} blocked, {n_failed} failed"
         ),
         "counts": {
             "total": total,
@@ -2597,6 +2647,7 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
             "approved": n_approved,
             "rejected": n_rejected,
             "failed": n_failed,
+            "blocked_on_setup_conflict": n_blocked_on_setup_conflict,
         },
         "all_workers_done": all_workers_done,
         "ready_to_merge": ready_to_merge,
@@ -2722,6 +2773,7 @@ pub async fn review_task(
                     PlanTaskStatus::Approved { .. } => "approved",
                     PlanTaskStatus::Rejected { .. } => "rejected",
                     PlanTaskStatus::Failed { .. } => "failed",
+                    PlanTaskStatus::BlockedOnSetupConflict { .. } => "blocked_on_setup_conflict",
                     _ => "unknown",
                 };
                 return Err(format!(
@@ -3077,6 +3129,7 @@ fn apply_decision_and_extract(
                     PlanTaskStatus::Approved { .. } => "approved",
                     PlanTaskStatus::Rejected { .. } => "rejected",
                     PlanTaskStatus::Failed { .. } => "failed",
+                    PlanTaskStatus::BlockedOnSetupConflict { .. } => "blocked_on_setup_conflict",
                     _ => "unknown",
                 };
                 return Err(format!(

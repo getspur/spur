@@ -70,6 +70,7 @@ pub fn signal_kind_bucket(kind: &str, bucket: &str) -> String {
 }
 
 pub const SIGNAL_LATE_ARRIVAL: &str = "signal:late-arrival";
+pub const SIGNAL_LABEL_INTEGRATION_CONFLICT: &str = "signal:integration-conflict";
 pub const READY_FOR_REVIEW: &str = "spur:ready-for-review";
 pub const REVIEW_REJECTED: &str = "spur:review-rejected";
 /// Marker applied to an epic after `build_epic_subgraph` successfully creates
@@ -200,6 +201,10 @@ mod tests {
             "signal:scope-drift:high"
         );
         assert_eq!(SIGNAL_LATE_ARRIVAL, "signal:late-arrival");
+        assert_eq!(
+            SIGNAL_LABEL_INTEGRATION_CONFLICT,
+            "signal:integration-conflict"
+        );
         assert_eq!(READY_FOR_REVIEW, "spur:ready-for-review");
         assert_eq!(REVIEW_REJECTED, "spur:review-rejected");
         assert_eq!(PLAN_COMPLETE, "spur:plan-complete");

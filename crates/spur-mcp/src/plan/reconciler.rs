@@ -210,6 +210,86 @@ async fn plan_dispatch_base_spec(
     })
 }
 
+fn setup_overlay_conflict(status: &spur_acp::DelegationStatus) -> Option<(&str, &[String])> {
+    match status {
+        spur_acp::DelegationStatus::SetupFailed {
+            error:
+                spur_acp::AttemptSetupError::OverlayConflict {
+                    source_task_id,
+                    files,
+                },
+        } => Some((source_task_id.as_str(), files.as_slice())),
+        _ => None,
+    }
+}
+
+async fn persist_setup_overlay_conflict(
+    pm: &spur_pm::PmService,
+    issue_id: &str,
+    feature_gate: &spur_license::FeatureGate,
+    plan_id: &str,
+    delegation_id: &str,
+    source_task_id: &str,
+    files: &[String],
+) -> anyhow::Result<()> {
+    crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        feature_gate,
+    )
+    .map_err(|error| anyhow::anyhow!(crate::server::feature_error_message(error)))?;
+    let adv = pm
+        .advanced()
+        .ok_or_else(|| anyhow::anyhow!("setup conflict routing requires beads backend"))?;
+    let signal_id = uuid::Uuid::new_v4().to_string();
+    let reason = serde_json::to_string(&serde_json::json!({
+        "dep_task_id": source_task_id,
+        "files": files,
+    }))?;
+
+    adv.add_comment(
+        issue_id,
+        &crate::plan::audit_sentinel::encode_comment(
+            &crate::plan::audit_sentinel::AuditSentinelKind::Signal {
+                signal_id: signal_id.clone(),
+                kind: "integration-conflict".to_string(),
+                severity: 1.0,
+                reason,
+            },
+        ),
+    )
+    .await?;
+    let signal_comment = format!(
+        "{}\n{}",
+        crate::plan::signals::SENTINEL_PREFIX,
+        serde_json::to_string(&serde_json::json!({
+            "signal_id": signal_id,
+            "kind": "integration_conflict",
+            "dep_task_id": source_task_id,
+            "files": files,
+        }))?
+    );
+    adv.add_comment(issue_id, &signal_comment).await?;
+
+    crate::plan::clear_dispatch_intent(pm, issue_id, delegation_id).await?;
+    pm.update_issue(
+        issue_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![crate::plan::labels::SIGNAL_LABEL_INTEGRATION_CONFLICT.to_string()],
+            ..Default::default()
+        },
+    )
+    .await?;
+    tracing::warn!(
+        %plan_id,
+        %issue_id,
+        %delegation_id,
+        dep_task_id = %source_task_id,
+        files = ?files,
+        "routed setup overlay conflict to integration-conflict signal"
+    );
+    Ok(())
+}
+
 async fn prune_projected_terminal_task_outcomes(
     outcomes: &Arc<tokio::sync::Mutex<OutcomeStore>>,
     plan_id: &str,
@@ -800,6 +880,51 @@ impl Reconciler {
                         }
                     }
                 };
+
+                if let Some((source_task_id, files)) = setup_overlay_conflict(&result.status) {
+                    if let Err(error) = persist_setup_overlay_conflict(
+                        pm.as_ref(),
+                        &issue_id,
+                        feature_gate.as_ref(),
+                        &plan_id,
+                        &delegation_id_for_completion,
+                        source_task_id,
+                        files,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            %plan_id,
+                            %task_id,
+                            %issue_id,
+                            %delegation_id_for_completion,
+                            "reconciler setup conflict persistence failed: {error}"
+                        );
+                    } else {
+                        fast_forward.notify_one();
+                    }
+
+                    match crate::plan::projector::project_plan_from_beads(
+                        pm.as_ref(),
+                        &plan_id,
+                        feature_gate.as_ref(),
+                    )
+                    .await
+                    {
+                        Ok(projected) => {
+                            if let Some(sink) = event_sink.as_deref() {
+                                crate::plan::snapshot::emit_plan_snapshot(Some(sink), &projected);
+                            }
+                        }
+                        Err(error) => tracing::warn!(
+                            %plan_id,
+                            %task_id,
+                            "failed to project plan snapshot after setup conflict: {error}"
+                        ),
+                    }
+                    return;
+                }
+
                 let dispatched_base_oid = dispatched_base_oid_rx.borrow().clone();
 
                 if let Err(error) = crate::plan::persist_worker_completion_and_notify(

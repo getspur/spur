@@ -69,6 +69,19 @@ pub fn clip_status_strings(status: &DelegationStatus, max_bytes: usize) -> Deleg
                 .0
                 .unwrap_or_default();
         }
+        DelegationStatus::SetupFailed { error } => match error {
+            crate::domain::delegation::AttemptSetupError::SnapshotFailed { error }
+            | crate::domain::delegation::AttemptSetupError::WorktreeFailed { error }
+            | crate::domain::delegation::AttemptSetupError::InitFailed { error }
+            | crate::domain::delegation::AttemptSetupError::SessionFailed { error } => {
+                *error = clip_with_ellipsis(Some(std::mem::take(error)), max_bytes)
+                    .0
+                    .unwrap_or_default();
+            }
+            crate::domain::delegation::AttemptSetupError::OverlayConflict { files, .. } => {
+                clip_string_vec(files, 16, 128);
+            }
+        },
         DelegationStatus::TimedOut { fallback, .. } => {
             if let TimeoutFallback::Reject { reason } = fallback {
                 *reason = clip_with_ellipsis(Some(std::mem::take(reason)), max_bytes)
@@ -110,6 +123,19 @@ fn clip_path_vec(v: &mut Vec<PathBuf>, max_count: usize, max_path_bytes: usize) 
         if cow.len() > max_path_bytes {
             let (clipped, _) = clip_with_ellipsis(Some(cow.into_owned()), max_path_bytes);
             *p = PathBuf::from(clipped.unwrap_or_default());
+        }
+    }
+}
+
+fn clip_string_vec(v: &mut Vec<String>, max_count: usize, max_bytes: usize) {
+    if v.len() > max_count {
+        v.truncate(max_count);
+    }
+    for s in v.iter_mut() {
+        if s.len() > max_bytes {
+            *s = clip_with_ellipsis(Some(std::mem::take(s)), max_bytes)
+                .0
+                .unwrap_or_default();
         }
     }
 }

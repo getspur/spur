@@ -481,6 +481,170 @@ async fn tick_once_dispatches_ready_task_with_approved_dep_overlay() {
 }
 
 #[tokio::test]
+async fn overlay_conflict_routes_to_blocked_on_setup_conflict() {
+    if !br_available() {
+        eprintln!(
+            "skipping overlay_conflict_routes_to_blocked_on_setup_conflict: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    init_git_repo(dir.path());
+    let worker_branch = "spur-test-t1-worker";
+    run_git(dir.path(), &["branch", worker_branch]);
+    run_br(dir.path(), &["init"]);
+
+    let pm = Arc::new(
+        spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+            .await
+            .expect("PmService::try_new failed")
+            .expect("expected beads pm"),
+    );
+    let feature_gate = common::server_builder::pro_feature_gate();
+    let subgraph = spur_mcp::build_epic_subgraph(
+        pm.as_ref(),
+        feature_gate.as_ref(),
+        "overlay-conflict-plan",
+        "Overlay Conflict Plan",
+        None,
+        &dependent_plan_tasks(),
+    )
+    .await
+    .expect("build_epic_subgraph");
+    let task_1_issue = subgraph.task_map["T1"].clone();
+    let task_2_issue = subgraph.task_map["T2"].clone();
+
+    let adv = pm.advanced().expect("beads backend");
+    spur_mcp::emit_plan_submit_audit(
+        adv,
+        "overlay-conflict-plan",
+        &subgraph,
+        Some("spur/plan-base-overlay-conflict"),
+        Some("base-snapshot-oid"),
+        None,
+        Some(&SessionId("brain".to_string())),
+    )
+    .await;
+    adv.add_comment(
+        &task_1_issue,
+        &audit_sentinel::encode_comment(&AuditSentinelKind::Dispatch {
+            delegation_id: "del-t1".to_string(),
+            worker: "codex".to_string(),
+            attempt: 1,
+        }),
+    )
+    .await
+    .expect("dispatch audit");
+    adv.add_comment(
+        &task_1_issue,
+        &audit_sentinel::encode_comment(&AuditSentinelKind::Completion {
+            delegation_id: "del-t1".to_string(),
+            completion_state: audit_sentinel::CompletionState::AwaitingReview,
+            superseded: false,
+            worker_branch: Some(worker_branch.to_string()),
+            result_summary: Some("T1 complete".to_string()),
+            artifact_uri: None,
+            dispatched_base_oid: Some("t1-dispatched-base".to_string()),
+        }),
+    )
+    .await
+    .expect("completion audit");
+    adv.add_comment(
+        &task_1_issue,
+        &audit_sentinel::encode_comment(&AuditSentinelKind::Approval {
+            delegation_id: "del-t1".to_string(),
+        }),
+    )
+    .await
+    .expect("approval audit");
+    pm.update_issue(
+        &task_1_issue,
+        spur_pm::IssueUpdate {
+            status: Some(pm.closed_status().to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("close approved T1");
+
+    let (delegation_tx, mut delegation_rx) = tokio::sync::mpsc::channel(1);
+    let task_tracker = tokio_util::task::TaskTracker::new();
+    let reconciler = Reconciler::new(
+        ReconcilerConfig {
+            repo_root: dir.path().to_path_buf(),
+            ..Default::default()
+        },
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        Some(ReconcilerDispatchCtx {
+            delegation_tx,
+            task_tracker: task_tracker.clone(),
+            brain_session_id: BrainSessionId::new(SessionId("brain".to_string())),
+            event_sink: None,
+            materializer: test_materializer(),
+        }),
+        Some("overlay-conflict-plan".to_string()),
+        feature_gate,
+    );
+
+    let did_work = reconciler.tick_once().await.expect("tick_once");
+    assert!(did_work, "T2 should be dispatched");
+    let request = tokio::time::timeout(std::time::Duration::from_secs(5), delegation_rx.recv())
+        .await
+        .expect("delegation request timeout")
+        .expect("delegation request");
+
+    request
+        .respond_to
+        .send(DelegationResult {
+            status: DelegationStatus::SetupFailed {
+                error: spur_acp::AttemptSetupError::OverlayConflict {
+                    source_task_id: "T1".to_string(),
+                    files: vec!["foo.rs".to_string()],
+                },
+            },
+            diff: None,
+            diff_summary: None,
+            summary: None,
+            estimated_cost_usd: 0.0,
+            worker_branch: None,
+            artifact: None,
+        })
+        .expect("send setup conflict result");
+    task_tracker.close();
+    task_tracker.wait().await;
+
+    let projected = spur_mcp::plan::projector::project_plan_from_beads(
+        pm.as_ref(),
+        "overlay-conflict-plan",
+        common::server_builder::pro_feature_gate().as_ref(),
+    )
+    .await
+    .expect("project plan");
+    let task = projected
+        .tasks
+        .iter()
+        .find(|task| task.spec.issue_id.as_deref() == Some(task_2_issue.as_str()))
+        .expect("projected task");
+    assert!(matches!(
+        &task.status,
+        spur_mcp::plan::PlanTaskStatus::BlockedOnSetupConflict { dep_task_id, files }
+            if dep_task_id == "T1" && files == &vec!["foo.rs".to_string()]
+    ));
+
+    let issue = pm.get_issue(&task_2_issue).await.expect("get T2 issue");
+    assert!(
+        issue
+            .labels
+            .iter()
+            .any(|label| label == "signal:integration-conflict"),
+        "T2 should carry the integration conflict signal label; labels={:?}",
+        issue.labels
+    );
+}
+
+#[tokio::test]
 async fn observe_ready_returns_unblocked_task_only() {
     if !br_available() {
         eprintln!("skipping reconciler_tick: `br` not on PATH");
