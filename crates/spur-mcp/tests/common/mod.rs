@@ -10,6 +10,7 @@
 use tokio::net::TcpListener;
 use tokio::sync::OnceCell;
 
+pub mod g_strict_harness;
 pub mod server_builder;
 
 static LOOPBACK_BINDABLE: OnceCell<bool> = OnceCell::const_new();
