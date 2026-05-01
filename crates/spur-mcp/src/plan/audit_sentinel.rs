@@ -52,6 +52,9 @@ pub struct CompletionAuditFields {
     /// (post-T9 wiring, dispatch-time). Used for forensics and downstream
     /// range computation. None for legacy or pre-overlay dispatches.
     pub dispatched_base_oid: Option<String>,
+    /// Repository root used to validate `dispatched_base_oid..worker_branch`.
+    /// This is emission-only context and is not serialized into the sentinel.
+    pub repo_root: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,6 +227,30 @@ pub fn parse_comment(body: &str) -> Option<Result<AuditSentinelKind, ParseError>
 pub enum ParseError {
     #[error("sentinel JSON parse error: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+pub fn count_worker_commits(
+    repo: &std::path::Path,
+    base: &str,
+    head: &str,
+) -> Result<usize, String> {
+    let range = format!("{base}..{head}");
+    let out = std::process::Command::new("git")
+        .args(["rev-list", "--count", &range])
+        .current_dir(repo)
+        .output()
+        .map_err(|e| format!("git rev-list failed: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git rev-list exit {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .map_err(|e| format!("parse count: {e}"))
 }
 
 #[cfg(test)]
