@@ -25,6 +25,19 @@ pub enum WorkerSignal {
         #[serde(default)]
         estimated_subtasks: Option<u8>,
     },
+    /// Brain-side detector signal: the worker created or modified a file
+    /// that overlaps non-trivially with an already-approved upstream task's
+    /// tip. Emitted by `clobber_detector` during `review_task`. May also
+    /// be emitted by future worker-side guards.
+    PotentialClobber {
+        signal_id: Uuid,
+        conflicting_task_id: String,
+        file: String,
+        /// OID at the upstream task's tip where the file content lives.
+        upstream_tip: String,
+        /// OID at the current worker's tip where the conflicting content lives.
+        worker_tip: String,
+    },
 }
 
 impl WorkerSignal {
@@ -32,6 +45,7 @@ impl WorkerSignal {
     pub fn signal_id(&self) -> Uuid {
         match self {
             WorkerSignal::ScopeDrift { signal_id, .. } => *signal_id,
+            WorkerSignal::PotentialClobber { signal_id, .. } => *signal_id,
         }
     }
 
@@ -39,6 +53,7 @@ impl WorkerSignal {
     pub fn kind_label(&self) -> &'static str {
         match self {
             WorkerSignal::ScopeDrift { .. } => "scope-drift",
+            WorkerSignal::PotentialClobber { .. } => "potential-clobber",
         }
     }
 }
@@ -107,6 +122,22 @@ mod tests {
         let body = format!("   \n  {}", encode_comment(&sig));
         let parsed = parse_comment(&body).unwrap().unwrap();
         assert_eq!(parsed, sig);
+    }
+
+    #[test]
+    fn potential_clobber_round_trips_and_has_label() {
+        let sig = WorkerSignal::PotentialClobber {
+            signal_id: Uuid::nil(),
+            conflicting_task_id: "task-1".to_string(),
+            file: "crates/spur-tui/src/foo.rs".to_string(),
+            upstream_tip: "abc123".to_string(),
+            worker_tip: "def456".to_string(),
+        };
+        let body = encode_comment(&sig);
+        let parsed = parse_comment(&body).unwrap().unwrap();
+        assert_eq!(parsed, sig);
+        assert_eq!(sig.kind_label(), "potential-clobber");
+        assert_eq!(sig.signal_id(), Uuid::nil());
     }
 
     #[test]

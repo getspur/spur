@@ -1247,6 +1247,11 @@ pub async fn handle_report_signal(
             reason.clone(),
             args.signal.kind_label().to_string(),
         ),
+        WorkerSignal::PotentialClobber { .. } => (
+            0.0,
+            String::new(),
+            args.signal.kind_label().to_string(),
+        ),
     };
 
     // Emit the audit sentinel BEFORE operational writes so the decision-at-
