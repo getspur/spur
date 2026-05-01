@@ -189,6 +189,87 @@ pub struct PlanState {
 }
 
 impl PlanState {
+    /// Compute the topologically ordered transitive closure of `task_id`'s
+    /// dependencies, restricted to currently approved tasks. The entry-point
+    /// task itself is never returned.
+    pub fn approved_dep_closure(&self, task_id: &str) -> Vec<&PlanTaskEntry> {
+        let index_by_task_id = self
+            .tasks
+            .iter()
+            .enumerate()
+            .map(|(idx, entry)| (entry.spec.task_id.as_str(), idx))
+            .collect::<HashMap<_, _>>();
+
+        if !index_by_task_id.contains_key(task_id) {
+            return Vec::new();
+        }
+
+        let mut visited = HashSet::new();
+        let mut ordered = Vec::new();
+        self.dfs_approved_deps(
+            task_id,
+            task_id,
+            &index_by_task_id,
+            &mut visited,
+            &mut ordered,
+        );
+
+        ordered
+            .into_iter()
+            .map(|idx| &self.tasks[idx])
+            .collect::<Vec<_>>()
+    }
+
+    fn dfs_approved_deps(
+        &self,
+        current_task_id: &str,
+        entry_task_id: &str,
+        index_by_task_id: &HashMap<&str, usize>,
+        visited: &mut HashSet<String>,
+        ordered: &mut Vec<usize>,
+    ) {
+        let Some(&current_idx) = index_by_task_id.get(current_task_id) else {
+            return;
+        };
+
+        for dep_task_id in &self.tasks[current_idx].spec.depends_on {
+            let Some(&dep_idx) = index_by_task_id.get(dep_task_id.as_str()) else {
+                continue;
+            };
+            let dep_entry = &self.tasks[dep_idx];
+            if !matches!(dep_entry.status, PlanTaskStatus::Approved { .. }) {
+                continue;
+            }
+            if !visited.insert(dep_entry.spec.task_id.clone()) {
+                continue;
+            }
+
+            self.dfs_approved_deps(
+                &dep_entry.spec.task_id,
+                entry_task_id,
+                index_by_task_id,
+                visited,
+                ordered,
+            );
+
+            if dep_entry.spec.task_id != entry_task_id {
+                ordered.push(dep_idx);
+            }
+        }
+    }
+
+    pub fn set_dispatched_base_oid(&mut self, task_id: &str, oid: String) -> bool {
+        let Some(entry) = self
+            .tasks
+            .iter_mut()
+            .find(|entry| entry.spec.task_id == task_id)
+        else {
+            return false;
+        };
+        entry.dispatched_base_oid = Some(oid);
+        true
+    }
+
     /// Build an immutable snapshot for the peer mailbox router. The caller
     /// briefly holds the `PlanState` lock to construct this; afterwards the
     /// snapshot is read without contention.
@@ -354,6 +435,88 @@ fn latest_delegation_id(entry: &PlanTaskEntry) -> Option<&str> {
     match &entry.status {
         PlanTaskStatus::Dispatched { delegation_id } => Some(delegation_id.as_str()),
         _ => entry.last_delegation_id.as_deref(),
+    }
+}
+
+#[cfg(test)]
+mod approved_dep_closure_tests {
+    use super::*;
+
+    fn entry(id: &str, deps: &[&str], status: PlanTaskStatus) -> PlanTaskEntry {
+        PlanTaskEntry {
+            spec: PlanTask {
+                task_id: id.to_string(),
+                agent: "codex".to_string(),
+                task: format!("Do {id}"),
+                depends_on: deps.iter().map(|dep| dep.to_string()).collect(),
+                issue_id: Some(format!("bd-{id}")),
+                context_files: Vec::new(),
+            },
+            status,
+            result: None,
+            worker_branch: Some(format!("spur/worker-{id}")),
+            attempt: 1,
+            history: Vec::new(),
+            last_delegation_id: None,
+            dispatched_base_oid: Some(format!("{id}-base")),
+        }
+    }
+
+    fn state(tasks: Vec<PlanTaskEntry>) -> PlanState {
+        PlanState {
+            plan_id: "plan-closure".to_string(),
+            tasks,
+            brain_session_id: BrainSessionId::new(spur_acp::SessionId("brain".to_string())),
+            base_snapshot_branch: None,
+            base_snapshot_oid: None,
+            merge_state: PlanMergeState::NotStarted,
+            epic_id: None,
+        }
+    }
+
+    fn ids(entries: Vec<&PlanTaskEntry>) -> Vec<&str> {
+        entries
+            .into_iter()
+            .map(|entry| entry.spec.task_id.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn approved_dep_closure_returns_linear_chain_in_topo_order() {
+        let state = state(vec![
+            entry("M1", &[], PlanTaskStatus::Approved { summary: None }),
+            entry("M2", &["M1"], PlanTaskStatus::Approved { summary: None }),
+            entry("M3", &["M2"], PlanTaskStatus::Ready),
+        ]);
+
+        assert_eq!(ids(state.approved_dep_closure("M3")), vec!["M1", "M2"]);
+    }
+
+    #[test]
+    fn approved_dep_closure_returns_parallel_siblings_after_shared_root() {
+        let state = state(vec![
+            entry("root", &[], PlanTaskStatus::Approved { summary: None }),
+            entry("M1", &["root"], PlanTaskStatus::Approved { summary: None }),
+            entry("M2", &["root"], PlanTaskStatus::Approved { summary: None }),
+            entry("M3", &["M1", "M2"], PlanTaskStatus::Ready),
+        ]);
+
+        assert_eq!(
+            ids(state.approved_dep_closure("M3")),
+            vec!["root", "M1", "M2"]
+        );
+    }
+
+    #[test]
+    fn approved_dep_closure_filters_pending_diamond_branch() {
+        let state = state(vec![
+            entry("root", &[], PlanTaskStatus::Approved { summary: None }),
+            entry("M1", &["root"], PlanTaskStatus::Approved { summary: None }),
+            entry("M2", &["root"], PlanTaskStatus::Pending),
+            entry("M3", &["M1", "M2"], PlanTaskStatus::Ready),
+        ]);
+
+        assert_eq!(ids(state.approved_dep_closure("M3")), vec!["root", "M1"]);
     }
 }
 
@@ -1497,6 +1660,7 @@ pub(crate) async fn persist_worker_completion_and_notify(
     brain_session_id: &BrainSessionId,
     attempt: u32,
     materializer: &crate::outcome_materializer::OutcomeMaterializer,
+    dispatched_base_oid: Option<String>,
 ) -> anyhow::Result<()> {
     let (completion_state, audits) =
         derive_worker_completion_state(pm, feature_gate, issue_id, delegation_id, &result.status)
@@ -1518,6 +1682,7 @@ pub(crate) async fn persist_worker_completion_and_notify(
         brain_session_id,
         attempt,
         materializer,
+        dispatched_base_oid,
     )
     .await
 }
@@ -1549,6 +1714,7 @@ pub(crate) async fn persist_system_completion_and_notify(
     brain_session_id: &BrainSessionId,
     attempt: u32,
     materializer: &crate::outcome_materializer::OutcomeMaterializer,
+    dispatched_base_oid: Option<String>,
 ) -> anyhow::Result<()> {
     let audits = read_audits_if_advanced(pm, feature_gate, issue_id).await?;
     let already_emitted = audits
@@ -1568,6 +1734,7 @@ pub(crate) async fn persist_system_completion_and_notify(
         brain_session_id,
         attempt,
         materializer,
+        dispatched_base_oid,
     )
     .await
 }
@@ -1660,6 +1827,7 @@ async fn persist_completion_inner(
     brain_session_id: &BrainSessionId,
     attempt: u32,
     materializer: &crate::outcome_materializer::OutcomeMaterializer,
+    dispatched_base_oid: Option<String>,
 ) -> anyhow::Result<()> {
     use crate::plan::audit_sentinel::CompletionState;
 
@@ -1675,7 +1843,7 @@ async fn persist_completion_inner(
                 worker_branch: result.worker_branch.clone(),
                 result_summary: result.summary.clone(),
                 artifact_uri: None,
-                dispatched_base_oid: None,
+                dispatched_base_oid,
             },
             already_emitted,
         )
@@ -1721,7 +1889,7 @@ async fn persist_completion_inner(
             worker_branch: result.worker_branch.clone(),
             result_summary: cont.payload.summary.clone(),
             artifact_uri,
-            dispatched_base_oid: None,
+            dispatched_base_oid,
         },
         already_emitted,
     )
@@ -1820,6 +1988,7 @@ pub async fn run_plan(
                 delegation_plan: None,
                 issue_id: task_spec.issue_id.clone(),
                 base: None,
+                dispatched_base_oid_tx: None,
                 attempt_tracker: Arc::new(std::sync::atomic::AtomicU32::new(task_attempt)),
             };
 
@@ -1890,6 +2059,7 @@ pub async fn run_plan(
                                 &brain_sid_ref,
                                 task_attempt,
                                 &materializer_ref,
+                                None,
                             )
                             .await
                             {
@@ -3291,6 +3461,7 @@ pub mod test_support {
         brain_session_id: &spur_acp::BrainSessionId,
         attempt: u32,
         materializer: &crate::outcome_materializer::OutcomeMaterializer,
+        dispatched_base_oid: Option<String>,
     ) -> anyhow::Result<()> {
         super::persist_worker_completion_and_notify(
             pm,
@@ -3303,6 +3474,7 @@ pub mod test_support {
             brain_session_id,
             attempt,
             materializer,
+            dispatched_base_oid,
         )
         .await
     }
@@ -4387,6 +4559,7 @@ mod tests {
             &brain_session_id,
             1,
             &materializer,
+            None,
         )
         .await
         .expect("persist completion");
@@ -4487,6 +4660,7 @@ mod tests {
             &brain_session_id,
             2,
             &materializer,
+            None,
         )
         .await
         .expect("persist completion");

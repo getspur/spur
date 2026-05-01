@@ -97,6 +97,10 @@ pub struct DelegationRequest {
     /// Plan-engine dispatches will pass Some(WithOverlay { .. }) once bd-1dwm
     /// dispatch wiring lands; ad-hoc brain dispatches may omit it.
     pub base: Option<BaseSpec>,
+    /// Sends the worker worktree HEAD after overlay application back to the
+    /// plan reconciler so completion audits can persist the true contribution
+    /// base for this attempt.
+    pub dispatched_base_oid_tx: Option<oneshot::Sender<String>>,
     /// Shared attempt tracker. Orchestrator updates this as review-loop
     /// retries advance so detached continuations can report the final
     /// 1-based worker attempt that produced the result.
