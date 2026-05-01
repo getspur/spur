@@ -53,14 +53,61 @@ BrainSession
 
 ### 3.2 Lifecycle
 
+**Lifecycle is bound to the count of active `enable_worker_mcp=true` delegations, NOT to request idle-time.** This is critical: a worker may spend minutes on local work (build, test, file edits) between MCP calls. Tying lifecycle to request idle would tear down the server mid-task and bind a new ephemeral port on next call, breaking the worker's stale URL.
+
 | Hook | Where | Behavior |
 |---|---|---|
-| Start | `Orchestrator::create_brain_session` (`orchestrator.rs:3718`) — but only on demand, not eager | First delegation needing it triggers `WorkerMcpServer::start()`; subsequent delegations reuse |
-| Idle stop | After last worker MCP request completes | 60s idle timer; if no new requests, shut down server, release port, drain audit retry queue |
-| Lazy restart | Next `enable_worker_mcp=true` delegation | Re-bind to a new ephemeral port |
-| Forced stop | `Orchestrator::retire_brain_session` | Drain in-flight requests with 5s timeout (mirrors `shutdown_mcp_server` at `orchestrator.rs:960`) |
+| Start | First `enable_worker_mcp=true` delegation begins | `WorkerMcpServer::start()` binds `127.0.0.1:0`, returns `Arc<WorkerMcpServer>` (see §3.2.1). Active-delegation count = 1. |
+| Increment | Subsequent `enable_worker_mcp=true` delegation begins | Reuse existing `Arc<WorkerMcpServer>`. Count += 1. |
+| Decrement | Worker completes (success or failure) | Count -= 1. If count > 0, server stays up. |
+| Stop | Count reaches 0 | Server enters shutdown: drain in-flight requests with 5s timeout (mirrors `shutdown_mcp_server` at `orchestrator.rs:960`), release port, drain audit retry queue, remove Arc from orchestrator's map. |
+| Cancel-shutdown | New delegation arrives during shutdown | Atomic check-and-set on a "shutting_down" flag; if a new dispatch wins the race, shutdown is cancelled and the server resumes. Otherwise, the new delegation triggers a fresh `start()`. |
+| Forced stop | `Orchestrator::retire_brain_session` | Same as count→0 path, regardless of count. |
 
 `BrainSession` itself is a passive struct (`orchestrator.rs:801`); all lifecycle hooks live on `Orchestrator` methods.
+
+#### 3.2.1 Server handle and storage
+
+```rust
+// crates/spur-mcp/src/worker_server.rs
+pub struct WorkerMcpServer {
+    addr: SocketAddr,
+    hmac_key: [u8; 32],
+    brain_session_id: BrainSessionId,
+    active_delegations: dashmap::DashMap<DelegationId, WorkerSessionState>,
+    audit_flush_tx: mpsc::UnboundedSender<FlushMessage>,
+    shutdown: tokio_util::sync::CancellationToken,
+}
+
+impl WorkerMcpServer {
+    /// Bind a new listener and spawn the accept loop. Returns the Arc immediately
+    /// (the server is ready to accept connections before this returns).
+    pub async fn start(
+        brain_session_id: BrainSessionId,
+        pm_service: Arc<PmService>,
+        feature_gate: Arc<FeatureGate>,
+        funnel: FunnelHandle,
+    ) -> Result<Arc<Self>, BindError>;
+
+    pub fn url(&self) -> String;  // http://127.0.0.1:PORT/mcp?token=<token>
+
+    pub fn issue_token(&self, delegation_id: &DelegationId, ttl: Duration) -> String;
+
+    pub async fn shutdown(self: Arc<Self>);  // 5s drain, force-abort on timeout
+}
+```
+
+The orchestrator stores running servers in:
+
+```rust
+// crates/spur-core/src/orchestrator.rs
+struct Orchestrator {
+    // ... existing fields ...
+    worker_mcp_servers: Arc<DashMap<BrainSessionId, Arc<WorkerMcpServer>>>,
+}
+```
+
+Lazy init via `dashmap::Entry::or_try_insert_with` ensures atomic single-start under concurrent dispatch.
 
 ### 3.3 Endpoint discovery
 
@@ -81,18 +128,29 @@ at `orchestrator.rs:6571-6577`. **No env var. No argv.** This matters because en
 
 ### 3.4 Authentication
 
-Per-delegation **bearer token** in the URL: `http://127.0.0.1:PORT/mcp?token=<HMAC>`. Token is HMAC-SHA256 over `(delegation_id, brain_session_id, expiry)` signed with an ephemeral per-orchestrator-process key. Server validates on every request:
+Per-delegation **bearer token** in the URL: `http://127.0.0.1:PORT/mcp?token=<token>`. The token is a compact signed message — payload + MAC, joined with `.` — modeled on JWT structure but without the unnecessary `alg` header (algorithm is fixed):
 
-1. Token signature matches.
-2. Token not expired (default lifetime: delegation timeout + 5min grace).
-3. Token's `delegation_id` matches the `delegation_id` in the JSON-RPC request payload (prevents worker A from spoofing worker B).
+```
+token := base64url(payload_json) || "." || base64url(HMAC-SHA256(key, base64url(payload_json)))
+payload_json := {"d":"<delegation_id>","b":"<brain_session_id>","e":<unix_seconds_expiry>}
+```
 
-Failures emit a `WorkerMcp{subkind: auth-denied | scope-violation}` audit sentinel (see §5).
+The HMAC key is 32 random bytes generated once per orchestrator process (held in `Arc<WorkerMcpServer>`). Default token lifetime is `delegation_timeout + 5min grace`, or `1h` if the delegation has no timeout.
+
+**Validation happens in HTTP middleware**, BEFORE the JSON-RPC dispatcher sees the request:
+
+1. Extract `token` from URL query string. Decode + verify HMAC. Reject with `-32600` if invalid.
+2. Decode payload; reject with `-32600` if expired (with hardcoded 30s clock-skew tolerance).
+3. **Attach `(delegation_id, brain_session_id)` to a request-scoped `WorkerCallContext`.** Handlers receive this context as a parameter — they do **NOT** read `delegation_id` from the JSON-RPC payload, because most tool schemas (`update_issue`, `get_issue`, `list_issues`, `report_signal`) do not have a `delegation_id` field. The token is the sole source of truth for caller identity.
+
+This middleware-extracted-context approach uniformly attributes every call regardless of tool schema. It also closes the spoofing vector: a worker cannot impersonate another worker's `delegation_id` because the token is signed over the canonical identity, not the payload.
+
+Failures emit a `WorkerMcp{subkind: auth-denied}` sentinel (see §5).
 
 The token mitigates three problems at once:
 - Local port-scan attackers cannot call tools (no token).
-- Workers cannot spoof each other's `delegation_id`.
-- `update_issue`'s open scope is bounded by the token requirement.
+- Workers cannot spoof each other's identity (token signature binds it).
+- `update_issue`'s open scope is bounded by the token requirement (only authenticated workers can call it).
 
 ### 3.5 `enable_worker_mcp` default
 
@@ -190,9 +248,27 @@ Encoded per `audit_sentinel.rs:200` `encode_comment`: `[[spur-audit v1]]\n{JSON}
 
 ### 5.3 Read-audit retry queue (fail-soft)
 
-Read-audit summaries are written via `PmService` with **exponential backoff** (30s base, 5min cap). Buffer wrapper struct implements `Drop` so a final flush attempt fires when the worker exits (the `Arc<DashMap>` deallocation alone does NOT auto-flush — explicit `.remove(delegation_id)` in the worker exit hook is required).
+Read-audit summaries are written via `PmService` with **exponential backoff** (30s base, 5min cap), executed by a **dedicated background flusher task** spawned at server start. The flusher owns a `mpsc::UnboundedReceiver<FlushMessage>`; producers (the worker exit hook + the buffer wrapper's `Drop`) send `FlushMessage` records on the corresponding sender.
 
-If `PmService` remains unavailable for >5min, the orchestrator emits one `WorkerMcp{subkind: PmDegraded}` event via funnel for TUI visibility. **This is fail-soft, not fail-closed**: audit data degrades when PM is unreachable; we accept the gap rather than block worker reads. (True fail-closed — blocking workers when PM is down — is a phase-2 option.)
+**Async `Drop` is not used**; Rust does not support it. The synchronous `Drop` impl on the buffer wrapper performs only a non-blocking `try_send` on the unbounded channel:
+
+```rust
+impl Drop for ReadAuditBuffer {
+    fn drop(&mut self) {
+        let entries = std::mem::take(&mut self.entries);
+        if !entries.is_empty() {
+            let _ = self.flush_tx.send(FlushMessage {
+                delegation_id: self.delegation_id.clone(),
+                entries,
+            });
+        }
+    }
+}
+```
+
+The orchestrator's worker exit hook also explicitly calls `worker_server.flush_delegation(delegation_id)` synchronously before allowing the worker session to drop — this drains the active buffer entry from the `DashMap` and pushes it to the flusher channel. Relying on `Arc<DashMap>` deallocation alone does NOT trigger flush; explicit `.remove(delegation_id)` is required.
+
+If `PmService` remains unavailable for >5min, the flusher emits one `WorkerMcp{subkind: PmDegraded}` event via funnel for TUI visibility. **This is fail-soft, not fail-closed**: audit data degrades when PM is unreachable; we accept the gap rather than block worker reads. (True fail-closed — blocking worker reads when PM is down — is a phase-2 option.)
 
 ---
 
@@ -234,19 +310,48 @@ Guarantees:
 
 ## 9. Implementation surface (estimate)
 
+### 9.1 Handler signature contract
+
+Existing handlers in `crates/spur-mcp/src/server.rs` return three different types:
+- `handle_get_issue`, `handle_update_issue`, `handle_get_plan_status`, `handle_fetch_outcome_artifact` → `JsonRpcResponse`
+- `handle_get_task_diff` → `Result<String, String>`
+- `handle_report_signal` → `anyhow::Result<Value>` (and is **already freestanding** at `server.rs:1198`)
+
+The refactor introduces a unified contract for freestanding handlers consumed by **both** `McpCallbackServer` and `WorkerMcpServer`:
+
+```rust
+// crates/spur-mcp/src/handlers.rs (new module)
+#[derive(Debug, thiserror::Error)]
+pub enum McpHandlerError { ... }  // unifies the existing inconsistent error types
+
+pub async fn get_issue(
+    pm: &PmService,
+    feature_gate: &FeatureGate,
+    ctx: &WorkerCallContext,  // delegation_id, brain_session_id from token middleware
+    args: GetIssueArgs,
+) -> Result<Value, McpHandlerError>;
+// (same shape for the other 7 tools)
+```
+
+Each server's dispatcher calls the freestanding handler and converts `Result<Value, McpHandlerError>` to `JsonRpcResponse`. The `WorkerCallContext` parameter is supplied by middleware (token decoding) on `WorkerMcpServer`; on `McpCallbackServer` it is constructed from the brain session.
+
+### 9.2 File-level estimate
+
 | File | Change | LOC |
 |---|---|---|
-| `crates/spur-mcp/src/worker_server.rs` | NEW: `WorkerMcpServer`, HTTP listener, token validation middleware, dispatch wrapper, audit retry queue | ~300 |
-| `crates/spur-mcp/src/server.rs` | Refactor: extract handler bodies (`handle_get_issue`, `handle_update_issue`, `handle_get_task_diff`, `handle_get_plan_status`, `handle_fetch_outcome_artifact`, `handle_report_signal`, `handle_report_progress`) into freestanding async functions consumable by both servers | ~120 (refactor) |
+| `crates/spur-mcp/src/worker_server.rs` | NEW: `WorkerMcpServer` struct, HTTP listener, token middleware, dispatch wrapper, active-delegation tracking, background audit flusher task, lazy start/atomic shutdown-cancel, drain-with-timeout | ~800 |
+| `crates/spur-mcp/src/handlers.rs` | NEW: freestanding handler functions per §9.1, `McpHandlerError` enum, `WorkerCallContext` struct | ~120 |
+| `crates/spur-mcp/src/server.rs` | Refactor: 5 method handlers (`handle_get_issue`, `handle_update_issue`, `handle_get_task_diff`, `handle_get_plan_status`, `handle_fetch_outcome_artifact`) become thin wrappers over the freestanding versions in `handlers.rs`. Note: `handle_report_signal` is already freestanding (`server.rs:1198`) — only its signature is re-aligned to the new contract. `handle_report_progress` does NOT exist yet — added to `handlers.rs` as net-new code. The `handle_get_task_diff` extraction is the heaviest (~210 LOC method body + dependency plumbing for `pm_service`, `feature_gate`, `repo_root`, `load_or_project_plan`). | ~350 |
 | `crates/spur-mcp/src/tools.rs` | Add `worker_tools_list()` returning the 8-tool subset | ~40 |
-| `crates/spur-mcp/src/plan/audit_sentinel.rs` | Add `WorkerMcp` variant + `WorkerMcpSubkind` enum | ~30 |
-| `crates/spur-mcp/src/tool_schemas.rs` | Add `enable_worker_mcp` and `enable_worker_progress` fields | ~10 |
-| `crates/spur-mcp/src/token.rs` | NEW: HMAC token gen + validation | ~80 |
+| `crates/spur-mcp/src/plan/audit_sentinel.rs` | Add `WorkerMcp` variant + `WorkerMcpSubkind` enum (kebab-case via existing serde rename) | ~30 |
+| `crates/spur-mcp/src/tool_schemas.rs` | Add `enable_worker_mcp` and `enable_worker_progress` fields to `DelegateToWorkerInput` and `DelegateParallelTaskInput` | ~10 |
+| `crates/spur-mcp/src/token.rs` | NEW: HMAC token gen + validation per §3.4 wire format | ~120 |
 | `crates/spur-mcp/src/lib.rs` | Register new modules | ~5 |
-| `crates/spur-core/src/orchestrator.rs` | Lazy `WorkerMcpServer` start/stop; idle-timeout reclamation; conditional `mcp_servers` injection at `:6571-6577`; new `DelegationDispatchError::WorkerMcpUnavailable` variant | ~150 |
+| `crates/spur-core/src/orchestrator.rs` | Lazy `WorkerMcpServer` start via `DashMap::or_try_insert_with`; per-server `worker_mcp_servers` map field; active-delegation count tracking; conditional `mcp_servers` injection at `:6571-6577`; `Orchestrator::retire_brain_session` shutdown integration | ~200 |
+| `crates/spur-acp/src/domain/delegation.rs` | New `DelegationDispatchError::WorkerMcpUnavailable` variant (existing enum at `server.rs:235`) — actually lives where `DelegationDispatchError` is defined; cited file may need adjustment when implementing | ~10 |
 | `crates/spur-acp/src/domain/events.rs` | Add `SpurEventBody::WorkerMcpDelegationSummary` variant | ~15 |
 
-**Estimate: ~750 LOC** (medium diff, mostly new file + targeted orchestrator changes).
+**Estimate: ~1,700 LOC** (medium-large diff — bumped 2× from the original ~750 estimate after final reviewers correctly flagged the underestimate, particularly the 5-handler `server.rs` refactor and the missing `handlers.rs` shared module).
 
 ---
 
@@ -307,7 +412,9 @@ These are intentionally out of MVP scope. Each becomes its own bd-* ticket after
 - `crates/spur-core/src/orchestrator.rs:6571-6577` (worker dispatch site — modified)
 - `crates/spur-core/src/orchestrator.rs:2161` (brain dispatch site — unchanged)
 - `crates/spur-mcp/src/server.rs:371` (`McpCallbackServer` — unchanged)
+- `crates/spur-mcp/src/server.rs:1198` (`handle_report_signal` — already freestanding; signature re-aligned to new contract)
 - `crates/spur-mcp/src/tools.rs:816` (brain `tools_list()` — unchanged)
-- `crates/spur-mcp/src/plan/audit_sentinel.rs:71` (`AuditSentinelKind` — extended)
+- `crates/spur-mcp/src/plan/audit_sentinel.rs:71` (`AuditSentinelKind` definition — extended with `WorkerMcp` variant)
+- `crates/spur-mcp/src/plan/audit_sentinel.rs:200` (`encode_comment` — sentinel emission helper)
 - bd-wjvs (parent investigation)
 - bd-14cq (this brainstorm — see comments for full review trail)
