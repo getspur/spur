@@ -21,6 +21,9 @@ pub struct DelegateToWorkerInput {
     pub delegation_plan: Option<DelegationPlan>,
     /// Optional beads issue ID to auto-track
     pub issue_id: Option<String>,
+    /// Optional explicit worker base. Omit for legacy behavior (RepoMain).
+    /// Use WithOverlay to apply dependency cherry-picks.
+    pub base: Option<crate::tools::BaseSpec>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -36,6 +39,8 @@ pub struct DelegateParallelTaskInput {
     pub issue_id: Option<String>,
     /// Per-task structured reasoning. Used for reviewer mismatch detection. Takes precedence over the batch-level delegation_plan.
     pub delegation_plan: Option<DelegationPlan>,
+    /// Optional explicit worker base. Omit for legacy behavior (RepoMain).
+    pub base: Option<crate::tools::BaseSpec>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]

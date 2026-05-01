@@ -650,6 +650,7 @@ impl Reconciler {
                 brain_session_id: dispatch.brain_session_id.clone(),
                 delegation_plan: None,
                 issue_id: task.spec.issue_id.clone(),
+                base: None,
                 attempt_tracker: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(
                     task_attempt,
                 )),
