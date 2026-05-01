@@ -4302,6 +4302,7 @@ impl McpCallbackServer {
             status_str,
             status_summary,
             worker_branch,
+            dispatched_base_oid,
             result,
             epic_id,
             base_snapshot_branch,
@@ -4349,6 +4350,7 @@ impl McpCallbackServer {
                 status_str,
                 status_summary,
                 entry.worker_branch.clone(),
+                entry.dispatched_base_oid.clone(),
                 entry.result.clone(),
                 state.epic_id.clone(),
                 state.base_snapshot_branch.clone(),
@@ -4453,17 +4455,27 @@ impl McpCallbackServer {
                 .or(worker_branch);
 
             if let Some(recovered_worker_branch) = recovered_worker_branch {
-                let base_ref = bootstrap
-                    .as_ref()
-                    .and_then(PersistedPlanBootstrap::preferred_base_ref)
-                    .map(str::to_string)
-                    .or(base_snapshot_oid)
-                    .or(base_snapshot_branch)
-                    .ok_or_else(|| {
-                        format!(
-                            "plan '{plan_id}' has no captured base snapshot; latest diff unavailable"
-                        )
-                    })?;
+                let base_ref = if let Some(dispatched_base_oid) = dispatched_base_oid {
+                    dispatched_base_oid
+                } else {
+                    tracing::warn!(
+                        plan_id = %plan_id,
+                        task_id = %task_id,
+                        worker_branch = %recovered_worker_branch,
+                        "get_task_diff falling back to base snapshot range because task has no dispatched_base_oid"
+                    );
+                    bootstrap
+                        .as_ref()
+                        .and_then(PersistedPlanBootstrap::preferred_base_ref)
+                        .map(str::to_string)
+                        .or(base_snapshot_oid)
+                        .or(base_snapshot_branch)
+                        .ok_or_else(|| {
+                            format!(
+                                "plan '{plan_id}' has no captured base snapshot; latest diff unavailable"
+                            )
+                        })?
+                };
                 let repo_root = self.repo_root.as_deref().ok_or_else(|| {
                     "Repository root not configured; get_task_diff cannot reconstruct persisted diffs"
                         .to_string()
@@ -6025,7 +6037,7 @@ mod merge_plan_tests {
     use crate::plan::audit_sentinel::{encode_comment, AuditSentinelKind, CompletionState};
     use crate::plan::{PlanMergeState, PlanTask};
     use serde_json::{json, Value};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
 
     async fn init_repo() -> TempDir {
@@ -6444,6 +6456,218 @@ mod merge_plan_tests {
         }
     }
 
+    async fn setup_cached_overlay_diff_plan(
+        plan_id: &str,
+        use_dispatched_base_oid: bool,
+    ) -> PersistedMergeFixture {
+        let dir = init_repo().await;
+        commit_file(dir.path(), "base.txt", "base\n", "seed").await;
+        let pm = init_beads_pm(dir.path()).await;
+
+        run_git_capture(
+            dir.path(),
+            None,
+            &["branch", "spur/brain-snapshot-test", "HEAD"],
+        )
+        .await
+        .expect("snapshot branch");
+        let base_snapshot_oid = run_git_capture(
+            dir.path(),
+            None,
+            &["rev-parse", "--verify", "spur/brain-snapshot-test"],
+        )
+        .await
+        .expect("snapshot oid");
+
+        run_git_capture(
+            dir.path(),
+            None,
+            &[
+                "checkout",
+                "-q",
+                "-b",
+                "spur/worker-a",
+                "spur/brain-snapshot-test",
+            ],
+        )
+        .await
+        .expect("checkout worker-a");
+        commit_file(dir.path(), "foo.rs", "fn foo() {}\n", "task a").await;
+
+        run_git_capture(
+            dir.path(),
+            None,
+            &["checkout", "-q", "spur/brain-snapshot-test"],
+        )
+        .await
+        .expect("checkout snapshot");
+        run_git_capture(
+            dir.path(),
+            None,
+            &[
+                "checkout",
+                "-q",
+                "-b",
+                "spur/worker-b",
+                "spur/brain-snapshot-test",
+            ],
+        )
+        .await
+        .expect("checkout worker-b");
+        run_git_capture(dir.path(), None, &["cherry-pick", "spur/worker-a"])
+            .await
+            .expect("apply task-a overlay");
+        let t2_dispatched_base_oid =
+            run_git_capture(dir.path(), None, &["rev-parse", "--verify", "HEAD"])
+                .await
+                .expect("overlay base oid");
+        commit_file(dir.path(), "bar.rs", "fn bar() {}\n", "task b").await;
+        run_git_capture(
+            dir.path(),
+            None,
+            &["checkout", "-q", "spur/brain-snapshot-test"],
+        )
+        .await
+        .expect("checkout snapshot");
+
+        let tasks = vec![
+            PlanTask {
+                task_id: "task-a".into(),
+                agent: "codex".into(),
+                task: "Create foo".into(),
+                depends_on: Vec::new(),
+                issue_id: None,
+                context_files: Vec::new(),
+            },
+            PlanTask {
+                task_id: "task-b".into(),
+                agent: "codex".into(),
+                task: "Create bar".into(),
+                depends_on: vec!["task-a".into()],
+                issue_id: None,
+                context_files: Vec::new(),
+            },
+        ];
+        let feature_gate = super::pro_feature_gate();
+        let subgraph = crate::build_epic_subgraph(
+            pm.as_ref(),
+            feature_gate.as_ref(),
+            plan_id,
+            "Epic",
+            None,
+            &tasks,
+        )
+        .await
+        .expect("build epic subgraph");
+
+        let task_a_issue_id = subgraph
+            .task_map
+            .get("task-a")
+            .cloned()
+            .expect("task-a issue id");
+        let task_b_issue_id = subgraph
+            .task_map
+            .get("task-b")
+            .cloned()
+            .expect("task-b issue id");
+        super::require_feature(
+            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+            feature_gate.as_ref(),
+        )
+        .expect("pro gate");
+        let adv = pm.advanced().expect("advanced beads backend");
+        crate::emit_plan_submit_audit(
+            adv,
+            plan_id,
+            &subgraph,
+            Some("spur/brain-snapshot-test"),
+            Some(base_snapshot_oid.as_str()),
+            Some("submit_plan"),
+            None,
+        )
+        .await;
+        for (issue_id, audit) in [
+            (
+                task_a_issue_id.as_str(),
+                AuditSentinelKind::Completion {
+                    delegation_id: "del-a".into(),
+                    completion_state: CompletionState::AwaitingReview,
+                    superseded: false,
+                    worker_branch: Some("spur/worker-a".into()),
+                    result_summary: Some("foo ready".into()),
+                    artifact_uri: None,
+                    dispatched_base_oid: Some(base_snapshot_oid.clone()),
+                },
+            ),
+            (
+                task_b_issue_id.as_str(),
+                AuditSentinelKind::Completion {
+                    delegation_id: "del-b".into(),
+                    completion_state: CompletionState::AwaitingReview,
+                    superseded: false,
+                    worker_branch: Some("spur/worker-b".into()),
+                    result_summary: Some("bar ready".into()),
+                    artifact_uri: None,
+                    dispatched_base_oid: use_dispatched_base_oid
+                        .then_some(t2_dispatched_base_oid),
+                },
+            ),
+        ] {
+            adv.add_comment(issue_id, &encode_comment(&audit))
+                .await
+                .expect("completion audit");
+            let delegation_id = match audit {
+                AuditSentinelKind::Completion { delegation_id, .. } => delegation_id,
+                _ => unreachable!("test fixture only emits completions"),
+            };
+            adv.add_comment(
+                issue_id,
+                &encode_comment(&AuditSentinelKind::Approval { delegation_id }),
+            )
+            .await
+            .expect("approval audit");
+            pm.update_issue(
+                issue_id,
+                spur_pm::IssueUpdate {
+                    status: Some(pm.closed_status().to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("close task issue");
+        }
+
+        let session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
+        let continuation_ctx = super::DetachedContinuationCtx {
+            on_complete: Arc::new(|_, _| Box::pin(async {})),
+        };
+        let (mut server, _channel) = super::McpCallbackServer::new(
+            &session_id,
+            Some(Arc::clone(&pm)),
+            None,
+            continuation_ctx,
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            Arc::clone(&feature_gate),
+        );
+        server.set_repo_root(dir.path().to_path_buf());
+        let projected = crate::plan::projector::project_plan_from_beads(
+            pm.as_ref(),
+            plan_id,
+            feature_gate.as_ref(),
+        )
+        .await
+        .expect("project persisted plan");
+        server.install_projected_plan(projected, false).await;
+
+        PersistedMergeFixture {
+            _dir: dir,
+            pm,
+            server,
+            plan_id: plan_id.to_string(),
+            epic_id: subgraph.epic_id,
+        }
+    }
+
     fn decode_merge_status(response: super::JsonRpcResponse) -> Value {
         assert!(
             response.error.is_none(),
@@ -6460,6 +6684,73 @@ mod merge_plan_tests {
 
     fn decode_task_diff_response(text: &str) -> Value {
         serde_json::from_str(text).expect("get_task_diff response JSON")
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedWarnings {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl CapturedWarnings {
+        fn contains(&self, needle: &str) -> bool {
+            self.events
+                .lock()
+                .expect("warning capture lock")
+                .iter()
+                .any(|event| event.contains(needle))
+        }
+    }
+
+    impl tracing::Subscriber for CapturedWarnings {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() <= tracing::Level::WARN
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            if *event.metadata().level() != tracing::Level::WARN {
+                return;
+            }
+
+            struct Visitor {
+                fields: String,
+            }
+
+            impl tracing::field::Visit for Visitor {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if !self.fields.is_empty() {
+                        self.fields.push(' ');
+                    }
+                    self.fields.push_str(field.name());
+                    self.fields.push('=');
+                    self.fields.push_str(&format!("{value:?}"));
+                }
+            }
+
+            let mut visitor = Visitor {
+                fields: String::new(),
+            };
+            event.record(&mut visitor);
+            self.events
+                .lock()
+                .expect("warning capture lock")
+                .push(visitor.fields);
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
     }
 
     #[tokio::test]
@@ -6733,6 +7024,62 @@ mod merge_plan_tests {
                 .map(|diff| diff.contains("worker.txt"))
                 .unwrap_or(false),
             "latest-attempt cache miss should rebuild full diff text: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_task_diff_uses_dispatched_base_oid_when_present() {
+        let fixture = setup_cached_overlay_diff_plan("plan-diff-overlay", true).await;
+
+        let text = fixture
+            .server
+            .handle_get_task_diff(&json!({
+                "plan_id": fixture.plan_id,
+                "task_id": "task-b",
+            }))
+            .await
+            .expect("get_task_diff should succeed");
+        let response = decode_task_diff_response(&text);
+        let diff = response["diff"].as_str().expect("diff text");
+
+        assert!(
+            diff.contains("bar.rs"),
+            "task-b diff should include its own change: {diff}"
+        );
+        assert!(
+            !diff.contains("foo.rs"),
+            "task-b diff must not include inherited task-a overlay: {diff}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_task_diff_warns_and_falls_back_for_legacy_task() {
+        let fixture = setup_cached_overlay_diff_plan("plan-diff-legacy", false).await;
+        let warnings = CapturedWarnings::default();
+        let _guard = tracing::subscriber::set_default(warnings.clone());
+
+        let text = fixture
+            .server
+            .handle_get_task_diff(&json!({
+                "plan_id": fixture.plan_id,
+                "task_id": "task-b",
+            }))
+            .await
+            .expect("get_task_diff should succeed");
+        let response = decode_task_diff_response(&text);
+        let diff = response["diff"].as_str().expect("diff text");
+
+        assert!(
+            diff.contains("foo.rs"),
+            "legacy fallback should retain the base snapshot range: {diff}"
+        );
+        assert!(
+            diff.contains("bar.rs"),
+            "legacy fallback should include the worker change: {diff}"
+        );
+        assert!(
+            warnings.contains("dispatched_base_oid"),
+            "legacy fallback should emit a warning mentioning dispatched_base_oid"
         );
     }
 
