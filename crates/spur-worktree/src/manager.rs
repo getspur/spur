@@ -3,6 +3,7 @@ use spur_acp::{BrainSessionId, SessionId};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tracing::debug;
@@ -14,6 +15,7 @@ static SNAPSHOT_SEQ: AtomicU64 = AtomicU64::new(0);
 pub struct WorktreeManager {
     pub repo_root: PathBuf,
     pub active: HashMap<String, WorktreeInfo>,
+    git_mutex: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Info about an active worktree.
@@ -125,6 +127,7 @@ impl WorktreeManager {
         Self {
             repo_root,
             active: HashMap::new(),
+            git_mutex: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -158,6 +161,62 @@ impl WorktreeManager {
                 stderr,
             ))
         }
+    }
+
+    async fn run_git_with_retry(
+        &self,
+        args: &[&str],
+        cwd: Option<&Path>,
+        lock: bool,
+    ) -> Result<String> {
+        const DELAYS_MS: [u64; 5] = [50, 100, 250, 500, 1000];
+        let mut last_err: Option<anyhow::Error> = None;
+
+        for (attempt, base_ms) in DELAYS_MS.iter().enumerate() {
+            let res = if lock {
+                let _g = self.git_mutex.lock().await;
+                self.run_git(args, cwd).await
+            } else {
+                self.run_git(args, cwd).await
+            };
+
+            match res {
+                Ok(output) => {
+                    if attempt > 0 {
+                        tracing::warn!(
+                            target: "spur.worktree.retry",
+                            attempt,
+                            args = ?args,
+                            "git command succeeded after retry",
+                        );
+                    }
+                    return Ok(output);
+                }
+                Err(e) if attempt < DELAYS_MS.len() - 1 && Self::is_transient_git_error(&e) => {
+                    tracing::debug!(
+                        target: "spur.worktree.retry",
+                        attempt,
+                        error = %e,
+                        args = ?args,
+                        "transient git error, retrying",
+                    );
+                    last_err = Some(e);
+                    tokio::time::sleep(Duration::from_millis(*base_ms)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| anyhow!("retry exhausted with no error captured")))
+    }
+
+    fn is_transient_git_error(e: &anyhow::Error) -> bool {
+        let s = e.to_string().to_lowercase();
+        s.contains("index.lock")
+            || s.contains("cannot lock ref")
+            || s.contains("lock file")
+            || s.contains("unable to create")
+            || s.contains("is locked")
     }
 
     /// Resolve HEAD of the given worktree path to its OID.
@@ -331,17 +390,17 @@ impl WorktreeManager {
                     .context("failed to create snapshot commit")?;
 
                 // Point the snapshot branch at this commit.
-                self.run_git(&["branch", &branch_name, &commit], None)
+                self.run_git_with_retry(&["branch", &branch_name, &commit], None, false)
                     .await
                     .context("failed to create snapshot branch")?;
             } else {
                 // stash create returned empty despite dirty status — branch at HEAD.
-                self.run_git(&["branch", &branch_name, "HEAD"], None)
+                self.run_git_with_retry(&["branch", &branch_name, "HEAD"], None, false)
                     .await
                     .context("failed to create snapshot branch")?;
             }
         } else {
-            self.run_git(&["branch", &branch_name, "HEAD"], None)
+            self.run_git_with_retry(&["branch", &branch_name, "HEAD"], None, false)
                 .await
                 .context("failed to create snapshot branch")?;
         }
@@ -370,7 +429,7 @@ impl WorktreeManager {
             .await
             .with_context(|| format!("failed to resolve base branch '{base_branch}'"))?;
 
-        self.run_git(
+        self.run_git_with_retry(
             &[
                 "worktree",
                 "add",
@@ -380,6 +439,7 @@ impl WorktreeManager {
                 base_branch,
             ],
             None,
+            true,
         )
         .await
         .with_context(|| format!("failed to create worktree at {worktree_path_str}"))?;
@@ -431,7 +491,7 @@ impl WorktreeManager {
             .await
             .with_context(|| format!("failed to resolve base branch '{base_branch}'"))?;
 
-        self.run_git(
+        self.run_git_with_retry(
             &[
                 "worktree",
                 "add",
@@ -441,6 +501,7 @@ impl WorktreeManager {
                 base_branch,
             ],
             None,
+            true,
         )
         .await
         .with_context(|| format!("failed to create v2 worktree at {worktree_path_str}"))?;
@@ -794,6 +855,7 @@ impl WorktreeManager {
         Self {
             repo_root,
             active: std::collections::HashMap::new(),
+            git_mutex: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -1255,6 +1317,76 @@ mod tests_option_e {
             info.branch,
             "spur/worker/v2/codex/550e8400-e29b-41d4-a716-446655440000/deadbeef-1111-2222-3333-444455556666"
         );
+    }
+
+    #[test]
+    fn classifies_git_lock_failures_as_transient() {
+        let err = anyhow!(
+            "git worktree failed (exit 128): fatal: cannot lock ref 'refs/heads/spur/worker/v2/codex/b/w': is locked"
+        );
+        assert!(WorktreeManager::is_transient_git_error(&err));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn parallel_worktree_creation_survives_lock_pressure() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _base_sha = seed_base_repo(tmp.path()).await;
+        let brain =
+            spur_acp::BrainSessionId::new(SessionId("550e8400-e29b-41d4-a716-446655440000".into()));
+        let mut workers = Vec::new();
+        let mut ref_locks = Vec::new();
+        for n in 0..8 {
+            let worker = SessionId(format!("00000000-0000-0000-0000-{n:012x}"));
+            let lock_path = tmp
+                .path()
+                .join(".git/refs/heads/spur/worker/v2/codex")
+                .join(brain.to_string())
+                .join(format!("{worker}.lock"));
+            tokio::fs::create_dir_all(lock_path.parent().unwrap())
+                .await
+                .expect("create ref lock parent");
+            tokio::fs::write(&lock_path, "held by test\n")
+                .await
+                .expect("create synthetic ref lock");
+            workers.push(worker);
+            ref_locks.push(lock_path);
+        }
+
+        let unlock_paths = ref_locks.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            for path in unlock_paths {
+                let _ = tokio::fs::remove_file(path).await;
+            }
+        });
+
+        let mut set = tokio::task::JoinSet::new();
+        for worker in workers {
+            let repo_root = tmp.path().to_path_buf();
+            let brain = brain.clone();
+            set.spawn(async move {
+                let mut manager = WorktreeManager::new(repo_root);
+                manager
+                    .create_worktree_v2(&brain, &worker, "codex", "main")
+                    .await
+                    .map(|info| info.branch)
+            });
+        }
+
+        let mut branches = Vec::new();
+        while let Some(result) = set.join_next().await {
+            let branch = result.expect("task join").expect("create v2 worktree");
+            branches.push(branch);
+        }
+
+        assert_eq!(branches.len(), 8);
+        let manager = WorktreeManager::new(tmp.path().to_path_buf());
+        for branch in branches {
+            manager
+                .run_git(&["rev-parse", "--verify", &branch], None)
+                .await
+                .expect("created worker branch should resolve");
+        }
     }
 }
 
