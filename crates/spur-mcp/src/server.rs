@@ -1484,6 +1484,23 @@ struct PlanBaseSnapshot {
     oid: Option<String>,
 }
 
+#[derive(Debug, Default)]
+struct ClobberReviewReport {
+    signals: Vec<crate::plan::signals::WorkerSignal>,
+    warnings: Vec<String>,
+}
+
+fn append_review_warning(resp: &mut serde_json::Value, warning: String) {
+    if let serde_json::Value::Object(map) = resp {
+        match map.get_mut("warnings") {
+            Some(serde_json::Value::Array(warnings)) => warnings.push(json!(warning)),
+            _ => {
+                map.insert("warnings".into(), json!([warning]));
+            }
+        }
+    }
+}
+
 async fn run_git_capture(
     repo_root: &std::path::Path,
     cwd: Option<&std::path::Path>,
@@ -4519,7 +4536,7 @@ impl McpCallbackServer {
             .map(|s| s as std::sync::Arc<dyn crate::plan::PmLike>);
 
         let result = crate::plan::handle_review_task(
-            plan_arc,
+            Arc::clone(&plan_arc),
             &plan_id,
             &task_id,
             decision,
@@ -4531,6 +4548,24 @@ impl McpCallbackServer {
             Arc::clone(&self.feature_gate),
         )
         .await?;
+        let mut result = result;
+
+        if decision == "approve" {
+            let clobber_report = self
+                .run_clobber_detector_for_review(&plan_arc, &task_id)
+                .await?;
+            if !clobber_report.signals.is_empty() {
+                if let serde_json::Value::Object(ref mut m) = result {
+                    m.insert(
+                        "signals".into(),
+                        serde_json::to_value(&clobber_report.signals).map_err(|e| e.to_string())?,
+                    );
+                }
+            }
+            for warning in clobber_report.warnings {
+                append_review_warning(&mut result, warning);
+            }
+        }
 
         if let Some(sink) = self.event_sink.as_deref() {
             let projected = self.load_or_project_plan(&plan_id).await?;
@@ -4539,6 +4574,177 @@ impl McpCallbackServer {
         }
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+    }
+
+    async fn run_clobber_detector_for_review(
+        &self,
+        plan_arc: &Arc<tokio::sync::Mutex<crate::plan::PlanState>>,
+        task_id: &str,
+    ) -> Result<ClobberReviewReport, String> {
+        let Some(repo_root) = self.repo_root.as_deref() else {
+            return Ok(ClobberReviewReport::default());
+        };
+
+        let (issue_id, worker_branch, prior_candidates) = {
+            let state = plan_arc.lock().await;
+            let Some(current) = state
+                .tasks
+                .iter()
+                .find(|entry| entry.spec.task_id == task_id)
+            else {
+                return Ok(ClobberReviewReport::default());
+            };
+            let Some(worker_branch) = current
+                .worker_branch
+                .clone()
+                .filter(|branch| !branch.is_empty())
+            else {
+                return Ok(ClobberReviewReport::default());
+            };
+            let prior_candidates = state
+                .tasks
+                .iter()
+                .filter(|entry| entry.spec.task_id != task_id)
+                .filter(|entry| {
+                    matches!(entry.status, crate::plan::PlanTaskStatus::Approved { .. })
+                })
+                .filter_map(|entry| {
+                    let branch_name = entry.worker_branch.clone()?;
+                    Some((
+                        entry.spec.task_id.clone(),
+                        branch_name,
+                        entry.dispatched_base_oid.clone(),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            (
+                current.spec.issue_id.clone(),
+                worker_branch,
+                prior_candidates,
+            )
+        };
+
+        if prior_candidates.is_empty() {
+            return Ok(ClobberReviewReport::default());
+        }
+
+        let mut warnings = Vec::new();
+        let mut priors = Vec::with_capacity(prior_candidates.len());
+        for (prior_task_id, branch_name, dispatched_base_oid) in prior_candidates {
+            let tip_oid = match dispatched_base_oid {
+                Some(oid) => oid,
+                None => {
+                    match run_git_capture(repo_root, None, &["rev-parse", branch_name.as_str()])
+                        .await
+                    {
+                        Ok(oid) => oid,
+                        Err(error) => {
+                            tracing::warn!(
+                                task_id = %prior_task_id,
+                                branch = %branch_name,
+                                "review_task clobber detector skipped prior: {error}"
+                            );
+                            warnings.push(format!(
+                                "clobber detector skipped prior task '{prior_task_id}': {error}"
+                            ));
+                            continue;
+                        }
+                    }
+                }
+            };
+            priors.push(crate::plan::clobber_detector::PriorTip {
+                task_id: prior_task_id,
+                branch_name,
+                tip_oid,
+            });
+        }
+
+        if priors.is_empty() {
+            return Ok(ClobberReviewReport {
+                signals: Vec::new(),
+                warnings,
+            });
+        }
+
+        let report = crate::plan::clobber_detector::run(repo_root, &worker_branch, &priors);
+        if report.signals.is_empty() {
+            return Ok(ClobberReviewReport {
+                signals: Vec::new(),
+                warnings,
+            });
+        }
+
+        if let (Some(pm), Some(issue_id)) = (self.pm_service.as_deref(), issue_id.as_deref()) {
+            if let Err(error) = require_feature(
+                FeatureKey::PM_PRO_BEADS_ADVANCED,
+                self.feature_gate.as_ref(),
+            ) {
+                let message = feature_error_message(error);
+                tracing::warn!(
+                    issue_id = %issue_id,
+                    "review_task clobber detector signal persistence skipped: {message}"
+                );
+                warnings.push(format!(
+                    "clobber detector could not write signal comments for issue '{issue_id}': {message}"
+                ));
+                return Ok(ClobberReviewReport {
+                    signals: report.signals,
+                    warnings,
+                });
+            }
+            if let Some(advanced) = pm.advanced() {
+                for signal in &report.signals {
+                    if let Err(error) = advanced
+                        .add_comment(issue_id, &crate::plan::signals::encode_comment(signal))
+                        .await
+                    {
+                        tracing::warn!(
+                            issue_id = %issue_id,
+                            signal_id = %signal.signal_id(),
+                            "review_task clobber detector signal comment failed: {error}"
+                        );
+                        warnings.push(format!(
+                            "clobber detector failed to write signal comment for issue '{issue_id}': {error}"
+                        ));
+                    }
+                }
+
+                let mut add_labels = report
+                    .signals
+                    .iter()
+                    .map(|signal| crate::plan::labels::signal_kind(signal.kind_label()))
+                    .collect::<Vec<_>>();
+                add_labels.sort();
+                add_labels.dedup();
+                if let Err(error) = pm
+                    .update_issue(
+                        issue_id,
+                        IssueUpdate {
+                            add_labels,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        issue_id = %issue_id,
+                        "review_task clobber detector signal label failed: {error}"
+                    );
+                    warnings.push(format!(
+                        "clobber detector failed to add signal label for issue '{issue_id}': {error}"
+                    ));
+                }
+            } else {
+                warnings.push(format!(
+                    "clobber detector could not write signal comments for issue '{issue_id}': beads advanced API unavailable"
+                ));
+            }
+        }
+
+        Ok(ClobberReviewReport {
+            signals: report.signals,
+            warnings,
+        })
     }
 
     async fn install_projected_plan(&self, projected: crate::plan::PlanState, emit_snapshot: bool) {
