@@ -9,11 +9,17 @@ use spur_acp::{GraphEdgeEvent, GraphNodeEvent};
 
 pub struct IssueGraphPane {
     scroll_offset: u16,
+    last_total_lines: u16,
+    last_visible_height: u16,
 }
 
 impl IssueGraphPane {
     pub fn new() -> Self {
-        Self { scroll_offset: 0 }
+        Self {
+            scroll_offset: 0,
+            last_total_lines: 0,
+            last_visible_height: 0,
+        }
     }
 
     pub fn reset(&mut self) {
@@ -25,11 +31,14 @@ impl IssueGraphPane {
     }
 
     pub fn scroll_down_by(&mut self, lines: u16) {
-        self.scroll_offset = self.scroll_offset.saturating_add(lines).min(500);
+        let max_offset = self
+            .last_total_lines
+            .saturating_sub(self.last_visible_height);
+        self.scroll_offset = self.scroll_offset.saturating_add(lines).min(max_offset);
     }
 
     pub fn render(
-        &self,
+        &mut self,
         requested_id: &str,
         nodes: &[GraphNodeEvent],
         edges: &[GraphEdgeEvent],
@@ -105,6 +114,13 @@ impl IssueGraphPane {
                 )));
             }
         }
+
+        let total_lines: u16 = lines.len().min(u16::MAX as usize) as u16;
+        let visible_height = chunks[2].height;
+        self.last_total_lines = total_lines;
+        self.last_visible_height = visible_height;
+        let max_offset = total_lines.saturating_sub(visible_height);
+        self.scroll_offset = self.scroll_offset.min(max_offset);
 
         let body = Paragraph::new(lines)
             .wrap(Wrap { trim: false })

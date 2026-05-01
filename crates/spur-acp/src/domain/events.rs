@@ -721,6 +721,8 @@ pub enum SpurEventBody {
     IssueCommandError {
         operation: String,
         error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
     },
 
     /// Graph health alert summary from bv (beads_viewer) analysis.

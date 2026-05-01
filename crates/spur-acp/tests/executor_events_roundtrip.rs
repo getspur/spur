@@ -269,6 +269,31 @@ fn issue_subgraph_loaded_roundtrips() {
 }
 
 #[test]
+fn issue_command_error_with_id_roundtrips() {
+    let ev = SpurEvent::now(SpurEventBody::IssueCommandError {
+        operation: "GetIssueGraph".into(),
+        error: "bv failed".into(),
+        id: Some("bd-root".into()),
+    });
+
+    let json = serde_json::to_string(&ev).unwrap();
+    let round: SpurEvent = serde_json::from_str(&json).unwrap();
+
+    match round.body {
+        SpurEventBody::IssueCommandError {
+            operation,
+            error,
+            id,
+        } => {
+            assert_eq!(operation, "GetIssueGraph");
+            assert_eq!(error, "bv failed");
+            assert_eq!(id, Some("bd-root".into()));
+        }
+        other => panic!("expected IssueCommandError, got {other:?}"),
+    }
+}
+
+#[test]
 fn plan_completed_roundtrips() {
     use spur_acp::{SpurEvent, SpurEventBody};
 

@@ -2165,6 +2165,7 @@ impl Orchestrator {
             self.funnel.emit(SpurEventBody::IssueCommandError {
                 operation: "startup".into(),
                 error: render_beads_startup_warning(warning).into(),
+                id: None,
             });
         } else if let Some(pm) = &self.pm_service {
             if pm.analyzer().is_none() {
@@ -2173,6 +2174,7 @@ impl Orchestrator {
                     error: "bv (beads_viewer) not installed — graph analysis disabled. \
                             Install: brew install dicklesworthstone/tap/bv"
                         .into(),
+                    id: None,
                 });
             }
         }
@@ -2675,6 +2677,7 @@ impl Orchestrator {
                             self.funnel.emit(SpurEventBody::IssueCommandError {
                                 operation: "RefreshIssues".into(),
                                 error: "No issue tracker configured".into(),
+                                id: None,
                             });
                         }
                     }
@@ -2693,6 +2696,7 @@ impl Orchestrator {
                                     self.funnel.emit(SpurEventBody::IssueCommandError {
                                         operation: "GetIssueDetail".into(),
                                         error: e.to_string(),
+                                        id: None,
                                     });
                                 }
                             }
@@ -2700,6 +2704,7 @@ impl Orchestrator {
                             self.funnel.emit(SpurEventBody::IssueCommandError {
                                 operation: "GetIssueDetail".into(),
                                 error: "No issue tracker configured".into(),
+                                id: None,
                             });
                         }
                     }
@@ -2708,6 +2713,7 @@ impl Orchestrator {
                     InteractiveInput::GetIssueGraph { id } => {
                         if let Some(pm) = &self.pm_service {
                             if let Some(bv) = pm.analyzer() {
+                                let req_id = id.clone();
                                 match bv.subgraph(&id, Some(2), Some("json")).await {
                                     Ok(graph) => {
                                         let (nodes, edges) =
@@ -2737,6 +2743,7 @@ impl Orchestrator {
                                         self.funnel.emit(SpurEventBody::IssueCommandError {
                                             operation: "GetIssueGraph".into(),
                                             error: e.to_string(),
+                                            id: Some(req_id),
                                         });
                                     }
                                 }
@@ -2745,12 +2752,14 @@ impl Orchestrator {
                                     operation: "GetIssueGraph".into(),
                                     error: "Graph analysis unavailable: bv is not configured"
                                         .into(),
+                                    id: Some(id),
                                 });
                             }
                         } else {
                             self.funnel.emit(SpurEventBody::IssueCommandError {
                                 operation: "GetIssueGraph".into(),
                                 error: "No issue tracker configured".into(),
+                                id: Some(id),
                             });
                         }
                     }
@@ -2771,6 +2780,7 @@ impl Orchestrator {
                                     self.funnel.emit(SpurEventBody::IssueCommandError {
                                         operation: "UpdateIssue".into(),
                                         error: e.to_string(),
+                                        id: None,
                                     });
                                 }
                             }
@@ -2778,6 +2788,7 @@ impl Orchestrator {
                             self.funnel.emit(SpurEventBody::IssueCommandError {
                                 operation: "UpdateIssue".into(),
                                 error: "No issue tracker configured".into(),
+                                id: None,
                             });
                         }
                     }
