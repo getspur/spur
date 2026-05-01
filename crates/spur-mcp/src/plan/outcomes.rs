@@ -862,10 +862,7 @@ mod tests {
 
         store.drop_plan("P1");
 
-        assert!(!store
-            .skip_observations
-            .keys()
-            .any(|(plan, _)| plan == "P1"));
+        assert!(!store.skip_observations.keys().any(|(plan, _)| plan == "P1"));
         assert!(store
             .skip_observations
             .contains_key(&("P2".to_string(), "task-1".to_string())));

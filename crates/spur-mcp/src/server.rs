@@ -997,8 +997,7 @@ fn replace_task_execution_labels(
 /// pair on the same issue would strip a label we just (idempotently) added.
 /// Filter the no-op pair out before issuing the update.
 fn filter_remove_labels(remove_labels: &mut Vec<String>, add_labels: &[String]) {
-    let add_set: std::collections::HashSet<&str> =
-        add_labels.iter().map(String::as_str).collect();
+    let add_set: std::collections::HashSet<&str> = add_labels.iter().map(String::as_str).collect();
     remove_labels.retain(|label| !add_set.contains(label.as_str()));
 }
 
