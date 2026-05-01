@@ -709,6 +709,14 @@ pub fn get_task_diff_def() -> ToolDefinition {
     }
 }
 
+fn preview_task_base_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "preview_task_base".into(),
+        description: "Read-only: returns the overlay commits and predicted base OID for a given plan task without creating a worker worktree. Use this BEFORE approving a downstream task to surface integration conflicts early. Returns null `predicted_base_oid` and a `conflict` payload when overlays cannot be applied cleanly.".into(),
+        input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::PreviewTaskBaseInput>(),
+    }
+}
+
 pub fn review_task_def() -> ToolDefinition {
     ToolDefinition {
         name: "review_task".to_string(),
@@ -830,6 +838,7 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         get_plan_status_def(),
         get_reconciler_status_def(),
         get_task_diff_def(),
+        preview_task_base_def(),
         review_task_def(),
         report_signal_def(),
     ]

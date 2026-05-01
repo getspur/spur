@@ -166,6 +166,41 @@ impl WorktreeManager {
             .await
     }
 
+    /// Create a worktree at an explicit path and branch without registering it
+    /// in the active worker-session map.
+    pub async fn create_worktree_at(&self, path: &Path, branch: &str, base: &str) -> Result<()> {
+        let path_str = path
+            .to_str()
+            .ok_or_else(|| anyhow!("worktree path is not valid UTF-8"))?;
+        self.run_git(&["worktree", "add", path_str, "-b", branch, base], None)
+            .await
+            .with_context(|| format!("failed to create worktree at {path_str}"))?;
+        Ok(())
+    }
+
+    /// Remove a worktree at an explicit path without consulting the active
+    /// worker-session map.
+    pub async fn remove_worktree_at(&self, path: &Path) -> Result<()> {
+        let path_str = path
+            .to_str()
+            .ok_or_else(|| anyhow!("worktree path is not valid UTF-8"))?;
+        self.run_git(
+            &["worktree", "remove", path_str, "--force", "--force"],
+            None,
+        )
+        .await
+        .with_context(|| format!("failed to remove worktree at {path_str}"))?;
+        Ok(())
+    }
+
+    /// Delete a branch by name.
+    pub async fn delete_branch(&self, name: &str) -> Result<()> {
+        self.run_git(&["branch", "-D", name], None)
+            .await
+            .with_context(|| format!("failed to delete branch '{name}'"))?;
+        Ok(())
+    }
+
     /// Apply a chain of overlay cherry-picks to a worker worktree.
     ///
     /// Each overlay is `(source_task_id, base_oid, tip_oid)`. Runs
