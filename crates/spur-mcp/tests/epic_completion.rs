@@ -6,7 +6,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use spur_acp::{BrainSessionId, SessionId, SpurEvent, SpurEventBody};
 use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind, EpicCompletionOutcome};
 use spur_mcp::plan::labels;
-use spur_mcp::plan::outcomes::{DispatchOutcome, OutcomeStore};
+use spur_mcp::plan::outcomes::{DispatchOutcome, OutcomeStore, SkipReason};
 use spur_mcp::plan::reconciler::{Reconciler, ReconcilerConfig, ReconcilerDispatchCtx};
 use spur_mcp::McpEventSink;
 use tempfile::TempDir;
@@ -356,10 +356,17 @@ async fn three_task_plan_drops_plan_outcomes_on_epic_close_but_retains_global_ri
 
     let pm = beads_pm(dir.path()).await;
     let outcomes = Arc::new(tokio::sync::Mutex::new(OutcomeStore::default()));
-    outcomes
-        .lock()
-        .await
-        .record_no_dispatch_context(None, 3, UNIX_EPOCH);
+    {
+        let mut store = outcomes.lock().await;
+        store.record_no_dispatch_context(None, 3, UNIX_EPOCH);
+        store.record_skipped(
+            Some(plan_id),
+            "phantom-task",
+            SkipReason::TaskMissingFromProjection,
+            UNIX_EPOCH,
+        );
+        assert_eq!(store.skip_observations_len(), 1);
+    }
 
     let (delegation_tx, mut delegation_rx) = tokio::sync::mpsc::channel(3);
     let task_tracker = tokio_util::task::TaskTracker::new();
@@ -395,8 +402,9 @@ async fn three_task_plan_drops_plan_outcomes_on_epic_close_but_retains_global_ri
             .outcomes_by_plan
             .get(plan_id)
             .expect("plan outcome buffer after dispatch");
-        assert_eq!(buffer.latest_per_task.len(), 3);
+        assert_eq!(buffer.latest_per_task.len(), 4);
         assert_eq!(outcomes.outcomes_global.snapshot().len(), 1);
+        assert_eq!(outcomes.skip_observations_len(), 1);
     }
 
     for request in requests {
@@ -436,6 +444,7 @@ async fn three_task_plan_drops_plan_outcomes_on_epic_close_but_retains_global_ri
 
     let outcomes = outcomes.lock().await;
     assert_eq!(outcomes.outcomes_by_plan.len(), 0);
+    assert_eq!(outcomes.skip_observations_len(), 0);
     assert!(matches!(
         outcomes.outcomes_global.snapshot().as_slice(),
         [DispatchOutcome::NoDispatchContext {
