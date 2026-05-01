@@ -151,8 +151,12 @@ fn graph_toggle_flow_fetches_renders_uses_cache_and_closes() {
     );
     let graph = render_text(&mut app, &mut terminal);
     assert!(graph.contains("Issue Graph: issue-1"), "rendered:\n{graph}");
-    assert!(graph.contains("issue-2"), "rendered:\n{graph}");
-    assert!(graph.contains("issue-1 -> issue-2"), "rendered:\n{graph}");
+    assert!(graph.contains("(issue-1)"), "rendered:\n{graph}");
+    assert!(graph.contains("(issue-2)"), "rendered:\n{graph}");
+    assert!(
+        graph.contains("Legend: ○ open"),
+        "tree renderer should display status legend:\n{graph}"
+    );
 
     app.handle_crossterm_event_for_test(key('v'));
     let text = render_text(&mut app, &mut terminal);
