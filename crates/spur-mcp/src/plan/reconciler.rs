@@ -142,6 +142,71 @@ fn unresolved_blocker_issue_ids(
     blockers
 }
 
+fn is_hex_oid(spec: &str) -> bool {
+    spec.len() == 40 && spec.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+async fn git_rev_parse(spec: &str) -> anyhow::Result<String> {
+    let output = tokio::process::Command::new("git")
+        .args(["rev-parse", spec])
+        .output()
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to execute git rev-parse {spec}: {error}"))?;
+
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    }
+
+    if is_hex_oid(spec) {
+        return Ok(spec.to_string());
+    }
+
+    anyhow::bail!(
+        "git rev-parse {spec} failed (exit {}): {}",
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stderr).trim()
+    )
+}
+
+async fn plan_dispatch_base_spec(
+    plan_state: &crate::plan::PlanState,
+    task_id: &str,
+) -> anyhow::Result<crate::tools::BaseSpec> {
+    let dep_closure = plan_state.approved_dep_closure(task_id);
+    let mut overlays = Vec::with_capacity(dep_closure.len());
+
+    for dep in dep_closure {
+        let base_oid = dep.dispatched_base_oid.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "approved dependency {} is missing dispatched_base_oid",
+                dep.spec.task_id
+            )
+        })?;
+        let worker_branch = dep.worker_branch.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "approved dependency {} is missing worker_branch",
+                dep.spec.task_id
+            )
+        })?;
+        let tip_oid = git_rev_parse(worker_branch).await?;
+        overlays.push(crate::tools::OverlayCommit {
+            source_task_id: dep.spec.task_id.clone(),
+            base_oid,
+            tip_oid,
+        });
+    }
+
+    Ok(crate::tools::BaseSpec::WithOverlay {
+        base: crate::tools::BaseTarget::Branch {
+            name: plan_state
+                .base_snapshot_branch
+                .clone()
+                .unwrap_or_else(|| "HEAD".to_string()),
+        },
+        overlays,
+    })
+}
+
 async fn prune_projected_terminal_task_outcomes(
     outcomes: &Arc<tokio::sync::Mutex<OutcomeStore>>,
     plan_id: &str,
@@ -628,6 +693,7 @@ impl Reconciler {
                 .labels
                 .iter()
                 .any(|label| crate::plan::labels::parse_agent(label).is_some());
+            let base_spec = plan_dispatch_base_spec(&projected, &task.spec.task_id).await?;
             crate::plan::persist_dispatch_intent(
                 self.pm.as_ref(),
                 &summary.id,
@@ -641,6 +707,8 @@ impl Reconciler {
             .await?;
 
             let (respond_to, rx) = tokio::sync::oneshot::channel();
+            let (dispatched_base_oid_tx, dispatched_base_oid_rx) =
+                tokio::sync::oneshot::channel();
             let request = crate::tools::DelegationRequest {
                 id: delegation_id.clone().into(),
                 agent: task.spec.agent.clone(),
@@ -650,7 +718,8 @@ impl Reconciler {
                 brain_session_id: dispatch.brain_session_id.clone(),
                 delegation_plan: None,
                 issue_id: task.spec.issue_id.clone(),
-                base: None,
+                base: Some(base_spec),
+                dispatched_base_oid_tx: Some(dispatched_base_oid_tx),
                 attempt_tracker: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(
                     task_attempt,
                 )),
@@ -724,6 +793,7 @@ impl Reconciler {
                         }
                     }
                 };
+                let dispatched_base_oid = dispatched_base_oid_rx.await.ok();
 
                 if let Err(error) = crate::plan::persist_worker_completion_and_notify(
                     pm.as_ref(),
@@ -736,6 +806,7 @@ impl Reconciler {
                     &brain_session_id,
                     task_attempt,
                     &materializer,
+                    dispatched_base_oid,
                 )
                 .await
                 {
@@ -920,6 +991,7 @@ impl Reconciler {
                 &dispatch.brain_session_id,
                 attempt,
                 &dispatch.materializer,
+                None,
             )
             .await?;
 
