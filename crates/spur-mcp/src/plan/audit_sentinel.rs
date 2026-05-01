@@ -48,6 +48,10 @@ pub struct CompletionAuditFields {
     /// the full delegation result. `None` for the Superseded path (the
     /// materializer is skipped to avoid emitting stale-attempt artifacts).
     pub artifact_uri: Option<String>,
+    /// HEAD of the worker worktree immediately after overlay cherry-picks
+    /// (post-T9 wiring, dispatch-time). Used for forensics and downstream
+    /// range computation. None for legacy or pre-overlay dispatches.
+    pub dispatched_base_oid: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +107,12 @@ pub enum AuditSentinelKind {
         /// issue can extract this and resolve via `fetch_outcome_artifact`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         artifact_uri: Option<String>,
+        /// HEAD of the worker worktree immediately after overlay cherry-picks
+        /// (post-T9 wiring, dispatch-time). Used for forensics + downstream
+        /// merge_plan/get_task_diff range computation. None for legacy or
+        /// pre-overlay dispatches.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dispatched_base_oid: Option<String>,
     },
     EpicCompletion {
         outcome: EpicCompletionOutcome,
@@ -269,6 +279,7 @@ mod tests {
                 worker_branch: Some("feat/x".into()),
                 result_summary: None,
                 artifact_uri: None,
+                dispatched_base_oid: None,
             },
             AuditSentinelKind::Approval {
                 delegation_id: "del-A".into(),
@@ -370,6 +381,7 @@ mod tests {
                 worker_branch: None,
                 result_summary: None,
                 artifact_uri: None,
+                dispatched_base_oid: None,
             },
             AuditSentinelKind::Approval {
                 delegation_id: "x".into(),
@@ -483,6 +495,7 @@ mod tests {
             worker_branch: Some("spur/worker-x".into()),
             result_summary: Some("done".into()),
             artifact_uri: Some("spur://outcome/aaa/bbb/1".into()),
+            dispatched_base_oid: None,
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: AuditSentinelKind = serde_json::from_str(&json).unwrap();
@@ -490,6 +503,55 @@ mod tests {
             assert_eq!(artifact_uri.as_deref(), Some("spur://outcome/aaa/bbb/1"));
         } else {
             panic!("variant changed");
+        }
+    }
+
+    #[test]
+    fn completion_kind_round_trips_dispatched_base_oid() {
+        let kind = AuditSentinelKind::Completion {
+            delegation_id: "abc".into(),
+            completion_state: CompletionState::AwaitingReview,
+            superseded: false,
+            worker_branch: Some("spur/worker-x".into()),
+            result_summary: Some("done".into()),
+            artifact_uri: None,
+            dispatched_base_oid: Some("oid123".into()),
+        };
+        let body = encode_comment(&kind);
+        let parsed = parse_comment(&body).unwrap().unwrap();
+        match parsed {
+            AuditSentinelKind::Completion {
+                dispatched_base_oid,
+                ..
+            } => {
+                assert_eq!(dispatched_base_oid.as_deref(), Some("oid123"));
+            }
+            _ => panic!("expected Completion"),
+        }
+    }
+
+    #[test]
+    fn completion_kind_parses_legacy_comment_without_dispatched_base_oid() {
+        let body = format!(
+            "{SENTINEL_PREFIX}\n{}",
+            serde_json::json!({
+                "kind": "completion",
+                "delegation_id": "abc",
+                "completion_state": "awaiting_review",
+                "superseded": false,
+                "worker_branch": null,
+                "result_summary": null,
+            })
+        );
+        let parsed = parse_comment(&body).unwrap().unwrap();
+        match parsed {
+            AuditSentinelKind::Completion {
+                dispatched_base_oid,
+                ..
+            } => {
+                assert!(dispatched_base_oid.is_none());
+            }
+            _ => panic!("expected Completion"),
         }
     }
 
@@ -502,6 +564,7 @@ mod tests {
             worker_branch: None,
             result_summary: None,
             artifact_uri: None,
+            dispatched_base_oid: None,
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(
@@ -519,6 +582,7 @@ mod tests {
             worker_branch: Some("feat/stale".into()),
             result_summary: Some("late completion ignored".into()),
             artifact_uri: None,
+            dispatched_base_oid: None,
         };
         let orphan = AuditSentinelKind::DispatchOrphanCleared {
             delegation_id: "del-A".into(),

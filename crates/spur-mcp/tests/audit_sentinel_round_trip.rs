@@ -82,6 +82,7 @@ fn every_audit_sentinel_variant_round_trips_through_br_comments() {
             worker_branch: Some("feat/x".into()),
             result_summary: Some("worker narrative: three refactors".into()),
             artifact_uri: None,
+            dispatched_base_oid: None,
         },
         AuditSentinelKind::Approval {
             delegation_id: "del-1".into(),
