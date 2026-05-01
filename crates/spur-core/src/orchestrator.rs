@@ -37,12 +37,13 @@ use spur_blob_store::{
 };
 use spur_cost::CostTracker;
 use spur_license::SpurLicense;
+use spur_mcp::tools::{BaseSpec, BaseTarget};
 use spur_mcp::{
     build_worker_info, DelegationChannel, DelegationRequest, McpCallbackServer, WorkerInfo,
 };
 use spur_pm::PmService;
 use spur_worktree::git_blob_store::GitBlobOutcomeStore;
-use spur_worktree::WorktreeManager;
+use spur_worktree::{manager::WorktreeError, WorktreeManager};
 
 use crate::lineage::ExecutorId;
 use crate::review_sink::ReviewSink;
@@ -87,6 +88,41 @@ pub fn normalize_agent_name(name: &str) -> String {
         }
     }
     lower
+}
+
+/// Resolve a BaseSpec into the concrete ref passed to create_worktree.
+fn resolve_base_branch(spec: &BaseSpec, snapshot_branch: &str) -> String {
+    match spec {
+        BaseSpec::RepoMain => snapshot_branch.to_string(),
+        BaseSpec::Branch { name } => name.clone(),
+        BaseSpec::Commit { oid } => oid.clone(),
+        BaseSpec::WithOverlay { base, .. } => resolve_base_target(base, snapshot_branch),
+    }
+}
+
+fn resolve_base_target(base: &BaseTarget, snapshot_branch: &str) -> String {
+    match base {
+        BaseTarget::RepoMain => snapshot_branch.to_string(),
+        BaseTarget::Branch { name } => name.clone(),
+        BaseTarget::Commit { oid } => oid.clone(),
+    }
+}
+
+/// Extract the overlay list from a BaseSpec, preserving reconciler order.
+fn extract_overlays(spec: &BaseSpec) -> Vec<(String, String, String)> {
+    match spec {
+        BaseSpec::WithOverlay { overlays, .. } => overlays
+            .iter()
+            .map(|overlay| {
+                (
+                    overlay.source_task_id.clone(),
+                    overlay.base_oid.clone(),
+                    overlay.tip_oid.clone(),
+                )
+            })
+            .collect(),
+        BaseSpec::RepoMain | BaseSpec::Branch { .. } | BaseSpec::Commit { .. } => Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -4920,7 +4956,7 @@ impl Orchestrator {
                 brain_session_id,
                 delegation_plan,
                 issue_id,
-                base: _,
+                base,
                 attempt_tracker,
             } = request;
             // Phase 4: `DelegationRequest.id` is now a typed `DelegationId`
@@ -5112,6 +5148,7 @@ impl Orchestrator {
                         review_sink.clone(),
                         attempt_tracker,
                         peer_mailbox,
+                        base,
                     ) => r,
                 };
                 drop(dispatch_lease_heartbeat_handle);
@@ -5231,6 +5268,7 @@ impl Orchestrator {
         review_sink: ReviewSink,
         attempt_tracker: Arc<std::sync::atomic::AtomicU32>,
         peer_mailbox: Option<crate::peer_mailbox::PeerMailboxBundle>,
+        base: Option<BaseSpec>,
     ) -> (DelegationResult, Option<ExecutorId>) {
         // Shadow `original_task` with the Relevant Files-prepended form
         // so retry loops at orchestrator.rs:3013 reuse the formatted
@@ -5315,7 +5353,7 @@ impl Orchestrator {
             };
             let outcome = match run_one_worker_attempt(
                 next_worker_session.clone(),
-                &WorkerAttemptCtx {
+                WorkerAttemptCtx {
                     brain_session_id: &brain_session_id,
                     agent: &agent,
                     task: &current_task,
@@ -5326,6 +5364,8 @@ impl Orchestrator {
                     issue_id: issue_id.clone(),
                     peer_mailbox: peer_mailbox.as_ref(),
                     ack_tx: ack_tx.clone(),
+                    base: base.clone(),
+                    dispatched_base_oid_tx: None,
                 },
                 &mut worktrees,
                 &funnel,
@@ -6016,9 +6056,8 @@ fn finalize(
 /// `WorkerAttemptOutcome`). Setup errors short-circuit the entire
 /// delegation without retry — retrying a worktree-creation failure is
 /// not a spec'd behavior.
-// All variants share the `Failed` suffix intentionally — they describe distinct
-// failure phases (snapshot, worktree, init, session) and the suffix aids
-// readability at match sites. Suppressing the lint is cleaner than renaming.
+// The setup failure variants describe distinct phases and keep existing match
+// sites readable. Suppressing the lint is cleaner than renaming.
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug)]
 enum AttemptSetupError {
@@ -6026,6 +6065,10 @@ enum AttemptSetupError {
     WorktreeFailed(String),
     InitFailed(String),
     SessionFailed(String),
+    OverlayConflict {
+        source_task_id: String,
+        files: Vec<String>,
+    },
 }
 
 impl std::fmt::Display for AttemptSetupError {
@@ -6035,6 +6078,14 @@ impl std::fmt::Display for AttemptSetupError {
             Self::WorktreeFailed(e) => write!(f, "Failed to create worktree: {e}"),
             Self::InitFailed(e) => write!(f, "Failed to initialize worker: {e}"),
             Self::SessionFailed(e) => write!(f, "Failed to create worker session: {e}"),
+            Self::OverlayConflict {
+                source_task_id,
+                files,
+            } => write!(
+                f,
+                "overlay conflict applying {source_task_id}: {} files",
+                files.len()
+            ),
         }
     }
 }
@@ -6272,6 +6323,9 @@ struct WorkerAttemptCtx<'a> {
     issue_id: Option<String>,
     peer_mailbox: Option<&'a crate::peer_mailbox::PeerMailboxBundle>,
     ack_tx: Option<tokio::sync::mpsc::UnboundedSender<()>>,
+    base: Option<BaseSpec>,
+    /// Sends the resolved post-overlay worktree HEAD back to the reconciler.
+    dispatched_base_oid_tx: Option<tokio::sync::oneshot::Sender<String>>,
 }
 
 /// Returns `Ok(WorkerAttemptOutcome)` for any flow that produced a
@@ -6285,7 +6339,7 @@ struct WorkerAttemptCtx<'a> {
 /// the public `DelegationResult` type.
 async fn run_one_worker_attempt(
     worker_session: SessionId,
-    ctx: &WorkerAttemptCtx<'_>,
+    mut ctx: WorkerAttemptCtx<'_>,
     worktrees: &mut WorktreeManager,
     funnel: &crate::event_funnel::FunnelHandle,
 ) -> Result<WorkerAttemptOutcome, AttemptSetupError> {
@@ -6313,8 +6367,14 @@ async fn run_one_worker_attempt(
         .await
         .map_err(|e| AttemptSetupError::SnapshotFailed(e.to_string()))?;
 
+    let base_branch = ctx
+        .base
+        .as_ref()
+        .map(|spec| resolve_base_branch(spec, &snapshot_branch))
+        .unwrap_or_else(|| snapshot_branch.clone());
+
     let worktree_info = worktrees
-        .create_worktree(&worker_session, ctx.agent, &snapshot_branch)
+        .create_worktree(&worker_session, ctx.agent, &base_branch)
         .await
         .map_err(|e| AttemptSetupError::WorktreeFailed(e.to_string()))?;
 
@@ -6326,6 +6386,40 @@ async fn run_one_worker_attempt(
             error = %e,
             "failed to delete snapshot branch after worktree creation; will leak until cleanup_orphans runs"
         );
+    }
+
+    let overlays = ctx.base.as_ref().map(extract_overlays).unwrap_or_default();
+    if !overlays.is_empty() {
+        if let Err(e) = worktrees
+            .apply_overlays(&worktree_info.path, &overlays)
+            .await
+        {
+            let setup_err = match e {
+                WorktreeError::OverlayConflict {
+                    source_task_id,
+                    files,
+                } => AttemptSetupError::OverlayConflict {
+                    source_task_id,
+                    files,
+                },
+                other => AttemptSetupError::WorktreeFailed(other.to_string()),
+            };
+            let _ = worktrees.remove_worktree(&worker_session).await;
+            return Err(setup_err);
+        }
+    }
+
+    let dispatched_base_oid = match worktrees.resolve_head(&worktree_info.path).await {
+        Ok(oid) => oid,
+        Err(e) => {
+            let _ = worktrees.remove_worktree(&worker_session).await;
+            return Err(AttemptSetupError::WorktreeFailed(format!(
+                "resolve worktree HEAD: {e}"
+            )));
+        }
+    };
+    if let Some(tx) = ctx.dispatched_base_oid_tx.take() {
+        let _ = tx.send(dispatched_base_oid);
     }
 
     // 2. Spawn worker agent in worktree via AgentConnection.
@@ -8875,6 +8969,66 @@ mod build_diff_summary_tests {
             "b.txt not in file list: {:?}",
             summary.files
         );
+    }
+}
+
+#[cfg(test)]
+mod base_spec_dispatch_tests {
+    use super::{extract_overlays, resolve_base_branch};
+    use spur_mcp::tools::{BaseSpec, BaseTarget, OverlayCommit};
+
+    #[test]
+    fn resolve_base_branch_unwraps_with_overlay() {
+        let spec = BaseSpec::WithOverlay {
+            base: BaseTarget::Branch {
+                name: "spur/plan-base-xyz".into(),
+            },
+            overlays: vec![],
+        };
+
+        assert_eq!(resolve_base_branch(&spec, "fallback"), "spur/plan-base-xyz");
+    }
+
+    #[test]
+    fn resolve_base_branch_falls_back_for_repo_main() {
+        let spec = BaseSpec::RepoMain;
+
+        assert_eq!(
+            resolve_base_branch(&spec, "spur/brain-snapshot-X"),
+            "spur/brain-snapshot-X"
+        );
+    }
+
+    #[test]
+    fn extract_overlays_returns_empty_for_non_overlay() {
+        assert!(extract_overlays(&BaseSpec::RepoMain).is_empty());
+        assert!(extract_overlays(&BaseSpec::Branch { name: "x".into() }).is_empty());
+        assert!(extract_overlays(&BaseSpec::Commit { oid: "abc".into() }).is_empty());
+    }
+
+    #[test]
+    fn extract_overlays_returns_all_for_with_overlay() {
+        let spec = BaseSpec::WithOverlay {
+            base: BaseTarget::RepoMain,
+            overlays: vec![
+                OverlayCommit {
+                    source_task_id: "T1".into(),
+                    base_oid: "a".into(),
+                    tip_oid: "b".into(),
+                },
+                OverlayCommit {
+                    source_task_id: "T2".into(),
+                    base_oid: "b".into(),
+                    tip_oid: "c".into(),
+                },
+            ],
+        };
+
+        let overlays = extract_overlays(&spec);
+
+        assert_eq!(overlays.len(), 2);
+        assert_eq!(overlays[0].0, "T1");
+        assert_eq!(overlays[1].0, "T2");
     }
 }
 

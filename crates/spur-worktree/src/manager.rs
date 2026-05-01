@@ -160,6 +160,12 @@ impl WorktreeManager {
         }
     }
 
+    /// Resolve HEAD of the given worktree path to its OID.
+    pub async fn resolve_head(&self, worktree_path: &Path) -> Result<String> {
+        self.run_git(&["rev-parse", "HEAD"], Some(worktree_path))
+            .await
+    }
+
     /// Apply a chain of overlay cherry-picks to a worker worktree.
     ///
     /// Each overlay is `(source_task_id, base_oid, tip_oid)`. Runs
