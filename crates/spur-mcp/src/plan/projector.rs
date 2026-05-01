@@ -23,10 +23,31 @@ pub fn sort_projection_comments(mut comments: Vec<spur_pm::Comment>) -> Vec<spur
 pub fn collect_sorted_audits(
     comments: Vec<spur_pm::Comment>,
 ) -> Vec<crate::plan::audit_sentinel::AuditSentinelKind> {
+    collect_sorted_audits_for_issue("<unknown>", comments)
+}
+
+pub fn collect_sorted_audits_for_issue(
+    issue_id: &str,
+    comments: Vec<spur_pm::Comment>,
+) -> Vec<crate::plan::audit_sentinel::AuditSentinelKind> {
     sort_projection_comments(comments)
         .into_iter()
-        .filter_map(|comment| crate::plan::audit_sentinel::parse_comment(&comment.body))
-        .filter_map(|result| result.ok())
+        .filter_map(
+            |comment| match crate::plan::audit_sentinel::parse_comment(&comment.body) {
+                Some(Ok(kind)) => Some(kind),
+                Some(Err(error)) => {
+                    tracing::warn!(
+                        target: "spur.audit.parse_failure",
+                        issue_id = %issue_id,
+                        comment_id = %comment.id,
+                        error = %error,
+                        "audit sentinel parse failed; comment dropped from projection",
+                    );
+                    None
+                }
+                None => None,
+            },
+        )
         .collect()
 }
 
@@ -433,7 +454,7 @@ pub async fn project_plan_from_beads(
     let adv = pm
         .advanced()
         .ok_or_else(|| anyhow::anyhow!("persisted projector requires beads backend"))?;
-    let epic_audits = collect_sorted_audits(adv.list_comments(&epic.id).await?);
+    let epic_audits = collect_sorted_audits_for_issue(&epic.id, adv.list_comments(&epic.id).await?);
     let closed_status = pm.closed_status().to_string();
     struct ProjectedTask {
         issue: spur_pm::Issue,
@@ -444,7 +465,10 @@ pub async fn project_plan_from_beads(
 
     let mut projected_tasks = Vec::with_capacity(tasks.len());
     for task_issue in tasks {
-        let audits = collect_sorted_audits(adv.list_comments(&task_issue.id).await?);
+        let audits = collect_sorted_audits_for_issue(
+            &task_issue.id,
+            adv.list_comments(&task_issue.id).await?,
+        );
         let task_spec = latest_task_spec(&audits);
         let (task_id, context_files) =
             task_spec.unwrap_or_else(|| (task_id_for_issue(&task_issue), Vec::new()));
@@ -530,9 +554,84 @@ pub async fn project_plan_from_beads(
 mod tests {
     use chrono::{TimeZone, Utc};
     use spur_pm::Comment;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
 
     use super::{AuditSentinelKind, CompletionState, PlanTask, PlanTaskEntry, PlanTaskStatus};
     use crate::plan::audit_sentinel::EpicCompletionOutcome;
+
+    #[derive(Debug, Clone)]
+    struct CapturedWarning {
+        target: String,
+        fields: HashMap<String, String>,
+    }
+
+    #[derive(Clone)]
+    struct WarningCapture(Arc<Mutex<Vec<CapturedWarning>>>);
+
+    impl tracing::Subscriber for WarningCapture {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() <= tracing::Level::WARN
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            if *event.metadata().level() != tracing::Level::WARN {
+                return;
+            }
+
+            let mut visitor = FieldVisitor {
+                fields: HashMap::new(),
+            };
+            event.record(&mut visitor);
+            self.0.lock().unwrap().push(CapturedWarning {
+                target: event.metadata().target().to_string(),
+                fields: visitor.fields,
+            });
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    struct FieldVisitor {
+        fields: HashMap<String, String>,
+    }
+
+    impl Visit for FieldVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+
+    fn capture_warnings<T>(f: impl FnOnce() -> T) -> (T, Vec<CapturedWarning>) {
+        let warnings = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = WarningCapture(Arc::clone(&warnings));
+
+        let result = tracing::subscriber::with_default(subscriber, f);
+        let captured = warnings.lock().unwrap().clone();
+        (result, captured)
+    }
+
+    fn comment(id: &str, body: String, offset_secs: i64) -> Comment {
+        Comment {
+            id: id.into(),
+            body,
+            actor: "spur".into(),
+            created_at: Utc.with_ymd_and_hms(2026, 4, 21, 10, 0, 0).unwrap()
+                + chrono::Duration::seconds(offset_secs),
+        }
+    }
 
     #[test]
     fn sort_projection_comments_orders_by_created_at_then_id() {
@@ -592,6 +691,117 @@ mod tests {
             audits[0],
             crate::plan::audit_sentinel::AuditSentinelKind::Approval { .. }
         ));
+    }
+
+    #[test]
+    fn projector_warns_and_drops_corrupt_audit_sentinel() {
+        let comments = vec![
+            comment(
+                "c-valid",
+                crate::plan::audit_sentinel::encode_comment(
+                    &crate::plan::audit_sentinel::AuditSentinelKind::Approval {
+                        delegation_id: "del-A".into(),
+                    },
+                ),
+                0,
+            ),
+            comment(
+                "c-corrupt",
+                format!("{}\nnot json", crate::plan::audit_sentinel::SENTINEL_PREFIX),
+                1,
+            ),
+        ];
+
+        let (audits, warnings) =
+            capture_warnings(|| super::collect_sorted_audits_for_issue("bd-task-1", comments));
+
+        assert_eq!(audits.len(), 1);
+        assert!(matches!(
+            audits[0],
+            crate::plan::audit_sentinel::AuditSentinelKind::Approval { .. }
+        ));
+        assert_eq!(warnings.len(), 1);
+
+        let warning = &warnings[0];
+        assert_eq!(warning.target, "spur.audit.parse_failure");
+        assert_eq!(
+            warning.fields.get("issue_id").map(String::as_str),
+            Some("bd-task-1")
+        );
+        assert_eq!(
+            warning.fields.get("comment_id").map(String::as_str),
+            Some("c-corrupt")
+        );
+        assert!(
+            warning
+                .fields
+                .get("error")
+                .is_some_and(|error| error.contains("sentinel JSON parse error")),
+            "warning fields should contain parse error, got {warning:?}"
+        );
+    }
+
+    #[test]
+    fn projector_handles_mix_of_valid_and_corrupt_sentinels() {
+        let comments = vec![
+            comment(
+                "c-4",
+                crate::plan::audit_sentinel::encode_comment(
+                    &crate::plan::audit_sentinel::AuditSentinelKind::Approval {
+                        delegation_id: "del-A".into(),
+                    },
+                ),
+                3,
+            ),
+            comment(
+                "c-2",
+                format!("{}\n{{", crate::plan::audit_sentinel::SENTINEL_PREFIX),
+                1,
+            ),
+            comment(
+                "c-3",
+                crate::plan::audit_sentinel::encode_comment(
+                    &crate::plan::audit_sentinel::AuditSentinelKind::Completion {
+                        delegation_id: "del-A".into(),
+                        completion_state: CompletionState::AwaitingReview,
+                        superseded: false,
+                        worker_branch: Some("spur/worker-a".into()),
+                        result_summary: Some("done".into()),
+                        artifact_uri: None,
+                        dispatched_base_oid: Some("base-oid".into()),
+                    },
+                ),
+                2,
+            ),
+            comment(
+                "c-1",
+                crate::plan::audit_sentinel::encode_comment(
+                    &crate::plan::audit_sentinel::AuditSentinelKind::Dispatch {
+                        delegation_id: "del-A".into(),
+                        worker: "codex".into(),
+                        attempt: 1,
+                    },
+                ),
+                0,
+            ),
+        ];
+
+        let (audits, warnings) =
+            capture_warnings(|| super::collect_sorted_audits_for_issue("bd-task-2", comments));
+
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].target, "spur.audit.parse_failure");
+        assert_eq!(
+            warnings[0].fields.get("issue_id").map(String::as_str),
+            Some("bd-task-2")
+        );
+        assert_eq!(
+            warnings[0].fields.get("comment_id").map(String::as_str),
+            Some("c-2")
+        );
+
+        let kinds: Vec<&str> = audits.iter().map(AuditSentinelKind::kind_str).collect();
+        assert_eq!(kinds, vec!["dispatch", "completion", "approval"]);
     }
 
     #[test]
