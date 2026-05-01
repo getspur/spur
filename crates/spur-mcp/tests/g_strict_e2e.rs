@@ -6,22 +6,26 @@
 //! the reconciler dispatches downstream tasks with the full approved
 //! dependency overlay closure.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use serde_json::{json, Value};
 use spur_acp::{BrainSessionId, DelegationResult, DelegationStatus, SessionId};
+use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
 use spur_mcp::plan::reconciler::{Reconciler, ReconcilerConfig, ReconcilerDispatchCtx};
 use spur_mcp::server::{DetachedContinuationCtx, McpCallbackServer};
 use spur_mcp::tools::{BaseSpec, BaseTarget, DelegationRequest};
 use tempfile::TempDir;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, Notify, OwnedMutexGuard};
 use tokio_util::task::TaskTracker;
 
 mod common;
+
+static CWD_LOCK: LazyLock<Arc<tokio::sync::Mutex<()>>> =
+    LazyLock::new(|| Arc::new(tokio::sync::Mutex::new(())));
 
 fn br_available() -> bool {
     Command::new("br")
@@ -126,19 +130,34 @@ fn task_status(status: &Value, task_id: &str) -> Option<String> {
     })
 }
 
+fn collect_audit_sentinels(list_json: &str) -> Vec<AuditSentinelKind> {
+    let items: Value = serde_json::from_str(list_json).expect("br comments list must be JSON");
+    items
+        .as_array()
+        .expect("comments must be a JSON array")
+        .iter()
+        .filter_map(|comment| comment.get("text").and_then(Value::as_str))
+        .filter_map(audit_sentinel::parse_comment)
+        .filter_map(Result::ok)
+        .collect()
+}
+
 struct TestHarness {
     _dir: TempDir,
+    _cwd_guard: OwnedMutexGuard<()>,
     original_cwd: PathBuf,
     repo: PathBuf,
     server: McpCallbackServer,
     reconciler: Reconciler,
     request_rx: mpsc::Receiver<DelegationRequest>,
+    pending_requests: VecDeque<DelegationRequest>,
     task_tracker: TaskTracker,
     task_issue_ids: HashMap<String, String>,
 }
 
 impl TestHarness {
     async fn new() -> Self {
+        let cwd_guard = CWD_LOCK.clone().lock_owned().await;
         let dir = TempDir::new().expect("tempdir");
         init_repo(dir.path());
         let original_cwd = std::env::current_dir().expect("current dir");
@@ -186,42 +205,25 @@ impl TestHarness {
 
         Self {
             _dir: dir,
+            _cwd_guard: cwd_guard,
             original_cwd,
             repo,
             server,
             reconciler,
             request_rx,
+            pending_requests: VecDeque::new(),
             task_tracker,
             task_issue_ids: HashMap::new(),
         }
     }
 
-    async fn submit_plan(&mut self) -> String {
+    async fn submit_plan_with_tasks(&mut self, epic_title: &str, tasks: Value) -> String {
         let response = self
             .server
             .__test_call_submit_plan(json!({
                 "persist_as_epic": true,
-                "epic_title": "G-strict bd-2dww synthetic reproducer",
-                "tasks": [
-                    {
-                        "task_id": "T1",
-                        "agent": "mock",
-                        "task": "create foo.rs with `pub struct Foo { pub n: u32 }`",
-                        "depends_on": [],
-                    },
-                    {
-                        "task_id": "T2",
-                        "agent": "mock",
-                        "task": "modify foo.rs to add `impl Foo { pub fn new(n: u32) -> Self { Self { n } } }`",
-                        "depends_on": ["T1"],
-                    },
-                    {
-                        "task_id": "T3",
-                        "agent": "mock",
-                        "task": "create main.rs with `use foo::Foo; fn main() { let _ = Foo::new(42); }`",
-                        "depends_on": ["T1", "T2"],
-                    },
-                ]
+                "epic_title": epic_title,
+                "tasks": tasks,
             }))
             .await;
         let plan_id = extract_submit_plan_id(&response);
@@ -229,25 +231,99 @@ impl TestHarness {
         plan_id
     }
 
+    async fn submit_plan(&mut self) -> String {
+        self.submit_plan_with_tasks(
+            "G-strict bd-2dww synthetic reproducer",
+            json!([
+                {
+                    "task_id": "T1",
+                    "agent": "mock",
+                    "task": "create foo.rs with `pub struct Foo { pub n: u32 }`",
+                    "depends_on": [],
+                },
+                {
+                    "task_id": "T2",
+                    "agent": "mock",
+                    "task": "modify foo.rs to add `impl Foo { pub fn new(n: u32) -> Self { Self { n } } }`",
+                    "depends_on": ["T1"],
+                },
+                {
+                    "task_id": "T3",
+                    "agent": "mock",
+                    "task": "create main.rs with `use foo::Foo; fn main() { let _ = Foo::new(42); }`",
+                    "depends_on": ["T1", "T2"],
+                },
+            ]),
+        )
+        .await
+    }
+
+    async fn submit_diamond_plan(&mut self) -> String {
+        self.submit_plan_with_tasks(
+            "G-strict diamond DAG closure reproducer",
+            json!([
+                {
+                    "task_id": "T1",
+                    "agent": "mock",
+                    "task": "create a.rs with `pub struct A;`",
+                    "depends_on": [],
+                },
+                {
+                    "task_id": "T2",
+                    "agent": "mock",
+                    "task": "create b.rs with `pub struct B;`",
+                    "depends_on": [],
+                },
+                {
+                    "task_id": "T3",
+                    "agent": "mock",
+                    "task": "create c.rs using both A and B",
+                    "depends_on": ["T1", "T2"],
+                },
+            ]),
+        )
+        .await
+    }
+
+    async fn submit_grandparent_plan(&mut self) -> String {
+        self.submit_plan_with_tasks(
+            "G-strict grandparent depth closure reproducer",
+            json!([
+                {
+                    "task_id": "T1",
+                    "agent": "mock",
+                    "task": "create lvl1.rs",
+                    "depends_on": [],
+                },
+                {
+                    "task_id": "T2",
+                    "agent": "mock",
+                    "task": "create lvl2.rs after reading lvl1.rs",
+                    "depends_on": ["T1"],
+                },
+                {
+                    "task_id": "T3",
+                    "agent": "mock",
+                    "task": "create lvl3.rs after reading lvl1.rs and lvl2.rs",
+                    "depends_on": ["T2"],
+                },
+                {
+                    "task_id": "T4",
+                    "agent": "mock",
+                    "task": "create lvl4.rs after reading lvl1.rs, lvl2.rs, and lvl3.rs",
+                    "depends_on": ["T3"],
+                },
+            ]),
+        )
+        .await
+    }
+
     async fn dispatch_and_approve_with_mock<F>(&mut self, plan_id: &str, task_id: &str, worker: F)
     where
         F: FnOnce(&Path),
     {
         self.reconciler.tick_once().await.expect("reconciler tick");
-        let request = tokio::time::timeout(Duration::from_secs(5), self.request_rx.recv())
-            .await
-            .expect("dispatch request timeout")
-            .expect("dispatch request");
-
-        let expected_issue_id = self
-            .task_issue_ids
-            .get(task_id)
-            .unwrap_or_else(|| panic!("missing issue id for {task_id}"));
-        assert_eq!(
-            request.issue_id.as_deref(),
-            Some(expected_issue_id.as_str()),
-            "reconciler must dispatch {task_id}"
-        );
+        let request = self.dispatch_request_for_task(task_id).await;
 
         self.run_mock_worker(task_id, request, worker).await;
         self.wait_for_task_status(plan_id, task_id, "awaiting_review")
@@ -271,6 +347,37 @@ impl TestHarness {
             Some("approved"),
             "{task_id} should be approved: {status}"
         );
+    }
+
+    async fn dispatch_request_for_task(&mut self, task_id: &str) -> DelegationRequest {
+        let expected_issue_id = self
+            .task_issue_ids
+            .get(task_id)
+            .unwrap_or_else(|| panic!("missing issue id for {task_id}"));
+
+        if let Some(index) = self
+            .pending_requests
+            .iter()
+            .position(|request| request.issue_id.as_deref() == Some(expected_issue_id.as_str()))
+        {
+            return self
+                .pending_requests
+                .remove(index)
+                .expect("pending request index exists");
+        }
+
+        loop {
+            let request = tokio::time::timeout(Duration::from_secs(5), self.request_rx.recv())
+                .await
+                .expect("dispatch request timeout")
+                .expect("dispatch request");
+
+            if request.issue_id.as_deref() == Some(expected_issue_id.as_str()) {
+                return request;
+            }
+
+            self.pending_requests.push_back(request);
+        }
     }
 
     async fn wait_for_task_status(&self, plan_id: &str, task_id: &str, expected: &str) -> Value {
@@ -304,6 +411,38 @@ impl TestHarness {
         )
     }
 
+    async fn get_task_diff(&self, plan_id: &str, task_id: &str) -> Value {
+        decode_tool_response(
+            &self
+                .server
+                .__test_call_tool(
+                    "get_task_diff",
+                    json!({ "plan_id": plan_id, "task_id": task_id }),
+                )
+                .await,
+        )
+    }
+
+    fn completion_dispatched_base_oid(&self, task_id: &str) -> String {
+        let issue_id = self
+            .task_issue_ids
+            .get(task_id)
+            .unwrap_or_else(|| panic!("missing issue id for {task_id}"));
+        let comments = run_br(&self.repo, &["comments", "list", issue_id, "--json"]);
+
+        collect_audit_sentinels(&comments)
+            .into_iter()
+            .filter_map(|sentinel| match sentinel {
+                AuditSentinelKind::Completion {
+                    dispatched_base_oid,
+                    ..
+                } => dispatched_base_oid,
+                _ => None,
+            })
+            .last()
+            .unwrap_or_else(|| panic!("missing completion dispatched_base_oid for {task_id}"))
+    }
+
     async fn run_mock_worker<F>(&self, task_id: &str, request: DelegationRequest, worker: F)
     where
         F: FnOnce(&Path),
@@ -314,7 +453,7 @@ impl TestHarness {
 
         let dispatched_base_oid = run_git(&worktree, &["rev-parse", "HEAD"]);
         if let Some(tx) = request.dispatched_base_oid_tx.as_ref() {
-            tx.send(Some(dispatched_base_oid))
+            tx.send(Some(dispatched_base_oid.clone()))
                 .expect("publish dispatched base oid");
         }
 
@@ -325,12 +464,14 @@ impl TestHarness {
             &worktree,
             &["commit", "-q", "-m", &format!("{task_id} contribution")],
         );
+        let diff_range = format!("{dispatched_base_oid}..HEAD");
+        let diff = run_git(&worktree, &["diff", &diff_range]);
 
         request
             .respond_to
             .send(DelegationResult {
                 status: DelegationStatus::Success,
-                diff: None,
+                diff: Some(diff),
                 diff_summary: None,
                 summary: Some(format!("{task_id} complete")),
                 estimated_cost_usd: 0.0,
@@ -471,4 +612,201 @@ async fn g_strict_prevents_bd_2dww_class_loss() {
         main.contains("use foo::Foo"),
         "merged main.rs must retain T3 import, got: {main}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn g_strict_diamond_dag_closure_walks_both_parents() {
+    if !br_available() {
+        eprintln!("skipping g_strict_diamond_dag_closure_walks_both_parents: `br` not on PATH");
+        return;
+    }
+
+    let mut harness = TestHarness::new().await;
+    let plan_id = harness.submit_diamond_plan().await;
+
+    harness
+        .dispatch_and_approve_with_mock(&plan_id, "T1", |worktree| {
+            std::fs::write(worktree.join("a.rs"), "pub struct A;\n").expect("write T1 a.rs");
+        })
+        .await;
+
+    harness
+        .dispatch_and_approve_with_mock(&plan_id, "T2", |worktree| {
+            std::fs::write(worktree.join("b.rs"), "pub struct B;\n").expect("write T2 b.rs");
+        })
+        .await;
+
+    harness
+        .dispatch_and_approve_with_mock(&plan_id, "T3", |worktree| {
+            let a = std::fs::read_to_string(worktree.join("a.rs"))
+                .expect("T3 worker must see a.rs from T1");
+            assert!(
+                a.contains("pub struct A"),
+                "T3 worker must see T1's a.rs, got: {a}"
+            );
+
+            let b = std::fs::read_to_string(worktree.join("b.rs"))
+                .expect("T3 worker must see b.rs from T2");
+            assert!(
+                b.contains("pub struct B"),
+                "T3 worker must see T2's b.rs, got: {b}"
+            );
+
+            std::fs::write(
+                worktree.join("c.rs"),
+                "mod a;\nmod b;\npub fn combine() -> (a::A, b::B) { (a::A, b::B) }\n",
+            )
+            .expect("write T3 c.rs");
+        })
+        .await;
+
+    let t3_diff = harness.get_task_diff(&plan_id, "T3").await;
+    let diff = t3_diff["diff"].as_str().expect("T3 diff text");
+    assert!(
+        diff.contains("c.rs"),
+        "T3 diff must include its own contribution: {diff}"
+    );
+    assert!(
+        !diff.contains("a.rs"),
+        "T3 diff must exclude inherited T1 overlay: {diff}"
+    );
+    assert!(
+        !diff.contains("b.rs"),
+        "T3 diff must exclude inherited T2 overlay: {diff}"
+    );
+
+    let merge_status = harness.merge_plan(&plan_id).await;
+    assert_eq!(
+        merge_status["merge"]["status"], "succeeded",
+        "merge_plan must succeed: {merge_status}"
+    );
+    let merge_branch = merge_status["merge"]["merge_branch"]
+        .as_str()
+        .expect("merge branch");
+
+    let a = harness.show(merge_branch, "a.rs");
+    assert!(
+        a.contains("pub struct A"),
+        "merged a.rs must retain T1 contribution, got: {a}"
+    );
+    let b = harness.show(merge_branch, "b.rs");
+    assert!(
+        b.contains("pub struct B"),
+        "merged b.rs must retain T2 contribution, got: {b}"
+    );
+    let c = harness.show(merge_branch, "c.rs");
+    assert!(
+        c.contains("combine"),
+        "merged c.rs must retain T3 contribution, got: {c}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn g_strict_grandparent_depth_chain_walks_full_closure() {
+    if !br_available() {
+        eprintln!("skipping g_strict_grandparent_depth_chain_walks_full_closure: `br` not on PATH");
+        return;
+    }
+
+    let mut harness = TestHarness::new().await;
+    let plan_id = harness.submit_grandparent_plan().await;
+
+    harness
+        .dispatch_and_approve_with_mock(&plan_id, "T1", |worktree| {
+            std::fs::write(worktree.join("lvl1.rs"), "pub const LVL1: u8 = 1;\n")
+                .expect("write T1 lvl1.rs");
+        })
+        .await;
+
+    harness
+        .dispatch_and_approve_with_mock(&plan_id, "T2", |worktree| {
+            let lvl1 = std::fs::read_to_string(worktree.join("lvl1.rs"))
+                .expect("T2 worker must see lvl1.rs from T1");
+            assert!(
+                lvl1.contains("LVL1"),
+                "T2 worker must see T1 contribution, got: {lvl1}"
+            );
+
+            std::fs::write(worktree.join("lvl2.rs"), "pub const LVL2: u8 = 2;\n")
+                .expect("write T2 lvl2.rs");
+        })
+        .await;
+
+    harness
+        .dispatch_and_approve_with_mock(&plan_id, "T3", |worktree| {
+            let lvl1 = std::fs::read_to_string(worktree.join("lvl1.rs"))
+                .expect("T3 worker must see lvl1.rs from T1");
+            assert!(
+                lvl1.contains("LVL1"),
+                "T3 worker must see T1 contribution, got: {lvl1}"
+            );
+
+            let lvl2 = std::fs::read_to_string(worktree.join("lvl2.rs"))
+                .expect("T3 worker must see lvl2.rs from T2");
+            assert!(
+                lvl2.contains("LVL2"),
+                "T3 worker must see T2 contribution, got: {lvl2}"
+            );
+
+            std::fs::write(worktree.join("lvl3.rs"), "pub const LVL3: u8 = 3;\n")
+                .expect("write T3 lvl3.rs");
+        })
+        .await;
+
+    harness
+        .dispatch_and_approve_with_mock(&plan_id, "T4", |worktree| {
+            let lvl1 = std::fs::read_to_string(worktree.join("lvl1.rs"))
+                .expect("T4 worker must see lvl1.rs from T1");
+            assert!(
+                lvl1.contains("LVL1"),
+                "T4 worker must see T1 contribution, got: {lvl1}"
+            );
+
+            let lvl2 = std::fs::read_to_string(worktree.join("lvl2.rs"))
+                .expect("T4 worker must see lvl2.rs from T2");
+            assert!(
+                lvl2.contains("LVL2"),
+                "T4 worker must see T2 contribution, got: {lvl2}"
+            );
+
+            let lvl3 = std::fs::read_to_string(worktree.join("lvl3.rs"))
+                .expect("T4 worker must see lvl3.rs from T3");
+            assert!(
+                lvl3.contains("LVL3"),
+                "T4 worker must see T3 contribution, got: {lvl3}"
+            );
+
+            std::fs::write(worktree.join("lvl4.rs"), "pub const LVL4: u8 = 4;\n")
+                .expect("write T4 lvl4.rs");
+        })
+        .await;
+
+    let t3_dispatched_base_oid = harness.completion_dispatched_base_oid("T3");
+    let t4_dispatched_base_oid = harness.completion_dispatched_base_oid("T4");
+    assert_ne!(
+        t4_dispatched_base_oid, t3_dispatched_base_oid,
+        "T4 dispatched_base_oid must include T3's overlay and differ from T3's base"
+    );
+
+    let merge_status = harness.merge_plan(&plan_id).await;
+    assert_eq!(
+        merge_status["merge"]["status"], "succeeded",
+        "merge_plan must succeed: {merge_status}"
+    );
+    let merge_branch = merge_status["merge"]["merge_branch"]
+        .as_str()
+        .expect("merge branch");
+
+    for (path, expected) in [
+        ("lvl1.rs", "LVL1"),
+        ("lvl2.rs", "LVL2"),
+        ("lvl3.rs", "LVL3"),
+        ("lvl4.rs", "LVL4"),
+    ] {
+        let contents = harness.show(merge_branch, path);
+        assert!(
+            contents.contains(expected),
+            "merged {path} must retain {expected}, got: {contents}"
+        );
+    }
 }
