@@ -5271,7 +5271,7 @@ impl Orchestrator {
         attempt_tracker: Arc<std::sync::atomic::AtomicU32>,
         peer_mailbox: Option<crate::peer_mailbox::PeerMailboxBundle>,
         base: Option<BaseSpec>,
-        mut dispatched_base_oid_tx: Option<tokio::sync::oneshot::Sender<String>>,
+        dispatched_base_oid_tx: Option<tokio::sync::watch::Sender<Option<String>>>,
     ) -> (DelegationResult, Option<ExecutorId>) {
         // Shadow `original_task` with the Relevant Files-prepended form
         // so retry loops at orchestrator.rs:3013 reuse the formatted
@@ -5368,7 +5368,7 @@ impl Orchestrator {
                     peer_mailbox: peer_mailbox.as_ref(),
                     ack_tx: ack_tx.clone(),
                     base: base.clone(),
-                    dispatched_base_oid_tx: dispatched_base_oid_tx.take(),
+                    dispatched_base_oid_tx: dispatched_base_oid_tx.clone(),
                 },
                 &mut worktrees,
                 &funnel,
@@ -6327,8 +6327,8 @@ struct WorkerAttemptCtx<'a> {
     peer_mailbox: Option<&'a crate::peer_mailbox::PeerMailboxBundle>,
     ack_tx: Option<tokio::sync::mpsc::UnboundedSender<()>>,
     base: Option<BaseSpec>,
-    /// Sends the resolved post-overlay worktree HEAD back to the reconciler.
-    dispatched_base_oid_tx: Option<tokio::sync::oneshot::Sender<String>>,
+    /// Publishes the resolved post-overlay worktree HEAD back to the reconciler.
+    dispatched_base_oid_tx: Option<tokio::sync::watch::Sender<Option<String>>>,
 }
 
 /// Returns `Ok(WorkerAttemptOutcome)` for any flow that produced a
@@ -6342,7 +6342,7 @@ struct WorkerAttemptCtx<'a> {
 /// the public `DelegationResult` type.
 async fn run_one_worker_attempt(
     worker_session: SessionId,
-    mut ctx: WorkerAttemptCtx<'_>,
+    ctx: WorkerAttemptCtx<'_>,
     worktrees: &mut WorktreeManager,
     funnel: &crate::event_funnel::FunnelHandle,
 ) -> Result<WorkerAttemptOutcome, AttemptSetupError> {
@@ -6421,8 +6421,8 @@ async fn run_one_worker_attempt(
             )));
         }
     };
-    if let Some(tx) = ctx.dispatched_base_oid_tx.take() {
-        let _ = tx.send(dispatched_base_oid);
+    if let Some(tx) = &ctx.dispatched_base_oid_tx {
+        let _ = tx.send(Some(dispatched_base_oid));
     }
 
     // 2. Spawn worker agent in worktree via AgentConnection.

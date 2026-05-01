@@ -5,7 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use spur_acp::{DelegationId, DelegationResult};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
 // ─── Request/Response types for orchestrator communication ────────────
 
@@ -97,10 +97,12 @@ pub struct DelegationRequest {
     /// Plan-engine dispatches will pass Some(WithOverlay { .. }) once bd-1dwm
     /// dispatch wiring lands; ad-hoc brain dispatches may omit it.
     pub base: Option<BaseSpec>,
-    /// Sends the worker worktree HEAD after overlay application back to the
+    /// Publishes the worker worktree HEAD after overlay application back to the
     /// plan reconciler so completion audits can persist the true contribution
-    /// base for this attempt.
-    pub dispatched_base_oid_tx: Option<oneshot::Sender<String>>,
+    /// base for the successful attempt. A watch sender is cloneable, so retry
+    /// attempts can each publish their own resolved base and the reconciler can
+    /// read the final value after the delegation result arrives.
+    pub dispatched_base_oid_tx: Option<watch::Sender<Option<String>>>,
     /// Shared attempt tracker. Orchestrator updates this as review-loop
     /// retries advance so detached continuations can report the final
     /// 1-based worker attempt that produced the result.
