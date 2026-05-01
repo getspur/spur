@@ -139,6 +139,12 @@ pub struct TestHarness {
     pending_requests: VecDeque<DelegationRequest>,
     task_tracker: TaskTracker,
     task_issue_ids: HashMap<String, String>,
+    fault_injection_hooks: FaultInjectionHooks,
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct FaultInjectionHooks {
+    pub panic_after_overlay_apply: Option<String>,
 }
 
 impl TestHarness {
@@ -163,7 +169,12 @@ impl TestHarness {
             pending_requests: VecDeque::new(),
             task_tracker,
             task_issue_ids: HashMap::new(),
+            fault_injection_hooks: FaultInjectionHooks::default(),
         }
+    }
+
+    pub fn set_fault_injection(&mut self, hooks: FaultInjectionHooks) {
+        self.fault_injection_hooks = hooks;
     }
 
     pub fn repo_root(&self) -> PathBuf {
@@ -197,6 +208,7 @@ impl TestHarness {
         self.request_rx = request_rx;
         self.pending_requests.clear();
         self.task_tracker = task_tracker;
+        self.fault_injection_hooks = FaultInjectionHooks::default();
 
         assert_eq!(
             self.server.__test_active_plan_count().await,
@@ -423,6 +435,37 @@ impl TestHarness {
         }
     }
 
+    pub async fn dispatch_and_panic_after_overlay_apply(&mut self, task_id: &str) -> String {
+        self.reconciler.tick_once().await.expect("reconciler tick");
+        let request = self.dispatch_request_for_task(task_id).await;
+        let hooks = self.fault_injection_hooks.clone();
+        let repo = self.repo.clone();
+        let task_id = task_id.to_string();
+
+        let handle = tokio::task::spawn_blocking(move || {
+            run_mock_worker_until_oid_send(&repo, &task_id, request, hooks)
+        });
+        let panic = handle
+            .await
+            .expect_err("fault injection must panic before OID send");
+        assert!(
+            panic.is_panic(),
+            "fault injection task must panic: {panic:?}"
+        );
+
+        panic
+            .try_into_panic()
+            .ok()
+            .and_then(|payload| {
+                payload.downcast_ref::<String>().cloned().or_else(|| {
+                    payload
+                        .downcast_ref::<&'static str>()
+                        .map(|s| (*s).to_string())
+                })
+            })
+            .unwrap_or_else(|| "unknown panic payload".to_string())
+    }
+
     pub async fn wait_for_task_status(
         &self,
         plan_id: &str,
@@ -439,6 +482,30 @@ impl TestHarness {
 
         let status = self.plan_status(plan_id).await;
         panic!("timed out waiting for {task_id}={expected}; final status: {status}");
+    }
+
+    pub async fn wait_for_terminal(&self, plan_id: &str, task_id: &str) -> Value {
+        for _ in 0..50 {
+            let status = self.plan_status(plan_id).await;
+            if let Some(task) = self.task_status_entry(&status, task_id) {
+                if matches!(
+                    task["status"].as_str(),
+                    Some("approved" | "failed" | "cancelled" | "superseded")
+                ) {
+                    return task.clone();
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        let status = self.plan_status(plan_id).await;
+        panic!("timed out waiting for {task_id} terminal; final status: {status}");
+    }
+
+    pub fn task_status_entry<'a>(&self, status: &'a Value, task_id: &str) -> Option<&'a Value> {
+        status["tasks"]
+            .as_array()
+            .and_then(|tasks| tasks.iter().find(|task| task["task_id"] == task_id))
     }
 
     pub async fn plan_status(&self, plan_id: &str) -> Value {
@@ -489,6 +556,33 @@ impl TestHarness {
             })
             .last()
             .unwrap_or_else(|| panic!("missing completion dispatched_base_oid for {task_id}"))
+    }
+
+    pub fn latest_completion_audit_for(&self, task_id: &str) -> AuditSentinelKind {
+        let issue_id = self
+            .task_issue_ids
+            .get(task_id)
+            .unwrap_or_else(|| panic!("missing issue id for {task_id}"));
+        let comments = run_br(&self.repo, &["comments", "list", issue_id, "--json"]);
+
+        collect_audit_sentinels(&comments)
+            .into_iter()
+            .filter(|sentinel| matches!(sentinel, AuditSentinelKind::Completion { .. }))
+            .last()
+            .unwrap_or_else(|| panic!("missing completion audit for {task_id}"))
+    }
+
+    pub fn add_audit_comment_for_task(&self, task_id: &str, audit: &AuditSentinelKind) {
+        let issue_id = self
+            .task_issue_ids
+            .get(task_id)
+            .unwrap_or_else(|| panic!("missing issue id for {task_id}"));
+        let body = audit_sentinel::encode_comment(audit);
+        run_br(&self.repo, &["comments", "add", issue_id, &body]);
+    }
+
+    pub async fn tick_reconciler(&self) -> anyhow::Result<bool> {
+        self.reconciler.tick_once().await
     }
 
     async fn run_mock_worker<F>(&self, task_id: &str, request: DelegationRequest, worker: F)
@@ -563,6 +657,54 @@ impl TestHarness {
     pub fn show(&self, branch: &str, path: &str) -> String {
         run_git(&self.repo, &["show", &format!("{branch}:{path}")])
     }
+}
+
+fn run_mock_worker_until_oid_send(
+    repo: &Path,
+    task_id: &str,
+    request: DelegationRequest,
+    hooks: FaultInjectionHooks,
+) {
+    let branch = format!("spur/g-strict-e2e-{task_id}");
+    let worktree = repo.join(".spur/worktrees").join(task_id);
+    create_worker_worktree(repo, &worktree, &branch, request.base.as_ref());
+
+    if let Some(message) = hooks.panic_after_overlay_apply {
+        panic!("fault injection: {message}");
+    }
+
+    let dispatched_base_oid = run_git(&worktree, &["rev-parse", "HEAD"]);
+    if let Some(tx) = request.dispatched_base_oid_tx.as_ref() {
+        tx.send(Some(dispatched_base_oid))
+            .expect("publish dispatched base oid");
+    }
+}
+
+fn create_worker_worktree(repo: &Path, worktree: &Path, branch: &str, base: Option<&BaseSpec>) {
+    std::fs::create_dir_all(worktree.parent().expect("worktree parent"))
+        .expect("create worktree parent");
+
+    match base {
+        Some(BaseSpec::WithOverlay { base, overlays }) => {
+            let base_ref = base_target_ref(base);
+            add_worktree(repo, worktree, branch, &base_ref);
+            for overlay in overlays {
+                let range = format!("{}..{}", overlay.base_oid, overlay.tip_oid);
+                run_git(worktree, &["cherry-pick", &range]);
+            }
+        }
+        Some(BaseSpec::Branch { name }) => add_worktree(repo, worktree, branch, name),
+        Some(BaseSpec::Commit { oid }) => add_worktree(repo, worktree, branch, oid),
+        Some(BaseSpec::RepoMain) | None => add_worktree(repo, worktree, branch, "HEAD"),
+    }
+}
+
+fn add_worktree(repo: &Path, worktree: &Path, branch: &str, base_ref: &str) {
+    let worktree_str = worktree.to_str().expect("worktree path utf8");
+    run_git(
+        repo,
+        &["worktree", "add", worktree_str, "-b", branch, base_ref],
+    );
 }
 
 impl Drop for TestHarness {

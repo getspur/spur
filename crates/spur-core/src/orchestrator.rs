@@ -1400,11 +1400,7 @@ fn dependency_graph_to_event_parts(
         return (Vec::new(), Vec::new());
     };
 
-    let nodes = adjacency
-        .nodes
-        .iter()
-        .map(graph_node_to_event)
-        .collect();
+    let nodes = adjacency.nodes.iter().map(graph_node_to_event).collect();
     let edges = adjacency
         .edges
         .unwrap_or_default()
@@ -1435,9 +1431,7 @@ impl IssueGraphPm for spur_pm::PmService {
         id: &str,
     ) -> anyhow::Result<spur_pm::graph::DependencyGraph> {
         self.analyzer()
-            .ok_or_else(|| {
-                anyhow::anyhow!("bv unavailable; install bv to view dependency graph")
-            })?
+            .ok_or_else(|| anyhow::anyhow!("bv unavailable; install bv to view dependency graph"))?
             .subgraph(id, Some(2), Some("json"))
             .await
     }
@@ -1523,12 +1517,35 @@ pub struct Orchestrator {
     /// Feature gate for dynamic quota/feature enforcement.
     feature_gate: Option<std::sync::Arc<spur_license::FeatureGate>>,
     pub(crate) peer_mailbox: Option<crate::peer_mailbox::PeerMailboxBundle>,
+    fault_injection_hooks: FaultInjectionHooks,
     /// Abort handle for the production peer-mailbox reconciler task spawned
     /// by `Orchestrator::new` when `peer_mailbox_enabled = true`. Stored
     /// directly so introspection does not depend on `background_tasks`
     /// insertion order. The task itself is still tracked in
     /// `background_tasks` for `Drop` to abort.
     pub(crate) peer_mailbox_reconciler_abort: Option<tokio::task::AbortHandle>,
+}
+
+#[cfg(any(test, feature = "fault-injection"))]
+#[derive(Default, Debug, Clone)]
+pub struct FaultInjectionHooks {
+    pub panic_after_overlay_apply: Option<String>,
+}
+
+#[cfg(not(any(test, feature = "fault-injection")))]
+#[derive(Default, Debug, Clone)]
+pub struct FaultInjectionHooks {
+    _private: (),
+}
+
+impl FaultInjectionHooks {
+    #[inline]
+    fn maybe_panic_after_overlay_apply(&self) {
+        #[cfg(any(test, feature = "fault-injection"))]
+        if let Some(message) = &self.panic_after_overlay_apply {
+            panic!("fault injection: {message}");
+        }
+    }
 }
 
 /// Detect whether an error from an `AgentConnection` RPC indicates the
@@ -1732,6 +1749,7 @@ impl Orchestrator {
             continuation_overflow: None,
             feature_gate,
             peer_mailbox: None,
+            fault_injection_hooks: FaultInjectionHooks::default(),
             peer_mailbox_reconciler_abort: None,
         };
 
@@ -1836,6 +1854,11 @@ impl Orchestrator {
     /// Attach a PM service. Must be called before `run_adhoc` or `run_interactive`.
     pub fn with_pm_service(mut self, pm: Arc<PmService>) -> Self {
         self.pm_service = Some(pm);
+        self
+    }
+
+    pub fn with_fault_injection_hooks(mut self, hooks: FaultInjectionHooks) -> Self {
+        self.fault_injection_hooks = hooks;
         self
     }
 
@@ -2192,6 +2215,7 @@ impl Orchestrator {
                 self.pm_service.clone(),
                 self.cancellation_control.clone(),
                 self.peer_mailbox.clone(),
+                self.fault_injection_hooks.clone(),
                 std::time::Duration::from_secs(self.config.spur.dispatch_lease_secs),
                 std::time::Duration::from_secs(self.config.spur.dispatch_lease_heartbeat_secs),
             ));
@@ -2854,12 +2878,7 @@ impl Orchestrator {
 
                     // ── GetIssueGraph ────────────────────────────────────
                     InteractiveInput::GetIssueGraph { id } => {
-                        handle_get_issue_graph(
-                            self.pm_service.as_deref(),
-                            &self.funnel,
-                            id,
-                        )
-                        .await;
+                        handle_get_issue_graph(self.pm_service.as_deref(), &self.funnel, id).await;
                     }
 
                     // ── UpdateIssue ───────────────────────────────────────
@@ -3839,6 +3858,7 @@ impl Orchestrator {
             self.pm_service.clone(),
             self.cancellation_control.clone(),
             self.peer_mailbox.clone(),
+            self.fault_injection_hooks.clone(),
             std::time::Duration::from_secs(self.config.spur.dispatch_lease_secs),
             std::time::Duration::from_secs(self.config.spur.dispatch_lease_heartbeat_secs),
         ));
@@ -4170,6 +4190,7 @@ impl Orchestrator {
             self.pm_service.clone(),
             self.cancellation_control.clone(),
             self.peer_mailbox.clone(),
+            self.fault_injection_hooks.clone(),
             std::time::Duration::from_secs(self.config.spur.dispatch_lease_secs),
             std::time::Duration::from_secs(self.config.spur.dispatch_lease_heartbeat_secs),
         ));
@@ -4950,6 +4971,7 @@ impl Orchestrator {
         pm_service: Option<Arc<PmService>>,
         cancellation_control: CancellationControl,
         peer_mailbox: Option<crate::peer_mailbox::PeerMailboxBundle>,
+        fault_injection_hooks: FaultInjectionHooks,
         dispatch_lease_duration: std::time::Duration,
         dispatch_lease_heartbeat: std::time::Duration,
     ) {
@@ -4999,6 +5021,7 @@ impl Orchestrator {
             let pm_service = pm_service.clone();
             let last_refresh_at = Arc::clone(&last_refresh_at);
             let peer_mailbox = peer_mailbox.clone();
+            let fault_injection_hooks = fault_injection_hooks.clone();
 
             // INV-6: register a cancellation token BEFORE spawning so
             // cancel() arriving between dispatch and spawn still works.
@@ -5166,6 +5189,7 @@ impl Orchestrator {
                         peer_mailbox,
                         base,
                         dispatched_base_oid_tx,
+                        fault_injection_hooks,
                     ) => r,
                 };
                 drop(dispatch_lease_heartbeat_handle);
@@ -5287,6 +5311,7 @@ impl Orchestrator {
         peer_mailbox: Option<crate::peer_mailbox::PeerMailboxBundle>,
         base: Option<BaseSpec>,
         dispatched_base_oid_tx: Option<tokio::sync::watch::Sender<Option<String>>>,
+        fault_injection_hooks: FaultInjectionHooks,
     ) -> (DelegationResult, Option<ExecutorId>) {
         // Shadow `original_task` with the Relevant Files-prepended form
         // so retry loops at orchestrator.rs:3013 reuse the formatted
@@ -5384,6 +5409,7 @@ impl Orchestrator {
                     ack_tx: ack_tx.clone(),
                     base: base.clone(),
                     dispatched_base_oid_tx: dispatched_base_oid_tx.clone(),
+                    fault_injection_hooks: &fault_injection_hooks,
                 },
                 &mut worktrees,
                 &funnel,
@@ -6367,6 +6393,7 @@ struct WorkerAttemptCtx<'a> {
     base: Option<BaseSpec>,
     /// Publishes the resolved post-overlay worktree HEAD back to the reconciler.
     dispatched_base_oid_tx: Option<tokio::sync::watch::Sender<Option<String>>>,
+    fault_injection_hooks: &'a FaultInjectionHooks,
 }
 
 /// Returns `Ok(WorkerAttemptOutcome)` for any flow that produced a
@@ -6449,6 +6476,8 @@ async fn run_one_worker_attempt(
             return Err(setup_err);
         }
     }
+
+    ctx.fault_injection_hooks.maybe_panic_after_overlay_apply();
 
     let dispatched_base_oid = match worktrees.resolve_head(&worktree_info.path).await {
         Ok(oid) => oid,
@@ -9101,13 +9130,7 @@ mod base_spec_dispatch_tests {
         let overlays = extract_overlays(&spec);
         let (funnel, mut events) = crate::event_funnel::test_channel();
 
-        emit_dispatch_overlay_applied(
-            &funnel,
-            "req-1",
-            Some(&spec),
-            "overlay-head",
-            &overlays,
-        );
+        emit_dispatch_overlay_applied(&funnel, "req-1", Some(&spec), "overlay-head", &overlays);
 
         match tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
             .await
