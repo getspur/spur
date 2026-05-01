@@ -14,6 +14,9 @@ pub enum IssueAction {
     WorkOn {
         id: String,
     },
+    ExecuteEpic {
+        id: String,
+    },
 }
 
 /// Actions that flow between components and the app controller.
@@ -183,6 +186,10 @@ pub enum Action {
     /// Fetch the dependency subgraph for an issue from the PM backend.
     GetIssueGraph {
         id: String,
+    },
+    /// Show a short status-bar hint owned by the App transient hint channel.
+    FlashHint {
+        message: String,
     },
     /// An issue-related action from the IssuesPanel or slash commands.
     Issue(IssueAction),
