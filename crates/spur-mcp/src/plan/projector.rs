@@ -49,15 +49,15 @@ pub fn project_attempt_facts(audits: &[AuditSentinelKind]) -> (u32, Option<Strin
     (attempt, last_delegation_id)
 }
 
-pub fn latest_completion_facts(
-    audits: &[AuditSentinelKind],
-) -> Option<(
+pub type CompletionFacts = (
     CompletionState,
     Option<String>,
     Option<String>,
     bool,
     Option<String>,
-)> {
+);
+
+pub fn latest_completion_facts(audits: &[AuditSentinelKind]) -> Option<CompletionFacts> {
     let mut latest = None;
 
     for audit in audits {

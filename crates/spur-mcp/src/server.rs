@@ -1202,6 +1202,17 @@ pub async fn handle_report_signal(
     }
 
     let args: Args = serde_json::from_value(args)?;
+    // Defense-in-depth: the MCP tool schema declares `kind` enum is
+    // `["scope_drift"]`, but harness input-schema enforcement is best-effort
+    // across MCP runtimes. Reject non-worker-emittable variants explicitly so
+    // a hallucinating worker cannot spoof brain-side signals (e.g.,
+    // PotentialClobber, which carries OIDs the worker has no authority over).
+    if !matches!(args.signal, WorkerSignal::ScopeDrift { .. }) {
+        anyhow::bail!(
+            "report_signal: only worker-emittable signal kinds are accepted; got {}",
+            args.signal.kind_label()
+        );
+    }
     require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED, feature_gate.as_ref())
         .map_err(|error| anyhow::anyhow!(feature_error_message(error)))?;
     let adv = pm

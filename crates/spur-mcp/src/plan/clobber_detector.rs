@@ -85,10 +85,20 @@ struct GitFileEntry {
 }
 
 fn worker_candidate_files(repo: &Path, worker_branch: &str) -> Vec<String> {
-    let fork_point = match git_merge_base(repo, "main", worker_branch) {
-        Ok(oid) => oid,
-        Err(_) => git_rev_parse(repo, "HEAD").unwrap_or_default(),
-    };
+    // Find the fork point relative to the project's default branch.
+    // Try common defaults; emit warning + fall back to HEAD if none resolve so
+    // the detector is observable when running on non-conventional repos.
+    let fork_point = ["main", "master", "trunk"]
+        .iter()
+        .find_map(|candidate| git_merge_base(repo, candidate, worker_branch).ok())
+        .or_else(|| {
+            tracing::warn!(
+                worker_branch = %worker_branch,
+                "clobber_detector: no merge-base against main/master/trunk; falling back to HEAD (detector may emit zero signals if HEAD is the worker tip)",
+            );
+            git_rev_parse(repo, "HEAD").ok()
+        })
+        .unwrap_or_default();
     if fork_point.is_empty() {
         return Vec::new();
     }
