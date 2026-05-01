@@ -1218,6 +1218,22 @@ pub async fn emit_completion_audit(
     let Some(adv) = pm.advanced() else {
         return Ok(());
     };
+    if let (Some(base), Some(branch)) = (
+        fields.dispatched_base_oid.as_deref(),
+        fields.worker_branch.as_deref(),
+    ) {
+        let repo_root = fields
+            .repo_root
+            .as_deref()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let count = crate::plan::audit_sentinel::count_worker_commits(repo_root, base, branch)
+            .map_err(|error| anyhow::anyhow!("worker output invariant check failed: {error}"))?;
+        if count != 1 {
+            anyhow::bail!(
+                "worker output invariant violated: branch {branch} has {count} commits in {base}..; expected exactly 1. Squash or use --amend."
+            );
+        }
+    }
     let kind = crate::plan::audit_sentinel::AuditSentinelKind::Completion {
         delegation_id: delegation_id.to_string(),
         completion_state,
@@ -1844,6 +1860,7 @@ async fn persist_completion_inner(
                 result_summary: result.summary.clone(),
                 artifact_uri: None,
                 dispatched_base_oid,
+                repo_root: None,
             },
             already_emitted,
         )
@@ -1890,6 +1907,7 @@ async fn persist_completion_inner(
             result_summary: cont.payload.summary.clone(),
             artifact_uri,
             dispatched_base_oid,
+            repo_root: None,
         },
         already_emitted,
     )
@@ -3542,6 +3560,8 @@ pub mod test_support {
 mod tests {
     use super::*;
     use spur_acp::SessionId;
+    use std::path::Path;
+    use std::process::Command;
     use std::sync::Arc;
 
     fn task(id: &str, deps: &[&str]) -> PlanTask {
@@ -5463,7 +5483,50 @@ mod tests {
             result_summary: Some("worker done".to_string()),
             artifact_uri: None,
             dispatched_base_oid: None,
+            repo_root: None,
         }
+    }
+
+    fn run_git(repo: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git command should run");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn worker_output_repo(worker_commit_count: usize) -> (tempfile::TempDir, String) {
+        let dir = tempfile::TempDir::new().expect("temp repo");
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "t@t"]);
+        run_git(dir.path(), &["config", "user.name", "t"]);
+        std::fs::write(dir.path().join("README.md"), "base\n").expect("write base file");
+        run_git(dir.path(), &["add", "README.md"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "base"]);
+        let base = run_git(dir.path(), &["rev-parse", "HEAD"]);
+
+        run_git(dir.path(), &["checkout", "-q", "-b", "worker"]);
+        for i in 0..worker_commit_count {
+            std::fs::write(
+                dir.path().join("worker.txt"),
+                format!("worker commit {}\n", i + 1),
+            )
+            .expect("write worker file");
+            run_git(dir.path(), &["add", "worker.txt"]);
+            run_git(
+                dir.path(),
+                &["commit", "-q", "-m", &format!("worker {}", i + 1)],
+            );
+        }
+
+        (dir, base)
     }
 
     #[tokio::test]
@@ -5517,6 +5580,7 @@ mod tests {
 
     #[tokio::test]
     async fn emit_completion_audit_populates_dispatched_base_oid() {
+        let (repo, base) = worker_output_repo(1);
         let pm = CompletionWritebackPm::new(vec![]);
         let entry = PlanTaskEntry {
             spec: PlanTask {
@@ -5529,11 +5593,11 @@ mod tests {
             },
             status: PlanTaskStatus::AwaitingReview { summary: None },
             result: None,
-            worker_branch: Some("spur/worker-test".to_string()),
+            worker_branch: Some("worker".to_string()),
             attempt: 1,
             history: Vec::new(),
             last_delegation_id: Some("del-A".to_string()),
-            dispatched_base_oid: Some("real-oid".to_string()),
+            dispatched_base_oid: Some(base.clone()),
         };
 
         super::emit_completion_audit(
@@ -5545,7 +5609,9 @@ mod tests {
             crate::plan::audit_sentinel::CompletionState::AwaitingReview,
             false,
             crate::plan::audit_sentinel::CompletionAuditFields {
+                worker_branch: entry.worker_branch.clone(),
                 dispatched_base_oid: entry.dispatched_base_oid.clone(),
+                repo_root: Some(repo.path().to_path_buf()),
                 ..completion_audit_fields()
             },
         )
@@ -5555,8 +5621,105 @@ mod tests {
         let comments = pm.advanced.comments.lock().expect("comments lock");
         let body = comments.first().expect("completion audit comment");
         assert!(
-            body.contains("\"dispatched_base_oid\":\"real-oid\""),
+            body.contains(&format!("\"dispatched_base_oid\":\"{base}\"")),
             "completion audit body should carry dispatched_base_oid: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_completion_audit_accepts_single_commit_worker_output() {
+        let (repo, base) = worker_output_repo(1);
+        let pm = CompletionWritebackPm::new(vec![]);
+
+        let result = super::emit_completion_audit(
+            Some(&pm),
+            &Some("bd-1".to_string()),
+            pro_feature_gate().as_ref(),
+            "plan-1",
+            "del-A",
+            crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+            false,
+            crate::plan::audit_sentinel::CompletionAuditFields {
+                worker_branch: Some("worker".to_string()),
+                dispatched_base_oid: Some(base),
+                repo_root: Some(repo.path().to_path_buf()),
+                ..completion_audit_fields()
+            },
+        )
+        .await;
+
+        assert!(result.is_ok(), "single-commit worker output must pass");
+        assert_eq!(
+            pm.completion_comment_count(),
+            1,
+            "valid worker output should emit the completion audit"
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_completion_audit_rejects_multi_commit_worker_output() {
+        let (repo, base) = worker_output_repo(2);
+        let pm = CompletionWritebackPm::new(vec![]);
+
+        let result = super::emit_completion_audit(
+            Some(&pm),
+            &Some("bd-1".to_string()),
+            pro_feature_gate().as_ref(),
+            "plan-1",
+            "del-A",
+            crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+            false,
+            crate::plan::audit_sentinel::CompletionAuditFields {
+                worker_branch: Some("worker".to_string()),
+                dispatched_base_oid: Some(base),
+                repo_root: Some(repo.path().to_path_buf()),
+                ..completion_audit_fields()
+            },
+        )
+        .await;
+
+        let err = result.expect_err("multi-commit worker output must be rejected");
+        assert!(
+            err.to_string().contains("expected exactly 1"),
+            "diagnostic should tell the worker to squash: {err}"
+        );
+        assert_eq!(
+            pm.completion_comment_count(),
+            0,
+            "invalid worker output must not emit a completion audit"
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_completion_audit_skips_commit_count_without_dispatched_base_oid() {
+        let (repo, _base) = worker_output_repo(2);
+        let pm = CompletionWritebackPm::new(vec![]);
+
+        let result = super::emit_completion_audit(
+            Some(&pm),
+            &Some("bd-1".to_string()),
+            pro_feature_gate().as_ref(),
+            "plan-1",
+            "del-A",
+            crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+            false,
+            crate::plan::audit_sentinel::CompletionAuditFields {
+                worker_branch: Some("worker".to_string()),
+                dispatched_base_oid: None,
+                repo_root: Some(repo.path().to_path_buf()),
+                ..completion_audit_fields()
+            },
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "legacy completion without dispatched_base_oid should skip the invariant"
+        );
+        assert_eq!(
+            pm.completion_comment_count(),
+            1,
+            "legacy completion should still emit the audit"
         );
     }
 
