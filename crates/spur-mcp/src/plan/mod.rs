@@ -6,6 +6,7 @@
 //! through the existing `DelegationRequest` → orchestrator pipeline.
 
 pub mod audit_sentinel;
+pub mod clobber_detector;
 pub mod labels;
 pub mod mutation;
 pub mod mutation_executor;
