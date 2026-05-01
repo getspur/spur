@@ -83,6 +83,7 @@ impl MutationProposer for ScopeDriftSplitProposer {
                     }],
                 }]
             }
+            WorkerSignal::PotentialClobber { .. } => vec![],
         }
     }
 }
@@ -138,6 +139,7 @@ mod tests {
     fn signal_matches_threshold(signal: &WorkerSignal, threshold: f32) -> bool {
         match signal {
             WorkerSignal::ScopeDrift { severity, .. } => *severity >= threshold,
+            WorkerSignal::PotentialClobber { .. } => false,
         }
     }
 
