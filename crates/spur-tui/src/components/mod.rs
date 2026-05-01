@@ -7,6 +7,7 @@ pub mod completion_trigger;
 pub mod config_option_query_source;
 pub mod detail_pane;
 pub mod diff_viewer;
+pub mod execute_modal;
 pub mod help_overlay;
 #[cfg(feature = "markdown")]
 pub mod image_cache;
