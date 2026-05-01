@@ -4544,22 +4544,34 @@ impl McpCallbackServer {
                 );
             }
 
-            let mut overlay_sources = Vec::new();
-            for dep in state.approved_dep_closure(&input.task_id) {
-                let base_oid = dep.dispatched_base_oid.clone().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "approved dependency {} is missing dispatched_base_oid",
-                        dep.spec.task_id
-                    )
-                })?;
-                let worker_branch = dep.worker_branch.clone().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "approved dependency {} is missing worker_branch",
-                        dep.spec.task_id
-                    )
-                })?;
-                overlay_sources.push((dep.spec.task_id.clone(), base_oid, worker_branch));
-            }
+            let plan_id = input.plan_id.as_str();
+            let task_id = input.task_id.as_str();
+            let overlay_sources = state
+                .approved_dep_closure(&input.task_id)
+                .into_iter()
+                .filter_map(|dep| {
+                    let dep_task_id = dep.spec.task_id.as_str();
+                    let Some(base_oid) = dep.dispatched_base_oid.clone() else {
+                        tracing::warn!(
+                            plan_id,
+                            task_id,
+                            dep_task_id,
+                            "preview_task_base: skipping approved dep without dispatched_base_oid — likely a pre-Phase-1 task"
+                        );
+                        return None;
+                    };
+                    let Some(worker_branch) = dep.worker_branch.as_ref().cloned() else {
+                        tracing::warn!(
+                            plan_id,
+                            task_id,
+                            dep_task_id,
+                            "preview_task_base: skipping approved dep without worker_branch"
+                        );
+                        return None;
+                    };
+                    Some((dep.spec.task_id.clone(), base_oid, worker_branch))
+                })
+                .collect::<Vec<_>>();
 
             let base_ref = state
                 .base_snapshot_branch
@@ -4649,26 +4661,25 @@ impl McpCallbackServer {
             Err(other) => Err(anyhow::anyhow!("preview overlay failed: {other}")),
         };
 
-        let mut cleanup_errors = Vec::new();
         if let Err(error) = manager.remove_worktree_at(&throwaway_path).await {
-            cleanup_errors.push(error.to_string());
+            tracing::warn!(
+                plan_id = input.plan_id.as_str(),
+                task_id = input.task_id.as_str(),
+                path = %throwaway_path.display(),
+                error = %error,
+                "preview_task_base: failed to remove preview worktree"
+            );
         }
         if let Err(error) = manager.delete_branch(&throwaway_branch).await {
-            cleanup_errors.push(error.to_string());
+            tracing::warn!(
+                plan_id = input.plan_id.as_str(),
+                task_id = input.task_id.as_str(),
+                branch = %throwaway_branch,
+                error = %error,
+                "preview_task_base: failed to delete preview branch"
+            );
         }
-
-        match (preview_result, cleanup_errors.is_empty()) {
-            (Ok(output), true) => Ok(output),
-            (Ok(_), false) => anyhow::bail!(
-                "preview cleanup failed after successful dry-run: {}",
-                cleanup_errors.join("; ")
-            ),
-            (Err(error), true) => Err(error),
-            (Err(error), false) => anyhow::bail!(
-                "{error}; preview cleanup also failed: {}",
-                cleanup_errors.join("; ")
-            ),
-        }
+        preview_result
     }
 
     async fn handle_preview_task_base(&self, id: Value, args: Value) -> JsonRpcResponse {
