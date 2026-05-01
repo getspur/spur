@@ -404,11 +404,14 @@ impl IssueBrowserView {
         }
 
         // ── Status bar ────────────────────────────────────────────────────
-        let mode_hint = match self.detail_mode {
-            DetailMode::Text => TEXT_STATUS_HINT,
-            DetailMode::Graph => GRAPH_STATUS_HINT,
+        let mode_hint = match self.issue_focus {
+            IssueFocus::Loaded { .. } | IssueFocus::Loading { .. } => Some(match self.detail_mode {
+                DetailMode::Text => TEXT_STATUS_HINT,
+                DetailMode::Graph => GRAPH_STATUS_HINT,
+            }),
+            IssueFocus::None => None,
         };
-        let status_hint = view_hint_override.or(Some(HintOverride::from_full(mode_hint)));
+        let status_hint = view_hint_override.or(mode_hint.map(HintOverride::from_full));
 
         StatusBar::render(
             frame,
