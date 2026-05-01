@@ -49,7 +49,7 @@ pub struct PlanTask {
 }
 
 /// Status of an individual plan task.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum PlanTaskStatus {
     /// Waiting for dependencies to complete.
@@ -92,7 +92,7 @@ impl PlanTaskStatus {
 /// Record of a single attempt at a plan task. Stored in `PlanTaskEntry.history`
 /// for attempts 1..attempt-1. The current (latest) attempt lives in the entry's
 /// top-level `result` and `worker_branch` fields.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttemptRecord {
     pub attempt: u32,
     pub worker_branch: Option<String>,
@@ -100,10 +100,16 @@ pub struct AttemptRecord {
     pub summary: Option<String>,
     /// Brain's `request_changes` feedback that caused this attempt to be superseded.
     pub feedback: String,
+    /// HEAD of the worker worktree immediately after overlay cherry-picks
+    /// (and before the worker's first commit). Used by `merge_plan` and
+    /// `get_task_diff` to compute the worker's net contribution range.
+    /// None for legacy attempts dispatched before bd-1dwm Phase 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatched_base_oid: Option<String>,
 }
 
 /// A task entry in the plan state (spec + runtime status).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanTaskEntry {
     pub spec: PlanTask,
     pub status: PlanTaskStatus,
@@ -122,6 +128,11 @@ pub struct PlanTaskEntry {
     /// so audit sentinels (Approval, Rejection) can reference it.
     #[serde(default)]
     pub last_delegation_id: Option<String>,
+    /// HEAD of the worker worktree immediately after overlay cherry-picks
+    /// for the current (latest) attempt. None for legacy or pre-overlay
+    /// dispatches. See bd-1dwm design spec.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatched_base_oid: Option<String>,
 }
 
 /// Result of attempting to integrate a fully approved plan onto a dedicated
@@ -374,6 +385,7 @@ mod scope_snapshot_integration_tests {
             attempt: 1,
             history: vec![],
             last_delegation_id: last_delegation.map(String::from),
+            dispatched_base_oid: None,
         }
     }
 
@@ -2630,6 +2642,7 @@ pub async fn review_task(
                     .and_then(|r| r.summary.clone())
                     .or_else(|| summary.clone()),
                 feedback: fb.to_string(),
+                dispatched_base_oid: None,
             };
             entry.history.push(current_record);
             entry.result = None;
@@ -3002,6 +3015,7 @@ fn apply_decision_and_extract(
                     .and_then(|r| r.summary.clone())
                     .or_else(|| summary.clone()),
                 feedback: fb.to_string(),
+                dispatched_base_oid: None,
             };
             entry.history.push(current_record);
             entry.result = None;
@@ -3419,6 +3433,44 @@ mod tests {
     }
 
     #[test]
+    fn plan_task_entry_serializes_dispatched_base_oid() {
+        let entry = super::PlanTaskEntry {
+            spec: super::PlanTask {
+                task_id: "T1".into(),
+                agent: "x".into(),
+                task: "do".into(),
+                depends_on: vec![],
+                issue_id: None,
+                context_files: vec![],
+            },
+            status: super::PlanTaskStatus::Approved { summary: None },
+            result: None,
+            worker_branch: Some("spur/worker-x-1".into()),
+            attempt: 1,
+            history: vec![],
+            last_delegation_id: None,
+            dispatched_base_oid: Some("abc123".into()),
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["dispatched_base_oid"], "abc123");
+    }
+
+    #[test]
+    fn legacy_plan_task_entry_without_dispatched_base_oid_deserializes() {
+        let json = serde_json::json!({
+            "spec": { "task_id": "T1", "agent": "x", "task": "do", "depends_on": [], "issue_id": null, "context_files": [] },
+            "status": { "status": "approved", "summary": null },
+            "result": null,
+            "worker_branch": null,
+            "attempt": 1,
+            "history": [],
+            "last_delegation_id": null,
+        });
+        let entry: super::PlanTaskEntry = serde_json::from_value(json).unwrap();
+        assert!(entry.dispatched_base_oid.is_none());
+    }
+
+    #[test]
     fn valid_linear_plan() {
         let tasks = vec![task("A", &[]), task("B", &["A"]), task("C", &["B"])];
         assert!(validate_plan(&tasks).is_ok());
@@ -3483,6 +3535,7 @@ mod tests {
             diff_summary: None,
             summary: Some("did thing".to_string()),
             feedback: "add null check".to_string(),
+            dispatched_base_oid: None,
         }];
         let enriched = super::build_enriched_task(
             "Implement foo",
@@ -3521,6 +3574,7 @@ mod tests {
             diff_summary: None,
             summary: Some("s".into()),
             feedback: "fb1".into(),
+            dispatched_base_oid: None,
         }];
         let enriched = super::build_enriched_task("Task", &history, "more", 2, super::MAX_ATTEMPTS);
         assert!(!enriched.contains("git show"));
@@ -3557,6 +3611,7 @@ mod tests {
                 attempt: 1,
                 history: vec![],
                 last_delegation_id: None,
+                dispatched_base_oid: None,
             }],
             brain_session_id: BrainSessionId::new(SessionId("b".into())),
             base_snapshot_branch: None,
@@ -4092,6 +4147,7 @@ mod tests {
                     attempt: 1,
                     history: Vec::new(),
                     last_delegation_id: None,
+                    dispatched_base_oid: None,
                 })
                 .collect(),
             brain_session_id: BrainSessionId::new(SessionId("brain".to_string())),
@@ -4506,6 +4562,7 @@ mod tests {
                 attempt: 1,
                 history: vec![],
                 last_delegation_id: None,
+                dispatched_base_oid: None,
             }],
         }));
 
@@ -4607,6 +4664,7 @@ mod tests {
                 attempt: 1,
                 history: vec![],
                 last_delegation_id: None,
+                dispatched_base_oid: None,
             }],
         }));
 
@@ -4728,6 +4786,7 @@ mod tests {
                     diff_summary: None,
                     summary: None,
                     feedback: "fix this".into(),
+                    dispatched_base_oid: None,
                 },
                 AttemptRecord {
                     attempt: 2,
@@ -4735,9 +4794,11 @@ mod tests {
                     diff_summary: None,
                     summary: None,
                     feedback: "fix that".into(),
+                    dispatched_base_oid: None,
                 },
             ],
             last_delegation_id: None,
+            dispatched_base_oid: None,
         };
         let mut state = PlanState {
             plan_id: "p1".into(),
@@ -4958,6 +5019,7 @@ mod tests {
                 attempt: 1,
                 history: vec![],
                 last_delegation_id: None,
+                dispatched_base_oid: None,
             }],
             brain_session_id: BrainSessionId::new(spur_acp::SessionId("brain".into())),
             base_snapshot_branch: Some("spur/brain-snapshot-test".into()),
@@ -4995,6 +5057,7 @@ mod tests {
                 attempt: 1,
                 history: vec![],
                 last_delegation_id: None,
+                dispatched_base_oid: None,
             }],
             brain_session_id: BrainSessionId::new(spur_acp::SessionId("brain".into())),
             base_snapshot_branch: Some("spur/brain-snapshot-test".into()),

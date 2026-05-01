@@ -49,6 +49,7 @@ async fn run_plan_stays_alive_while_task_awaiting_review() {
             attempt: 1,
             history: vec![],
             last_delegation_id: None,
+            dispatched_base_oid: None,
         }],
     };
 
