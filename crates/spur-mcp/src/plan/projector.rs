@@ -143,6 +143,32 @@ fn has_review_rejected_label(labels: &[String]) -> bool {
     })
 }
 
+fn has_integration_conflict_label(labels: &[String]) -> bool {
+    labels
+        .iter()
+        .any(|label| label == crate::plan::labels::SIGNAL_LABEL_INTEGRATION_CONFLICT)
+}
+
+fn latest_integration_conflict(audits: &[AuditSentinelKind]) -> Option<(String, Vec<String>)> {
+    #[derive(serde::Deserialize)]
+    struct IntegrationConflictReason {
+        dep_task_id: String,
+        #[serde(default)]
+        files: Vec<String>,
+    }
+
+    audits.iter().rev().find_map(|audit| {
+        let AuditSentinelKind::Signal { kind, reason, .. } = audit else {
+            return None;
+        };
+        if kind != "integration-conflict" && kind != "integration_conflict" {
+            return None;
+        }
+        let reason = serde_json::from_str::<IntegrationConflictReason>(reason).ok()?;
+        Some((reason.dep_task_id, reason.files))
+    })
+}
+
 fn task_id_for_issue(issue: &spur_pm::Issue) -> String {
     issue
         .labels
@@ -194,6 +220,12 @@ pub fn project_status_for_issue(
 ) -> PlanTaskStatus {
     if issue.status == closed_status {
         return project_closed_status(issue, audits);
+    }
+
+    if has_integration_conflict_label(&issue.labels) {
+        let (dep_task_id, files) =
+            latest_integration_conflict(audits).unwrap_or_else(|| ("unknown".to_string(), vec![]));
+        return PlanTaskStatus::BlockedOnSetupConflict { dep_task_id, files };
     }
 
     if let Some(delegation_id) = issue

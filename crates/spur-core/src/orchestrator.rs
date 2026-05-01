@@ -5399,13 +5399,36 @@ impl Orchestrator {
                     // DelegationCompleted is emitted (the worker
                     // session was named, even if no worker actually
                     // ran).
+                    let status = match setup_err {
+                        AttemptSetupError::OverlayConflict {
+                            source_task_id,
+                            files,
+                        } => DelegationStatus::SetupFailed {
+                            error: spur_acp::AttemptSetupError::OverlayConflict {
+                                source_task_id,
+                                files,
+                            },
+                        },
+                        AttemptSetupError::SnapshotFailed(error) => DelegationStatus::Failed {
+                            error: spur_acp::AttemptSetupError::SnapshotFailed { error }
+                                .to_string(),
+                        },
+                        AttemptSetupError::WorktreeFailed(error) => DelegationStatus::Failed {
+                            error: spur_acp::AttemptSetupError::WorktreeFailed { error }
+                                .to_string(),
+                        },
+                        AttemptSetupError::InitFailed(error) => DelegationStatus::Failed {
+                            error: spur_acp::AttemptSetupError::InitFailed { error }.to_string(),
+                        },
+                        AttemptSetupError::SessionFailed(error) => DelegationStatus::Failed {
+                            error: spur_acp::AttemptSetupError::SessionFailed { error }.to_string(),
+                        },
+                    };
                     return (
                         finalize(
                             &funnel,
                             next_worker_session,
-                            DelegationStatus::Failed {
-                                error: setup_err.to_string(),
-                            },
+                            status,
                             None,
                             None,
                             None,

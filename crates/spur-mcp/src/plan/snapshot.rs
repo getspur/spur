@@ -53,6 +53,7 @@ fn build_snapshot_counts(state: &PlanState) -> PlanSnapshotCounts {
             PlanTaskStatus::Cancelled { .. } | PlanTaskStatus::Superseded { .. } => {
                 counts.cancelled += 1
             }
+            PlanTaskStatus::BlockedOnSetupConflict { .. } => counts.pending += 1,
         }
     }
     counts
@@ -205,6 +206,23 @@ fn build_task_snapshot(state: &PlanState, task: &PlanTaskEntry) -> PlanSnapshotT
             Some(mutation_id.clone()),
             by.clone(),
         ),
+        PlanTaskStatus::BlockedOnSetupConflict { dep_task_id, files } => (
+            "blocked_on_setup_conflict".to_string(),
+            Some(format!(
+                "Setup overlay conflict applying {dep_task_id}: {} file(s)",
+                files.len()
+            )),
+            None,
+            Some(files.join(", ")),
+            task.worker_branch.clone().or_else(|| {
+                task.result
+                    .as_ref()
+                    .and_then(|result| result.worker_branch.clone())
+            }),
+            task.last_delegation_id.clone(),
+            None,
+            Vec::new(),
+        ),
     };
 
     PlanSnapshotTask {
@@ -272,6 +290,7 @@ fn task_next_action(task: &PlanTaskEntry) -> String {
     match task.status {
         PlanTaskStatus::AwaitingReview { .. } => "review".to_string(),
         PlanTaskStatus::Rejected { .. } | PlanTaskStatus::Failed { .. } => "inspect".to_string(),
+        PlanTaskStatus::BlockedOnSetupConflict { .. } => "inspect".to_string(),
         PlanTaskStatus::Pending | PlanTaskStatus::Ready | PlanTaskStatus::Dispatched { .. } => {
             "wait".to_string()
         }
