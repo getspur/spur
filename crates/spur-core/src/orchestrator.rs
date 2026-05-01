@@ -2670,7 +2670,7 @@ impl Orchestrator {
                     // ── RefreshIssues ─────────────────────────────────────
                     InteractiveInput::RefreshIssues => {
                         if let Some(pm) = &self.pm_service {
-                            refresh_pm_state(pm, &self.funnel, Some(50), false).await;
+                            refresh_pm_state(pm, &self.funnel, Some(1000), false).await;
                         } else {
                             self.funnel.emit(SpurEventBody::IssueCommandError {
                                 operation: "RefreshIssues".into(),
@@ -5105,7 +5105,7 @@ impl Orchestrator {
                     if last.elapsed() >= std::time::Duration::from_secs(3) {
                         *last = tokio::time::Instant::now();
                         drop(last); // release lock before async work
-                        refresh_pm_state(pm, &funnel, Some(50), false).await;
+                        refresh_pm_state(pm, &funnel, Some(1000), false).await;
                     } else {
                         tracing::debug!("Skipping post-delegation refresh (debounced)");
                     }
