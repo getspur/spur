@@ -189,6 +189,8 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
             }
         }
 
+        SpurEventBody::DispatchOverlayApplied { .. } => {}
+
         SpurEventBody::DelegationCompleted {
             worker_session,
             status,
