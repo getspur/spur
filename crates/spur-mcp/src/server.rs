@@ -2534,6 +2534,7 @@ impl McpCallbackServer {
             "add_dependency" => self.handle_add_dependency(id, arguments).await,
             "create_pr" => self.handle_create_pr(id, arguments).await,
             "merge_plan" => self.handle_merge_plan(id, arguments).await,
+            "resume_plan" => self.handle_resume_plan(id, arguments).await,
             "graph_triage" => self.handle_graph_triage(id, arguments).await,
             "graph_plan" => self.handle_graph_plan(id, arguments).await,
             "graph_insights" => self.handle_graph_insights(id, arguments).await,
@@ -3621,6 +3622,113 @@ impl McpCallbackServer {
                 } else {
                     JsonRpcResponse::internal_error(id, msg)
                 }
+            }
+        }
+    }
+
+    async fn handle_resume_plan(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let plan_id = match args.get("plan_id").and_then(|value| value.as_str()) {
+            Some(plan_id) => plan_id,
+            None => return JsonRpcResponse::invalid_params(id, "resume_plan: missing plan_id"),
+        };
+        let pm = match self.pm_service.as_deref() {
+            Some(pm) => pm,
+            None => return JsonRpcResponse::internal_error(id, "resume_plan requires PM service"),
+        };
+
+        let epics = match pm
+            .list_issues(IssueFilter {
+                labels: vec![crate::plan::labels::plan_id(plan_id)],
+                issue_type: Some("epic".to_string()),
+                include_closed: true,
+                limit: Some(10),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(epics) => epics,
+            Err(error) => {
+                return JsonRpcResponse::internal_error(
+                    id,
+                    format!("resume_plan: failed to find plan: {error}"),
+                )
+            }
+        };
+        let Some(epic_summary) = epics.first() else {
+            return JsonRpcResponse::error(
+                id,
+                -32004,
+                format!("resume_plan: plan not found: {plan_id}"),
+            );
+        };
+        let epic_id = epic_summary.id.clone();
+        let epic = match pm.get_issue(&epic_id).await {
+            Ok(epic) => epic,
+            Err(error) => {
+                return JsonRpcResponse::internal_error(
+                    id,
+                    format!("resume_plan: failed to load epic {epic_id}: {error}"),
+                )
+            }
+        };
+
+        match crate::plan::ownership::classify_owner(
+            &epic.labels,
+            self.brain_session_id.as_session_id(),
+        ) {
+            crate::plan::ownership::PlanOwnerMatch::OwnedByCurrent => {
+                let result = json!({
+                    "status": "already_owner",
+                    "plan_id": plan_id,
+                    "epic_id": epic_id,
+                });
+                let text =
+                    serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
+                JsonRpcResponse::success(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }] }),
+                )
+            }
+            crate::plan::ownership::PlanOwnerMatch::OwnedByOther { owner } => {
+                JsonRpcResponse::error(
+                    id,
+                    -32009,
+                    format!(
+                        "resume_plan: plan {plan_id} is owned by {owner}; active handoff is not implemented in MVP"
+                    ),
+                )
+            }
+            crate::plan::ownership::PlanOwnerMatch::Unowned => {
+                let owner_label =
+                    crate::plan::labels::plan_owner(&self.brain_session_id.as_session_id().0);
+                if let Err(error) = apply_issue_update(
+                    pm,
+                    &epic_id,
+                    IssueUpdate {
+                        add_labels: vec![owner_label],
+                        ..Default::default()
+                    },
+                )
+                .await
+                {
+                    return JsonRpcResponse::internal_error(
+                        id,
+                        format!("resume_plan: failed to claim plan: {error}"),
+                    );
+                }
+                self.fast_forward_reconciler();
+
+                let result = json!({
+                    "status": "claimed",
+                    "plan_id": plan_id,
+                    "epic_id": epic_id,
+                });
+                let text =
+                    serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
+                JsonRpcResponse::success(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }] }),
+                )
             }
         }
     }
