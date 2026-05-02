@@ -609,6 +609,27 @@ pub async fn build_epic_subgraph(
     epic_body: Option<&str>,
     tasks: &[crate::plan::PlanTask],
 ) -> Result<EpicSubgraph, String> {
+    build_epic_subgraph_with_activation_labels(
+        pm,
+        feature_gate,
+        plan_id,
+        epic_title,
+        epic_body,
+        tasks,
+        Vec::new(),
+    )
+    .await
+}
+
+async fn build_epic_subgraph_with_activation_labels(
+    pm: &spur_pm::PmService,
+    feature_gate: &spur_license::FeatureGate,
+    plan_id: &str,
+    epic_title: &str,
+    epic_body: Option<&str>,
+    tasks: &[crate::plan::PlanTask],
+    activation_add_labels: Vec<String>,
+) -> Result<EpicSubgraph, String> {
     let (epic_create, child_specs) =
         plan_epic_issue_creates(plan_id, epic_title, epic_body, tasks)?;
     require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED, feature_gate)
@@ -657,10 +678,12 @@ pub async fn build_epic_subgraph(
         task_map.insert(task_id, child_id);
     }
 
+    let mut add_labels = vec![crate::plan::labels::PLAN_COMPLETE.to_string()];
+    add_labels.extend(activation_add_labels);
     pm.update_issue(
         &epic_id,
         spur_pm::types::IssueUpdate {
-            add_labels: vec![crate::plan::labels::PLAN_COMPLETE.to_string()],
+            add_labels,
             remove_labels: vec![crate::plan::labels::PLAN_PENDING.to_string()],
             ..Default::default()
         },
@@ -3816,36 +3839,20 @@ impl McpCallbackServer {
                 .as_deref()
                 .expect("gate ensures pm is beads");
             let title = epic_title.as_deref().expect("gate ensures non-empty title");
-            match build_epic_subgraph(
+            let owner_label =
+                crate::plan::labels::plan_owner(&self.brain_session_id.as_session_id().0);
+            match build_epic_subgraph_with_activation_labels(
                 pm,
                 self.feature_gate.as_ref(),
                 &plan_id,
                 title,
                 epic_body.as_deref(),
                 &tasks,
+                vec![owner_label],
             )
             .await
             {
                 Ok(sg) => {
-                    let owner_label =
-                        crate::plan::labels::plan_owner(&self.brain_session_id.as_session_id().0);
-                    if let Err(e) = pm
-                        .update_issue(
-                            &sg.epic_id,
-                            spur_pm::IssueUpdate {
-                                add_labels: vec![owner_label],
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                    {
-                        return JsonRpcResponse::error(
-                            id,
-                            -32000,
-                            format!("submit_plan: failed to persist plan owner: {e}"),
-                        );
-                    }
-
                     if let Some(adv) = pm.advanced() {
                         let audit =
                             crate::plan::audit_sentinel::AuditSentinelKind::PlanOwnershipAcquired {

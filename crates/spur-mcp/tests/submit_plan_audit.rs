@@ -122,6 +122,11 @@ async fn submit_plan_persists_plan_owner_on_epic() {
         .find_map(|line| line.strip_prefix("epic_id: "))
         .and_then(|rest| rest.split_whitespace().next())
         .expect("submit_plan response must include epic_id");
+    let expected_plan_id = text
+        .lines()
+        .find_map(|line| line.strip_prefix("plan_id: "))
+        .and_then(|rest| rest.split_whitespace().next())
+        .expect("submit_plan response must include plan_id");
     let epic = pm.get_issue(epic_id).await.expect("load created epic");
 
     let owner_label = spur_mcp::plan::labels::plan_owner(brain_session.as_session_id().0.as_str());
@@ -129,6 +134,34 @@ async fn submit_plan_persists_plan_owner_on_epic() {
         epic.labels.contains(&owner_label),
         "epic {epic_id} must carry owner label {owner_label}; got labels: {:?}",
         epic.labels
+    );
+
+    let list_out =
+        run_br(dir.path(), &["comments", "list", epic_id]).expect("br comments list failed");
+    let items: serde_json::Value =
+        serde_json::from_str(&list_out).expect("br comments list output must be valid JSON");
+    let texts: Vec<String> = items
+        .as_array()
+        .expect("comments list must be a JSON array")
+        .iter()
+        .filter_map(|c| c.get("text").and_then(|t| t.as_str()).map(String::from))
+        .collect();
+    let sentinels = collect_sentinels(&texts);
+
+    assert!(
+        sentinels.iter().any(|sentinel| matches!(
+            sentinel,
+            AuditSentinelKind::PlanOwnershipAcquired {
+                plan_id,
+                owner,
+                token,
+                reason,
+            } if plan_id == expected_plan_id
+                && owner == &brain_session.to_string()
+                && !token.is_empty()
+                && reason == "submit_plan"
+        )),
+        "PlanOwnershipAcquired audit sentinel not found on epic {epic_id}; comments: {texts:?}"
     );
 }
 
