@@ -427,6 +427,10 @@ pub struct McpCallbackServer {
     /// `execute_epic` calls from racing into double-dispatch. Terminal plans
     /// are cleared lazily on the next `execute_epic` call for the same epic.
     plan_registry: Arc<tokio::sync::Mutex<crate::plan::PlanRegistry>>,
+    /// Serializes current-brain ownership claims across `execute_epic` and
+    /// `resume_plan`. The durable invariant lives in beads owner labels; this
+    /// local lock closes scan-before-write races within one brain server.
+    active_plan_claim_lock: Arc<tokio::sync::Mutex<()>>,
     /// INV-6: handle to the orchestrator's per-delegation cancellation token
     /// registry. `None` in test harnesses that don't wire a real orchestrator.
     cancellation_control: Option<CancellationControl>,
@@ -1762,6 +1766,7 @@ impl McpCallbackServer {
                 crate::plan::outcomes::OutcomeStore::default(),
             )),
             plan_registry: Arc::new(tokio::sync::Mutex::new(crate::plan::PlanRegistry::default())),
+            active_plan_claim_lock: Arc::new(tokio::sync::Mutex::new(())),
             cancellation_control: None,
             continuation_ctx: Arc::new(continuation_ctx),
             materializer,
@@ -3622,9 +3627,10 @@ impl McpCallbackServer {
         let epics = pm
             .list_issues(IssueFilter {
                 labels: vec![owner_label],
+                status: Some("open".to_string()),
                 issue_type: Some("epic".to_string()),
-                include_closed: true,
-                limit: Some(1_000),
+                include_closed: false,
+                limit: Some(10_000),
                 ..Default::default()
             })
             .await
@@ -3863,6 +3869,7 @@ impl McpCallbackServer {
                 ),
             ),
             crate::plan::ownership::PlanOwnerMatch::Unowned => {
+                let _active_plan_claim_guard = self.active_plan_claim_lock.lock().await;
                 match self.current_brain_active_owned_plan(pm, None, None).await {
                     Ok(Some(active)) => {
                         return JsonRpcResponse::error(
@@ -4474,6 +4481,7 @@ impl McpCallbackServer {
             }
         }
 
+        let _active_plan_claim_guard = self.active_plan_claim_lock.lock().await;
         match self
             .current_brain_active_owned_plan(pm, None, Some(&epic_id))
             .await
