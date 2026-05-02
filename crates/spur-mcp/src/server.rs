@@ -4259,34 +4259,35 @@ impl McpCallbackServer {
     }
 
     async fn handle_get_plan_status(&self, id: Value, args: Value) -> JsonRpcResponse {
-        let plan_id = match args.get("plan_id").and_then(|v| v.as_str()) {
-            Some(p) => p.to_string(),
-            None => return JsonRpcResponse::invalid_params(id, "Missing required field 'plan_id'"),
+        let ctx = crate::handlers::WorkerCallContext {
+            delegation_id: String::new(),
+            brain_session_id: self.brain_session_id.as_session_id().0.clone(),
         };
-
-        let plan_state = match self.load_or_project_plan(&plan_id).await {
-            Ok(plan_state) => plan_state,
-            Err(_) => {
-                return JsonRpcResponse::invalid_params(id, format!("Unknown plan_id: '{plan_id}'"))
+        match crate::handlers::get_plan_status(self, &self.reconciler_outcomes, &ctx, args).await {
+            Ok(status) => {
+                let text = serde_json::to_string_pretty(&status)
+                    .unwrap_or_else(|_| status.to_string());
+                JsonRpcResponse::success(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }] }),
+                )
             }
-        };
-
-        let state = plan_state.lock().await;
-        let mut status = crate::plan::build_plan_status(&plan_id, &state);
-        let outcomes = self.reconciler_outcomes.lock().await;
-        if let serde_json::Value::Object(ref mut fields) = status {
-            fields.insert(
-                "recent_outcomes".into(),
-                serde_json::json!(outcomes.recent_outcomes(&plan_id)),
-            );
-            fields.insert(
-                "stuck_tasks".into(),
-                serde_json::json!(outcomes.stuck_tasks_for_plan(&plan_id)),
-            );
+            Err(crate::handlers::McpHandlerError::InvalidParams(e)) => {
+                JsonRpcResponse::invalid_params(id, e)
+            }
+            Err(crate::handlers::McpHandlerError::NotFound(e)) => {
+                JsonRpcResponse::error(id, -32004, e)
+            }
+            Err(crate::handlers::McpHandlerError::Unauthorized(e)) => {
+                JsonRpcResponse::error(id, -32001, e)
+            }
+            Err(crate::handlers::McpHandlerError::UpstreamPm(e)) => {
+                JsonRpcResponse::internal_error(id, format!("get_plan_status failed: {e}"))
+            }
+            Err(crate::handlers::McpHandlerError::Internal(e)) => {
+                JsonRpcResponse::internal_error(id, e)
+            }
         }
-        let text = serde_json::to_string_pretty(&status).unwrap_or_else(|_| status.to_string());
-
-        JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
     }
 
     async fn handle_get_reconciler_status(&self, id: Value) -> JsonRpcResponse {
@@ -5288,6 +5289,16 @@ impl crate::plan::reconciler::ReconcilerAutomation for McpCallbackServer {
 
     async fn create_pr(&self, params: spur_pm::PrParams) -> anyhow::Result<String> {
         self.create_pr_impl(params).await
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::handlers::PlanResolver for McpCallbackServer {
+    async fn load_or_project_plan(
+        &self,
+        plan_id: &str,
+    ) -> Result<Arc<tokio::sync::Mutex<crate::plan::PlanState>>, String> {
+        McpCallbackServer::load_or_project_plan(self, plan_id).await
     }
 }
 
