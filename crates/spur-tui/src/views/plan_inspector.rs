@@ -309,10 +309,17 @@ impl View for PlanInspectorView {
                 id: None,
             } if operation == "GetIssueDetail" => {
                 if let Some(open_issue_id) = self.open_issue_id.as_ref() {
-                    if matches!(
-                        self.issue_states.get(open_issue_id),
-                        Some(TaskIssueState::Loading)
-                    ) {
+                    let loading_count = self
+                        .issue_states
+                        .values()
+                        .filter(|state| matches!(state, TaskIssueState::Loading))
+                        .count();
+                    if loading_count == 1
+                        && matches!(
+                            self.issue_states.get(open_issue_id),
+                            Some(TaskIssueState::Loading)
+                        )
+                    {
                         self.issue_states
                             .insert(open_issue_id.clone(), TaskIssueState::Error(error.clone()));
                     }
