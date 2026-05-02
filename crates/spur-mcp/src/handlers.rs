@@ -1,5 +1,5 @@
 use serde_json::Value;
-use spur_pm::PmService;
+use spur_pm::{IssueUpdate, PmService};
 
 #[derive(Debug, Clone)]
 pub struct WorkerCallContext {
@@ -61,6 +61,74 @@ pub async fn get_issue(
 
     serde_json::to_value(issue)
         .map_err(|e| McpHandlerError::Internal(format!("failed to serialize issue: {e}")))
+}
+
+pub async fn update_issue(
+    pm: &PmService,
+    _ctx: &WorkerCallContext,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, McpHandlerError> {
+    let id = args
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| McpHandlerError::InvalidParams("missing 'id'".into()))?;
+
+    let comment = args
+        .get("comment")
+        .and_then(serde_json::Value::as_str)
+        .map(String::from);
+
+    let add_labels: Vec<String> = args
+        .get("add_labels")
+        .and_then(serde_json::Value::as_array)
+        .map(|labels| {
+            labels
+                .iter()
+                .filter_map(|label| label.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let remove_labels: Vec<String> = args
+        .get("remove_labels")
+        .and_then(serde_json::Value::as_array)
+        .map(|labels| {
+            labels
+                .iter()
+                .filter_map(|label| label.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let status = args
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .map(String::from);
+
+    let priority = args
+        .get("priority")
+        .and_then(|v| v.as_i64())
+        .map(|n| n as i32);
+
+    let assignee = args
+        .get("assignee")
+        .and_then(serde_json::Value::as_str)
+        .map(String::from);
+
+    let update = IssueUpdate {
+        status,
+        comment,
+        add_labels,
+        remove_labels,
+        priority,
+        assignee,
+    };
+
+    pm.update_issue(id, update)
+        .await
+        .map_err(|e| McpHandlerError::UpstreamPm(format!("{e}")))?;
+
+    Ok(serde_json::json!({ "ok": true }))
 }
 
 #[cfg(test)]

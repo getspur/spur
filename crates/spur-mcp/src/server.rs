@@ -3247,47 +3247,35 @@ impl McpCallbackServer {
             Some(pm) => pm,
             None => return JsonRpcResponse::internal_error(id, "No issue tracker configured"),
         };
-        let issue_id = match args.get("id").and_then(|v| v.as_str()) {
-            Some(i) => i.to_string(),
-            None => return JsonRpcResponse::invalid_params(id, "Missing required field 'id'"),
+        let ctx = crate::handlers::WorkerCallContext {
+            delegation_id: String::new(),
+            brain_session_id: self.brain_session_id.as_session_id().0.clone(),
         };
 
-        let add_labels: Vec<String> = args
-            .get("add_labels")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        let remove_labels: Vec<String> = args
-            .get("remove_labels")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-
-        let update = IssueUpdate {
-            status: args
-                .get("status")
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            comment: args
-                .get("comment")
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            priority: args
-                .get("priority")
-                .and_then(|v| v.as_i64())
-                .map(|n| n as i32),
-            assignee: args
-                .get("assignee")
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            add_labels,
-            remove_labels,
-        };
-
-        match pm.update_issue(&issue_id, update).await {
-            Ok(()) => JsonRpcResponse::success(
-                id,
-                json!({ "content": [{ "type": "text", "text": "Issue updated." }] }),
-            ),
-            Err(e) => JsonRpcResponse::internal_error(id, format!("update_issue failed: {e}")),
+        match crate::handlers::update_issue(pm, &ctx, args).await {
+            Ok(result) => {
+                let text = serde_json::to_string_pretty(&result)
+                    .unwrap_or_else(|_| result.to_string());
+                JsonRpcResponse::success(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }] }),
+                )
+            }
+            Err(crate::handlers::McpHandlerError::InvalidParams(e)) => {
+                JsonRpcResponse::invalid_params(id, e)
+            }
+            Err(crate::handlers::McpHandlerError::NotFound(e)) => {
+                JsonRpcResponse::error(id, -32004, e)
+            }
+            Err(crate::handlers::McpHandlerError::Unauthorized(e)) => {
+                JsonRpcResponse::error(id, -32001, e)
+            }
+            Err(crate::handlers::McpHandlerError::UpstreamPm(e)) => {
+                JsonRpcResponse::internal_error(id, format!("update_issue failed: {e}"))
+            }
+            Err(crate::handlers::McpHandlerError::Internal(e)) => {
+                JsonRpcResponse::internal_error(id, e)
+            }
         }
     }
 
