@@ -969,6 +969,23 @@ pub enum SpurEventBody {
         delegation_id: String,
     },
 
+    /// A plan task reached a terminal failed state.
+    PlanTaskFailed {
+        plan_id: String,
+        task_id: String,
+        attempt: u32,
+        max_attempts: u32,
+        error: String,
+        delegation_id: String,
+    },
+
+    /// A plan task completed worker execution and is waiting for brain review.
+    PlanTaskAwaitingReview {
+        plan_id: String,
+        task_id: String,
+        delegation_id: String,
+    },
+
     // ── Plan lifecycle events (INV-7) ─────────────────────────────────────────
     /// Emitted once when a submitted plan reaches a terminal state (no tasks
     /// left to dispatch). Counts reflect the final status of all tasks.

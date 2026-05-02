@@ -13,6 +13,12 @@ fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterialize
     ))
 }
 
+fn test_continuation_ctx() -> Arc<spur_mcp::server::DetachedContinuationCtx> {
+    Arc::new(spur_mcp::server::DetachedContinuationCtx {
+        on_complete: Arc::new(|_, _| Box::pin(async {})),
+    })
+}
+
 /// A test sink that captures emitted event bodies synchronously.
 struct CaptureSink {
     events: std::sync::Mutex<Vec<spur_acp::SpurEvent>>,
@@ -186,6 +192,7 @@ async fn test_delegation_cancelled_result_does_not_cascade() {
             None,
             None,
             None,
+            test_continuation_ctx(),
             test_materializer(),
             common::server_builder::pro_feature_gate(),
         )
@@ -311,6 +318,7 @@ async fn test_plan_ready_to_merge_blocked_by_cancelled_and_count() {
         Some(sink_ref),
         None,
         None,
+        test_continuation_ctx(),
         test_materializer(),
         common::server_builder::pro_feature_gate(),
     )

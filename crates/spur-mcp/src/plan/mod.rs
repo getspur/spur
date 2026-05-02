@@ -1741,7 +1741,8 @@ pub(crate) async fn persist_worker_completion_and_notify(
     attempt: u32,
     materializer: &crate::outcome_materializer::OutcomeMaterializer,
     dispatched_base_oid: Option<String>,
-) -> anyhow::Result<()> {
+    task_id: Option<&str>,
+) -> anyhow::Result<Option<DeferredCompletionPush>> {
     let (completion_state, audits) =
         derive_worker_completion_state(pm, feature_gate, issue_id, delegation_id, &result.status)
             .await?;
@@ -1763,6 +1764,7 @@ pub(crate) async fn persist_worker_completion_and_notify(
         attempt,
         materializer,
         dispatched_base_oid,
+        task_id,
     )
     .await
 }
@@ -1795,7 +1797,8 @@ pub(crate) async fn persist_system_completion_and_notify(
     attempt: u32,
     materializer: &crate::outcome_materializer::OutcomeMaterializer,
     dispatched_base_oid: Option<String>,
-) -> anyhow::Result<()> {
+    task_id: Option<&str>,
+) -> anyhow::Result<Option<DeferredCompletionPush>> {
     let audits = read_audits_if_advanced(pm, feature_gate, issue_id).await?;
     let already_emitted = audits
         .as_deref()
@@ -1815,6 +1818,7 @@ pub(crate) async fn persist_system_completion_and_notify(
         attempt,
         materializer,
         dispatched_base_oid,
+        task_id,
     )
     .await
 }
@@ -1914,7 +1918,8 @@ async fn persist_completion_inner(
     attempt: u32,
     materializer: &crate::outcome_materializer::OutcomeMaterializer,
     dispatched_base_oid: Option<String>,
-) -> anyhow::Result<()> {
+    task_id: Option<&str>,
+) -> anyhow::Result<Option<DeferredCompletionPush>> {
     use crate::plan::audit_sentinel::CompletionState;
 
     if matches!(completion_state, CompletionState::Superseded) {
@@ -1936,13 +1941,14 @@ async fn persist_completion_inner(
         )
         .await?;
         crate::server::notify_fast_forward(fast_forward);
-        return Ok(());
+        return Ok(None);
     }
 
     let source = match completion_state {
-        CompletionState::AwaitingReview | CompletionState::Failed => {
-            spur_acp::domain::ContinuationSource::PlanCompleted
+        CompletionState::AwaitingReview => {
+            spur_acp::domain::ContinuationSource::PlanTaskAwaitingReview
         }
+        CompletionState::Failed => spur_acp::domain::ContinuationSource::PlanTaskFailed,
         CompletionState::Cancelled => spur_acp::domain::ContinuationSource::Cancelled,
         CompletionState::Superseded => unreachable!("handled above"),
     };
@@ -1952,7 +1958,7 @@ async fn persist_completion_inner(
             spur_acp::DelegationId::from(delegation_id),
             attempt,
             brain_session_id.clone(),
-            source,
+            source.clone(),
             None,
         )
         .await;
@@ -1983,7 +1989,25 @@ async fn persist_completion_inner(
     )
     .await?;
     crate::server::notify_fast_forward(fast_forward);
-    Ok(())
+
+    // Cancelled completions persist audit but emit no event/continuation.
+    if !matches!(
+        completion_state,
+        CompletionState::AwaitingReview | CompletionState::Failed
+    ) {
+        return Ok(None);
+    }
+
+    let event = task_id.map(|tid| PlanTaskTerminalEventPayload {
+        plan_id: plan_id.to_string(),
+        task_id: tid.to_string(),
+        delegation_id: delegation_id.to_string(),
+        attempt,
+        completion_state,
+        result_status: result.status.clone(),
+    });
+    let _ = source; // ContinuationSource lives on `cont` already; field elided.
+    Ok(Some(DeferredCompletionPush { cont, event }))
 }
 
 pub(crate) fn completion_state_from_status(
@@ -2001,6 +2025,141 @@ pub(crate) fn completion_state_from_status(
     }
 }
 
+/// Payload `persist_completion_inner` packages for the caller to emit AFTER
+/// updating the in-memory plan state. Held by [`DeferredCompletionPush`] and
+/// consumed by [`DeferredCompletionPush::deliver`].
+pub struct PlanTaskTerminalEventPayload {
+    pub plan_id: String,
+    pub task_id: String,
+    pub delegation_id: String,
+    pub attempt: u32,
+    pub completion_state: crate::plan::audit_sentinel::CompletionState,
+    pub result_status: DelegationStatus,
+}
+
+/// Deferred terminal-state notifications a plan-completion caller MUST drain
+/// after updating in-memory `PlanState` and dropping the lock. Carries both
+/// the brain re-prompt continuation and the observability event payload so
+/// emission ordering is consistent across both observers — events and
+/// continuations both fire AFTER the in-memory state is terminal.
+///
+/// Contract: caller calls `Self::deliver(...)` exactly once, AFTER updating
+/// the in-memory plan state. Dropping the value silently elides the
+/// notifications and is rejected at compile time by `#[must_use]`.
+#[must_use = "deferred completion notifications dropped — brain will not be re-prompted"]
+pub struct DeferredCompletionPush {
+    pub cont: spur_acp::domain::BrainContinuation,
+    pub event: Option<PlanTaskTerminalEventPayload>,
+}
+
+impl DeferredCompletionPush {
+    /// Emit the terminal event AND push the brain continuation. Call AFTER
+    /// updating the in-memory PlanState and dropping the lock.
+    pub async fn deliver(
+        self,
+        event_sink: Option<&dyn crate::events::McpEventSink>,
+        continuation_ctx: &crate::server::DetachedContinuationCtx,
+    ) {
+        if let Some(payload) = self.event.as_ref() {
+            emit_plan_task_terminal_event(event_sink, payload);
+        }
+        let delegation_id = self.cont.delegation_id.as_str().to_string();
+        (continuation_ctx.on_complete)(self.cont, delegation_id).await;
+    }
+}
+
+fn emit_plan_task_terminal_event(
+    sink: Option<&dyn crate::events::McpEventSink>,
+    payload: &PlanTaskTerminalEventPayload,
+) {
+    let Some(sink) = sink else {
+        return;
+    };
+    match payload.completion_state {
+        crate::plan::audit_sentinel::CompletionState::AwaitingReview => {
+            sink.emit(spur_acp::SpurEventBody::PlanTaskAwaitingReview {
+                plan_id: payload.plan_id.clone(),
+                task_id: payload.task_id.clone(),
+                delegation_id: payload.delegation_id.clone(),
+            });
+        }
+        crate::plan::audit_sentinel::CompletionState::Failed => {
+            let error = match &payload.result_status {
+                DelegationStatus::Failed { error } => error.clone(),
+                DelegationStatus::SetupFailed { error } => error.to_string(),
+                other => format!("{other:?}"),
+            };
+            sink.emit(spur_acp::SpurEventBody::PlanTaskFailed {
+                plan_id: payload.plan_id.clone(),
+                task_id: payload.task_id.clone(),
+                attempt: payload.attempt,
+                max_attempts: MAX_ATTEMPTS,
+                error,
+                delegation_id: payload.delegation_id.clone(),
+            });
+        }
+        crate::plan::audit_sentinel::CompletionState::Cancelled
+        | crate::plan::audit_sentinel::CompletionState::Superseded => {}
+    }
+}
+
+async fn materialize_and_push_detached_continuation(
+    continuation_ctx: &crate::server::DetachedContinuationCtx,
+    materializer: &crate::outcome_materializer::OutcomeMaterializer,
+    result: &DelegationResult,
+    delegation_id: &str,
+    attempt: u32,
+    brain_session_id: &BrainSessionId,
+    source: spur_acp::domain::ContinuationSource,
+) {
+    let cont = materializer
+        .materialize(
+            result.clone(),
+            spur_acp::DelegationId::from(delegation_id),
+            attempt,
+            brain_session_id.clone(),
+            source,
+            None,
+        )
+        .await;
+    (continuation_ctx.on_complete)(cont, delegation_id.to_string()).await;
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn push_plan_completed_continuation(
+    continuation_ctx: &crate::server::DetachedContinuationCtx,
+    materializer: &crate::outcome_materializer::OutcomeMaterializer,
+    brain_session_id: &BrainSessionId,
+    plan_id: &str,
+    approved_count: u32,
+    rejected_count: u32,
+    failed_count: u32,
+    cancelled_count: u32,
+) {
+    let delegation_id = format!("plan::{plan_id}::completed");
+    let result = DelegationResult {
+        status: DelegationStatus::Success,
+        diff: None,
+        diff_summary: None,
+        summary: Some(format!(
+            "Plan completed: {approved_count} approved, {rejected_count} rejected, {failed_count} failed, {cancelled_count} cancelled"
+        )),
+        estimated_cost_usd: 0.0,
+        worker_branch: None,
+        artifact: None,
+    };
+    materialize_and_push_detached_continuation(
+        continuation_ctx,
+        materializer,
+        &result,
+        &delegation_id,
+        1,
+        brain_session_id,
+        spur_acp::domain::ContinuationSource::PlanCompleted,
+    )
+    .await;
+}
+
 // ─── Executor ────────────────────────────────────────────────────────
 
 /// Run a submitted plan to completion. Dispatches tasks through the
@@ -2008,12 +2167,14 @@ pub(crate) fn completion_state_from_status(
 ///
 /// Spawned as a tokio task by `handle_submit_plan`. The plan state is
 /// updated in-place; `get_plan_status` reads it concurrently.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_plan(
     plan: Arc<Mutex<PlanState>>,
     delegation_tx: mpsc::Sender<DelegationRequest>,
     event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
     pm: Option<Arc<dyn PmLike>>,
     fast_forward: Option<Arc<tokio::sync::Notify>>,
+    continuation_ctx: Arc<crate::server::DetachedContinuationCtx>,
     materializer: Arc<crate::outcome_materializer::OutcomeMaterializer>,
     feature_gate: Arc<spur_license::FeatureGate>,
 ) {
@@ -2126,6 +2287,8 @@ pub async fn run_plan(
             let materializer_ref = Arc::clone(&materializer);
             let feature_gate_ref = Arc::clone(&feature_gate);
             let brain_sid_ref = brain_sid.clone();
+            let continuation_ctx_ref = Arc::clone(&continuation_ctx);
+            let event_sink_ref = event_sink.clone();
             let issue_id_for_completion = task_spec.issue_id.clone();
             let delegation_id_for_completion = delegation_id.clone();
 
@@ -2133,10 +2296,11 @@ pub async fn run_plan(
                 match rx.await {
                     Ok(result) => {
                         // Collect completion data before acquiring lock.
-                        if let (Some(pm), Some(issue_id)) =
+                        let mut deferred: Option<DeferredCompletionPush> = None;
+                        let persisted_completion = if let (Some(pm), Some(issue_id)) =
                             (pm_ref.as_deref(), issue_id_for_completion.as_deref())
                         {
-                            if let Err(error) = persist_worker_completion_and_notify(
+                            match persist_worker_completion_and_notify(
                                 pm,
                                 issue_id,
                                 feature_gate_ref.as_ref(),
@@ -2148,19 +2312,29 @@ pub async fn run_plan(
                                 task_attempt,
                                 &materializer_ref,
                                 None,
+                                Some(&tid),
                             )
                             .await
                             {
-                                warn!(
-                                    plan_id = %pid,
-                                    task_id = %tid,
-                                    issue_id = %issue_id,
-                                    "failed to persist completion result: {error}"
-                                );
-                                return tid;
+                                Ok(payload) => {
+                                    deferred = payload;
+                                    true
+                                }
+                                Err(error) => {
+                                    warn!(
+                                        plan_id = %pid,
+                                        task_id = %tid,
+                                        issue_id = %issue_id,
+                                        "failed to persist completion result: {error}"
+                                    );
+                                    return tid;
+                                }
                             }
-                        }
+                        } else {
+                            false
+                        };
 
+                        let mut completion_state = None;
                         let mut p = plan_ref.lock().await;
                         if let Some(entry) =
                             p.tasks.iter_mut().find(|t| t.spec.task_id == tid)
@@ -2172,12 +2346,17 @@ pub async fn run_plan(
                                         summary: result.summary.clone(),
                                     };
                                     entry.worker_branch = result.worker_branch.clone();
+                                    completion_state = Some(
+                                        crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+                                    );
                                 }
                                 DelegationStatus::Failed { error } => {
                                     warn!(plan_id = %pid, task_id = %tid, "Plan task failed: {error}");
                                     entry.status = PlanTaskStatus::Failed {
                                         error: error.clone(),
                                     };
+                                    completion_state =
+                                        Some(crate::plan::audit_sentinel::CompletionState::Failed);
                                 }
                                 DelegationStatus::Cancelled { reason } => {
                                     warn!(plan_id = %pid, task_id = %tid, "Plan task cancelled: {reason}");
@@ -2203,15 +2382,73 @@ pub async fn run_plan(
                                     entry.status = PlanTaskStatus::Failed {
                                         error: error.to_string(),
                                     };
+                                    completion_state =
+                                        Some(crate::plan::audit_sentinel::CompletionState::Failed);
                                 }
                                 other => {
                                     warn!(plan_id = %pid, task_id = %tid, "Plan task ended: {other:?}");
                                     entry.status = PlanTaskStatus::Failed {
                                         error: format!("{other:?}"),
                                     };
+                                    completion_state =
+                                        Some(crate::plan::audit_sentinel::CompletionState::Failed);
                                 }
                             }
-                            entry.result = Some(result);
+                            entry.result = Some(result.clone());
+                        }
+                        drop(p);
+
+                        // Build the ephemeral-path DeferredCompletionPush if
+                        // we didn't persist (no PM / no issue_id). Persisted
+                        // path's deferred was returned by persist_*_and_notify
+                        // above. Either way, deliver AFTER drop(p) so events
+                        // and continuations both observe terminal state.
+                        if !persisted_completion {
+                            if let Some(state) = completion_state {
+                                let source = match state {
+                                    crate::plan::audit_sentinel::CompletionState::AwaitingReview => {
+                                        Some(spur_acp::domain::ContinuationSource::PlanTaskAwaitingReview)
+                                    }
+                                    crate::plan::audit_sentinel::CompletionState::Failed => {
+                                        Some(spur_acp::domain::ContinuationSource::PlanTaskFailed)
+                                    }
+                                    crate::plan::audit_sentinel::CompletionState::Cancelled
+                                    | crate::plan::audit_sentinel::CompletionState::Superseded => None,
+                                };
+                                if let Some(source) = source {
+                                    let cont = materializer_ref
+                                        .materialize(
+                                            result.clone(),
+                                            spur_acp::DelegationId::from(
+                                                delegation_id_for_completion.as_str(),
+                                            ),
+                                            task_attempt,
+                                            brain_sid_ref.clone(),
+                                            source.clone(),
+                                            None,
+                                        )
+                                        .await;
+                                    let event = Some(PlanTaskTerminalEventPayload {
+                                        plan_id: pid.clone(),
+                                        task_id: tid.clone(),
+                                        delegation_id: delegation_id_for_completion.clone(),
+                                        attempt: task_attempt,
+                                        completion_state: state,
+                                        result_status: result.status.clone(),
+                                    });
+                                    let _ = source;
+                                    deferred = Some(DeferredCompletionPush { cont, event });
+                                }
+                            }
+                        }
+
+                        if let Some(deferred) = deferred {
+                            deferred
+                                .deliver(
+                                    event_sink_ref.as_deref(),
+                                    continuation_ctx_ref.as_ref(),
+                                )
+                                .await;
                         }
                     }
                     Err(_) => {
@@ -2379,6 +2616,17 @@ pub async fn run_plan(
             cancelled: cancelled_count,
         });
     }
+    push_plan_completed_continuation(
+        continuation_ctx.as_ref(),
+        &materializer,
+        &brain_sid,
+        &plan_id,
+        approved_count,
+        rejected_count,
+        failed_count,
+        cancelled_count,
+    )
+    .await;
 }
 
 // ─── Status rendering ────────────────────────────────────────────────
@@ -3586,7 +3834,7 @@ pub mod test_support {
         attempt: u32,
         materializer: &crate::outcome_materializer::OutcomeMaterializer,
         dispatched_base_oid: Option<String>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<super::DeferredCompletionPush>> {
         super::persist_worker_completion_and_notify(
             pm,
             issue_id,
@@ -3599,6 +3847,7 @@ pub mod test_support {
             attempt,
             materializer,
             dispatched_base_oid,
+            None,
         )
         .await
     }
@@ -3685,6 +3934,12 @@ mod tests {
         Arc::new(crate::outcome_materializer::OutcomeMaterializer::new(
             Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
         ))
+    }
+
+    fn test_continuation_ctx() -> Arc<crate::server::DetachedContinuationCtx> {
+        Arc::new(crate::server::DetachedContinuationCtx {
+            on_complete: Arc::new(|_, _| Box::pin(async {})),
+        })
     }
 
     fn pro_feature_gate() -> Arc<spur_license::FeatureGate> {
@@ -3942,6 +4197,7 @@ mod tests {
                 None,
                 None,
                 None,
+                test_continuation_ctx(),
                 test_materializer(),
                 pro_feature_gate(),
             )
@@ -3964,6 +4220,7 @@ mod tests {
                 None,
                 None,
                 None,
+                test_continuation_ctx(),
                 test_materializer(),
                 pro_feature_gate(),
             )
@@ -4686,6 +4943,7 @@ mod tests {
             1,
             &materializer,
             None,
+            None,
         )
         .await
         .expect("persist completion");
@@ -4786,6 +5044,7 @@ mod tests {
             &brain_session_id,
             2,
             &materializer,
+            None,
             None,
         )
         .await
@@ -4888,6 +5147,7 @@ mod tests {
                     None,
                     Some(pm),
                     None,
+                    test_continuation_ctx(),
                     test_materializer(),
                     pro_feature_gate(),
                 )
@@ -4989,6 +5249,7 @@ mod tests {
                     None,
                     Some(Arc::new(FailingPm)),
                     None,
+                    test_continuation_ctx(),
                     test_materializer(),
                     pro_feature_gate(),
                 )

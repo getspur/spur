@@ -24,6 +24,10 @@ pub enum ContinuationSource {
     BlockTimeout,
     /// Worker reached `DelegationStatus::Cancelled` (INV-6).
     Cancelled,
+    /// `SpurEventBody::PlanTaskFailed` fired for a plan task the brain dispatched.
+    PlanTaskFailed,
+    /// `SpurEventBody::PlanTaskAwaitingReview` fired for a plan task the brain dispatched.
+    PlanTaskAwaitingReview,
     /// `SpurEventBody::PlanCompleted` fired for a plan the brain dispatched.
     PlanCompleted,
     /// `SpurEventBody::PlanReadyToMerge` fired for a plan the brain dispatched.
