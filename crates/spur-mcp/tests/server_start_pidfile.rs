@@ -1,7 +1,6 @@
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
-use std::time::Duration;
 
 use spur_acp::{BrainSessionId, SessionId};
 use spur_mcp::{server::DetachedContinuationCtx, McpCallbackServer};
@@ -90,70 +89,52 @@ async fn beads_backed_start_requires_repo_root_before_listener_boot() {
 }
 
 #[tokio::test]
-async fn dropping_server_handle_releases_pidfile_for_next_start() {
+async fn beads_backed_start_allows_concurrent_brain_servers() {
     if !br_available() {
-        eprintln!(
-            "skipping dropping_server_handle_releases_pidfile_for_next_start: `br` not on PATH"
-        );
+        eprintln!("skipping beads_backed_start_allows_concurrent_brain_servers: `br` not on PATH");
         return;
     }
-    skip_if_no_loopback!("dropping_server_handle_releases_pidfile_for_next_start");
+    skip_if_no_loopback!("beads_backed_start_allows_concurrent_brain_servers");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
     let pm = beads_pm(dir.path()).await;
-    let brain_sid = BrainSessionId::new(SessionId::new());
+    let first_brain_sid = BrainSessionId::new(SessionId::new());
+    let second_brain_sid = BrainSessionId::new(SessionId::new());
 
-    let (mut server, _channel) = McpCallbackServer::new(
-        &brain_sid,
+    let (mut first_server, _first_channel) = McpCallbackServer::new(
+        &first_brain_sid,
         Some(pm.clone()),
         None,
         test_continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
         common::server_builder::pro_feature_gate(),
     );
-    server.set_repo_root(dir.path().to_path_buf());
-    server.set_reconciler_enabled(true, None);
+    first_server.set_repo_root(dir.path().to_path_buf());
+    first_server.set_reconciler_enabled(true, None);
 
-    let (_url, handle) = Arc::new(server)
+    let (_first_url, first_handle) = Arc::new(first_server)
         .start()
         .await
-        .expect("initial start should succeed");
+        .expect("first start should succeed");
 
-    // Regression: dropping the start() handle must not detach a live server
-    // that keeps holding `.beads/.spur-brain.pid`.
-    drop(handle);
+    let (mut second_server, _second_channel) = McpCallbackServer::new(
+        &second_brain_sid,
+        Some(pm.clone()),
+        None,
+        test_continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        common::server_builder::pro_feature_gate(),
+    );
+    second_server.set_repo_root(dir.path().to_path_buf());
+    second_server.set_reconciler_enabled(true, None);
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
-    loop {
-        let (mut next_server, _channel) = McpCallbackServer::new(
-            &brain_sid,
-            Some(pm.clone()),
-            None,
-            test_continuation_ctx(),
-            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-            common::server_builder::pro_feature_gate(),
-        );
-        next_server.set_repo_root(dir.path().to_path_buf());
-        next_server.set_reconciler_enabled(true, None);
+    let (_second_url, second_handle) = Arc::new(second_server)
+        .start()
+        .await
+        .expect("second start should succeed while the first server is still running");
 
-        match Arc::new(next_server).start().await {
-            Ok((_url, next_handle)) => {
-                drop(next_handle);
-                return;
-            }
-            Err(error)
-                if format!("{error:#}")
-                    .contains("another SPUR brain session already owns this .beads/")
-                    && tokio::time::Instant::now() < deadline =>
-            {
-                tokio::task::yield_now().await;
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            Err(error) => panic!(
-                "dropping the server handle must release the pidfile for the next start: {error:#}"
-            ),
-        }
-    }
+    drop(second_handle);
+    drop(first_handle);
 }
