@@ -673,10 +673,11 @@ pub enum SpurEventBody {
     },
     WorkerMcpDelegationSummary {
         delegation_id: String,
-        calls_total: u64,
-        calls_by_tool: std::collections::BTreeMap<String, u64>,
-        p99_latency_ms: u64,
-        errors: u64,
+        brain_session_id: String,
+        tool_calls: u32,
+        audits_emitted: u32,
+        duration_ms: u64,
+        outcome: String,
     },
     ConflictDetected {
         files: Vec<PathBuf>,
@@ -1139,12 +1140,11 @@ mod tests {
     fn worker_mcp_delegation_summary_round_trip() {
         let event = SpurEventBody::WorkerMcpDelegationSummary {
             delegation_id: "abc-123".into(),
-            calls_total: 42,
-            calls_by_tool: vec![("get_issue".into(), 30), ("update_issue".into(), 12)]
-                .into_iter()
-                .collect(),
-            p99_latency_ms: 87,
-            errors: 2,
+            brain_session_id: "session-99".into(),
+            tool_calls: 42,
+            audits_emitted: 7,
+            duration_ms: 1234,
+            outcome: "success".into(),
         };
         let json = serde_json::to_string(&event).unwrap();
         let decoded: SpurEventBody = serde_json::from_str(&json).unwrap();

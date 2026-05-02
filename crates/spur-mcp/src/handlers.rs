@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value;
-use spur_pm::{IssueUpdate, PmService};
+use spur_pm::{IssueFilter, IssueUpdate, PmService};
 use tokio::sync::Mutex;
 
 use crate::outcome_materializer::OutcomeMaterializer;
@@ -69,6 +69,62 @@ pub async fn get_issue(
 
     serde_json::to_value(issue)
         .map_err(|e| McpHandlerError::Internal(format!("failed to serialize issue: {e}")))
+}
+
+pub async fn list_issues(
+    pm: &PmService,
+    _ctx: &WorkerCallContext,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, McpHandlerError> {
+    let labels: Vec<String> = args
+        .get("labels")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    let filter = IssueFilter {
+        status: args
+            .get("status")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        assignee: args
+            .get("assignee")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        priority_min: args
+            .get("priority_min")
+            .and_then(|v| v.as_i64())
+            .map(|n| n as i32),
+        priority_max: args
+            .get("priority_max")
+            .and_then(|v| v.as_i64())
+            .map(|n| n as i32),
+        issue_type: args
+            .get("issue_type")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        text_search: args
+            .get("text_search")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        limit: Some(
+            args.get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(20)
+                .min(100) as usize,
+        ),
+        offset: None,
+        labels,
+        since: None,
+        include_closed: false,
+    };
+
+    let issues = pm
+        .list_issues(filter)
+        .await
+        .map_err(|e| McpHandlerError::UpstreamPm(format!("{e}")))?;
+
+    serde_json::to_value(issues)
+        .map_err(|e| McpHandlerError::Internal(format!("failed to serialize issues: {e}")))
 }
 
 pub async fn update_issue(
@@ -735,7 +791,9 @@ pub async fn report_progress(
     let Args { message, percent } = serde_json::from_value(args)
         .map_err(|e| McpHandlerError::InvalidParams(format!("invalid args: {e}")))?;
 
-    sink.emit(SpurEventBody::WorkerReportProgress {
+    // Dual-gate gate 2: drop on full bus rather than block. The return
+    // value is ignored because the contract is fire-and-forget.
+    let _ = sink.try_emit(SpurEventBody::WorkerReportProgress {
         delegation_id: ctx.delegation_id.clone(),
         message,
         percent,

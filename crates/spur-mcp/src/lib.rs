@@ -6,6 +6,7 @@ pub mod server;
 pub mod token;
 pub mod tool_schemas;
 pub mod tools;
+pub mod worker_server;
 
 pub use plan::test_support;
 
