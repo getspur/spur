@@ -88,7 +88,7 @@ async fn request_changes_feedback_survives_reprojection_and_reaches_worker() {
         "plan-bd-33it",
         "Plan bd-33it",
         None,
-        &vec![PlanTask {
+        &[PlanTask {
             task_id: "t1".into(),
             agent: "codex".into(),
             task: "Implement the feature".into(),

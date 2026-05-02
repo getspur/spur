@@ -1397,6 +1397,58 @@ pub(crate) async fn emit_rejection_audit(
     }
 }
 
+/// Emit a `[[spur-audit v1]] ReviewFeedback` sentinel comment so the projector
+/// can rebuild `AttemptRecord.history` from beads on every reprojection.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn emit_review_feedback_audit(
+    pm: Option<&dyn PmLike>,
+    issue_id: &Option<String>,
+    feature_gate: &spur_license::FeatureGate,
+    plan_id: &str,
+    delegation_id: &str,
+    attempt: u32,
+    feedback: &str,
+    worker_branch: Option<String>,
+    summary: Option<String>,
+) {
+    let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
+        return;
+    };
+    if let Err(error) = crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        feature_gate,
+    ) {
+        warn!(
+            target: "spur.audit.emit_failure",
+            kind = "review_feedback",
+            issue_id = %issue_id,
+            plan_id = %plan_id,
+            delegation_id = %delegation_id,
+            "ReviewFeedback audit comment emission skipped: {error:?}"
+        );
+        return;
+    }
+    let Some(adv) = pm.advanced() else { return };
+    let kind = crate::plan::audit_sentinel::AuditSentinelKind::ReviewFeedback {
+        delegation_id: delegation_id.to_string(),
+        attempt,
+        feedback: feedback.to_string(),
+        worker_branch,
+        summary,
+    };
+    let body = crate::plan::audit_sentinel::encode_comment(&kind);
+    if let Err(e) = adv.add_comment(issue_id, &body).await {
+        warn!(
+            target: "spur.audit.emit_failure",
+            kind = "review_feedback",
+            issue_id = %issue_id,
+            plan_id = %plan_id,
+            delegation_id = %delegation_id,
+            "ReviewFeedback audit comment emission failed: {e}"
+        );
+    }
+}
+
 /// Build the persisted label mutation used when a task is about to be sent
 /// to a worker.
 pub fn dispatch_intent_update(
@@ -3200,23 +3252,29 @@ pub async fn review_task(
             let issue_id_for_audit = entry.spec.issue_id.clone();
             let superseded_branch: Option<String> =
                 entry.history.last().and_then(|h| h.worker_branch.clone());
+            // Capture before result is reset by the lines above (it's already
+            // None here, but the summary fallback is computed against `summary`).
+            let attempt_summary = entry
+                .result
+                .as_ref()
+                .and_then(|r| r.summary.clone())
+                .or_else(|| summary.clone());
+            let attempt_no = entry.attempt;
+            let attempt_delegation_id = entry.last_delegation_id.clone().unwrap_or_default();
             if let (Some(pm), Some(id)) = (pm, issue_id_for_audit.as_ref()) {
                 let comment = format_request_changes_comment(
                     fb,
-                    entry.attempt,
+                    attempt_no,
                     MAX_ATTEMPTS,
                     superseded_branch.as_deref(),
                 );
                 let sentinel = audit_sentinel::encode_comment(
                     &audit_sentinel::AuditSentinelKind::ReviewFeedback {
-                        attempt_no: entry.attempt,
-                        feedback_text: fb.to_string(),
+                        delegation_id: attempt_delegation_id.clone(),
+                        attempt: attempt_no,
+                        feedback: fb.to_string(),
                         worker_branch: superseded_branch.clone(),
-                        summary: entry
-                            .result
-                            .as_ref()
-                            .and_then(|r| r.summary.clone())
-                            .or_else(|| summary.clone()),
+                        summary: attempt_summary.clone(),
                     },
                 );
                 let update = spur_pm::IssueUpdate {
@@ -3347,6 +3405,15 @@ enum PendingAuditEmit {
         plan_id: String,
         delegation_id: String,
         feedback: String,
+    },
+    ReviewFeedback {
+        issue_id: Option<String>,
+        plan_id: String,
+        delegation_id: String,
+        attempt: u32,
+        feedback: String,
+        worker_branch: Option<String>,
+        summary: Option<String>,
     },
 }
 
@@ -3596,24 +3663,19 @@ fn apply_decision_and_extract(
             let issue_id_for_audit = entry.spec.issue_id.clone();
             let superseded_branch: Option<String> =
                 entry.history.last().and_then(|h| h.worker_branch.clone());
+            let attempt_summary = entry
+                .result
+                .as_ref()
+                .and_then(|r| r.summary.clone())
+                .or_else(|| summary.clone());
+            let attempt_no = entry.attempt;
+            let attempt_delegation_id = entry.last_delegation_id.clone().unwrap_or_default();
             if let Some(id) = issue_id_for_audit {
                 let comment = format_request_changes_comment(
                     fb,
-                    entry.attempt,
+                    attempt_no,
                     MAX_ATTEMPTS,
                     superseded_branch.as_deref(),
-                );
-                let sentinel = audit_sentinel::encode_comment(
-                    &audit_sentinel::AuditSentinelKind::ReviewFeedback {
-                        attempt_no: entry.attempt,
-                        feedback_text: fb.to_string(),
-                        worker_branch: superseded_branch.clone(),
-                        summary: entry
-                            .result
-                            .as_ref()
-                            .and_then(|r| r.summary.clone())
-                            .or_else(|| summary.clone()),
-                    },
                 );
                 let update = spur_pm::IssueUpdate {
                     status: Some("open".to_string()),
@@ -3625,12 +3687,14 @@ fn apply_decision_and_extract(
                     issue_id: id.clone(),
                     update,
                 });
-                beads_ops.push(PendingBeadsOp {
-                    issue_id: id,
-                    update: spur_pm::IssueUpdate {
-                        comment: Some(sentinel),
-                        ..Default::default()
-                    },
+                audit_emits.push(PendingAuditEmit::ReviewFeedback {
+                    issue_id: Some(id),
+                    plan_id: plan_id.to_string(),
+                    delegation_id: attempt_delegation_id,
+                    attempt: attempt_no,
+                    feedback: fb.to_string(),
+                    worker_branch: superseded_branch.clone(),
+                    summary: attempt_summary,
                 });
             }
             warnings.push(
@@ -3758,6 +3822,28 @@ pub async fn handle_review_task(
                         &plan_id,
                         &delegation_id,
                         &feedback,
+                    )
+                    .await;
+                }
+                PendingAuditEmit::ReviewFeedback {
+                    issue_id,
+                    plan_id,
+                    delegation_id,
+                    attempt,
+                    feedback,
+                    worker_branch,
+                    summary,
+                } => {
+                    emit_review_feedback_audit(
+                        Some(pm),
+                        &issue_id,
+                        feature_gate.as_ref(),
+                        &plan_id,
+                        &delegation_id,
+                        attempt,
+                        &feedback,
+                        worker_branch,
+                        summary,
                     )
                     .await;
                 }
