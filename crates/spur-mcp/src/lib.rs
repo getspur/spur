@@ -11,7 +11,7 @@ pub use plan::test_support;
 pub use events::McpEventSink;
 pub use server::{
     build_entries_with_task_map, build_epic_subgraph, build_worker_info, emit_plan_submit_audit,
-    parse_delegation_plan, parse_parallel_tasks, plan_epic_issue_creates, validate_parallel_args,
+    parse_parallel_tasks, plan_epic_issue_creates, validate_parallel_args,
     EpicSubgraph, McpCallbackServer, WorkerInfo,
 };
 pub use tools::{tools_list, DelegationChannel, DelegationRequest, ToolDefinition};
