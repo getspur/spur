@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -10,7 +11,7 @@ use spur_license::FeatureGate;
 use spur_mcp::events::McpEventSink;
 use spur_mcp::handlers::PlanResolver;
 use spur_mcp::plan::PlanState;
-use spur_mcp::worker_server::{WorkerMcpDeps, WorkerMcpServer};
+use spur_mcp::worker_server::{DelegationContext, WorkerMcpDeps, WorkerMcpServer};
 use spur_pm::PmService;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
@@ -126,5 +127,241 @@ async fn start_binds_listener_and_returns_url() {
     assert!(
         after_shutdown.is_err(),
         "listener still reachable after shutdown: {after_shutdown:?}"
+    );
+}
+
+// ─── T22: active_delegations counter + atomic shutdown drain ──────────────
+
+/// Sink that records the maximum value of [`WorkerMcpServer::active_count`]
+/// observed during dispatch. Holds a `Weak` server reference set after
+/// `start()` to avoid the chicken-and-egg problem of `funnel` being part of
+/// `WorkerMcpDeps`.
+struct ObservingSink {
+    server: Arc<OnceLock<Weak<WorkerMcpServer>>>,
+    max_seen: Arc<AtomicU32>,
+    /// std-thread sleep so concurrent dispatchers overlap long enough for the
+    /// counter to genuinely climb above 1. Each dispatcher runs on its own
+    /// tokio worker, so a multi_thread runtime with N+ workers can park N
+    /// dispatchers simultaneously.
+    delay: Duration,
+}
+
+impl McpEventSink for ObservingSink {
+    fn emit(&self, _event: SpurEventBody) {
+        if let Some(weak) = self.server.get() {
+            if let Some(s) = weak.upgrade() {
+                let observed = s.active_count();
+                let mut current = self.max_seen.load(Ordering::SeqCst);
+                while observed > current {
+                    match self.max_seen.compare_exchange(
+                        current,
+                        observed,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    ) {
+                        Ok(_) => break,
+                        Err(actual) => current = actual,
+                    }
+                }
+            }
+        }
+        // `block_in_place` lets tokio move other tasks off this worker so
+        // concurrent dispatchers can actually overlap and our `max_seen`
+        // CAS in this very `emit` sees more than 1.
+        tokio::task::block_in_place(|| std::thread::sleep(self.delay));
+    }
+
+    fn try_emit(&self, event: SpurEventBody) -> Result<(), SpurEventBody> {
+        self.emit(event);
+        Ok(())
+    }
+}
+
+/// Sink that holds each dispatcher in `emit` for a fixed wall-clock delay
+/// — long enough for the test to spawn `shutdown()` and assert the drain is
+/// blocking. Self-unblocks via `std::thread::sleep` so there is no
+/// cross-thread synchronization required to release the dispatcher.
+struct DelayingSink {
+    started: Arc<AtomicU32>,
+    delay: Duration,
+}
+
+impl McpEventSink for DelayingSink {
+    fn emit(&self, _event: SpurEventBody) {
+        self.started.fetch_add(1, Ordering::SeqCst);
+        // `block_in_place` tells tokio's multi_thread runtime to move other
+        // tasks off this worker before we block, so the test's polling task
+        // can still run while the dispatcher is held here.
+        tokio::task::block_in_place(|| std::thread::sleep(self.delay));
+    }
+
+    fn try_emit(&self, event: SpurEventBody) -> Result<(), SpurEventBody> {
+        self.emit(event);
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn active_count_tracks_concurrent_dispatch_entry_and_exit() {
+    if !br_available() {
+        eprintln!("skipping: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+    let pm = test_pm_service_empty(dir.path()).await;
+
+    let server_slot: Arc<OnceLock<Weak<WorkerMcpServer>>> = Arc::new(OnceLock::new());
+    let max_seen = Arc::new(AtomicU32::new(0));
+    let sink = Arc::new(ObservingSink {
+        server: Arc::clone(&server_slot),
+        max_seen: Arc::clone(&max_seen),
+        delay: Duration::from_millis(300),
+    });
+
+    let mut deps = test_deps(pm);
+    deps.funnel = sink;
+    let server = WorkerMcpServer::start("session-active".into(), deps)
+        .await
+        .expect("start must succeed");
+    server_slot
+        .set(Arc::downgrade(&server))
+        .map_err(|_| "set once")
+        .unwrap();
+
+    assert_eq!(server.active_count(), 0, "counter starts at zero");
+
+    server.register_delegation(
+        "d-1".into(),
+        DelegationContext {
+            enable_worker_progress: true,
+        },
+    );
+
+    let n: u32 = 4;
+    let url = server.url();
+    let token = server.issue_token("d-1", Duration::from_secs(60));
+    let request_url = format!("{url}?token={token}");
+
+    let mut handles = Vec::with_capacity(n as usize);
+    for i in 0..n {
+        let request_url = request_url.clone();
+        handles.push(tokio::spawn(async move {
+            reqwest::Client::new()
+                .post(&request_url)
+                .json(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": i,
+                    "method": "tools/call",
+                    "params": {"name": "report_progress", "arguments": {"message": "hi"}},
+                }))
+                .send()
+                .await
+        }));
+    }
+
+    for h in handles {
+        let resp = h.await.expect("task joins").expect("request sends");
+        assert!(resp.status().is_success() || resp.status().is_client_error());
+    }
+
+    assert_eq!(
+        server.active_count(),
+        0,
+        "counter must return to zero after all dispatchers exit"
+    );
+    let observed = max_seen.load(Ordering::SeqCst);
+    assert!(
+        observed >= 2,
+        "expected at least 2 concurrent dispatchers in flight, observed max {observed}"
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn shutdown_blocks_until_active_count_reaches_zero() {
+    if !br_available() {
+        eprintln!("skipping: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+    let pm = test_pm_service_empty(dir.path()).await;
+
+    // Dispatcher will be held inside `emit` for ~3 seconds. While held,
+    // `active_count` stays at 1 and `shutdown()` must block in its drain
+    // loop. After the sleep returns the dispatcher decrements via
+    // `ActiveCallGuard::drop` and shutdown's drain polling completes.
+    let started = Arc::new(AtomicU32::new(0));
+    let dispatch_hold = Duration::from_millis(3000);
+    let sink = Arc::new(DelayingSink {
+        started: Arc::clone(&started),
+        delay: dispatch_hold,
+    });
+
+    let mut deps = test_deps(pm);
+    deps.funnel = sink;
+    let server = WorkerMcpServer::start("session-drain".into(), deps)
+        .await
+        .expect("start must succeed");
+
+    server.register_delegation(
+        "d-1".into(),
+        DelegationContext {
+            enable_worker_progress: true,
+        },
+    );
+
+    let token = server.issue_token("d-1", Duration::from_secs(60));
+    let request_url = format!("{}?token={}", server.url(), token);
+
+    let _req_handle = tokio::spawn(async move {
+        let _ = reqwest::Client::new()
+            .post(&request_url)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "report_progress", "arguments": {"message": "hi"}},
+            }))
+            .send()
+            .await;
+    });
+
+    // Wait until the dispatcher's guard has incremented the counter. Polling
+    // `active_count` directly is the most direct signal — if it reaches 1
+    // we know the guard is alive.
+    for _ in 0..400 {
+        if server.active_count() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        server.active_count(),
+        1,
+        "in-flight dispatcher must increment counter (started={})",
+        started.load(Ordering::SeqCst)
+    );
+
+    // Shutdown must drain — i.e., not return until the in-flight dispatcher
+    // decrements `active_delegations` back to 0. Time it: the elapsed time
+    // must be at least a meaningful fraction of `dispatch_hold` (we allow
+    // slack so this is not flaky on slow CI).
+    let shutdown_start = std::time::Instant::now();
+    Arc::clone(&server).shutdown().await;
+    let elapsed = shutdown_start.elapsed();
+
+    assert_eq!(
+        server.active_count(),
+        0,
+        "active_count must be 0 once shutdown returns"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(500),
+        "shutdown returned in {elapsed:?} — should have waited on the in-flight dispatcher (~{dispatch_hold:?})"
     );
 }
