@@ -689,21 +689,22 @@ pub async fn emit_plan_submit_audit(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PersistedPlanBootstrap {
-    epic_id: String,
-    base_snapshot_branch: Option<String>,
-    base_snapshot_oid: Option<String>,
+pub(crate) struct PersistedPlanBootstrap {
+    #[allow(dead_code)]
+    pub(crate) epic_id: String,
+    pub(crate) base_snapshot_branch: Option<String>,
+    pub(crate) base_snapshot_oid: Option<String>,
 }
 
 impl PersistedPlanBootstrap {
-    fn preferred_base_ref(&self) -> Option<&str> {
+    pub(crate) fn preferred_base_ref(&self) -> Option<&str> {
         self.base_snapshot_oid
             .as_deref()
             .or(self.base_snapshot_branch.as_deref())
     }
 }
 
-async fn read_persisted_plan_bootstrap(
+pub(crate) async fn read_persisted_plan_bootstrap(
     pm: &spur_pm::PmService,
     feature_gate: &spur_license::FeatureGate,
     plan_id: &str,
@@ -740,12 +741,12 @@ async fn read_persisted_plan_bootstrap(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PersistedTaskCompletion {
-    worker_branch: Option<String>,
-    summary: Option<String>,
+pub(crate) struct PersistedTaskCompletion {
+    pub(crate) worker_branch: Option<String>,
+    pub(crate) summary: Option<String>,
 }
 
-async fn read_latest_task_completion(
+pub(crate) async fn read_latest_task_completion(
     pm: &spur_pm::PmService,
     feature_gate: &spur_license::FeatureGate,
     issue_id: &str,
@@ -774,7 +775,7 @@ async fn read_latest_task_completion(
     }))
 }
 
-async fn reconstruct_historical_attempts(
+pub(crate) async fn reconstruct_historical_attempts(
     pm: &spur_pm::PmService,
     feature_gate: &spur_license::FeatureGate,
     issue_id: &str,
@@ -1528,7 +1529,7 @@ async fn run_git_capture(
     }
 }
 
-async fn diff_text_from_branches(
+pub(crate) async fn diff_text_from_branches(
     repo_root: &std::path::Path,
     base_ref: &str,
     worker_branch: &str,
@@ -2520,13 +2521,7 @@ impl McpCallbackServer {
             "execute_epic" => self.handle_execute_epic(id, arguments).await,
             "get_plan_status" => self.handle_get_plan_status(id, arguments).await,
             "get_reconciler_status" => self.handle_get_reconciler_status(id).await,
-            "get_task_diff" => match self.handle_get_task_diff(&arguments).await {
-                Ok(text) => JsonRpcResponse::success(
-                    id,
-                    json!({ "content": [{ "type": "text", "text": text }] }),
-                ),
-                Err(e) => JsonRpcResponse::internal_error(id, e),
-            },
+            "get_task_diff" => self.handle_get_task_diff(id, arguments).await,
             "preview_task_base" => self.handle_preview_task_base(id, arguments).await,
             "review_task" => match self.handle_review_task(&arguments).await {
                 Ok(text) => JsonRpcResponse::success(
@@ -4220,217 +4215,52 @@ impl McpCallbackServer {
         JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
     }
 
-    async fn handle_get_task_diff(&self, args: &serde_json::Value) -> Result<String, String> {
-        let plan_id = args["plan_id"]
-            .as_str()
-            .ok_or("missing plan_id")?
-            .to_string();
-        let task_id = args["task_id"]
-            .as_str()
-            .ok_or("missing task_id")?
-            .to_string();
-        let attempt = args["attempt"].as_u64().map(|n| n as u32);
-
-        let plan_arc = self.load_or_project_plan(&plan_id).await?;
-
-        let (
-            current_attempt,
-            history,
-            agent,
-            task_description,
-            issue_id,
-            status_str,
-            status_summary,
-            worker_branch,
-            dispatched_base_oid,
-            result,
-            epic_id,
-            base_snapshot_branch,
-            base_snapshot_oid,
-        ) = {
-            let state = plan_arc.lock().await;
-            let entry = state
-                .tasks
-                .iter()
-                .find(|t| t.spec.task_id == task_id)
-                .ok_or_else(|| format!("unknown task '{task_id}' in plan '{plan_id}'"))?;
-
-            match &entry.status {
-                crate::plan::PlanTaskStatus::Pending | crate::plan::PlanTaskStatus::Ready => {
-                    return Err(format!("task '{task_id}' has not been dispatched yet"));
-                }
-                crate::plan::PlanTaskStatus::Dispatched { .. } => {
-                    return Err(format!(
-                        "task '{task_id}' is still running — diff not available yet"
-                    ));
-                }
-                _ => {}
-            }
-
-            let status_str = match &entry.status {
-                crate::plan::PlanTaskStatus::AwaitingReview { .. } => "awaiting_review",
-                crate::plan::PlanTaskStatus::Approved { .. } => "approved",
-                crate::plan::PlanTaskStatus::Rejected { .. } => "rejected",
-                crate::plan::PlanTaskStatus::Failed { .. } => "failed",
-                _ => "unknown",
-            }
-            .to_string();
-            let status_summary = match &entry.status {
-                crate::plan::PlanTaskStatus::AwaitingReview { summary }
-                | crate::plan::PlanTaskStatus::Approved { summary } => summary.clone(),
-                _ => None,
-            };
-
-            (
-                entry.attempt,
-                entry.history.clone(),
-                entry.spec.agent.clone(),
-                entry.spec.task.clone(),
-                entry.spec.issue_id.clone(),
-                status_str,
-                status_summary,
-                entry.worker_branch.clone(),
-                entry.dispatched_base_oid.clone(),
-                entry.result.clone(),
-                state.epic_id.clone(),
-                state.base_snapshot_branch.clone(),
-                state.base_snapshot_oid.clone(),
-            )
+    async fn handle_get_task_diff(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let ctx = crate::handlers::WorkerCallContext {
+            delegation_id: String::new(),
+            brain_session_id: self.brain_session_id.as_session_id().0.clone(),
         };
-
-        // If attempt specified and differs from current, look up historical attempt.
-        if let Some(want_attempt) = attempt {
-            if want_attempt != current_attempt {
-                let historical_attempts = if history.is_empty() {
-                    if let (Some(pm), Some(issue_id)) =
-                        (self.pm_service.as_deref(), issue_id.as_deref())
-                    {
-                        reconstruct_historical_attempts(
-                            pm,
-                            self.feature_gate.as_ref(),
-                            issue_id,
-                            current_attempt,
-                        )
-                        .await?
-                    } else {
-                        Vec::new()
-                    }
-                } else {
-                    history.clone()
-                };
-                let Some(rec) = historical_attempts
-                    .iter()
-                    .find(|r| r.attempt == want_attempt)
-                else {
-                    return Err(format!(
-                        "task '{task_id}' has no attempt {want_attempt} (current: {}, history: {} entries)",
-                        current_attempt,
-                        historical_attempts.len()
-                    ));
-                };
-                let mut resp = serde_json::Map::new();
-                resp.insert("task_id".into(), json!(task_id));
-                resp.insert("agent".into(), json!(agent));
-                resp.insert("attempt".into(), json!(want_attempt));
-                resp.insert("status".into(), json!("historical"));
-                resp.insert("task_description".into(), json!(task_description));
-                if let Some(ref id) = issue_id {
-                    resp.insert("issue_id".into(), json!(id));
-                }
-                if let Some(ref b) = rec.worker_branch {
-                    resp.insert("worker_branch".into(), json!(b));
-                }
-                if let Some(ref s) = rec.summary {
-                    resp.insert("summary".into(), json!(s));
-                }
-                if let Some(ref d) = rec.diff_summary {
-                    resp.insert(
-                        "diff_summary".into(),
-                        serde_json::to_value(d).unwrap_or_default(),
-                    );
-                }
-                resp.insert("feedback".into(), json!(rec.feedback));
-                resp.insert(
-                    "note".into(),
-                    json!("Historical attempt — full diff text not stored. Inspect git: `git show <worker_branch>`."),
-                );
-                return serde_json::to_string_pretty(&serde_json::Value::Object(resp))
-                    .map_err(|e| e.to_string());
-            }
-        }
-
-        let mut resp = serde_json::Map::new();
-        resp.insert("task_id".into(), json!(task_id));
-        resp.insert("agent".into(), json!(agent));
-        resp.insert("task_description".into(), json!(task_description));
-        if let Some(ref issue_id) = issue_id {
-            resp.insert("issue_id".into(), json!(issue_id));
-        }
-        resp.insert("status".into(), json!(status_str));
-
-        if let Some(ref branch) = worker_branch {
-            resp.insert("worker_branch".into(), json!(branch));
-        }
-        if let Some(ref summary) = status_summary {
-            resp.insert("summary".into(), json!(summary));
-        }
-        if let Some(ref result) = result {
-            for (k, v) in crate::plan::build_task_diff_fields(result) {
-                resp.insert(k, v);
-            }
-        } else if let (Some(pm), Some(epic_id), Some(issue_id)) = (
+        match crate::handlers::get_task_diff(
             self.pm_service.as_deref(),
-            epic_id.as_deref(),
-            issue_id.as_deref(),
-        ) {
-            let bootstrap =
-                read_persisted_plan_bootstrap(pm, self.feature_gate.as_ref(), &plan_id, epic_id)
-                    .await
-                    .ok();
-            let completion =
-                read_latest_task_completion(pm, self.feature_gate.as_ref(), issue_id).await?;
-            let recovered_worker_branch = completion
-                .as_ref()
-                .and_then(|record| record.worker_branch.clone())
-                .or(worker_branch);
-
-            if let Some(recovered_worker_branch) = recovered_worker_branch {
-                let base_ref = if let Some(dispatched_base_oid) = dispatched_base_oid {
-                    dispatched_base_oid
-                } else {
-                    tracing::warn!(
-                        plan_id = %plan_id,
-                        task_id = %task_id,
-                        worker_branch = %recovered_worker_branch,
-                        "get_task_diff falling back to base snapshot range because task has no dispatched_base_oid"
-                    );
-                    bootstrap
-                        .as_ref()
-                        .and_then(PersistedPlanBootstrap::preferred_base_ref)
-                        .map(str::to_string)
-                        .or(base_snapshot_oid)
-                        .or(base_snapshot_branch)
-                        .ok_or_else(|| {
-                            format!(
-                                "plan '{plan_id}' has no captured base snapshot; latest diff unavailable"
-                            )
-                        })?
+            self.feature_gate.as_ref(),
+            self.repo_root.as_deref(),
+            self,
+            &ctx,
+            args,
+        )
+        .await
+        {
+            Ok(value) => {
+                let text = match serde_json::to_string_pretty(&value) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        return JsonRpcResponse::internal_error(
+                            id,
+                            format!("get_task_diff response serialization failed: {e}"),
+                        )
+                    }
                 };
-                let repo_root = self.repo_root.as_deref().ok_or_else(|| {
-                    "Repository root not configured; get_task_diff cannot reconstruct persisted diffs"
-                        .to_string()
-                })?;
-                let diff =
-                    diff_text_from_branches(repo_root, &base_ref, &recovered_worker_branch).await?;
-                resp.insert("worker_branch".into(), json!(recovered_worker_branch));
-                resp.insert("diff".into(), json!(diff));
-                if let Some(summary) = completion.and_then(|record| record.summary) {
-                    resp.insert("summary".into(), json!(summary));
-                }
+                JsonRpcResponse::success(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }] }),
+                )
+            }
+            Err(crate::handlers::McpHandlerError::InvalidParams(e)) => {
+                JsonRpcResponse::invalid_params(id, e)
+            }
+            Err(crate::handlers::McpHandlerError::NotFound(e)) => {
+                JsonRpcResponse::error(id, -32004, e)
+            }
+            Err(crate::handlers::McpHandlerError::Unauthorized(e)) => {
+                JsonRpcResponse::error(id, -32001, e)
+            }
+            Err(crate::handlers::McpHandlerError::UpstreamPm(e)) => {
+                JsonRpcResponse::internal_error(id, format!("get_task_diff failed: {e}"))
+            }
+            Err(crate::handlers::McpHandlerError::Internal(e)) => {
+                JsonRpcResponse::internal_error(id, e)
             }
         }
-
-        serde_json::to_string_pretty(&serde_json::Value::Object(resp)).map_err(|e| e.to_string())
     }
 
     async fn preview_task_base_impl(
@@ -6540,7 +6370,7 @@ mod clobber_review_tests {
 
 #[cfg(test)]
 mod merge_plan_tests {
-    use super::{integrate_plan_branches, run_git_capture, snapshot_plan_base};
+    use super::{integrate_plan_branches, run_git_capture, snapshot_plan_base, JsonRpcResponse};
     use crate::plan::audit_sentinel::{encode_comment, AuditSentinelKind, CompletionState};
     use crate::plan::{PlanMergeState, PlanTask};
     use serde_json::{json, Value};
@@ -7192,6 +7022,16 @@ mod merge_plan_tests {
         serde_json::from_str(text).expect("get_task_diff response JSON")
     }
 
+    fn task_diff_text(response: JsonRpcResponse) -> String {
+        let result = response
+            .result
+            .expect("get_task_diff JsonRpcResponse must be Ok");
+        result["content"][0]["text"]
+            .as_str()
+            .expect("get_task_diff response must carry content[0].text")
+            .to_string()
+    }
+
     #[derive(Clone, Default)]
     struct CapturedWarnings {
         events: Arc<Mutex<Vec<String>>>,
@@ -7512,14 +7352,17 @@ mod merge_plan_tests {
     async fn get_task_diff_rehydrates_latest_attempt_when_cache_missing() {
         let fixture = setup_persisted_merge_ready_plan("plan-diff-recover", true).await;
 
-        let text = fixture
+        let raw = fixture
             .server
-            .handle_get_task_diff(&json!({
-                "plan_id": fixture.plan_id,
-                "task_id": "task-a",
-            }))
-            .await
-            .expect("get_task_diff should succeed");
+            .handle_get_task_diff(
+                json!(1),
+                json!({
+                    "plan_id": fixture.plan_id,
+                    "task_id": "task-a",
+                }),
+            )
+            .await;
+        let text = task_diff_text(raw);
         let response = decode_task_diff_response(&text);
 
         assert_eq!(response["worker_branch"], "spur/worker-a");
@@ -7537,14 +7380,17 @@ mod merge_plan_tests {
     async fn get_task_diff_uses_dispatched_base_oid_when_present() {
         let fixture = setup_cached_overlay_diff_plan("plan-diff-overlay", true).await;
 
-        let text = fixture
+        let raw = fixture
             .server
-            .handle_get_task_diff(&json!({
-                "plan_id": fixture.plan_id,
-                "task_id": "task-b",
-            }))
-            .await
-            .expect("get_task_diff should succeed");
+            .handle_get_task_diff(
+                json!(1),
+                json!({
+                    "plan_id": fixture.plan_id,
+                    "task_id": "task-b",
+                }),
+            )
+            .await;
+        let text = task_diff_text(raw);
         let response = decode_task_diff_response(&text);
         let diff = response["diff"].as_str().expect("diff text");
 
@@ -7564,14 +7410,17 @@ mod merge_plan_tests {
         let warnings = CapturedWarnings::default();
         let _guard = tracing::subscriber::set_default(warnings.clone());
 
-        let text = fixture
+        let raw = fixture
             .server
-            .handle_get_task_diff(&json!({
-                "plan_id": fixture.plan_id,
-                "task_id": "task-b",
-            }))
-            .await
-            .expect("get_task_diff should succeed");
+            .handle_get_task_diff(
+                json!(1),
+                json!({
+                    "plan_id": fixture.plan_id,
+                    "task_id": "task-b",
+                }),
+            )
+            .await;
+        let text = task_diff_text(raw);
         let response = decode_task_diff_response(&text);
         let diff = response["diff"].as_str().expect("diff text");
 
@@ -7593,15 +7442,18 @@ mod merge_plan_tests {
     async fn get_task_diff_historical_attempts_remain_summary_only() {
         let fixture = setup_persisted_retried_plan("plan-diff-history", true).await;
 
-        let text = fixture
+        let raw = fixture
             .server
-            .handle_get_task_diff(&json!({
-                "plan_id": fixture.plan_id,
-                "task_id": "task-a",
-                "attempt": 1,
-            }))
-            .await
-            .expect("historical get_task_diff should succeed");
+            .handle_get_task_diff(
+                json!(1),
+                json!({
+                    "plan_id": fixture.plan_id,
+                    "task_id": "task-a",
+                    "attempt": 1,
+                }),
+            )
+            .await;
+        let text = task_diff_text(raw);
         let response = decode_task_diff_response(&text);
 
         assert_eq!(response["status"], "historical");

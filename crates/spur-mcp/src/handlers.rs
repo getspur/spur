@@ -304,6 +304,264 @@ pub async fn fetch_outcome_artifact(
     }))
 }
 
+/// Phase 2 Task 11: freestanding `get_task_diff` handler — the heaviest
+/// extraction in this phase.
+///
+/// Mechanically transcribed from `McpCallbackServer::handle_get_task_diff`.
+/// `pm` and `repo_root` are `Option` so cached-result reads (where
+/// `entry.result == Some(_)`) succeed even when the brain has no PmService /
+/// repo_root configured — matching the pre-refactor behavior. Each path that
+/// actually needs them performs its own `.ok_or_else(...)` check inside the
+/// recovery branch.
+///
+/// String errors from the helper functions are mapped to `McpHandlerError`
+/// by prefix: `"not licensed"` → `Unauthorized` (preserves the -32001 wire
+/// code on feature-gate denials), everything else → `Internal`.
+pub async fn get_task_diff(
+    pm: Option<&PmService>,
+    feature_gate: &spur_license::FeatureGate,
+    repo_root: Option<&std::path::Path>,
+    plan_resolver: &dyn PlanResolver,
+    _ctx: &WorkerCallContext,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, McpHandlerError> {
+    use serde_json::json;
+
+    let plan_id = args
+        .get("plan_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| McpHandlerError::InvalidParams("missing plan_id".into()))?
+        .to_string();
+    let task_id = args
+        .get("task_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| McpHandlerError::InvalidParams("missing task_id".into()))?
+        .to_string();
+    let attempt = args.get("attempt").and_then(|v| v.as_u64()).map(|n| n as u32);
+
+    let plan_arc = plan_resolver
+        .load_or_project_plan(&plan_id)
+        .await
+        .map_err(McpHandlerError::InvalidParams)?;
+
+    let (
+        current_attempt,
+        history,
+        agent,
+        task_description,
+        issue_id,
+        status_str,
+        status_summary,
+        worker_branch,
+        dispatched_base_oid,
+        result,
+        epic_id,
+        base_snapshot_branch,
+        base_snapshot_oid,
+    ) = {
+        let state = plan_arc.lock().await;
+        let entry = state
+            .tasks
+            .iter()
+            .find(|t| t.spec.task_id == task_id)
+            .ok_or_else(|| {
+                McpHandlerError::InvalidParams(format!(
+                    "unknown task '{task_id}' in plan '{plan_id}'"
+                ))
+            })?;
+
+        match &entry.status {
+            crate::plan::PlanTaskStatus::Pending | crate::plan::PlanTaskStatus::Ready => {
+                return Err(McpHandlerError::InvalidParams(format!(
+                    "task '{task_id}' has not been dispatched yet"
+                )));
+            }
+            crate::plan::PlanTaskStatus::Dispatched { .. } => {
+                return Err(McpHandlerError::InvalidParams(format!(
+                    "task '{task_id}' is still running — diff not available yet"
+                )));
+            }
+            _ => {}
+        }
+
+        let status_str = match &entry.status {
+            crate::plan::PlanTaskStatus::AwaitingReview { .. } => "awaiting_review",
+            crate::plan::PlanTaskStatus::Approved { .. } => "approved",
+            crate::plan::PlanTaskStatus::Rejected { .. } => "rejected",
+            crate::plan::PlanTaskStatus::Failed { .. } => "failed",
+            _ => "unknown",
+        }
+        .to_string();
+        let status_summary = match &entry.status {
+            crate::plan::PlanTaskStatus::AwaitingReview { summary }
+            | crate::plan::PlanTaskStatus::Approved { summary } => summary.clone(),
+            _ => None,
+        };
+
+        (
+            entry.attempt,
+            entry.history.clone(),
+            entry.spec.agent.clone(),
+            entry.spec.task.clone(),
+            entry.spec.issue_id.clone(),
+            status_str,
+            status_summary,
+            entry.worker_branch.clone(),
+            entry.dispatched_base_oid.clone(),
+            entry.result.clone(),
+            state.epic_id.clone(),
+            state.base_snapshot_branch.clone(),
+            state.base_snapshot_oid.clone(),
+        )
+    };
+
+    // If attempt specified and differs from current, look up historical attempt.
+    if let Some(want_attempt) = attempt {
+        if want_attempt != current_attempt {
+            let historical_attempts = if history.is_empty() {
+                if let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) {
+                    crate::server::reconstruct_historical_attempts(
+                        pm,
+                        feature_gate,
+                        issue_id,
+                        current_attempt,
+                    )
+                    .await
+                    .map_err(map_string_error)?
+                } else {
+                    Vec::new()
+                }
+            } else {
+                history.clone()
+            };
+            let Some(rec) = historical_attempts
+                .iter()
+                .find(|r| r.attempt == want_attempt)
+            else {
+                return Err(McpHandlerError::InvalidParams(format!(
+                    "task '{task_id}' has no attempt {want_attempt} (current: {}, history: {} entries)",
+                    current_attempt,
+                    historical_attempts.len()
+                )));
+            };
+            let mut resp = serde_json::Map::new();
+            resp.insert("task_id".into(), json!(task_id));
+            resp.insert("agent".into(), json!(agent));
+            resp.insert("attempt".into(), json!(want_attempt));
+            resp.insert("status".into(), json!("historical"));
+            resp.insert("task_description".into(), json!(task_description));
+            if let Some(ref id) = issue_id {
+                resp.insert("issue_id".into(), json!(id));
+            }
+            if let Some(ref b) = rec.worker_branch {
+                resp.insert("worker_branch".into(), json!(b));
+            }
+            if let Some(ref s) = rec.summary {
+                resp.insert("summary".into(), json!(s));
+            }
+            if let Some(ref d) = rec.diff_summary {
+                resp.insert(
+                    "diff_summary".into(),
+                    serde_json::to_value(d).unwrap_or_default(),
+                );
+            }
+            resp.insert("feedback".into(), json!(rec.feedback));
+            resp.insert(
+                "note".into(),
+                json!("Historical attempt — full diff text not stored. Inspect git: `git show <worker_branch>`."),
+            );
+            return Ok(serde_json::Value::Object(resp));
+        }
+    }
+
+    let mut resp = serde_json::Map::new();
+    resp.insert("task_id".into(), json!(task_id));
+    resp.insert("agent".into(), json!(agent));
+    resp.insert("task_description".into(), json!(task_description));
+    if let Some(ref issue_id) = issue_id {
+        resp.insert("issue_id".into(), json!(issue_id));
+    }
+    resp.insert("status".into(), json!(status_str));
+
+    if let Some(ref branch) = worker_branch {
+        resp.insert("worker_branch".into(), json!(branch));
+    }
+    if let Some(ref summary) = status_summary {
+        resp.insert("summary".into(), json!(summary));
+    }
+    if let Some(ref result) = result {
+        for (k, v) in crate::plan::build_task_diff_fields(result) {
+            resp.insert(k, v);
+        }
+    } else if let (Some(pm), Some(epic_id), Some(issue_id)) =
+        (pm, epic_id.as_deref(), issue_id.as_deref())
+    {
+        let bootstrap =
+            crate::server::read_persisted_plan_bootstrap(pm, feature_gate, &plan_id, epic_id)
+                .await
+                .ok();
+        let completion = crate::server::read_latest_task_completion(pm, feature_gate, issue_id)
+            .await
+            .map_err(map_string_error)?;
+        let recovered_worker_branch = completion
+            .as_ref()
+            .and_then(|record| record.worker_branch.clone())
+            .or(worker_branch);
+
+        if let Some(recovered_worker_branch) = recovered_worker_branch {
+            let base_ref = if let Some(dispatched_base_oid) = dispatched_base_oid {
+                dispatched_base_oid
+            } else {
+                tracing::warn!(
+                    plan_id = %plan_id,
+                    task_id = %task_id,
+                    worker_branch = %recovered_worker_branch,
+                    "get_task_diff falling back to base snapshot range because task has no dispatched_base_oid"
+                );
+                bootstrap
+                    .as_ref()
+                    .and_then(crate::server::PersistedPlanBootstrap::preferred_base_ref)
+                    .map(str::to_string)
+                    .or(base_snapshot_oid)
+                    .or(base_snapshot_branch)
+                    .ok_or_else(|| {
+                        McpHandlerError::Internal(format!(
+                            "plan '{plan_id}' has no captured base snapshot; latest diff unavailable"
+                        ))
+                    })?
+            };
+            let repo_root = repo_root.ok_or_else(|| {
+                McpHandlerError::Internal(
+                    "Repository root not configured; get_task_diff cannot reconstruct persisted diffs"
+                        .to_string(),
+                )
+            })?;
+            let diff = crate::server::diff_text_from_branches(
+                repo_root,
+                &base_ref,
+                &recovered_worker_branch,
+            )
+            .await
+            .map_err(map_string_error)?;
+            resp.insert("worker_branch".into(), json!(recovered_worker_branch));
+            resp.insert("diff".into(), json!(diff));
+            if let Some(summary) = completion.and_then(|record| record.summary) {
+                resp.insert("summary".into(), json!(summary));
+            }
+        }
+    }
+
+    Ok(serde_json::Value::Object(resp))
+}
+
+fn map_string_error(error: String) -> McpHandlerError {
+    if error.starts_with("not licensed") {
+        McpHandlerError::Unauthorized(error)
+    } else {
+        McpHandlerError::Internal(error)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
