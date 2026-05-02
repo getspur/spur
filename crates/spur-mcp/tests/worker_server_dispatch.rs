@@ -108,6 +108,30 @@ impl McpEventSink for CountingSink {
     }
 }
 
+/// Sink that captures every event body it receives via `try_emit`.
+struct RecordingSink {
+    events: std::sync::Mutex<Vec<SpurEventBody>>,
+}
+
+impl RecordingSink {
+    fn new() -> Self {
+        Self {
+            events: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl McpEventSink for RecordingSink {
+    fn emit(&self, event: SpurEventBody) {
+        self.events.lock().unwrap().push(event);
+    }
+
+    fn try_emit(&self, event: SpurEventBody) -> Result<(), SpurEventBody> {
+        self.emit(event);
+        Ok(())
+    }
+}
+
 struct NullPlanResolver;
 
 #[async_trait]
@@ -215,6 +239,112 @@ async fn tools_list_returns_8_curated_tools() {
     ] {
         assert!(names.contains(&expected), "missing curated tool: {expected}");
     }
+    server.shutdown().await;
+}
+
+// ─── T23: per-delegation summary event emission ───────────────────────────
+
+#[tokio::test]
+async fn dispatcher_drop_emits_summary_event_with_correct_counts() {
+    if !br_available() {
+        eprintln!("skipping: `br` not on PATH");
+        return;
+    }
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+    let pm = pm_service_fixture(dir.path()).await;
+    let sink = Arc::new(RecordingSink::new());
+    let server = WorkerMcpServer::start(
+        "session-summary".into(),
+        test_deps_with_funnel(Arc::clone(&pm), Arc::clone(&sink) as Arc<dyn McpEventSink>),
+    )
+    .await
+    .expect("start must succeed");
+
+    server.register_delegation(
+        "d-summary".into(),
+        spur_mcp::worker_server::DelegationContext {
+            enable_worker_progress: false,
+        },
+    );
+    let token = server.issue_token("d-summary", Duration::from_secs(60));
+
+    // Create an issue so both read and write calls succeed.
+    let issue_id = pm
+        .create_issue(spur_pm::IssueCreate {
+            title: "summary test".into(),
+            description: Some("body".into()),
+            issue_type: Some("task".into()),
+            ..Default::default()
+        })
+        .await
+        .expect("create issue");
+
+    // One read tool call (get_issue)
+    let body = call_jsonrpc(
+        &server,
+        &token,
+        "tools/call",
+        serde_json::json!({"name": "get_issue", "arguments": {"id": &issue_id}}),
+    )
+    .await;
+    assert!(
+        body.get("result").is_some(),
+        "get_issue should succeed, got: {body}"
+    );
+
+    // One write tool call (update_issue) — also emits an audit
+    let body = call_jsonrpc(
+        &server,
+        &token,
+        "tools/call",
+        serde_json::json!({
+            "name": "update_issue",
+            "arguments": {
+                "id": &issue_id,
+                "comment": "summary audit"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(
+        body["result"]["ok"].as_bool(),
+        Some(true),
+        "update_issue should succeed, got: {body}"
+    );
+
+    // Complete the delegation
+    server.complete_delegation("d-summary", "success");
+
+    let events = sink.events.lock().unwrap();
+    let summaries: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, SpurEventBody::WorkerMcpDelegationSummary { .. }))
+        .collect();
+    assert_eq!(
+        summaries.len(),
+        1,
+        "expected exactly one summary event, got: {events:?}"
+    );
+
+    if let SpurEventBody::WorkerMcpDelegationSummary {
+        delegation_id,
+        brain_session_id,
+        tool_calls,
+        audits_emitted,
+        outcome,
+        ..
+    } = &summaries[0]
+    {
+        assert_eq!(delegation_id, "d-summary");
+        assert_eq!(brain_session_id, "session-summary");
+        assert_eq!(*tool_calls, 2, "expected 2 tool calls (get_issue + update_issue)");
+        assert_eq!(*audits_emitted, 1, "expected 1 audit (update_issue)");
+        assert_eq!(outcome, "success");
+    } else {
+        panic!("expected WorkerMcpDelegationSummary, got: {:?}", summaries[0]);
+    }
+
     server.shutdown().await;
 }
 
