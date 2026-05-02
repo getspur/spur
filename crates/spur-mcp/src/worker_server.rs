@@ -477,7 +477,21 @@ async fn dispatch_tool_call(
         "get_issue" => crate::handlers::get_issue(deps.pm_service.as_ref(), &ctx, args).await,
         "list_issues" => crate::handlers::list_issues(deps.pm_service.as_ref(), &ctx, args).await,
         "update_issue" => {
-            crate::handlers::update_issue(deps.pm_service.as_ref(), &ctx, args).await
+            let issue_id = args.get("id").and_then(|v| v.as_str()).map(String::from);
+            let result = crate::handlers::update_issue(deps.pm_service.as_ref(), &ctx, args).await;
+            if result.is_ok() {
+                if let Some(ref issue_id) = issue_id {
+                    emit_worker_write_audit(
+                        deps.pm_service.as_ref(),
+                        deps.feature_gate.as_ref(),
+                        &ctx.delegation_id,
+                        "update_issue",
+                        issue_id,
+                    )
+                    .await;
+                }
+            }
+            result
         }
         "report_signal" => {
             crate::handlers::report_signal(
@@ -547,6 +561,75 @@ async fn dispatch_tool_call(
     }
 }
 
+/// Maximum time to wait for an audit sentinel comment to be written before
+/// giving up and returning success to the worker. Slow beads must not stall
+/// the worker indefinitely.
+const AUDIT_EMIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Emit a `[[spur-audit v1]] WorkerWrite` sentinel comment on the issue that
+/// was just mutated by a worker write tool. Called synchronously before the
+/// handler result is returned to the worker so the audit trail is durable even
+/// if the worker process dies immediately after the call.
+async fn emit_worker_write_audit(
+    pm: &spur_pm::PmService,
+    feature_gate: &spur_license::FeatureGate,
+    delegation_id: &str,
+    tool: &str,
+    issue_id: &str,
+) {
+    if let Err(error) = crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        feature_gate,
+    ) {
+        tracing::warn!(
+            delegation_id = %delegation_id,
+            issue_id = %issue_id,
+            tool = %tool,
+            "WorkerWrite audit comment emission skipped: {error:?}"
+        );
+        return;
+    }
+    emit_worker_write_audit_inner(pm.advanced(), delegation_id, tool, issue_id).await;
+}
+
+async fn emit_worker_write_audit_inner(
+    advanced: Option<&dyn spur_pm::BeadsAdvanced>,
+    delegation_id: &str,
+    tool: &str,
+    issue_id: &str,
+) {
+    let Some(adv) = advanced else {
+        return;
+    };
+    let kind = crate::plan::audit_sentinel::AuditSentinelKind::WorkerWrite {
+        delegation_id: delegation_id.to_string(),
+        tool: tool.to_string(),
+        issue_id: issue_id.to_string(),
+    };
+    let body = crate::plan::audit_sentinel::encode_comment(&kind);
+    let emit_fut = adv.add_comment(issue_id, &body);
+    match tokio::time::timeout(AUDIT_EMIT_TIMEOUT, emit_fut).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            tracing::warn!(
+                delegation_id = %delegation_id,
+                issue_id = %issue_id,
+                tool = %tool,
+                "WorkerWrite audit comment emission failed: {e}"
+            );
+        }
+        Err(_) => {
+            tracing::warn!(
+                delegation_id = %delegation_id,
+                issue_id = %issue_id,
+                tool = %tool,
+                "WorkerWrite audit comment emission timed out after {}s",
+                AUDIT_EMIT_TIMEOUT.as_secs()
+            );
+        }
+    }
+}
+
 fn success_response(id: Value, result: Value) -> String {
     serde_json::to_string(&json!({
         "jsonrpc": "2.0",
@@ -570,4 +653,212 @@ fn error_response(id: Value, code: i32, message: impl Into<String>) -> String {
     .unwrap_or_else(|_| {
         r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"response serialization failed"},"id":null}"#.to_string()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use spur_pm::{BeadsAdvanced, Comment, CommentId, DependencyCycle, IssueSummary, ReadyFilter};
+    use tracing::field::{Field, Visit};
+
+    use super::*;
+
+    // ─── Mock BeadsAdvanced implementations ───────────────────────────────
+
+    struct RecordingAdvanced {
+        comments: Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait]
+    impl BeadsAdvanced for RecordingAdvanced {
+        async fn list_ready(&self, _filter: ReadyFilter) -> anyhow::Result<Vec<IssueSummary>> {
+            Ok(Vec::new())
+        }
+        async fn list_comments(&self, _issue_id: &str) -> anyhow::Result<Vec<Comment>> {
+            Ok(Vec::new())
+        }
+        async fn add_comment(&self, issue_id: &str, body: &str) -> anyhow::Result<CommentId> {
+            self.comments
+                .lock()
+                .unwrap()
+                .push((issue_id.to_string(), body.to_string()));
+            Ok("c-1".into())
+        }
+        async fn remove_dependency(
+            &self,
+            _issue_id: &str,
+            _depends_on_id: &str,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn dep_cycles(&self) -> anyhow::Result<Vec<DependencyCycle>> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct FailingAdvanced;
+
+    #[async_trait]
+    impl BeadsAdvanced for FailingAdvanced {
+        async fn list_ready(&self, _filter: ReadyFilter) -> anyhow::Result<Vec<IssueSummary>> {
+            Ok(Vec::new())
+        }
+        async fn list_comments(&self, _issue_id: &str) -> anyhow::Result<Vec<Comment>> {
+            Ok(Vec::new())
+        }
+        async fn add_comment(&self, _issue_id: &str, _body: &str) -> anyhow::Result<CommentId> {
+            Err(anyhow::anyhow!("simulated add_comment failure"))
+        }
+        async fn remove_dependency(
+            &self,
+            _issue_id: &str,
+            _depends_on_id: &str,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn dep_cycles(&self) -> anyhow::Result<Vec<DependencyCycle>> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct HangingAdvanced;
+
+    #[async_trait]
+    impl BeadsAdvanced for HangingAdvanced {
+        async fn list_ready(&self, _filter: ReadyFilter) -> anyhow::Result<Vec<IssueSummary>> {
+            Ok(Vec::new())
+        }
+        async fn list_comments(&self, _issue_id: &str) -> anyhow::Result<Vec<Comment>> {
+            Ok(Vec::new())
+        }
+        async fn add_comment(&self, _issue_id: &str, _body: &str) -> anyhow::Result<CommentId> {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok("c-1".into())
+        }
+        async fn remove_dependency(
+            &self,
+            _issue_id: &str,
+            _depends_on_id: &str,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn dep_cycles(&self) -> anyhow::Result<Vec<DependencyCycle>> {
+            Ok(Vec::new())
+        }
+    }
+
+    // ─── Warning capture helper ───────────────────────────────────────────
+
+    #[derive(Clone, Default)]
+    struct CapturedWarnings {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl CapturedWarnings {
+        fn contains(&self, needle: &str) -> bool {
+            self.events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| event.contains(needle))
+        }
+    }
+
+    impl tracing::Subscriber for CapturedWarnings {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() <= tracing::Level::WARN
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            if *event.metadata().level() != tracing::Level::WARN {
+                return;
+            }
+            let mut visitor = StringVisitor::default();
+            event.record(&mut visitor);
+            self.events.lock().unwrap().push(visitor.0);
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[derive(Default)]
+    struct StringVisitor(String);
+
+    impl Visit for StringVisitor {
+        fn record_debug(&mut self, _field: &Field, value: &dyn std::fmt::Debug) {
+            self.0.push_str(&format!("{value:?}"));
+        }
+    }
+
+    // ─── Tests ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn emit_worker_write_audit_inner_writes_sentinel_comment() {
+        let recorder = RecordingAdvanced {
+            comments: Mutex::new(Vec::new()),
+        };
+        emit_worker_write_audit_inner(Some(&recorder), "del-A", "update_issue", "bd-123").await;
+
+        let comments = recorder.comments.lock().unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].0, "bd-123");
+        assert!(comments[0]
+            .1
+            .starts_with(crate::plan::audit_sentinel::SENTINEL_PREFIX));
+        assert!(comments[0].1.contains("\"kind\":\"worker-write\""));
+        assert!(comments[0].1.contains("\"delegation_id\":\"del-A\""));
+        assert!(comments[0].1.contains("\"tool\":\"update_issue\""));
+        assert!(comments[0].1.contains("\"issue_id\":\"bd-123\""));
+    }
+
+    #[tokio::test]
+    async fn emit_worker_write_audit_inner_logs_warning_on_failure() {
+        let warnings = CapturedWarnings::default();
+        let _guard = tracing::subscriber::set_default(warnings.clone());
+
+        emit_worker_write_audit_inner(Some(&FailingAdvanced), "del-A", "update_issue", "bd-123")
+            .await;
+
+        assert!(
+            warnings.contains("WorkerWrite audit comment emission failed"),
+            "expected warning about audit emission failure, got: {:?}",
+            warnings.events.lock().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_worker_write_audit_inner_noop_when_advanced_none() {
+        // Should not panic and should complete immediately.
+        emit_worker_write_audit_inner(None, "del-A", "update_issue", "bd-123").await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn emit_worker_write_audit_inner_times_out_and_warns() {
+        let warnings = CapturedWarnings::default();
+
+        let handle = tokio::spawn({
+            let warnings = warnings.clone();
+            async move {
+                let _guard = tracing::subscriber::set_default(warnings);
+                let hanging = HangingAdvanced;
+                emit_worker_write_audit_inner(Some(&hanging), "del-A", "update_issue", "bd-123")
+                    .await;
+            }
+        });
+
+        tokio::time::advance(Duration::from_secs(6)).await;
+        handle.await.expect("emit completes");
+
+        assert!(
+            warnings.contains("timed out after 5s"),
+            "expected timeout warning, got: {:?}",
+            warnings.events.lock().unwrap()
+        );
+    }
 }
