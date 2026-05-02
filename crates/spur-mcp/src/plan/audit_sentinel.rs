@@ -160,6 +160,16 @@ pub enum AuditSentinelKind {
         signal_id: String,
         terminal_status: String,
     },
+    WorkerMcp {
+        delegation_id: String,
+        subkind: WorkerMcpSubkind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_issue_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// Forward-compat fallback. When a future SPUR release adds a new audit
     /// sentinel variant and emits it into a beads comment, older clients
     /// parsing that comment will deserialize it into `Unknown` instead of
@@ -167,6 +177,17 @@ pub enum AuditSentinelKind {
     /// should skip `Unknown`; the encode path must never emit it.
     #[serde(other)]
     Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkerMcpSubkind {
+    Call,
+    AuthDenied,
+    ScopeViolation,
+    UpstreamFailure,
+    FlushFailed,
+    PmDegraded,
 }
 
 impl AuditSentinelKind {
@@ -186,6 +207,7 @@ impl AuditSentinelKind {
             Self::MutationCommit { .. } => "mutation-commit",
             Self::MutationInvariantViolation { .. } => "mutation-invariant-violation",
             Self::LateSignal { .. } => "late-signal",
+            Self::WorkerMcp { .. } => "worker-mcp",
             Self::Unknown => "unknown",
         }
     }
@@ -691,5 +713,38 @@ mod tests {
         };
         let parsed = parse_comment(&encode_comment(&kind)).unwrap().unwrap();
         assert_eq!(parsed, kind);
+    }
+
+    #[test]
+    fn worker_mcp_sentinel_round_trip() {
+        let kind = AuditSentinelKind::WorkerMcp {
+            delegation_id: "abc-123".into(),
+            subkind: WorkerMcpSubkind::Call,
+            tool_name: Some("update_issue".into()),
+            target_issue_id: Some("bd-1234".into()),
+            error: None,
+        };
+        let encoded = encode_comment(&kind);
+        let decoded = parse_comment(&encoded).unwrap().unwrap();
+        assert_eq!(decoded, kind);
+        assert_eq!(decoded.kind_str(), "worker-mcp");
+        assert!(encoded.contains("\"call\""));
+        assert!(!encoded.contains("\"Call\""));
+    }
+
+    #[test]
+    fn worker_mcp_subkind_kebab_case_serialization() {
+        let cases = [
+            (WorkerMcpSubkind::Call, "call"),
+            (WorkerMcpSubkind::AuthDenied, "auth-denied"),
+            (WorkerMcpSubkind::ScopeViolation, "scope-violation"),
+            (WorkerMcpSubkind::UpstreamFailure, "upstream-failure"),
+            (WorkerMcpSubkind::FlushFailed, "flush-failed"),
+            (WorkerMcpSubkind::PmDegraded, "pm-degraded"),
+        ];
+        for (sub, expected) in cases {
+            let json = serde_json::to_string(&sub).unwrap();
+            assert_eq!(json, format!("\"{expected}\""));
+        }
     }
 }
