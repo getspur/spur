@@ -188,7 +188,7 @@ pub struct ToolDefinition {
 fn delegate_to_worker_def() -> ToolDefinition {
     ToolDefinition {
         name: "delegate_to_worker".into(),
-        description: "Delegate a task to a worker agent. Returns inline if the worker finishes within the inline-wait window (configurable via `delegation.inline_wait_ms`; default 0). Otherwise returns `{status: \"pending\", delegation_id}` and you will be re-prompted automatically when the worker completes — you do not need to poll. Pass a `delegation_plan` parameter (at minimum `{chosen, rationale}`; more for multi-step work). Structure the `task` field as CONTEXT / GOAL / CONSTRAINTS / EXPECTED_OUTPUT. Use `list_available_workers` when routing is ambiguous.".into(),
+        description: "Delegate a task to a worker agent. Returns inline if the worker finishes within the inline-wait window (configurable via `delegation.inline_wait_ms`; default 0). Otherwise returns `{status: \"pending\", delegation_id}` and you will be re-prompted automatically when the worker completes — you do not need to poll. Pass a `delegation_plan` parameter (at minimum `{chosen, rationale}`; more for multi-step work). Structure the `task` field as CONTEXT / GOAL / CONSTRAINTS / EXPECTED_OUTPUT. Optional `enable_worker_mcp` and `enable_worker_progress` booleans default to false/omitted; workers receive no MCP or progress channel unless explicitly opted in. Use `list_available_workers` when routing is ambiguous.".into(),
         input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::DelegateToWorkerInput>(),
     }
 }
@@ -196,7 +196,7 @@ fn delegate_to_worker_def() -> ToolDefinition {
 fn delegate_parallel_def() -> ToolDefinition {
     ToolDefinition {
         name: "delegate_parallel".into(),
-        description: "Delegate multiple tasks in parallel. Returns a response array of length N; each element is either an inline result or `{status: \"pending\", delegation_id}` with an automatic re-prompt when that task completes. Each task's per-task `delegation_plan` documents structured reasoning for reviewer mismatch checks. Subtasks MUST be independent — no shared state, no sequential data dependencies. If unsure, use `delegate_to_worker` serially.".into(),
+        description: "Delegate multiple tasks in parallel. Returns a response array of length N; each element is either an inline result or `{status: \"pending\", delegation_id}` with an automatic re-prompt when that task completes. Each task's per-task `delegation_plan` documents structured reasoning for reviewer mismatch checks. Per-task optional `enable_worker_mcp` and `enable_worker_progress` booleans default to false/omitted; workers receive no MCP or progress channel unless explicitly opted in. Subtasks MUST be independent — no shared state, no sequential data dependencies. If unsure, use `delegate_to_worker` serially.".into(),
         input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::DelegateParallelInput>(),
     }
 }
