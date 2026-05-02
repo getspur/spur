@@ -10,7 +10,7 @@ use rmcp::{
 use serde_json::{json, Value};
 use spur_acp::{BrainSessionId, SessionId};
 use spur_mcp::tools::{BaseSpec, BaseTarget, OverlayCommit};
-use spur_mcp::{McpCallbackServer, server::DetachedContinuationCtx};
+use spur_mcp::{server::DetachedContinuationCtx, McpCallbackServer};
 use std::sync::Arc;
 
 mod common;
@@ -38,9 +38,7 @@ fn mock_server() -> (McpCallbackServer, spur_mcp::DelegationChannel) {
 
 /// Call delegate_to_worker via the rmcp trait and return the captured
 /// DelegationRequest from the delegation channel.
-async fn call_delegate_to_worker(
-    args: Value,
-) -> spur_mcp::tools::DelegationRequest {
+async fn call_delegate_to_worker(args: Value) -> spur_mcp::tools::DelegationRequest {
     let (server, mut channel) = mock_server();
     let server = Arc::new(server);
     let (client_io, server_io) = tokio::io::duplex(16 * 1024);
@@ -54,8 +52,7 @@ async fn call_delegate_to_worker(
 
     let _result = client
         .call_tool(
-            CallToolRequestParams::new("delegate_to_worker")
-                .with_arguments(json_object(args)),
+            CallToolRequestParams::new("delegate_to_worker").with_arguments(json_object(args)),
         )
         .await
         .expect("call_tool should succeed");
@@ -115,10 +112,7 @@ async fn base_commit_survives() {
     }))
     .await;
 
-    assert_eq!(
-        request.base,
-        Some(BaseSpec::Commit { oid: oid.into() })
-    );
+    assert_eq!(request.base, Some(BaseSpec::Commit { oid: oid.into() }));
 }
 
 #[tokio::test]

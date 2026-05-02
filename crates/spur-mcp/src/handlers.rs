@@ -146,10 +146,7 @@ pub async fn update_issue(
 /// can take `&dyn PlanResolver`. Reused by Task 11 (`get_task_diff`).
 #[async_trait]
 pub trait PlanResolver: Send + Sync {
-    async fn load_or_project_plan(
-        &self,
-        plan_id: &str,
-    ) -> Result<Arc<Mutex<PlanState>>, String>;
+    async fn load_or_project_plan(&self, plan_id: &str) -> Result<Arc<Mutex<PlanState>>, String>;
 }
 
 pub async fn get_plan_status(
@@ -161,9 +158,7 @@ pub async fn get_plan_status(
     let plan_id = args
         .get("plan_id")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            McpHandlerError::InvalidParams("Missing required field 'plan_id'".into())
-        })?
+        .ok_or_else(|| McpHandlerError::InvalidParams("Missing required field 'plan_id'".into()))?
         .to_string();
 
     let plan_state = plan_resolver
@@ -235,9 +230,10 @@ pub async fn fetch_outcome_artifact(
     // through to the missing-arg fallback and return data for a different
     // attempt than the brain asked for.
     let attempt = match args.get("attempt") {
-        None | Some(serde_json::Value::Null) => {
-            materializer.latest_attempt(&delegation_id).await.unwrap_or(1)
-        }
+        None | Some(serde_json::Value::Null) => materializer
+            .latest_attempt(&delegation_id)
+            .await
+            .unwrap_or(1),
         Some(v) => match v.as_u64() {
             Some(n) if (1..=u32::MAX as u64).contains(&n) => n as u32,
             _ => {
@@ -288,8 +284,10 @@ pub async fn fetch_outcome_artifact(
         }
     };
 
-    let projected_text = crate::server::project_section(&content.bytes, section, &key)
-        .map_err(|error| McpHandlerError::Internal(format!("Section projection failed: {error}")))?;
+    let projected_text =
+        crate::server::project_section(&content.bytes, section, &key).map_err(|error| {
+            McpHandlerError::Internal(format!("Section projection failed: {error}"))
+        })?;
 
     tracing::info!(
         target: "spur.metrics.outcome_fetched",
@@ -337,7 +335,10 @@ pub async fn get_task_diff(
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| McpHandlerError::InvalidParams("missing task_id".into()))?
         .to_string();
-    let attempt = args.get("attempt").and_then(|v| v.as_u64()).map(|n| n as u32);
+    let attempt = args
+        .get("attempt")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
 
     let plan_arc = plan_resolver
         .load_or_project_plan(&plan_id)
@@ -560,6 +561,145 @@ fn map_string_error(error: String) -> McpHandlerError {
     } else {
         McpHandlerError::Internal(error)
     }
+}
+
+/// Worker-facing handler for the `report_signal` MCP tool.
+pub async fn report_signal(
+    pm: &PmService,
+    feature_gate: &spur_license::FeatureGate,
+    ctx: &WorkerCallContext,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, McpHandlerError> {
+    use serde_json::json;
+
+    use crate::plan::audit_sentinel::{encode_comment as audit_encode, AuditSentinelKind};
+    use crate::plan::labels;
+    use crate::plan::signals::{encode_comment as signal_encode, WorkerSignal};
+
+    #[derive(serde::Deserialize)]
+    struct Args {
+        task_id: String,
+        signal: WorkerSignal,
+    }
+
+    let args: Args = serde_json::from_value(args)
+        .map_err(|e| McpHandlerError::InvalidParams(format!("invalid args: {e}")))?;
+
+    // Defense-in-depth: the MCP tool schema declares `kind` enum is
+    // `["scope_drift"]`, but harness input-schema enforcement is best-effort
+    // across MCP runtimes. Reject non-worker-emittable variants explicitly so
+    // a hallucinating worker cannot spoof brain-side signals (e.g.,
+    // PotentialClobber, which carries OIDs the worker has no authority over).
+    if !matches!(args.signal, WorkerSignal::ScopeDrift { .. }) {
+        return Err(McpHandlerError::InvalidParams(format!(
+            "report_signal: only worker-emittable signal kinds are accepted; got {}",
+            args.signal.kind_label()
+        )));
+    }
+
+    crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        feature_gate,
+    )
+    .map_err(|error| McpHandlerError::Unauthorized(crate::server::feature_error_message(error)))?;
+
+    let adv = pm
+        .advanced()
+        .ok_or_else(|| McpHandlerError::Internal("report_signal requires beads backend".into()))?;
+
+    let issue = pm
+        .get_issue(&args.task_id)
+        .await
+        .map_err(|e| McpHandlerError::UpstreamPm(format!("{e}")))?;
+
+    let signal_id = args.signal.signal_id().to_string();
+
+    // Beads persists a compressed status vocabulary — SPUR's nine-state
+    // PlanTaskStatus terminals (Approved, Failed, Cancelled, Superseded) all
+    // project to the beads `closed` status. Rejected stays `open` (retry-
+    // eligible). Using the beads closed-status predicate correctly models
+    // every SPUR terminal without matching vocabulary that beads never emits.
+    // Fine-grain which-terminal is recoverable from audit comments + labels
+    // (spur:superseded-by:*, Approval/Rejection sentinels) at consumer time.
+    if issue.status.as_str() == pm.closed_status() {
+        adv.add_comment(
+            &args.task_id,
+            &audit_encode(&AuditSentinelKind::LateSignal {
+                signal_id: signal_id.clone(),
+                terminal_status: issue.status.clone(),
+            }),
+        )
+        .await
+        .map_err(|e| McpHandlerError::UpstreamPm(format!("{e}")))?;
+
+        pm.update_issue(
+            &args.task_id,
+            spur_pm::IssueUpdate {
+                add_labels: vec![labels::SIGNAL_LATE_ARRIVAL.to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| McpHandlerError::UpstreamPm(format!("{e}")))?;
+
+        return Ok(json!({
+            "recorded": true,
+            "signal_id": signal_id,
+            "late": true,
+        }));
+    }
+
+    let (severity, reason, kind_label) = match &args.signal {
+        WorkerSignal::ScopeDrift {
+            severity, reason, ..
+        } => (
+            *severity,
+            reason.clone(),
+            args.signal.kind_label().to_string(),
+        ),
+        WorkerSignal::PotentialClobber { .. } => {
+            (0.0, String::new(), args.signal.kind_label().to_string())
+        }
+    };
+
+    // Emit the audit sentinel BEFORE operational writes so the decision-at-
+    // decision-time is immutably recorded. Beads has no transactions; if the
+    // task closes between our terminal check above and subsequent writes, the
+    // watcher's status-at-tick-time filter (signal_watcher.rs) still enforces
+    // I3 at consumption. Ordering here makes partial failures auditable and
+    // matches the late-path ordering (audit-before-label) for consistency.
+    adv.add_comment(
+        &args.task_id,
+        &audit_encode(&AuditSentinelKind::Signal {
+            signal_id: signal_id.clone(),
+            delegation_id: ctx.delegation_id.clone(),
+            kind: kind_label.clone(),
+            severity,
+            reason,
+        }),
+    )
+    .await
+    .map_err(|e| McpHandlerError::UpstreamPm(format!("{e}")))?;
+
+    adv.add_comment(&args.task_id, &signal_encode(&args.signal))
+        .await
+        .map_err(|e| McpHandlerError::UpstreamPm(format!("{e}")))?;
+
+    pm.update_issue(
+        &args.task_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![labels::signal_kind(&kind_label)],
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|e| McpHandlerError::UpstreamPm(format!("{e}")))?;
+
+    Ok(json!({
+        "recorded": true,
+        "signal_id": signal_id,
+        "late": false,
+    }))
 }
 
 #[cfg(test)]

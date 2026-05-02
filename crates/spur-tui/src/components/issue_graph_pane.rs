@@ -255,7 +255,9 @@ fn format_node_line(
     cycle: bool,
 ) -> String {
     let node = node_by_id.get(id).copied();
-    let status = node.and_then(|node| node.status.as_deref()).unwrap_or("open");
+    let status = node
+        .and_then(|node| node.status.as_deref())
+        .unwrap_or("open");
     let title = node
         .and_then(|node| node.title.as_deref())
         .filter(|title| !title.is_empty())

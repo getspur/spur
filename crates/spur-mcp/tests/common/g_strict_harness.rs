@@ -567,7 +567,8 @@ impl TestHarness {
         let comments = run_br(&self.repo, &["comments", "list", issue_id, "--json"]);
 
         collect_audit_sentinels(&comments)
-            .into_iter().rfind(|sentinel| matches!(sentinel, AuditSentinelKind::Completion { .. }))
+            .into_iter()
+            .rfind(|sentinel| matches!(sentinel, AuditSentinelKind::Completion { .. }))
             .unwrap_or_else(|| panic!("missing completion audit for {task_id}"))
     }
 

@@ -6,10 +6,10 @@ use std::process::Command;
 use std::sync::Arc;
 
 use serde_json::json;
+use spur_mcp::handlers::{report_signal, WorkerCallContext};
 use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
 use spur_mcp::plan::labels;
 use spur_mcp::plan::signals::{self, WorkerSignal};
-use spur_mcp::server::handle_report_signal;
 use spur_pm::{IssueCreate, PmService};
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -136,16 +136,20 @@ async fn report_signal_on_closed_task_records_late_arrival() {
     let signal = scope_drift_signal(Uuid::new_v4());
     let signal_id = signal.signal_id().to_string();
 
-    let result = handle_report_signal(
-        Arc::clone(&pm),
-        common::server_builder::pro_feature_gate(),
+    let result = report_signal(
+        &pm,
+        common::server_builder::pro_feature_gate().as_ref(),
+        &WorkerCallContext {
+            delegation_id: String::new(),
+            brain_session_id: "test-session".into(),
+        },
         json!({
             "task_id": task_id.clone(),
             "signal": signal.clone(),
         }),
     )
     .await
-    .expect("handle_report_signal must succeed");
+    .expect("report_signal must succeed");
 
     assert_eq!(
         result,
