@@ -52,6 +52,13 @@ pub fn source_issue(issue_id: &str) -> String {
 
 pub const DELEGATION_ID_PREFIX: &str = "spur:delegation-id:";
 pub const LEASE_EXPIRES_AT_PREFIX: &str = "spur:lease-expires-at:";
+pub const PLAN_OWNER_PREFIX: &str = "spur:plan-owner:";
+pub const PLAN_OWNER_TOKEN_PREFIX: &str = "spur:plan-owner-token:";
+pub const PLAN_OWNER_LEASE_EXPIRES_AT_PREFIX: &str = "spur:plan-owner-lease-expires-at:";
+
+pub fn compact_label_component(value: &str) -> String {
+    value.replace('-', "")
+}
 
 pub fn delegation_id(delegation_id: &str) -> String {
     format!("{DELEGATION_ID_PREFIX}{delegation_id}")
@@ -59,6 +66,18 @@ pub fn delegation_id(delegation_id: &str) -> String {
 
 pub fn lease_expires_at(ts: i64) -> String {
     format!("{LEASE_EXPIRES_AT_PREFIX}{ts}")
+}
+
+pub fn plan_owner(owner: &str) -> String {
+    format!("{PLAN_OWNER_PREFIX}{}", compact_label_component(owner))
+}
+
+pub fn plan_owner_token(token: &str) -> String {
+    format!("{PLAN_OWNER_TOKEN_PREFIX}{}", compact_label_component(token))
+}
+
+pub fn plan_owner_lease_expires_at(ts: i64) -> String {
+    format!("{PLAN_OWNER_LEASE_EXPIRES_AT_PREFIX}{ts}")
 }
 
 pub fn signal_kind(kind: &str) -> String {
@@ -96,6 +115,21 @@ pub fn parse_delegation_id(label: &str) -> Option<&str> {
 
 pub fn parse_lease_expires_at(label: &str) -> Option<i64> {
     label.strip_prefix(LEASE_EXPIRES_AT_PREFIX)?.parse().ok()
+}
+
+pub fn parse_plan_owner(label: &str) -> Option<&str> {
+    label.strip_prefix(PLAN_OWNER_PREFIX)
+}
+
+pub fn parse_plan_owner_token(label: &str) -> Option<&str> {
+    label.strip_prefix(PLAN_OWNER_TOKEN_PREFIX)
+}
+
+pub fn parse_plan_owner_lease_expires_at(label: &str) -> Option<i64> {
+    label
+        .strip_prefix(PLAN_OWNER_LEASE_EXPIRES_AT_PREFIX)?
+        .parse()
+        .ok()
 }
 
 /// Returns `Some(task_id)` if the given label is a `spur:plan-task-id:<id>` label.
@@ -234,6 +268,41 @@ mod tests {
         assert_eq!(parse_lease_expires_at("unrelated"), None);
         assert_eq!(parse_signal_kind("signal:scope-drift"), Some("scope-drift"));
         assert_eq!(parse_signal_kind("signal:scope-drift:high"), None);
+    }
+
+    #[test]
+    fn plan_owner_labels_normalize_uuid_components() {
+        assert_eq!(
+            plan_owner("550e8400-e29b-41d4-a716-446655440000"),
+            "spur:plan-owner:550e8400e29b41d4a716446655440000"
+        );
+        assert_eq!(
+            plan_owner_token("7c6258f1-6a67-4f6a-a9b4-5ea1ef59ff7a"),
+            "spur:plan-owner-token:7c6258f16a674f6aa9b45ea1ef59ff7a"
+        );
+        assert_eq!(
+            plan_owner_lease_expires_at(1_777_777_777),
+            "spur:plan-owner-lease-expires-at:1777777777"
+        );
+    }
+
+    #[test]
+    fn plan_owner_parsers_invert_constructors() {
+        assert_eq!(
+            parse_plan_owner(&plan_owner("550e8400-e29b-41d4-a716-446655440000")),
+            Some("550e8400e29b41d4a716446655440000")
+        );
+        assert_eq!(
+            parse_plan_owner_token(&plan_owner_token("7c6258f1-6a67-4f6a-a9b4-5ea1ef59ff7a")),
+            Some("7c6258f16a674f6aa9b45ea1ef59ff7a")
+        );
+        assert_eq!(
+            parse_plan_owner_lease_expires_at(&plan_owner_lease_expires_at(1_777_777_777)),
+            Some(1_777_777_777)
+        );
+        assert_eq!(parse_plan_owner("unrelated"), None);
+        assert_eq!(parse_plan_owner_token("unrelated"), None);
+        assert_eq!(parse_plan_owner_lease_expires_at("unrelated"), None);
     }
 
     #[test]
