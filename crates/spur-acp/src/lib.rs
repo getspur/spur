@@ -36,8 +36,8 @@ pub use spur_agent_caps::SpurAgentCaps;
 // Re-export domain types
 pub use crate::domain::events::{
     Artifact, DiffSummary, FileTouchKind, LifecycleState, LoadOutcome, PeerInfluenceSummary,
-    PlanSnapshot, PlanSnapshotCounts, PlanSnapshotTask, ReviewDecision, ReviewKind, ReviewPayload,
-    Role,
+    PlanLifecycleEvent, PlanOwnerStateEvent, PlanSnapshot, PlanSnapshotCounts, PlanSnapshotTask,
+    PlanSummaryCountsEvent, PlanSummaryEvent, ReviewDecision, ReviewKind, ReviewPayload, Role,
 };
 pub use domain::{
     ArtifactKind, AttemptSetupError, CancelOutcome, CancellationControl, DelegationAbortHandle,

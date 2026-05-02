@@ -183,6 +183,12 @@ pub enum Action {
     },
     /// Refresh the tracked issues list from the PM backend.
     RefreshIssues,
+    /// Refresh persisted plan summaries from the PM backend.
+    RefreshPlans,
+    /// Resume a persisted plan.
+    ResumePlan {
+        plan_id: String,
+    },
     /// Fetch the dependency subgraph for an issue from the PM backend.
     GetIssueGraph {
         id: String,
