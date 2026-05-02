@@ -41,6 +41,8 @@ fn action_kind(action: &UserInput) -> &'static str {
         UserInput::VendorExec { .. } => "VendorExec",
         UserInput::CancelStream { .. } => "CancelStream",
         UserInput::RefreshIssues => "RefreshIssues",
+        UserInput::RefreshPlans => "RefreshPlans",
+        UserInput::ResumePlan { .. } => "ResumePlan",
         UserInput::GetIssueDetail { .. } => "GetIssueDetail",
         UserInput::GetIssueGraph { .. } => "GetIssueGraph",
         UserInput::UpdateIssue { .. } => "UpdateIssue",

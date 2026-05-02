@@ -11,7 +11,7 @@ use spur_acp::{
     SpurEvent, SpurEventBody,
 };
 
-use crate::action::{Action, IssueAction, ViewId};
+use crate::action::{Action, ViewId};
 use crate::components::status_bar::{HintOverride, StatusBar, StatusBarProps};
 
 use super::{View, ViewContext};
@@ -42,6 +42,17 @@ impl PlanBrowserView {
         &self.plans
     }
 
+    pub fn set_current_session(&mut self, current_session: SessionId) -> bool {
+        let changed = self.current_session != current_session;
+        self.current_session = current_session;
+        changed
+    }
+
+    #[cfg(test)]
+    pub fn current_session_for_test(&self) -> &SessionId {
+        &self.current_session
+    }
+
     fn selected_plan(&self) -> Option<&PlanSummaryEvent> {
         self.plans.get(self.selected)
     }
@@ -57,6 +68,9 @@ impl PlanBrowserView {
 
     fn has_current_active_plan(&self, ctx: &ViewContext<'_>) -> bool {
         self.current_active_plan(ctx).is_some()
+            || self.plans.iter().any(|plan| {
+                matches!(plan.owner_state, PlanOwnerStateEvent::Mine) && plan_is_active(plan)
+            })
     }
 
     fn selected_is_current_active_plan(
@@ -66,6 +80,7 @@ impl PlanBrowserView {
     ) -> bool {
         self.current_active_plan(ctx)
             .is_some_and(|active| active.plan_id == plan.plan_id)
+            || (matches!(plan.owner_state, PlanOwnerStateEvent::Mine) && plan_is_active(plan))
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -146,10 +161,8 @@ impl PlanBrowserView {
 
     fn view_selected_epic(&self) -> Option<Action> {
         self.selected_plan()
-            .map(|plan| {
-                Action::Issue(IssueAction::ViewDetail {
-                    id: plan.epic_id.clone(),
-                })
+            .map(|plan| Action::OpenIssueInBacklog {
+                id: plan.epic_id.clone(),
             })
             .or(Some(Action::FlashHint {
                 message: "No plan selected".into(),
@@ -208,6 +221,15 @@ impl PlanBrowserView {
                 "Current Sprint: {} {} {}",
                 plan.plan_id, plan.status, plan.progress
             )
+        } else if let Some(plan) = self.plans.iter().find(|plan| {
+            matches!(plan.owner_state, PlanOwnerStateEvent::Mine) && plan_is_active(plan)
+        }) {
+            format!(
+                "Current Sprint: {} {} {}",
+                plan.plan_id,
+                Self::lifecycle_label(plan.lifecycle),
+                Self::progress_text(plan.counts.as_ref())
+            )
         } else {
             "No sprint owned by this brain.".into()
         }
@@ -262,7 +284,19 @@ impl PlanBrowserView {
             Span::styled("Progress", Style::default().add_modifier(Modifier::BOLD)),
         ])];
 
-        for (idx, plan) in self.plans.iter().enumerate() {
+        let visible_rows = inner.height.saturating_sub(1) as usize;
+        let start = if visible_rows == 0 || self.selected < visible_rows {
+            0
+        } else {
+            self.selected + 1 - visible_rows
+        };
+        let end = if visible_rows == 0 {
+            start
+        } else {
+            (start + visible_rows).min(self.plans.len())
+        };
+
+        for (idx, plan) in self.plans.iter().enumerate().skip(start).take(end - start) {
             let marker = if idx == self.selected { ">" } else { " " };
             let style = if idx == self.selected {
                 Style::default().fg(Color::Yellow)
@@ -453,4 +487,11 @@ fn truncate(value: &str, max_chars: usize) -> String {
             .collect::<String>()
             + "..."
     }
+}
+
+fn plan_is_active(plan: &PlanSummaryEvent) -> bool {
+    !matches!(
+        plan.lifecycle,
+        PlanLifecycleEvent::Complete | PlanLifecycleEvent::Failed
+    )
 }
