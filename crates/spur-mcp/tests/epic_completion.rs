@@ -221,6 +221,7 @@ async fn reconciler_pushes_plan_completed_continuation_after_worker_completion_c
     ));
     let plan_label = labels::plan_id(plan_id);
     label_issue(dir.path(), &epic_id, &plan_label);
+    label_issue(dir.path(), &epic_id, &labels::plan_owner("brain"));
     label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
     label_issue(dir.path(), &task_id, &plan_label);
     label_issue(dir.path(), &task_id, &labels::plan_task_id("t1"));
