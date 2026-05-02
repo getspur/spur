@@ -129,8 +129,19 @@ pub enum AuditSentinelKind {
         delegation_id: String,
         feedback: String,
     },
+    ReviewFeedback {
+        delegation_id: String,
+        attempt: u32,
+        feedback: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worker_branch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+    },
     Signal {
         signal_id: String,
+        #[serde(default)]
+        delegation_id: String,
         #[serde(rename = "signal_kind")]
         kind: String,
         severity: f32,
@@ -190,6 +201,15 @@ pub enum AuditSentinelKind {
         token: String,
         progress_cursor: String,
     },
+    WorkerWrite {
+        delegation_id: String,
+        tool: String,
+        issue_id: String,
+    },
+    ReadAggregate {
+        delegation_id: String,
+        entries: Vec<ReadAggregateEntry>,
+    },
     /// Forward-compat fallback. When a future SPUR release adds a new audit
     /// sentinel variant and emits it into a beads comment, older clients
     /// parsing that comment will deserialize it into `Unknown` instead of
@@ -197,6 +217,14 @@ pub enum AuditSentinelKind {
     /// should skip `Unknown`; the encode path must never emit it.
     #[serde(other)]
     Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadAggregateEntry {
+    pub tool_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_issue_id: Option<String>,
+    pub ts: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,6 +250,7 @@ impl AuditSentinelKind {
             Self::EpicCompletion { .. } => "epic-completion",
             Self::Approval { .. } => "approval",
             Self::Rejection { .. } => "rejection",
+            Self::ReviewFeedback { .. } => "review-feedback",
             Self::Signal { .. } => "signal",
             Self::MutationPlan { .. } => "mutation-plan",
             Self::MutationCommit { .. } => "mutation-commit",
@@ -231,6 +260,8 @@ impl AuditSentinelKind {
             Self::PlanOwnershipAcquired { .. } => "plan-ownership-acquired",
             Self::PlanOwnershipTransferred { .. } => "plan-ownership-transferred",
             Self::PlanHandoffReady { .. } => "plan-handoff-ready",
+            Self::WorkerWrite { .. } => "worker-write",
+            Self::ReadAggregate { .. } => "read-aggregate",
             Self::Unknown => "unknown",
         }
     }
@@ -360,8 +391,16 @@ mod tests {
                 delegation_id: "del-A".into(),
                 feedback: "try again".into(),
             },
+            AuditSentinelKind::ReviewFeedback {
+                delegation_id: "del-A".into(),
+                attempt: 1,
+                feedback: "add null check".into(),
+                worker_branch: Some("spur/worker-x".into()),
+                summary: Some("did thing".into()),
+            },
             AuditSentinelKind::Signal {
                 signal_id: "sig-1".into(),
+                delegation_id: "del-A".into(),
                 kind: "scope-drift".into(),
                 severity: 0.82,
                 reason: "auth spans 4 subsystems".into(),
@@ -406,6 +445,26 @@ mod tests {
                 owner: "brain-A".into(),
                 token: "token-A".into(),
                 progress_cursor: "cursor-1".into(),
+            },
+            AuditSentinelKind::WorkerWrite {
+                delegation_id: "del-A".into(),
+                tool: "update_issue".into(),
+                issue_id: "bd-123".into(),
+            },
+            AuditSentinelKind::ReadAggregate {
+                delegation_id: "del-A".into(),
+                entries: vec![
+                    ReadAggregateEntry {
+                        tool_name: "get_issue".into(),
+                        target_issue_id: Some("bd-123".into()),
+                        ts: 0,
+                    },
+                    ReadAggregateEntry {
+                        tool_name: "list_issues".into(),
+                        target_issue_id: None,
+                        ts: 1,
+                    },
+                ],
             },
         ];
         for k in cases {
@@ -482,8 +541,16 @@ mod tests {
                 delegation_id: "x".into(),
                 feedback: "f".into(),
             },
+            AuditSentinelKind::ReviewFeedback {
+                delegation_id: "del-B".into(),
+                attempt: 2,
+                feedback: "fix edge case".into(),
+                worker_branch: None,
+                summary: None,
+            },
             AuditSentinelKind::Signal {
                 signal_id: "sig-1".into(),
+                delegation_id: "del-A".into(),
                 kind: "scope-drift".into(),
                 severity: 0.82,
                 reason: "auth spans 4 subsystems".into(),
@@ -528,6 +595,19 @@ mod tests {
                 owner: "brain-A".into(),
                 token: "token-A".into(),
                 progress_cursor: "cursor-1".into(),
+            },
+            AuditSentinelKind::WorkerWrite {
+                delegation_id: "del-A".into(),
+                tool: "update_issue".into(),
+                issue_id: "bd-123".into(),
+            },
+            AuditSentinelKind::ReadAggregate {
+                delegation_id: "del-A".into(),
+                entries: vec![ReadAggregateEntry {
+                    tool_name: "get_issue".into(),
+                    target_issue_id: Some("bd-1".into()),
+                    ts: 0,
+                }],
             },
             AuditSentinelKind::Unknown,
         ] {
@@ -712,9 +792,39 @@ mod tests {
     }
 
     #[test]
+    fn review_feedback_variant_round_trips() {
+        let kind = AuditSentinelKind::ReviewFeedback {
+            delegation_id: "del-bd-33it".into(),
+            attempt: 2,
+            feedback: "fix the edge case".into(),
+            worker_branch: Some("spur/worker-bd-33it".into()),
+            summary: Some("partial fix".into()),
+        };
+        let encoded = encode_comment(&kind);
+        let parsed = parse_comment(&encoded).unwrap().unwrap();
+        assert_eq!(parsed, kind);
+        assert_eq!(parsed.kind_str(), "review-feedback");
+    }
+
+    #[test]
+    fn review_feedback_omits_optional_fields_when_none() {
+        let kind = AuditSentinelKind::ReviewFeedback {
+            delegation_id: "del-1".into(),
+            attempt: 1,
+            feedback: "add tests".into(),
+            worker_branch: None,
+            summary: None,
+        };
+        let json = serde_json::to_string(&kind).unwrap();
+        assert!(!json.contains("worker_branch"));
+        assert!(!json.contains("summary"));
+    }
+
+    #[test]
     fn signal_variant_round_trips() {
         let kind = AuditSentinelKind::Signal {
             signal_id: "sig-1".into(),
+            delegation_id: "del-A".into(),
             kind: "scope-drift".into(),
             severity: 0.82,
             reason: "auth spans 4 subsystems".into(),
@@ -793,6 +903,45 @@ mod tests {
         assert_eq!(decoded.kind_str(), "worker-mcp");
         assert!(encoded.contains("\"call\""));
         assert!(!encoded.contains("\"Call\""));
+    }
+
+    #[test]
+    fn worker_write_sentinel_round_trip() {
+        let kind = AuditSentinelKind::WorkerWrite {
+            delegation_id: "del-A".into(),
+            tool: "update_issue".into(),
+            issue_id: "bd-123".into(),
+        };
+        let encoded = encode_comment(&kind);
+        let decoded = parse_comment(&encoded).unwrap().unwrap();
+        assert_eq!(decoded, kind);
+        assert_eq!(decoded.kind_str(), "worker-write");
+        assert!(encoded.contains("\"update_issue\""));
+    }
+
+    #[test]
+    fn read_aggregate_sentinel_round_trip() {
+        let kind = AuditSentinelKind::ReadAggregate {
+            delegation_id: "del-A".into(),
+            entries: vec![
+                ReadAggregateEntry {
+                    tool_name: "get_issue".into(),
+                    target_issue_id: Some("bd-123".into()),
+                    ts: 0,
+                },
+                ReadAggregateEntry {
+                    tool_name: "list_issues".into(),
+                    target_issue_id: None,
+                    ts: 1,
+                },
+            ],
+        };
+        let encoded = encode_comment(&kind);
+        let decoded = parse_comment(&encoded).unwrap().unwrap();
+        assert_eq!(decoded, kind);
+        assert_eq!(decoded.kind_str(), "read-aggregate");
+        assert!(encoded.contains("\"get_issue\""));
+        assert!(encoded.contains("\"list_issues\""));
     }
 
     #[test]

@@ -180,7 +180,7 @@ pub(crate) fn feature_error_message(error: McpError) -> String {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum ProjectionError {
+pub(crate) enum ProjectionError {
     #[error("stored blob is not valid UTF-8: {0}")]
     InvalidUtf8(#[source] std::string::FromUtf8Error),
     #[error("stored blob is not a valid DelegationResult: {0}")]
@@ -189,7 +189,7 @@ enum ProjectionError {
     SerializeFailed(#[source] serde_json::Error),
 }
 
-fn project_section(
+pub(crate) fn project_section(
     full_bytes: &[u8],
     section: spur_blob_store::Section,
     key: &spur_acp::domain::outcome::OutcomeKey,
@@ -237,6 +237,8 @@ enum DelegationDispatchError {
     SessionRetiring,
     #[allow(dead_code)]
     #[error("worker MCP server unavailable: {reason}")]
+    // TODO(worker-mcp): remove once dispatch wiring constructs this error.
+    #[allow(dead_code)]
     WorkerMcpUnavailable { reason: String },
 }
 
@@ -511,17 +513,6 @@ fn pro_feature_gate() -> Arc<spur_license::FeatureGate> {
     gate
 }
 
-pub fn parse_delegation_plan(
-    container: &Value,
-) -> Result<Option<spur_acp::DelegationPlan>, String> {
-    match container.get("delegation_plan") {
-        None | Some(Value::Null) => Ok(None),
-        Some(value) => serde_json::from_value(value.clone())
-            .map(Some)
-            .map_err(|error| format!("invalid delegation_plan: {error}")),
-    }
-}
-
 /// Parse the `tasks` array from a `delegate_parallel` args payload into
 /// a list of partially-populated `DelegationRequest` skeletons. Public
 /// (crate-level) so integration tests can exercise the parse logic
@@ -539,36 +530,20 @@ pub fn parse_parallel_tasks(
         .ok_or_else(|| "Missing 'tasks' array".to_string())?;
     let mut out = Vec::with_capacity(tasks.len());
     for task_obj in tasks {
-        let agent = task_obj
-            .get("agent")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "task.agent missing".to_string())?
-            .to_string();
-        let task = task_obj
-            .get("task")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "task.task missing".to_string())?
-            .to_string();
-        let context_files: Vec<String> = task_obj
-            .get("context_files")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        let issue_id = task_obj
-            .get("issue_id")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let delegation_plan = parse_delegation_plan(task_obj)?;
+        let task: crate::tool_schemas::DelegateParallelTaskInput =
+            serde_json::from_value(task_obj.clone())
+                .map_err(|e| format!("Invalid task arguments: {e}"))?;
         let (tx, _rx) = tokio::sync::oneshot::channel();
         out.push(DelegationRequest {
             id: DelegationId::new(),
-            agent,
-            task,
-            context_files,
+            agent: task.agent,
+            task: task.task,
+            context_files: task.context_files.unwrap_or_default(),
             respond_to: tx,
             brain_session_id: brain_session_id.clone(),
-            delegation_plan,
-            issue_id,
-            base: None,
+            delegation_plan: task.delegation_plan,
+            issue_id: task.issue_id,
+            base: task.base,
             dispatched_base_oid_tx: None,
             attempt_tracker: new_attempt_tracker(),
         });
@@ -733,21 +708,22 @@ pub async fn emit_plan_submit_audit(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PersistedPlanBootstrap {
-    epic_id: String,
-    base_snapshot_branch: Option<String>,
-    base_snapshot_oid: Option<String>,
+pub(crate) struct PersistedPlanBootstrap {
+    #[allow(dead_code)]
+    pub(crate) epic_id: String,
+    pub(crate) base_snapshot_branch: Option<String>,
+    pub(crate) base_snapshot_oid: Option<String>,
 }
 
 impl PersistedPlanBootstrap {
-    fn preferred_base_ref(&self) -> Option<&str> {
+    pub(crate) fn preferred_base_ref(&self) -> Option<&str> {
         self.base_snapshot_oid
             .as_deref()
             .or(self.base_snapshot_branch.as_deref())
     }
 }
 
-async fn read_persisted_plan_bootstrap(
+pub(crate) async fn read_persisted_plan_bootstrap(
     pm: &spur_pm::PmService,
     feature_gate: &spur_license::FeatureGate,
     plan_id: &str,
@@ -784,12 +760,12 @@ async fn read_persisted_plan_bootstrap(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PersistedTaskCompletion {
-    worker_branch: Option<String>,
-    summary: Option<String>,
+pub(crate) struct PersistedTaskCompletion {
+    pub(crate) worker_branch: Option<String>,
+    pub(crate) summary: Option<String>,
 }
 
-async fn read_latest_task_completion(
+pub(crate) async fn read_latest_task_completion(
     pm: &spur_pm::PmService,
     feature_gate: &spur_license::FeatureGate,
     issue_id: &str,
@@ -818,7 +794,7 @@ async fn read_latest_task_completion(
     }))
 }
 
-async fn reconstruct_historical_attempts(
+pub(crate) async fn reconstruct_historical_attempts(
     pm: &spur_pm::PmService,
     feature_gate: &spur_license::FeatureGate,
     issue_id: &str,
@@ -876,6 +852,27 @@ async fn reconstruct_historical_attempts(
             } => {
                 if let Some(record) = attempts_by_delegation.get_mut(&delegation_id) {
                     record.feedback = feedback;
+                }
+            }
+            // bd-33it: request_changes feedback also populates the historical
+            // attempt record. Joined by delegation_id so the get_task_diff
+            // operator-visible historical view sees the same feedback the
+            // reconciler used to enrich the worker prompt on retry.
+            crate::plan::audit_sentinel::AuditSentinelKind::ReviewFeedback {
+                delegation_id,
+                feedback,
+                worker_branch,
+                summary,
+                ..
+            } => {
+                if let Some(record) = attempts_by_delegation.get_mut(&delegation_id) {
+                    record.feedback = feedback;
+                    if record.worker_branch.is_none() {
+                        record.worker_branch = worker_branch;
+                    }
+                    if record.summary.is_none() {
+                        record.summary = summary;
+                    }
                 }
             }
             _ => {}
@@ -1233,121 +1230,6 @@ pub async fn resolve_dispatch_orphan(
     Ok(true)
 }
 
-/// Worker-facing handler for the `report_signal` MCP tool.
-#[doc(hidden)]
-pub async fn handle_report_signal(
-    pm: Arc<PmService>,
-    feature_gate: Arc<spur_license::FeatureGate>,
-    args: serde_json::Value,
-) -> anyhow::Result<serde_json::Value> {
-    use crate::plan::audit_sentinel::{encode_comment as audit_encode, AuditSentinelKind};
-    use crate::plan::labels;
-    use crate::plan::signals::{encode_comment as signal_encode, WorkerSignal};
-
-    #[derive(serde::Deserialize)]
-    struct Args {
-        task_id: String,
-        signal: WorkerSignal,
-    }
-
-    let args: Args = serde_json::from_value(args)?;
-    // Defense-in-depth: the MCP tool schema declares `kind` enum is
-    // `["scope_drift"]`, but harness input-schema enforcement is best-effort
-    // across MCP runtimes. Reject non-worker-emittable variants explicitly so
-    // a hallucinating worker cannot spoof brain-side signals (e.g.,
-    // PotentialClobber, which carries OIDs the worker has no authority over).
-    if !matches!(args.signal, WorkerSignal::ScopeDrift { .. }) {
-        anyhow::bail!(
-            "report_signal: only worker-emittable signal kinds are accepted; got {}",
-            args.signal.kind_label()
-        );
-    }
-    require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED, feature_gate.as_ref())
-        .map_err(|error| anyhow::anyhow!(feature_error_message(error)))?;
-    let adv = pm
-        .advanced()
-        .ok_or_else(|| anyhow::anyhow!("report_signal requires beads backend"))?;
-    let issue = pm.get_issue(&args.task_id).await?;
-    let signal_id = args.signal.signal_id().to_string();
-
-    // Beads persists a compressed status vocabulary — SPUR's nine-state
-    // PlanTaskStatus terminals (Approved, Failed, Cancelled, Superseded) all
-    // project to the beads `closed` status. Rejected stays `open` (retry-
-    // eligible). Using the beads closed-status predicate correctly models
-    // every SPUR terminal without matching vocabulary that beads never emits.
-    // Fine-grain which-terminal is recoverable from audit comments + labels
-    // (spur:superseded-by:*, Approval/Rejection sentinels) at consumer time.
-    if issue.status.as_str() == pm.closed_status() {
-        adv.add_comment(
-            &args.task_id,
-            &audit_encode(&AuditSentinelKind::LateSignal {
-                signal_id: signal_id.clone(),
-                terminal_status: issue.status.clone(),
-            }),
-        )
-        .await?;
-        pm.update_issue(
-            &args.task_id,
-            spur_pm::IssueUpdate {
-                add_labels: vec![labels::SIGNAL_LATE_ARRIVAL.to_string()],
-                ..Default::default()
-            },
-        )
-        .await?;
-        return Ok(json!({
-            "recorded": true,
-            "signal_id": signal_id,
-            "late": true,
-        }));
-    }
-
-    let (severity, reason, kind_label) = match &args.signal {
-        WorkerSignal::ScopeDrift {
-            severity, reason, ..
-        } => (
-            *severity,
-            reason.clone(),
-            args.signal.kind_label().to_string(),
-        ),
-        WorkerSignal::PotentialClobber { .. } => {
-            (0.0, String::new(), args.signal.kind_label().to_string())
-        }
-    };
-
-    // Emit the audit sentinel BEFORE operational writes so the decision-at-
-    // decision-time is immutably recorded. Beads has no transactions; if the
-    // task closes between our terminal check above and subsequent writes, the
-    // watcher's status-at-tick-time filter (signal_watcher.rs) still enforces
-    // I3 at consumption. Ordering here makes partial failures auditable and
-    // matches the late-path ordering (audit-before-label) for consistency.
-    adv.add_comment(
-        &args.task_id,
-        &audit_encode(&AuditSentinelKind::Signal {
-            signal_id: signal_id.clone(),
-            kind: kind_label.clone(),
-            severity,
-            reason,
-        }),
-    )
-    .await?;
-    adv.add_comment(&args.task_id, &signal_encode(&args.signal))
-        .await?;
-    pm.update_issue(
-        &args.task_id,
-        spur_pm::IssueUpdate {
-            add_labels: vec![labels::signal_kind(&kind_label)],
-            ..Default::default()
-        },
-    )
-    .await?;
-
-    Ok(json!({
-        "recorded": true,
-        "signal_id": signal_id,
-        "late": false,
-    }))
-}
-
 /// Pure helper: compute the IssueCreate values that build_epic_subgraph
 /// would dispatch to PmService. Returns the epic's IssueCreate plus a
 /// Vec of (task_id, IssueCreate) for each child in topological order.
@@ -1572,7 +1454,7 @@ async fn run_git_capture(
     }
 }
 
-async fn diff_text_from_branches(
+pub(crate) async fn diff_text_from_branches(
     repo_root: &std::path::Path,
     base_ref: &str,
     worker_branch: &str,
@@ -1895,6 +1777,7 @@ impl McpCallbackServer {
             plan_sink,
             plan_pm,
             self.reconciler_fast_forward.as_ref().cloned(),
+            Arc::clone(&self.continuation_ctx),
             Arc::new(self.materializer.clone()),
             Arc::clone(&self.feature_gate),
         ));
@@ -2300,6 +2183,7 @@ impl McpCallbackServer {
                         brain_session_id: self.brain_session_id.clone(),
                         event_sink: self.event_sink.clone(),
                         materializer: Arc::new(self.materializer.clone()),
+                        continuation_ctx: Arc::clone(&self.continuation_ctx),
                     };
                     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
                     reconciler_cancel_tx = Some(cancel_tx);
@@ -2516,7 +2400,18 @@ impl McpCallbackServer {
                     }
                 };
 
-                match handle_report_signal(pm, Arc::clone(&self.feature_gate), arguments).await {
+                let ctx = crate::handlers::WorkerCallContext {
+                    delegation_id: String::new(),
+                    brain_session_id: self.brain_session_id.as_session_id().0.clone(),
+                };
+                match crate::handlers::report_signal(
+                    pm.as_ref(),
+                    self.feature_gate.as_ref(),
+                    &ctx,
+                    arguments,
+                )
+                .await
+                {
                     Ok(result) => {
                         let text = serde_json::to_string_pretty(&result)
                             .unwrap_or_else(|_| result.to_string());
@@ -2525,10 +2420,21 @@ impl McpCallbackServer {
                             json!({ "content": [{ "type": "text", "text": text }] }),
                         )
                     }
-                    Err(error) => JsonRpcResponse::internal_error(
-                        id,
-                        format!("report_signal failed: {error}"),
-                    ),
+                    Err(crate::handlers::McpHandlerError::InvalidParams(e)) => {
+                        JsonRpcResponse::invalid_params(id, e)
+                    }
+                    Err(crate::handlers::McpHandlerError::NotFound(e)) => {
+                        JsonRpcResponse::error(id, -32004, e)
+                    }
+                    Err(crate::handlers::McpHandlerError::Unauthorized(e)) => {
+                        JsonRpcResponse::error(id, -32001, e)
+                    }
+                    Err(crate::handlers::McpHandlerError::UpstreamPm(e)) => {
+                        JsonRpcResponse::internal_error(id, format!("report_signal failed: {e}"))
+                    }
+                    Err(crate::handlers::McpHandlerError::Internal(e)) => {
+                        JsonRpcResponse::internal_error(id, e)
+                    }
                 }
             }
             "create_issue" => self.handle_create_issue(id, arguments).await,
@@ -2545,13 +2451,7 @@ impl McpCallbackServer {
             "execute_epic" => self.handle_execute_epic(id, arguments).await,
             "get_plan_status" => self.handle_get_plan_status(id, arguments).await,
             "get_reconciler_status" => self.handle_get_reconciler_status(id).await,
-            "get_task_diff" => match self.handle_get_task_diff(&arguments).await {
-                Ok(text) => JsonRpcResponse::success(
-                    id,
-                    json!({ "content": [{ "type": "text", "text": text }] }),
-                ),
-                Err(e) => JsonRpcResponse::internal_error(id, e),
-            },
+            "get_task_diff" => self.handle_get_task_diff(id, arguments).await,
             "preview_task_base" => self.handle_preview_task_base(id, arguments).await,
             "review_task" => match self.handle_review_task(&arguments).await {
                 Ok(text) => JsonRpcResponse::success(
@@ -2560,6 +2460,7 @@ impl McpCallbackServer {
                 ),
                 Err(e) => JsonRpcResponse::internal_error(id, e),
             },
+            "report_progress" => self.handle_report_progress(id, arguments).await,
             _ => JsonRpcResponse::error(id, -32601, format!("Unknown tool: {tool_name}")),
         }
     }
@@ -2570,27 +2471,13 @@ impl McpCallbackServer {
         if let Err(error) = self.ensure_accepting_delegations() {
             return error.into_response(id);
         }
-        let bad_params = |message| JsonRpcResponse::invalid_params(id.clone(), message);
-        let agent = match args.get("agent").and_then(|v| v.as_str()) {
-            Some(a) => a.to_string(),
-            None => return JsonRpcResponse::invalid_params(id, "Missing required field 'agent'"),
-        };
-        let task = match args.get("task").and_then(|v| v.as_str()) {
-            Some(t) => t.to_string(),
-            None => return JsonRpcResponse::invalid_params(id, "Missing required field 'task'"),
-        };
-        let context_files: Vec<String> = args
-            .get("context_files")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        let delegation_plan = match parse_delegation_plan(&args).map_err(bad_params) {
-            Ok(plan) => plan,
-            Err(response) => return response,
-        };
-        let issue_id = args
-            .get("issue_id")
-            .and_then(|v| v.as_str())
-            .map(String::from);
+        let parsed: crate::tool_schemas::DelegateToWorkerInput =
+            match serde_json::from_value(args.clone()) {
+                Ok(p) => p,
+                Err(e) => {
+                    return JsonRpcResponse::invalid_params(id, format!("Invalid arguments: {e}"))
+                }
+            };
 
         let request_id = DelegationId::new();
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -2598,19 +2485,19 @@ impl McpCallbackServer {
 
         let delegation = DelegationRequest {
             id: request_id.clone(),
-            agent: agent.clone(),
-            task: task.clone(),
-            context_files,
+            agent: parsed.agent.clone(),
+            task: parsed.task,
+            context_files: parsed.context_files.unwrap_or_default(),
             respond_to: tx,
             brain_session_id: self.brain_session_id.clone(),
-            delegation_plan,
-            issue_id,
-            base: None,
+            delegation_plan: parsed.delegation_plan,
+            issue_id: parsed.issue_id,
+            base: parsed.base,
             dispatched_base_oid_tx: None,
             attempt_tracker: Arc::clone(&attempt_tracker),
         };
 
-        info!(agent = %agent, request_id = %request_id, "Sending delegation request");
+        info!(agent = %parsed.agent, request_id = %request_id, "Sending delegation request");
 
         if let Err(_e) = self.delegation_tx.send(delegation).await {
             error!("Failed to send delegation request");
@@ -2682,7 +2569,8 @@ impl McpCallbackServer {
                     "delegation_id": request_id,
                     "continuation_will_fire": false,
                     "description": format!(
-                        "Delegation to '{agent}' completed inline (delegation_id={request_id})."
+                        "Delegation to '{agent}' completed inline (delegation_id={request_id}).",
+                        agent = parsed.agent
                     ),
                     "result": result_json,
                 });
@@ -2700,7 +2588,7 @@ impl McpCallbackServer {
             }
             _ = tokio::time::sleep(inline_wait) => {
                 info!(
-                    agent = %agent,
+                    agent = %parsed.agent,
                     request_id = %request_id,
                     inline_wait_ms = inline_wait.as_millis() as u64,
                     "Delegation inline window expired — detaching via continuation bridge"
@@ -2729,7 +2617,8 @@ impl McpCallbackServer {
                         "Delegation to '{agent}' is running in the background \
                          (delegation_id={request_id}). A continuation event will \
                          fire automatically when the worker completes. Do NOT call \
-                         check_delegation_status — you will be re-prompted automatically."
+                         check_delegation_status — you will be re-prompted automatically.",
+                        agent = parsed.agent
                     ),
                 });
                 let payload_text = serde_json::to_string_pretty(&payload)
@@ -2968,120 +2857,35 @@ impl McpCallbackServer {
     }
 
     async fn handle_fetch_outcome_artifact(&self, id: Value, args: Value) -> JsonRpcResponse {
-        use spur_blob_store::Section;
-
-        let delegation_id: DelegationId = match args.get("delegation_id").and_then(|v| v.as_str()) {
-            Some(s) if !s.is_empty() => s.into(),
-            _ => {
-                return JsonRpcResponse::invalid_params(id, "Missing or empty 'delegation_id'");
-            }
+        let ctx = crate::handlers::WorkerCallContext {
+            delegation_id: String::new(),
+            brain_session_id: self.brain_session_id.as_session_id().0.clone(),
         };
-
-        let section_str = args
-            .get("section")
-            .and_then(|v| v.as_str())
-            .unwrap_or("full");
-        let section = match section_str {
-            "full" => Section::Full,
-            "status_only" => Section::StatusOnly,
-            "summary" => Section::Summary,
-            "diff_only" => Section::DiffOnly,
-            other => {
-                return JsonRpcResponse::invalid_params(
-                    id,
-                    format!(
-                        "Unknown section '{other}'. Must be one of: status_only, summary, diff_only, full."
-                    ),
-                );
-            }
-        };
-
-        // Distinguish missing (use latest) from invalid (reject). Without this
-        // split, a non-numeric or negative `attempt` value would silently fall
-        // through to the missing-arg fallback and return data for a different
-        // attempt than the brain asked for.
-        let attempt = match args.get("attempt") {
-            None | Some(serde_json::Value::Null) => self
-                .materializer
-                .latest_attempt(&delegation_id)
-                .await
-                .unwrap_or(1),
-            Some(v) => match v.as_u64() {
-                Some(n) if (1..=u32::MAX as u64).contains(&n) => n as u32,
-                _ => {
-                    return JsonRpcResponse::invalid_params(
-                        id,
-                        "Invalid 'attempt': must be u32 >= 1",
-                    );
-                }
-            },
-        };
-
-        let key = spur_acp::domain::outcome::OutcomeKey {
-            brain_session_id: self.brain_session_id.clone(),
-            delegation_id: delegation_id.clone(),
-            attempt,
-        };
-
-        let start = std::time::Instant::now();
-        let content = match self.outcome_store.get(&key, Some(Section::Full)).await {
-            Ok(content) => content,
-            Err(spur_blob_store::StoreError::NotFound(_)) => {
-                tracing::warn!(
-                    target: "spur.metrics.outcome_fetch_not_found",
-                    ?key,
-                    section = section_str,
-                    "outcome not found; possible hallucinated id, post-GC read, or in-flight race"
-                );
-                return JsonRpcResponse::error(
-                    id,
-                    -32004,
-                    format!(
-                        "Outcome artifact not found for delegation_id={delegation_id} attempt={attempt}"
-                    ),
-                );
-            }
-            Err(spur_blob_store::StoreError::Unauthorized { requested, actual }) => {
-                tracing::warn!(
-                    target: "spur.metrics.outcome_fetch_unauthorized",
-                    ?requested,
-                    ?actual,
-                    "cross-session fetch rejected"
-                );
-                return JsonRpcResponse::error(id, -32001, "cross-session outcome read forbidden");
-            }
-            Err(error) => {
-                return JsonRpcResponse::internal_error(
-                    id,
-                    format!("OutcomeStore::get failed: {error}"),
-                );
-            }
-        };
-
-        let projected_text = match project_section(&content.bytes, section, &key) {
-            Ok(text) => text,
-            Err(error) => {
-                return JsonRpcResponse::internal_error(
-                    id,
-                    format!("Section projection failed: {error}"),
-                );
-            }
-        };
-
-        tracing::info!(
-            target: "spur.metrics.outcome_fetched",
-            ?key,
-            section = section_str,
-            byte_size = projected_text.len() as u64,
-            latency_ms = start.elapsed().as_millis() as u64,
-        );
-
-        JsonRpcResponse::success(
-            id,
-            json!({
-                "content": [{ "type": "text", "text": projected_text }]
-            }),
+        match crate::handlers::fetch_outcome_artifact(
+            &self.materializer,
+            self.outcome_store.as_ref(),
+            &ctx,
+            args,
         )
+        .await
+        {
+            Ok(value) => JsonRpcResponse::success(id, value),
+            Err(crate::handlers::McpHandlerError::InvalidParams(e)) => {
+                JsonRpcResponse::invalid_params(id, e)
+            }
+            Err(crate::handlers::McpHandlerError::NotFound(e)) => {
+                JsonRpcResponse::error(id, -32004, e)
+            }
+            Err(crate::handlers::McpHandlerError::Unauthorized(e)) => {
+                JsonRpcResponse::error(id, -32001, e)
+            }
+            Err(crate::handlers::McpHandlerError::UpstreamPm(e)) => {
+                JsonRpcResponse::internal_error(id, format!("fetch_outcome_artifact failed: {e}"))
+            }
+            Err(crate::handlers::McpHandlerError::Internal(e)) => {
+                JsonRpcResponse::internal_error(id, e)
+            }
+        }
     }
 
     async fn handle_cancel_delegation(&self, id: Value, args: Value) -> JsonRpcResponse {
@@ -3183,21 +2987,35 @@ impl McpCallbackServer {
             Some(pm) => pm,
             None => return JsonRpcResponse::internal_error(id, "No issue tracker configured"),
         };
-        let issue_id = match args.get("id").and_then(|v| v.as_str()) {
-            Some(i) => i.to_string(),
-            None => return JsonRpcResponse::invalid_params(id, "Missing required field 'id'"),
+        let ctx = crate::handlers::WorkerCallContext {
+            delegation_id: String::new(),
+            brain_session_id: self.brain_session_id.as_session_id().0.clone(),
         };
 
-        match pm.get_issue(&issue_id).await {
+        match crate::handlers::get_issue(pm, &ctx, args).await {
             Ok(issue) => {
                 let text =
-                    serde_json::to_string_pretty(&issue).unwrap_or_else(|_| format!("{issue:?}"));
+                    serde_json::to_string_pretty(&issue).unwrap_or_else(|_| issue.to_string());
                 JsonRpcResponse::success(
                     id,
                     json!({ "content": [{ "type": "text", "text": text }] }),
                 )
             }
-            Err(e) => JsonRpcResponse::internal_error(id, format!("get_issue failed: {e}")),
+            Err(crate::handlers::McpHandlerError::InvalidParams(e)) => {
+                JsonRpcResponse::invalid_params(id, e)
+            }
+            Err(crate::handlers::McpHandlerError::NotFound(e)) => {
+                JsonRpcResponse::error(id, -32004, e)
+            }
+            Err(crate::handlers::McpHandlerError::Unauthorized(e)) => {
+                JsonRpcResponse::error(id, -32001, e)
+            }
+            Err(crate::handlers::McpHandlerError::UpstreamPm(e)) => {
+                JsonRpcResponse::internal_error(id, format!("get_issue failed: {e}"))
+            }
+            Err(crate::handlers::McpHandlerError::Internal(e)) => {
+                JsonRpcResponse::internal_error(id, e)
+            }
         }
     }
 
@@ -3267,47 +3085,35 @@ impl McpCallbackServer {
             Some(pm) => pm,
             None => return JsonRpcResponse::internal_error(id, "No issue tracker configured"),
         };
-        let issue_id = match args.get("id").and_then(|v| v.as_str()) {
-            Some(i) => i.to_string(),
-            None => return JsonRpcResponse::invalid_params(id, "Missing required field 'id'"),
+        let ctx = crate::handlers::WorkerCallContext {
+            delegation_id: String::new(),
+            brain_session_id: self.brain_session_id.as_session_id().0.clone(),
         };
 
-        let add_labels: Vec<String> = args
-            .get("add_labels")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        let remove_labels: Vec<String> = args
-            .get("remove_labels")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-
-        let update = IssueUpdate {
-            status: args
-                .get("status")
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            comment: args
-                .get("comment")
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            priority: args
-                .get("priority")
-                .and_then(|v| v.as_i64())
-                .map(|n| n as i32),
-            assignee: args
-                .get("assignee")
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            add_labels,
-            remove_labels,
-        };
-
-        match pm.update_issue(&issue_id, update).await {
-            Ok(()) => JsonRpcResponse::success(
-                id,
-                json!({ "content": [{ "type": "text", "text": "Issue updated." }] }),
-            ),
-            Err(e) => JsonRpcResponse::internal_error(id, format!("update_issue failed: {e}")),
+        match crate::handlers::update_issue(pm, &ctx, args).await {
+            Ok(result) => {
+                let text =
+                    serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
+                JsonRpcResponse::success(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }] }),
+                )
+            }
+            Err(crate::handlers::McpHandlerError::InvalidParams(e)) => {
+                JsonRpcResponse::invalid_params(id, e)
+            }
+            Err(crate::handlers::McpHandlerError::NotFound(e)) => {
+                JsonRpcResponse::error(id, -32004, e)
+            }
+            Err(crate::handlers::McpHandlerError::Unauthorized(e)) => {
+                JsonRpcResponse::error(id, -32001, e)
+            }
+            Err(crate::handlers::McpHandlerError::UpstreamPm(e)) => {
+                JsonRpcResponse::internal_error(id, format!("update_issue failed: {e}"))
+            }
+            Err(crate::handlers::McpHandlerError::Internal(e)) => {
+                JsonRpcResponse::internal_error(id, e)
+            }
         }
     }
 
@@ -4151,19 +3957,22 @@ impl McpCallbackServer {
                  plan_id: {plan_id}\n\
                  epic_id: {epic_id} (beads)\n\
                  task_map: {task_map_json}\n\
-                 Poll with get_plan_status to monitor progress.",
+                 A continuation will fire on each per-task failure/awaiting-review and on plan completion. \
+                 Polling get_plan_status remains available as a safety net.",
                 epic_id = sg.epic_id,
             )
         } else {
             format!(
                 "Plan submitted: {task_count} tasks. plan_id: {plan_id}\n\
-                 Poll with get_plan_status to monitor progress."
+                 A continuation will fire on each per-task failure/awaiting-review and on plan completion. \
+                 Polling get_plan_status remains available as a safety net."
             )
         };
 
         JsonRpcResponse::success(
             id,
             json!({
+                "continuation_will_fire": true,
                 "content": [{
                     "type": "text",
                     "text": response_text
@@ -4525,34 +4334,35 @@ impl McpCallbackServer {
     }
 
     async fn handle_get_plan_status(&self, id: Value, args: Value) -> JsonRpcResponse {
-        let plan_id = match args.get("plan_id").and_then(|v| v.as_str()) {
-            Some(p) => p.to_string(),
-            None => return JsonRpcResponse::invalid_params(id, "Missing required field 'plan_id'"),
+        let ctx = crate::handlers::WorkerCallContext {
+            delegation_id: String::new(),
+            brain_session_id: self.brain_session_id.as_session_id().0.clone(),
         };
-
-        let plan_state = match self.load_or_project_plan(&plan_id).await {
-            Ok(plan_state) => plan_state,
-            Err(_) => {
-                return JsonRpcResponse::invalid_params(id, format!("Unknown plan_id: '{plan_id}'"))
+        match crate::handlers::get_plan_status(self, &self.reconciler_outcomes, &ctx, args).await {
+            Ok(status) => {
+                let text =
+                    serde_json::to_string_pretty(&status).unwrap_or_else(|_| status.to_string());
+                JsonRpcResponse::success(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }] }),
+                )
             }
-        };
-
-        let state = plan_state.lock().await;
-        let mut status = crate::plan::build_plan_status(&plan_id, &state);
-        let outcomes = self.reconciler_outcomes.lock().await;
-        if let serde_json::Value::Object(ref mut fields) = status {
-            fields.insert(
-                "recent_outcomes".into(),
-                serde_json::json!(outcomes.recent_outcomes(&plan_id)),
-            );
-            fields.insert(
-                "stuck_tasks".into(),
-                serde_json::json!(outcomes.stuck_tasks_for_plan(&plan_id)),
-            );
+            Err(crate::handlers::McpHandlerError::InvalidParams(e)) => {
+                JsonRpcResponse::invalid_params(id, e)
+            }
+            Err(crate::handlers::McpHandlerError::NotFound(e)) => {
+                JsonRpcResponse::error(id, -32004, e)
+            }
+            Err(crate::handlers::McpHandlerError::Unauthorized(e)) => {
+                JsonRpcResponse::error(id, -32001, e)
+            }
+            Err(crate::handlers::McpHandlerError::UpstreamPm(e)) => {
+                JsonRpcResponse::internal_error(id, format!("get_plan_status failed: {e}"))
+            }
+            Err(crate::handlers::McpHandlerError::Internal(e)) => {
+                JsonRpcResponse::internal_error(id, e)
+            }
         }
-        let text = serde_json::to_string_pretty(&status).unwrap_or_else(|_| status.to_string());
-
-        JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
     }
 
     async fn handle_get_reconciler_status(&self, id: Value) -> JsonRpcResponse {
@@ -4570,217 +4380,93 @@ impl McpCallbackServer {
         JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
     }
 
-    async fn handle_get_task_diff(&self, args: &serde_json::Value) -> Result<String, String> {
-        let plan_id = args["plan_id"]
-            .as_str()
-            .ok_or("missing plan_id")?
-            .to_string();
-        let task_id = args["task_id"]
-            .as_str()
-            .ok_or("missing task_id")?
-            .to_string();
-        let attempt = args["attempt"].as_u64().map(|n| n as u32);
-
-        let plan_arc = self.load_or_project_plan(&plan_id).await?;
-
-        let (
-            current_attempt,
-            history,
-            agent,
-            task_description,
-            issue_id,
-            status_str,
-            status_summary,
-            worker_branch,
-            dispatched_base_oid,
-            result,
-            epic_id,
-            base_snapshot_branch,
-            base_snapshot_oid,
-        ) = {
-            let state = plan_arc.lock().await;
-            let entry = state
-                .tasks
-                .iter()
-                .find(|t| t.spec.task_id == task_id)
-                .ok_or_else(|| format!("unknown task '{task_id}' in plan '{plan_id}'"))?;
-
-            match &entry.status {
-                crate::plan::PlanTaskStatus::Pending | crate::plan::PlanTaskStatus::Ready => {
-                    return Err(format!("task '{task_id}' has not been dispatched yet"));
-                }
-                crate::plan::PlanTaskStatus::Dispatched { .. } => {
-                    return Err(format!(
-                        "task '{task_id}' is still running — diff not available yet"
-                    ));
-                }
-                _ => {}
-            }
-
-            let status_str = match &entry.status {
-                crate::plan::PlanTaskStatus::AwaitingReview { .. } => "awaiting_review",
-                crate::plan::PlanTaskStatus::Approved { .. } => "approved",
-                crate::plan::PlanTaskStatus::Rejected { .. } => "rejected",
-                crate::plan::PlanTaskStatus::Failed { .. } => "failed",
-                _ => "unknown",
-            }
-            .to_string();
-            let status_summary = match &entry.status {
-                crate::plan::PlanTaskStatus::AwaitingReview { summary }
-                | crate::plan::PlanTaskStatus::Approved { summary } => summary.clone(),
-                _ => None,
-            };
-
-            (
-                entry.attempt,
-                entry.history.clone(),
-                entry.spec.agent.clone(),
-                entry.spec.task.clone(),
-                entry.spec.issue_id.clone(),
-                status_str,
-                status_summary,
-                entry.worker_branch.clone(),
-                entry.dispatched_base_oid.clone(),
-                entry.result.clone(),
-                state.epic_id.clone(),
-                state.base_snapshot_branch.clone(),
-                state.base_snapshot_oid.clone(),
-            )
+    async fn handle_get_task_diff(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let ctx = crate::handlers::WorkerCallContext {
+            delegation_id: String::new(),
+            brain_session_id: self.brain_session_id.as_session_id().0.clone(),
         };
-
-        // If attempt specified and differs from current, look up historical attempt.
-        if let Some(want_attempt) = attempt {
-            if want_attempt != current_attempt {
-                let historical_attempts = if history.is_empty() {
-                    if let (Some(pm), Some(issue_id)) =
-                        (self.pm_service.as_deref(), issue_id.as_deref())
-                    {
-                        reconstruct_historical_attempts(
-                            pm,
-                            self.feature_gate.as_ref(),
-                            issue_id,
-                            current_attempt,
-                        )
-                        .await?
-                    } else {
-                        Vec::new()
-                    }
-                } else {
-                    history.clone()
-                };
-                let Some(rec) = historical_attempts
-                    .iter()
-                    .find(|r| r.attempt == want_attempt)
-                else {
-                    return Err(format!(
-                        "task '{task_id}' has no attempt {want_attempt} (current: {}, history: {} entries)",
-                        current_attempt,
-                        historical_attempts.len()
-                    ));
-                };
-                let mut resp = serde_json::Map::new();
-                resp.insert("task_id".into(), json!(task_id));
-                resp.insert("agent".into(), json!(agent));
-                resp.insert("attempt".into(), json!(want_attempt));
-                resp.insert("status".into(), json!("historical"));
-                resp.insert("task_description".into(), json!(task_description));
-                if let Some(ref id) = issue_id {
-                    resp.insert("issue_id".into(), json!(id));
-                }
-                if let Some(ref b) = rec.worker_branch {
-                    resp.insert("worker_branch".into(), json!(b));
-                }
-                if let Some(ref s) = rec.summary {
-                    resp.insert("summary".into(), json!(s));
-                }
-                if let Some(ref d) = rec.diff_summary {
-                    resp.insert(
-                        "diff_summary".into(),
-                        serde_json::to_value(d).unwrap_or_default(),
-                    );
-                }
-                resp.insert("feedback".into(), json!(rec.feedback));
-                resp.insert(
-                    "note".into(),
-                    json!("Historical attempt — full diff text not stored. Inspect git: `git show <worker_branch>`."),
-                );
-                return serde_json::to_string_pretty(&serde_json::Value::Object(resp))
-                    .map_err(|e| e.to_string());
-            }
-        }
-
-        let mut resp = serde_json::Map::new();
-        resp.insert("task_id".into(), json!(task_id));
-        resp.insert("agent".into(), json!(agent));
-        resp.insert("task_description".into(), json!(task_description));
-        if let Some(ref issue_id) = issue_id {
-            resp.insert("issue_id".into(), json!(issue_id));
-        }
-        resp.insert("status".into(), json!(status_str));
-
-        if let Some(ref branch) = worker_branch {
-            resp.insert("worker_branch".into(), json!(branch));
-        }
-        if let Some(ref summary) = status_summary {
-            resp.insert("summary".into(), json!(summary));
-        }
-        if let Some(ref result) = result {
-            for (k, v) in crate::plan::build_task_diff_fields(result) {
-                resp.insert(k, v);
-            }
-        } else if let (Some(pm), Some(epic_id), Some(issue_id)) = (
+        match crate::handlers::get_task_diff(
             self.pm_service.as_deref(),
-            epic_id.as_deref(),
-            issue_id.as_deref(),
-        ) {
-            let bootstrap =
-                read_persisted_plan_bootstrap(pm, self.feature_gate.as_ref(), &plan_id, epic_id)
-                    .await
-                    .ok();
-            let completion =
-                read_latest_task_completion(pm, self.feature_gate.as_ref(), issue_id).await?;
-            let recovered_worker_branch = completion
-                .as_ref()
-                .and_then(|record| record.worker_branch.clone())
-                .or(worker_branch);
-
-            if let Some(recovered_worker_branch) = recovered_worker_branch {
-                let base_ref = if let Some(dispatched_base_oid) = dispatched_base_oid {
-                    dispatched_base_oid
-                } else {
-                    tracing::warn!(
-                        plan_id = %plan_id,
-                        task_id = %task_id,
-                        worker_branch = %recovered_worker_branch,
-                        "get_task_diff falling back to base snapshot range because task has no dispatched_base_oid"
-                    );
-                    bootstrap
-                        .as_ref()
-                        .and_then(PersistedPlanBootstrap::preferred_base_ref)
-                        .map(str::to_string)
-                        .or(base_snapshot_oid)
-                        .or(base_snapshot_branch)
-                        .ok_or_else(|| {
-                            format!(
-                                "plan '{plan_id}' has no captured base snapshot; latest diff unavailable"
-                            )
-                        })?
+            self.feature_gate.as_ref(),
+            self.repo_root.as_deref(),
+            self,
+            &ctx,
+            args,
+        )
+        .await
+        {
+            Ok(value) => {
+                let text = match serde_json::to_string_pretty(&value) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        return JsonRpcResponse::internal_error(
+                            id,
+                            format!("get_task_diff response serialization failed: {e}"),
+                        )
+                    }
                 };
-                let repo_root = self.repo_root.as_deref().ok_or_else(|| {
-                    "Repository root not configured; get_task_diff cannot reconstruct persisted diffs"
-                        .to_string()
-                })?;
-                let diff =
-                    diff_text_from_branches(repo_root, &base_ref, &recovered_worker_branch).await?;
-                resp.insert("worker_branch".into(), json!(recovered_worker_branch));
-                resp.insert("diff".into(), json!(diff));
-                if let Some(summary) = completion.and_then(|record| record.summary) {
-                    resp.insert("summary".into(), json!(summary));
-                }
+                JsonRpcResponse::success(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }] }),
+                )
+            }
+            Err(crate::handlers::McpHandlerError::InvalidParams(e)) => {
+                JsonRpcResponse::invalid_params(id, e)
+            }
+            Err(crate::handlers::McpHandlerError::NotFound(e)) => {
+                JsonRpcResponse::error(id, -32004, e)
+            }
+            Err(crate::handlers::McpHandlerError::Unauthorized(e)) => {
+                JsonRpcResponse::error(id, -32001, e)
+            }
+            Err(crate::handlers::McpHandlerError::UpstreamPm(e)) => {
+                JsonRpcResponse::internal_error(id, format!("get_task_diff failed: {e}"))
+            }
+            Err(crate::handlers::McpHandlerError::Internal(e)) => {
+                JsonRpcResponse::internal_error(id, e)
             }
         }
+    }
 
-        serde_json::to_string_pretty(&serde_json::Value::Object(resp)).map_err(|e| e.to_string())
+    async fn handle_report_progress(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let sink = match self.event_sink.as_deref() {
+            Some(sink) => sink,
+            None => {
+                return JsonRpcResponse::internal_error(
+                    id,
+                    "report_progress: event sink not configured",
+                )
+            }
+        };
+        let ctx = crate::handlers::WorkerCallContext {
+            delegation_id: String::new(),
+            brain_session_id: self.brain_session_id.as_session_id().0.clone(),
+        };
+        match crate::handlers::report_progress(sink, &ctx, args).await {
+            Ok(value) => {
+                let text =
+                    serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
+                JsonRpcResponse::success(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }] }),
+                )
+            }
+            Err(crate::handlers::McpHandlerError::InvalidParams(e)) => {
+                JsonRpcResponse::invalid_params(id, e)
+            }
+            Err(crate::handlers::McpHandlerError::NotFound(e)) => {
+                JsonRpcResponse::error(id, -32004, e)
+            }
+            Err(crate::handlers::McpHandlerError::Unauthorized(e)) => {
+                JsonRpcResponse::error(id, -32001, e)
+            }
+            Err(crate::handlers::McpHandlerError::UpstreamPm(e)) => {
+                JsonRpcResponse::internal_error(id, format!("report_progress failed: {e}"))
+            }
+            Err(crate::handlers::McpHandlerError::Internal(e)) => {
+                JsonRpcResponse::internal_error(id, e)
+            }
+        }
     }
 
     async fn preview_task_base_impl(
@@ -5554,6 +5240,16 @@ impl crate::plan::reconciler::ReconcilerAutomation for McpCallbackServer {
 
     async fn create_pr(&self, params: spur_pm::PrParams) -> anyhow::Result<String> {
         self.create_pr_impl(params).await
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::handlers::PlanResolver for McpCallbackServer {
+    async fn load_or_project_plan(
+        &self,
+        plan_id: &str,
+    ) -> Result<Arc<tokio::sync::Mutex<crate::plan::PlanState>>, String> {
+        McpCallbackServer::load_or_project_plan(self, plan_id).await
     }
 }
 
@@ -6583,10 +6279,13 @@ mod fetch_outcome_artifact_tests {
             .await;
 
         let error = response.error.as_ref().expect("expected error response");
-        assert_eq!(error.code, -32004);
+        // Phase 2 Task 10: a missing artifact is reported as Unauthorized
+        // rather than NotFound so that a caller cannot probe whether a given
+        // (delegation_id, attempt) exists in another brain session.
+        assert_eq!(error.code, -32001);
         assert!(
-            error.message.contains("not found"),
-            "error message must mention not-found: {error:?}"
+            error.message.contains("not accessible"),
+            "error message must mention not-accessible: {error:?}"
         );
     }
 
@@ -6682,8 +6381,9 @@ mod fetch_outcome_artifact_tests {
             Some("secret stdout for session A")
         );
 
-        // Server B fetches under its own brain_session_id and gets NotFound,
-        // even though the shared store contains Server A's outcome.
+        // Server B fetches under its own brain_session_id and is denied as
+        // Unauthorized — the store-miss is deliberately indistinguishable
+        // from a "different session" miss to prevent cross-session probing.
         let resp_b = server_b
             .handle_tool_call(
                 Value::Number(1.into()),
@@ -6694,9 +6394,9 @@ mod fetch_outcome_artifact_tests {
             )
             .await;
         let err = resp_b.error.as_ref().expect("server B must error");
-        assert_eq!(err.code, -32004);
+        assert_eq!(err.code, -32001);
         assert!(
-            err.message.contains("not found"),
+            err.message.contains("not accessible"),
             "Server B must not expose Server A's delegations: {err:?}"
         );
     }
@@ -6876,7 +6576,7 @@ mod clobber_review_tests {
 
 #[cfg(test)]
 mod merge_plan_tests {
-    use super::{integrate_plan_branches, run_git_capture, snapshot_plan_base};
+    use super::{integrate_plan_branches, run_git_capture, snapshot_plan_base, JsonRpcResponse};
     use crate::plan::audit_sentinel::{encode_comment, AuditSentinelKind, CompletionState};
     use crate::plan::{PlanMergeState, PlanTask};
     use serde_json::{json, Value};
@@ -7528,6 +7228,16 @@ mod merge_plan_tests {
         serde_json::from_str(text).expect("get_task_diff response JSON")
     }
 
+    fn task_diff_text(response: JsonRpcResponse) -> String {
+        let result = response
+            .result
+            .expect("get_task_diff JsonRpcResponse must be Ok");
+        result["content"][0]["text"]
+            .as_str()
+            .expect("get_task_diff response must carry content[0].text")
+            .to_string()
+    }
+
     #[derive(Clone, Default)]
     struct CapturedWarnings {
         events: Arc<Mutex<Vec<String>>>,
@@ -7848,14 +7558,17 @@ mod merge_plan_tests {
     async fn get_task_diff_rehydrates_latest_attempt_when_cache_missing() {
         let fixture = setup_persisted_merge_ready_plan("plan-diff-recover", true).await;
 
-        let text = fixture
+        let raw = fixture
             .server
-            .handle_get_task_diff(&json!({
-                "plan_id": fixture.plan_id,
-                "task_id": "task-a",
-            }))
-            .await
-            .expect("get_task_diff should succeed");
+            .handle_get_task_diff(
+                json!(1),
+                json!({
+                    "plan_id": fixture.plan_id,
+                    "task_id": "task-a",
+                }),
+            )
+            .await;
+        let text = task_diff_text(raw);
         let response = decode_task_diff_response(&text);
 
         assert_eq!(response["worker_branch"], "spur/worker-a");
@@ -7873,14 +7586,17 @@ mod merge_plan_tests {
     async fn get_task_diff_uses_dispatched_base_oid_when_present() {
         let fixture = setup_cached_overlay_diff_plan("plan-diff-overlay", true).await;
 
-        let text = fixture
+        let raw = fixture
             .server
-            .handle_get_task_diff(&json!({
-                "plan_id": fixture.plan_id,
-                "task_id": "task-b",
-            }))
-            .await
-            .expect("get_task_diff should succeed");
+            .handle_get_task_diff(
+                json!(1),
+                json!({
+                    "plan_id": fixture.plan_id,
+                    "task_id": "task-b",
+                }),
+            )
+            .await;
+        let text = task_diff_text(raw);
         let response = decode_task_diff_response(&text);
         let diff = response["diff"].as_str().expect("diff text");
 
@@ -7900,14 +7616,17 @@ mod merge_plan_tests {
         let warnings = CapturedWarnings::default();
         let _guard = tracing::subscriber::set_default(warnings.clone());
 
-        let text = fixture
+        let raw = fixture
             .server
-            .handle_get_task_diff(&json!({
-                "plan_id": fixture.plan_id,
-                "task_id": "task-b",
-            }))
-            .await
-            .expect("get_task_diff should succeed");
+            .handle_get_task_diff(
+                json!(1),
+                json!({
+                    "plan_id": fixture.plan_id,
+                    "task_id": "task-b",
+                }),
+            )
+            .await;
+        let text = task_diff_text(raw);
         let response = decode_task_diff_response(&text);
         let diff = response["diff"].as_str().expect("diff text");
 
@@ -7929,15 +7648,18 @@ mod merge_plan_tests {
     async fn get_task_diff_historical_attempts_remain_summary_only() {
         let fixture = setup_persisted_retried_plan("plan-diff-history", true).await;
 
-        let text = fixture
+        let raw = fixture
             .server
-            .handle_get_task_diff(&json!({
-                "plan_id": fixture.plan_id,
-                "task_id": "task-a",
-                "attempt": 1,
-            }))
-            .await
-            .expect("historical get_task_diff should succeed");
+            .handle_get_task_diff(
+                json!(1),
+                json!({
+                    "plan_id": fixture.plan_id,
+                    "task_id": "task-a",
+                    "attempt": 1,
+                }),
+            )
+            .await;
+        let text = task_diff_text(raw);
         let response = decode_task_diff_response(&text);
 
         assert_eq!(response["status"], "historical");

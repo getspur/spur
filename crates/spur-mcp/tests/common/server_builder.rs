@@ -15,6 +15,10 @@ pub fn continuation_ctx() -> DetachedContinuationCtx {
     }
 }
 
+pub fn continuation_ctx_arc() -> Arc<DetachedContinuationCtx> {
+    Arc::new(continuation_ctx())
+}
+
 pub fn community_feature_gate() -> Arc<FeatureGate> {
     Arc::new(FeatureGate::new(PolicyResolver::embedded()))
 }

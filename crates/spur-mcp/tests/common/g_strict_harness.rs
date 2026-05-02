@@ -260,6 +260,7 @@ impl TestHarness {
                 brain_session_id: session_id,
                 event_sink: None,
                 materializer: test_materializer(),
+                continuation_ctx: super::server_builder::continuation_ctx_arc(),
             }),
             None,
             feature_gate,
@@ -554,7 +555,7 @@ impl TestHarness {
                 } => dispatched_base_oid,
                 _ => None,
             })
-            .last()
+            .next_back()
             .unwrap_or_else(|| panic!("missing completion dispatched_base_oid for {task_id}"))
     }
 
@@ -567,8 +568,7 @@ impl TestHarness {
 
         collect_audit_sentinels(&comments)
             .into_iter()
-            .filter(|sentinel| matches!(sentinel, AuditSentinelKind::Completion { .. }))
-            .last()
+            .rfind(|sentinel| matches!(sentinel, AuditSentinelKind::Completion { .. }))
             .unwrap_or_else(|| panic!("missing completion audit for {task_id}"))
     }
 

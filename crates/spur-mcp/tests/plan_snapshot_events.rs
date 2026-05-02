@@ -389,6 +389,7 @@ async fn reconciler_dispatch_and_completion_emit_refreshed_snapshots() {
             brain_session_id: BrainSessionId::new(SessionId("brain".into())),
             event_sink: Some(sink_ref),
             materializer: test_materializer(),
+            continuation_ctx: common::server_builder::continuation_ctx_arc(),
         }),
         Some(plan_id.clone()),
         common::server_builder::pro_feature_gate(),

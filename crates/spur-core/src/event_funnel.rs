@@ -50,6 +50,13 @@ impl spur_mcp::McpEventSink for FunnelHandle {
         // Delegates to the inherent `FunnelHandle::emit` method defined above.
         FunnelHandle::emit(self, event);
     }
+
+    fn try_emit(&self, event: SpurEventBody) -> Result<(), SpurEventBody> {
+        // FunnelHandle uses an unbounded channel — enqueue is always
+        // non-blocking, so this is equivalent to `emit`.
+        FunnelHandle::emit(self, event);
+        Ok(())
+    }
 }
 
 /// Create a `FunnelHandle` backed by a plain unbounded channel whose
