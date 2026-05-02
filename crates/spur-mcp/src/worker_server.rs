@@ -14,6 +14,25 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// Configuration for the background audit flusher and idle thresholds.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkerMcpServerConfig {
+    /// How long a read-audit buffer must be untouched before the background
+    /// flusher considers it idle and emits a `ReadAggregate` sentinel.
+    pub idle_threshold: Duration,
+    /// How often the flusher scans the per-delegation buffer map.
+    pub scan_interval: Duration,
+}
+
+impl Default for WorkerMcpServerConfig {
+    fn default() -> Self {
+        Self {
+            idle_threshold: Duration::from_secs(30),
+            scan_interval: Duration::from_secs(10),
+        }
+    }
+}
+
 use parking_lot::Mutex;
 use rand::RngCore;
 use serde_json::{json, Value};
@@ -176,6 +195,7 @@ pub struct WorkerMcpServer {
     deps: Arc<DispatcherDeps>,
     shutdown: CancellationToken,
     accept_loop_handle: Mutex<Option<JoinHandle<()>>>,
+    flusher_handle: Mutex<Option<JoinHandle<()>>>,
     /// Receiver half of the read-audit flush channel. Created in `start()`
     /// and owned here until T21 spawns the background flusher task that
     /// `take()`s it. Holding the receiver here prevents the channel from
@@ -230,6 +250,18 @@ impl WorkerMcpServer {
         brain_session_id: String,
         deps: WorkerMcpDeps,
     ) -> Result<Arc<Self>, BindError> {
+        Self::start_with_config(brain_session_id, deps, WorkerMcpServerConfig::default()).await
+    }
+
+    /// Bind a fresh TCP listener on `127.0.0.1:0`, generate an in-process HMAC
+    /// key from the OS RNG, spawn the accept loop, and spawn the background
+    /// audit flusher task. Returns once the listener is bound and ready to
+    /// accept connections.
+    pub async fn start_with_config(
+        brain_session_id: String,
+        deps: WorkerMcpDeps,
+        config: WorkerMcpServerConfig,
+    ) -> Result<Arc<Self>, BindError> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
 
@@ -263,17 +295,31 @@ impl WorkerMcpServer {
             deps: Arc::clone(&dispatcher_deps),
             shutdown: shutdown.clone(),
             accept_loop_handle: Mutex::new(None),
+            flusher_handle: Mutex::new(None),
             flush_rx: Mutex::new(Some(flush_rx)),
         });
 
-        let handle = tokio::spawn(accept_loop(
+        let accept_handle = tokio::spawn(accept_loop(
             listener,
-            shutdown,
+            shutdown.clone(),
             hmac_key,
-            brain_session_id,
-            dispatcher_deps,
+            brain_session_id.clone(),
+            Arc::clone(&dispatcher_deps),
         ));
-        *server.accept_loop_handle.lock() = Some(handle);
+        *server.accept_loop_handle.lock() = Some(accept_handle);
+
+        let flush_rx = server
+            .flush_rx
+            .lock()
+            .take()
+            .expect("flush_rx always present at start");
+        let flusher_handle = tokio::spawn(audit_flusher_task(
+            Arc::clone(&dispatcher_deps),
+            flush_rx,
+            shutdown.clone(),
+            config,
+        ));
+        *server.flusher_handle.lock() = Some(flusher_handle);
 
         Ok(server)
     }
@@ -341,13 +387,33 @@ impl WorkerMcpServer {
         self.flush_rx.lock().take()
     }
 
+    /// Inject a read-audit buffer directly into the map. Used by tests to set
+    /// up buffer state without sending HTTP requests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn inject_read_buffer_for_test(&self, delegation_id: &str) -> Arc<ReadAuditBuffer> {
+        let buf = Arc::new(ReadAuditBuffer::new(
+            delegation_id.to_string(),
+            self.deps.flush_tx.clone(),
+        ));
+        self.deps
+            .read_audit_buffers
+            .lock()
+            .insert(delegation_id.to_string(), Arc::clone(&buf));
+        buf
+    }
+
     /// Cancel the accept loop and wait up to 5 seconds for it to exit.
+    /// Also waits up to 1 second for the background audit flusher task.
     /// Idempotent: a second call after shutdown is a no-op.
     pub async fn shutdown(self: Arc<Self>) {
         self.shutdown.cancel();
-        let handle = self.accept_loop_handle.lock().take();
-        if let Some(handle) = handle {
+        let accept_handle = self.accept_loop_handle.lock().take();
+        if let Some(handle) = accept_handle {
             let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        }
+        let flusher_handle = self.flusher_handle.lock().take();
+        if let Some(handle) = flusher_handle {
+            let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
         }
         // Reference held only to keep the deps Arc alive until shutdown
         // completes; explicit drop documents intent.
@@ -404,8 +470,7 @@ async fn handle_connection(
         Ok(body) => format_http_response(200, "OK", &body),
         Err(err) => {
             tracing::warn!(?peer, error = ?err, "WorkerMcp AuthDenied");
-            let body =
-                r#"{"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid Request"},"id":null}"#;
+            let body = r#"{"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid Request"},"id":null}"#;
             format_http_response(401, "Unauthorized", body)
         }
     };
@@ -449,18 +514,16 @@ fn extract_token(request_line: &str, headers: &[(String, String)]) -> Option<Str
         return None;
     }
     let path_and_query = parts[1];
-    path_and_query
-        .split_once('?')
-        .and_then(|(_, query)| {
-            query.split('&').find_map(|param| {
-                let (k, v) = param.split_once('=')?;
-                if k == "token" {
-                    Some(v.to_string())
-                } else {
-                    None
-                }
-            })
+    path_and_query.split_once('?').and_then(|(_, query)| {
+        query.split('&').find_map(|param| {
+            let (k, v) = param.split_once('=')?;
+            if k == "token" {
+                Some(v.to_string())
+            } else {
+                None
+            }
         })
+    })
 }
 
 /// Read and parse an HTTP request from `stream`, validate the bearer token,
@@ -575,10 +638,7 @@ async fn dispatch(ctx: WorkerCallContext, body: Vec<u8>, deps: Arc<DispatcherDep
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let params = parsed
-        .get("params")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
+    let params = parsed.get("params").cloned().unwrap_or_else(|| json!({}));
 
     match method.as_str() {
         "tools/list" => {
@@ -762,6 +822,167 @@ fn append_read_audit_entry(
 /// giving up and returning success to the worker. Slow beads must not stall
 /// the worker indefinitely.
 const AUDIT_EMIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Spawn a dedicated background task that owns the `flush_rx` half of the
+/// read-audit flush channel. The task receives `FlushMessage`s (either from
+/// buffer `Drop` or from the periodic idle scan) and writes aggregated
+/// `ReadAggregate` sentinel comments to the PM backend. It also scans the
+/// `read_audit_buffers` map every `scan_interval` and removes idle entries
+/// (last entry `ts` older than `idle_threshold`).
+async fn audit_flusher_task(
+    deps: Arc<DispatcherDeps>,
+    mut flush_rx: mpsc::UnboundedReceiver<FlushMessage>,
+    shutdown: CancellationToken,
+    config: WorkerMcpServerConfig,
+) {
+    let mut interval = tokio::time::interval(config.scan_interval);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => break,
+            Some(msg) = flush_rx.recv() => {
+                tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => break,
+                    _ = emit_read_aggregate(&deps, msg.delegation_id, msg.entries, &shutdown) => {},
+                }
+            }
+            _ = interval.tick() => {
+                tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => break,
+                    _ = scan_and_flush_idle_buffers(&deps, &config, &shutdown) => {},
+                }
+            }
+        }
+    }
+}
+
+/// Scan the per-delegation read-audit buffer map and flush idle buffers.
+///
+/// Concurrency note: while the map lock is held, idle buffers are removed
+/// and their entries drained. If a concurrent handler holds an `Arc` clone
+/// and appends AFTER drain, the entry remains in the buffer until the
+/// handler returns; `Drop` then sends a follow-up `FlushMessage`. This
+/// produces a duplicate sentinel comment but no data loss in steady state.
+///
+/// TODO(T24): During shutdown, the flusher's recv loop exits before all
+/// in-flight `Arc` clones have dropped. Drop-fired `FlushMessage`s after that
+/// point are silently lost. T24's shutdown drain owns this window.
+async fn scan_and_flush_idle_buffers(
+    deps: &DispatcherDeps,
+    config: &WorkerMcpServerConfig,
+    shutdown: &CancellationToken,
+) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let threshold = config.idle_threshold;
+
+    let to_flush: Vec<(String, Vec<ReadAuditEntry>)> = {
+        let mut map = deps.read_audit_buffers.lock();
+        let mut result = Vec::new();
+
+        let idle_ids: Vec<String> = map
+            .iter()
+            .filter(|(_, buf)| {
+                let entries = buf.entries.lock();
+                match entries.last() {
+                    Some(e) => {
+                        let entry_time = Duration::from_secs(e.ts);
+                        now.saturating_sub(entry_time) > threshold
+                    }
+                    None => true,
+                }
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        for id in idle_ids {
+            if let Some(buf) = map.remove(&id) {
+                let entries = std::mem::take(&mut *buf.entries.lock());
+                if !entries.is_empty() {
+                    result.push((id, entries));
+                }
+            }
+        }
+
+        result
+    };
+
+    for (delegation_id, entries) in to_flush {
+        if shutdown.is_cancelled() {
+            break;
+        }
+        emit_read_aggregate(deps, delegation_id, entries, shutdown).await;
+    }
+}
+
+/// Encode a `ReadAggregate` sentinel from the drained entries and write it
+/// to the PM backend. The comment is placed on the first non-None
+/// `target_issue_id` in the entry list; if none exists the flush is a no-op.
+/// The flusher task remains cancellable via `shutdown` so it can exit promptly
+/// even if PM I/O is slow.
+async fn emit_read_aggregate(
+    deps: &DispatcherDeps,
+    delegation_id: String,
+    entries: Vec<ReadAuditEntry>,
+    shutdown: &CancellationToken,
+) {
+    if entries.is_empty() {
+        return;
+    }
+
+    let issue_id = match entries.iter().find_map(|e| e.target_issue_id.clone()) {
+        Some(id) => id,
+        None => {
+            tracing::warn!(
+                delegation_id = %delegation_id,
+                entry_count = entries.len(),
+                tools = ?entries.iter().map(|e| &e.tool_name).collect::<Vec<_>>(),
+                "ReadAggregate audit dropped: no entry has a target_issue_id (all read-only ops without explicit target)"
+            );
+            return;
+        }
+    };
+
+    if let Err(error) = crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        &deps.feature_gate,
+    ) {
+        tracing::warn!(
+            delegation_id = %delegation_id,
+            issue_id = %issue_id,
+            "ReadAggregate audit comment emission skipped: {error:?}"
+        );
+        return;
+    }
+
+    let kind = crate::plan::audit_sentinel::AuditSentinelKind::ReadAggregate {
+        delegation_id,
+        entries: entries
+            .into_iter()
+            .map(|e| crate::plan::audit_sentinel::ReadAggregateEntry {
+                tool_name: e.tool_name,
+                target_issue_id: e.target_issue_id,
+                ts: e.ts,
+            })
+            .collect(),
+    };
+    let body = crate::plan::audit_sentinel::encode_comment(&kind);
+
+    let Some(adv) = deps.pm_service.advanced() else {
+        return;
+    };
+
+    tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => {}
+        _ = adv.add_comment(&issue_id, &body) => {}
+    }
+}
 
 /// Emit a `[[spur-audit v1]] WorkerWrite` sentinel comment on the issue that
 /// was just mutated by a worker write tool. Called synchronously before the
