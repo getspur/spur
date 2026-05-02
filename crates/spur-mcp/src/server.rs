@@ -236,6 +236,8 @@ enum DelegationDispatchError {
     #[error("SessionRetiring")]
     SessionRetiring,
     #[error("worker MCP server unavailable: {reason}")]
+    // TODO(worker-mcp): remove once dispatch wiring constructs this error.
+    #[allow(dead_code)]
     WorkerMcpUnavailable { reason: String },
 }
 
@@ -1876,6 +1878,7 @@ impl McpCallbackServer {
             plan_sink,
             plan_pm,
             self.reconciler_fast_forward.as_ref().cloned(),
+            Arc::clone(&self.continuation_ctx),
             Arc::new(self.materializer.clone()),
             Arc::clone(&self.feature_gate),
         ));
@@ -2297,6 +2300,7 @@ impl McpCallbackServer {
                         brain_session_id: self.brain_session_id.clone(),
                         event_sink: self.event_sink.clone(),
                         materializer: Arc::new(self.materializer.clone()),
+                        continuation_ctx: Arc::clone(&self.continuation_ctx),
                     };
                     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
                     reconciler_cancel_tx = Some(cancel_tx);
@@ -3918,19 +3922,22 @@ impl McpCallbackServer {
                  plan_id: {plan_id}\n\
                  epic_id: {epic_id} (beads)\n\
                  task_map: {task_map_json}\n\
-                 Poll with get_plan_status to monitor progress.",
+                 A continuation will fire on each per-task failure/awaiting-review and on plan completion. \
+                 Polling get_plan_status remains available as a safety net.",
                 epic_id = sg.epic_id,
             )
         } else {
             format!(
                 "Plan submitted: {task_count} tasks. plan_id: {plan_id}\n\
-                 Poll with get_plan_status to monitor progress."
+                 A continuation will fire on each per-task failure/awaiting-review and on plan completion. \
+                 Polling get_plan_status remains available as a safety net."
             )
         };
 
         JsonRpcResponse::success(
             id,
             json!({
+                "continuation_will_fire": true,
                 "content": [{
                     "type": "text",
                     "text": response_text
