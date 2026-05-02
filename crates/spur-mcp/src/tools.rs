@@ -868,6 +868,29 @@ pub fn tools_list() -> Vec<ToolDefinition> {
     ]
 }
 
+/// Curated worker-facing tool subset exposed by `WorkerMcpServer`.
+///
+/// Workers receive only read-and-emit tools: 5 read tools that surface
+/// project state plus 1 write tool (`update_issue`) and 2 fire-and-forget
+/// signal tools (`report_signal`, `report_progress`). Brain-only orchestration
+/// tools (delegate_*, submit_plan, merge_plan, execute_epic, review_task,
+/// create_pr, create_issue, add_dependency, cancel_delegation,
+/// list_available_workers, get_reconciler_status, graph_*, preview_task_base)
+/// are intentionally excluded — exposing them to workers would invert the
+/// brain→worker authority direction and let workers self-dispatch.
+pub fn worker_tools_list() -> Vec<ToolDefinition> {
+    vec![
+        get_issue_def(),
+        list_issues_def(),
+        get_task_diff_def(),
+        get_plan_status_def(),
+        fetch_outcome_artifact_def(),
+        update_issue_def(),
+        report_signal_def(),
+        report_progress_def(),
+    ]
+}
+
 #[cfg(test)]
 mod schema_truthfulness_tests {
     use super::*;
@@ -938,5 +961,83 @@ mod schema_truthfulness_tests {
             required.contains(&"delegation_id"),
             "delegation_id must be required"
         );
+    }
+}
+
+#[cfg(test)]
+mod worker_tools_subset_tests {
+    use super::*;
+
+    const EXPECTED_WORKER_TOOLS: &[&str] = &[
+        "get_issue",
+        "list_issues",
+        "get_task_diff",
+        "get_plan_status",
+        "fetch_outcome_artifact",
+        "update_issue",
+        "report_signal",
+        "report_progress",
+    ];
+
+    #[test]
+    fn worker_tools_list_contains_exactly_the_curated_set() {
+        let actual: Vec<String> = worker_tools_list()
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        let expected: Vec<String> =
+            EXPECTED_WORKER_TOOLS.iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            actual, expected,
+            "worker_tools_list drift; update EXPECTED_WORKER_TOOLS in same commit if intentional",
+        );
+    }
+
+    #[test]
+    fn worker_tools_list_excludes_brain_only_tools() {
+        let actual: Vec<String> = worker_tools_list()
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        let forbidden = [
+            "delegate_to_worker",
+            "delegate_parallel",
+            "check_delegation_status",
+            "cancel_delegation",
+            "list_available_workers",
+            "create_issue",
+            "add_dependency",
+            "create_pr",
+            "merge_plan",
+            "submit_plan",
+            "execute_epic",
+            "get_reconciler_status",
+            "preview_task_base",
+            "review_task",
+            "graph_triage",
+            "graph_plan",
+            "graph_insights",
+            "graph_alerts",
+            "graph_subgraph",
+        ];
+        for tool in &forbidden {
+            assert!(
+                !actual.iter().any(|n| n == tool),
+                "leaked brain-only tool into worker subset: {tool}",
+            );
+        }
+    }
+
+    #[test]
+    fn worker_tools_list_is_a_strict_subset_of_tools_list() {
+        let full: std::collections::HashSet<String> =
+            tools_list().iter().map(|t| t.name.clone()).collect();
+        for w in worker_tools_list() {
+            assert!(
+                full.contains(&w.name),
+                "worker tool '{}' missing from full tools_list — definitions must align",
+                w.name,
+            );
+        }
     }
 }
