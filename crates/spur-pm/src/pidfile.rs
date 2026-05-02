@@ -125,8 +125,14 @@ mod tests {
         {
             let _g1 = PidFileGuard::acquire(&path).unwrap();
         }
-        assert!(path.exists(), "pidfile path must remain for continuity across restarts");
+        assert!(
+            path.exists(),
+            "pidfile path must remain for continuity across restarts"
+        );
         let _g2 = PidFileGuard::acquire(&path).unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap().trim(), std::process::id().to_string());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().trim(),
+            std::process::id().to_string()
+        );
     }
 }

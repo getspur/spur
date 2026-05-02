@@ -251,6 +251,7 @@ async fn persist_setup_overlay_conflict(
         &crate::plan::audit_sentinel::encode_comment(
             &crate::plan::audit_sentinel::AuditSentinelKind::Signal {
                 signal_id: signal_id.clone(),
+                delegation_id: String::new(),
                 kind: "integration-conflict".to_string(),
                 severity: 1.0,
                 reason,
