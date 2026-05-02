@@ -231,17 +231,38 @@ fn project_section(
     serde_json::to_string(&projected).map_err(ProjectionError::SerializeFailed)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 enum DelegationDispatchError {
     #[error("SessionRetiring")]
     SessionRetiring,
+    #[error("worker MCP server unavailable: {reason}")]
+    WorkerMcpUnavailable { reason: String },
 }
 
 impl DelegationDispatchError {
-    const JSONRPC_CODE: i64 = -32001;
+    fn json_rpc_code(&self) -> i64 {
+        match self {
+            Self::SessionRetiring => -32001,
+            Self::WorkerMcpUnavailable { .. } => -32002,
+        }
+    }
 
     fn into_response(self, id: Value) -> JsonRpcResponse {
-        JsonRpcResponse::error(id, Self::JSONRPC_CODE, self.to_string())
+        JsonRpcResponse::error(id, self.json_rpc_code(), self.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DelegationDispatchError;
+
+    #[test]
+    fn worker_mcp_unavailable_jsonrpc_code_is_minus_32002() {
+        let err = DelegationDispatchError::WorkerMcpUnavailable {
+            reason: "port exhausted".into(),
+        };
+        assert_eq!(err.json_rpc_code(), -32002);
+        assert!(err.to_string().contains("port exhausted"));
     }
 }
 
