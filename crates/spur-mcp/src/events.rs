@@ -11,4 +11,14 @@ use spur_acp::SpurEventBody;
 /// Emit plan-review lifecycle events to the process-wide event funnel.
 pub trait McpEventSink: Send + Sync {
     fn emit(&self, event: SpurEventBody);
+
+    /// Attempt to emit without blocking. Return `Err(event)` if the sink
+    /// is at capacity so the caller can drop rather than back-pressure.
+    ///
+    /// Default returns `Err(event)` — production sinks MUST override this
+    /// to opt in to non-blocking acceptance.
+    #[allow(clippy::result_large_err)]
+    fn try_emit(&self, event: SpurEventBody) -> Result<(), SpurEventBody> {
+        Err(event)
+    }
 }
