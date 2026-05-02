@@ -181,6 +181,11 @@ pub enum AuditSentinelKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    WorkerWrite {
+        delegation_id: String,
+        tool: String,
+        issue_id: String,
+    },
     /// Forward-compat fallback. When a future SPUR release adds a new audit
     /// sentinel variant and emits it into a beads comment, older clients
     /// parsing that comment will deserialize it into `Unknown` instead of
@@ -220,6 +225,7 @@ impl AuditSentinelKind {
             Self::MutationInvariantViolation { .. } => "mutation-invariant-violation",
             Self::LateSignal { .. } => "late-signal",
             Self::WorkerMcp { .. } => "worker-mcp",
+            Self::WorkerWrite { .. } => "worker-write",
             Self::Unknown => "unknown",
         }
     }
@@ -384,6 +390,11 @@ mod tests {
                 signal_id: "sig-2".into(),
                 terminal_status: "approved".into(),
             },
+            AuditSentinelKind::WorkerWrite {
+                delegation_id: "del-A".into(),
+                tool: "update_issue".into(),
+                issue_id: "bd-123".into(),
+            },
         ];
         for k in cases {
             let body = encode_comment(&k);
@@ -493,6 +504,11 @@ mod tests {
             AuditSentinelKind::LateSignal {
                 signal_id: "sig-2".into(),
                 terminal_status: "approved".into(),
+            },
+            AuditSentinelKind::WorkerWrite {
+                delegation_id: "del-A".into(),
+                tool: "update_issue".into(),
+                issue_id: "bd-123".into(),
             },
             AuditSentinelKind::Unknown,
         ] {
@@ -788,6 +804,20 @@ mod tests {
         assert_eq!(decoded.kind_str(), "worker-mcp");
         assert!(encoded.contains("\"call\""));
         assert!(!encoded.contains("\"Call\""));
+    }
+
+    #[test]
+    fn worker_write_sentinel_round_trip() {
+        let kind = AuditSentinelKind::WorkerWrite {
+            delegation_id: "del-A".into(),
+            tool: "update_issue".into(),
+            issue_id: "bd-123".into(),
+        };
+        let encoded = encode_comment(&kind);
+        let decoded = parse_comment(&encoded).unwrap().unwrap();
+        assert_eq!(decoded, kind);
+        assert_eq!(decoded.kind_str(), "worker-write");
+        assert!(encoded.contains("\"update_issue\""));
     }
 
     #[test]
