@@ -180,7 +180,7 @@ pub(crate) fn feature_error_message(error: McpError) -> String {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum ProjectionError {
+pub(crate) enum ProjectionError {
     #[error("stored blob is not valid UTF-8: {0}")]
     InvalidUtf8(#[source] std::string::FromUtf8Error),
     #[error("stored blob is not a valid DelegationResult: {0}")]
@@ -189,7 +189,7 @@ enum ProjectionError {
     SerializeFailed(#[source] serde_json::Error),
 }
 
-fn project_section(
+pub(crate) fn project_section(
     full_bytes: &[u8],
     section: spur_blob_store::Section,
     key: &spur_acp::domain::outcome::OutcomeKey,
@@ -2934,120 +2934,35 @@ impl McpCallbackServer {
     }
 
     async fn handle_fetch_outcome_artifact(&self, id: Value, args: Value) -> JsonRpcResponse {
-        use spur_blob_store::Section;
-
-        let delegation_id: DelegationId = match args.get("delegation_id").and_then(|v| v.as_str()) {
-            Some(s) if !s.is_empty() => s.into(),
-            _ => {
-                return JsonRpcResponse::invalid_params(id, "Missing or empty 'delegation_id'");
-            }
+        let ctx = crate::handlers::WorkerCallContext {
+            delegation_id: String::new(),
+            brain_session_id: self.brain_session_id.as_session_id().0.clone(),
         };
-
-        let section_str = args
-            .get("section")
-            .and_then(|v| v.as_str())
-            .unwrap_or("full");
-        let section = match section_str {
-            "full" => Section::Full,
-            "status_only" => Section::StatusOnly,
-            "summary" => Section::Summary,
-            "diff_only" => Section::DiffOnly,
-            other => {
-                return JsonRpcResponse::invalid_params(
-                    id,
-                    format!(
-                        "Unknown section '{other}'. Must be one of: status_only, summary, diff_only, full."
-                    ),
-                );
-            }
-        };
-
-        // Distinguish missing (use latest) from invalid (reject). Without this
-        // split, a non-numeric or negative `attempt` value would silently fall
-        // through to the missing-arg fallback and return data for a different
-        // attempt than the brain asked for.
-        let attempt = match args.get("attempt") {
-            None | Some(serde_json::Value::Null) => self
-                .materializer
-                .latest_attempt(&delegation_id)
-                .await
-                .unwrap_or(1),
-            Some(v) => match v.as_u64() {
-                Some(n) if (1..=u32::MAX as u64).contains(&n) => n as u32,
-                _ => {
-                    return JsonRpcResponse::invalid_params(
-                        id,
-                        "Invalid 'attempt': must be u32 >= 1",
-                    );
-                }
-            },
-        };
-
-        let key = spur_acp::domain::outcome::OutcomeKey {
-            brain_session_id: self.brain_session_id.clone(),
-            delegation_id: delegation_id.clone(),
-            attempt,
-        };
-
-        let start = std::time::Instant::now();
-        let content = match self.outcome_store.get(&key, Some(Section::Full)).await {
-            Ok(content) => content,
-            Err(spur_blob_store::StoreError::NotFound(_)) => {
-                tracing::warn!(
-                    target: "spur.metrics.outcome_fetch_not_found",
-                    ?key,
-                    section = section_str,
-                    "outcome not found; possible hallucinated id, post-GC read, or in-flight race"
-                );
-                return JsonRpcResponse::error(
-                    id,
-                    -32004,
-                    format!(
-                        "Outcome artifact not found for delegation_id={delegation_id} attempt={attempt}"
-                    ),
-                );
-            }
-            Err(spur_blob_store::StoreError::Unauthorized { requested, actual }) => {
-                tracing::warn!(
-                    target: "spur.metrics.outcome_fetch_unauthorized",
-                    ?requested,
-                    ?actual,
-                    "cross-session fetch rejected"
-                );
-                return JsonRpcResponse::error(id, -32001, "cross-session outcome read forbidden");
-            }
-            Err(error) => {
-                return JsonRpcResponse::internal_error(
-                    id,
-                    format!("OutcomeStore::get failed: {error}"),
-                );
-            }
-        };
-
-        let projected_text = match project_section(&content.bytes, section, &key) {
-            Ok(text) => text,
-            Err(error) => {
-                return JsonRpcResponse::internal_error(
-                    id,
-                    format!("Section projection failed: {error}"),
-                );
-            }
-        };
-
-        tracing::info!(
-            target: "spur.metrics.outcome_fetched",
-            ?key,
-            section = section_str,
-            byte_size = projected_text.len() as u64,
-            latency_ms = start.elapsed().as_millis() as u64,
-        );
-
-        JsonRpcResponse::success(
-            id,
-            json!({
-                "content": [{ "type": "text", "text": projected_text }]
-            }),
+        match crate::handlers::fetch_outcome_artifact(
+            &self.materializer,
+            self.outcome_store.as_ref(),
+            &ctx,
+            args,
         )
+        .await
+        {
+            Ok(value) => JsonRpcResponse::success(id, value),
+            Err(crate::handlers::McpHandlerError::InvalidParams(e)) => {
+                JsonRpcResponse::invalid_params(id, e)
+            }
+            Err(crate::handlers::McpHandlerError::NotFound(e)) => {
+                JsonRpcResponse::error(id, -32004, e)
+            }
+            Err(crate::handlers::McpHandlerError::Unauthorized(e)) => {
+                JsonRpcResponse::error(id, -32001, e)
+            }
+            Err(crate::handlers::McpHandlerError::UpstreamPm(e)) => {
+                JsonRpcResponse::internal_error(id, format!("fetch_outcome_artifact failed: {e}"))
+            }
+            Err(crate::handlers::McpHandlerError::Internal(e)) => {
+                JsonRpcResponse::internal_error(id, e)
+            }
+        }
     }
 
     async fn handle_cancel_delegation(&self, id: Value, args: Value) -> JsonRpcResponse {
@@ -6328,10 +6243,13 @@ mod fetch_outcome_artifact_tests {
             .await;
 
         let error = response.error.as_ref().expect("expected error response");
-        assert_eq!(error.code, -32004);
+        // Phase 2 Task 10: a missing artifact is reported as Unauthorized
+        // rather than NotFound so that a caller cannot probe whether a given
+        // (delegation_id, attempt) exists in another brain session.
+        assert_eq!(error.code, -32001);
         assert!(
-            error.message.contains("not found"),
-            "error message must mention not-found: {error:?}"
+            error.message.contains("not accessible"),
+            "error message must mention not-accessible: {error:?}"
         );
     }
 
@@ -6427,8 +6345,9 @@ mod fetch_outcome_artifact_tests {
             Some("secret stdout for session A")
         );
 
-        // Server B fetches under its own brain_session_id and gets NotFound,
-        // even though the shared store contains Server A's outcome.
+        // Server B fetches under its own brain_session_id and is denied as
+        // Unauthorized — the store-miss is deliberately indistinguishable
+        // from a "different session" miss to prevent cross-session probing.
         let resp_b = server_b
             .handle_tool_call(
                 Value::Number(1.into()),
@@ -6439,9 +6358,9 @@ mod fetch_outcome_artifact_tests {
             )
             .await;
         let err = resp_b.error.as_ref().expect("server B must error");
-        assert_eq!(err.code, -32004);
+        assert_eq!(err.code, -32001);
         assert!(
-            err.message.contains("not found"),
+            err.message.contains("not accessible"),
             "Server B must not expose Server A's delegations: {err:?}"
         );
     }

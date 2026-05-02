@@ -5,6 +5,7 @@ use serde_json::Value;
 use spur_pm::{IssueUpdate, PmService};
 use tokio::sync::Mutex;
 
+use crate::outcome_materializer::OutcomeMaterializer;
 use crate::plan::outcomes::OutcomeStore;
 use crate::plan::PlanState;
 
@@ -184,6 +185,123 @@ pub async fn get_plan_status(
         );
     }
     Ok(status)
+}
+
+/// Phase 2 Task 10: freestanding `fetch_outcome_artifact` handler.
+///
+/// SECURITY INVARIANT: the lookup `OutcomeKey` is built from
+/// `ctx.brain_session_id`, NEVER from a caller-supplied parameter — this is
+/// what enforces cross-session isolation (formerly server.rs:2997-3001).
+///
+/// A miss in the underlying store is reported as `Unauthorized` rather than
+/// `NotFound` so that a caller in session A cannot probe whether a given
+/// `(delegation_id, attempt)` exists in session B.
+pub async fn fetch_outcome_artifact(
+    materializer: &OutcomeMaterializer,
+    outcome_store: &dyn spur_blob_store::OutcomeStore,
+    ctx: &WorkerCallContext,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, McpHandlerError> {
+    use spur_acp::DelegationId;
+    use spur_blob_store::Section;
+
+    let delegation_id: DelegationId = match args.get("delegation_id").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.into(),
+        _ => {
+            return Err(McpHandlerError::InvalidParams(
+                "Missing or empty 'delegation_id'".into(),
+            ));
+        }
+    };
+
+    let section_str = args
+        .get("section")
+        .and_then(|v| v.as_str())
+        .unwrap_or("full");
+    let section = match section_str {
+        "full" => Section::Full,
+        "status_only" => Section::StatusOnly,
+        "summary" => Section::Summary,
+        "diff_only" => Section::DiffOnly,
+        other => {
+            return Err(McpHandlerError::InvalidParams(format!(
+                "Unknown section '{other}'. Must be one of: status_only, summary, diff_only, full."
+            )));
+        }
+    };
+
+    // Distinguish missing (use latest) from invalid (reject). Without this
+    // split, a non-numeric or negative `attempt` value would silently fall
+    // through to the missing-arg fallback and return data for a different
+    // attempt than the brain asked for.
+    let attempt = match args.get("attempt") {
+        None | Some(serde_json::Value::Null) => {
+            materializer.latest_attempt(&delegation_id).await.unwrap_or(1)
+        }
+        Some(v) => match v.as_u64() {
+            Some(n) if (1..=u32::MAX as u64).contains(&n) => n as u32,
+            _ => {
+                return Err(McpHandlerError::InvalidParams(
+                    "Invalid 'attempt': must be u32 >= 1".into(),
+                ));
+            }
+        },
+    };
+
+    let key = spur_acp::domain::outcome::OutcomeKey {
+        brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId(
+            ctx.brain_session_id.clone(),
+        )),
+        delegation_id: delegation_id.clone(),
+        attempt,
+    };
+
+    let start = std::time::Instant::now();
+    let content = match outcome_store.get(&key, Some(Section::Full)).await {
+        Ok(content) => content,
+        Err(spur_blob_store::StoreError::NotFound(_)) => {
+            tracing::warn!(
+                target: "spur.metrics.outcome_fetch_not_found",
+                ?key,
+                section = section_str,
+                "outcome not found; reported as Unauthorized to prevent cross-session probing"
+            );
+            return Err(McpHandlerError::Unauthorized(format!(
+                "Outcome artifact not accessible for delegation_id={delegation_id} attempt={attempt}"
+            )));
+        }
+        Err(spur_blob_store::StoreError::Unauthorized { requested, actual }) => {
+            tracing::warn!(
+                target: "spur.metrics.outcome_fetch_unauthorized",
+                ?requested,
+                ?actual,
+                "cross-session fetch rejected"
+            );
+            return Err(McpHandlerError::Unauthorized(
+                "cross-session outcome read forbidden".into(),
+            ));
+        }
+        Err(error) => {
+            return Err(McpHandlerError::Internal(format!(
+                "OutcomeStore::get failed: {error}"
+            )));
+        }
+    };
+
+    let projected_text = crate::server::project_section(&content.bytes, section, &key)
+        .map_err(|error| McpHandlerError::Internal(format!("Section projection failed: {error}")))?;
+
+    tracing::info!(
+        target: "spur.metrics.outcome_fetched",
+        ?key,
+        section = section_str,
+        byte_size = projected_text.len() as u64,
+        latency_ms = start.elapsed().as_millis() as u64,
+    );
+
+    Ok(serde_json::json!({
+        "content": [{ "type": "text", "text": projected_text }]
+    }))
 }
 
 #[cfg(test)]
