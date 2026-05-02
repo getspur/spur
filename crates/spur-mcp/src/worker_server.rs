@@ -11,6 +11,7 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -201,6 +202,35 @@ pub struct WorkerMcpServer {
     /// `take()`s it. Holding the receiver here prevents the channel from
     /// closing prematurely during the T20→T21 transitional window.
     flush_rx: Mutex<Option<mpsc::UnboundedReceiver<FlushMessage>>>,
+    /// In-flight dispatcher count. Incremented on `dispatch` entry by
+    /// [`ActiveCallGuard`] and decremented on its `Drop`. [`shutdown`]
+    /// polls this counter (via [`active_count`](Self::active_count)) so
+    /// in-flight requests are drained before the flusher task is joined.
+    /// `Arc` so the guard owned by each dispatch task can decrement
+    /// independently of the server's lifetime.
+    active_delegations: Arc<AtomicU32>,
+}
+
+/// RAII guard that increments [`WorkerMcpServer::active_delegations`] on
+/// construction and decrements on drop. Created at the top of [`dispatch`]
+/// so the count is panic-safe — even if a handler panics between increment
+/// and decrement, unwinding through `Drop` keeps the counter consistent.
+/// This mirrors the [`ReadAuditBuffer`] Drop pattern used by T20.
+struct ActiveCallGuard {
+    counter: Arc<AtomicU32>,
+}
+
+impl ActiveCallGuard {
+    fn new(counter: Arc<AtomicU32>) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self { counter }
+    }
+}
+
+impl Drop for ActiveCallGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// Internal bundle of the materialized handler dependencies. Mirrors
@@ -233,6 +263,9 @@ struct DispatcherDeps {
     /// `ReadAuditBuffer` so the buffer's `Drop` can deliver final entries
     /// even if the dispatcher tears down without an explicit flush.
     flush_tx: mpsc::UnboundedSender<FlushMessage>,
+    /// Shared counter incremented/decremented by [`ActiveCallGuard`] inside
+    /// [`dispatch`]. Same `Arc` instance held by [`WorkerMcpServer`].
+    active_delegations: Arc<AtomicU32>,
 }
 
 /// Errors returned by [`WorkerMcpServer::start`].
@@ -273,6 +306,7 @@ impl WorkerMcpServer {
         let read_audit_buffers =
             Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
         let (flush_tx, flush_rx) = mpsc::unbounded_channel::<FlushMessage>();
+        let active_delegations = Arc::new(AtomicU32::new(0));
         let dispatcher_deps = Arc::new(DispatcherDeps {
             pm_service: deps.pm_service,
             feature_gate: deps.feature_gate,
@@ -285,6 +319,7 @@ impl WorkerMcpServer {
             delegations: Arc::clone(&delegations),
             read_audit_buffers: Arc::clone(&read_audit_buffers),
             flush_tx,
+            active_delegations: Arc::clone(&active_delegations),
         });
 
         let shutdown = CancellationToken::new();
@@ -297,6 +332,7 @@ impl WorkerMcpServer {
             accept_loop_handle: Mutex::new(None),
             flusher_handle: Mutex::new(None),
             flush_rx: Mutex::new(Some(flush_rx)),
+            active_delegations,
         });
 
         let accept_handle = tokio::spawn(accept_loop(
@@ -402,14 +438,30 @@ impl WorkerMcpServer {
         buf
     }
 
-    /// Cancel the accept loop and wait up to 5 seconds for it to exit.
-    /// Also waits up to 1 second for the background audit flusher task.
+    /// Number of dispatchers currently in flight. Read by [`shutdown`] to
+    /// drain in-flight requests; exposed publicly so callers and tests can
+    /// observe pressure without reaching into `DispatcherDeps`.
+    pub fn active_count(&self) -> u32 {
+        self.active_delegations.load(Ordering::SeqCst)
+    }
+
+    /// Cancel the accept loop and wait up to 5 seconds for it to exit. Then
+    /// drain in-flight dispatchers (poll [`active_count`](Self::active_count)
+    /// until it reaches 0) before joining the background audit flusher task.
+    /// T22 introduces the unconditional drain; T24 will add an explicit
+    /// timeout that force-aborts dispatchers if the drain stalls.
     /// Idempotent: a second call after shutdown is a no-op.
     pub async fn shutdown(self: Arc<Self>) {
         self.shutdown.cancel();
         let accept_handle = self.accept_loop_handle.lock().take();
         if let Some(handle) = accept_handle {
             let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        }
+        // Listener is closed (accept_loop has returned), so no new requests
+        // can arrive. Existing dispatchers continue and decrement
+        // `active_delegations` via `ActiveCallGuard::drop` as they finish.
+        while self.active_count() > 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let flusher_handle = self.flusher_handle.lock().take();
         if let Some(handle) = flusher_handle {
@@ -621,6 +673,12 @@ async fn handle_request(
 ///
 /// Unknown method or unknown tool name → `-32601 Method not found`.
 async fn dispatch(ctx: WorkerCallContext, body: Vec<u8>, deps: Arc<DispatcherDeps>) -> String {
+    // RAII counter — held for the entire dispatcher lifetime including
+    // panics and early returns. Drop fires `fetch_sub` so `active_count`
+    // returns to 0 once every in-flight request finishes. `shutdown()`
+    // polls this counter to know when it is safe to tear down.
+    let _active_guard = ActiveCallGuard::new(Arc::clone(&deps.active_delegations));
+
     let parsed: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(_) => return error_response(Value::Null, -32700, "Parse error"),
