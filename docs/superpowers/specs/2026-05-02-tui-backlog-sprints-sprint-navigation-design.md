@@ -618,6 +618,91 @@ Open Sprints to resume or Backlog to execute an epic.
 9. Add snapshot tests for all owner-state rows and active-slot blocked states.
 10. Add integration tests for resume/open/execute blocked cases.
 
+## Current Implementation Status (feat/tui-backlog-sprints-sprint-navigation)
+
+As of this worktree implementation, the spec is in an MVP-complete state for the first three flows:
+
+1. `Backlog -> execute_epic -> Sprints`
+2. `Sprints -> resume unowned -> Sprints`
+3. `Sprints (Mine) -> Sprint (PlanInspector)`
+
+Status snapshot:
+
+| Spec Item | Status | Location |
+| --- | --- | --- |
+| Plan summary contract (`PlansLoaded`, `PlanSummaryEvent`) | done | `crates/spur-acp/src/domain/events.rs`, `crates/spur-acp/src/domain/mod.rs` |
+| Plan list refresh and request path | done | `crates/spur-tui/src/action.rs`, `crates/spur-tui/src/app.rs` |
+| `PlanBrowserView` and owner-state rendering | done | `crates/spur-tui/src/views/plan_browser.rs` |
+| Resume action for `Unowned` only | done | `crates/spur-tui/src/action.rs`, `crates/spur-tui/src/views/plan_browser.rs`, `crates/spur-tui/src/app.rs` |
+| Active-plan cardinality guard (single active nonterminal per brain) | done | `crates/spur-mcp/src/server.rs` (`current_brain_active_owned_plan`) |
+| Active slot open guard in TUI navigation | done | `crates/spur-tui/src/views/plan_browser.rs`, `crates/spur-tui/src/app.rs` |
+| Sprint task issue-detail fetch + rich metadata | done | `crates/spur-tui/src/views/plan_inspector.rs`, `crates/spur-tui/src/components/plan_task_detail.rs` |
+| Sprint task detail scroll affordance | done | `crates/spur-tui/src/views/plan_inspector.rs`, `crates/spur-tui/src/components/plan_task_detail.rs` |
+| Plan owner label replacement during execute path | done | `crates/spur-mcp/src/server.rs` |
+
+## UAT Scenarios for Acceptance
+
+1. **Create and own one plan from backlog**
+   - With no active owned plan: select an epic in `IssueBrowserView` and press `E`.
+   - Expectation: execution succeeds, epic gets one owner label for current brain, and `PlanBrowserView` shows it as `mine`.
+
+2. **Block double-active from backlog**
+   - With one active nonterminal `mine` plan in progress: attempt `E` on another issue.
+   - Expectation: MCP returns `current brain session already owns active plan...`; no new plan labels are applied and UI shows a blocking hint.
+
+3. **Resume blocked when busy**
+   - In `PlanBrowserView`, with one active `mine` plan, place cursor on an `unowned` row and press `R`.
+   - Expectation: no ownership change; row remains `unowned`; user hint explains resume blocked.
+
+4. **Resume allowed when free**
+   - With no active `mine` plan, select an `unowned` row and press `R`.
+   - Expectation: MCP adds owner label; row flips to `mine`; `Open` uses current session plan path.
+
+5. **Blocked handoff paths**
+   - For `Other` or `Ambiguous` rows, `Enter` and `R` are rejected.
+   - Expectation: `PlanBrowserView` remains on the same row and no active session plan is changed.
+
+6. **Open Sprint detail affordances**
+   - On `Mine` row, press `Enter` to open `PlanInspectorView`.
+   - Select task with issue ID and press `Enter` to open issue detail.
+   - Use `j/k`, `PgUp/PgDn`, `g/G`; expect visible scroll clamp and line-range hint updates.
+
+## Expanded View Interaction Matrix
+
+```mermaid
+sequenceDiagram
+    participant User as User
+    participant A as TUI App
+    participant I as IssueBrowser
+    participant S as PlanBrowser
+    participant P as PlanInspector
+    participant M as MCP
+    participant PM as Beads/PM
+
+    User->>I: E on epic
+    I->>A: Action::Issue(IssueAction::ExecuteEpic)
+    A->>M: UserInput::ExecuteEpic
+    M->>PM: execute_epic(epic_id) + active-plan check
+    M-->>A: Plan command success / blocked
+    A->>S: RefreshPlans on success
+    PM-->>S: PlansLoaded
+
+    User->>S: R on Unowned
+    S->>A: Action::ResumePlan
+    A->>M: UserInput::ResumePlan
+    M->>PM: resume_plan(plan_id) + active-plan check
+    M-->>A: claimed / blocked
+    A->>S: show updated owner_state or hint
+
+    User->>S: Enter on Mine(active for this session)
+    S->>A: NavigateTo(PlanInspector(session))
+    A->>P: Render current session projection
+    User->>P: Enter on task with issue
+    P->>A: Action::Issue(ViewDetail)
+    A->>PM: issue detail fetch
+    PM-->>P: IssueDetailFetched
+```
+
 ## Deferred Work
 
 - Active owner handoff handshake.
