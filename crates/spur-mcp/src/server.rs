@@ -3149,21 +3149,35 @@ impl McpCallbackServer {
             Some(pm) => pm,
             None => return JsonRpcResponse::internal_error(id, "No issue tracker configured"),
         };
-        let issue_id = match args.get("id").and_then(|v| v.as_str()) {
-            Some(i) => i.to_string(),
-            None => return JsonRpcResponse::invalid_params(id, "Missing required field 'id'"),
+        let ctx = crate::handlers::WorkerCallContext {
+            delegation_id: String::new(),
+            brain_session_id: self.brain_session_id.as_session_id().0.clone(),
         };
 
-        match pm.get_issue(&issue_id).await {
+        match crate::handlers::get_issue(pm, &ctx, args).await {
             Ok(issue) => {
-                let text =
-                    serde_json::to_string_pretty(&issue).unwrap_or_else(|_| format!("{issue:?}"));
+                let text = serde_json::to_string_pretty(&issue)
+                    .unwrap_or_else(|_| issue.to_string());
                 JsonRpcResponse::success(
                     id,
                     json!({ "content": [{ "type": "text", "text": text }] }),
                 )
             }
-            Err(e) => JsonRpcResponse::internal_error(id, format!("get_issue failed: {e}")),
+            Err(crate::handlers::McpHandlerError::InvalidParams(e)) => {
+                JsonRpcResponse::invalid_params(id, e)
+            }
+            Err(crate::handlers::McpHandlerError::NotFound(e)) => {
+                JsonRpcResponse::error(id, -32004, e)
+            }
+            Err(crate::handlers::McpHandlerError::Unauthorized(e)) => {
+                JsonRpcResponse::error(id, -32001, e)
+            }
+            Err(crate::handlers::McpHandlerError::UpstreamPm(e)) => {
+                JsonRpcResponse::internal_error(id, format!("get_issue failed: {e}"))
+            }
+            Err(crate::handlers::McpHandlerError::Internal(e)) => {
+                JsonRpcResponse::internal_error(id, e)
+            }
         }
     }
 

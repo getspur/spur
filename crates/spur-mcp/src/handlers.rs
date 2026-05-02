@@ -1,4 +1,5 @@
 use serde_json::Value;
+use spur_pm::PmService;
 
 #[derive(Debug, Clone)]
 pub struct WorkerCallContext {
@@ -41,6 +42,25 @@ impl McpHandlerError {
             }
         })
     }
+}
+
+pub async fn get_issue(
+    pm: &PmService,
+    _ctx: &WorkerCallContext,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, McpHandlerError> {
+    let issue_id = args
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| McpHandlerError::InvalidParams("missing required field 'id'".into()))?;
+
+    let issue = pm
+        .get_issue(issue_id)
+        .await
+        .map_err(|e| McpHandlerError::UpstreamPm(format!("{e}")))?;
+
+    serde_json::to_value(issue)
+        .map_err(|e| McpHandlerError::Internal(format!("failed to serialize issue: {e}")))
 }
 
 #[cfg(test)]
