@@ -301,6 +301,63 @@ async fn tick_once_does_not_dispatch_partial_plan_after_child_create_failure() {
 }
 
 #[tokio::test]
+async fn tick_once_skips_plan_owned_by_another_brain() {
+    if !br_available() {
+        eprintln!("skipping tick_once_skips_plan_owned_by_another_brain: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let pm = Arc::new(
+        spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+            .await
+            .expect("PmService::try_new failed")
+            .expect("expected beads pm"),
+    );
+    let feature_gate = common::server_builder::pro_feature_gate();
+    let subgraph = spur_mcp::build_epic_subgraph(
+        pm.as_ref(),
+        feature_gate.as_ref(),
+        "other-owned-plan",
+        "Other Owned Plan",
+        None,
+        &[plan_task("t1")],
+    )
+    .await
+    .expect("build_epic_subgraph");
+    label_issue(
+        dir.path(),
+        &subgraph.epic_id,
+        &labels::plan_owner("other-brain"),
+    );
+
+    let (delegation_tx, mut delegation_rx) = tokio::sync::mpsc::channel(1);
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        Some(ReconcilerDispatchCtx {
+            delegation_tx,
+            task_tracker: tokio_util::task::TaskTracker::new(),
+            brain_session_id: BrainSessionId::new(SessionId("brain".to_string())),
+            event_sink: None,
+            materializer: test_materializer(),
+        }),
+        Some("other-owned-plan".to_string()),
+        feature_gate,
+    );
+
+    let did_work = reconciler.tick_once().await.expect("tick_once");
+    assert!(!did_work, "other-owned plan must not produce dispatch work");
+    assert!(
+        delegation_rx.try_recv().is_err(),
+        "other-owned plan must not enqueue a delegation"
+    );
+}
+
+#[tokio::test]
 async fn tick_once_dispatches_ready_task_with_approved_dep_overlay() {
     if !br_available() {
         eprintln!(
@@ -333,6 +390,7 @@ async fn tick_once_dispatches_ready_task_with_approved_dep_overlay() {
     )
     .await
     .expect("build_epic_subgraph");
+    label_issue(dir.path(), &subgraph.epic_id, &labels::plan_owner("brain"));
     let task_1_issue = subgraph.task_map["T1"].clone();
     let task_2_issue = subgraph.task_map["T2"].clone();
 
