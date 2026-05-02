@@ -58,6 +58,26 @@ fn sample_plan_store() -> PlanProjectionStore {
     store
 }
 
+fn plan_store_with_selected_task_without_issue() -> PlanProjectionStore {
+    let mut store = PlanProjectionStore::default();
+    store.apply(&SpurEvent::now(SpurEventBody::PlanSnapshotUpdated {
+        session_id: SessionId("brain-1".into()),
+        snapshot: Box::new(PlanSnapshot {
+            plan_id: "plan-1".into(),
+            status: "running".into(),
+            progress: "0/1 done".into(),
+            next_action: "No issue IDs in this plan; use this to validate Enter feedback.".into(),
+            ready_to_merge: false,
+            counts: PlanSnapshotCounts {
+                pending: 1,
+                ..Default::default()
+            },
+            tasks: vec![task("task-no-issue", 0, &[], None, "pending")],
+        }),
+    }));
+    store
+}
+
 fn out_of_stage_order_plan_store() -> PlanProjectionStore {
     let mut store = PlanProjectionStore::default();
     store.apply(&SpurEvent::now(SpurEventBody::PlanSnapshotUpdated {
@@ -291,6 +311,13 @@ fn sample_issue_detail_event(id: &str, title: &str, status: &str, body: &str) ->
     }
 }
 
+fn long_issue_body() -> String {
+    (0..80)
+        .map(|idx| format!("body-line-{idx:03}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[test]
 fn plan_inspector_renders_wide_lane_board() {
     let backend = TestBackend::new(120, 32);
@@ -464,6 +491,114 @@ fn plan_inspector_enter_requests_issue_detail() {
         action,
         Some(Action::Issue(IssueAction::ViewDetail { ref id })) if id == "bd-1"
     ));
+}
+
+#[test]
+fn plan_inspector_enter_no_issue_task_flashes_hint() {
+    let mut view = PlanInspectorView::new(SessionId("brain-1".into()));
+    let plans = plan_store_with_selected_task_without_issue();
+    let lineage = sample_lineage();
+    let synopsis = SessionSynopsisProjection::new();
+    let ctx = ViewContext {
+        lineage: &lineage,
+        plan_projection: &plans,
+        synopsis: &synopsis,
+        brain_status: &BrainStatus::Idle,
+        license_badge: None,
+        flag_summary: None,
+        tombstone: None,
+        transient_hint_override: None,
+    };
+
+    let action = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &ctx);
+    match action {
+        Some(Action::FlashHint { message }) => {
+            assert!(message.contains("No issue linked"));
+        }
+        _ => panic!("expected flash hint when task has no issue id"),
+    }
+}
+
+#[test]
+fn plan_inspector_esc_closes_open_issue_detail() {
+    let mut view = PlanInspectorView::new(SessionId("brain-1".into()));
+    let plans = sample_plan_store();
+    let lineage = sample_lineage();
+    let synopsis = SessionSynopsisProjection::new();
+    let ctx = ViewContext {
+        lineage: &lineage,
+        plan_projection: &plans,
+        synopsis: &synopsis,
+        brain_status: &BrainStatus::Idle,
+        license_badge: None,
+        flag_summary: None,
+        tombstone: None,
+        transient_hint_override: None,
+    };
+
+    let action = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &ctx);
+    assert!(matches!(
+        action,
+        Some(Action::Issue(IssueAction::ViewDetail { ref id })) if id == "bd-1"
+    ));
+
+    let close_action = view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &ctx);
+    assert!(close_action.is_none());
+
+    let back_action = view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &ctx);
+    assert!(matches!(back_action, Some(Action::NavigateBack)));
+}
+
+#[test]
+fn plan_inspector_task_detail_scroll_affordance() {
+    let mut view = PlanInspectorView::new(SessionId("brain-1".into()));
+    let plans = sample_plan_store();
+    let lineage = sample_lineage();
+    let synopsis = SessionSynopsisProjection::new();
+    let ctx = ViewContext {
+        lineage: &lineage,
+        plan_projection: &plans,
+        synopsis: &synopsis,
+        brain_status: &BrainStatus::Idle,
+        license_badge: None,
+        flag_summary: None,
+        tombstone: None,
+        transient_hint_override: None,
+    };
+    let backend = TestBackend::new(120, 32);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let open_action = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &ctx);
+    assert!(matches!(
+        open_action,
+        Some(Action::Issue(IssueAction::ViewDetail { ref id })) if id == "bd-1"
+    ));
+
+    view.handle_spur_event(
+        &SpurEvent::now(SpurEventBody::IssueDetailFetched {
+            requested_id: "bd-1".into(),
+            issue: sample_issue_detail_event("bd-1", "Long body task", "open", &long_issue_body()),
+        }),
+        &ctx,
+    );
+
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let initial = terminal.backend().buffer().clone();
+    assert!(buffer_contains(&initial, "body-line-000"));
+    assert!(!buffer_contains(&initial, "body-line-020"));
+
+    let down_action = view.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE), &ctx);
+    assert!(matches!(down_action, Some(Action::ScrollDown)));
+    let down_action = view.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE), &ctx);
+    assert!(matches!(down_action, Some(Action::ScrollDown)));
+
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let scrolled = terminal.backend().buffer().clone();
+    assert!(buffer_contains(&scrolled, "body-line-020"));
 }
 
 #[test]

@@ -21,6 +21,7 @@ pub struct PlanInspectorView {
     stacked_mode: bool,
     open_issue_id: Option<String>,
     issue_states: HashMap<String, TaskIssueState>,
+    task_detail_scroll: usize,
 }
 
 #[derive(Debug)]
@@ -38,6 +39,7 @@ impl PlanInspectorView {
             stacked_mode: false,
             open_issue_id: None,
             issue_states: HashMap::new(),
+            task_detail_scroll: 0,
         }
     }
 
@@ -48,8 +50,22 @@ impl PlanInspectorView {
     fn set_selected_task_id(&mut self, task_id: Option<String>) {
         if self.selected_task_id.as_deref() != task_id.as_deref() {
             self.open_issue_id = None;
+            self.task_detail_scroll = 0;
         }
         self.selected_task_id = task_id;
+    }
+
+    fn close_issue_detail(&mut self) {
+        self.open_issue_id = None;
+        self.task_detail_scroll = 0;
+    }
+
+    fn scroll_task_detail_up(&mut self, lines: usize) {
+        self.task_detail_scroll = self.task_detail_scroll.saturating_sub(lines);
+    }
+
+    fn scroll_task_detail_down(&mut self, lines: usize) {
+        self.task_detail_scroll = self.task_detail_scroll.saturating_add(lines);
     }
 
     fn selected_issue_id<'a>(&self, task: &'a spur_core::TrackedTask) -> Option<&'a str> {
@@ -59,11 +75,12 @@ impl PlanInspectorView {
     fn toggle_issue_detail(&mut self, task: &spur_core::TrackedTask) -> Option<Action> {
         let issue_id = self.selected_issue_id(task)?;
         if self.open_issue_id.as_deref() == Some(issue_id) {
-            self.open_issue_id = None;
+            self.close_issue_detail();
             return None;
         }
 
         self.open_issue_id = Some(issue_id.to_string());
+        self.task_detail_scroll = 0;
         let needs_request = !matches!(
             self.issue_states.get(issue_id),
             Some(TaskIssueState::Loaded(_))
@@ -230,14 +247,34 @@ impl View for PlanInspectorView {
                 KeyCode::Char('G') => self.jump_lane_end(plan),
                 KeyCode::Enter if key.modifiers.is_empty() => {
                     if let Some(task) = self.selected_task(plan) {
-                        return self.toggle_issue_detail(task);
+                        if self.selected_issue_id(task).is_some() {
+                            return self.toggle_issue_detail(task);
+                        }
+                        return Some(Action::FlashHint {
+                            message: "No issue linked to selected task".to_string(),
+                        });
                     }
+                }
+                KeyCode::PageUp if self.open_issue_id.is_some() => {
+                    self.scroll_task_detail_up(10);
+                    return Some(Action::ScrollUp);
+                }
+                KeyCode::PageDown if self.open_issue_id.is_some() => {
+                    self.scroll_task_detail_down(10);
+                    return Some(Action::ScrollDown);
                 }
                 _ => {}
             }
         }
         match key.code {
-            KeyCode::Esc => Some(Action::NavigateBack),
+            KeyCode::Esc => {
+                if self.open_issue_id.is_some() {
+                    self.close_issue_detail();
+                    None
+                } else {
+                    Some(Action::NavigateBack)
+                }
+            }
             KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::ALT) => {
                 Some(Action::NavigateBack)
             }
@@ -294,7 +331,9 @@ impl View for PlanInspectorView {
         .split(area);
         self.stacked_mode = area.width < 90;
 
-        if let Some(plan) = ctx.plan_projection.current_for_session(&self.session_id) {
+        let selected_task_has_issue = if let Some(plan) =
+            ctx.plan_projection.current_for_session(&self.session_id)
+        {
             self.ensure_selection(plan);
             let selected = self.selected_task(plan);
             let selected_stage_idx = selected.map(|t| t.stage_idx).unwrap_or(0);
@@ -394,6 +433,7 @@ impl View for PlanInspectorView {
                         live_node,
                         issue_detail.0,
                         issue_detail.1,
+                        self.task_detail_scroll,
                     );
                 } else {
                     frame.render_widget(
@@ -435,20 +475,39 @@ impl View for PlanInspectorView {
                         live_node,
                         issue_detail.0,
                         issue_detail.1,
+                        self.task_detail_scroll,
                     );
                 }
             }
+
+            selected.and_then(|task| task.issue_id.as_deref()).is_some()
         } else {
             frame.render_widget(
                 Paragraph::new("No tracked plan for this session yet.")
                     .block(Block::default().borders(Borders::ALL)),
                 chunks[1],
             );
-        }
+            false
+        };
 
+        let enter_hint = if self.open_issue_id.is_some() {
+            "Enter: close issue detail"
+        } else if selected_task_has_issue {
+            "Enter: issue detail"
+        } else {
+            "Enter: no linked issue"
+        };
+        let scroll_hint = if self.open_issue_id.is_some() {
+            "  PgUp/PgDn: scroll detail"
+        } else {
+            ""
+        };
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
-                " h/l: lane  j/k: task  Enter: issue detail  g/G: ends  Alt+P/Esc: close ",
+                format!(
+                    " h/l: lane  j/k: task  {}  g/G: ends  Alt+P/Esc: close {}",
+                    enter_hint, scroll_hint
+                ),
                 Style::default().fg(Color::DarkGray),
             )])),
             chunks[2],

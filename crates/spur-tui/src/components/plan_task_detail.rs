@@ -15,6 +15,7 @@ pub fn render_task_detail(
     live_node: Option<&ExecutorNode>,
     issue_detail: Option<&Issue>,
     issue_detail_status: Option<&str>,
+    scroll_offset: usize,
 ) {
     let mut lines = vec![
         section_header("Identity"),
@@ -154,9 +155,14 @@ pub fn render_task_detail(
         }
     }
 
+    let scroll_offset = match u16::try_from(scroll_offset) {
+        Ok(offset) => offset,
+        Err(_) => u16::MAX,
+    };
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
+            .scroll((scroll_offset, 0))
             .block(Block::default().borders(Borders::ALL).title("Task detail")),
         area,
     );
