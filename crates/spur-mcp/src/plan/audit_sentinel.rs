@@ -130,8 +130,9 @@ pub enum AuditSentinelKind {
         feedback: String,
     },
     ReviewFeedback {
-        attempt_no: u32,
-        feedback_text: String,
+        delegation_id: String,
+        attempt: u32,
+        feedback: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         worker_branch: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -349,8 +350,9 @@ mod tests {
                 feedback: "try again".into(),
             },
             AuditSentinelKind::ReviewFeedback {
-                attempt_no: 1,
-                feedback_text: "add null check".into(),
+                delegation_id: "del-A".into(),
+                attempt: 1,
+                feedback: "add null check".into(),
                 worker_branch: Some("spur/worker-x".into()),
                 summary: Some("did thing".into()),
             },
@@ -458,8 +460,9 @@ mod tests {
                 feedback: "f".into(),
             },
             AuditSentinelKind::ReviewFeedback {
-                attempt_no: 2,
-                feedback_text: "fix edge case".into(),
+                delegation_id: "del-B".into(),
+                attempt: 2,
+                feedback: "fix edge case".into(),
                 worker_branch: None,
                 summary: None,
             },
@@ -676,8 +679,9 @@ mod tests {
     #[test]
     fn review_feedback_variant_round_trips() {
         let kind = AuditSentinelKind::ReviewFeedback {
-            attempt_no: 2,
-            feedback_text: "fix the edge case".into(),
+            delegation_id: "del-bd-33it".into(),
+            attempt: 2,
+            feedback: "fix the edge case".into(),
             worker_branch: Some("spur/worker-bd-33it".into()),
             summary: Some("partial fix".into()),
         };
@@ -690,8 +694,9 @@ mod tests {
     #[test]
     fn review_feedback_omits_optional_fields_when_none() {
         let kind = AuditSentinelKind::ReviewFeedback {
-            attempt_no: 1,
-            feedback_text: "add tests".into(),
+            delegation_id: "del-1".into(),
+            attempt: 1,
+            feedback: "add tests".into(),
             worker_branch: None,
             summary: None,
         };

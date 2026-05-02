@@ -92,8 +92,9 @@ fn every_audit_sentinel_variant_round_trips_through_br_comments() {
             feedback: "needs more tests".into(),
         },
         AuditSentinelKind::ReviewFeedback {
-            attempt_no: 1,
-            feedback_text: "add null check".into(),
+            delegation_id: "del-1".into(),
+            attempt: 1,
+            feedback: "add null check".into(),
             worker_branch: Some("spur/worker-x".into()),
             summary: Some("did thing".into()),
         },

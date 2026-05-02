@@ -75,18 +75,19 @@ pub fn project_attempt_history(audits: &[AuditSentinelKind]) -> Vec<super::Attem
         .iter()
         .filter_map(|audit| {
             if let AuditSentinelKind::ReviewFeedback {
-                attempt_no,
-                feedback_text,
+                delegation_id: _,
+                attempt,
+                feedback,
                 worker_branch,
                 summary,
             } = audit
             {
                 Some(super::AttemptRecord {
-                    attempt: *attempt_no,
+                    attempt: *attempt,
                     worker_branch: worker_branch.clone(),
                     diff_summary: None,
                     summary: summary.clone(),
-                    feedback: feedback_text.clone(),
+                    feedback: feedback.clone(),
                     dispatched_base_oid: None,
                 })
             } else {
@@ -860,14 +861,16 @@ mod tests {
                 attempt: 1,
             },
             AuditSentinelKind::ReviewFeedback {
-                attempt_no: 1,
-                feedback_text: "fix edge case".into(),
+                delegation_id: "del-1".into(),
+                attempt: 1,
+                feedback: "fix edge case".into(),
                 worker_branch: Some("spur/worker-1".into()),
                 summary: Some("partial".into()),
             },
             AuditSentinelKind::ReviewFeedback {
-                attempt_no: 2,
-                feedback_text: "also add tests".into(),
+                delegation_id: "del-2".into(),
+                attempt: 2,
+                feedback: "also add tests".into(),
                 worker_branch: None,
                 summary: None,
             },
