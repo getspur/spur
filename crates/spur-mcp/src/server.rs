@@ -678,8 +678,8 @@ async fn build_epic_subgraph_with_activation_labels(
         task_map.insert(task_id, child_id);
     }
 
-    let mut add_labels = vec![crate::plan::labels::PLAN_COMPLETE.to_string()];
-    add_labels.extend(activation_add_labels);
+    let mut add_labels = activation_add_labels;
+    add_labels.push(crate::plan::labels::PLAN_COMPLETE.to_string());
     pm.update_issue(
         &epic_id,
         spur_pm::types::IssueUpdate {
