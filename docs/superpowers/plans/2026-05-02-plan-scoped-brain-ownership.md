@@ -1242,7 +1242,7 @@ git commit -m "feat(spur-mcp): add explicit resume_plan MVP"
 **Files:**
 - No production file changes expected.
 
-- [ ] **Step 1: Run focused tests**
+- [x] **Step 1: Run focused tests**
 
 Run:
 
@@ -1256,7 +1256,7 @@ scripts/spur-cargo test -p spur-mcp --test plan_ownership -- --nocapture
 
 Expected: all focused tests pass. If `reconciler_tick` fixtures fail because owner-missing legacy plans are now blocked, add explicit owner labels to tests that expect dispatch.
 
-- [ ] **Step 2: Run formatting**
+- [x] **Step 2: Run formatting**
 
 Run:
 
@@ -1266,7 +1266,7 @@ scripts/spur-cargo fmt --all
 
 Expected: formatting completes with exit 0.
 
-- [ ] **Step 3: Run crate tests**
+- [x] **Step 3: Run crate tests**
 
 Run:
 
@@ -1276,7 +1276,7 @@ scripts/spur-cargo test -p spur-mcp
 
 Expected: all `spur-mcp` tests pass.
 
-- [ ] **Step 4: Run clippy for touched crate**
+- [x] **Step 4: Run clippy for touched crate**
 
 Run:
 
@@ -1286,7 +1286,7 @@ scripts/spur-cargo clippy -p spur-mcp -- -D warnings
 
 Expected: clippy exits 0.
 
-- [ ] **Step 5: Commit verification-only adjustments if any**
+- [x] **Step 5: Commit verification-only adjustments if any**
 
 If formatting changed files:
 
@@ -1302,7 +1302,7 @@ If no files changed, do not create an empty commit.
 **Files:**
 - Create: `docs/superpowers/plans/2026-05-02-plan-ownership-cas-hardening.md`
 
-- [ ] **Step 1: Create follow-up plan for CAS and active handoff**
+- [x] **Step 1: Create follow-up plan for CAS and active handoff**
 
 Write a short follow-up plan with these tasks:
 
@@ -1329,7 +1329,7 @@ Use this exact header:
 ---
 ```
 
-- [ ] **Step 2: Commit follow-up plan**
+- [x] **Step 2: Commit follow-up plan**
 
 ```bash
 git add docs/superpowers/plans/2026-05-02-plan-ownership-cas-hardening.md
