@@ -3827,6 +3827,45 @@ impl McpCallbackServer {
             .await
             {
                 Ok(sg) => {
+                    let owner_label =
+                        crate::plan::labels::plan_owner(&self.brain_session_id.as_session_id().0);
+                    if let Err(e) = pm
+                        .update_issue(
+                            &sg.epic_id,
+                            spur_pm::IssueUpdate {
+                                add_labels: vec![owner_label],
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                    {
+                        return JsonRpcResponse::error(
+                            id,
+                            -32000,
+                            format!("submit_plan: failed to persist plan owner: {e}"),
+                        );
+                    }
+
+                    if let Some(adv) = pm.advanced() {
+                        let audit =
+                            crate::plan::audit_sentinel::AuditSentinelKind::PlanOwnershipAcquired {
+                                plan_id: plan_id.clone(),
+                                owner: self.brain_session_id.to_string(),
+                                token: uuid::Uuid::new_v4().to_string(),
+                                reason: "submit_plan".to_string(),
+                            };
+                        let body = crate::plan::audit_sentinel::encode_comment(&audit);
+                        if let Err(e) = adv.add_comment(&sg.epic_id, &body).await {
+                            tracing::warn!(
+                                target: "spur.audit.emit_failure",
+                                kind = "plan_ownership_acquired",
+                                epic_id = %sg.epic_id,
+                                plan_id = %plan_id,
+                                "PlanOwnershipAcquired audit comment emission failed (owner label is persisted; audit missing): {e}"
+                            );
+                        }
+                    }
+
                     info!(
                         plan_id = %plan_id,
                         epic_id = %sg.epic_id,
