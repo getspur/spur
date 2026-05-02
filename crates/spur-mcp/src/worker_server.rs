@@ -4,22 +4,27 @@
 //! T15 implements the lifecycle skeleton: bind a TCP listener on
 //! `127.0.0.1:0`, run a cancellable accept loop, and expose `start()` /
 //! `url()` / `shutdown()`. T16 adds HMAC token validation middleware.
-//! JSON-RPC dispatch (T17), audit (T18+) and the rest of Phase 4 add
-//! behaviour on top.
+//! T17 wires the JSON-RPC dispatcher: `tools/list` returns the curated
+//! 8-tool subset and `tools/call` routes to the freestanding handlers in
+//! [`crate::handlers`]. Audit emission (T19+) and per-delegation gating
+//! (T18) layer on top of this dispatcher.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 use rand::RngCore;
+use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::events::McpEventSink;
-use crate::handlers::WorkerCallContext;
+use crate::handlers::{McpHandlerError, PlanResolver, WorkerCallContext};
+use crate::outcome_materializer::OutcomeMaterializer;
 use crate::token::{validate_token, TokenError};
 
 /// Maximum allowed HTTP body size (1 MiB). JSON-RPC payloads are tiny;
@@ -43,6 +48,23 @@ const MAX_HEADER_LINE: usize = 8 * 1024;
 /// Maximum number of headers accepted per request.
 const MAX_HEADERS: usize = 64;
 
+/// Shared dependencies the dispatcher hands to handlers. Bundled into a
+/// struct so [`WorkerMcpServer::start`] stays one positional arg per
+/// orthogonal concept and so future tasks (T18 dual-gating, T19 audit) can
+/// extend the set without churning every call site.
+#[derive(Clone)]
+pub struct WorkerMcpDeps {
+    pub pm_service: Arc<spur_pm::PmService>,
+    pub feature_gate: Arc<spur_license::FeatureGate>,
+    pub funnel: Arc<dyn McpEventSink>,
+    pub plan_resolver: Arc<dyn PlanResolver>,
+    pub reconciler_outcomes: Arc<tokio::sync::Mutex<crate::plan::outcomes::OutcomeStore>>,
+    pub outcome_store: Arc<dyn spur_blob_store::OutcomeStore>,
+    /// Required by `get_task_diff` when reconstructing diffs from persisted
+    /// worker branches; `None` disables that recovery branch.
+    pub repo_root: Option<PathBuf>,
+}
+
 /// Per-`BrainSession` worker MCP server. Owns a TCP listener on
 /// `127.0.0.1:<random-port>` and a cancellable accept loop.
 pub struct WorkerMcpServer {
@@ -53,8 +75,24 @@ pub struct WorkerMcpServer {
     /// `BrainSession` id stamped onto every `WorkerCallContext` issued by this
     /// server (T16+).
     brain_session_id: String,
+    /// Materializer is derived from `outcome_store` once at start so the
+    /// dispatcher hot path doesn't pay for the construction per request.
+    deps: Arc<DispatcherDeps>,
     shutdown: CancellationToken,
     accept_loop_handle: Mutex<Option<JoinHandle<()>>>,
+}
+
+/// Internal bundle of the materialized handler dependencies. Mirrors
+/// [`WorkerMcpDeps`] plus the derived [`OutcomeMaterializer`].
+struct DispatcherDeps {
+    pm_service: Arc<spur_pm::PmService>,
+    feature_gate: Arc<spur_license::FeatureGate>,
+    funnel: Arc<dyn McpEventSink>,
+    plan_resolver: Arc<dyn PlanResolver>,
+    reconciler_outcomes: Arc<tokio::sync::Mutex<crate::plan::outcomes::OutcomeStore>>,
+    outcome_store: Arc<dyn spur_blob_store::OutcomeStore>,
+    materializer: OutcomeMaterializer,
+    repo_root: Option<PathBuf>,
 }
 
 /// Errors returned by [`WorkerMcpServer::start`].
@@ -70,9 +108,7 @@ impl WorkerMcpServer {
     /// listener is bound and ready to accept connections.
     pub async fn start(
         brain_session_id: String,
-        _pm_service: Arc<spur_pm::PmService>,
-        _feature_gate: Arc<spur_license::FeatureGate>,
-        _funnel: Arc<dyn McpEventSink>,
+        deps: WorkerMcpDeps,
     ) -> Result<Arc<Self>, BindError> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
@@ -80,17 +116,35 @@ impl WorkerMcpServer {
         let mut hmac_key = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut hmac_key);
 
+        let materializer = OutcomeMaterializer::new(Arc::clone(&deps.outcome_store));
+        let dispatcher_deps = Arc::new(DispatcherDeps {
+            pm_service: deps.pm_service,
+            feature_gate: deps.feature_gate,
+            funnel: deps.funnel,
+            plan_resolver: deps.plan_resolver,
+            reconciler_outcomes: deps.reconciler_outcomes,
+            outcome_store: deps.outcome_store,
+            materializer,
+            repo_root: deps.repo_root,
+        });
+
         let shutdown = CancellationToken::new();
         let server = Arc::new(Self {
             addr,
             hmac_key,
             brain_session_id: brain_session_id.clone(),
+            deps: Arc::clone(&dispatcher_deps),
             shutdown: shutdown.clone(),
             accept_loop_handle: Mutex::new(None),
         });
 
-        let handle =
-            tokio::spawn(accept_loop(listener, shutdown, hmac_key, brain_session_id));
+        let handle = tokio::spawn(accept_loop(
+            listener,
+            shutdown,
+            hmac_key,
+            brain_session_id,
+            dispatcher_deps,
+        ));
         *server.accept_loop_handle.lock() = Some(handle);
 
         Ok(server)
@@ -135,6 +189,9 @@ impl WorkerMcpServer {
         if let Some(handle) = handle {
             let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
         }
+        // Reference held only to keep the deps Arc alive until shutdown
+        // completes; explicit drop documents intent.
+        drop(self.deps.clone());
     }
 }
 
@@ -146,8 +203,9 @@ async fn accept_loop(
     shutdown: CancellationToken,
     hmac_key: [u8; 32],
     brain_session_id: String,
+    deps: Arc<DispatcherDeps>,
 ) {
-    // TODO(T17): track per-connection tasks via tokio_util::task::TaskTracker
+    // TODO(T24): track per-connection tasks via tokio_util::task::TaskTracker
     // so shutdown drains in-flight requests instead of detaching them.
     loop {
         tokio::select! {
@@ -159,6 +217,7 @@ async fn accept_loop(
                         peer,
                         hmac_key,
                         brain_session_id.clone(),
+                        Arc::clone(&deps),
                     ));
                 }
                 Err(_) => {
@@ -173,14 +232,15 @@ async fn accept_loop(
 }
 
 /// Parse an HTTP request, validate the bearer token, and either reject with
-/// 401 or dispatch to the JSON-RPC handler (T17).
+/// 401 or dispatch to the JSON-RPC handler.
 async fn handle_connection(
     mut stream: TcpStream,
     peer: SocketAddr,
     hmac_key: [u8; 32],
     brain_session_id: String,
+    deps: Arc<DispatcherDeps>,
 ) {
-    let response = match handle_request(&mut stream, &hmac_key, &brain_session_id).await {
+    let response = match handle_request(&mut stream, &hmac_key, &brain_session_id, deps).await {
         Ok(body) => format_http_response(200, "OK", &body),
         Err(err) => {
             tracing::warn!(?peer, error = ?err, "WorkerMcp AuthDenied");
@@ -250,6 +310,7 @@ async fn handle_request(
     stream: &mut TcpStream,
     hmac_key: &[u8; 32],
     brain_session_id: &str,
+    deps: Arc<DispatcherDeps>,
 ) -> Result<String, TokenError> {
     let mut buf_reader = tokio::io::BufReader::new(stream);
     let mut request_line = String::new();
@@ -324,23 +385,150 @@ async fn handle_request(
         brain_session_id: payload.b,
     };
 
-    dispatch(ctx, body).await
+    Ok(dispatch(ctx, body, deps).await)
 }
 
-/// Stub dispatcher. T17 replaces this with the real JSON-RPC router.
-async fn dispatch(_ctx: WorkerCallContext, body: Vec<u8>) -> Result<String, TokenError> {
-    let id = serde_json::from_slice::<serde_json::Value>(&body)
-        .ok()
-        .and_then(|v| v.get("id").cloned())
-        .unwrap_or(serde_json::Value::Null);
+/// JSON-RPC dispatcher. Returns the serialized response body — even error
+/// responses are HTTP 200 once the token has been validated, per JSON-RPC 2.0
+/// (errors live inside the body, not in the transport status).
+///
+/// Reads the request body, rejects batches (`-32600`), then routes:
+/// - `tools/list` → curated 8-tool subset from [`crate::tools::worker_tools_list`]
+/// - `tools/call` → freestanding handler in [`crate::handlers`] keyed by name
+///
+/// Unknown method or unknown tool name → `-32601 Method not found`.
+async fn dispatch(ctx: WorkerCallContext, body: Vec<u8>, deps: Arc<DispatcherDeps>) -> String {
+    let parsed: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => return error_response(Value::Null, -32700, "Parse error"),
+    };
 
-    Ok(serde_json::json!({
+    // Batched JSON-RPC requests would force per-element token re-validation
+    // and audit attribution we deliberately don't support — reject up front.
+    if parsed.is_array() {
+        return error_response(Value::Null, -32600, "Batched requests are not supported");
+    }
+
+    let id = parsed.get("id").cloned().unwrap_or(Value::Null);
+    let method = parsed
+        .get("method")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let params = parsed
+        .get("params")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+
+    match method.as_str() {
+        "tools/list" => {
+            let tools = crate::tools::worker_tools_list();
+            success_response(id, json!({ "tools": tools }))
+        }
+        "tools/call" => dispatch_tool_call(ctx, id, params, deps).await,
+        other => error_response(id, -32601, format!("Method not found: {other}")),
+    }
+}
+
+async fn dispatch_tool_call(
+    ctx: WorkerCallContext,
+    id: Value,
+    params: Value,
+    deps: Arc<DispatcherDeps>,
+) -> String {
+    let name = match params.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => return error_response(id, -32602, "missing required field 'name'"),
+    };
+    let args = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+
+    let result: Result<Value, McpHandlerError> = match name.as_str() {
+        "get_issue" => crate::handlers::get_issue(deps.pm_service.as_ref(), &ctx, args).await,
+        "list_issues" => crate::handlers::list_issues(deps.pm_service.as_ref(), &ctx, args).await,
+        "update_issue" => {
+            crate::handlers::update_issue(deps.pm_service.as_ref(), &ctx, args).await
+        }
+        "report_signal" => {
+            crate::handlers::report_signal(
+                deps.pm_service.as_ref(),
+                deps.feature_gate.as_ref(),
+                &ctx,
+                args,
+            )
+            .await
+        }
+        "report_progress" => {
+            crate::handlers::report_progress(deps.funnel.as_ref(), &ctx, args).await
+        }
+        "get_plan_status" => {
+            crate::handlers::get_plan_status(
+                deps.plan_resolver.as_ref(),
+                &deps.reconciler_outcomes,
+                &ctx,
+                args,
+            )
+            .await
+        }
+        "fetch_outcome_artifact" => {
+            crate::handlers::fetch_outcome_artifact(
+                &deps.materializer,
+                deps.outcome_store.as_ref(),
+                &ctx,
+                args,
+            )
+            .await
+        }
+        "get_task_diff" => {
+            crate::handlers::get_task_diff(
+                Some(deps.pm_service.as_ref()),
+                deps.feature_gate.as_ref(),
+                deps.repo_root.as_deref(),
+                deps.plan_resolver.as_ref(),
+                &ctx,
+                args,
+            )
+            .await
+        }
+        other => {
+            return error_response(id, -32601, format!("Method not found: {other}"));
+        }
+    };
+
+    match result {
+        Ok(value) => success_response(id, value),
+        Err(err) => {
+            let resp = err.to_jsonrpc_response(id);
+            serde_json::to_string(&resp).unwrap_or_else(|_| {
+                r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"response serialization failed"},"id":null}"#.to_string()
+            })
+        }
+    }
+}
+
+fn success_response(id: Value, result: Value) -> String {
+    serde_json::to_string(&json!({
         "jsonrpc": "2.0",
-        "error": {
-            "code": -32601,
-            "message": "Method not found"
-        },
-        "id": id
+        "id": id,
+        "result": result,
+    }))
+    .unwrap_or_else(|_| {
+        r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"response serialization failed"},"id":null}"#.to_string()
     })
-    .to_string())
+}
+
+fn error_response(id: Value, code: i32, message: impl Into<String>) -> String {
+    serde_json::to_string(&json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": code,
+            "message": message.into(),
+        },
+    }))
+    .unwrap_or_else(|_| {
+        r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"response serialization failed"},"id":null}"#.to_string()
+    })
 }
