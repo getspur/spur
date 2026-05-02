@@ -2485,7 +2485,6 @@ async fn execute_epic_persists_execution_scope_labels_on_epic_and_tasks() {
     run_br(dir.path(), &["dep", "add", &task_a_id, &epic_id]);
     run_br(dir.path(), &["dep", "add", &task_b_id, &epic_id]);
     run_br(dir.path(), &["dep", "add", &task_b_id, &task_a_id]);
-    label_issue(dir.path(), &epic_id, &labels::plan_owner("brain"));
 
     let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
         .await
@@ -2516,6 +2515,12 @@ async fn execute_epic_persists_execution_scope_labels_on_epic_and_tasks() {
     );
 
     let epic = pm.get_issue(&epic_id).await.expect("get epic");
+    assert!(
+        epic.labels
+            .iter()
+            .any(|label| label == &labels::plan_owner(&brain_sid.as_session_id().0)),
+        "execute_epic should stamp owner label for current brain session"
+    );
     assert!(epic
         .labels
         .iter()
