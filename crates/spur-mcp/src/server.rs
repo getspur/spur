@@ -784,6 +784,12 @@ async fn read_persisted_plan_bootstrap(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveOwnedPlan {
+    plan_id: String,
+    epic_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct PersistedTaskCompletion {
     worker_branch: Option<String>,
     summary: Option<String>,
@@ -3591,6 +3597,108 @@ impl McpCallbackServer {
             .await
     }
 
+    async fn projected_plan_status(&self, plan_id: &str) -> Result<serde_json::Value, String> {
+        let plan_arc = self.load_or_project_plan(plan_id).await?;
+        let state = plan_arc.lock().await;
+        Ok(crate::plan::build_plan_status(plan_id, &state))
+    }
+
+    async fn is_projected_plan_nonterminal(&self, plan_id: &str) -> Result<bool, String> {
+        let status = self.projected_plan_status(plan_id).await?;
+        let overall = status
+            .get("status")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        Ok(!crate::plan::is_terminal_plan_status(overall))
+    }
+
+    async fn current_brain_active_owned_plan(
+        &self,
+        pm: &spur_pm::PmService,
+        exempt_plan_id: Option<&str>,
+        exempt_epic_id: Option<&str>,
+    ) -> Result<Option<ActiveOwnedPlan>, String> {
+        let owner_label = crate::plan::labels::plan_owner(&self.brain_session_id.as_session_id().0);
+        let epics = pm
+            .list_issues(IssueFilter {
+                labels: vec![owner_label],
+                issue_type: Some("epic".to_string()),
+                include_closed: true,
+                limit: Some(1_000),
+                ..Default::default()
+            })
+            .await
+            .map_err(|error| format!("failed to scan active owned plans: {error}"))?;
+
+        for epic_summary in epics {
+            let epic_id = epic_summary.id;
+            let epic = pm
+                .get_issue(&epic_id)
+                .await
+                .map_err(|error| format!("failed to load owned plan epic {epic_id}: {error}"))?;
+            let plan_ids = epic
+                .labels
+                .iter()
+                .filter_map(|label| crate::plan::labels::parse_plan_id(label))
+                .collect::<HashSet<_>>();
+
+            for plan_id in plan_ids {
+                if exempt_plan_id == Some(plan_id) || exempt_epic_id == Some(epic_id.as_str()) {
+                    continue;
+                }
+                if self.is_projected_plan_nonterminal(plan_id).await? {
+                    return Ok(Some(ActiveOwnedPlan {
+                        plan_id: plan_id.to_string(),
+                        epic_id: epic_id.clone(),
+                    }));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn nonterminal_plan_status_for_epic(
+        &self,
+        pm: &spur_pm::PmService,
+        epic_id: &str,
+    ) -> Result<Option<(String, serde_json::Value)>, String> {
+        let epic = pm
+            .get_issue(epic_id)
+            .await
+            .map_err(|error| format!("failed to load epic {epic_id}: {error}"))?;
+        let plan_ids = epic
+            .labels
+            .iter()
+            .filter_map(|label| crate::plan::labels::parse_plan_id(label))
+            .collect::<HashSet<_>>();
+        let mut active = Vec::new();
+
+        for plan_id in plan_ids {
+            let status = self.projected_plan_status(plan_id).await?;
+            let overall = status
+                .get("status")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            if !crate::plan::is_terminal_plan_status(overall) {
+                active.push((plan_id.to_string(), status));
+            }
+        }
+
+        match active.len() {
+            0 => Ok(None),
+            1 => Ok(active.into_iter().next()),
+            _ => Err(format!(
+                "epic {epic_id} has multiple nonterminal plans: {}",
+                active
+                    .iter()
+                    .map(|(plan_id, _)| plan_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        }
+    }
+
     async fn handle_merge_plan(&self, id: Value, args: Value) -> JsonRpcResponse {
         let plan_id = match args.get("plan_id").and_then(|v| v.as_str()) {
             Some(p) => p.to_string(),
@@ -3692,6 +3800,39 @@ impl McpCallbackServer {
             self.brain_session_id.as_session_id(),
         ) {
             crate::plan::ownership::PlanOwnerMatch::OwnedByCurrent => {
+                match self.is_projected_plan_nonterminal(plan_id).await {
+                    Ok(true) => {
+                        match self
+                            .current_brain_active_owned_plan(pm, Some(plan_id), Some(&epic_id))
+                            .await
+                        {
+                            Ok(Some(active)) => {
+                                return JsonRpcResponse::error(
+                                    id,
+                                    -32009,
+                                    format!(
+                                        "resume_plan: current brain session already owns active plan {} (epic {}); cannot resume different active plan {plan_id}",
+                                        active.plan_id, active.epic_id
+                                    ),
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                return JsonRpcResponse::internal_error(
+                                    id,
+                                    format!("resume_plan: {error}"),
+                                )
+                            }
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        return JsonRpcResponse::internal_error(
+                            id,
+                            format!("resume_plan: failed to project plan {plan_id}: {error}"),
+                        )
+                    }
+                }
                 let result = json!({
                     "status": "already_owner",
                     "plan_id": plan_id,
@@ -3722,6 +3863,25 @@ impl McpCallbackServer {
                 ),
             ),
             crate::plan::ownership::PlanOwnerMatch::Unowned => {
+                match self.current_brain_active_owned_plan(pm, None, None).await {
+                    Ok(Some(active)) => {
+                        return JsonRpcResponse::error(
+                            id,
+                            -32009,
+                            format!(
+                                "resume_plan: current brain session already owns active plan {} (epic {}); finish it before claiming plan {plan_id}",
+                                active.plan_id, active.epic_id
+                            ),
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        return JsonRpcResponse::internal_error(
+                            id,
+                            format!("resume_plan: {error}"),
+                        )
+                    }
+                }
                 let owner_label =
                     crate::plan::labels::plan_owner(&self.brain_session_id.as_session_id().0);
                 if let Err(error) = apply_issue_update(
@@ -4277,6 +4437,62 @@ impl McpCallbackServer {
                         .by_epic
                         .insert(epic_id.clone(), PENDING_SENTINEL.into());
                 }
+            }
+        }
+
+        match self.nonterminal_plan_status_for_epic(pm, &epic_id).await {
+            Ok(Some((existing_plan_id, status_val))) => {
+                self.plan_registry.lock().await.by_epic.remove(&epic_id);
+                self.plan_registry
+                    .lock()
+                    .await
+                    .by_epic
+                    .insert(epic_id.clone(), existing_plan_id);
+
+                let mut resp_val = status_val;
+                if let serde_json::Value::Object(ref mut m) = resp_val {
+                    m.insert("epic_id".into(), serde_json::json!(epic_id));
+                    m.insert(
+                        "next_action".into(),
+                        serde_json::json!(
+                            "Plan already active for this epic. \
+                             Poll with get_plan_status(plan_id) to monitor progress."
+                        ),
+                    );
+                }
+                let text = serde_json::to_string_pretty(&resp_val)
+                    .unwrap_or_else(|_| resp_val.to_string());
+                return JsonRpcResponse::success(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }] }),
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.plan_registry.lock().await.by_epic.remove(&epic_id);
+                return JsonRpcResponse::internal_error(id, format!("execute_epic: {error}"));
+            }
+        }
+
+        match self
+            .current_brain_active_owned_plan(pm, None, Some(&epic_id))
+            .await
+        {
+            Ok(Some(active)) => {
+                self.plan_registry.lock().await.by_epic.remove(&epic_id);
+                return JsonRpcResponse::error(
+                    id,
+                    -32009,
+                    format!(
+                        "execute_epic: current brain session already owns active plan {} (epic {}); finish it before executing epic {epic_id}",
+                        active.plan_id, active.epic_id
+                    ),
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.plan_registry.lock().await.by_epic.remove(&epic_id);
+                return JsonRpcResponse::internal_error(id, format!("execute_epic: {error}"));
             }
         }
 
