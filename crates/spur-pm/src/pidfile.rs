@@ -2,9 +2,9 @@
 //!
 //! Uses `fs2::FileExt::try_lock_exclusive` — non-blocking, advisory. On
 //! acquire success the file contains the current PID; on drop, the lock
-//! releases and the file is removed. If the holder process crashes, the OS
-//! releases the lock but the file persists with a stale PID; `acquire`
-//! treats stale-PID files as acquirable.
+//! releases. The file remains on disk and is overwritten by the next holder,
+//! which avoids false single-session breakage when one process drops its lock
+//! while another has already reacquired it.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -70,7 +70,6 @@ impl Drop for PidFileGuard {
         if let Some(f) = self.file.take() {
             let _ = f.unlock();
         }
-        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -117,5 +116,17 @@ mod tests {
         let path = dir.path().join(".spur-brain.pid");
         std::fs::write(&path, "99999\n").unwrap();
         let _g = PidFileGuard::acquire(&path).expect("stale pidfile should be reacquirable");
+    }
+
+    #[test]
+    fn pidfile_remains_for_next_holder() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(".spur-brain.pid");
+        {
+            let _g1 = PidFileGuard::acquire(&path).unwrap();
+        }
+        assert!(path.exists(), "pidfile path must remain for continuity across restarts");
+        let _g2 = PidFileGuard::acquire(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap().trim(), std::process::id().to_string());
     }
 }
