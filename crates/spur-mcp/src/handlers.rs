@@ -1,5 +1,12 @@
+use std::sync::Arc;
+
+use async_trait::async_trait;
 use serde_json::Value;
 use spur_pm::{IssueUpdate, PmService};
+use tokio::sync::Mutex;
+
+use crate::plan::outcomes::OutcomeStore;
+use crate::plan::PlanState;
 
 #[derive(Debug, Clone)]
 pub struct WorkerCallContext {
@@ -129,6 +136,54 @@ pub async fn update_issue(
         .map_err(|e| McpHandlerError::UpstreamPm(format!("{e}")))?;
 
     Ok(serde_json::json!({ "ok": true }))
+}
+
+/// Abstracts `McpCallbackServer::load_or_project_plan` so freestanding
+/// handlers can resolve a plan without depending on the full server.
+///
+/// Kept `dyn`-compatible (no generic methods, no `Self: Sized`) so handlers
+/// can take `&dyn PlanResolver`. Reused by Task 11 (`get_task_diff`).
+#[async_trait]
+pub trait PlanResolver: Send + Sync {
+    async fn load_or_project_plan(
+        &self,
+        plan_id: &str,
+    ) -> Result<Arc<Mutex<PlanState>>, String>;
+}
+
+pub async fn get_plan_status(
+    plan_resolver: &dyn PlanResolver,
+    reconciler_outcomes: &Mutex<OutcomeStore>,
+    _ctx: &WorkerCallContext,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, McpHandlerError> {
+    let plan_id = args
+        .get("plan_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            McpHandlerError::InvalidParams("Missing required field 'plan_id'".into())
+        })?
+        .to_string();
+
+    let plan_state = plan_resolver
+        .load_or_project_plan(&plan_id)
+        .await
+        .map_err(|_| McpHandlerError::InvalidParams(format!("Unknown plan_id: '{plan_id}'")))?;
+
+    let state = plan_state.lock().await;
+    let mut status = crate::plan::build_plan_status(&plan_id, &state);
+    let outcomes = reconciler_outcomes.lock().await;
+    if let serde_json::Value::Object(ref mut fields) = status {
+        fields.insert(
+            "recent_outcomes".into(),
+            serde_json::json!(outcomes.recent_outcomes(&plan_id)),
+        );
+        fields.insert(
+            "stuck_tasks".into(),
+            serde_json::json!(outcomes.stuck_tasks_for_plan(&plan_id)),
+        );
+    }
+    Ok(status)
 }
 
 #[cfg(test)]
