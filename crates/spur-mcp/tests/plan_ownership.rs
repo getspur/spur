@@ -195,3 +195,112 @@ async fn resume_plan_refuses_plan_owned_by_other_brain() {
         "resume_plan must refuse active owners with MVP handoff message: {response}"
     );
 }
+
+#[tokio::test]
+async fn resume_plan_rejects_duplicate_plan_epics() {
+    if !br_available() {
+        eprintln!("skipping resume_plan_rejects_duplicate_plan_epics: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init");
+    let pm = beads_pm(dir.path()).await;
+    let feature_gate = common::server_builder::pro_feature_gate();
+    let plan_id = "plan-resume-duplicate";
+    spur_mcp::build_epic_subgraph(
+        pm.as_ref(),
+        feature_gate.as_ref(),
+        plan_id,
+        "Plan Resume Duplicate A",
+        None,
+        &one_task(),
+    )
+    .await
+    .expect("build first epic subgraph");
+    spur_mcp::build_epic_subgraph(
+        pm.as_ref(),
+        feature_gate.as_ref(),
+        plan_id,
+        "Plan Resume Duplicate B",
+        None,
+        &one_task(),
+    )
+    .await
+    .expect("build second epic subgraph");
+
+    let session_id = BrainSessionId::new(SessionId("brain-current".into()));
+    let (server, _channel) = McpCallbackServer::new(
+        &session_id,
+        Some(Arc::clone(&pm)),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        common::server_builder::pro_feature_gate(),
+    );
+
+    let response = server
+        .__test_call_tool("resume_plan", json!({ "plan_id": plan_id }))
+        .await;
+    assert!(
+        error_message(&response).contains("ambiguous plan lookup"),
+        "resume_plan must reject duplicate plan epics: {response}"
+    );
+}
+
+#[tokio::test]
+async fn resume_plan_refuses_mixed_current_and_other_owner_labels() {
+    if !br_available() {
+        eprintln!(
+            "skipping resume_plan_refuses_mixed_current_and_other_owner_labels: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init");
+    let pm = beads_pm(dir.path()).await;
+    let feature_gate = common::server_builder::pro_feature_gate();
+    let plan_id = "plan-resume-mixed-owners";
+    let subgraph = spur_mcp::build_epic_subgraph(
+        pm.as_ref(),
+        feature_gate.as_ref(),
+        plan_id,
+        "Plan Resume Mixed Owners",
+        None,
+        &one_task(),
+    )
+    .await
+    .expect("build epic subgraph");
+
+    let session_id = BrainSessionId::new(SessionId("brain-current".into()));
+    pm.update_issue(
+        &subgraph.epic_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![
+                labels::plan_owner(&session_id.as_session_id().0),
+                labels::plan_owner("other-brain"),
+            ],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("add mixed owner labels");
+
+    let (server, _channel) = McpCallbackServer::new(
+        &session_id,
+        Some(Arc::clone(&pm)),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        common::server_builder::pro_feature_gate(),
+    );
+
+    let response = server
+        .__test_call_tool("resume_plan", json!({ "plan_id": plan_id }))
+        .await;
+    assert!(
+        error_message(&response).contains("ambiguous owner labels"),
+        "resume_plan must refuse mixed current and other owner labels: {response}"
+    );
+}
