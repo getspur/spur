@@ -91,6 +91,12 @@ fn every_audit_sentinel_variant_round_trips_through_br_comments() {
             delegation_id: "del-1".into(),
             feedback: "needs more tests".into(),
         },
+        AuditSentinelKind::ReviewFeedback {
+            attempt_no: 1,
+            feedback_text: "add null check".into(),
+            worker_branch: Some("spur/worker-x".into()),
+            summary: Some("did thing".into()),
+        },
     ];
 
     for v in &variants {
