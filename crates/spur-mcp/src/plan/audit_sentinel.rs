@@ -131,6 +131,8 @@ pub enum AuditSentinelKind {
     },
     Signal {
         signal_id: String,
+        #[serde(default)]
+        delegation_id: String,
         #[serde(rename = "signal_kind")]
         kind: String,
         severity: f32,
@@ -339,6 +341,7 @@ mod tests {
             },
             AuditSentinelKind::Signal {
                 signal_id: "sig-1".into(),
+                delegation_id: "del-A".into(),
                 kind: "scope-drift".into(),
                 severity: 0.82,
                 reason: "auth spans 4 subsystems".into(),
@@ -441,6 +444,7 @@ mod tests {
             },
             AuditSentinelKind::Signal {
                 signal_id: "sig-1".into(),
+                delegation_id: "del-A".into(),
                 kind: "scope-drift".into(),
                 severity: 0.82,
                 reason: "auth spans 4 subsystems".into(),
@@ -652,6 +656,7 @@ mod tests {
     fn signal_variant_round_trips() {
         let kind = AuditSentinelKind::Signal {
             signal_id: "sig-1".into(),
+            delegation_id: "del-A".into(),
             kind: "scope-drift".into(),
             severity: 0.82,
             reason: "auth spans 4 subsystems".into(),

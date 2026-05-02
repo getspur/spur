@@ -47,10 +47,7 @@ struct FixedPlanResolver {
 
 #[async_trait]
 impl PlanResolver for FixedPlanResolver {
-    async fn load_or_project_plan(
-        &self,
-        plan_id: &str,
-    ) -> Result<Arc<Mutex<PlanState>>, String> {
+    async fn load_or_project_plan(&self, plan_id: &str) -> Result<Arc<Mutex<PlanState>>, String> {
         let p = self.plan.lock().await;
         if p.plan_id == plan_id {
             Ok(self.plan.clone())
@@ -64,10 +61,7 @@ struct MissingPlanResolver;
 
 #[async_trait]
 impl PlanResolver for MissingPlanResolver {
-    async fn load_or_project_plan(
-        &self,
-        plan_id: &str,
-    ) -> Result<Arc<Mutex<PlanState>>, String> {
+    async fn load_or_project_plan(&self, plan_id: &str) -> Result<Arc<Mutex<PlanState>>, String> {
         Err(format!("unknown plan '{plan_id}'"))
     }
 }
@@ -119,7 +113,10 @@ async fn get_plan_status_missing_plan_id_invalid_params() {
         .await
         .expect_err("missing plan_id must be InvalidParams");
 
-    assert!(matches!(err, McpHandlerError::InvalidParams(_)), "got {err:?}");
+    assert!(
+        matches!(err, McpHandlerError::InvalidParams(_)),
+        "got {err:?}"
+    );
 }
 
 #[tokio::test]

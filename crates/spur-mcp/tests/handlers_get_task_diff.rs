@@ -60,10 +60,7 @@ struct FixedPlanResolver {
 
 #[async_trait]
 impl PlanResolver for FixedPlanResolver {
-    async fn load_or_project_plan(
-        &self,
-        plan_id: &str,
-    ) -> Result<Arc<Mutex<PlanState>>, String> {
+    async fn load_or_project_plan(&self, plan_id: &str) -> Result<Arc<Mutex<PlanState>>, String> {
         let p = self.plan.lock().await;
         if p.plan_id == plan_id {
             Ok(self.plan.clone())
@@ -96,9 +93,7 @@ fn make_plan_with_cached_result(plan_id: &str) -> PlanState {
     };
     PlanState {
         plan_id: plan_id.to_string(),
-        brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId(
-            "brain-test".into(),
-        )),
+        brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-test".into())),
         base_snapshot_branch: None,
         base_snapshot_oid: None,
         merge_state: PlanMergeState::NotStarted,
@@ -128,9 +123,7 @@ fn make_plan_with_cached_result(plan_id: &str) -> PlanState {
 fn make_plan_needing_recovery(plan_id: &str) -> PlanState {
     PlanState {
         plan_id: plan_id.to_string(),
-        brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId(
-            "brain-test".into(),
-        )),
+        brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-test".into())),
         base_snapshot_branch: None,
         base_snapshot_oid: None,
         merge_state: PlanMergeState::NotStarted,

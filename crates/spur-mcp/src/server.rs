@@ -1190,121 +1190,6 @@ pub async fn resolve_dispatch_orphan(
     Ok(true)
 }
 
-/// Worker-facing handler for the `report_signal` MCP tool.
-#[doc(hidden)]
-pub async fn handle_report_signal(
-    pm: Arc<PmService>,
-    feature_gate: Arc<spur_license::FeatureGate>,
-    args: serde_json::Value,
-) -> anyhow::Result<serde_json::Value> {
-    use crate::plan::audit_sentinel::{encode_comment as audit_encode, AuditSentinelKind};
-    use crate::plan::labels;
-    use crate::plan::signals::{encode_comment as signal_encode, WorkerSignal};
-
-    #[derive(serde::Deserialize)]
-    struct Args {
-        task_id: String,
-        signal: WorkerSignal,
-    }
-
-    let args: Args = serde_json::from_value(args)?;
-    // Defense-in-depth: the MCP tool schema declares `kind` enum is
-    // `["scope_drift"]`, but harness input-schema enforcement is best-effort
-    // across MCP runtimes. Reject non-worker-emittable variants explicitly so
-    // a hallucinating worker cannot spoof brain-side signals (e.g.,
-    // PotentialClobber, which carries OIDs the worker has no authority over).
-    if !matches!(args.signal, WorkerSignal::ScopeDrift { .. }) {
-        anyhow::bail!(
-            "report_signal: only worker-emittable signal kinds are accepted; got {}",
-            args.signal.kind_label()
-        );
-    }
-    require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED, feature_gate.as_ref())
-        .map_err(|error| anyhow::anyhow!(feature_error_message(error)))?;
-    let adv = pm
-        .advanced()
-        .ok_or_else(|| anyhow::anyhow!("report_signal requires beads backend"))?;
-    let issue = pm.get_issue(&args.task_id).await?;
-    let signal_id = args.signal.signal_id().to_string();
-
-    // Beads persists a compressed status vocabulary — SPUR's nine-state
-    // PlanTaskStatus terminals (Approved, Failed, Cancelled, Superseded) all
-    // project to the beads `closed` status. Rejected stays `open` (retry-
-    // eligible). Using the beads closed-status predicate correctly models
-    // every SPUR terminal without matching vocabulary that beads never emits.
-    // Fine-grain which-terminal is recoverable from audit comments + labels
-    // (spur:superseded-by:*, Approval/Rejection sentinels) at consumer time.
-    if issue.status.as_str() == pm.closed_status() {
-        adv.add_comment(
-            &args.task_id,
-            &audit_encode(&AuditSentinelKind::LateSignal {
-                signal_id: signal_id.clone(),
-                terminal_status: issue.status.clone(),
-            }),
-        )
-        .await?;
-        pm.update_issue(
-            &args.task_id,
-            spur_pm::IssueUpdate {
-                add_labels: vec![labels::SIGNAL_LATE_ARRIVAL.to_string()],
-                ..Default::default()
-            },
-        )
-        .await?;
-        return Ok(json!({
-            "recorded": true,
-            "signal_id": signal_id,
-            "late": true,
-        }));
-    }
-
-    let (severity, reason, kind_label) = match &args.signal {
-        WorkerSignal::ScopeDrift {
-            severity, reason, ..
-        } => (
-            *severity,
-            reason.clone(),
-            args.signal.kind_label().to_string(),
-        ),
-        WorkerSignal::PotentialClobber { .. } => {
-            (0.0, String::new(), args.signal.kind_label().to_string())
-        }
-    };
-
-    // Emit the audit sentinel BEFORE operational writes so the decision-at-
-    // decision-time is immutably recorded. Beads has no transactions; if the
-    // task closes between our terminal check above and subsequent writes, the
-    // watcher's status-at-tick-time filter (signal_watcher.rs) still enforces
-    // I3 at consumption. Ordering here makes partial failures auditable and
-    // matches the late-path ordering (audit-before-label) for consistency.
-    adv.add_comment(
-        &args.task_id,
-        &audit_encode(&AuditSentinelKind::Signal {
-            signal_id: signal_id.clone(),
-            kind: kind_label.clone(),
-            severity,
-            reason,
-        }),
-    )
-    .await?;
-    adv.add_comment(&args.task_id, &signal_encode(&args.signal))
-        .await?;
-    pm.update_issue(
-        &args.task_id,
-        spur_pm::IssueUpdate {
-            add_labels: vec![labels::signal_kind(&kind_label)],
-            ..Default::default()
-        },
-    )
-    .await?;
-
-    Ok(json!({
-        "recorded": true,
-        "signal_id": signal_id,
-        "late": false,
-    }))
-}
-
 /// Pure helper: compute the IssueCreate values that build_epic_subgraph
 /// would dispatch to PmService. Returns the epic's IssueCreate plus a
 /// Vec of (task_id, IssueCreate) for each child in topological order.
@@ -2493,7 +2378,18 @@ impl McpCallbackServer {
                     }
                 };
 
-                match handle_report_signal(pm, Arc::clone(&self.feature_gate), arguments).await {
+                let ctx = crate::handlers::WorkerCallContext {
+                    delegation_id: String::new(),
+                    brain_session_id: self.brain_session_id.as_session_id().0.clone(),
+                };
+                match crate::handlers::report_signal(
+                    pm.as_ref(),
+                    self.feature_gate.as_ref(),
+                    &ctx,
+                    arguments,
+                )
+                .await
+                {
                     Ok(result) => {
                         let text = serde_json::to_string_pretty(&result)
                             .unwrap_or_else(|_| result.to_string());
@@ -2502,10 +2398,21 @@ impl McpCallbackServer {
                             json!({ "content": [{ "type": "text", "text": text }] }),
                         )
                     }
-                    Err(error) => JsonRpcResponse::internal_error(
-                        id,
-                        format!("report_signal failed: {error}"),
-                    ),
+                    Err(crate::handlers::McpHandlerError::InvalidParams(e)) => {
+                        JsonRpcResponse::invalid_params(id, e)
+                    }
+                    Err(crate::handlers::McpHandlerError::NotFound(e)) => {
+                        JsonRpcResponse::error(id, -32004, e)
+                    }
+                    Err(crate::handlers::McpHandlerError::Unauthorized(e)) => {
+                        JsonRpcResponse::error(id, -32001, e)
+                    }
+                    Err(crate::handlers::McpHandlerError::UpstreamPm(e)) => {
+                        JsonRpcResponse::internal_error(id, format!("report_signal failed: {e}"))
+                    }
+                    Err(crate::handlers::McpHandlerError::Internal(e)) => {
+                        JsonRpcResponse::internal_error(id, e)
+                    }
                 }
             }
             "create_issue" => self.handle_create_issue(id, arguments).await,
@@ -2544,10 +2451,7 @@ impl McpCallbackServer {
             match serde_json::from_value(args.clone()) {
                 Ok(p) => p,
                 Err(e) => {
-                    return JsonRpcResponse::invalid_params(
-                        id,
-                        format!("Invalid arguments: {e}"),
-                    )
+                    return JsonRpcResponse::invalid_params(id, format!("Invalid arguments: {e}"))
                 }
             };
 
@@ -3066,8 +2970,8 @@ impl McpCallbackServer {
 
         match crate::handlers::get_issue(pm, &ctx, args).await {
             Ok(issue) => {
-                let text = serde_json::to_string_pretty(&issue)
-                    .unwrap_or_else(|_| issue.to_string());
+                let text =
+                    serde_json::to_string_pretty(&issue).unwrap_or_else(|_| issue.to_string());
                 JsonRpcResponse::success(
                     id,
                     json!({ "content": [{ "type": "text", "text": text }] }),
@@ -3164,8 +3068,8 @@ impl McpCallbackServer {
 
         match crate::handlers::update_issue(pm, &ctx, args).await {
             Ok(result) => {
-                let text = serde_json::to_string_pretty(&result)
-                    .unwrap_or_else(|_| result.to_string());
+                let text =
+                    serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
                 JsonRpcResponse::success(
                     id,
                     json!({ "content": [{ "type": "text", "text": text }] }),
@@ -4175,8 +4079,8 @@ impl McpCallbackServer {
         };
         match crate::handlers::get_plan_status(self, &self.reconciler_outcomes, &ctx, args).await {
             Ok(status) => {
-                let text = serde_json::to_string_pretty(&status)
-                    .unwrap_or_else(|_| status.to_string());
+                let text =
+                    serde_json::to_string_pretty(&status).unwrap_or_else(|_| status.to_string());
                 JsonRpcResponse::success(
                     id,
                     json!({ "content": [{ "type": "text", "text": text }] }),

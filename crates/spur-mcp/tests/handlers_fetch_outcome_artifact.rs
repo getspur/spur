@@ -95,7 +95,8 @@ async fn fetch_outcome_artifact_returns_full_text_for_same_session() {
     let text = value["content"][0]["text"]
         .as_str()
         .expect("content[0].text must be a string");
-    let parsed: DelegationResult = serde_json::from_str(text).expect("full text is DelegationResult JSON");
+    let parsed: DelegationResult =
+        serde_json::from_str(text).expect("full text is DelegationResult JSON");
     assert_eq!(parsed.summary.as_deref(), Some("session A summary"));
 }
 
@@ -149,5 +150,8 @@ async fn fetch_outcome_artifact_missing_delegation_id_invalid_params() {
     let err = fetch_outcome_artifact(&materializer, store.as_ref(), &ctx, json!({}))
         .await
         .expect_err("missing delegation_id must be InvalidParams");
-    assert!(matches!(err, McpHandlerError::InvalidParams(_)), "got {err:?}");
+    assert!(
+        matches!(err, McpHandlerError::InvalidParams(_)),
+        "got {err:?}"
+    );
 }

@@ -175,10 +175,7 @@ fn per_task_base_commit_survives() {
     });
     let brain_sid = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
     let parsed = spur_mcp::parse_parallel_tasks(&args, &brain_sid).expect("parse ok");
-    assert_eq!(
-        parsed[0].base,
-        Some(BaseSpec::Commit { oid: oid.into() })
-    );
+    assert_eq!(parsed[0].base, Some(BaseSpec::Commit { oid: oid.into() }));
 }
 
 #[test]
