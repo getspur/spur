@@ -56,8 +56,20 @@ pub const PLAN_OWNER_PREFIX: &str = "spur:plan-owner:";
 pub const PLAN_OWNER_TOKEN_PREFIX: &str = "spur:plan-owner-token:";
 pub const PLAN_OWNER_LEASE_EXPIRES_AT_PREFIX: &str = "spur:plan-owner-lease-expires-at:";
 
+fn assert_br_legal_compact_component(component: &str) {
+    assert!(
+        !component.is_empty()
+            && component
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':')),
+        "compacted br label component must be non-empty and contain only ASCII alphanumeric, dash, underscore, or colon characters: {component:?}"
+    );
+}
+
 pub fn compact_label_component(value: &str) -> String {
-    value.replace('-', "")
+    let compacted = value.replace('-', "");
+    assert_br_legal_compact_component(&compacted);
+    compacted
 }
 
 pub fn delegation_id(delegation_id: &str) -> String {
@@ -72,8 +84,13 @@ pub fn plan_owner(owner: &str) -> String {
     format!("{PLAN_OWNER_PREFIX}{}", compact_label_component(owner))
 }
 
+/// Update-path only: prefix + compact UUID is 54 chars, exceeding the
+/// 50-character `br create --label` cap.
 pub fn plan_owner_token(token: &str) -> String {
-    format!("{PLAN_OWNER_TOKEN_PREFIX}{}", compact_label_component(token))
+    format!(
+        "{PLAN_OWNER_TOKEN_PREFIX}{}",
+        compact_label_component(token)
+    )
 }
 
 pub fn plan_owner_lease_expires_at(ts: i64) -> String {
@@ -284,6 +301,17 @@ mod tests {
             plan_owner_lease_expires_at(1_777_777_777),
             "spur:plan-owner-lease-expires-at:1777777777"
         );
+    }
+
+    #[test]
+    fn compact_label_component_rejects_br_illegal_characters() {
+        let result = std::panic::catch_unwind(|| compact_label_component("bad/value"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn plan_owner_token_documents_update_path_length() {
+        assert!(plan_owner_token("7c6258f1-6a67-4f6a-a9b4-5ea1ef59ff7a").len() > 50);
     }
 
     #[test]
