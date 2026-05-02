@@ -346,6 +346,18 @@ pub enum BindError {
     Io(#[from] std::io::Error),
 }
 
+/// Outcome of [`WorkerMcpServer::shutdown`]'s drain phase. `drained` is `true`
+/// when every in-flight dispatcher exited before the caller-supplied deadline;
+/// `false` when the deadline elapsed with at least one dispatcher still in
+/// flight. `active_at_deadline` is the snapshot of [`WorkerMcpServer::active_count`]
+/// taken at the moment the drain loop bailed (always `0` when `drained` is
+/// `true`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShutdownOutcome {
+    pub drained: bool,
+    pub active_at_deadline: u32,
+}
+
 impl WorkerMcpServer {
     /// Bind a fresh TCP listener on `127.0.0.1:0`, generate an in-process HMAC
     /// key from the OS RNG, and spawn the accept loop. Returns once the
@@ -545,24 +557,61 @@ impl WorkerMcpServer {
         self.active_delegations.load(Ordering::SeqCst)
     }
 
-    /// Cancel the accept loop and wait up to 5 seconds for it to exit. Then
-    /// drain in-flight dispatchers (poll [`active_count`](Self::active_count)
-    /// until it reaches 0) before joining the background audit flusher task.
-    /// T22 introduces the unconditional drain; T24 will add an explicit
-    /// timeout that force-aborts dispatchers if the drain stalls.
-    /// Idempotent: a second call after shutdown is a no-op.
-    pub async fn shutdown(self: Arc<Self>) {
+    /// Cancel the accept loop, drain in-flight dispatchers up to `deadline`,
+    /// then join the background audit flusher task. Returns a
+    /// [`ShutdownOutcome`] describing whether the drain completed (`drained =
+    /// true`) or the deadline elapsed with dispatchers still in flight
+    /// (`drained = false`, `active_at_deadline > 0`).
+    ///
+    /// Drain semantics:
+    /// 1. The accept loop is cancelled first, so the listener stops accepting
+    ///    new connections immediately.
+    /// 2. Existing dispatchers continue and decrement `active_delegations`
+    ///    via [`ActiveCallGuard::drop`] as they return.
+    /// 3. The drain loop polls [`active_count`](Self::active_count) every
+    ///    `DRAIN_POLL_INTERVAL` (bounded — never busy-loops) until either the
+    ///    counter reaches `0` or `deadline` elapses.
+    /// 4. On deadline elapse a `WARN`-level log is emitted with the in-flight
+    ///    count. The flusher task is still joined so its TaskTracker drains
+    ///    and the deps `Arc` is released.
+    ///
+    /// The caller picks `deadline`; a typical default is `5s`. Callers that
+    /// don't care about the outcome may discard the return value.
+    /// Idempotent: a second call after shutdown finds the accept and flusher
+    /// handles already taken and returns immediately with `drained = true`.
+    pub async fn shutdown(self: Arc<Self>, deadline: Duration) -> ShutdownOutcome {
         self.shutdown.cancel();
         let accept_handle = self.accept_loop_handle.lock().take();
         if let Some(handle) = accept_handle {
             let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
         }
+
         // Listener is closed (accept_loop has returned), so no new requests
-        // can arrive. Existing dispatchers continue and decrement
-        // `active_delegations` via `ActiveCallGuard::drop` as they finish.
-        while self.active_count() > 0 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        // can arrive. Drain existing dispatchers, bounded by `deadline`.
+        let drain_deadline = Instant::now() + deadline;
+        let outcome = loop {
+            let active = self.active_count();
+            if active == 0 {
+                break ShutdownOutcome {
+                    drained: true,
+                    active_at_deadline: 0,
+                };
+            }
+            if Instant::now() >= drain_deadline {
+                tracing::warn!(
+                    brain_session_id = %self.brain_session_id,
+                    active = active,
+                    deadline_ms = deadline.as_millis() as u64,
+                    "WorkerMcpServer drain deadline elapsed with in-flight dispatchers"
+                );
+                break ShutdownOutcome {
+                    drained: false,
+                    active_at_deadline: active,
+                };
+            }
+            tokio::time::sleep(DRAIN_POLL_INTERVAL).await;
+        };
+
         let flusher_handle = self.flusher_handle.lock().take();
         if let Some(handle) = flusher_handle {
             let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
@@ -570,8 +619,14 @@ impl WorkerMcpServer {
         // Reference held only to keep the deps Arc alive until shutdown
         // completes; explicit drop documents intent.
         drop(self.deps.clone());
+        outcome
     }
 }
+
+/// How often [`WorkerMcpServer::shutdown`] re-checks `active_count` while
+/// draining. Bounded so the polling loop never busy-spins, small enough that
+/// a fast-completing dispatcher doesn't materially extend shutdown latency.
+const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Free fn so the spawned task does not capture an `Arc<Self>` — that would
 /// create a strong reference cycle with `accept_loop_handle` and prevent the
