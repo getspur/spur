@@ -4336,16 +4336,19 @@ impl McpCallbackServer {
             for label in &epic_issue.labels {
                 if crate::plan::labels::parse_plan_id(label).is_some()
                     || crate::plan::labels::parse_agent(label).is_some()
+                    || crate::plan::labels::parse_plan_owner(label).is_some()
                 {
                     remove_labels.push(label.clone());
                 }
             }
+            let add_labels = vec![
+                crate::plan::labels::plan_id(&plan_id),
+                crate::plan::labels::PLAN_COMPLETE.to_string(),
+                owner_label,
+            ];
+            filter_remove_labels(&mut remove_labels, &add_labels);
             let update = spur_pm::IssueUpdate {
-                add_labels: vec![
-                    crate::plan::labels::plan_id(&plan_id),
-                    crate::plan::labels::PLAN_COMPLETE.to_string(),
-                    owner_label,
-                ],
+                add_labels,
                 remove_labels,
                 ..Default::default()
             };

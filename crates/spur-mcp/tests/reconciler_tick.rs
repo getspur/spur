@@ -2504,6 +2504,15 @@ async fn execute_epic_persists_execution_scope_labels_on_epic_and_tasks() {
         name: "codex".into(),
         ..Default::default()
     }]);
+    pm.update_issue(
+        &epic_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![labels::plan_owner("other-brain")],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("pre-seed prior owner label");
 
     let response = server
         .__test_call_execute_epic(&epic_id, Some("codex"))
@@ -2519,7 +2528,22 @@ async fn execute_epic_persists_execution_scope_labels_on_epic_and_tasks() {
         epic.labels
             .iter()
             .any(|label| label == &labels::plan_owner(&brain_sid.as_session_id().0)),
-        "execute_epic should stamp owner label for current brain session"
+        "execute_epic should stamp current owner label for current brain session"
+    );
+    let owner_labels: Vec<&str> = epic
+        .labels
+        .iter()
+        .filter_map(|label| labels::parse_plan_owner(label))
+        .collect();
+    assert_eq!(
+        owner_labels.len(),
+        1,
+        "execute_epic should replace old owner labels instead of accumulating them; got {owner_labels:?}"
+    );
+    assert_eq!(
+        owner_labels[0],
+        &brain_sid.as_session_id().0.replace('-', ""),
+        "execute_epic should keep exactly current owner"
     );
     assert!(epic
         .labels
