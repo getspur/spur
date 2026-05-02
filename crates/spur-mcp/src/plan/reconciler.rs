@@ -1025,6 +1025,7 @@ impl Reconciler {
 
         let now = chrono::Utc::now().timestamp();
         let mut did_work = false;
+        let mut plan_activation_cache = HashMap::new();
 
         for summary in summaries_by_id.into_values() {
             let Some(delegation_id) = summary
@@ -1072,6 +1073,14 @@ impl Reconciler {
                 .iter()
                 .find_map(|label| crate::plan::labels::parse_plan_task_id(label))
                 .unwrap_or_else(|| summary.id.clone());
+            let write_state = self
+                .plan_allows_writes(&plan_id, None, &mut plan_activation_cache)
+                .await?;
+            if let Some(reason) = write_state.skip_reason() {
+                self.record_skipped(Some(&plan_id), &task_id, reason).await;
+                continue;
+            }
+
             let age_secs = now.saturating_sub(expires_at);
             let audits = crate::plan::projector::collect_sorted_audits_for_issue(
                 &summary.id,
@@ -1207,6 +1216,7 @@ impl Reconciler {
         }
 
         let mut did_work = false;
+        let mut plan_activation_cache = HashMap::new();
 
         for epic in epics {
             let Some(plan_id) = epic
@@ -1218,6 +1228,17 @@ impl Reconciler {
                     .await;
                 continue;
             };
+
+            if self.dispatch.is_none() {
+                continue;
+            }
+            let write_state = self
+                .plan_allows_writes(plan_id, Some(&epic), &mut plan_activation_cache)
+                .await?;
+            if let Some(reason) = write_state.skip_reason() {
+                self.record_skipped(Some(plan_id), &epic.id, reason).await;
+                continue;
+            }
 
             let mut children = self
                 .pm
@@ -1751,6 +1772,84 @@ impl Reconciler {
         }
         cache.insert(plan_id.to_string(), state.clone());
         Ok(state)
+    }
+
+    async fn plan_allows_writes(
+        &self,
+        plan_id: &str,
+        complete_epic: Option<&spur_pm::IssueSummary>,
+        cache: &mut HashMap<String, PlanDispatchState>,
+    ) -> anyhow::Result<PlanDispatchState> {
+        if let Some(state) = cache.get(plan_id) {
+            return Ok(state.clone());
+        }
+
+        let state = if let Some(epic) = complete_epic {
+            self.complete_epic_allows_current_brain_writes(&epic.id, &epic.labels)
+        } else {
+            let mut state = PlanDispatchState::PlanMissingCompleteEpic;
+            for summary in self
+                .pm
+                .list_issues(IssueFilter {
+                    labels: vec![
+                        crate::plan::labels::plan_id(plan_id),
+                        crate::plan::labels::PLAN_COMPLETE.to_string(),
+                    ],
+                    issue_type: Some("epic".to_string()),
+                    include_closed: true,
+                    limit: Some(100),
+                    ..Default::default()
+                })
+                .await?
+            {
+                state =
+                    self.complete_epic_allows_current_brain_writes(&summary.id, &summary.labels);
+                break;
+            }
+            state
+        };
+
+        if !matches!(state, PlanDispatchState::Allowed) {
+            tracing::debug!(
+                plan_id = %plan_id,
+                ?state,
+                "reconciler suppressed plan write path for inactive owner"
+            );
+        }
+        cache.insert(plan_id.to_string(), state.clone());
+        Ok(state)
+    }
+
+    fn complete_epic_allows_current_brain_writes(
+        &self,
+        epic_id: &str,
+        labels: &[String],
+    ) -> PlanDispatchState {
+        let Some(dispatch) = self.dispatch.as_ref() else {
+            return PlanDispatchState::PlanOwnedByAnotherBrain {
+                epic_id: epic_id.to_string(),
+                owner: "unowned".to_string(),
+            };
+        };
+
+        match crate::plan::ownership::classify_owner(
+            labels,
+            dispatch.brain_session_id.as_session_id(),
+        ) {
+            crate::plan::ownership::PlanOwnerMatch::OwnedByCurrent => PlanDispatchState::Allowed,
+            crate::plan::ownership::PlanOwnerMatch::OwnedByOther { owner } => {
+                PlanDispatchState::PlanOwnedByAnotherBrain {
+                    epic_id: epic_id.to_string(),
+                    owner,
+                }
+            }
+            crate::plan::ownership::PlanOwnerMatch::Unowned => {
+                PlanDispatchState::PlanOwnedByAnotherBrain {
+                    epic_id: epic_id.to_string(),
+                    owner: "unowned".to_string(),
+                }
+            }
+        }
     }
 
     /// Returns the IDs of ready tasks under the configured plan filter,
