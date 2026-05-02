@@ -781,6 +781,29 @@ fn report_signal_def() -> ToolDefinition {
     }
 }
 
+fn report_progress_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "report_progress".into(),
+        description: "Worker-facing fire-and-forget progress emission. Sends \
+            a free-form `message` (and optional `percent`) to the brain as a \
+            `WorkerReportProgress` event. The handler returns `{ok: true}` \
+            on accept; the side effect IS the event. No PM writes, no audit \
+            sentinel — distinct from `report_signal` (which persists). \
+            Workers stream rich progress text without minting structured \
+            milestone names. Consumers (TUI / dashboards) decide how to \
+            render `percent` (no clamping)."
+            .into(),
+        input_schema: json!({
+            "type": "object",
+            "required": ["message"],
+            "properties": {
+                "message": { "type": "string" },
+                "percent": { "type": ["number", "null"] }
+            }
+        }),
+    }
+}
+
 fn execute_epic_def() -> ToolDefinition {
     ToolDefinition {
         name: "execute_epic".into(),
@@ -841,6 +864,7 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         preview_task_base_def(),
         review_task_def(),
         report_signal_def(),
+        report_progress_def(),
     ]
 }
 

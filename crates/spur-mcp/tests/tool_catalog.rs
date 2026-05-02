@@ -34,6 +34,7 @@ const EXPECTED: &[&str] = &[
     "preview_task_base",
     "review_task",
     "report_signal",
+    "report_progress",
 ];
 
 #[test]

@@ -702,6 +702,48 @@ pub async fn report_signal(
     }))
 }
 
+/// Phase 2 Task 13: fire-and-forget `report_progress` handler.
+///
+/// Worker streams a free-form status `message` (required) plus an optional
+/// `percent` to the brain. The handler emits exactly one
+/// `SpurEventBody::WorkerReportProgress` via the injected
+/// [`McpEventSink`](crate::events::McpEventSink) and returns a tiny `{ok:true}`
+/// acknowledgement — the side effect IS the event.
+///
+/// Distinct from the orchestrator-synthesized `WorkerProgress` variant
+/// (executor-scoped, structured `name`/`u8 pct` milestone). This variant is
+/// delegation-scoped, free-form text, and intentionally does NOT clamp or
+/// validate the `percent` numeric range — consumers (TUI / dashboards) decide.
+///
+/// Defense-in-depth: even though the MCP tool schema declares the args shape,
+/// `serde_json::from_value` is used so a malformed payload from a hallucinating
+/// worker becomes `InvalidParams` (-32602) rather than a silent emission.
+pub async fn report_progress(
+    sink: &dyn crate::events::McpEventSink,
+    ctx: &WorkerCallContext,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, McpHandlerError> {
+    use spur_acp::SpurEventBody;
+
+    #[derive(serde::Deserialize)]
+    struct Args {
+        message: String,
+        #[serde(default)]
+        percent: Option<f64>,
+    }
+
+    let Args { message, percent } = serde_json::from_value(args)
+        .map_err(|e| McpHandlerError::InvalidParams(format!("invalid args: {e}")))?;
+
+    sink.emit(SpurEventBody::WorkerReportProgress {
+        delegation_id: ctx.delegation_id.clone(),
+        message,
+        percent,
+    });
+
+    Ok(serde_json::json!({ "ok": true }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
