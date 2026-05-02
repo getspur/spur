@@ -370,6 +370,23 @@ fn merge_plan_def() -> ToolDefinition {
     }
 }
 
+fn resume_plan_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "resume_plan".into(),
+        description: "Explicitly claim or resume a persisted beads plan. MVP claims unowned plans and refuses plans with active owners; active handoff is not implemented.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "plan_id": {
+                    "type": "string",
+                    "description": "The persisted beads plan_id to claim or resume"
+                }
+            },
+            "required": ["plan_id"]
+        }),
+    }
+}
+
 fn check_delegation_status_def() -> ToolDefinition {
     ToolDefinition {
         name: "check_delegation_status".into(),
@@ -828,6 +845,7 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         add_dependency_def(),
         create_pr_def(),
         merge_plan_def(),
+        resume_plan_def(),
         graph_triage_def(),
         graph_plan_def(),
         graph_insights_def(),
