@@ -128,6 +128,7 @@ fn test_dispatch_ctx() -> ReconcilerDispatchCtx {
         brain_session_id: BrainSessionId::new(SessionId("brain".into())),
         event_sink: None,
         materializer: test_materializer(),
+        continuation_ctx: common::server_builder::continuation_ctx_arc(),
     }
 }
 
