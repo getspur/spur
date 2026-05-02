@@ -19,6 +19,7 @@ use rand::RngCore;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -32,6 +33,94 @@ use crate::token::{validate_token, TokenError};
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DelegationContext {
     pub enable_worker_progress: bool,
+}
+
+/// One read-tool call recorded for later aggregation into a single
+/// `worker-mcp` audit comment by the background flusher (T21).
+///
+/// Read tools (`get_issue`, `list_issues`, `get_task_diff`,
+/// `get_plan_status`, `fetch_outcome_artifact`) are coalesced per delegation
+/// rather than producing one beads comment per call so the audit trail stays
+/// readable.
+#[derive(Debug, Clone)]
+pub struct ReadAuditEntry {
+    pub tool_name: String,
+    pub target_issue_id: Option<String>,
+    /// Unix seconds, captured at append time.
+    pub ts: u64,
+}
+
+/// Drained payload sent across the flush channel to the background audit
+/// task. Carries the full delegation_id so the receiver can route the
+/// aggregated comment to the correct beads issue.
+#[derive(Debug)]
+pub struct FlushMessage {
+    pub delegation_id: String,
+    pub entries: Vec<ReadAuditEntry>,
+}
+
+/// Per-delegation aggregation buffer for read-tool audit entries.
+///
+/// Held inside the dispatcher's `read_audit_buffers` map keyed by
+/// `delegation_id`. Each read-tool call appends a [`ReadAuditEntry`]; the
+/// background flusher (T21) drains the buffer either on idle timeout or on
+/// explicit delegation completion. As a safety net, the synchronous [`Drop`]
+/// impl performs a non-blocking `send` on the flush channel so entries are
+/// not lost even if the buffer is removed from the map without an explicit
+/// flush call.
+pub struct ReadAuditBuffer {
+    delegation_id: String,
+    entries: Mutex<Vec<ReadAuditEntry>>,
+    flush_tx: mpsc::UnboundedSender<FlushMessage>,
+}
+
+impl ReadAuditBuffer {
+    pub fn new(delegation_id: String, flush_tx: mpsc::UnboundedSender<FlushMessage>) -> Self {
+        Self {
+            delegation_id,
+            entries: Mutex::new(Vec::new()),
+            flush_tx,
+        }
+    }
+
+    /// Append an entry. O(1) amortized; only blocks on the per-buffer lock,
+    /// never on the flush channel.
+    pub fn append(&self, entry: ReadAuditEntry) {
+        self.entries.lock().push(entry);
+    }
+
+    pub fn entry_count(&self) -> usize {
+        self.entries.lock().len()
+    }
+
+    pub fn delegation_id(&self) -> &str {
+        &self.delegation_id
+    }
+
+    /// Test-only escape hatch so unit tests can populate the buffer without
+    /// going through the dispatcher.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn append_for_test(&self, entry: ReadAuditEntry) {
+        self.append(entry);
+    }
+}
+
+impl Drop for ReadAuditBuffer {
+    fn drop(&mut self) {
+        let entries = std::mem::take(&mut *self.entries.lock());
+        if entries.is_empty() {
+            return;
+        }
+        // `mpsc::UnboundedSender::send` never blocks. If the receiver has
+        // been dropped we silently swallow the error: there's no actor left
+        // to deliver the audit to, and panicking inside `Drop` would abort
+        // the process. The background flusher (T21) keeps the receiver
+        // alive for the server's lifetime.
+        let _ = self.flush_tx.send(FlushMessage {
+            delegation_id: std::mem::take(&mut self.delegation_id),
+            entries,
+        });
+    }
 }
 
 /// Maximum allowed HTTP body size (1 MiB). JSON-RPC payloads are tiny;
@@ -87,6 +176,11 @@ pub struct WorkerMcpServer {
     deps: Arc<DispatcherDeps>,
     shutdown: CancellationToken,
     accept_loop_handle: Mutex<Option<JoinHandle<()>>>,
+    /// Receiver half of the read-audit flush channel. Created in `start()`
+    /// and owned here until T21 spawns the background flusher task that
+    /// `take()`s it. Holding the receiver here prevents the channel from
+    /// closing prematurely during the T20→T21 transitional window.
+    flush_rx: Mutex<Option<mpsc::UnboundedReceiver<FlushMessage>>>,
 }
 
 /// Internal bundle of the materialized handler dependencies. Mirrors
@@ -106,6 +200,19 @@ struct DispatcherDeps {
     /// terminal delegation status (Success/Failed/Cancelled) so long-running
     /// brain sessions don't leak DelegationContext entries indefinitely.
     delegations: Arc<parking_lot::Mutex<std::collections::HashMap<String, DelegationContext>>>,
+    /// Per-delegation read-tool aggregation buffers. Each entry is `Arc`'d
+    /// so concurrent in-flight read calls and the (future T21) background
+    /// flusher can hold cheap references without contending for the outer
+    /// map lock. Keyed by `delegation_id`.
+    /// TODO(T21): the background flusher periodically removes idle entries
+    /// (last-touched > N minutes) so this map doesn't grow unbounded across
+    /// long-lived brain sessions.
+    read_audit_buffers:
+        Arc<parking_lot::Mutex<std::collections::HashMap<String, Arc<ReadAuditBuffer>>>>,
+    /// Sender half of the read-audit flush channel. Cloned into every new
+    /// `ReadAuditBuffer` so the buffer's `Drop` can deliver final entries
+    /// even if the dispatcher tears down without an explicit flush.
+    flush_tx: mpsc::UnboundedSender<FlushMessage>,
 }
 
 /// Errors returned by [`WorkerMcpServer::start`].
@@ -131,6 +238,9 @@ impl WorkerMcpServer {
 
         let materializer = OutcomeMaterializer::new(Arc::clone(&deps.outcome_store));
         let delegations = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
+        let read_audit_buffers =
+            Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
+        let (flush_tx, flush_rx) = mpsc::unbounded_channel::<FlushMessage>();
         let dispatcher_deps = Arc::new(DispatcherDeps {
             pm_service: deps.pm_service,
             feature_gate: deps.feature_gate,
@@ -141,6 +251,8 @@ impl WorkerMcpServer {
             materializer,
             repo_root: deps.repo_root,
             delegations: Arc::clone(&delegations),
+            read_audit_buffers: Arc::clone(&read_audit_buffers),
+            flush_tx,
         });
 
         let shutdown = CancellationToken::new();
@@ -151,6 +263,7 @@ impl WorkerMcpServer {
             deps: Arc::clone(&dispatcher_deps),
             shutdown: shutdown.clone(),
             accept_loop_handle: Mutex::new(None),
+            flush_rx: Mutex::new(Some(flush_rx)),
         });
 
         let handle = tokio::spawn(accept_loop(
@@ -207,6 +320,25 @@ impl WorkerMcpServer {
     /// a PM-free HashMap lookup.
     pub fn register_delegation(&self, delegation_id: String, ctx: DelegationContext) {
         self.deps.delegations.lock().insert(delegation_id, ctx);
+    }
+
+    /// Borrow the read-audit buffer for a delegation. Used by tests to assert
+    /// the dispatcher correctly appends per read-tool call. Production callers
+    /// (T21 background flusher) reach into `deps.read_audit_buffers` directly.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn peek_read_buffer(&self, delegation_id: &str) -> Option<Arc<ReadAuditBuffer>> {
+        self.deps
+            .read_audit_buffers
+            .lock()
+            .get(delegation_id)
+            .cloned()
+    }
+
+    /// Take ownership of the flush-channel receiver. T21's background flusher
+    /// calls this once at startup; subsequent calls return `None`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn take_flush_receiver(&self) -> Option<mpsc::UnboundedReceiver<FlushMessage>> {
+        self.flush_rx.lock().take()
     }
 
     /// Cancel the accept loop and wait up to 5 seconds for it to exit.
@@ -474,8 +606,19 @@ async fn dispatch_tool_call(
         .unwrap_or_else(|| json!({}));
 
     let result: Result<Value, McpHandlerError> = match name.as_str() {
-        "get_issue" => crate::handlers::get_issue(deps.pm_service.as_ref(), &ctx, args).await,
-        "list_issues" => crate::handlers::list_issues(deps.pm_service.as_ref(), &ctx, args).await,
+        "get_issue" => {
+            append_read_audit_entry(
+                deps.as_ref(),
+                &ctx.delegation_id,
+                "get_issue",
+                args.get("id").and_then(|v| v.as_str()).map(String::from),
+            );
+            crate::handlers::get_issue(deps.pm_service.as_ref(), &ctx, args).await
+        }
+        "list_issues" => {
+            append_read_audit_entry(deps.as_ref(), &ctx.delegation_id, "list_issues", None);
+            crate::handlers::list_issues(deps.pm_service.as_ref(), &ctx, args).await
+        }
         "update_issue" => {
             let issue_id = args.get("id").and_then(|v| v.as_str()).map(String::from);
             let result = crate::handlers::update_issue(deps.pm_service.as_ref(), &ctx, args).await;
@@ -517,6 +660,14 @@ async fn dispatch_tool_call(
             crate::handlers::report_progress(deps.funnel.as_ref(), &ctx, args).await
         }
         "get_plan_status" => {
+            append_read_audit_entry(
+                deps.as_ref(),
+                &ctx.delegation_id,
+                "get_plan_status",
+                args.get("plan_id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+            );
             crate::handlers::get_plan_status(
                 deps.plan_resolver.as_ref(),
                 &deps.reconciler_outcomes,
@@ -526,6 +677,14 @@ async fn dispatch_tool_call(
             .await
         }
         "fetch_outcome_artifact" => {
+            append_read_audit_entry(
+                deps.as_ref(),
+                &ctx.delegation_id,
+                "fetch_outcome_artifact",
+                args.get("delegation_id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+            );
             crate::handlers::fetch_outcome_artifact(
                 &deps.materializer,
                 deps.outcome_store.as_ref(),
@@ -535,6 +694,14 @@ async fn dispatch_tool_call(
             .await
         }
         "get_task_diff" => {
+            append_read_audit_entry(
+                deps.as_ref(),
+                &ctx.delegation_id,
+                "get_task_diff",
+                args.get("task_id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+            );
             crate::handlers::get_task_diff(
                 Some(deps.pm_service.as_ref()),
                 deps.feature_gate.as_ref(),
@@ -559,6 +726,36 @@ async fn dispatch_tool_call(
             })
         }
     }
+}
+
+/// Append a read-tool call to the per-delegation aggregation buffer. Lazily
+/// creates the buffer on first call. Lock scope is intentionally tight — the
+/// outer `read_audit_buffers` mutex is released before any `append` so a slow
+/// `Drop` (channel send) never blocks an unrelated delegation.
+fn append_read_audit_entry(
+    deps: &DispatcherDeps,
+    delegation_id: &str,
+    tool_name: &str,
+    target_issue_id: Option<String>,
+) {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let buf = {
+        let mut map = deps.read_audit_buffers.lock();
+        Arc::clone(map.entry(delegation_id.to_string()).or_insert_with(|| {
+            Arc::new(ReadAuditBuffer::new(
+                delegation_id.to_string(),
+                deps.flush_tx.clone(),
+            ))
+        }))
+    };
+    buf.append(ReadAuditEntry {
+        tool_name: tool_name.to_string(),
+        target_issue_id,
+        ts,
+    });
 }
 
 /// Maximum time to wait for an audit sentinel comment to be written before
