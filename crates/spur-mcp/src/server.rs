@@ -3661,6 +3661,20 @@ impl McpCallbackServer {
                 format!("resume_plan: plan not found: {plan_id}"),
             );
         };
+        if epics.len() > 1 {
+            let epic_ids = epics
+                .iter()
+                .map(|epic| epic.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return JsonRpcResponse::error(
+                id,
+                -32009,
+                format!(
+                    "resume_plan: ambiguous plan lookup for {plan_id}; multiple epics matched: {epic_ids}"
+                ),
+            );
+        }
         let epic_id = epic_summary.id.clone();
         let epic = match pm.get_issue(&epic_id).await {
             Ok(epic) => epic,
@@ -3698,6 +3712,14 @@ impl McpCallbackServer {
                     ),
                 )
             }
+            crate::plan::ownership::PlanOwnerMatch::Ambiguous { owners } => JsonRpcResponse::error(
+                id,
+                -32009,
+                format!(
+                    "resume_plan: plan {plan_id} has ambiguous owner labels: {}",
+                    owners.join(", ")
+                ),
+            ),
             crate::plan::ownership::PlanOwnerMatch::Unowned => {
                 let owner_label =
                     crate::plan::labels::plan_owner(&self.brain_session_id.as_session_id().0);
@@ -3718,17 +3740,59 @@ impl McpCallbackServer {
                 }
                 self.fast_forward_reconciler();
 
-                let result = json!({
-                    "status": "claimed",
-                    "plan_id": plan_id,
-                    "epic_id": epic_id,
-                });
-                let text =
-                    serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
-                JsonRpcResponse::success(
-                    id,
-                    json!({ "content": [{ "type": "text", "text": text }] }),
-                )
+                let epic = match pm.get_issue(&epic_id).await {
+                    Ok(epic) => epic,
+                    Err(error) => {
+                        return JsonRpcResponse::internal_error(
+                            id,
+                            format!(
+                                "resume_plan: failed to reload claimed epic {epic_id}: {error}"
+                            ),
+                        )
+                    }
+                };
+                match crate::plan::ownership::classify_owner(
+                    &epic.labels,
+                    self.brain_session_id.as_session_id(),
+                ) {
+                    crate::plan::ownership::PlanOwnerMatch::OwnedByCurrent => {
+                        let result = json!({
+                            "status": "claimed",
+                            "plan_id": plan_id,
+                            "epic_id": epic_id,
+                        });
+                        let text = serde_json::to_string_pretty(&result)
+                            .unwrap_or_else(|_| result.to_string());
+                        JsonRpcResponse::success(
+                            id,
+                            json!({ "content": [{ "type": "text", "text": text }] }),
+                        )
+                    }
+                    crate::plan::ownership::PlanOwnerMatch::OwnedByOther { owner } => {
+                        JsonRpcResponse::error(
+                            id,
+                            -32009,
+                            format!(
+                                "resume_plan: failed to claim plan {plan_id}; plan is owned by {owner}"
+                            ),
+                        )
+                    }
+                    crate::plan::ownership::PlanOwnerMatch::Ambiguous { owners } => {
+                        JsonRpcResponse::error(
+                            id,
+                            -32009,
+                            format!(
+                                "resume_plan: failed to claim plan {plan_id}; ambiguous owner labels: {}",
+                                owners.join(", ")
+                            ),
+                        )
+                    }
+                    crate::plan::ownership::PlanOwnerMatch::Unowned => JsonRpcResponse::error(
+                        id,
+                        -32009,
+                        format!("resume_plan: failed to claim plan {plan_id}; plan remains unowned"),
+                    ),
+                }
             }
         }
     }
