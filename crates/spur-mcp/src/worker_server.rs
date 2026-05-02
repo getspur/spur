@@ -11,9 +11,9 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Configuration for the background audit flusher and idle thresholds.
 #[derive(Debug, Clone, Copy)]
@@ -233,6 +233,73 @@ impl Drop for ActiveCallGuard {
     }
 }
 
+/// Per-delegation tracker that emits a `WorkerMcpDelegationSummary` event on
+/// Drop. Held in [`DispatcherDeps::delegation_guards`] and removed by
+/// [`WorkerMcpServer::complete_delegation`] (or on server shutdown) so the
+/// summary fires exactly once per delegation.
+pub struct DelegationDispatchGuard {
+    delegation_id: String,
+    brain_session_id: String,
+    funnel: Arc<dyn McpEventSink>,
+    tool_calls: AtomicU32,
+    audits_emitted: AtomicU32,
+    start: Instant,
+    outcome: AtomicBool, // true = success, false = error
+    /// Set to `true` by [`WorkerMcpServer::complete_delegation`] so the
+    /// summary only fires on explicit delegation close, not on server
+    /// shutdown or map eviction.
+    completed: AtomicBool,
+}
+
+impl DelegationDispatchGuard {
+    pub fn new(delegation_id: String, brain_session_id: String, funnel: Arc<dyn McpEventSink>) -> Self {
+        Self {
+            delegation_id,
+            brain_session_id,
+            funnel,
+            tool_calls: AtomicU32::new(0),
+            audits_emitted: AtomicU32::new(0),
+            start: Instant::now(),
+            outcome: AtomicBool::new(true),
+            completed: AtomicBool::new(false),
+        }
+    }
+
+    pub fn record_tool_call(&self) {
+        self.tool_calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_audit(&self) {
+        self.audits_emitted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn mark_error(&self) {
+        self.outcome.store(false, Ordering::Relaxed);
+    }
+}
+
+impl Drop for DelegationDispatchGuard {
+    fn drop(&mut self) {
+        if !self.completed.load(Ordering::Relaxed) {
+            return;
+        }
+        let body = spur_acp::SpurEventBody::WorkerMcpDelegationSummary {
+            delegation_id: self.delegation_id.clone(),
+            brain_session_id: self.brain_session_id.clone(),
+            tool_calls: self.tool_calls.load(Ordering::Relaxed),
+            audits_emitted: self.audits_emitted.load(Ordering::Relaxed),
+            duration_ms: self.start.elapsed().as_millis() as u64,
+            outcome: if self.outcome.load(Ordering::Relaxed) {
+                "success".into()
+            } else {
+                "error".into()
+            },
+        };
+        // `try_emit` so a full broadcast bus doesn't back-pressure the Drop.
+        let _ = self.funnel.try_emit(body);
+    }
+}
+
 /// Internal bundle of the materialized handler dependencies. Mirrors
 /// [`WorkerMcpDeps`] plus the derived [`OutcomeMaterializer`].
 struct DispatcherDeps {
@@ -266,6 +333,10 @@ struct DispatcherDeps {
     /// Shared counter incremented/decremented by [`ActiveCallGuard`] inside
     /// [`dispatch`]. Same `Arc` instance held by [`WorkerMcpServer`].
     active_delegations: Arc<AtomicU32>,
+    /// Per-delegation summary guards. Each entry emits one
+    /// `WorkerMcpDelegationSummary` on removal (or on server shutdown).
+    delegation_guards:
+        Arc<parking_lot::Mutex<std::collections::HashMap<String, DelegationDispatchGuard>>>,
 }
 
 /// Errors returned by [`WorkerMcpServer::start`].
@@ -307,6 +378,8 @@ impl WorkerMcpServer {
             Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
         let (flush_tx, flush_rx) = mpsc::unbounded_channel::<FlushMessage>();
         let active_delegations = Arc::new(AtomicU32::new(0));
+        let delegation_guards =
+            Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
         let dispatcher_deps = Arc::new(DispatcherDeps {
             pm_service: deps.pm_service,
             feature_gate: deps.feature_gate,
@@ -320,6 +393,7 @@ impl WorkerMcpServer {
             read_audit_buffers: Arc::clone(&read_audit_buffers),
             flush_tx,
             active_delegations: Arc::clone(&active_delegations),
+            delegation_guards: Arc::clone(&delegation_guards),
         });
 
         let shutdown = CancellationToken::new();
@@ -401,7 +475,33 @@ impl WorkerMcpServer {
     /// orchestrator at dispatch time so the `report_progress` dual-gate is
     /// a PM-free HashMap lookup.
     pub fn register_delegation(&self, delegation_id: String, ctx: DelegationContext) {
-        self.deps.delegations.lock().insert(delegation_id, ctx);
+        let mut map = self.deps.delegations.lock();
+        map.insert(delegation_id.clone(), ctx);
+        // Ensure a summary guard exists for this delegation.
+        let mut guards = self.deps.delegation_guards.lock();
+        guards.entry(delegation_id.clone()).or_insert_with(|| {
+            DelegationDispatchGuard::new(
+                delegation_id,
+                self.brain_session_id.clone(),
+                Arc::clone(&self.deps.funnel),
+            )
+        });
+    }
+
+    /// Signal that a delegation has reached a terminal state. Removes the
+    /// cached context and drops the per-delegation summary guard, which emits
+    /// one `WorkerMcpDelegationSummary` event.
+    pub fn complete_delegation(&self, delegation_id: &str, outcome: &str) {
+        self.deps.delegations.lock().remove(delegation_id);
+        self.deps.read_audit_buffers.lock().remove(delegation_id);
+        if let Some(guard) = self.deps.delegation_guards.lock().remove(delegation_id) {
+            if outcome == "error" {
+                guard.mark_error();
+            }
+            guard.completed.store(true, Ordering::Relaxed);
+            // Explicit drop to trigger the summary emission.
+            drop(guard);
+        }
     }
 
     /// Borrow the read-audit buffer for a delegation. Used by tests to assert
@@ -723,6 +823,8 @@ async fn dispatch_tool_call(
         .cloned()
         .unwrap_or_else(|| json!({}));
 
+    record_tool_call(&deps, &ctx.delegation_id);
+
     let result: Result<Value, McpHandlerError> = match name.as_str() {
         "get_issue" => {
             append_read_audit_entry(
@@ -750,6 +852,7 @@ async fn dispatch_tool_call(
                         issue_id,
                     )
                     .await;
+                    record_audit(&deps, &ctx.delegation_id);
                 }
             }
             result
@@ -838,6 +941,7 @@ async fn dispatch_tool_call(
     match result {
         Ok(value) => success_response(id, value),
         Err(err) => {
+            mark_delegation_error(&deps, &ctx.delegation_id);
             let resp = err.to_jsonrpc_response(id);
             serde_json::to_string(&resp).unwrap_or_else(|_| {
                 r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"response serialization failed"},"id":null}"#.to_string()
@@ -874,6 +978,33 @@ fn append_read_audit_entry(
         target_issue_id,
         ts,
     });
+}
+
+/// Record one tool call on the per-delegation summary guard. No-op if the
+/// guard has not been created yet (e.g., unregistered delegation).
+fn record_tool_call(deps: &DispatcherDeps, delegation_id: &str) {
+    let map = deps.delegation_guards.lock();
+    if let Some(guard) = map.get(delegation_id) {
+        guard.record_tool_call();
+    }
+}
+
+/// Record one audit on the per-delegation summary guard. No-op if the guard
+/// has not been created yet.
+fn record_audit(deps: &DispatcherDeps, delegation_id: &str) {
+    let map = deps.delegation_guards.lock();
+    if let Some(guard) = map.get(delegation_id) {
+        guard.record_audit();
+    }
+}
+
+/// Mark the per-delegation summary guard as errored. No-op if the guard has
+/// not been created yet.
+fn mark_delegation_error(deps: &DispatcherDeps, delegation_id: &str) {
+    let map = deps.delegation_guards.lock();
+    if let Some(guard) = map.get(delegation_id) {
+        guard.mark_error();
+    }
 }
 
 /// Maximum time to wait for an audit sentinel comment to be written before
@@ -1336,5 +1467,80 @@ mod tests {
             "expected timeout warning, got: {:?}",
             warnings.events.lock().unwrap()
         );
+    }
+
+    #[test]
+    fn delegation_dispatch_guard_drop_emits_summary_via_try_emit() {
+        use std::sync::atomic::AtomicBool;
+
+        struct TryEmitRecordingSink {
+            events: Mutex<Vec<spur_acp::SpurEventBody>>,
+            full: AtomicBool,
+        }
+
+        impl crate::events::McpEventSink for TryEmitRecordingSink {
+            fn emit(&self, _event: spur_acp::SpurEventBody) {
+                panic!("emit must not be called — try_emit should be used");
+            }
+
+            fn try_emit(&self, event: spur_acp::SpurEventBody) -> Result<(), spur_acp::SpurEventBody> {
+                if self.full.load(Ordering::SeqCst) {
+                    return Err(event);
+                }
+                self.events.lock().unwrap().push(event);
+                Ok(())
+            }
+        }
+
+        let sink = Arc::new(TryEmitRecordingSink {
+            events: Mutex::new(Vec::new()),
+            full: AtomicBool::new(false),
+        });
+
+        let guard = DelegationDispatchGuard::new(
+            "d-test".into(),
+            "session-test".into(),
+            Arc::clone(&sink) as Arc<dyn crate::events::McpEventSink>,
+        );
+        guard.record_tool_call();
+        guard.record_tool_call();
+        guard.record_audit();
+        guard.completed.store(true, Ordering::Relaxed);
+        drop(guard);
+
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        if let spur_acp::SpurEventBody::WorkerMcpDelegationSummary {
+            delegation_id,
+            brain_session_id,
+            tool_calls,
+            audits_emitted,
+            outcome,
+            ..
+        } = &events[0]
+        {
+            assert_eq!(delegation_id, "d-test");
+            assert_eq!(brain_session_id, "session-test");
+            assert_eq!(*tool_calls, 2);
+            assert_eq!(*audits_emitted, 1);
+            assert_eq!(outcome, "success");
+        } else {
+            panic!("expected WorkerMcpDelegationSummary, got: {:?}", events[0]);
+        }
+
+        // When the sink is full, the guard should silently drop the event.
+        let sink2 = Arc::new(TryEmitRecordingSink {
+            events: Mutex::new(Vec::new()),
+            full: AtomicBool::new(true),
+        });
+        let guard2 = DelegationDispatchGuard::new(
+            "d-full".into(),
+            "session-full".into(),
+            Arc::clone(&sink2) as Arc<dyn crate::events::McpEventSink>,
+        );
+        guard2.record_tool_call();
+        guard2.completed.store(true, Ordering::Relaxed);
+        drop(guard2);
+        assert!(sink2.events.lock().unwrap().is_empty(), "event must be dropped when sink is full");
     }
 }
