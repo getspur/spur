@@ -7,7 +7,10 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 
+use serde_json::json;
+use spur_acp::{BrainSessionId, SessionId};
 use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
 use spur_mcp::plan::PlanTask;
 use tempfile::TempDir;
@@ -69,6 +72,64 @@ fn collect_sentinels(texts: &[String]) -> Vec<AuditSentinelKind> {
         .filter_map(|text| audit_sentinel::parse_comment(text))
         .filter_map(|result| result.ok())
         .collect()
+}
+
+#[tokio::test]
+async fn submit_plan_persists_plan_owner_on_epic() {
+    if !br_available() {
+        eprintln!("skipping submit_plan_persists_plan_owner_on_epic: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init failed");
+
+    let pm = Arc::new(
+        spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+            .await
+            .expect("PmService::try_new failed")
+            .expect("expected Some(PmService)"),
+    );
+    let brain_session = BrainSessionId::new(SessionId("brain-owner-submit".into()));
+    let (server, _channel) = common::server_builder::MockServerBuilder::pro()
+        .with_session_id(brain_session.clone())
+        .with_pm_service(Arc::clone(&pm))
+        .build();
+
+    let response = server
+        .__test_call_submit_plan(json!({
+            "persist_as_epic": true,
+            "epic_title": "Owner Persist Epic",
+            "tasks": [{
+                "task_id": "t1",
+                "agent": "claude-code-acp",
+                "task": "Do T1.",
+                "depends_on": [],
+                "context_files": []
+            }]
+        }))
+        .await;
+
+    assert!(
+        response.get("error").is_none(),
+        "submit_plan should succeed: {response}"
+    );
+    let text = response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("submit_plan text response");
+    let epic_id = text
+        .lines()
+        .find_map(|line| line.strip_prefix("epic_id: "))
+        .and_then(|rest| rest.split_whitespace().next())
+        .expect("submit_plan response must include epic_id");
+    let epic = pm.get_issue(epic_id).await.expect("load created epic");
+
+    let owner_label = spur_mcp::plan::labels::plan_owner(brain_session.as_session_id().0.as_str());
+    assert!(
+        epic.labels.contains(&owner_label),
+        "epic {epic_id} must carry owner label {owner_label}; got labels: {:?}",
+        epic.labels
+    );
 }
 
 #[tokio::test]
