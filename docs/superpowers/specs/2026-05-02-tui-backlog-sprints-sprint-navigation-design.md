@@ -20,6 +20,41 @@ The first-principles boundary is write authority. Backlog can browse broad repos
 4. A plan opens in `PlanInspectorView` only when ownership is confirmed as current brain.
 5. `owned_by_other` and `ambiguous_owner` plans cannot open in `PlanInspectorView`.
 6. MVP `resume_plan` may claim only unowned plans. Active handoff is explicitly deferred.
+7. Active execution is one-to-one: one active plan has exactly one owner brain, and one brain session may own at most one active nonterminal plan.
+
+## Active Plan Cardinality
+
+A brain session is the reasoning, context, and worker-orchestration owner for a plan. Allowing one brain session to own multiple active plans would make the Sprint view ambiguous and would risk mixing worker dispatch, review, and repair state across unrelated plans.
+
+Therefore SPUR enforces:
+
+```text
+count(active nonterminal plans owned by current brain session) <= 1
+```
+
+Definitions:
+
+- **Owned by current brain**: epic has `spur:plan-owner:<current_brain_session>`.
+- **Active**: lifecycle is not terminal.
+- **Terminal**: complete, failed, cancelled, or any future terminal state that no longer accepts worker dispatch/review writes.
+
+Allowed:
+
+```text
+One brain session owns one running plan.
+Many brain sessions each own one running plan.
+One brain session has multiple historical/terminal plans.
+```
+
+Blocked:
+
+```text
+One brain session owns two running plans.
+One brain session resumes an unowned plan while already owning another active plan.
+One brain session executes a new epic while already owning another active plan.
+```
+
+This is a server-side invariant. TUI checks improve UX, but MCP must enforce it in `execute_epic` and `resume_plan`.
 
 ## Mental Model
 
@@ -90,11 +125,13 @@ Sprints is ownership-scoped. It answers "which persisted plans exist and which c
 Responsibilities:
 
 - List persisted plan epics.
+- Highlight the current brain's single active Sprint slot.
 - Display ownership state.
 - Display plan lifecycle/progress summary.
 - Resume unowned plans.
 - Open current-brain-owned plans into Sprint.
 - Block owned-by-other and ambiguous plans.
+- Block resume/execute when the current brain already owns another active plan.
 - Link back to the source epic in Backlog.
 
 ### Sprint: `PlanInspectorView`
@@ -206,16 +243,17 @@ This is the correct guardrail: no session plan projection means no active Sprint
 
 ```text
 ┌──────────────────────────── Sprints ─────────────────────────────┐
+│ Current Sprint: plan-a1 running 2/7        Enter Open Sprint      │
 │ r Refresh   Enter Open   R Resume   b Backlog   Esc Dashboard     │
 ├──────────────┬──────────┬──────────────┬──────────┬──────────────┤
 │ Plan         │ Epic     │ Owner        │ State    │ Progress     │
 ├──────────────┼──────────┼──────────────┼──────────┼──────────────┤
 │ plan-a1      │ bd-120   │ mine         │ running  │ 2/7 done     │
-│ plan-b2      │ bd-122   │ unowned      │ paused   │ 0/4 done     │
+│ plan-b2      │ bd-122   │ unowned      │ paused   │ blocked      │
 │ plan-c3      │ bd-130   │ other-brain  │ running  │ 1/5 done     │
 │ plan-d4      │ bd-140   │ ambiguous    │ invalid  │ --           │
 └──────────────┴──────────┴──────────────┴──────────┴──────────────┘
-│ mine: Enter opens Sprint   unowned: R resumes   other: blocked    │
+│ mine: Enter opens Sprint   unowned: R resumes only if no current   │
 └───────────────────────────────────────────────────────────────────┘
 ```
 
@@ -276,12 +314,18 @@ sequenceDiagram
     B->>App: Action::Issue(ExecuteEpic { epic_id })
     App->>Brain: UserInput::ExecuteEpic
     Brain->>MCP: execute_epic(epic_id)
+    MCP->>PM: Check current brain active plan count
+    alt current brain already owns active plan
+        MCP-->>Brain: error: ActivePlanAlreadyOwned
+        Brain-->>App: show blocked hint
+    else no active plan owned by current brain
     MCP->>PM: Persist plan labels + owner label
     MCP-->>Brain: Plan status
     Brain-->>App: PlanSnapshotUpdated
     App->>S: Navigate or refresh Sprints
     S->>PM: Refresh plans
     PM-->>S: PlansLoaded(owner_state = Mine)
+    end
 ```
 
 ### Journey 2: Resume Unowned Sprint
@@ -301,6 +345,11 @@ sequenceDiagram
     S->>App: Action::ResumePlan { plan_id }
     App->>Brain: UserInput::ResumePlan { plan_id }
     Brain->>MCP: resume_plan(plan_id)
+    MCP->>PM: Check current brain active plan count
+    alt current brain already owns another active plan
+        MCP-->>Brain: error: ActivePlanAlreadyOwned
+        Brain-->>App: show blocked hint
+    else no active plan owned by current brain
     MCP->>PM: Add current plan-owner label
     MCP->>PM: Reload epic and classify owner
     PM-->>MCP: owner_state = Mine
@@ -310,6 +359,7 @@ sequenceDiagram
     U->>S: Press Enter Open
     S->>App: NavigateTo(PlanInspector(current_session))
     App->>I: Render current session plan
+    end
 ```
 
 ### Journey 3: Block Active Handoff in MVP
@@ -370,13 +420,15 @@ stateDiagram-v2
     BacklogDetail --> Backlog: Enter / Esc
     Backlog --> BacklogGraph: v
     BacklogGraph --> Backlog: v / Esc
-    Backlog --> Sprints: Execute epic then view Sprints
+    Backlog --> Sprints: Execute epic succeeds
+    Backlog --> Backlog: Execute blocked, active sprint exists
     Backlog --> Dashboard: Esc
 
     Sprints --> Sprint: Enter on Mine
     Sprints --> SprintsRefreshing: r Refresh
     SprintsRefreshing --> Sprints: PlansLoaded
-    Sprints --> SprintsRefreshing: R Resume Unowned
+    Sprints --> SprintsRefreshing: R Resume Unowned, no active Mine
+    Sprints --> Sprints: R Resume blocked, active Mine exists
     Sprints --> BacklogDetail: e View Epic
     Sprints --> Dashboard: Esc
 
@@ -395,7 +447,8 @@ stateDiagram-v2
 stateDiagram-v2
     [*] --> Unowned
 
-    Unowned --> Mine: resume_plan success
+    Unowned --> Mine: resume_plan success, brain has no active plan
+    Unowned --> Unowned: resume_plan blocked, brain already owns active plan
     Unowned --> Other: race, other claimed first
     Unowned --> Ambiguous: race, conflicting labels detected
 
@@ -410,6 +463,22 @@ stateDiagram-v2
     Ambiguous --> Ambiguous: all writes/open blocked
     Ambiguous --> Unowned: future manual repair
     Complete --> [*]
+```
+
+## Brain Active-Plan Slot
+
+```mermaid
+stateDiagram-v2
+    [*] --> Empty
+
+    Empty --> Occupied: execute_epic success
+    Empty --> Occupied: resume_plan success
+
+    Occupied --> Occupied: Open Sprint
+    Occupied --> Occupied: execute_epic blocked
+    Occupied --> Occupied: resume another plan blocked
+    Occupied --> Empty: owned plan reaches terminal lifecycle
+    Occupied --> Empty: future explicit transfer/abandon
 ```
 
 ## Sprint Issue Detail State
@@ -439,9 +508,16 @@ stateDiagram-v2
 | Owner state | Enter | R Resume | e View Epic |
 | --- | --- | --- | --- |
 | `Mine` | Open Sprint | No-op / already owned hint | Backlog detail |
-| `Unowned` | Hint: resume first | `resume_plan` | Backlog detail |
+| `Unowned` | Hint: resume first | `resume_plan` only if no active Mine | Backlog detail |
 | `Other` | Blocked hint | Blocked hint | Backlog detail |
 | `Ambiguous` | Blocked hint | Blocked hint | Backlog detail |
+
+### Active Slot Actions
+
+| Current brain active plan | Backlog Execute Epic | Sprints Resume Unowned | Sprints Open Mine |
+| --- | --- | --- | --- |
+| None | Allowed | Allowed | No-op unless row is Mine terminal/history |
+| One active Mine | Blocked | Blocked | Allowed only for that active plan |
 
 ### Empty States
 
@@ -507,12 +583,13 @@ Backlog raw epic -> Sprint
 Sprints owned-by-other -> Sprint
 Sprints ambiguous -> Sprint
 Sprint selecting arbitrary persisted plan
+Brain session opening a second active Sprint
 ```
 
 Only allow:
 
 ```text
-Sprints Mine -> Sprint(current_session)
+Sprints Mine active plan -> Sprint(current_session)
 ```
 
 `PlanInspectorView` still guards with:
@@ -535,10 +612,11 @@ Open Sprints to resume or Backlog to execute an epic.
 3. Add MCP/orchestrator plan listing from beads labels.
 4. Add `PlanBrowserView` read-only list.
 5. Add `ResumePlan` action for unowned rows.
-6. Add `Open Sprint` action for `Mine` rows only.
-7. Add route wiring and status-bar hints.
-8. Add snapshot tests for all owner-state rows.
-9. Add integration tests for resume/open blocked cases.
+6. Add server-side active-plan cardinality checks to `execute_epic` and `resume_plan`.
+7. Add `Open Sprint` action for the single active `Mine` row only.
+8. Add route wiring and status-bar hints.
+9. Add snapshot tests for all owner-state rows and active-slot blocked states.
+10. Add integration tests for resume/open/execute blocked cases.
 
 ## Deferred Work
 
