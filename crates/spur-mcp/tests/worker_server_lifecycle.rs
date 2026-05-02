@@ -3,13 +3,17 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use spur_acp::SpurEventBody;
 use spur_license::policy::PolicyResolver;
 use spur_license::FeatureGate;
 use spur_mcp::events::McpEventSink;
-use spur_mcp::worker_server::WorkerMcpServer;
+use spur_mcp::handlers::PlanResolver;
+use spur_mcp::plan::PlanState;
+use spur_mcp::worker_server::{WorkerMcpDeps, WorkerMcpServer};
 use spur_pm::PmService;
 use tempfile::TempDir;
+use tokio::sync::Mutex;
 
 fn br_available() -> bool {
     Command::new("br")
@@ -54,6 +58,29 @@ fn test_funnel() -> Arc<dyn McpEventSink> {
     Arc::new(NullSink)
 }
 
+struct NullPlanResolver;
+
+#[async_trait]
+impl PlanResolver for NullPlanResolver {
+    async fn load_or_project_plan(&self, plan_id: &str) -> Result<Arc<Mutex<PlanState>>, String> {
+        Err(format!("test resolver: unknown plan_id '{plan_id}'"))
+    }
+}
+
+fn test_deps(pm: Arc<PmService>) -> WorkerMcpDeps {
+    WorkerMcpDeps {
+        pm_service: pm,
+        feature_gate: test_feature_gate(),
+        funnel: test_funnel(),
+        plan_resolver: Arc::new(NullPlanResolver),
+        reconciler_outcomes: Arc::new(Mutex::new(
+            spur_mcp::plan::outcomes::OutcomeStore::default(),
+        )),
+        outcome_store: Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        repo_root: None,
+    }
+}
+
 #[tokio::test]
 async fn start_binds_listener_and_returns_url() {
     if !br_available() {
@@ -65,10 +92,7 @@ async fn start_binds_listener_and_returns_url() {
     run_br(dir.path(), &["init"]);
 
     let pm = test_pm_service_empty(dir.path()).await;
-    let feature_gate = test_feature_gate();
-    let funnel = test_funnel();
-
-    let server = WorkerMcpServer::start("session-1".into(), pm, feature_gate, funnel)
+    let server = WorkerMcpServer::start("session-1".into(), test_deps(pm))
         .await
         .expect("start must succeed");
 
