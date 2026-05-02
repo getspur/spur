@@ -907,6 +907,18 @@ pub enum SpurEventBody {
         pct: Option<u8>,
     },
 
+    /// Worker invoked the curated `report_progress` MCP tool with a
+    /// free-form status message. Distinct from `WorkerProgress`
+    /// (executor-scoped, structured milestone `name`/`u8` percentage)
+    /// — this carries an arbitrary delegation-scoped message and an
+    /// optional `f64` percent so workers can stream rich progress text
+    /// without minting milestone names.
+    WorkerReportProgress {
+        delegation_id: String,
+        message: String,
+        percent: Option<f64>,
+    },
+
     /// Live session notification from a running worker agent. Emitted
     /// by the orchestrator for every `SessionNotification` received
     /// from a worker's `drive_prompt_notifications` stream. The TUI
