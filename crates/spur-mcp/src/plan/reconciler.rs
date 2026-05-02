@@ -436,6 +436,7 @@ pub enum PlanDispatchState {
     PlanMissingCompleteEpic,
     EpicNotOpen { epic_id: String },
     PlanHasPendingEpic { epic_id: String },
+    PlanOwnedByAnotherBrain { epic_id: String, owner: String },
 }
 
 impl PlanDispatchState {
@@ -445,6 +446,11 @@ impl PlanDispatchState {
             Self::PlanMissingCompleteEpic => Some(SkipReason::PlanMissingCompleteEpic),
             Self::EpicNotOpen { .. } => Some(SkipReason::EpicNotOpen),
             Self::PlanHasPendingEpic { .. } => Some(SkipReason::PlanHasPendingEpic),
+            Self::PlanOwnedByAnotherBrain { owner, .. } => {
+                Some(SkipReason::PlanOwnedByAnotherBrain {
+                    owner: owner.clone(),
+                })
+            }
         }
     }
 }
@@ -1686,6 +1692,40 @@ impl Reconciler {
                 .any(|label| label == crate::plan::labels::PLAN_COMPLETE)
             {
                 if epic.status == "open" {
+                    if let Some(dispatch) = self.dispatch.as_ref() {
+                        match crate::plan::ownership::classify_owner(
+                            &epic.labels,
+                            dispatch.brain_session_id.as_session_id(),
+                        ) {
+                            crate::plan::ownership::PlanOwnerMatch::OwnedByCurrent => {}
+                            crate::plan::ownership::PlanOwnerMatch::OwnedByOther { owner } => {
+                                let state = PlanDispatchState::PlanOwnedByAnotherBrain {
+                                    epic_id: epic.id.clone(),
+                                    owner,
+                                };
+                                tracing::debug!(
+                                    plan_id = %plan_id,
+                                    ?state,
+                                    "reconciler suppressed ready tasks for plan owned by another brain"
+                                );
+                                cache.insert(plan_id.to_string(), state.clone());
+                                return Ok(state);
+                            }
+                            crate::plan::ownership::PlanOwnerMatch::Unowned => {
+                                let state = PlanDispatchState::PlanOwnedByAnotherBrain {
+                                    epic_id: epic.id.clone(),
+                                    owner: "unowned".to_string(),
+                                };
+                                tracing::debug!(
+                                    plan_id = %plan_id,
+                                    ?state,
+                                    "reconciler suppressed ready tasks for unowned plan"
+                                );
+                                cache.insert(plan_id.to_string(), state.clone());
+                                return Ok(state);
+                            }
+                        }
+                    }
                     open_complete_epic = Some(epic.id.clone());
                 } else if closed_complete_epic.is_none() {
                     closed_complete_epic = Some(epic.id.clone());
