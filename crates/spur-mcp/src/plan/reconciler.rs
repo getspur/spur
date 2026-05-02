@@ -1732,6 +1732,19 @@ impl Reconciler {
                                 cache.insert(plan_id.to_string(), state.clone());
                                 return Ok(state);
                             }
+                            crate::plan::ownership::PlanOwnerMatch::Ambiguous { owners } => {
+                                let state = PlanDispatchState::PlanOwnedByAnotherBrain {
+                                    epic_id: epic.id.clone(),
+                                    owner: owners.join(","),
+                                };
+                                tracing::debug!(
+                                    plan_id = %plan_id,
+                                    ?state,
+                                    "reconciler suppressed ready tasks for plan with ambiguous owner labels"
+                                );
+                                cache.insert(plan_id.to_string(), state.clone());
+                                return Ok(state);
+                            }
                             crate::plan::ownership::PlanOwnerMatch::Unowned => {
                                 let state = PlanDispatchState::PlanOwnedByAnotherBrain {
                                     epic_id: epic.id.clone(),
@@ -1841,6 +1854,12 @@ impl Reconciler {
                 PlanDispatchState::PlanOwnedByAnotherBrain {
                     epic_id: epic_id.to_string(),
                     owner,
+                }
+            }
+            crate::plan::ownership::PlanOwnerMatch::Ambiguous { owners } => {
+                PlanDispatchState::PlanOwnedByAnotherBrain {
+                    epic_id: epic_id.to_string(),
+                    owner: owners.join(","),
                 }
             }
             crate::plan::ownership::PlanOwnerMatch::Unowned => {
