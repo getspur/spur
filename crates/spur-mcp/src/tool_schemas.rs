@@ -24,6 +24,12 @@ pub struct DelegateToWorkerInput {
     /// Optional explicit worker base. Omit for legacy behavior (RepoMain).
     /// Use WithOverlay to apply dependency cherry-picks.
     pub base: Option<crate::tools::BaseSpec>,
+    /// Opt in to exposing a curated worker MCP subset. Omit for the default no-MCP worker contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_worker_mcp: Option<bool>,
+    /// Opt in to worker progress events. Omit to preserve existing silent worker behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_worker_progress: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -41,6 +47,12 @@ pub struct DelegateParallelTaskInput {
     pub delegation_plan: Option<DelegationPlan>,
     /// Optional explicit worker base. Omit for legacy behavior (RepoMain).
     pub base: Option<crate::tools::BaseSpec>,
+    /// Opt in to exposing a curated worker MCP subset. Omit for the default no-MCP worker contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_worker_mcp: Option<bool>,
+    /// Opt in to worker progress events. Omit to preserve existing silent worker behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_worker_progress: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -69,4 +81,24 @@ pub struct PreviewTaskBaseOutput {
 pub struct PreviewConflict {
     pub dep_task_id: String,
     pub files: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delegate_input_default_enable_flags_false() {
+        let json = r#"{"agent": "kimi", "task": "do work"}"#;
+        let input: DelegateToWorkerInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.enable_worker_mcp, None);
+        assert_eq!(input.enable_worker_progress, None);
+    }
+
+    #[test]
+    fn delegate_input_explicit_enable_worker_mcp() {
+        let json = r#"{"agent": "kimi", "task": "do work", "enable_worker_mcp": true}"#;
+        let input: DelegateToWorkerInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.enable_worker_mcp, Some(true));
+    }
 }
