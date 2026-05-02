@@ -27,6 +27,13 @@ use crate::handlers::{McpHandlerError, PlanResolver, WorkerCallContext};
 use crate::outcome_materializer::OutcomeMaterializer;
 use crate::token::{validate_token, TokenError};
 
+/// Per-delegation context cached by the dispatcher so gating checks never
+/// hit the PM on the hot path.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DelegationContext {
+    pub enable_worker_progress: bool,
+}
+
 /// Maximum allowed HTTP body size (1 MiB). JSON-RPC payloads are tiny;
 /// anything larger is treated as an attack.
 const MAX_BODY_BYTES: usize = 1024 * 1024;
@@ -93,6 +100,12 @@ struct DispatcherDeps {
     outcome_store: Arc<dyn spur_blob_store::OutcomeStore>,
     materializer: OutcomeMaterializer,
     repo_root: Option<PathBuf>,
+    /// Cached per-delegation context — populated by the orchestrator at
+    /// dispatch time so gating checks are O(1) and PM-free.
+    /// TODO(T22/T24): add unregister_delegation() called by the orchestrator on
+    /// terminal delegation status (Success/Failed/Cancelled) so long-running
+    /// brain sessions don't leak DelegationContext entries indefinitely.
+    delegations: Arc<parking_lot::Mutex<std::collections::HashMap<String, DelegationContext>>>,
 }
 
 /// Errors returned by [`WorkerMcpServer::start`].
@@ -117,6 +130,7 @@ impl WorkerMcpServer {
         rand::rngs::OsRng.fill_bytes(&mut hmac_key);
 
         let materializer = OutcomeMaterializer::new(Arc::clone(&deps.outcome_store));
+        let delegations = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
         let dispatcher_deps = Arc::new(DispatcherDeps {
             pm_service: deps.pm_service,
             feature_gate: deps.feature_gate,
@@ -126,6 +140,7 @@ impl WorkerMcpServer {
             outcome_store: deps.outcome_store,
             materializer,
             repo_root: deps.repo_root,
+            delegations: Arc::clone(&delegations),
         });
 
         let shutdown = CancellationToken::new();
@@ -165,7 +180,13 @@ impl WorkerMcpServer {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        self.issue_token_with_expiry(delegation_id, now + ttl.as_secs())
+        let payload = crate::token::WorkerTokenPayload {
+            d: delegation_id.to_string(),
+            b: self.brain_session_id.clone(),
+            e: now + ttl.as_secs(),
+        };
+        crate::token::encode_token(&self.hmac_key, &payload)
+            .expect("HMAC key length is valid for HmacSha256")
     }
 
     /// Issue a token with an explicit expiry timestamp (unix seconds).
@@ -179,6 +200,13 @@ impl WorkerMcpServer {
         };
         crate::token::encode_token(&self.hmac_key, &payload)
             .expect("HMAC key length is valid for HmacSha256")
+    }
+
+    /// Register (or update) cached per-delegation context. Called by the
+    /// orchestrator at dispatch time so the `report_progress` dual-gate is
+    /// a PM-free HashMap lookup.
+    pub fn register_delegation(&self, delegation_id: String, ctx: DelegationContext) {
+        self.deps.delegations.lock().insert(delegation_id, ctx);
     }
 
     /// Cancel the accept loop and wait up to 5 seconds for it to exit.
@@ -461,6 +489,17 @@ async fn dispatch_tool_call(
             .await
         }
         "report_progress" => {
+            // Dual-gate gate 1: check cached delegation context. If progress
+            // is disabled, silently drop and return success (fire-and-forget).
+            let delegation_ctx = deps
+                .delegations
+                .lock()
+                .get(&ctx.delegation_id)
+                .copied()
+                .unwrap_or_default();
+            if !delegation_ctx.enable_worker_progress {
+                return success_response(id, json!({ "ok": true }));
+            }
             crate::handlers::report_progress(deps.funnel.as_ref(), &ctx, args).await
         }
         "get_plan_status" => {

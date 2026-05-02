@@ -7,6 +7,7 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -63,6 +64,50 @@ impl McpEventSink for NullSink {
     fn emit(&self, _event: SpurEventBody) {}
 }
 
+/// Sink that panics on any emission — used to verify the disabled-gate
+/// short-circuits before the handler is invoked.
+struct PanicSink;
+
+impl McpEventSink for PanicSink {
+    fn emit(&self, _event: SpurEventBody) {
+        panic!("emit must not be called when progress is disabled");
+    }
+    fn try_emit(&self, _event: SpurEventBody) -> Result<(), SpurEventBody> {
+        panic!("try_emit must not be called when progress is disabled");
+    }
+}
+
+/// Sink that simulates a full broadcast bus — `try_emit` always returns
+/// `Err` so the handler must silently drop and still return success.
+struct FullSink;
+
+impl McpEventSink for FullSink {
+    fn emit(&self, _event: SpurEventBody) {
+        panic!("emit must not be called — try_emit should be used");
+    }
+    fn try_emit(&self, event: SpurEventBody) -> Result<(), SpurEventBody> {
+        Err(event)
+    }
+}
+
+/// Counting sink that records each event it receives. Used to verify the
+/// happy path — when progress is enabled AND the bus has capacity, the
+/// handler IS called and the event IS emitted.
+struct CountingSink {
+    count: AtomicUsize,
+}
+
+impl McpEventSink for CountingSink {
+    fn emit(&self, _event: SpurEventBody) {
+        self.count.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn try_emit(&self, event: SpurEventBody) -> Result<(), SpurEventBody> {
+        self.emit(event);
+        Ok(())
+    }
+}
+
 struct NullPlanResolver;
 
 #[async_trait]
@@ -73,10 +118,14 @@ impl PlanResolver for NullPlanResolver {
 }
 
 fn test_deps(pm: Arc<PmService>) -> WorkerMcpDeps {
+    test_deps_with_funnel(pm, Arc::new(NullSink))
+}
+
+fn test_deps_with_funnel(pm: Arc<PmService>, funnel: Arc<dyn McpEventSink>) -> WorkerMcpDeps {
     WorkerMcpDeps {
         pm_service: pm,
         feature_gate: test_feature_gate(),
-        funnel: Arc::new(NullSink),
+        funnel,
         plan_resolver: Arc::new(NullPlanResolver),
         reconciler_outcomes: Arc::new(Mutex::new(
             spur_mcp::plan::outcomes::OutcomeStore::default(),
@@ -166,6 +215,119 @@ async fn tools_list_returns_8_curated_tools() {
     ] {
         assert!(names.contains(&expected), "missing curated tool: {expected}");
     }
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn report_progress_disabled_returns_success_without_calling_handler() {
+    if !br_available() {
+        eprintln!("skipping: `br` not on PATH");
+        return;
+    }
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+    let pm = pm_service_fixture(dir.path()).await;
+    let server = WorkerMcpServer::start(
+        "session-disp".into(),
+        test_deps_with_funnel(pm, Arc::new(PanicSink)),
+    )
+    .await
+    .expect("start must succeed");
+    server.register_delegation(
+        "d-1".into(),
+        spur_mcp::worker_server::DelegationContext {
+            enable_worker_progress: false,
+        },
+    );
+    let token = server.issue_token("d-1", Duration::from_secs(60));
+    let body = call_jsonrpc(
+        &server,
+        &token,
+        "tools/call",
+        serde_json::json!({"name": "report_progress", "arguments": {"message": "hi"}}),
+    )
+    .await;
+    assert_eq!(
+        body["result"]["ok"].as_bool(),
+        Some(true),
+        "should return success when progress is disabled, got: {body}"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn report_progress_full_bus_silently_drops_and_returns_success() {
+    if !br_available() {
+        eprintln!("skipping: `br` not on PATH");
+        return;
+    }
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+    let pm = pm_service_fixture(dir.path()).await;
+    let server = WorkerMcpServer::start(
+        "session-disp".into(),
+        test_deps_with_funnel(pm, Arc::new(FullSink)),
+    )
+    .await
+    .expect("start must succeed");
+    server.register_delegation(
+        "d-1".into(),
+        spur_mcp::worker_server::DelegationContext {
+            enable_worker_progress: true,
+        },
+    );
+    let token = server.issue_token("d-1", Duration::from_secs(60));
+    let body = call_jsonrpc(
+        &server,
+        &token,
+        "tools/call",
+        serde_json::json!({"name": "report_progress", "arguments": {"message": "hi"}}),
+    )
+    .await;
+    assert_eq!(
+        body["result"]["ok"].as_bool(),
+        Some(true),
+        "should return success even when bus is full, got: {body}"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn report_progress_enabled_with_capacity_emits_event() {
+    if !br_available() {
+        eprintln!("skipping: `br` not on PATH");
+        return;
+    }
+    let sink = Arc::new(CountingSink { count: AtomicUsize::new(0) });
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+    let pm = pm_service_fixture(dir.path()).await;
+    let server = WorkerMcpServer::start(
+        "session-disp".into(),
+        test_deps_with_funnel(pm, sink.clone()),
+    )
+    .await
+    .expect("start must succeed");
+    server.register_delegation(
+        "d-1".into(),
+        spur_mcp::worker_server::DelegationContext {
+            enable_worker_progress: true,
+        },
+    );
+    let token = server.issue_token("d-1", Duration::from_secs(60));
+    let body = call_jsonrpc(
+        &server,
+        &token,
+        "tools/call",
+        serde_json::json!({"name": "report_progress", "arguments": {"message": "hi"}}),
+    )
+    .await;
+    assert_eq!(body["result"]["ok"].as_bool(), Some(true));
+    assert_eq!(
+        sink.count.load(Ordering::SeqCst),
+        1,
+        "event must be emitted exactly once"
+    );
     server.shutdown().await;
 }
 

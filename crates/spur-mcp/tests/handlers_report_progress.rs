@@ -16,6 +16,11 @@ impl McpEventSink for RecordingSink {
     fn emit(&self, event: SpurEventBody) {
         self.events.lock().unwrap().push(event);
     }
+
+    fn try_emit(&self, event: SpurEventBody) -> Result<(), SpurEventBody> {
+        self.emit(event);
+        Ok(())
+    }
 }
 
 fn ctx() -> WorkerCallContext {

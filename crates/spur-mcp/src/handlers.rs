@@ -791,7 +791,9 @@ pub async fn report_progress(
     let Args { message, percent } = serde_json::from_value(args)
         .map_err(|e| McpHandlerError::InvalidParams(format!("invalid args: {e}")))?;
 
-    sink.emit(SpurEventBody::WorkerReportProgress {
+    // Dual-gate gate 2: drop on full bus rather than block. The return
+    // value is ignored because the contract is fire-and-forget.
+    let _ = sink.try_emit(SpurEventBody::WorkerReportProgress {
         delegation_id: ctx.delegation_id.clone(),
         message,
         percent,
