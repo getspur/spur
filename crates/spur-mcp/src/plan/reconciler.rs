@@ -1801,7 +1801,7 @@ impl Reconciler {
             self.complete_epic_allows_current_brain_writes(&epic.id, &epic.labels)
         } else {
             let mut state = PlanDispatchState::PlanMissingCompleteEpic;
-            for summary in self
+            if let Some(summary) = self
                 .pm
                 .list_issues(IssueFilter {
                     labels: vec![
@@ -1814,10 +1814,11 @@ impl Reconciler {
                     ..Default::default()
                 })
                 .await?
+                .into_iter()
+                .next()
             {
                 state =
                     self.complete_epic_allows_current_brain_writes(&summary.id, &summary.labels);
-                break;
             }
             state
         };
