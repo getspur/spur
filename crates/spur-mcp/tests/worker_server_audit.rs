@@ -17,7 +17,9 @@ use spur_license::FeatureGate;
 use spur_mcp::events::McpEventSink;
 use spur_mcp::handlers::PlanResolver;
 use spur_mcp::plan::PlanState;
-use spur_mcp::worker_server::{WorkerMcpDeps, WorkerMcpServer};
+use spur_mcp::worker_server::{
+    DelegationContext, ReadAuditBuffer, ReadAuditEntry, WorkerMcpDeps, WorkerMcpServer,
+};
 use spur_pm::{IssueCreate, PmService};
 use tempfile::TempDir;
 use tokio::sync::Mutex;
@@ -188,6 +190,102 @@ async fn update_issue_success_emits_worker_write_audit_sentinel() {
     }
 
     server.shutdown().await;
+}
+
+// ─── T20: per-delegation read-audit aggregation buffer ────────────────────
+
+#[tokio::test]
+async fn read_tool_calls_append_to_buffer() {
+    if !br_available() {
+        eprintln!("skipping: `br` not on PATH");
+        return;
+    }
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+    let pm = pm_service_fixture(dir.path()).await;
+    let issue_id = pm
+        .create_issue(IssueCreate {
+            title: "read-buffer test".into(),
+            ..Default::default()
+        })
+        .await
+        .expect("create issue");
+
+    let server = WorkerMcpServer::start("session-read-buf".into(), test_deps(Arc::clone(&pm)))
+        .await
+        .expect("start must succeed");
+    server.register_delegation(
+        "d-1".into(),
+        DelegationContext {
+            enable_worker_progress: false,
+        },
+    );
+    let token = server.issue_token("d-1", Duration::from_secs(60));
+
+    for _ in 0..3 {
+        let body = call_jsonrpc(
+            &server,
+            &token,
+            "tools/call",
+            serde_json::json!({
+                "name": "get_issue",
+                "arguments": { "id": issue_id }
+            }),
+        )
+        .await;
+        assert!(
+            body.get("result").is_some(),
+            "get_issue result; got: {body}"
+        );
+    }
+
+    let buf = server
+        .peek_read_buffer("d-1")
+        .expect("buffer should exist after read calls");
+    assert_eq!(buf.entry_count(), 3);
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn drop_buffer_sends_on_flush_channel() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let buf = ReadAuditBuffer::new("d-1".into(), tx);
+    buf.append_for_test(ReadAuditEntry {
+        tool_name: "get_issue".into(),
+        target_issue_id: None,
+        ts: 0,
+    });
+    drop(buf);
+    let msg = rx.try_recv().expect("flush message expected on drop");
+    assert_eq!(msg.delegation_id, "d-1");
+    assert_eq!(msg.entries.len(), 1);
+    assert_eq!(msg.entries[0].tool_name, "get_issue");
+}
+
+#[tokio::test]
+async fn drop_buffer_with_no_entries_is_silent() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let buf = ReadAuditBuffer::new("d-2".into(), tx);
+    drop(buf);
+    assert!(
+        rx.try_recv().is_err(),
+        "empty buffer must NOT send a flush message"
+    );
+}
+
+#[tokio::test]
+async fn drop_buffer_after_receiver_dropped_does_not_panic() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    drop(rx);
+    let buf = ReadAuditBuffer::new("d-3".into(), tx);
+    buf.append_for_test(ReadAuditEntry {
+        tool_name: "list_issues".into(),
+        target_issue_id: None,
+        ts: 1,
+    });
+    // Must not panic even though the receiver is gone.
+    drop(buf);
 }
 
 #[tokio::test]
