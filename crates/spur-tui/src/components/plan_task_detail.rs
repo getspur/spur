@@ -2,16 +2,19 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 use spur_core::{ExecutorNode, TrackedTask};
+use spur_pm::Issue;
 
 pub fn render_task_detail(
     frame: &mut Frame,
     area: Rect,
     task: &TrackedTask,
     live_node: Option<&ExecutorNode>,
+    issue_detail: Option<&Issue>,
+    issue_detail_status: Option<&str>,
 ) {
     let mut lines = vec![
         section_header("Identity"),
@@ -102,8 +105,59 @@ pub fn render_task_detail(
         }
     }
 
+    // ── Issue detail (optional) ────────────────────────────────────────────
+    if let Some(status) = issue_detail_status {
+        lines.push(section_header("Issue"));
+        lines.push(kv("status", status));
+    }
+    if let Some(issue) = issue_detail {
+        lines.push(section_header("Issue"));
+        lines.push(kv("id", &issue.id));
+        lines.push(kv("title", &issue.title));
+        lines.push(kv("status", &issue.status));
+        lines.push(kv(
+            "priority",
+            &issue
+                .priority
+                .map(|priority| format!("P{priority}"))
+                .unwrap_or_else(|| "--".to_string()),
+        ));
+        lines.push(kv("type", issue.issue_type.as_deref().unwrap_or("--")));
+        lines.push(kv(
+            "assignee",
+            issue.assignee.as_deref().unwrap_or("unassigned"),
+        ));
+        lines.push(kv(
+            "due",
+            &issue
+                .due_at
+                .map(|due_at| due_at.format("%Y-%m-%d").to_string())
+                .unwrap_or_else(|| "--".to_string()),
+        ));
+        if !issue.labels.is_empty() {
+            lines.push(kv("labels", &issue.labels.join(", ")));
+        }
+        if !issue.blocked_by.is_empty() {
+            lines.push(kv("blocked_by", &issue.blocked_by.join(", ")));
+        }
+        if !issue.url.is_empty() {
+            lines.push(kv("url", &issue.url));
+        }
+
+        lines.push(section_header("Description"));
+        if issue.body.is_empty() {
+            lines.push(kv("body", "(empty)"));
+        } else {
+            for line in issue.body.lines() {
+                lines.push(Line::from(vec![Span::raw(line.to_string())]));
+            }
+        }
+    }
+
     frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Task detail")),
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).title("Task detail")),
         area,
     );
 }
