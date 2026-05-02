@@ -33,6 +33,7 @@ fn spur_local_source_exposes_v1_set() {
     assert!(names.contains(&"mode"), "missing /mode: {:?}", names);
     assert!(names.contains(&"cost"), "missing /cost: {:?}", names);
     assert!(names.contains(&"quit"), "missing /quit: {:?}", names);
+    assert!(names.contains(&"sprints"), "missing /sprints: {:?}", names);
 
     for e in &entries {
         assert!(matches!(e.source, spur_tui::commands::CommandSource::Spur));
