@@ -5,6 +5,7 @@
 //! asserting each DelegationRequest carries the right per-task fields.
 
 use serde_json::json;
+use spur_mcp::tools::{BaseSpec, BaseTarget, OverlayCommit};
 
 #[test]
 fn per_task_context_files_survive_to_delegation_requests() {
@@ -130,5 +131,115 @@ fn parse_parallel_tasks_requires_brain_session_id() {
         parsed[0].brain_session_id.as_session_id().0,
         spur_acp::SessionId::new().0,
         "brain_session_id must equal the caller-supplied value, not a fresh UUID"
+    );
+}
+
+// ─── bd-1u8p: BaseSpec per-task plumbing ──────────────────────────────
+
+#[test]
+fn per_task_base_repo_main_survives() {
+    let args = json!({
+        "tasks": [
+            { "agent": "claude-code-acp", "task": "T", "base": { "kind": "repo_main" } }
+        ]
+    });
+    let brain_sid = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
+    let parsed = spur_mcp::parse_parallel_tasks(&args, &brain_sid).expect("parse ok");
+    assert_eq!(parsed[0].base, Some(BaseSpec::RepoMain));
+}
+
+#[test]
+fn per_task_base_branch_survives() {
+    let args = json!({
+        "tasks": [
+            { "agent": "claude-code-acp", "task": "T", "base": { "kind": "branch", "name": "feat/foo" } }
+        ]
+    });
+    let brain_sid = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
+    let parsed = spur_mcp::parse_parallel_tasks(&args, &brain_sid).expect("parse ok");
+    assert_eq!(
+        parsed[0].base,
+        Some(BaseSpec::Branch {
+            name: "feat/foo".into()
+        })
+    );
+}
+
+#[test]
+fn per_task_base_commit_survives() {
+    let oid = "0000000000000000000000000000000000000000";
+    let args = json!({
+        "tasks": [
+            { "agent": "claude-code-acp", "task": "T", "base": { "kind": "commit", "oid": oid } }
+        ]
+    });
+    let brain_sid = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
+    let parsed = spur_mcp::parse_parallel_tasks(&args, &brain_sid).expect("parse ok");
+    assert_eq!(parsed[0].base, Some(BaseSpec::Commit { oid: oid.into() }));
+}
+
+#[test]
+fn per_task_base_with_overlay_survives() {
+    let args = json!({
+        "tasks": [
+            {
+                "agent": "claude-code-acp",
+                "task": "T",
+                "base": {
+                    "kind": "with_overlay",
+                    "base": { "kind": "repo_main" },
+                    "overlays": [
+                        {
+                            "base_oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                            "tip_oid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                            "source_task_id": "test-overlay"
+                        }
+                    ]
+                }
+            }
+        ]
+    });
+    let brain_sid = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
+    let parsed = spur_mcp::parse_parallel_tasks(&args, &brain_sid).expect("parse ok");
+    match &parsed[0].base {
+        Some(BaseSpec::WithOverlay { base, overlays }) => {
+            assert_eq!(*base, BaseTarget::RepoMain);
+            assert_eq!(overlays.len(), 1);
+            assert_eq!(
+                overlays[0],
+                OverlayCommit {
+                    base_oid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                    tip_oid: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                    source_task_id: "test-overlay".into(),
+                }
+            );
+        }
+        other => panic!("expected WithOverlay, got {:?}", other),
+    }
+}
+
+#[test]
+fn per_task_delegation_plan_rejects_malformed_object() {
+    let args = json!({
+        "tasks": [
+            {
+                "agent": "claude-code-acp",
+                "task": "Task A",
+                "delegation_plan": { "chosen": 7 }
+            }
+        ]
+    });
+
+    let brain_sid = spur_acp::BrainSessionId::new(spur_acp::SessionId("test-brain".into()));
+    let err = spur_mcp::parse_parallel_tasks(&args, &brain_sid)
+        .expect_err("malformed per-task delegation_plan must be rejected");
+
+    assert!(
+        err.contains("Invalid task arguments:"),
+        "error should mention Invalid task arguments: {err}",
+    );
+    assert!(
+        err.contains("expected a string"),
+        "error should preserve the serde message: {err}",
     );
 }

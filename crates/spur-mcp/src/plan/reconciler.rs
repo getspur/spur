@@ -251,6 +251,7 @@ async fn persist_setup_overlay_conflict(
         &crate::plan::audit_sentinel::encode_comment(
             &crate::plan::audit_sentinel::AuditSentinelKind::Signal {
                 signal_id: signal_id.clone(),
+                delegation_id: String::new(),
                 kind: "integration-conflict".to_string(),
                 severity: 1.0,
                 reason,
@@ -395,6 +396,7 @@ pub struct ReconcilerDispatchCtx {
     pub brain_session_id: spur_acp::BrainSessionId,
     pub event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
     pub materializer: Arc<crate::outcome_materializer::OutcomeMaterializer>,
+    pub continuation_ctx: Arc<crate::server::DetachedContinuationCtx>,
 }
 
 pub struct ReconcilerConfig {
@@ -802,10 +804,23 @@ impl Reconciler {
             let (respond_to, rx) = tokio::sync::oneshot::channel();
             let (dispatched_base_oid_tx, dispatched_base_oid_rx) =
                 tokio::sync::watch::channel(None);
+            let task_text = if task.history.is_empty() {
+                task.spec.task.clone()
+            } else {
+                let current_feedback =
+                    task.history.last().map(|r| r.feedback.as_str()).unwrap_or("");
+                crate::plan::build_enriched_task(
+                    &task.spec.task,
+                    &task.history,
+                    current_feedback,
+                    task.attempt,
+                    crate::plan::MAX_ATTEMPTS,
+                )
+            };
             let request = crate::tools::DelegationRequest {
                 id: delegation_id.clone().into(),
                 agent: task.spec.agent.clone(),
-                task: task.spec.task.clone(),
+                task: task_text,
                 context_files: task.spec.context_files.clone(),
                 respond_to,
                 brain_session_id: dispatch.brain_session_id.clone(),
@@ -859,6 +874,7 @@ impl Reconciler {
             let event_sink = dispatch.event_sink.clone();
             let brain_session_id = dispatch.brain_session_id.clone();
             let materializer = Arc::clone(&dispatch.materializer);
+            let continuation_ctx = Arc::clone(&dispatch.continuation_ctx);
             let feature_gate = Arc::clone(&self.feature_gate);
             let outcomes = Arc::clone(&self.outcomes);
             dispatch.task_tracker.spawn(async move {
@@ -933,7 +949,7 @@ impl Reconciler {
 
                 let dispatched_base_oid = dispatched_base_oid_rx.borrow().clone();
 
-                if let Err(error) = crate::plan::persist_worker_completion_and_notify(
+                let deferred = match crate::plan::persist_worker_completion_and_notify(
                     pm.as_ref(),
                     &issue_id,
                     feature_gate.as_ref(),
@@ -945,17 +961,22 @@ impl Reconciler {
                     task_attempt,
                     &materializer,
                     dispatched_base_oid,
+                    Some(&task_id),
                 )
                 .await
                 {
-                    tracing::warn!(
-                        %plan_id,
-                        %task_id,
-                        %issue_id,
-                        %delegation_id_for_completion,
-                        "reconciler completion persistence failed: {error}"
-                    );
-                }
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        tracing::warn!(
+                            %plan_id,
+                            %task_id,
+                            %issue_id,
+                            %delegation_id_for_completion,
+                            "reconciler completion persistence failed: {error}"
+                        );
+                        None
+                    }
+                };
 
                 match crate::plan::projector::project_plan_from_beads(
                     pm.as_ref(),
@@ -980,6 +1001,11 @@ impl Reconciler {
                         %task_id,
                         "failed to project plan snapshot after completion: {error}"
                     ),
+                }
+                if let Some(deferred) = deferred {
+                    deferred
+                        .deliver(event_sink.as_deref(), continuation_ctx.as_ref())
+                        .await;
                 }
             });
 
@@ -1127,7 +1153,7 @@ impl Reconciler {
                 worker_branch: None,
                 artifact: None,
             };
-            crate::plan::persist_system_completion_and_notify(
+            let deferred = crate::plan::persist_system_completion_and_notify(
                 self.pm.as_ref(),
                 &summary.id,
                 self.feature_gate.as_ref(),
@@ -1140,6 +1166,7 @@ impl Reconciler {
                 attempt,
                 &dispatch.materializer,
                 None,
+                Some(&task_id),
             )
             .await?;
 
@@ -1164,6 +1191,14 @@ impl Reconciler {
                 });
             }
             self.emit_snapshot_for_plan(&plan_id).await;
+            if let Some(deferred) = deferred {
+                deferred
+                    .deliver(
+                        dispatch.event_sink.as_deref(),
+                        dispatch.continuation_ctx.as_ref(),
+                    )
+                    .await;
+            }
             did_work = true;
         }
 
@@ -1355,6 +1390,19 @@ impl Reconciler {
                             cancelled: outcome.cancelled_count,
                         });
                     }
+                    if let Some(dispatch) = self.dispatch.as_ref() {
+                        crate::plan::push_plan_completed_continuation(
+                            dispatch.continuation_ctx.as_ref(),
+                            &dispatch.materializer,
+                            &dispatch.brain_session_id,
+                            plan_id,
+                            outcome.approved_count,
+                            outcome.rejected_count,
+                            outcome.failed_count,
+                            outcome.cancelled_count,
+                        )
+                        .await;
+                    }
                     did_work = true;
                 }
 
@@ -1486,6 +1534,19 @@ impl Reconciler {
                         failed: outcome.failed_count,
                         cancelled: outcome.cancelled_count,
                     });
+                }
+                if let Some(dispatch) = self.dispatch.as_ref() {
+                    crate::plan::push_plan_completed_continuation(
+                        dispatch.continuation_ctx.as_ref(),
+                        &dispatch.materializer,
+                        &dispatch.brain_session_id,
+                        plan_id,
+                        outcome.approved_count,
+                        outcome.rejected_count,
+                        outcome.failed_count,
+                        outcome.cancelled_count,
+                    )
+                    .await;
                 }
             }
             if outcome.add_integration_pending {
@@ -1932,6 +1993,9 @@ mod tests {
             materializer: Arc::new(crate::outcome_materializer::OutcomeMaterializer::new(
                 Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
             )),
+            continuation_ctx: Arc::new(crate::server::DetachedContinuationCtx {
+                on_complete: Arc::new(|_, _| Box::pin(async {})),
+            }),
         };
 
         let cloned = ctx.clone();

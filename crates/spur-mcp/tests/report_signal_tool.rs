@@ -5,10 +5,10 @@ use std::process::Command;
 use std::sync::Arc;
 
 use serde_json::json;
+use spur_mcp::handlers::{report_signal, WorkerCallContext};
 use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
 use spur_mcp::plan::labels;
 use spur_mcp::plan::signals::{self, WorkerSignal};
-use spur_mcp::server::handle_report_signal;
 use spur_pm::{IssueCreate, PmService};
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -116,16 +116,20 @@ async fn report_signal_on_open_task_records_all_artifacts() {
     let signal = scope_drift_signal(Uuid::new_v4());
     let signal_id = signal.signal_id().to_string();
 
-    let result = handle_report_signal(
-        Arc::clone(&pm),
-        common::server_builder::pro_feature_gate(),
+    let result = report_signal(
+        &pm,
+        common::server_builder::pro_feature_gate().as_ref(),
+        &WorkerCallContext {
+            delegation_id: String::new(),
+            brain_session_id: "test-session".into(),
+        },
         json!({
             "task_id": task_id.clone(),
             "signal": signal.clone(),
         }),
     )
     .await
-    .expect("handle_report_signal must succeed");
+    .expect("report_signal must succeed");
 
     assert_eq!(
         result,
@@ -161,10 +165,12 @@ async fn report_signal_on_open_task_records_all_artifacts() {
             kind,
             AuditSentinelKind::Signal {
                 signal_id: found_id,
+                delegation_id,
                 kind,
                 severity,
                 reason,
             } if found_id == &signal_id
+                && delegation_id.is_empty()
                 && kind == "scope-drift"
                 && (*severity - 0.82).abs() < 1e-6
                 && reason == "auth refactor pulls in 4 new subsystems"
@@ -209,16 +215,20 @@ async fn report_signal_on_terminal_task_records_late_arrival() {
     let signal = scope_drift_signal(Uuid::new_v4());
     let signal_id = signal.signal_id().to_string();
 
-    let result = handle_report_signal(
-        Arc::clone(&pm),
-        common::server_builder::pro_feature_gate(),
+    let result = report_signal(
+        &pm,
+        common::server_builder::pro_feature_gate().as_ref(),
+        &WorkerCallContext {
+            delegation_id: String::new(),
+            brain_session_id: "test-session".into(),
+        },
         json!({
             "task_id": task_id.clone(),
             "signal": signal.clone(),
         }),
     )
     .await
-    .expect("handle_report_signal must succeed");
+    .expect("report_signal must succeed");
 
     assert_eq!(
         result,
@@ -268,4 +278,72 @@ async fn report_signal_on_terminal_task_records_late_arrival() {
         !labels.contains(&labels::signal_kind(signal.kind_label())),
         "late-arrival path must not carry the signal kind label; got labels: {labels:?}"
     );
+}
+
+#[tokio::test]
+async fn report_signal_threads_worker_call_context() {
+    if !br_available() {
+        eprintln!("skipping: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init failed");
+
+    let pm = beads_pm(dir.path()).await;
+    let task_id = create_task(&pm, "Context thread task").await;
+    let signal = scope_drift_signal(Uuid::new_v4());
+    let signal_id = signal.signal_id().to_string();
+    let expected_delegation_id = "del-test-42";
+
+    let result = report_signal(
+        &pm,
+        common::server_builder::pro_feature_gate().as_ref(),
+        &WorkerCallContext {
+            delegation_id: expected_delegation_id.into(),
+            brain_session_id: "test-session".into(),
+        },
+        json!({
+            "task_id": task_id.clone(),
+            "signal": signal.clone(),
+        }),
+    )
+    .await
+    .expect("report_signal must succeed");
+
+    assert_eq!(
+        result,
+        json!({
+            "recorded": true,
+            "signal_id": signal_id.clone(),
+            "late": false,
+        })
+    );
+
+    let comments = comment_texts(dir.path(), &task_id);
+    let parsed_audits: Vec<AuditSentinelKind> = comments
+        .iter()
+        .filter_map(|text| audit_sentinel::parse_comment(text).and_then(|parsed| parsed.ok()))
+        .collect();
+    assert_eq!(
+        parsed_audits.len(),
+        1,
+        "task should record exactly one audit sentinel"
+    );
+    assert!(parsed_audits.iter().any(|kind| {
+        matches!(
+            kind,
+            AuditSentinelKind::Signal {
+                signal_id: found_id,
+                delegation_id,
+                kind,
+                severity,
+                reason,
+            } if found_id == &signal_id
+                && delegation_id == expected_delegation_id
+                && kind == "scope-drift"
+                && (*severity - 0.82).abs() < 1e-6
+                && reason == "auth refactor pulls in 4 new subsystems"
+        )
+    }));
 }

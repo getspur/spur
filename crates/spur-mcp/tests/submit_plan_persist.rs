@@ -163,6 +163,30 @@ fn submit_plan_schema_still_advertises_tasks_as_required() {
     assert!(required.contains(&"tasks"));
 }
 
+#[tokio::test]
+async fn submit_plan_response_advertises_continuation_fire() {
+    let server = common::server_builder::mock_pro_server();
+    let response = server
+        .__test_call_submit_plan(serde_json::json!({
+            "tasks": [{
+                "task_id": "t1",
+                "agent": "codex",
+                "task": "Do one thing",
+                "depends_on": []
+            }]
+        }))
+        .await;
+    assert!(
+        response.get("error").is_none(),
+        "submit_plan should succeed: {response}"
+    );
+    assert_eq!(
+        response["result"]["continuation_will_fire"],
+        serde_json::json!(true),
+        "submit_plan response should advertise detached continuations: {response}"
+    );
+}
+
 /// INV-7: verify that `run_plan` emits `PlanCompleted` when all tasks are
 /// already in a terminal Approved state on entry (so the executor loop exits
 /// immediately without dispatching), but leaves `PlanReadyToMerge` to the
@@ -224,6 +248,9 @@ async fn run_plan_emits_plan_completed_on_terminal_state() {
         Some(sink_ref),
         None,
         None,
+        Arc::new(DetachedContinuationCtx {
+            on_complete: Arc::new(|_, _| Box::pin(async {})),
+        }),
         test_materializer(),
         common::server_builder::pro_feature_gate(),
     )
@@ -406,6 +433,9 @@ async fn run_plan_marks_pending_tasks_failed_on_terminal_exit() {
         Some(sink_ref),
         None,
         None,
+        Arc::new(DetachedContinuationCtx {
+            on_complete: Arc::new(|_, _| Box::pin(async {})),
+        }),
         test_materializer(),
         common::server_builder::pro_feature_gate(),
     )

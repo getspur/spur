@@ -673,10 +673,11 @@ pub enum SpurEventBody {
     },
     WorkerMcpDelegationSummary {
         delegation_id: String,
-        calls_total: u64,
-        calls_by_tool: std::collections::BTreeMap<String, u64>,
-        p99_latency_ms: u64,
-        errors: u64,
+        brain_session_id: String,
+        tool_calls: u32,
+        audits_emitted: u32,
+        duration_ms: u64,
+        outcome: String,
     },
     ConflictDetected {
         files: Vec<PathBuf>,
@@ -907,6 +908,18 @@ pub enum SpurEventBody {
         pct: Option<u8>,
     },
 
+    /// Worker invoked the curated `report_progress` MCP tool with a
+    /// free-form status message. Distinct from `WorkerProgress`
+    /// (executor-scoped, structured milestone `name`/`u8` percentage)
+    /// — this carries an arbitrary delegation-scoped message and an
+    /// optional `f64` percent so workers can stream rich progress text
+    /// without minting milestone names.
+    WorkerReportProgress {
+        delegation_id: String,
+        message: String,
+        percent: Option<f64>,
+    },
+
     /// Live session notification from a running worker agent. Emitted
     /// by the orchestrator for every `SessionNotification` received
     /// from a worker's `drive_prompt_notifications` stream. The TUI
@@ -966,6 +979,23 @@ pub enum SpurEventBody {
         /// Attempt budget. Defaults to 0 on pre-Phase-2 replay.
         #[serde(default)]
         max_attempts: u32,
+        delegation_id: String,
+    },
+
+    /// A plan task reached a terminal failed state.
+    PlanTaskFailed {
+        plan_id: String,
+        task_id: String,
+        attempt: u32,
+        max_attempts: u32,
+        error: String,
+        delegation_id: String,
+    },
+
+    /// A plan task completed worker execution and is waiting for brain review.
+    PlanTaskAwaitingReview {
+        plan_id: String,
+        task_id: String,
         delegation_id: String,
     },
 
@@ -1110,12 +1140,11 @@ mod tests {
     fn worker_mcp_delegation_summary_round_trip() {
         let event = SpurEventBody::WorkerMcpDelegationSummary {
             delegation_id: "abc-123".into(),
-            calls_total: 42,
-            calls_by_tool: vec![("get_issue".into(), 30), ("update_issue".into(), 12)]
-                .into_iter()
-                .collect(),
-            p99_latency_ms: 87,
-            errors: 2,
+            brain_session_id: "session-99".into(),
+            tool_calls: 42,
+            audits_emitted: 7,
+            duration_ms: 1234,
+            outcome: "success".into(),
         };
         let json = serde_json::to_string(&event).unwrap();
         let decoded: SpurEventBody = serde_json::from_str(&json).unwrap();

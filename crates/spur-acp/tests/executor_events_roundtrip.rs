@@ -238,6 +238,51 @@ fn plan_snapshot_updated_rejects_malformed_payload() {
 }
 
 #[test]
+fn plan_task_failed_roundtrips_from_json() {
+    let json = r#"{
+        "occurred_at": {"secs_since_epoch": 1000, "nanos_since_epoch": 0},
+        "body": {"PlanTaskFailed": {
+            "plan_id": "plan-1",
+            "task_id": "task-1",
+            "attempt": 2,
+            "max_attempts": 3,
+            "error": "worker failed",
+            "delegation_id": "del-1"
+        }}
+    }"#;
+
+    let event: SpurEvent = serde_json::from_str(json).expect("PlanTaskFailed must deserialize");
+    let encoded = serde_json::to_value(&event).expect("serialize PlanTaskFailed");
+    assert_eq!(
+        encoded["body"]["PlanTaskFailed"]["plan_id"],
+        serde_json::json!("plan-1")
+    );
+    let _round: SpurEvent = serde_json::from_value(encoded).expect("round-trip PlanTaskFailed");
+}
+
+#[test]
+fn plan_task_awaiting_review_roundtrips_from_json() {
+    let json = r#"{
+        "occurred_at": {"secs_since_epoch": 1000, "nanos_since_epoch": 0},
+        "body": {"PlanTaskAwaitingReview": {
+            "plan_id": "plan-1",
+            "task_id": "task-1",
+            "delegation_id": "del-1"
+        }}
+    }"#;
+
+    let event: SpurEvent =
+        serde_json::from_str(json).expect("PlanTaskAwaitingReview must deserialize");
+    let encoded = serde_json::to_value(&event).expect("serialize PlanTaskAwaitingReview");
+    assert_eq!(
+        encoded["body"]["PlanTaskAwaitingReview"]["plan_id"],
+        serde_json::json!("plan-1")
+    );
+    let _round: SpurEvent =
+        serde_json::from_value(encoded).expect("round-trip PlanTaskAwaitingReview");
+}
+
+#[test]
 fn issue_subgraph_loaded_roundtrips() {
     use spur_acp::{GraphEdgeEvent, GraphNodeEvent, SpurEvent, SpurEventBody};
 

@@ -1,0 +1,3 @@
+[submodule "public-releases"]
+	path = public-releases
+	url = https://github.com/getspur/spur-releases.git

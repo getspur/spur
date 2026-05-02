@@ -3,6 +3,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
+use spur_acp::domain::{BrainContinuation, ContinuationSource};
 use spur_acp::{BrainSessionId, SessionId, SpurEvent, SpurEventBody};
 use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind, EpicCompletionOutcome};
 use spur_mcp::plan::labels;
@@ -73,6 +74,19 @@ fn parse_id_from_create(json: &str) -> String {
 
 fn label_issue(repo: &Path, issue_id: &str, label: &str) {
     run_br(repo, &["label", "add", issue_id, label]);
+}
+
+fn continuation_ctx(
+    tx: tokio::sync::mpsc::UnboundedSender<BrainContinuation>,
+) -> spur_mcp::server::DetachedContinuationCtx {
+    spur_mcp::server::DetachedContinuationCtx {
+        on_complete: Arc::new(move |cont, _worker_session| {
+            let tx = tx.clone();
+            Box::pin(async move {
+                tx.send(cont).expect("capture continuation");
+            })
+        }),
+    }
 }
 
 fn collect_sentinels(list_json: &str) -> Vec<AuditSentinelKind> {
@@ -166,6 +180,115 @@ async fn seed_epic_fixture(
     label_issue(repo, &epic_id, labels::PLAN_COMPLETE);
 
     (beads_pm(repo).await, epic_id, task_a_id, task_b_id)
+}
+
+#[tokio::test]
+async fn reconciler_pushes_plan_completed_continuation_after_worker_completion_closes_epic() {
+    if !br_available() {
+        eprintln!(
+            "skipping reconciler_pushes_plan_completed_continuation_after_worker_completion_closes_epic: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+    let plan_id = "P-reconciler-continuation";
+    let epic_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Reconciler Continuation Epic",
+            "--priority",
+            "2",
+        ],
+    ));
+    let task_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Reconciler Continuation Task",
+            "--priority",
+            "2",
+        ],
+    ));
+    let plan_label = labels::plan_id(plan_id);
+    label_issue(dir.path(), &epic_id, &plan_label);
+    label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
+    label_issue(dir.path(), &task_id, &plan_label);
+    label_issue(dir.path(), &task_id, &labels::plan_task_id("t1"));
+    label_issue(dir.path(), &task_id, &labels::agent("codex"));
+
+    let pm = beads_pm(dir.path()).await;
+    let (continuation_tx, mut continuation_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (delegation_tx, mut delegation_rx) = tokio::sync::mpsc::channel(1);
+    let task_tracker = tokio_util::task::TaskTracker::new();
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        Some(ReconcilerDispatchCtx {
+            delegation_tx,
+            task_tracker: task_tracker.clone(),
+            brain_session_id: BrainSessionId::new(SessionId("brain".into())),
+            event_sink: None,
+            materializer: test_materializer(),
+            continuation_ctx: Arc::new(continuation_ctx(continuation_tx)),
+        }),
+        Some(plan_id.into()),
+        common::server_builder::pro_feature_gate(),
+    );
+
+    assert!(reconciler.tick_once().await.expect("dispatch tick"));
+    let request = tokio::time::timeout(Duration::from_secs(2), delegation_rx.recv())
+        .await
+        .expect("dispatch request should arrive")
+        .expect("dispatch request");
+    assert_eq!(request.issue_id.as_deref(), Some(task_id.as_str()));
+    request
+        .respond_to
+        .send(spur_acp::DelegationResult {
+            status: spur_acp::DelegationStatus::Failed {
+                error: "worker failed".into(),
+            },
+            diff: None,
+            diff_summary: None,
+            summary: Some("worker failed".into()),
+            estimated_cost_usd: 0.0,
+            worker_branch: None,
+            artifact: None,
+        })
+        .expect("send worker result");
+    task_tracker.close();
+    tokio::time::timeout(Duration::from_secs(2), task_tracker.wait())
+        .await
+        .expect("completion task should finish");
+
+    assert!(reconciler.tick_once().await.expect("epic closure tick"));
+
+    let plan_cont = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let cont = continuation_rx
+                .recv()
+                .await
+                .expect("continuation channel open");
+            if cont.source == ContinuationSource::PlanCompleted {
+                break cont;
+            }
+        }
+    })
+    .await
+    .expect("PlanCompleted continuation should fire from reconciler");
+    assert_eq!(plan_cont.source, ContinuationSource::PlanCompleted);
+
+    let epic = pm.get_issue(&epic_id).await.expect("get epic");
+    assert_eq!(epic.status, pm.closed_status());
 }
 
 #[tokio::test]
@@ -265,6 +388,7 @@ async fn t_v0d_2_all_approved_epic_still_yields_plan_ready_to_merge() {
             brain_session_id: BrainSessionId::new(SessionId("brain".into())),
             event_sink: Some(sink_ref),
             materializer: test_materializer(),
+            continuation_ctx: common::server_builder::continuation_ctx_arc(),
         }),
         Some("P1".into()),
         common::server_builder::pro_feature_gate(),
@@ -393,6 +517,7 @@ async fn three_task_plan_drops_plan_outcomes_on_epic_close_but_retains_global_ri
             brain_session_id: BrainSessionId::new(SessionId("brain".into())),
             event_sink: None,
             materializer: test_materializer(),
+            continuation_ctx: common::server_builder::continuation_ctx_arc(),
         }),
         Some(plan_id.into()),
         common::server_builder::pro_feature_gate(),
@@ -589,6 +714,7 @@ async fn closed_epic_backfill_emits_plan_completed_event() {
             brain_session_id: BrainSessionId::new(SessionId("brain".into())),
             event_sink: Some(sink_ref),
             materializer: test_materializer(),
+            continuation_ctx: common::server_builder::continuation_ctx_arc(),
         }),
         Some("P2".into()),
         common::server_builder::pro_feature_gate(),
