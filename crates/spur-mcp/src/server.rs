@@ -235,6 +235,7 @@ fn project_section(
 enum DelegationDispatchError {
     #[error("SessionRetiring")]
     SessionRetiring,
+    #[allow(dead_code)]
     #[error("worker MCP server unavailable: {reason}")]
     WorkerMcpUnavailable { reason: String },
 }
@@ -4002,6 +4003,9 @@ impl McpCallbackServer {
             .await
             {
                 Ok(sg) => {
+                    if let Err(error) = self.require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED) {
+                        return JsonRpcResponse::mcp_error(id.clone(), error);
+                    }
                     if let Some(adv) = pm.advanced() {
                         let audit =
                             crate::plan::audit_sentinel::AuditSentinelKind::PlanOwnershipAcquired {

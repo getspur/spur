@@ -215,6 +215,12 @@ async fn t_v0c_2_reconciler_dispatch_writes_label_and_dispatch_audit() {
     .await
     .expect("build epic subgraph");
     let task_id = subgraph.task_map.get("t1").expect("task id").clone();
+    add_labels(
+        pm.as_ref(),
+        &subgraph.epic_id,
+        &[labels::plan_owner("brain")],
+    )
+    .await;
 
     let (delegation_tx, mut delegation_rx) = tokio::sync::mpsc::channel(1);
     let reconciler = Reconciler::new(
@@ -390,6 +396,12 @@ async fn t_v0c_5_request_changes_stays_open_and_reconciler_redispatches() {
     .await
     .expect("build epic subgraph");
     let task_id = subgraph.task_map.get("t1").expect("task id").clone();
+    add_labels(
+        pm.as_ref(),
+        &subgraph.epic_id,
+        &[labels::plan_owner("brain")],
+    )
+    .await;
     add_labels(
         pm.as_ref(),
         &task_id,
@@ -715,6 +727,12 @@ async fn t_v0c_10_startup_reclaims_mid_plan_and_continues_dispatch() {
     .await
     .expect("build epic subgraph");
     let task_id = subgraph.task_map.get("t1").expect("task id").clone();
+    add_labels(
+        pm.as_ref(),
+        &subgraph.epic_id,
+        &[labels::plan_owner("brain")],
+    )
+    .await;
     let session_id = BrainSessionId::new(SessionId("brain".into()));
     let (mut server, mut channel) = McpCallbackServer::new(
         &session_id,
@@ -767,6 +785,12 @@ async fn t_v0c_11_startup_reclaim_clears_stale_dispatch_before_redispatch() {
     .await
     .expect("build epic subgraph");
     let task_id = subgraph.task_map.get("t1").expect("task id").clone();
+    add_labels(
+        pm.as_ref(),
+        &subgraph.epic_id,
+        &[labels::plan_owner("brain")],
+    )
+    .await;
     let stale_delegation_id = "del-stale";
     add_labels(
         pm.as_ref(),
