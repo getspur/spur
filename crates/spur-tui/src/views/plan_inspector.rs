@@ -68,6 +68,14 @@ impl PlanInspectorView {
         self.task_detail_scroll = self.task_detail_scroll.saturating_add(lines);
     }
 
+    fn scroll_task_detail_to_top(&mut self) {
+        self.task_detail_scroll = 0;
+    }
+
+    fn scroll_task_detail_to_bottom(&mut self) {
+        self.task_detail_scroll = usize::MAX;
+    }
+
     fn selected_issue_id<'a>(&self, task: &'a spur_core::TrackedTask) -> Option<&'a str> {
         task.issue_id.as_deref()
     }
@@ -238,6 +246,37 @@ impl View for PlanInspectorView {
         let plan = ctx.plan_projection.current_for_session(&self.session_id);
         if let Some(plan) = plan {
             self.ensure_selection(plan);
+
+            if self.open_issue_id.is_some() {
+                match key.code {
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        self.scroll_task_detail_up(1);
+                        return Some(Action::ScrollUp);
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        self.scroll_task_detail_down(1);
+                        return Some(Action::ScrollDown);
+                    }
+                    KeyCode::Char('g') if key.modifiers.is_empty() => {
+                        self.scroll_task_detail_to_top();
+                        return Some(Action::ScrollToTop);
+                    }
+                    KeyCode::Char('G') => {
+                        self.scroll_task_detail_to_bottom();
+                        return Some(Action::ScrollToBottom);
+                    }
+                    KeyCode::PageUp => {
+                        self.scroll_task_detail_up(10);
+                        return Some(Action::ScrollUp);
+                    }
+                    KeyCode::PageDown => {
+                        self.scroll_task_detail_down(10);
+                        return Some(Action::ScrollDown);
+                    }
+                    _ => {}
+                }
+            }
+
             match key.code {
                 KeyCode::Char('h') | KeyCode::Left => self.move_lane(plan, -1),
                 KeyCode::Char('l') | KeyCode::Right => self.move_lane(plan, 1),
@@ -254,14 +293,6 @@ impl View for PlanInspectorView {
                             message: "No issue linked to selected task".to_string(),
                         });
                     }
-                }
-                KeyCode::PageUp if self.open_issue_id.is_some() => {
-                    self.scroll_task_detail_up(10);
-                    return Some(Action::ScrollUp);
-                }
-                KeyCode::PageDown if self.open_issue_id.is_some() => {
-                    self.scroll_task_detail_down(10);
-                    return Some(Action::ScrollDown);
                 }
                 _ => {}
             }
@@ -505,7 +536,7 @@ impl View for PlanInspectorView {
             "Enter: no linked issue"
         };
         let scroll_hint = if self.open_issue_id.is_some() {
-            "  PgUp/PgDn: scroll detail"
+            "  j/k: line scroll  g/G: top/btm  PgUp/PgDn: page"
         } else {
             ""
         };
