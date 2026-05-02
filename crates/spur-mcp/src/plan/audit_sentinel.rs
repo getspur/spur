@@ -170,6 +170,26 @@ pub enum AuditSentinelKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    PlanOwnershipAcquired {
+        plan_id: String,
+        owner: String,
+        token: String,
+        reason: String,
+    },
+    PlanOwnershipTransferred {
+        plan_id: String,
+        from: String,
+        to: String,
+        mode: String,
+        previous_token: String,
+        new_token: String,
+    },
+    PlanHandoffReady {
+        plan_id: String,
+        owner: String,
+        token: String,
+        progress_cursor: String,
+    },
     /// Forward-compat fallback. When a future SPUR release adds a new audit
     /// sentinel variant and emits it into a beads comment, older clients
     /// parsing that comment will deserialize it into `Unknown` instead of
@@ -208,6 +228,9 @@ impl AuditSentinelKind {
             Self::MutationInvariantViolation { .. } => "mutation-invariant-violation",
             Self::LateSignal { .. } => "late-signal",
             Self::WorkerMcp { .. } => "worker-mcp",
+            Self::PlanOwnershipAcquired { .. } => "plan-ownership-acquired",
+            Self::PlanOwnershipTransferred { .. } => "plan-ownership-transferred",
+            Self::PlanHandoffReady { .. } => "plan-handoff-ready",
             Self::Unknown => "unknown",
         }
     }
@@ -364,6 +387,26 @@ mod tests {
                 signal_id: "sig-2".into(),
                 terminal_status: "approved".into(),
             },
+            AuditSentinelKind::PlanOwnershipAcquired {
+                plan_id: "P1".into(),
+                owner: "brain-A".into(),
+                token: "token-A".into(),
+                reason: "submit_plan".into(),
+            },
+            AuditSentinelKind::PlanOwnershipTransferred {
+                plan_id: "P1".into(),
+                from: "brain-A".into(),
+                to: "brain-B".into(),
+                mode: "inactive-reclaim".into(),
+                previous_token: "token-A".into(),
+                new_token: "token-B".into(),
+            },
+            AuditSentinelKind::PlanHandoffReady {
+                plan_id: "P1".into(),
+                owner: "brain-A".into(),
+                token: "token-A".into(),
+                progress_cursor: "cursor-1".into(),
+            },
         ];
         for k in cases {
             let body = encode_comment(&k);
@@ -465,6 +508,26 @@ mod tests {
             AuditSentinelKind::LateSignal {
                 signal_id: "sig-2".into(),
                 terminal_status: "approved".into(),
+            },
+            AuditSentinelKind::PlanOwnershipAcquired {
+                plan_id: "P1".into(),
+                owner: "brain-A".into(),
+                token: "token-A".into(),
+                reason: "submit_plan".into(),
+            },
+            AuditSentinelKind::PlanOwnershipTransferred {
+                plan_id: "P1".into(),
+                from: "brain-A".into(),
+                to: "brain-B".into(),
+                mode: "inactive-reclaim".into(),
+                previous_token: "token-A".into(),
+                new_token: "token-B".into(),
+            },
+            AuditSentinelKind::PlanHandoffReady {
+                plan_id: "P1".into(),
+                owner: "brain-A".into(),
+                token: "token-A".into(),
+                progress_cursor: "cursor-1".into(),
             },
             AuditSentinelKind::Unknown,
         ] {
