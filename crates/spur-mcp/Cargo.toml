@@ -44,6 +44,7 @@ proptest = { workspace = true }
 reqwest = { workspace = true }
 rusqlite = { workspace = true }
 spur-blob-store = { workspace = true, features = ["test-support"] }
+spur-mcp = { path = ".", features = ["test-support"] }
 tempfile = "3"
 # start_paused = true on #[tokio::test] requires test-util feature.
 tokio = { version = "1", features = ["full", "test-util"] }
