@@ -201,12 +201,14 @@ impl PlanInspectorView {
     }
 
     fn move_lane(&mut self, plan: &TrackedPlan, delta: isize) {
+        self.close_issue_detail();
         let current = self.current_stage(plan) as isize;
         let next = (current + delta).clamp(0, Self::max_stage(plan) as isize) as usize;
         self.select_first_in_stage(plan, next);
     }
 
     fn move_task(&mut self, plan: &TrackedPlan, delta: isize) {
+        self.close_issue_detail();
         let tasks: Vec<_> = if self.stacked_mode {
             crate::components::plan_stage_board::stage_grouped_tasks(plan)
         } else {
