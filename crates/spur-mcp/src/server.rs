@@ -3728,7 +3728,7 @@ impl McpCallbackServer {
                     pm,
                     &epic_id,
                     IssueUpdate {
-                        add_labels: vec![owner_label],
+                        add_labels: vec![owner_label.clone()],
                         ..Default::default()
                     },
                 )
@@ -3770,6 +3770,23 @@ impl McpCallbackServer {
                         )
                     }
                     crate::plan::ownership::PlanOwnerMatch::OwnedByOther { owner } => {
+                        if let Err(error) = apply_issue_update(
+                            pm,
+                            &epic_id,
+                            IssueUpdate {
+                                remove_labels: vec![owner_label],
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        {
+                            return JsonRpcResponse::internal_error(
+                                id,
+                                format!(
+                                    "resume_plan: failed to clean up contested owner claim for plan {plan_id}: {error}"
+                                ),
+                            );
+                        }
                         JsonRpcResponse::error(
                             id,
                             -32009,
@@ -3779,6 +3796,23 @@ impl McpCallbackServer {
                         )
                     }
                     crate::plan::ownership::PlanOwnerMatch::Ambiguous { owners } => {
+                        if let Err(error) = apply_issue_update(
+                            pm,
+                            &epic_id,
+                            IssueUpdate {
+                                remove_labels: vec![owner_label],
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        {
+                            return JsonRpcResponse::internal_error(
+                                id,
+                                format!(
+                                    "resume_plan: failed to clean up contested owner claim for plan {plan_id}: {error}"
+                                ),
+                            );
+                        }
                         JsonRpcResponse::error(
                             id,
                             -32009,
