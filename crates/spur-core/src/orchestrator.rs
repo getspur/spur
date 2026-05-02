@@ -22,10 +22,11 @@ use spur_acp::session_lock::{AcquireOutcome, SessionAttachGuard};
 use spur_acp::types::*;
 use spur_acp::{
     CancellationControl, DelegationAbortHandle, DelegationAbortReason, DelegationResult,
-    DelegationStatus, GraphEdgeEvent, GraphNodeEvent, LifecycleState, ReviewKind, ReviewPayload,
+    DelegationStatus, GraphEdgeEvent, GraphNodeEvent, LifecycleState, PlanLifecycleEvent,
+    PlanOwnerStateEvent, PlanSummaryCountsEvent, PlanSummaryEvent, ReviewKind, ReviewPayload,
     SpurEvent, SpurEventBody, TimeoutFallback,
 };
-use spur_pm::Issue;
+use spur_pm::{Issue, IssueSummary};
 
 use agent_client_protocol::schema::{
     ContentBlock, InitializeRequest, ListSessionsRequest, McpServer, McpServerHttp, PromptRequest,
@@ -1189,6 +1190,12 @@ pub enum InteractiveInput {
     },
     /// Refresh the issue list and re-emit IssuesLoaded.
     RefreshIssues,
+    /// Refresh persisted plan summaries and emit PlansLoaded.
+    RefreshPlans,
+    /// Resume a persisted plan.
+    ResumePlan {
+        plan_id: String,
+    },
     /// Fetch full issue detail and emit IssueDetailFetched.
     GetIssueDetail {
         id: String,
@@ -1352,6 +1359,196 @@ async fn refresh_pm_state(
         }
     }
     None
+}
+
+const PLAN_COMPLETE_LABEL: &str = "spur:plan-complete";
+const PLAN_PENDING_LABEL: &str = "spur:plan-pending";
+const PLAN_ID_PREFIX: &str = "spur:plan-id:";
+const PLAN_OWNER_PREFIX: &str = "spur:plan-owner:";
+const READY_FOR_REVIEW_LABEL: &str = "spur:ready-for-review";
+const REVIEW_REJECTED_LABEL: &str = "spur:review-rejected";
+
+fn parse_label_value<'a>(label: &'a str, prefix: &str) -> Option<&'a str> {
+    label.strip_prefix(prefix).filter(|value| !value.is_empty())
+}
+
+fn compact_label_component(value: &str) -> String {
+    value.replace('-', "")
+}
+
+fn plan_id_from_labels(labels: &[String]) -> Option<String> {
+    labels
+        .iter()
+        .find_map(|label| parse_label_value(label, PLAN_ID_PREFIX))
+        .map(ToOwned::to_owned)
+}
+
+fn plan_owner_state_from_labels(
+    labels: &[String],
+    current_brain_session: Option<&SessionId>,
+) -> PlanOwnerStateEvent {
+    let mut owners: Vec<String> = labels
+        .iter()
+        .filter_map(|label| parse_label_value(label, PLAN_OWNER_PREFIX))
+        .map(ToOwned::to_owned)
+        .collect();
+    owners.sort();
+    owners.dedup();
+
+    match owners.as_slice() {
+        [] => PlanOwnerStateEvent::Unowned,
+        [owner] => {
+            let current = current_brain_session.map(|session| compact_label_component(&session.0));
+            if current.as_deref() == Some(owner.as_str()) {
+                PlanOwnerStateEvent::Mine
+            } else {
+                PlanOwnerStateEvent::Other {
+                    owner: owner.clone(),
+                }
+            }
+        }
+        _ => PlanOwnerStateEvent::Ambiguous { owners },
+    }
+}
+
+fn count_plan_children(issues: &[IssueSummary], epic_id: &str) -> PlanSummaryCountsEvent {
+    let mut counts = PlanSummaryCountsEvent {
+        total: 0,
+        pending: 0,
+        ready: 0,
+        running: 0,
+        awaiting_review: 0,
+        approved: 0,
+        rejected: 0,
+        failed: 0,
+        cancelled: 0,
+    };
+
+    for issue in issues {
+        if issue.id == epic_id || issue.issue_type.as_deref() == Some("epic") {
+            continue;
+        }
+
+        counts.total += 1;
+        let status = issue.status.as_str();
+        let has_label = |needle: &str| issue.labels.iter().any(|label| label == needle);
+
+        if status == "cancelled" {
+            counts.cancelled += 1;
+        } else if status == "failed" {
+            counts.failed += 1;
+        } else if matches!(status, "rejected" | "review-rejected")
+            || has_label(REVIEW_REJECTED_LABEL)
+            || has_label("rejected")
+        {
+            counts.rejected += 1;
+        } else if matches!(status, "approved" | "closed") {
+            counts.approved += 1;
+        } else if status == "awaiting_review" || has_label(READY_FOR_REVIEW_LABEL) {
+            counts.awaiting_review += 1;
+        } else if matches!(status, "in_progress" | "running" | "dispatched") {
+            counts.running += 1;
+        } else if status == "ready" {
+            counts.ready += 1;
+        } else {
+            counts.pending += 1;
+        }
+    }
+
+    counts
+}
+
+fn lifecycle_from_plan(
+    epic: &IssueSummary,
+    counts: Option<&PlanSummaryCountsEvent>,
+) -> PlanLifecycleEvent {
+    if epic.labels.iter().any(|label| label == PLAN_PENDING_LABEL) {
+        return PlanLifecycleEvent::Pending;
+    }
+    if epic.status == "cancelled" || epic.status == "failed" {
+        return PlanLifecycleEvent::Failed;
+    }
+    if epic.status == "closed" {
+        return PlanLifecycleEvent::Complete;
+    }
+
+    let Some(counts) = counts else {
+        return if epic.labels.iter().any(|label| label == PLAN_COMPLETE_LABEL) {
+            PlanLifecycleEvent::Running
+        } else {
+            PlanLifecycleEvent::Unknown
+        };
+    };
+
+    if counts.failed > 0 || counts.rejected > 0 {
+        PlanLifecycleEvent::Failed
+    } else if counts.total > 0 && counts.approved + counts.cancelled == counts.total {
+        PlanLifecycleEvent::Complete
+    } else if counts.awaiting_review > 0 {
+        PlanLifecycleEvent::AwaitingReview
+    } else if counts.total > 0 && counts.pending == counts.total {
+        PlanLifecycleEvent::Pending
+    } else if counts.total > 0 {
+        PlanLifecycleEvent::Running
+    } else if epic.labels.iter().any(|label| label == PLAN_COMPLETE_LABEL) {
+        PlanLifecycleEvent::Running
+    } else {
+        PlanLifecycleEvent::Unknown
+    }
+}
+
+async fn load_plan_summaries(
+    pm: &PmService,
+    current_brain_session: Option<&SessionId>,
+) -> anyhow::Result<Vec<PlanSummaryEvent>> {
+    let epics = pm
+        .list_issues(spur_pm::IssueFilter {
+            issue_type: Some("epic".into()),
+            include_closed: true,
+            limit: Some(1000),
+            ..Default::default()
+        })
+        .await?;
+
+    let mut plans = Vec::new();
+    for epic in epics {
+        let Some(plan_id) = plan_id_from_labels(&epic.labels) else {
+            continue;
+        };
+
+        let plan_label = format!("{PLAN_ID_PREFIX}{plan_id}");
+        let counts = match pm
+            .list_issues(spur_pm::IssueFilter {
+                labels: vec![plan_label],
+                include_closed: true,
+                limit: Some(1000),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(children) => Some(count_plan_children(&children, &epic.id)),
+            Err(err) => {
+                warn!(
+                    plan_id = %plan_id,
+                    error = %err,
+                    "failed to load persisted plan children for summary counts"
+                );
+                None
+            }
+        };
+
+        plans.push(PlanSummaryEvent {
+            plan_id,
+            epic_id: epic.id.clone(),
+            title: epic.title.clone(),
+            owner_state: plan_owner_state_from_labels(&epic.labels, current_brain_session),
+            lifecycle: lifecycle_from_plan(&epic, counts.as_ref()),
+            counts,
+            updated_at: None,
+        });
+    }
+
+    Ok(plans)
 }
 
 /// Convert spur_pm::Issue to the spur_acp mirror type for event bus transmission.
@@ -2847,6 +3044,40 @@ impl Orchestrator {
                                 id: None,
                             });
                         }
+                    }
+
+                    // ── RefreshPlans ──────────────────────────────────────
+                    InteractiveInput::RefreshPlans => {
+                        if let Some(pm) = &self.pm_service {
+                            let current_session = brain.as_ref().map(|b| &b.spur_session_id);
+                            match load_plan_summaries(pm, current_session).await {
+                                Ok(plans) => {
+                                    self.funnel.emit(SpurEventBody::PlansLoaded { plans });
+                                }
+                                Err(e) => {
+                                    self.funnel.emit(SpurEventBody::PlanCommandError {
+                                        operation: "RefreshPlans".into(),
+                                        plan_id: None,
+                                        error: e.to_string(),
+                                    });
+                                }
+                            }
+                        } else {
+                            self.funnel.emit(SpurEventBody::PlanCommandError {
+                                operation: "RefreshPlans".into(),
+                                plan_id: None,
+                                error: "No issue tracker configured".into(),
+                            });
+                        }
+                    }
+
+                    // ── ResumePlan ────────────────────────────────────────
+                    InteractiveInput::ResumePlan { plan_id } => {
+                        self.funnel.emit(SpurEventBody::PlanCommandError {
+                            operation: "ResumePlan".into(),
+                            plan_id: Some(plan_id),
+                            error: "resume_plan is not supported by the orchestrator TUI bridge yet; use the MCP resume_plan tool from an active brain session when server support is available".into(),
+                        });
                     }
 
                     // ── GetIssueDetail ────────────────────────────────────
