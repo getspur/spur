@@ -671,6 +671,13 @@ pub enum SpurEventBody {
         worker_session: SessionId,
         status: DelegationStatus,
     },
+    WorkerMcpDelegationSummary {
+        delegation_id: String,
+        calls_total: u64,
+        calls_by_tool: std::collections::BTreeMap<String, u64>,
+        p99_latency_ms: u64,
+        errors: u64,
+    },
     ConflictDetected {
         files: Vec<PathBuf>,
     },
@@ -1079,11 +1086,41 @@ pub enum SpurEventBody {
     },
 }
 
+impl PartialEq for SpurEventBody {
+    fn eq(&self, other: &Self) -> bool {
+        match (serde_json::to_value(self), serde_json::to_value(other)) {
+            (Ok(left), Ok(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
 /// A single entry in a replayed conversation history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryEntry {
     pub role: String,
     pub text: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_mcp_delegation_summary_round_trip() {
+        let event = SpurEventBody::WorkerMcpDelegationSummary {
+            delegation_id: "abc-123".into(),
+            calls_total: 42,
+            calls_by_tool: vec![("get_issue".into(), 30), ("update_issue".into(), 12)]
+                .into_iter()
+                .collect(),
+            p99_latency_ms: 87,
+            errors: 2,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let decoded: SpurEventBody = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, event);
+    }
 }
 
 #[cfg(test)]
