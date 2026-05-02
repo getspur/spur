@@ -193,6 +193,10 @@ pub enum Action {
     GetIssueGraph {
         id: String,
     },
+    /// Navigate to Backlog and open issue detail for the given issue id.
+    OpenIssueInBacklog {
+        id: String,
+    },
     /// Show a short status-bar hint owned by the App transient hint channel.
     FlashHint {
         message: String,

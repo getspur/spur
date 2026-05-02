@@ -2,10 +2,9 @@ use ratatui::{backend::TestBackend, layout::Rect, Terminal};
 use spur_tui::action::ViewId;
 use spur_tui::components::status_bar::{StatusBar, StatusBarProps};
 
-fn render_status(width: u16) -> String {
+fn render_status_for(view: &ViewId, width: u16) -> String {
     let backend = TestBackend::new(width, 1);
     let mut term = Terminal::new(backend).unwrap();
-    let view = ViewId::Dashboard;
     term.draw(|f| {
         let area = Rect {
             x: 0,
@@ -14,7 +13,7 @@ fn render_status(width: u16) -> String {
             height: 1,
         };
         let props = StatusBarProps {
-            view: &view,
+            view,
             tombstone: None,
             running: 0,
             pending_review: 0,
@@ -43,6 +42,10 @@ fn render_status(width: u16) -> String {
         .collect::<String>()
 }
 
+fn render_status(width: u16) -> String {
+    render_status_for(&ViewId::Dashboard, width)
+}
+
 #[test]
 fn status_bar_shows_ctrl_k_go_badge() {
     let line = render_status(120);
@@ -51,4 +54,13 @@ fn status_bar_shows_ctrl_k_go_badge() {
         "status bar missing Ctrl+K badge: {line}"
     );
     assert!(line.contains("go"), "badge missing 'go' label: {line}");
+}
+
+#[test]
+fn plan_browser_status_bar_hint_includes_refresh() {
+    let line = render_status_for(&ViewId::PlanBrowser, 120);
+    assert!(
+        line.contains("[r]refresh"),
+        "PlanBrowser status bar hint missing refresh: {line}"
+    );
 }

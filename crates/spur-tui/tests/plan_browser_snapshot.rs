@@ -234,7 +234,7 @@ fn enter_on_active_mine_plan_opens_current_session_sprint() {
 }
 
 #[test]
-fn enter_on_mine_without_active_current_plan_shows_hint() {
+fn enter_on_persisted_mine_without_projection_opens_current_session_sprint() {
     let mut view = PlanBrowserView::new(SessionId("brain-1".into()));
     let lineage = ExecutorLineage::new();
     let plans = PlanProjectionStore::default();
@@ -243,10 +243,66 @@ fn enter_on_mine_without_active_current_plan_shows_hint() {
 
     let action = view.handle_key(key(KeyCode::Enter), &ctx);
 
+    assert!(
+        matches!(
+            action,
+            Some(Action::NavigateTo(ViewId::PlanInspector(SessionId(ref id)))) if id == "brain-1"
+        ),
+        "expected PlanInspector navigation from persisted Mine row, got {action:?}"
+    );
+}
+
+#[test]
+fn persisted_mine_row_blocks_resume_even_without_projection() {
+    let mut view = PlanBrowserView::new(SessionId("brain-1".into()));
+    let lineage = ExecutorLineage::new();
+    let plans = PlanProjectionStore::default();
+    let ctx = view_ctx(&lineage, &plans);
+    view.handle_spur_event(&loaded_event(), &ctx);
+
+    view.handle_key(key(KeyCode::Char('j')), &ctx);
+    let action = view.handle_key(key(KeyCode::Char('R')), &ctx);
+
     match action {
         Some(Action::FlashHint { message }) => {
-            assert!(message.contains("No active sprint"), "{message}");
+            assert!(message.contains("already owns active sprint"), "{message}");
         }
-        other => panic!("expected missing-active-plan FlashHint, got {other:?}"),
+        other => panic!("expected blocked FlashHint, got {other:?}"),
     }
+}
+
+#[test]
+fn selected_row_remains_visible_when_list_is_longer_than_viewport() {
+    let mut view = PlanBrowserView::new(SessionId("brain-1".into()));
+    let lineage = ExecutorLineage::new();
+    let plans = PlanProjectionStore::default();
+    let ctx = view_ctx(&lineage, &plans);
+    let long_plans = (0..18)
+        .map(|idx| {
+            summary(
+                &format!("plan-{idx:02}"),
+                PlanOwnerStateEvent::Unowned,
+                PlanLifecycleEvent::Pending,
+                0,
+                1,
+            )
+        })
+        .collect();
+    view.handle_spur_event(
+        &SpurEvent::now(SpurEventBody::PlansLoaded { plans: long_plans }),
+        &ctx,
+    );
+    view.handle_key(key(KeyCode::Char('G')), &ctx);
+
+    let backend = TestBackend::new(90, 14);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let rendered = rendered_text(&terminal);
+
+    assert!(
+        rendered.contains("> plan-17"),
+        "selected final row should stay visible:\n{rendered}"
+    );
 }
