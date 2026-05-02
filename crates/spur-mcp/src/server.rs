@@ -835,6 +835,27 @@ pub(crate) async fn reconstruct_historical_attempts(
                     record.feedback = feedback;
                 }
             }
+            // bd-33it: request_changes feedback also populates the historical
+            // attempt record. Joined by delegation_id so the get_task_diff
+            // operator-visible historical view sees the same feedback the
+            // reconciler used to enrich the worker prompt on retry.
+            crate::plan::audit_sentinel::AuditSentinelKind::ReviewFeedback {
+                delegation_id,
+                feedback,
+                worker_branch,
+                summary,
+                ..
+            } => {
+                if let Some(record) = attempts_by_delegation.get_mut(&delegation_id) {
+                    record.feedback = feedback;
+                    if record.worker_branch.is_none() {
+                        record.worker_branch = worker_branch;
+                    }
+                    if record.summary.is_none() {
+                        record.summary = summary;
+                    }
+                }
+            }
             _ => {}
         }
     }
