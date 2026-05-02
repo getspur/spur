@@ -33,7 +33,13 @@ To get started, navigate to the root of your project repository in your terminal
 spur init
 ```
 
-This command sets up the necessary workspace environment, creating a `.spur/config.toml` file where you can customize agent routing, UI preferences, and workspace behaviors.
+When you run `spur init`, the CLI performs several intelligent setup steps:
+* **Agent Discovery:** Scans your system's `$PATH` for supported agents (like `claude`, `codex`, `gemini`, or `kiro`) and registers them in your config. If an agent is missing, it provides a handy installation hint (e.g., `npm install -g @anthropic-ai/claude-code`).
+* **Project Management Tools:** Checks for optional local PM tools like `br` (beads) or `bv` for tracking issues.
+* **Interactive Setup:** Prompts you for optional setups, such as configuring a Telegram bot for remote interaction, and explicitly asks you to review permission bypasses (auto-approvals) for safety.
+* **Configuration Generation:** Creates or merges `.spur/config.toml` with your discovered agents, setting one as the "Brain" orchestrator. *(Note: `spur init` is safe to run multiple times; it will merge new agents without overwriting your manual customizations.)*
+
+*(Tip: Run `spur init --skills` to additionally install the bundled SpurPower agent skills to your repository.)*
 
 ## 3. First Launch
 
