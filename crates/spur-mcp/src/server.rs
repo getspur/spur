@@ -4331,6 +4331,8 @@ impl McpCallbackServer {
         let mut rollback_updates: Vec<(String, spur_pm::IssueUpdate)> = Vec::new();
         if let Ok(epic_issue) = pm.get_issue(&epic_id).await {
             let mut remove_labels = Vec::new();
+            let owner_label =
+                crate::plan::labels::plan_owner(&self.brain_session_id.as_session_id().0);
             for label in &epic_issue.labels {
                 if crate::plan::labels::parse_plan_id(label).is_some()
                     || crate::plan::labels::parse_agent(label).is_some()
@@ -4342,6 +4344,7 @@ impl McpCallbackServer {
                 add_labels: vec![
                     crate::plan::labels::plan_id(&plan_id),
                     crate::plan::labels::PLAN_COMPLETE.to_string(),
+                    owner_label,
                 ],
                 remove_labels,
                 ..Default::default()
