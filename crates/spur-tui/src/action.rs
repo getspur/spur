@@ -230,6 +230,7 @@ pub enum PermissionChoice {
 pub enum ViewId {
     Dashboard,
     IssueBrowser,
+    PlanBrowser,
     SessionDetail(SessionId),
     SessionPicker,
     PlanInspector(SessionId),
