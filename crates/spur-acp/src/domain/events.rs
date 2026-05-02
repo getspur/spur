@@ -191,6 +191,52 @@ pub struct IssueSummaryEvent {
     pub assignee: Option<String>,
 }
 
+/// Persisted plan summary carried in `PlansLoaded` for Sprints browsing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlanSummaryEvent {
+    pub plan_id: String,
+    pub epic_id: String,
+    pub title: String,
+    pub owner_state: PlanOwnerStateEvent,
+    pub lifecycle: PlanLifecycleEvent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counts: Option<PlanSummaryCountsEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlanSummaryCountsEvent {
+    pub total: u32,
+    pub pending: u32,
+    pub ready: u32,
+    pub running: u32,
+    pub awaiting_review: u32,
+    pub approved: u32,
+    pub rejected: u32,
+    pub failed: u32,
+    #[serde(default)]
+    pub cancelled: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PlanOwnerStateEvent {
+    Mine,
+    Unowned,
+    Other { owner: String },
+    Ambiguous { owners: Vec<String> },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PlanLifecycleEvent {
+    Pending,
+    Running,
+    AwaitingReview,
+    Complete,
+    Failed,
+    Unknown,
+}
+
 /// Full issue detail carried in the `IssueDetailFetched` event.
 /// Mirrors `spur_pm::Issue` without taking a direct dependency on spur-pm.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -714,6 +760,11 @@ pub enum SpurEventBody {
         issues: Vec<IssueSummaryEvent>,
     },
 
+    /// Emitted when the Sprints surface requests persisted plan summaries.
+    PlansLoaded {
+        plans: Vec<PlanSummaryEvent>,
+    },
+
     /// Response to a TUI request for full issue detail.
     /// Follows SessionsListed / IssuesLoaded precedent for request-response on broadcast.
     IssueDetailFetched {
@@ -739,6 +790,14 @@ pub enum SpurEventBody {
         error: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
+    },
+
+    /// Feedback for a failed plan operation initiated from TUI.
+    PlanCommandError {
+        operation: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan_id: Option<String>,
+        error: String,
     },
 
     /// Graph health alert summary from bv (beads_viewer) analysis.

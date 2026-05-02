@@ -118,6 +118,12 @@ pub enum UserInput {
     },
     /// Request the orchestrator to refresh the issue list and re-emit IssuesLoaded.
     RefreshIssues,
+    /// Request the orchestrator to refresh persisted plan summaries.
+    RefreshPlans,
+    /// Request the orchestrator to resume a persisted plan.
+    ResumePlan {
+        plan_id: String,
+    },
     /// Request full issue detail from the PM backend.
     GetIssueDetail {
         id: String,
@@ -3428,6 +3434,16 @@ impl App {
                 }
                 if let Some(ref tx) = self.user_input_tx {
                     let _ = tx.try_send(UserInput::RefreshIssues);
+                }
+            }
+            Action::RefreshPlans => {
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::RefreshPlans);
+                }
+            }
+            Action::ResumePlan { plan_id } => {
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::ResumePlan { plan_id });
                 }
             }
             Action::GetIssueGraph { id } => {
