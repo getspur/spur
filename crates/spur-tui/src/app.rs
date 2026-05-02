@@ -38,6 +38,7 @@ use crate::session_metadata::{ReadOnlyFutureSchema, SessionMetadataStore};
 use crate::tui;
 use crate::views::dashboard::{DashboardMode, DashboardView};
 use crate::views::issue_browser::IssueBrowserView;
+use crate::views::plan_browser::PlanBrowserView;
 use crate::views::plan_inspector::PlanInspectorView;
 use crate::views::session_detail::SessionDetailView;
 use crate::views::session_picker::SessionPickerView;
@@ -288,6 +289,7 @@ pub struct App {
     dashboard: DashboardView,
     session_detail: Option<SessionDetailView>,
     session_picker: Option<SessionPickerView>,
+    plan_browser: Option<PlanBrowserView>,
     plan_inspector: Option<PlanInspectorView>,
     issue_browser: Option<IssueBrowserView>,
     help_visible: bool,
@@ -595,6 +597,7 @@ impl App {
             dashboard,
             session_detail: None,
             session_picker,
+            plan_browser: None,
             plan_inspector: None,
             issue_browser: None,
             help_visible: false,
@@ -1838,6 +1841,10 @@ impl App {
                         .plan_inspector
                         .as_mut()
                         .and_then(|view| view.handle_key(key, &ctx)),
+                    ViewId::PlanBrowser => self
+                        .plan_browser
+                        .as_mut()
+                        .and_then(|view| view.handle_key(key, &ctx)),
                     ViewId::IssueBrowser => self
                         .issue_browser
                         .as_mut()
@@ -1943,6 +1950,7 @@ impl App {
                         }
                     }
                     ViewId::PlanInspector(_) => {}
+                    ViewId::PlanBrowser => {}
                     ViewId::IssueBrowser => {}
                     ViewId::Insights => {}
                     #[cfg(feature = "markdown")]
@@ -2132,6 +2140,7 @@ impl App {
                 // No mouse scroll in v1 picker.
             }
             ViewId::PlanInspector(_) => {}
+            ViewId::PlanBrowser => {}
             ViewId::IssueBrowser => {
                 if let Some(ref mut browser) = self.issue_browser {
                     if browser.issue_detail_visible() {
@@ -2571,6 +2580,9 @@ impl App {
         if let Some(ref mut inspector) = self.plan_inspector {
             inspector.handle_spur_event(&event, &ctx);
         }
+        if let Some(ref mut browser) = self.plan_browser {
+            browser.handle_spur_event(&event, &ctx);
+        }
         if let Some(ref mut browser) = self.issue_browser {
             browser.handle_spur_event(&event, &ctx);
         }
@@ -2612,6 +2624,20 @@ impl App {
                 self.plan_inspector = Some(PlanInspectorView::new(session.clone()));
                 self.current_view = ViewId::PlanInspector(session.clone());
                 self.dirty = true;
+            }
+
+            Action::NavigateTo(ViewId::PlanBrowser) => {
+                if self.plan_browser.is_none() {
+                    let current_session = self
+                        .session_detail
+                        .as_ref()
+                        .map(|detail| detail.session_id().clone())
+                        .unwrap_or_else(|| SessionId(String::new()));
+                    self.plan_browser = Some(PlanBrowserView::new(current_session));
+                }
+                self.current_view = ViewId::PlanBrowser;
+                self.dirty = true;
+                self.process_action(Action::RefreshPlans);
             }
 
             Action::NavigateTo(ViewId::IssueBrowser) => {
@@ -2657,6 +2683,11 @@ impl App {
                 if let ViewId::PlanInspector(ref session) = self.current_view {
                     self.current_view = ViewId::SessionDetail(session.clone());
                     self.plan_inspector = None;
+                    self.dirty = true;
+                    return;
+                }
+                if matches!(self.current_view, ViewId::PlanBrowser) {
+                    self.current_view = ViewId::Dashboard;
                     self.dirty = true;
                     return;
                 }
@@ -3890,6 +3921,11 @@ impl App {
                     view.tick();
                 }
             }
+            ViewId::PlanBrowser => {
+                if let Some(view) = self.plan_browser.as_mut() {
+                    view.tick();
+                }
+            }
             ViewId::IssueBrowser => {
                 if let Some(view) = self.issue_browser.as_mut() {
                     view.tick();
@@ -3971,6 +4007,11 @@ impl App {
             }
             ViewId::PlanInspector(_) => {
                 if let Some(ref mut view) = self.plan_inspector {
+                    view.render(frame, view_area, &ctx);
+                }
+            }
+            ViewId::PlanBrowser => {
+                if let Some(ref mut view) = self.plan_browser {
                     view.render(frame, view_area, &ctx);
                 }
             }

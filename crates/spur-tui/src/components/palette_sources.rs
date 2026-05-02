@@ -36,6 +36,14 @@ impl PaletteSource for ViewSource {
             },
             PaletteResult {
                 kind: PaletteKind::View,
+                label: "Sprints".into(),
+                subtitle: "view · open plan browser".into(),
+                payload: PalettePayload::View {
+                    action: Action::NavigateTo(ViewId::PlanBrowser),
+                },
+            },
+            PaletteResult {
+                kind: PaletteKind::View,
                 label: "Sessions".into(),
                 subtitle: "view · open session picker".into(),
                 payload: PalettePayload::View {
