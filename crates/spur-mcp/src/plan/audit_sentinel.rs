@@ -181,6 +181,15 @@ pub enum AuditSentinelKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    WorkerWrite {
+        delegation_id: String,
+        tool: String,
+        issue_id: String,
+    },
+    ReadAggregate {
+        delegation_id: String,
+        entries: Vec<ReadAggregateEntry>,
+    },
     /// Forward-compat fallback. When a future SPUR release adds a new audit
     /// sentinel variant and emits it into a beads comment, older clients
     /// parsing that comment will deserialize it into `Unknown` instead of
@@ -188,6 +197,14 @@ pub enum AuditSentinelKind {
     /// should skip `Unknown`; the encode path must never emit it.
     #[serde(other)]
     Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadAggregateEntry {
+    pub tool_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_issue_id: Option<String>,
+    pub ts: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,6 +237,8 @@ impl AuditSentinelKind {
             Self::MutationInvariantViolation { .. } => "mutation-invariant-violation",
             Self::LateSignal { .. } => "late-signal",
             Self::WorkerMcp { .. } => "worker-mcp",
+            Self::WorkerWrite { .. } => "worker-write",
+            Self::ReadAggregate { .. } => "read-aggregate",
             Self::Unknown => "unknown",
         }
     }
@@ -384,6 +403,26 @@ mod tests {
                 signal_id: "sig-2".into(),
                 terminal_status: "approved".into(),
             },
+            AuditSentinelKind::WorkerWrite {
+                delegation_id: "del-A".into(),
+                tool: "update_issue".into(),
+                issue_id: "bd-123".into(),
+            },
+            AuditSentinelKind::ReadAggregate {
+                delegation_id: "del-A".into(),
+                entries: vec![
+                    ReadAggregateEntry {
+                        tool_name: "get_issue".into(),
+                        target_issue_id: Some("bd-123".into()),
+                        ts: 0,
+                    },
+                    ReadAggregateEntry {
+                        tool_name: "list_issues".into(),
+                        target_issue_id: None,
+                        ts: 1,
+                    },
+                ],
+            },
         ];
         for k in cases {
             let body = encode_comment(&k);
@@ -493,6 +532,19 @@ mod tests {
             AuditSentinelKind::LateSignal {
                 signal_id: "sig-2".into(),
                 terminal_status: "approved".into(),
+            },
+            AuditSentinelKind::WorkerWrite {
+                delegation_id: "del-A".into(),
+                tool: "update_issue".into(),
+                issue_id: "bd-123".into(),
+            },
+            AuditSentinelKind::ReadAggregate {
+                delegation_id: "del-A".into(),
+                entries: vec![ReadAggregateEntry {
+                    tool_name: "get_issue".into(),
+                    target_issue_id: Some("bd-1".into()),
+                    ts: 0,
+                }],
             },
             AuditSentinelKind::Unknown,
         ] {
@@ -788,6 +840,45 @@ mod tests {
         assert_eq!(decoded.kind_str(), "worker-mcp");
         assert!(encoded.contains("\"call\""));
         assert!(!encoded.contains("\"Call\""));
+    }
+
+    #[test]
+    fn worker_write_sentinel_round_trip() {
+        let kind = AuditSentinelKind::WorkerWrite {
+            delegation_id: "del-A".into(),
+            tool: "update_issue".into(),
+            issue_id: "bd-123".into(),
+        };
+        let encoded = encode_comment(&kind);
+        let decoded = parse_comment(&encoded).unwrap().unwrap();
+        assert_eq!(decoded, kind);
+        assert_eq!(decoded.kind_str(), "worker-write");
+        assert!(encoded.contains("\"update_issue\""));
+    }
+
+    #[test]
+    fn read_aggregate_sentinel_round_trip() {
+        let kind = AuditSentinelKind::ReadAggregate {
+            delegation_id: "del-A".into(),
+            entries: vec![
+                ReadAggregateEntry {
+                    tool_name: "get_issue".into(),
+                    target_issue_id: Some("bd-123".into()),
+                    ts: 0,
+                },
+                ReadAggregateEntry {
+                    tool_name: "list_issues".into(),
+                    target_issue_id: None,
+                    ts: 1,
+                },
+            ],
+        };
+        let encoded = encode_comment(&kind);
+        let decoded = parse_comment(&encoded).unwrap().unwrap();
+        assert_eq!(decoded, kind);
+        assert_eq!(decoded.kind_str(), "read-aggregate");
+        assert!(encoded.contains("\"get_issue\""));
+        assert!(encoded.contains("\"list_issues\""));
     }
 
     #[test]
