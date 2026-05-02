@@ -517,17 +517,6 @@ fn pro_feature_gate() -> Arc<spur_license::FeatureGate> {
     gate
 }
 
-pub fn parse_delegation_plan(
-    container: &Value,
-) -> Result<Option<spur_acp::DelegationPlan>, String> {
-    match container.get("delegation_plan") {
-        None | Some(Value::Null) => Ok(None),
-        Some(value) => serde_json::from_value(value.clone())
-            .map(Some)
-            .map_err(|error| format!("invalid delegation_plan: {error}")),
-    }
-}
-
 /// Parse the `tasks` array from a `delegate_parallel` args payload into
 /// a list of partially-populated `DelegationRequest` skeletons. Public
 /// (crate-level) so integration tests can exercise the parse logic
@@ -545,36 +534,20 @@ pub fn parse_parallel_tasks(
         .ok_or_else(|| "Missing 'tasks' array".to_string())?;
     let mut out = Vec::with_capacity(tasks.len());
     for task_obj in tasks {
-        let agent = task_obj
-            .get("agent")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "task.agent missing".to_string())?
-            .to_string();
-        let task = task_obj
-            .get("task")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "task.task missing".to_string())?
-            .to_string();
-        let context_files: Vec<String> = task_obj
-            .get("context_files")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        let issue_id = task_obj
-            .get("issue_id")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let delegation_plan = parse_delegation_plan(task_obj)?;
+        let task: crate::tool_schemas::DelegateParallelTaskInput =
+            serde_json::from_value(task_obj.clone())
+                .map_err(|e| format!("Invalid task arguments: {e}"))?;
         let (tx, _rx) = tokio::sync::oneshot::channel();
         out.push(DelegationRequest {
             id: DelegationId::new(),
-            agent,
-            task,
-            context_files,
+            agent: task.agent,
+            task: task.task,
+            context_files: task.context_files.unwrap_or_default(),
             respond_to: tx,
             brain_session_id: brain_session_id.clone(),
-            delegation_plan,
-            issue_id,
-            base: None,
+            delegation_plan: task.delegation_plan,
+            issue_id: task.issue_id,
+            base: task.base,
             dispatched_base_oid_tx: None,
             attempt_tracker: new_attempt_tracker(),
         });
@@ -2572,27 +2545,16 @@ impl McpCallbackServer {
         if let Err(error) = self.ensure_accepting_delegations() {
             return error.into_response(id);
         }
-        let bad_params = |message| JsonRpcResponse::invalid_params(id.clone(), message);
-        let agent = match args.get("agent").and_then(|v| v.as_str()) {
-            Some(a) => a.to_string(),
-            None => return JsonRpcResponse::invalid_params(id, "Missing required field 'agent'"),
-        };
-        let task = match args.get("task").and_then(|v| v.as_str()) {
-            Some(t) => t.to_string(),
-            None => return JsonRpcResponse::invalid_params(id, "Missing required field 'task'"),
-        };
-        let context_files: Vec<String> = args
-            .get("context_files")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        let delegation_plan = match parse_delegation_plan(&args).map_err(bad_params) {
-            Ok(plan) => plan,
-            Err(response) => return response,
-        };
-        let issue_id = args
-            .get("issue_id")
-            .and_then(|v| v.as_str())
-            .map(String::from);
+        let parsed: crate::tool_schemas::DelegateToWorkerInput =
+            match serde_json::from_value(args.clone()) {
+                Ok(p) => p,
+                Err(e) => {
+                    return JsonRpcResponse::invalid_params(
+                        id,
+                        format!("Invalid arguments: {e}"),
+                    )
+                }
+            };
 
         let request_id = DelegationId::new();
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -2600,19 +2562,19 @@ impl McpCallbackServer {
 
         let delegation = DelegationRequest {
             id: request_id.clone(),
-            agent: agent.clone(),
-            task: task.clone(),
-            context_files,
+            agent: parsed.agent.clone(),
+            task: parsed.task,
+            context_files: parsed.context_files.unwrap_or_default(),
             respond_to: tx,
             brain_session_id: self.brain_session_id.clone(),
-            delegation_plan,
-            issue_id,
-            base: None,
+            delegation_plan: parsed.delegation_plan,
+            issue_id: parsed.issue_id,
+            base: parsed.base,
             dispatched_base_oid_tx: None,
             attempt_tracker: Arc::clone(&attempt_tracker),
         };
 
-        info!(agent = %agent, request_id = %request_id, "Sending delegation request");
+        info!(agent = %parsed.agent, request_id = %request_id, "Sending delegation request");
 
         if let Err(_e) = self.delegation_tx.send(delegation).await {
             error!("Failed to send delegation request");
@@ -2684,7 +2646,8 @@ impl McpCallbackServer {
                     "delegation_id": request_id,
                     "continuation_will_fire": false,
                     "description": format!(
-                        "Delegation to '{agent}' completed inline (delegation_id={request_id})."
+                        "Delegation to '{agent}' completed inline (delegation_id={request_id}).",
+                        agent = parsed.agent
                     ),
                     "result": result_json,
                 });
@@ -2702,7 +2665,7 @@ impl McpCallbackServer {
             }
             _ = tokio::time::sleep(inline_wait) => {
                 info!(
-                    agent = %agent,
+                    agent = %parsed.agent,
                     request_id = %request_id,
                     inline_wait_ms = inline_wait.as_millis() as u64,
                     "Delegation inline window expired — detaching via continuation bridge"
@@ -2731,7 +2694,8 @@ impl McpCallbackServer {
                         "Delegation to '{agent}' is running in the background \
                          (delegation_id={request_id}). A continuation event will \
                          fire automatically when the worker completes. Do NOT call \
-                         check_delegation_status — you will be re-prompted automatically."
+                         check_delegation_status — you will be re-prompted automatically.",
+                        agent = parsed.agent
                     ),
                 });
                 let payload_text = serde_json::to_string_pretty(&payload)
