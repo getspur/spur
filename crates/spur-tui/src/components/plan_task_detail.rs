@@ -146,17 +146,11 @@ pub fn render_task_detail(
         ));
         lines.push(kv(
             "created",
-            &issue
-                .created_at
-                .map(|created_at| created_at.format("%Y-%m-%d").to_string())
-                .unwrap_or_else(|| "--".to_string()),
+            &issue.created_at.format("%Y-%m-%d").to_string(),
         ));
         lines.push(kv(
             "updated",
-            &issue
-                .updated_at
-                .map(|updated_at| updated_at.format("%Y-%m-%d").to_string())
-                .unwrap_or_else(|| "--".to_string()),
+            &issue.updated_at.format("%Y-%m-%d").to_string(),
         ));
         if !issue.labels.is_empty() {
             lines.push(kv("labels", &issue.labels.join(", ")));
