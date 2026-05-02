@@ -1,10 +1,12 @@
+use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
 use spur_acp::{
-    PlanSnapshot, PlanSnapshotCounts, PlanSnapshotTask, SessionId, SpurEvent, SpurEventBody,
+    IssueDetailEvent, PlanSnapshot, PlanSnapshotCounts, PlanSnapshotTask, SessionId, SpurEvent,
+    SpurEventBody,
 };
 use spur_core::{ExecutorLineage, PlanProjectionStore, SessionSynopsisProjection};
-use spur_tui::action::Action;
+use spur_tui::action::{Action, IssueAction};
 use spur_tui::app::BrainStatus;
 use spur_tui::views::plan_inspector::PlanInspectorView;
 use spur_tui::views::{View, ViewContext};
@@ -269,6 +271,26 @@ fn buffer_contains(buf: &Buffer, needle: &str) -> bool {
     s.contains(needle)
 }
 
+fn sample_issue_detail_event(id: &str, title: &str, status: &str, body: &str) -> IssueDetailEvent {
+    let now = Utc::now();
+    IssueDetailEvent {
+        id: id.into(),
+        source: "github".into(),
+        title: title.into(),
+        body: body.into(),
+        status: status.into(),
+        labels: vec!["label-a".into(), "label-b".into()],
+        assignee: Some("coder".into()),
+        url: "https://example.com/issue".into(),
+        priority: Some(1),
+        issue_type: Some("bug".into()),
+        blocked_by: vec!["blocked-by-1".into()],
+        due_at: None,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
 #[test]
 fn plan_inspector_renders_wide_lane_board() {
     let backend = TestBackend::new(120, 32);
@@ -418,6 +440,83 @@ fn plan_inspector_alt_p_requests_navigate_back() {
 
     let action = view.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT), &ctx);
     assert!(matches!(action, Some(Action::NavigateBack)));
+}
+
+#[test]
+fn plan_inspector_enter_requests_issue_detail() {
+    let mut view = PlanInspectorView::new(SessionId("brain-1".into()));
+    let plans = sample_plan_store();
+    let lineage = sample_lineage();
+    let synopsis = SessionSynopsisProjection::new();
+    let ctx = ViewContext {
+        lineage: &lineage,
+        plan_projection: &plans,
+        synopsis: &synopsis,
+        brain_status: &BrainStatus::Idle,
+        license_badge: None,
+        flag_summary: None,
+        tombstone: None,
+        transient_hint_override: None,
+    };
+
+    let action = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &ctx);
+    assert!(matches!(
+        action,
+        Some(Action::Issue(IssueAction::ViewDetail { ref id })) if id == "bd-1"
+    ));
+}
+
+#[test]
+fn plan_inspector_renders_issue_detail_loading_and_fetched() {
+    let mut view = PlanInspectorView::new(SessionId("brain-1".into()));
+    let plans = sample_plan_store();
+    let lineage = sample_lineage();
+    let synopsis = SessionSynopsisProjection::new();
+    let ctx = ViewContext {
+        lineage: &lineage,
+        plan_projection: &plans,
+        synopsis: &synopsis,
+        brain_status: &BrainStatus::Idle,
+        license_badge: None,
+        flag_summary: None,
+        tombstone: None,
+        transient_hint_override: None,
+    };
+
+    let backend = TestBackend::new(120, 32);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let action = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &ctx);
+    assert!(matches!(
+        action,
+        Some(Action::Issue(IssueAction::ViewDetail { ref id })) if id == "bd-1"
+    ));
+
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let loading_buffer = terminal.backend().buffer().clone();
+    assert!(buffer_contains(&loading_buffer, "Loading issue detail..."));
+
+    view.handle_spur_event(
+        &SpurEvent::now(SpurEventBody::IssueDetailFetched {
+            requested_id: "bd-1".into(),
+            issue: sample_issue_detail_event("bd-1", "Contract task", "open", "Detailed\nbody"),
+        }),
+        &ctx,
+    );
+
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let detail_buffer = terminal.backend().buffer().clone();
+    assert!(buffer_contains(&detail_buffer, "Issue"));
+    assert!(buffer_contains(&detail_buffer, "id: bd-1"));
+    assert!(buffer_contains(&detail_buffer, "title: Contract task"));
+    assert!(buffer_contains(&detail_buffer, "status: open"));
+    assert!(buffer_contains(&detail_buffer, "Description"));
+    assert!(buffer_contains(&detail_buffer, "body"));
+    assert!(buffer_contains(&detail_buffer, "Detailed"));
 }
 
 #[test]

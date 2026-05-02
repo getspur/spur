@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -9,7 +11,7 @@ use ratatui::{
 use spur_acp::{SessionId, SpurEvent};
 use spur_core::TrackedPlan;
 
-use crate::action::Action;
+use crate::action::{Action, IssueAction};
 
 use super::View;
 
@@ -17,6 +19,15 @@ pub struct PlanInspectorView {
     session_id: SessionId,
     selected_task_id: Option<String>,
     stacked_mode: bool,
+    open_issue_id: Option<String>,
+    issue_states: HashMap<String, TaskIssueState>,
+}
+
+#[derive(Debug)]
+enum TaskIssueState {
+    Loading,
+    Loaded(spur_pm::Issue),
+    Error(String),
 }
 
 impl PlanInspectorView {
@@ -25,11 +36,92 @@ impl PlanInspectorView {
             session_id,
             selected_task_id: None,
             stacked_mode: false,
+            open_issue_id: None,
+            issue_states: HashMap::new(),
         }
     }
 
     pub fn session_id(&self) -> &SessionId {
         &self.session_id
+    }
+
+    fn set_selected_task_id(&mut self, task_id: Option<String>) {
+        if self.selected_task_id.as_deref() != task_id.as_deref() {
+            self.open_issue_id = None;
+        }
+        self.selected_task_id = task_id;
+    }
+
+    fn selected_issue_id<'a>(&self, task: &'a spur_core::TrackedTask) -> Option<&'a str> {
+        task.issue_id.as_deref()
+    }
+
+    fn toggle_issue_detail(&mut self, task: &spur_core::TrackedTask) -> Option<Action> {
+        let issue_id = self.selected_issue_id(task)?;
+        if self.open_issue_id.as_deref() == Some(issue_id) {
+            self.open_issue_id = None;
+            return None;
+        }
+
+        self.open_issue_id = Some(issue_id.to_string());
+        let needs_request = !matches!(
+            self.issue_states.get(issue_id),
+            Some(TaskIssueState::Loaded(_))
+        );
+        if needs_request {
+            self.issue_states
+                .insert(issue_id.to_string(), TaskIssueState::Loading);
+            Some(Action::Issue(IssueAction::ViewDetail {
+                id: issue_id.to_string(),
+            }))
+        } else {
+            None
+        }
+    }
+
+    fn issue_detail_for_selected(
+        &self,
+        task: &spur_core::TrackedTask,
+    ) -> (Option<&spur_pm::Issue>, Option<&str>) {
+        let issue_id = match self.selected_issue_id(task) {
+            Some(id) => id,
+            None => return (None, None),
+        };
+
+        if self.open_issue_id.as_deref() != Some(issue_id) {
+            return (None, None);
+        }
+
+        match self.issue_states.get(issue_id) {
+            Some(TaskIssueState::Loaded(issue)) => (Some(issue), None),
+            Some(TaskIssueState::Loading) => (None, Some("Loading issue detail...")),
+            Some(TaskIssueState::Error(error)) => (None, Some(error.as_str())),
+            None => (None, None),
+        }
+    }
+
+    fn detail_event_to_issue(event: &spur_acp::IssueDetailEvent) -> spur_pm::Issue {
+        spur_pm::Issue {
+            id: event.id.clone(),
+            source: match event.source.as_str() {
+                "github" => spur_pm::PmSource::GitHub,
+                "linear" => spur_pm::PmSource::Linear,
+                "plane" => spur_pm::PmSource::Plane,
+                _ => spur_pm::PmSource::Beads,
+            },
+            title: event.title.clone(),
+            status: event.status.clone(),
+            priority: event.priority,
+            issue_type: event.issue_type.clone(),
+            assignee: event.assignee.clone(),
+            due_at: event.due_at,
+            blocked_by: event.blocked_by.clone(),
+            labels: event.labels.clone(),
+            url: event.url.clone(),
+            body: event.body.clone(),
+            created_at: event.created_at,
+            updated_at: event.updated_at,
+        }
     }
 
     fn ensure_selection(&mut self, plan: &TrackedPlan) {
@@ -41,9 +133,11 @@ impl PlanInspectorView {
         if selected_exists {
             return;
         }
-        self.selected_task_id = crate::components::plan_stage_board::stage_grouped_tasks(plan)
-            .first()
-            .map(|task| task.task_id.clone());
+        self.set_selected_task_id(
+            crate::components::plan_stage_board::stage_grouped_tasks(plan)
+                .first()
+                .map(|task| task.task_id.clone()),
+        );
     }
 
     fn selected_task<'a>(&self, plan: &'a TrackedPlan) -> Option<&'a spur_core::TrackedTask> {
@@ -74,9 +168,11 @@ impl PlanInspectorView {
     }
 
     fn select_first_in_stage(&mut self, plan: &TrackedPlan, stage_idx: usize) {
-        self.selected_task_id = Self::tasks_in_stage(plan, stage_idx)
-            .first()
-            .map(|task| task.task_id.clone());
+        self.set_selected_task_id(
+            Self::tasks_in_stage(plan, stage_idx)
+                .first()
+                .map(|task| task.task_id.clone()),
+        );
     }
 
     fn move_lane(&mut self, plan: &TrackedPlan, delta: isize) {
@@ -104,7 +200,7 @@ impl PlanInspectorView {
             })
             .unwrap_or(0) as isize;
         let next = (current_idx + delta).clamp(0, tasks.len() as isize - 1) as usize;
-        self.selected_task_id = Some(tasks[next].task_id.clone());
+        self.set_selected_task_id(Some(tasks[next].task_id.clone()));
     }
 
     fn jump_lane_start(&mut self, plan: &TrackedPlan) {
@@ -114,7 +210,7 @@ impl PlanInspectorView {
     fn jump_lane_end(&mut self, plan: &TrackedPlan) {
         let stage_idx = self.current_stage(plan);
         if let Some(task) = Self::tasks_in_stage(plan, stage_idx).last() {
-            self.selected_task_id = Some(task.task_id.clone());
+            self.set_selected_task_id(Some(task.task_id.clone()));
         }
     }
 }
@@ -132,6 +228,11 @@ impl View for PlanInspectorView {
                 KeyCode::Char('k') | KeyCode::Up => self.move_task(plan, -1),
                 KeyCode::Char('g') if key.modifiers.is_empty() => self.jump_lane_start(plan),
                 KeyCode::Char('G') => self.jump_lane_end(plan),
+                KeyCode::Enter if key.modifiers.is_empty() => {
+                    if let Some(task) = self.selected_task(plan) {
+                        return self.toggle_issue_detail(task);
+                    }
+                }
                 _ => {}
             }
         }
@@ -144,7 +245,45 @@ impl View for PlanInspectorView {
         }
     }
 
-    fn handle_spur_event(&mut self, _event: &SpurEvent, _ctx: &super::ViewContext) {}
+    fn handle_spur_event(&mut self, event: &SpurEvent, _ctx: &super::ViewContext) {
+        match &event.body {
+            spur_acp::SpurEventBody::IssueDetailFetched {
+                requested_id,
+                issue,
+            } => {
+                self.issue_states.insert(
+                    requested_id.clone(),
+                    TaskIssueState::Loaded(Self::detail_event_to_issue(issue)),
+                );
+            }
+            spur_acp::SpurEventBody::IssueCommandError {
+                operation,
+                error,
+                id: Some(id),
+            } if operation == "GetIssueDetail" => {
+                if let Some(TaskIssueState::Loading) = self.issue_states.get(id) {
+                    self.issue_states
+                        .insert(id.clone(), TaskIssueState::Error(error.clone()));
+                }
+            }
+            spur_acp::SpurEventBody::IssueCommandError {
+                operation,
+                error,
+                id: None,
+            } if operation == "GetIssueDetail" => {
+                if let Some(open_issue_id) = self.open_issue_id.as_ref() {
+                    if matches!(
+                        self.issue_states.get(open_issue_id),
+                        Some(TaskIssueState::Loading)
+                    ) {
+                        self.issue_states
+                            .insert(open_issue_id.clone(), TaskIssueState::Error(error.clone()));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &super::ViewContext) {
         let chunks = Layout::vertical([
@@ -168,6 +307,10 @@ impl View for PlanInspectorView {
                             issue_id,
                         )
                     });
+            let issue_detail = selected
+                .as_ref()
+                .map(|task| self.issue_detail_for_selected(task))
+                .unwrap_or((None, None));
 
             // ── Header ──────────────────────────────────────────────────────
             let header_rows =
@@ -249,6 +392,8 @@ impl View for PlanInspectorView {
                         detail_area,
                         task,
                         live_node,
+                        issue_detail.0,
+                        issue_detail.1,
                     );
                 } else {
                     frame.render_widget(
@@ -288,6 +433,8 @@ impl View for PlanInspectorView {
                         detail_area,
                         task,
                         live_node,
+                        issue_detail.0,
+                        issue_detail.1,
                     );
                 }
             }
@@ -301,7 +448,7 @@ impl View for PlanInspectorView {
 
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
-                " h/l: lane  j/k: task  g/G: ends  Alt+P/Esc: close ",
+                " h/l: lane  j/k: task  Enter: issue detail  g/G: ends  Alt+P/Esc: close ",
                 Style::default().fg(Color::DarkGray),
             )])),
             chunks[2],
