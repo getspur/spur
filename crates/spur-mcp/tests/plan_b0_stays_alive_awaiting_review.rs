@@ -25,6 +25,12 @@ fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterialize
     ))
 }
 
+fn test_continuation_ctx() -> Arc<spur_mcp::server::DetachedContinuationCtx> {
+    Arc::new(spur_mcp::server::DetachedContinuationCtx {
+        on_complete: Arc::new(|_, _| Box::pin(async {})),
+    })
+}
+
 #[tokio::test]
 async fn run_plan_stays_alive_while_task_awaiting_review() {
     let state = PlanState {
@@ -66,6 +72,7 @@ async fn run_plan_stays_alive_while_task_awaiting_review() {
             None,
             None,
             None,
+            test_continuation_ctx(),
             test_materializer(),
             common::server_builder::pro_feature_gate(),
         )
