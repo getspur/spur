@@ -4,6 +4,7 @@ pub mod insights;
 pub mod issue_browser;
 #[cfg(feature = "markdown")]
 pub mod mermaid_viewer;
+pub mod plan_browser;
 pub mod plan_inspector;
 pub mod session_detail;
 pub mod session_picker;
