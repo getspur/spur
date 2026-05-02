@@ -217,7 +217,7 @@ async fn flusher_emits_sentinel_for_stale_entry() {
     let sentinel = sentinel.unwrap();
     assert_eq!(sentinel.kind_str(), "read-aggregate");
 
-    server.shutdown().await;
+    server.shutdown(Duration::from_secs(5)).await;
 }
 
 #[tokio::test]
@@ -242,7 +242,7 @@ async fn flusher_exits_within_1s_of_cancellation() {
             .expect("start must succeed");
 
     let start = tokio::time::Instant::now();
-    server.shutdown().await;
+    server.shutdown(Duration::from_secs(5)).await;
     let elapsed = start.elapsed();
 
     assert!(
@@ -302,5 +302,5 @@ async fn flusher_warns_when_all_entries_have_no_target_issue_id() {
         warnings.events.lock().unwrap()
     );
 
-    server.shutdown().await;
+    server.shutdown(Duration::from_secs(5)).await;
 }

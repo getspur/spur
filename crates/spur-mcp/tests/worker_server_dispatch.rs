@@ -239,7 +239,7 @@ async fn tools_list_returns_8_curated_tools() {
     ] {
         assert!(names.contains(&expected), "missing curated tool: {expected}");
     }
-    server.shutdown().await;
+    server.shutdown(Duration::from_secs(5)).await;
 }
 
 // ─── T23: per-delegation summary event emission ───────────────────────────
@@ -345,7 +345,7 @@ async fn dispatcher_drop_emits_summary_event_with_correct_counts() {
         panic!("expected WorkerMcpDelegationSummary, got: {:?}", summaries[0]);
     }
 
-    server.shutdown().await;
+    server.shutdown(Duration::from_secs(5)).await;
 }
 
 #[tokio::test]
@@ -382,7 +382,7 @@ async fn report_progress_disabled_returns_success_without_calling_handler() {
         Some(true),
         "should return success when progress is disabled, got: {body}"
     );
-    server.shutdown().await;
+    server.shutdown(Duration::from_secs(5)).await;
 }
 
 #[tokio::test]
@@ -419,7 +419,7 @@ async fn report_progress_full_bus_silently_drops_and_returns_success() {
         Some(true),
         "should return success even when bus is full, got: {body}"
     );
-    server.shutdown().await;
+    server.shutdown(Duration::from_secs(5)).await;
 }
 
 #[tokio::test]
@@ -458,7 +458,7 @@ async fn report_progress_enabled_with_capacity_emits_event() {
         1,
         "event must be emitted exactly once"
     );
-    server.shutdown().await;
+    server.shutdown(Duration::from_secs(5)).await;
 }
 
 #[tokio::test]
@@ -482,7 +482,7 @@ async fn tools_call_get_issue_routes_to_handler() {
         "dispatcher should return raw issue JSON, got: {body}"
     );
     assert_eq!(body["result"]["body"].as_str(), Some("issue body"));
-    server.shutdown().await;
+    server.shutdown(Duration::from_secs(5)).await;
 }
 
 #[tokio::test]
@@ -505,7 +505,7 @@ async fn tools_call_unknown_tool_returns_method_not_found() {
         Some(-32601),
         "unknown brain-only tool must be -32601, got: {body}"
     );
-    server.shutdown().await;
+    server.shutdown(Duration::from_secs(5)).await;
 }
 
 #[tokio::test]
@@ -532,5 +532,5 @@ async fn json_rpc_batched_request_rejected() {
         Some(-32600),
         "batches must be -32600 Invalid Request, got: {body}"
     );
-    server.shutdown().await;
+    server.shutdown(Duration::from_secs(5)).await;
 }

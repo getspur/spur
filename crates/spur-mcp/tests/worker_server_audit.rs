@@ -189,7 +189,7 @@ async fn update_issue_success_emits_worker_write_audit_sentinel() {
         panic!("expected WorkerWrite sentinel, got: {sentinel:?}");
     }
 
-    server.shutdown().await;
+    server.shutdown(Duration::from_secs(5)).await;
 }
 
 // ─── T20: per-delegation read-audit aggregation buffer ────────────────────
@@ -244,7 +244,7 @@ async fn read_tool_calls_append_to_buffer() {
         .expect("buffer should exist after read calls");
     assert_eq!(buf.entry_count(), 3);
 
-    server.shutdown().await;
+    server.shutdown(Duration::from_secs(5)).await;
 }
 
 #[tokio::test]
@@ -341,5 +341,5 @@ async fn update_issue_without_id_arg_does_not_emit_audit() {
         "no audit sentinel should exist when id arg is missing, got: {sentinels:?}"
     );
 
-    server.shutdown().await;
+    server.shutdown(Duration::from_secs(5)).await;
 }

@@ -109,7 +109,7 @@ async fn valid_token_round_trip_header() {
         .await
         .expect("request");
     assert_eq!(resp.status(), 200, "valid token should pass middleware");
-    server.shutdown().await;
+    server.shutdown(Duration::from_secs(5)).await;
 }
 
 #[tokio::test]
@@ -133,7 +133,7 @@ async fn valid_token_round_trip_query() {
         200,
         "valid token in query should pass middleware"
     );
-    server.shutdown().await;
+    server.shutdown(Duration::from_secs(5)).await;
 }
 
 #[tokio::test]
@@ -151,7 +151,7 @@ async fn missing_token_returns_401() {
         .await
         .expect("request");
     assert_eq!(resp.status(), 401);
-    server.shutdown().await;
+    server.shutdown(Duration::from_secs(5)).await;
 }
 
 #[tokio::test]
@@ -170,7 +170,7 @@ async fn malformed_token_returns_401() {
         .await
         .expect("request");
     assert_eq!(resp.status(), 401);
-    server.shutdown().await;
+    server.shutdown(Duration::from_secs(5)).await;
 }
 
 #[tokio::test]
@@ -196,7 +196,7 @@ async fn tampered_hmac_rejected() {
         .await
         .expect("request");
     assert_eq!(resp.status(), 401);
-    server.shutdown().await;
+    server.shutdown(Duration::from_secs(5)).await;
 }
 
 #[tokio::test]
@@ -220,7 +220,7 @@ async fn expired_token_rejected() {
         .await
         .expect("request");
     assert_eq!(resp.status(), 401);
-    server.shutdown().await;
+    server.shutdown(Duration::from_secs(5)).await;
 }
 
 #[tokio::test]
@@ -256,8 +256,8 @@ async fn wrong_brain_session_id_rejected() {
         "token from server A must be rejected by server B"
     );
 
-    server_a.shutdown().await;
-    server_b.shutdown().await;
+    server_a.shutdown(Duration::from_secs(5)).await;
+    server_b.shutdown(Duration::from_secs(5)).await;
 }
 
 /// Send a header line longer than MAX_HEADER_LINE (8192 bytes) with no
@@ -313,5 +313,5 @@ async fn long_header_line_without_newline_rejected_quickly() {
         elapsed
     );
 
-    server.shutdown().await;
+    server.shutdown(Duration::from_secs(5)).await;
 }
