@@ -607,3 +607,133 @@ async fn terminal_owned_plan_does_not_block_execute_epic() {
         "execute_epic should start target epic: {response}"
     );
 }
+
+#[tokio::test]
+async fn concurrent_resume_plan_claims_only_one_active_plan_for_current_brain() {
+    if !br_available() {
+        eprintln!(
+            "skipping concurrent_resume_plan_claims_only_one_active_plan_for_current_brain: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init");
+    let pm = beads_pm(dir.path()).await;
+    let feature_gate = common::server_builder::pro_feature_gate();
+    for (plan_id, title) in [
+        ("plan-concurrent-resume-a", "Concurrent Resume A"),
+        ("plan-concurrent-resume-b", "Concurrent Resume B"),
+    ] {
+        spur_mcp::build_epic_subgraph(
+            pm.as_ref(),
+            feature_gate.as_ref(),
+            plan_id,
+            title,
+            None,
+            &one_task(),
+        )
+        .await
+        .expect("build epic subgraph");
+    }
+
+    let session_id = BrainSessionId::new(SessionId("brain-current".into()));
+    let (server, _channel) = McpCallbackServer::new(
+        &session_id,
+        Some(Arc::clone(&pm)),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        common::server_builder::pro_feature_gate(),
+    );
+
+    let (first, second) = tokio::join!(
+        server.__test_call_tool(
+            "resume_plan",
+            json!({ "plan_id": "plan-concurrent-resume-a" })
+        ),
+        server.__test_call_tool(
+            "resume_plan",
+            json!({ "plan_id": "plan-concurrent-resume-b" })
+        ),
+    );
+
+    let successes = [first.get("error").is_none(), second.get("error").is_none()]
+        .into_iter()
+        .filter(|success| *success)
+        .count();
+    assert_eq!(
+        successes, 1,
+        "exactly one concurrent resume_plan should claim ownership: first={first} second={second}"
+    );
+    let errors = [first, second]
+        .into_iter()
+        .filter_map(|response| response.get("error").cloned())
+        .collect::<Vec<_>>();
+    assert_eq!(errors.len(), 1, "one resume_plan response should error");
+    assert!(
+        errors[0]
+            .get("message")
+            .and_then(|message| message.as_str())
+            .is_some_and(|message| message.contains("already owns active plan")),
+        "losing resume_plan response must report active-plan cardinality: {:?}",
+        errors[0]
+    );
+}
+
+#[tokio::test]
+async fn concurrent_execute_epic_starts_only_one_active_plan_for_current_brain() {
+    if !br_available() {
+        eprintln!(
+            "skipping concurrent_execute_epic_starts_only_one_active_plan_for_current_brain: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init");
+    let pm = beads_pm(dir.path()).await;
+    let first_epic = create_executable_epic(dir.path(), "Concurrent Execute A");
+    let second_epic = create_executable_epic(dir.path(), "Concurrent Execute B");
+
+    let session_id = BrainSessionId::new(SessionId("brain-current".into()));
+    let (mut server, _channel) = McpCallbackServer::new(
+        &session_id,
+        Some(Arc::clone(&pm)),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        common::server_builder::pro_feature_gate(),
+    );
+    server.set_workers(vec![spur_mcp::WorkerInfo {
+        name: "codex".into(),
+        ..Default::default()
+    }]);
+
+    let (first, second) = tokio::join!(
+        server.__test_call_execute_epic(&first_epic, Some("codex")),
+        server.__test_call_execute_epic(&second_epic, Some("codex")),
+    );
+
+    let successes = [first.get("error").is_none(), second.get("error").is_none()]
+        .into_iter()
+        .filter(|success| *success)
+        .count();
+    assert_eq!(
+        successes, 1,
+        "exactly one concurrent execute_epic should start ownership: first={first} second={second}"
+    );
+    let errors = [first, second]
+        .into_iter()
+        .filter_map(|response| response.get("error").cloned())
+        .collect::<Vec<_>>();
+    assert_eq!(errors.len(), 1, "one execute_epic response should error");
+    assert!(
+        errors[0]
+            .get("message")
+            .and_then(|message| message.as_str())
+            .is_some_and(|message| message.contains("already owns active plan")),
+        "losing execute_epic response must report active-plan cardinality: {:?}",
+        errors[0]
+    );
+}
