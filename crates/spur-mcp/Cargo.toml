@@ -10,8 +10,10 @@ license.workspace = true
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
+base64ct = { version = "1", features = ["alloc"] }
 chrono = { workspace = true }
 futures = { workspace = true }
+hmac = "0.12"
 parking_lot = "0.12"
 rmcp = { workspace = true }
 schemars = { workspace = true }
