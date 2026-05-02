@@ -129,6 +129,14 @@ pub enum AuditSentinelKind {
         delegation_id: String,
         feedback: String,
     },
+    ReviewFeedback {
+        attempt_no: u32,
+        feedback_text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worker_branch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+    },
     Signal {
         signal_id: String,
         #[serde(default)]
@@ -204,6 +212,7 @@ impl AuditSentinelKind {
             Self::EpicCompletion { .. } => "epic-completion",
             Self::Approval { .. } => "approval",
             Self::Rejection { .. } => "rejection",
+            Self::ReviewFeedback { .. } => "review-feedback",
             Self::Signal { .. } => "signal",
             Self::MutationPlan { .. } => "mutation-plan",
             Self::MutationCommit { .. } => "mutation-commit",
@@ -339,6 +348,12 @@ mod tests {
                 delegation_id: "del-A".into(),
                 feedback: "try again".into(),
             },
+            AuditSentinelKind::ReviewFeedback {
+                attempt_no: 1,
+                feedback_text: "add null check".into(),
+                worker_branch: Some("spur/worker-x".into()),
+                summary: Some("did thing".into()),
+            },
             AuditSentinelKind::Signal {
                 signal_id: "sig-1".into(),
                 delegation_id: "del-A".into(),
@@ -441,6 +456,12 @@ mod tests {
             AuditSentinelKind::Rejection {
                 delegation_id: "x".into(),
                 feedback: "f".into(),
+            },
+            AuditSentinelKind::ReviewFeedback {
+                attempt_no: 2,
+                feedback_text: "fix edge case".into(),
+                worker_branch: None,
+                summary: None,
             },
             AuditSentinelKind::Signal {
                 signal_id: "sig-1".into(),
@@ -650,6 +671,33 @@ mod tests {
             completion
         );
         assert_eq!(parse_comment(&orphan_body).unwrap().unwrap(), orphan);
+    }
+
+    #[test]
+    fn review_feedback_variant_round_trips() {
+        let kind = AuditSentinelKind::ReviewFeedback {
+            attempt_no: 2,
+            feedback_text: "fix the edge case".into(),
+            worker_branch: Some("spur/worker-bd-33it".into()),
+            summary: Some("partial fix".into()),
+        };
+        let encoded = encode_comment(&kind);
+        let parsed = parse_comment(&encoded).unwrap().unwrap();
+        assert_eq!(parsed, kind);
+        assert_eq!(parsed.kind_str(), "review-feedback");
+    }
+
+    #[test]
+    fn review_feedback_omits_optional_fields_when_none() {
+        let kind = AuditSentinelKind::ReviewFeedback {
+            attempt_no: 1,
+            feedback_text: "add tests".into(),
+            worker_branch: None,
+            summary: None,
+        };
+        let json = serde_json::to_string(&kind).unwrap();
+        assert!(!json.contains("worker_branch"));
+        assert!(!json.contains("summary"));
     }
 
     #[test]

@@ -70,6 +70,32 @@ pub fn project_attempt_facts(audits: &[AuditSentinelKind]) -> (u32, Option<Strin
     (attempt, last_delegation_id)
 }
 
+pub fn project_attempt_history(audits: &[AuditSentinelKind]) -> Vec<super::AttemptRecord> {
+    audits
+        .iter()
+        .filter_map(|audit| {
+            if let AuditSentinelKind::ReviewFeedback {
+                attempt_no,
+                feedback_text,
+                worker_branch,
+                summary,
+            } = audit
+            {
+                Some(super::AttemptRecord {
+                    attempt: *attempt_no,
+                    worker_branch: worker_branch.clone(),
+                    diff_summary: None,
+                    summary: summary.clone(),
+                    feedback: feedback_text.clone(),
+                    dispatched_base_oid: None,
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 pub type CompletionFacts = (
     CompletionState,
     Option<String>,
@@ -488,6 +514,7 @@ pub async fn project_plan_from_beads(
 
     for projected_task in projected_tasks {
         let (attempt, last_delegation_id) = project_attempt_facts(&projected_task.audits);
+        let history = project_attempt_history(&projected_task.audits);
         let completion = latest_completion_facts(&projected_task.audits);
         let (worker_branch, dispatched_base_oid) = completion
             .map(|(_, worker_branch, _, _, dispatched_base_oid)| {
@@ -528,7 +555,7 @@ pub async fn project_plan_from_beads(
             result: None,
             worker_branch,
             attempt,
-            history: Vec::new(),
+            history,
             last_delegation_id,
             dispatched_base_oid,
         });
@@ -822,6 +849,51 @@ mod tests {
         let (attempt, last_delegation_id) = super::project_attempt_facts(&audits);
         assert_eq!(attempt, 2);
         assert_eq!(last_delegation_id.as_deref(), Some("del-2"));
+    }
+
+    #[test]
+    fn project_attempt_history_reconstructs_from_review_feedback_sentinels() {
+        let audits = vec![
+            AuditSentinelKind::Dispatch {
+                delegation_id: "del-1".into(),
+                worker: "codex".into(),
+                attempt: 1,
+            },
+            AuditSentinelKind::ReviewFeedback {
+                attempt_no: 1,
+                feedback_text: "fix edge case".into(),
+                worker_branch: Some("spur/worker-1".into()),
+                summary: Some("partial".into()),
+            },
+            AuditSentinelKind::ReviewFeedback {
+                attempt_no: 2,
+                feedback_text: "also add tests".into(),
+                worker_branch: None,
+                summary: None,
+            },
+        ];
+
+        let history = super::project_attempt_history(&audits);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].attempt, 1);
+        assert_eq!(history[0].feedback, "fix edge case");
+        assert_eq!(history[0].worker_branch.as_deref(), Some("spur/worker-1"));
+        assert_eq!(history[0].summary.as_deref(), Some("partial"));
+        assert_eq!(history[1].attempt, 2);
+        assert_eq!(history[1].feedback, "also add tests");
+        assert!(history[1].worker_branch.is_none());
+        assert!(history[1].summary.is_none());
+    }
+
+    #[test]
+    fn project_attempt_history_empty_when_no_review_feedback() {
+        let audits = vec![AuditSentinelKind::Dispatch {
+            delegation_id: "del-1".into(),
+            worker: "codex".into(),
+            attempt: 1,
+        }];
+        let history = super::project_attempt_history(&audits);
+        assert!(history.is_empty());
     }
 
     fn issue(

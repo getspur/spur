@@ -1017,8 +1017,7 @@ pub fn display_name(spec_task: &str) -> String {
 /// `new_attempt` / `max_attempts` surface the retry budget to the worker so
 /// it can self-calibrate urgency on the final attempt. No bloat cap — the
 /// 3-attempt limit bounds size.
-#[allow(dead_code)]
-fn build_enriched_task(
+pub(crate) fn build_enriched_task(
     original_task: &str,
     history: &[AttemptRecord],
     current_feedback: &str,
@@ -3208,6 +3207,18 @@ pub async fn review_task(
                     MAX_ATTEMPTS,
                     superseded_branch.as_deref(),
                 );
+                let sentinel = audit_sentinel::encode_comment(
+                    &audit_sentinel::AuditSentinelKind::ReviewFeedback {
+                        attempt_no: entry.attempt,
+                        feedback_text: fb.to_string(),
+                        worker_branch: superseded_branch.clone(),
+                        summary: entry
+                            .result
+                            .as_ref()
+                            .and_then(|r| r.summary.clone())
+                            .or_else(|| summary.clone()),
+                    },
+                );
                 let update = spur_pm::IssueUpdate {
                     status: Some("open".to_string()),
                     remove_labels: review_ready_label_removals(),
@@ -3216,6 +3227,13 @@ pub async fn review_task(
                 };
                 if let Err(e) = apply_issue_update(pm, id, update).await {
                     warnings.push(format!("beads comment failed: {e}"));
+                }
+                let sentinel_update = spur_pm::IssueUpdate {
+                    comment: Some(sentinel),
+                    ..Default::default()
+                };
+                if let Err(e) = apply_issue_update(pm, id, sentinel_update).await {
+                    warnings.push(format!("audit sentinel comment failed: {e}"));
                 }
             }
             warnings.push(
@@ -3585,6 +3603,18 @@ fn apply_decision_and_extract(
                     MAX_ATTEMPTS,
                     superseded_branch.as_deref(),
                 );
+                let sentinel = audit_sentinel::encode_comment(
+                    &audit_sentinel::AuditSentinelKind::ReviewFeedback {
+                        attempt_no: entry.attempt,
+                        feedback_text: fb.to_string(),
+                        worker_branch: superseded_branch.clone(),
+                        summary: entry
+                            .result
+                            .as_ref()
+                            .and_then(|r| r.summary.clone())
+                            .or_else(|| summary.clone()),
+                    },
+                );
                 let update = spur_pm::IssueUpdate {
                     status: Some("open".to_string()),
                     remove_labels: review_ready_label_removals(),
@@ -3592,8 +3622,15 @@ fn apply_decision_and_extract(
                     ..Default::default()
                 };
                 beads_ops.push(PendingBeadsOp {
-                    issue_id: id,
+                    issue_id: id.clone(),
                     update,
+                });
+                beads_ops.push(PendingBeadsOp {
+                    issue_id: id,
+                    update: spur_pm::IssueUpdate {
+                        comment: Some(sentinel),
+                        ..Default::default()
+                    },
                 });
             }
             warnings.push(
