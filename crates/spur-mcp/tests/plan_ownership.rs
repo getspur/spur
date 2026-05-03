@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 use spur_acp::{BrainSessionId, SessionId};
+use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
 use spur_mcp::plan::{labels, PlanTask};
 use spur_mcp::server::{DetachedContinuationCtx, McpCallbackServer};
 use spur_mcp::tools_list;
@@ -508,5 +509,282 @@ async fn review_task_refuses_unowned_plan() {
     assert!(
         msg.contains("review_task") && msg.contains("unowned"),
         "review_task must refuse unowned plans (no auto-claim): {response}"
+    );
+}
+
+async fn collect_epic_sentinels(
+    pm: &spur_pm::PmService,
+    epic_id: &str,
+) -> Vec<AuditSentinelKind> {
+    let adv = pm
+        .advanced()
+        .expect("beads-backed PmService must return advanced()");
+    let comments = adv
+        .list_comments(epic_id)
+        .await
+        .expect("list_comments must succeed");
+    comments
+        .iter()
+        .filter_map(|c| audit_sentinel::parse_comment(&c.body))
+        .filter_map(|result| result.ok())
+        .collect()
+}
+
+#[ignore = "requires br on PATH; run with --ignored"]
+#[tokio::test]
+async fn execute_epic_emits_plan_ownership_acquired_when_claiming_unowned_epic() {
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init");
+    let pm = beads_pm(dir.path()).await;
+    let feature_gate = common::server_builder::pro_feature_gate();
+    let plan_id = "plan-execute-claim-unowned";
+    let subgraph = spur_mcp::build_epic_subgraph(
+        pm.as_ref(),
+        feature_gate.as_ref(),
+        plan_id,
+        "Execute Claim Unowned",
+        None,
+        &one_task(),
+    )
+    .await
+    .expect("build epic subgraph");
+
+    let session_id = BrainSessionId::new(SessionId("brain-current".into()));
+    let (mut server, _channel) = McpCallbackServer::new(
+        &session_id,
+        Some(Arc::clone(&pm)),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        common::server_builder::pro_feature_gate(),
+    );
+    server.set_workers(vec![spur_mcp::WorkerInfo {
+        name: "codex".into(),
+        ..Default::default()
+    }]);
+
+    let response = server
+        .__test_call_execute_epic(&subgraph.epic_id, Some("codex"))
+        .await;
+    assert!(
+        response.get("error").is_none(),
+        "execute_epic should claim unowned epic: {response}"
+    );
+
+    let sentinels = collect_epic_sentinels(pm.as_ref(), &subgraph.epic_id).await;
+    let matches: Vec<&AuditSentinelKind> = sentinels
+        .iter()
+        .filter(|sentinel| {
+            matches!(
+                sentinel,
+                AuditSentinelKind::PlanOwnershipAcquired { reason, .. }
+                    if reason == "execute_epic"
+            )
+        })
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one PlanOwnershipAcquired sentinel from execute_epic; sentinels: {sentinels:?}"
+    );
+    let AuditSentinelKind::PlanOwnershipAcquired {
+        owner,
+        token,
+        reason,
+        ..
+    } = matches[0]
+    else {
+        unreachable!("filtered to PlanOwnershipAcquired");
+    };
+    assert_eq!(owner, &session_id.to_string());
+    assert!(!token.is_empty(), "token must be a non-empty UUID");
+    assert_eq!(reason, "execute_epic");
+}
+
+#[ignore = "requires br on PATH; run with --ignored"]
+#[tokio::test]
+async fn execute_epic_emits_plan_ownership_transferred_when_taking_over_from_other_brain() {
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init");
+    let pm = beads_pm(dir.path()).await;
+    let feature_gate = common::server_builder::pro_feature_gate();
+    let plan_id = "plan-execute-takeover";
+    let subgraph = spur_mcp::build_epic_subgraph(
+        pm.as_ref(),
+        feature_gate.as_ref(),
+        plan_id,
+        "Execute Takeover",
+        None,
+        &one_task(),
+    )
+    .await
+    .expect("build epic subgraph");
+    let other_brain = "other-brain";
+    pm.update_issue(
+        &subgraph.epic_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![labels::plan_owner(other_brain)],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("seed other-brain owner label");
+
+    let session_id = BrainSessionId::new(SessionId("brain-current".into()));
+    let (mut server, _channel) = McpCallbackServer::new(
+        &session_id,
+        Some(Arc::clone(&pm)),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        common::server_builder::pro_feature_gate(),
+    );
+    server.set_workers(vec![spur_mcp::WorkerInfo {
+        name: "codex".into(),
+        ..Default::default()
+    }]);
+
+    let response = server
+        .__test_call_execute_epic(&subgraph.epic_id, Some("codex"))
+        .await;
+    assert!(
+        response.get("error").is_none(),
+        "execute_epic should take over epic owned by another brain: {response}"
+    );
+
+    let sentinels = collect_epic_sentinels(pm.as_ref(), &subgraph.epic_id).await;
+    let matches: Vec<&AuditSentinelKind> = sentinels
+        .iter()
+        .filter(|sentinel| {
+            matches!(
+                sentinel,
+                AuditSentinelKind::PlanOwnershipTransferred { mode, .. }
+                    if mode == "execute_epic"
+            )
+        })
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one PlanOwnershipTransferred sentinel from execute_epic; sentinels: {sentinels:?}"
+    );
+    let AuditSentinelKind::PlanOwnershipTransferred {
+        from,
+        to,
+        mode,
+        new_token,
+        ..
+    } = matches[0]
+    else {
+        unreachable!("filtered to PlanOwnershipTransferred");
+    };
+    assert_eq!(from, &labels::compact_label_component(other_brain));
+    assert_eq!(to, &session_id.to_string());
+    assert_eq!(mode, "execute_epic");
+    assert!(!new_token.is_empty(), "new_token must be a non-empty UUID");
+}
+
+#[ignore = "requires br on PATH; run with --ignored"]
+#[tokio::test]
+async fn execute_epic_emits_plan_ownership_acquired_when_re_issued_by_current_brain() {
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init");
+    let pm = beads_pm(dir.path()).await;
+    let feature_gate = common::server_builder::pro_feature_gate();
+    let plan_id = "plan-execute-reissue";
+    let subgraph = spur_mcp::build_epic_subgraph(
+        pm.as_ref(),
+        feature_gate.as_ref(),
+        plan_id,
+        "Execute Re-issue",
+        None,
+        &one_task(),
+    )
+    .await
+    .expect("build epic subgraph");
+
+    let session_id = BrainSessionId::new(SessionId("brain-current".into()));
+    pm.update_issue(
+        &subgraph.epic_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![labels::plan_owner(&session_id.as_session_id().0)],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("seed current-brain owner label");
+
+    let (mut server, _channel) = McpCallbackServer::new(
+        &session_id,
+        Some(Arc::clone(&pm)),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        common::server_builder::pro_feature_gate(),
+    );
+    server.set_workers(vec![spur_mcp::WorkerInfo {
+        name: "codex".into(),
+        ..Default::default()
+    }]);
+
+    let response = server
+        .__test_call_execute_epic(&subgraph.epic_id, Some("codex"))
+        .await;
+    assert!(
+        response.get("error").is_none(),
+        "execute_epic should re-issue ownership when already owned by current brain: {response}"
+    );
+
+    let sentinels = collect_epic_sentinels(pm.as_ref(), &subgraph.epic_id).await;
+    let matches: Vec<&AuditSentinelKind> = sentinels
+        .iter()
+        .filter(|sentinel| {
+            matches!(
+                sentinel,
+                AuditSentinelKind::PlanOwnershipAcquired { reason, .. }
+                    if reason == "execute_epic"
+            )
+        })
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one PlanOwnershipAcquired sentinel from execute_epic re-issue; sentinels: {sentinels:?}"
+    );
+    let AuditSentinelKind::PlanOwnershipAcquired {
+        owner,
+        token,
+        reason,
+        ..
+    } = matches[0]
+    else {
+        unreachable!("filtered to PlanOwnershipAcquired");
+    };
+    assert_eq!(owner, &session_id.to_string());
+    assert!(!token.is_empty(), "token must be a non-empty UUID");
+    assert_eq!(reason, "execute_epic");
+
+    let transfers = sentinels
+        .iter()
+        .filter(|s| matches!(s, AuditSentinelKind::PlanOwnershipTransferred { .. }))
+        .count();
+    assert_eq!(
+        transfers, 0,
+        "re-issue by current brain must not emit PlanOwnershipTransferred"
     );
 }
