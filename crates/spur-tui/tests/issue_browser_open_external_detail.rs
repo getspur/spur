@@ -237,6 +237,149 @@ fn open_issue_queues_pending_select_when_id_not_yet_tracked() {
 }
 
 #[test]
+fn open_existing_browser_with_uncached_id_triggers_refresh_and_aligns_selection() {
+    // Regression: when IssueBrowser already exists from a prior visit but
+    // the requested epic isn't in its cached tracked_issues, OpenIssueInBacklog
+    // must (1) fire RefreshIssues so the queued id can land in the list, and
+    // (2) once the refresh arrives, select the row matching the open detail
+    // — keeping the left list visually consistent with the right pane.
+    //
+    // Pre-fix bug: just_created=false skipped RefreshIssues, so pending_select
+    // sat forever and the selected row stayed at whatever the user had last.
+    let (mut app, mut rx) = spur_tui::test_support::app_with_user_input_tx();
+
+    // First visit: create the browser with one cached issue (NOT the epic
+    // we'll later request). Drain RefreshIssues from initial creation.
+    spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
+    let _ = drain(&mut rx);
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssuesLoaded {
+            issues: vec![sample_summary("bd-stale", "Stale cached", "task")],
+        }),
+    );
+
+    // Navigate away (back to Dashboard) so we're not currently in IssueBrowser.
+    spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::Dashboard));
+    let _ = drain(&mut rx);
+
+    // Now open an epic that ISN'T in the cached list. just_created=false here.
+    spur_tui::test_support::process_action(
+        &mut app,
+        Action::OpenIssueInBacklog {
+            id: "bd-epic-fresh".into(),
+        },
+    );
+    let inputs = drain(&mut rx);
+    let dump = labels(&inputs);
+    assert!(
+        inputs
+            .iter()
+            .any(|u| matches!(u, UserInput::RefreshIssues)),
+        "uncached id must trigger RefreshIssues even when browser already \
+         existed; got {dump}",
+    );
+
+    // The refresh arrives carrying the requested epic. The IssuesLoaded
+    // handler must select the epic row (because issue_focus is Loading{epic}
+    // / pending_select is set), not idx 0.
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssuesLoaded {
+            issues: vec![
+                sample_summary("bd-other-a", "Filler before", "task"),
+                sample_summary("bd-other-b", "Filler more", "task"),
+                sample_summary("bd-epic-fresh", "The opened epic", "epic"),
+                sample_summary("bd-other-c", "Filler after", "task"),
+            ],
+        }),
+    );
+
+    // Verify selection moved to the epic by pressing Enter and watching the
+    // GetIssueDetail target — Enter on the selected row requests detail for
+    // that row's id.
+    app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let after_enter = drain(&mut rx);
+    let dump2 = labels(&after_enter);
+    assert!(
+        has_get_issue_detail(&after_enter, "bd-epic-fresh"),
+        "Enter must target bd-epic-fresh (selection aligned to detail), \
+         got {dump2}",
+    );
+}
+
+#[test]
+fn issues_loaded_keeps_selection_on_open_detail_even_when_list_reorders() {
+    // Regression: previously the IssuesLoaded handler preserved selection
+    // by INDEX rather than by ID — feeding the OLD index into the NEW list
+    // and reading whatever happened to be there. When the orchestrator's
+    // list re-sorts (e.g. priority change, new issues created), the row
+    // shown in the right-pane detail would silently desync from the row
+    // highlighted in the left list. The fix prefers the open-detail id.
+    let (mut app, mut rx) = spur_tui::test_support::app_with_user_input_tx();
+    spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
+    let _ = drain(&mut rx);
+
+    // Initial list: epic at idx 1.
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssuesLoaded {
+            issues: vec![
+                sample_summary("bd-task-a", "Task A", "task"),
+                sample_summary("bd-epic-x", "Epic X", "epic"),
+                sample_summary("bd-task-b", "Task B", "task"),
+            ],
+        }),
+    );
+
+    // Open detail on the epic.
+    spur_tui::test_support::process_action(
+        &mut app,
+        Action::OpenIssueInBacklog {
+            id: "bd-epic-x".into(),
+        },
+    );
+    let _ = drain(&mut rx);
+
+    // Complete the Loading -> Loaded transition so a subsequent Esc closes
+    // the detail rather than navigating back out of IssueBrowser.
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssueDetailFetched {
+            requested_id: "bd-epic-x".into(),
+            issue: sample_detail("bd-epic-x", "Epic X"),
+        }),
+    );
+
+    // List re-sorts: epic is now at idx 2, idx 1 is a different task.
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssuesLoaded {
+            issues: vec![
+                sample_summary("bd-task-a", "Task A", "task"),
+                sample_summary("bd-task-c", "Newly inserted", "task"),
+                sample_summary("bd-epic-x", "Epic X", "epic"),
+                sample_summary("bd-task-b", "Task B", "task"),
+            ],
+        }),
+    );
+
+    // Esc closes the now-Loaded detail (focus -> None) without navigating
+    // away. Then Enter on focus=None requests detail for the selected row,
+    // exposing what the panel currently has selected.
+    app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    let _ = drain(&mut rx);
+    app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let after_enter = drain(&mut rx);
+    let dump = labels(&after_enter);
+    assert!(
+        has_get_issue_detail(&after_enter, "bd-epic-x"),
+        "selection must follow the open-detail id across list reorder, \
+         got {dump}",
+    );
+}
+
+#[test]
 fn graph_error_after_focus_graph_does_not_force_text_load_into_graph() {
     // Regression for the state-leak both gemini and kimi flagged in Inc 3:
     // before the fix, IssueCommandError on the graph fetch left
