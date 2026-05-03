@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::TestBackend, Terminal};
 use spur_acp::{IssueDetailEvent, IssueSummaryEvent, SpurEvent, SpurEventBody};
 use spur_core::ExecutorLineage;
-use spur_tui::action::{Action, IssueAction, ViewId};
+use spur_tui::action::{Action, IssueAction};
 use spur_tui::views::issue_browser::IssueBrowserView;
 use spur_tui::views::{View, ViewContext};
 
@@ -114,8 +114,9 @@ fn empty_browser_esc_navigates_back() {
     let mut view = IssueBrowserView::default();
     let action = view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &test_ctx());
     assert!(
-        matches!(action, Some(Action::NavigateTo(ViewId::Dashboard))),
-        "expected NavigateTo(Dashboard), got {:?}",
+        matches!(action, Some(Action::NavigateBack)),
+        "expected NavigateBack so the app's view_history stack returns to the \
+         caller (e.g. PlanBrowser via 'e'), got {:?}",
         action
     );
 }

@@ -1348,7 +1348,19 @@ async fn refresh_pm_state(
                 issues: event_issues,
             });
         }
-        Err(e) => tracing::warn!("Failed to load issues: {e}"),
+        Err(e) => {
+            // Surface to the TUI so the empty list isn't indistinguishable from
+            // a genuinely empty backlog. Without this emit, parse failures (e.g.
+            // a corrupt `.beads/issues.jsonl` from a bad git merge) leave the
+            // view stuck on "No issues loaded" with no signal of the real cause.
+            let error = e.to_string();
+            tracing::warn!("Failed to load issues: {error}");
+            funnel.emit(SpurEventBody::IssueCommandError {
+                operation: "list_issues".into(),
+                error,
+                id: None,
+            });
+        }
     }
 
     // Emit alerts + optionally build prompt summary.
