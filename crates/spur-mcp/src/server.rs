@@ -2442,6 +2442,7 @@ impl McpCallbackServer {
             "create_pr" => self.handle_create_pr(id, arguments).await,
             "merge_plan" => self.handle_merge_plan(id, arguments).await,
             "resume_plan" => self.handle_resume_plan(id, arguments).await,
+            "force_reclaim_plan" => self.handle_force_reclaim_plan(id, arguments).await,
             "graph_triage" => self.handle_graph_triage(id, arguments).await,
             "graph_plan" => self.handle_graph_plan(id, arguments).await,
             "graph_insights" => self.handle_graph_insights(id, arguments).await,
@@ -3734,6 +3735,181 @@ impl McpCallbackServer {
                 }
             }
         }
+    }
+
+    /// Operator-initiated force-reclaim. Removes any existing
+    /// `spur:plan-owner:*` labels from the plan's epic and stamps the current
+    /// brain. Records a `PlanForceReclaimed` audit sentinel with the prior
+    /// owner (or `None` if Unowned) and an optional operator-supplied reason.
+    /// Refuses unless `confirm: true` is passed.
+    async fn handle_force_reclaim_plan(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let plan_id = match args.get("plan_id").and_then(|v| v.as_str()) {
+            Some(plan_id) => plan_id,
+            None => {
+                return JsonRpcResponse::invalid_params(id, "force_reclaim_plan: missing plan_id")
+            }
+        };
+        let confirm = args.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false);
+        if !confirm {
+            return JsonRpcResponse::invalid_params(
+                id,
+                "force_reclaim_plan: missing or false `confirm`. This tool clobbers any \
+                 concurrent owner brain's in-flight state and is intended only for stuck or \
+                 dead owners. Re-invoke with `confirm: true` to acknowledge.",
+            );
+        }
+        let reason = args
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+
+        let pm = match self.pm_service.as_deref() {
+            Some(pm) => pm,
+            None => {
+                return JsonRpcResponse::internal_error(
+                    id,
+                    "force_reclaim_plan requires PM service",
+                )
+            }
+        };
+
+        if let Some(response) =
+            self.require_feature_response(id.clone(), FeatureKey::PM_PRO_BEADS_ADVANCED)
+        {
+            return response;
+        }
+
+        let epics = match pm
+            .list_issues(IssueFilter {
+                labels: vec![crate::plan::labels::plan_id(plan_id)],
+                issue_type: Some("epic".to_string()),
+                include_closed: true,
+                limit: Some(10),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(epics) => epics,
+            Err(error) => {
+                return JsonRpcResponse::internal_error(
+                    id,
+                    format!("force_reclaim_plan: failed to find plan: {error}"),
+                )
+            }
+        };
+        let Some(epic_summary) = epics.first() else {
+            return JsonRpcResponse::error(
+                id,
+                -32004,
+                format!("force_reclaim_plan: plan not found: {plan_id}"),
+            );
+        };
+        if epics.len() > 1 {
+            let epic_ids = epics
+                .iter()
+                .map(|epic| epic.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return JsonRpcResponse::error(
+                id,
+                -32009,
+                format!(
+                    "force_reclaim_plan: ambiguous plan lookup for {plan_id}; multiple epics matched: {epic_ids}"
+                ),
+            );
+        }
+        let epic_id = epic_summary.id.clone();
+        let epic = match pm.get_issue(&epic_id).await {
+            Ok(epic) => epic,
+            Err(error) => {
+                return JsonRpcResponse::internal_error(
+                    id,
+                    format!("force_reclaim_plan: failed to load epic {epic_id}: {error}"),
+                )
+            }
+        };
+
+        // Capture prior owner(s) for the audit sentinel BEFORE rewriting labels.
+        // The single-owner case yields `Some("<owner>")`; the rare ambiguous
+        // multi-owner case preserves the comma-joined list verbatim so operators
+        // can see what was clobbered. Unowned → `None`.
+        let prior_owners: Vec<String> = epic
+            .labels
+            .iter()
+            .filter_map(|label| {
+                crate::plan::labels::parse_plan_owner(label).map(|owner| owner.to_string())
+            })
+            .collect();
+        let prior_owner = match prior_owners.len() {
+            0 => None,
+            1 => Some(prior_owners[0].clone()),
+            _ => Some(prior_owners.join(",")),
+        };
+
+        let new_owner_label =
+            crate::plan::labels::plan_owner(&self.brain_session_id.as_session_id().0);
+        let mut remove_labels: Vec<String> = epic
+            .labels
+            .iter()
+            .filter(|label| crate::plan::labels::parse_plan_owner(label).is_some())
+            .cloned()
+            .collect();
+        let add_labels = vec![new_owner_label.clone()];
+        filter_remove_labels(&mut remove_labels, &add_labels);
+
+        if let Err(error) = apply_issue_update(
+            pm,
+            &epic_id,
+            IssueUpdate {
+                add_labels,
+                remove_labels,
+                ..Default::default()
+            },
+        )
+        .await
+        {
+            return JsonRpcResponse::internal_error(
+                id,
+                format!(
+                    "force_reclaim_plan: failed to write owner labels on epic {epic_id}: {error}"
+                ),
+            );
+        }
+        self.fast_forward_reconciler();
+
+        let new_owner = self.brain_session_id.to_string();
+        let token = uuid::Uuid::new_v4().to_string();
+
+        if let Some(adv) = pm.advanced() {
+            let audit = crate::plan::audit_sentinel::AuditSentinelKind::PlanForceReclaimed {
+                plan_id: plan_id.to_string(),
+                prior_owner: prior_owner.clone(),
+                new_owner: new_owner.clone(),
+                token: token.clone(),
+                reason: reason.clone(),
+            };
+            let body = crate::plan::audit_sentinel::encode_comment(&audit);
+            if let Err(e) = adv.add_comment(&epic_id, &body).await {
+                tracing::warn!(
+                    target: "spur.audit.emit_failure",
+                    kind = "plan_force_reclaimed",
+                    epic_id = %epic_id,
+                    plan_id = %plan_id,
+                    "PlanForceReclaimed audit comment emission failed (owner label is persisted; audit missing): {e}"
+                );
+            }
+        }
+
+        let result = json!({
+            "prior_owner": prior_owner,
+            "new_owner": new_owner,
+            "audit_token": token,
+        });
+        let text = serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
+        JsonRpcResponse::success(
+            id,
+            json!({ "content": [{ "type": "text", "text": text }] }),
+        )
     }
 
     // ─── Graph analysis handlers (bv robot protocol) ───────────────
