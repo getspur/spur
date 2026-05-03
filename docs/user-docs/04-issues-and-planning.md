@@ -132,13 +132,19 @@ stateDiagram-v2
             WT --> Worker
         }
         
-        state "Awaiting User Review" as Review:::userState
+        state "Brain Review (Gate 1)" as BrainReview:::brainState
+        state "User Escalation (Gate 2)" as UserEscalation:::userState
         
         CheckDeps --> Dispatch : Dependencies Met
         Dispatch --> Executing : delegate_to_worker()
-        Executing --> Review : Worker completes
-        Review --> CheckDeps : Approved (Unblocks next tasks)
-        Review --> Executing : Rejected (Redispatch to Worker)
+        Executing --> BrainReview : Worker completes
+        
+        BrainReview --> CheckDeps : Brain Approves (Unblocks)
+        BrainReview --> Executing : Brain Requests Changes (Retry)
+        BrainReview --> UserEscalation : Critical Blocker / Scope Drift
+        
+        UserEscalation --> CheckDeps : User Approves
+        UserEscalation --> Executing : User Requests Changes
     }
     
     state "All Tasks Approved" as Complete:::systemState
@@ -156,7 +162,9 @@ stateDiagram-v2
 1. **Planning Phase:** The Brain receives your request, analyzes the requirements, and breaks the work down into a series of smaller, manageable tasks.
 2. **DAG Generation:** The Brain submits these tasks to the Orchestrator via the `submit_plan` tool. Crucially, it defines the *dependencies* between these tasks, forming a Directed Acyclic Graph (DAG).
 3. **The Reconciler Loop:** This is Spur's autonomous engine. It constantly evaluates the DAG. If a task has no uncompleted dependencies, the Reconciler immediately dispatches it. 
-4. **Execution & Review:** Dispatched tasks run in isolated worktrees (see below). When they finish, they pause for your review. Approving a task tells the Reconciler to mark it complete, which then unblocks any downstream tasks waiting on it.
+4. **Execution & The Two-Tier Gate:** Dispatched tasks run in isolated worktrees (see below). When a worker finishes, it passes through a **Two-Tier Review Gate**:
+   * **Gate 1 (The Brain):** The Brain agent automatically uses the `get_task_diff` tool to inspect the worker's output. It acts as the first line of defense, either approving the work or rejecting/requesting changes (sending the worker back to try again).
+   * **Gate 2 (The User):** You do not need to micro-manage every task. If the worker repeatedly fails, experiences scope drift, or encounters a critical blocker, the Brain will escalate to you. You act as the final authority to resolve complex blockers.
 5. **Final Merge:** Once the Reconciler confirms every task in the DAG is successfully approved, the Brain executes a final deterministic merge, integrating the entire feature back into your main branch.
 
 ### Graph-Strict (G-Strict) Execution & Merge Strategy
