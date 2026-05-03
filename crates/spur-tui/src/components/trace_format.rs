@@ -16,43 +16,93 @@ use spur_acp::{
 
 // ─── Glyph / label helpers ──────────────────────────────────────────
 
+/// Convert external tool/file/stdout text into printable terminal text before
+/// it reaches ratatui's backend.
+///
+/// Raw C0 controls break ratatui's cursor model: a tab jumps to a terminal tab
+/// stop, carriage return moves to column 0, and ESC can begin an ANSI sequence.
+/// In a contiguous diff stream that leaves stale cells behind, which matches
+/// the ghost characters visible after numbered file-output rows.
+pub(crate) fn terminal_safe_text(input: &str) -> String {
+    if !input.as_bytes().iter().any(|b| is_terminal_control_byte(*b)) {
+        return input.to_string();
+    }
+
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '\t' => out.push_str("    "),
+            '\x1b' => out.push_str("^["),
+            '\x00'..='\x08'
+            | '\x0b'..='\x0c'
+            | '\x0e'..='\x1f'
+            | '\x7f'
+            | '\r'
+            | '\n' => {
+                out.push('^');
+                out.push(control_name(ch));
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn is_terminal_control_byte(byte: u8) -> bool {
+    matches!(byte, b'\t' | b'\r' | b'\n' | 0x00..=0x08 | 0x0b..=0x1f | 0x7f)
+}
+
+fn control_name(ch: char) -> char {
+    match ch {
+        '\x00'..='\x1a' => ((ch as u8) + b'@') as char,
+        '\x1b' => '[',
+        '\x1c' => '\\',
+        '\x1d' => ']',
+        '\x1e' => '^',
+        '\x1f' => '_',
+        '\x7f' => '?',
+        '\r' => 'M',
+        '\n' => 'J',
+        _ => '?',
+    }
+}
+
 /// Map `ToolFamily` to a display glyph + color.
 pub(crate) fn family_glyph(f: ToolFamily) -> (&'static str, Color) {
     match f {
-        ToolFamily::Read => ("⚙ reads", Color::Cyan),
-        ToolFamily::Edit => ("✎ edits", Color::Yellow),
-        ToolFamily::Delete => ("✗ deletes", Color::Red),
-        ToolFamily::Move => ("→ moves", Color::Yellow),
-        ToolFamily::Search => ("🔎 search", Color::Blue),
+        ToolFamily::Read => ("reads", Color::Cyan),
+        ToolFamily::Edit => ("edits", Color::Yellow),
+        ToolFamily::Delete => ("deletes", Color::Red),
+        ToolFamily::Move => ("moves", Color::Yellow),
+        ToolFamily::Search => ("search", Color::Blue),
         ToolFamily::Execute => ("$ runs", Color::Magenta),
-        ToolFamily::Think => ("◈ thinks", Color::DarkGray),
-        ToolFamily::Fetch => ("↯ fetch", Color::Blue),
-        ToolFamily::SwitchMode => ("⇄ mode", Color::Cyan),
-        ToolFamily::Plan => ("▸ plan", Color::Cyan),
-        ToolFamily::Mcp => ("⧉ mcp", Color::DarkGray),
-        ToolFamily::Unknown => ("🔧 ACT", Color::Yellow),
+        ToolFamily::Think => ("thinks", Color::DarkGray),
+        ToolFamily::Fetch => ("fetch", Color::Blue),
+        ToolFamily::SwitchMode => ("mode", Color::Cyan),
+        ToolFamily::Plan => ("plan", Color::Cyan),
+        ToolFamily::Mcp => ("mcp", Color::DarkGray),
+        ToolFamily::Unknown => ("ACT", Color::Yellow),
     }
 }
 
 /// Map `ObservePayload` to an outcome glyph + color.
 ///
-/// Glyphs MUST be EAW=W (`✅` `❌`) or pure ASCII to avoid the iTerm2
-/// font-fallback cursor desync described in
-/// `tests/expanded_mode_ghost_text_repro.rs`. Do not introduce EAW=N
-/// glyphs (`✓` `✗` `✉` `⊞` etc.) here.
+/// Labels MUST be pure ASCII to avoid terminal font-fallback cursor desync
+/// in ratatui's contiguous diff output. Do not introduce emoji, EAW=A, or
+/// EAW=N glyphs here.
 pub(crate) fn outcome_glyph(p: &ObservePayload) -> (&'static str, Color) {
     match p {
         ObservePayload::CommandOutput {
             exit_code: Some(0), ..
-        } => ("✅", Color::Green),
+        } => ("ok", Color::Green),
         ObservePayload::CommandOutput {
             exit_code: Some(_), ..
-        } => ("❌", Color::Red),
+        } => ("err", Color::Red),
         ObservePayload::CommandOutput {
             exit_code: None, ..
         } => ("?", Color::Yellow),
-        ObservePayload::Error { .. } => ("❌", Color::Red),
-        _ => ("✅", Color::Green),
+        ObservePayload::Error { .. } => ("err", Color::Red),
+        _ => ("ok", Color::Green),
     }
 }
 
@@ -94,8 +144,8 @@ pub(crate) fn observe_compact(payload: &ObservePayload) -> (&'static str, Color,
         } => {
             let total = stdout.lines().count() + stderr.lines().count();
             match exit_code {
-                Some(0) => ("✅", Color::Green, format!("{} lines", total)),
-                Some(c) => ("❌", Color::Red, format!("exit {} · {} lines", c, total)),
+                Some(0) => ("ok", Color::Green, format!("{} lines", total)),
+                Some(c) => ("err", Color::Red, format!("exit {} - {} lines", c, total)),
                 None => ("?", Color::Yellow, format!("{} lines", total)),
             }
         }
@@ -104,32 +154,32 @@ pub(crate) fn observe_compact(payload: &ObservePayload) -> (&'static str, Color,
         } => {
             let n = content.lines().count();
             let suffix = if *truncated { " (truncated)" } else { "" };
-            ("✅", Color::Green, format!("{} lines{}", n, suffix))
+            ("ok", Color::Green, format!("{} lines{}", n, suffix))
         }
         ObservePayload::EditResult {
             replacements, diff, ..
         } => {
             if let Some(n) = replacements {
                 (
-                    "✅",
+                    "ok",
                     Color::Green,
                     format!("{} replacement{}", n, if *n == 1 { "" } else { "s" }),
                 )
             } else if let Some(d) = diff {
                 let plus = d.lines().filter(|l| l.starts_with('+')).count();
                 let minus = d.lines().filter(|l| l.starts_with('-')).count();
-                ("✅", Color::Green, format!("+{}/-{}", plus, minus))
+                ("ok", Color::Green, format!("+{}/-{}", plus, minus))
             } else {
-                ("✅", Color::Green, String::new())
+                ("ok", Color::Green, String::new())
             }
         }
         ObservePayload::Json { pretty } => {
             let n = pretty.lines().count();
-            ("✅", Color::Green, format!("{} lines", n))
+            ("ok", Color::Green, format!("{} lines", n))
         }
         ObservePayload::Text { body } => {
             let n = body.lines().count();
-            ("✅", Color::Green, format!("{} lines", n))
+            ("ok", Color::Green, format!("{} lines", n))
         }
         ObservePayload::Error { message } => {
             let truncated = if message.chars().count() > 60 {
@@ -137,12 +187,64 @@ pub(crate) fn observe_compact(payload: &ObservePayload) -> (&'static str, Color,
                 while !message.is_char_boundary(end) && end > 0 {
                     end -= 1;
                 }
-                format!("{}…", &message[..end])
+                format!("{}...", &message[..end])
             } else {
                 message.clone()
             };
-            ("❌", Color::Red, truncated)
+            ("err", Color::Red, truncated)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_ascii(label: &str) {
+        assert!(
+            label.is_ascii(),
+            "ReAct-owned chrome must be ASCII to avoid terminal cursor-width desync: {label:?}"
+        );
+    }
+
+    #[test]
+    fn internal_trace_chrome_labels_are_ascii() {
+        for family in [
+            ToolFamily::Read,
+            ToolFamily::Edit,
+            ToolFamily::Delete,
+            ToolFamily::Move,
+            ToolFamily::Search,
+            ToolFamily::Execute,
+            ToolFamily::Think,
+            ToolFamily::Fetch,
+            ToolFamily::SwitchMode,
+            ToolFamily::Plan,
+            ToolFamily::Mcp,
+            ToolFamily::Unknown,
+        ] {
+            assert_ascii(family_glyph(family).0);
+        }
+
+        let ok_payload = ObservePayload::Text { body: String::new() };
+        assert_ascii(outcome_glyph(&ok_payload).0);
+        assert_ascii(observe_compact(&ok_payload).0);
+
+        let err_payload = ObservePayload::Error {
+            message: "boom".to_string(),
+        };
+        assert_ascii(outcome_glyph(&err_payload).0);
+        assert_ascii(observe_compact(&err_payload).0);
+    }
+
+    #[test]
+    fn rendered_external_text_does_not_emit_terminal_controls() {
+        assert_eq!(
+            terminal_safe_text("2728\tself.process_action();"),
+            "2728    self.process_action();"
+        );
+        assert_eq!(terminal_safe_text("red\x1b[31m"), "red^[[31m");
+        assert_eq!(terminal_safe_text("left\rright"), "left^Mright");
     }
 }
 
@@ -155,14 +257,14 @@ pub(crate) fn input_display_lines(input: &ToolInputDisplay) -> Vec<Line<'static>
         ToolInputDisplay::Path(p) => {
             lines.push(Line::from(vec![
                 Span::raw("   "),
-                Span::styled(p.clone(), Style::default().fg(Color::DarkGray)),
+                Span::styled(terminal_safe_text(p), Style::default().fg(Color::DarkGray)),
             ]));
         }
         ToolInputDisplay::Diff { path, diff } => {
             lines.push(Line::from(vec![
                 Span::raw("   "),
                 Span::styled(
-                    path.clone(),
+                    terminal_safe_text(path),
                     Style::default()
                         .fg(Color::DarkGray)
                         .add_modifier(Modifier::BOLD),
@@ -180,7 +282,7 @@ pub(crate) fn input_display_lines(input: &ToolInputDisplay) -> Vec<Line<'static>
                     lines.push(Line::from(vec![
                         Span::raw("   "),
                         Span::styled(
-                            format!("[… {} more]", remaining),
+                            format!("[... {} more]", remaining),
                             Style::default().fg(Color::DarkGray),
                         ),
                     ]));
@@ -195,7 +297,7 @@ pub(crate) fn input_display_lines(input: &ToolInputDisplay) -> Vec<Line<'static>
                 };
                 lines.push(Line::from(vec![
                     Span::raw("   "),
-                    Span::styled(dl.to_string(), Style::default().fg(color)),
+                    Span::styled(terminal_safe_text(dl), Style::default().fg(color)),
                 ]));
                 count += 1;
             }
@@ -203,13 +305,16 @@ pub(crate) fn input_display_lines(input: &ToolInputDisplay) -> Vec<Line<'static>
         ToolInputDisplay::Command { cmd, cwd } => {
             lines.push(Line::from(vec![
                 Span::raw("   "),
-                Span::styled(format!("$ {}", cmd), Style::default().fg(Color::Magenta)),
+                Span::styled(
+                    format!("$ {}", terminal_safe_text(cmd)),
+                    Style::default().fg(Color::Magenta),
+                ),
             ]));
             if let Some(cwd) = cwd {
                 lines.push(Line::from(vec![
                     Span::raw("   "),
                     Span::styled(
-                        format!("(cwd: {})", cwd),
+                        format!("(cwd: {})", terminal_safe_text(cwd)),
                         Style::default().fg(Color::DarkGray),
                     ),
                 ]));
@@ -219,7 +324,7 @@ pub(crate) fn input_display_lines(input: &ToolInputDisplay) -> Vec<Line<'static>
             lines.push(Line::from(vec![
                 Span::raw("   "),
                 Span::styled(
-                    q.clone(),
+                    terminal_safe_text(q),
                     Style::default()
                         .fg(Color::White)
                         .add_modifier(Modifier::ITALIC),
@@ -230,7 +335,7 @@ pub(crate) fn input_display_lines(input: &ToolInputDisplay) -> Vec<Line<'static>
             for jl in p.lines().take(8) {
                 lines.push(Line::from(vec![
                     Span::raw("   "),
-                    Span::styled(jl.to_string(), Style::default().fg(Color::DarkGray)),
+                    Span::styled(terminal_safe_text(jl), Style::default().fg(Color::DarkGray)),
                 ]));
             }
         }
@@ -238,7 +343,7 @@ pub(crate) fn input_display_lines(input: &ToolInputDisplay) -> Vec<Line<'static>
             for tl in t.lines() {
                 lines.push(Line::from(vec![
                     Span::raw("   "),
-                    Span::styled(tl.to_string(), Style::default().fg(Color::White)),
+                    Span::styled(terminal_safe_text(tl), Style::default().fg(Color::White)),
                 ]));
             }
         }
@@ -274,7 +379,7 @@ pub(crate) fn observe_payload_lines(
             for sl in stdout.lines().take(stdout_limit) {
                 lines.push(Line::from(vec![
                     Span::raw("   "),
-                    Span::styled(sl.to_string(), Style::default().fg(Color::White)),
+                    Span::styled(terminal_safe_text(sl), Style::default().fg(Color::White)),
                 ]));
             }
             if collapsed && stdout_total > stdout_limit {
@@ -282,7 +387,7 @@ pub(crate) fn observe_payload_lines(
                     Span::raw("   "),
                     Span::styled(
                         format!(
-                            "[… {} more lines · Ctrl+O expand]",
+                            "[... {} more lines - Ctrl+O expand]",
                             stdout_total - stdout_limit
                         ),
                         Style::default().fg(Color::DarkGray),
@@ -293,14 +398,14 @@ pub(crate) fn observe_payload_lines(
             for el in stderr.lines().take(stderr_limit) {
                 lines.push(Line::from(vec![
                     Span::raw("   "),
-                    Span::styled(el.to_string(), Style::default().fg(Color::Red)),
+                    Span::styled(terminal_safe_text(el), Style::default().fg(Color::Red)),
                 ]));
             }
             if collapsed && stderr_total > stderr_limit {
                 lines.push(Line::from(vec![
                     Span::raw("   "),
                     Span::styled(
-                        format!("[… {} more lines]", stderr_total - stderr_limit),
+                        format!("[... {} more lines]", stderr_total - stderr_limit),
                         Style::default().fg(Color::DarkGray),
                     ),
                 ]));
@@ -314,7 +419,7 @@ pub(crate) fn observe_payload_lines(
             let line_count = content.lines().count();
             let path_str = path.as_deref().unwrap_or("<unknown>");
             let header = format!(
-                "{} · {} lines{}",
+                "{} - {} lines{}",
                 path_str,
                 line_count,
                 if *truncated { " (truncated)" } else { "" }
@@ -327,14 +432,14 @@ pub(crate) fn observe_payload_lines(
             for cl in content.lines().take(limit) {
                 lines.push(Line::from(vec![
                     Span::raw("   "),
-                    Span::styled(cl.to_string(), Style::default().fg(Color::White)),
+                    Span::styled(terminal_safe_text(cl), Style::default().fg(Color::White)),
                 ]));
             }
             if collapsed && line_count > limit {
                 lines.push(Line::from(vec![
                     Span::raw("   "),
                     Span::styled(
-                        format!("[… {} more lines · Ctrl+O expand]", line_count - limit),
+                        format!("[... {} more lines - Ctrl+O expand]", line_count - limit),
                         Style::default().fg(Color::DarkGray),
                     ),
                 ]));
@@ -364,14 +469,14 @@ pub(crate) fn observe_payload_lines(
                     };
                     lines.push(Line::from(vec![
                         Span::raw("   "),
-                        Span::styled(dl.to_string(), Style::default().fg(color)),
+                        Span::styled(terminal_safe_text(dl), Style::default().fg(color)),
                     ]));
                 }
                 if collapsed && total > limit {
                     lines.push(Line::from(vec![
                         Span::raw("   "),
                         Span::styled(
-                            format!("[… {} more lines]", total - limit),
+                            format!("[... {} more lines]", total - limit),
                             Style::default().fg(Color::DarkGray),
                         ),
                     ]));
@@ -379,7 +484,7 @@ pub(crate) fn observe_payload_lines(
             } else if let Some(p) = path {
                 lines.push(Line::from(vec![
                     Span::raw("   "),
-                    Span::styled(p.clone(), Style::default().fg(Color::DarkGray)),
+                Span::styled(terminal_safe_text(p), Style::default().fg(Color::DarkGray)),
                 ]));
             }
         }
@@ -389,14 +494,14 @@ pub(crate) fn observe_payload_lines(
             for jl in pretty.lines().take(limit) {
                 lines.push(Line::from(vec![
                     Span::raw("   "),
-                    Span::styled(jl.to_string(), Style::default().fg(Color::DarkGray)),
+                    Span::styled(terminal_safe_text(jl), Style::default().fg(Color::DarkGray)),
                 ]));
             }
             if collapsed && total > limit {
                 lines.push(Line::from(vec![
                     Span::raw("   "),
                     Span::styled(
-                        format!("[… {} more lines · Ctrl+O expand]", total - limit),
+                        format!("[... {} more lines - Ctrl+O expand]", total - limit),
                         Style::default().fg(Color::DarkGray),
                     ),
                 ]));
@@ -408,14 +513,14 @@ pub(crate) fn observe_payload_lines(
             for tl in body.lines().take(limit) {
                 lines.push(Line::from(vec![
                     Span::raw("   "),
-                    Span::styled(tl.to_string(), Style::default().fg(Color::White)),
+                    Span::styled(terminal_safe_text(tl), Style::default().fg(Color::White)),
                 ]));
             }
             if collapsed && total > limit {
                 lines.push(Line::from(vec![
                     Span::raw("   "),
                     Span::styled(
-                        format!("[… {} more lines · Ctrl+O expand]", total - limit),
+                        format!("[... {} more lines - Ctrl+O expand]", total - limit),
                         Style::default().fg(Color::DarkGray),
                     ),
                 ]));
@@ -424,7 +529,7 @@ pub(crate) fn observe_payload_lines(
         ObservePayload::Error { message } => {
             lines.push(Line::from(vec![
                 Span::raw("   "),
-                Span::styled(message.clone(), Style::default().fg(Color::Red)),
+                Span::styled(terminal_safe_text(message), Style::default().fg(Color::Red)),
             ]));
         }
     }
