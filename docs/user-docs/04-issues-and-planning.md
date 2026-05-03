@@ -87,6 +87,185 @@ Next to the task title, you may see **Meta Chips** providing live context:
 *   **Retries** (e.g., `retry 2/3`): Shows if a task failed previously and is being re-attempted.
 *   **Conflicts**: Explicit warnings if setup overlays conflicted (e.g., `2 files conflict with T1`).
 
+## Worktree Isolation Discipline (The Spur Advantage)
+
+A major challenge with AI coding agents is that they mutate files in your repository as they work. If you run two agents simultaneously, or try to continue your own coding while an agent is thinking, you will face file collisions, broken builds, and git conflicts.
+
+**Spur solves this completely using automated Git Worktrees.**
+
+Whenever the Brain orchestrator dispatches a task to a Worker agent, it does **not** run the worker in your main directory. Instead, Spur:
+
+1. **Creates an Isolated Clone:** Automatically runs `git worktree add` to generate a temporary, hidden directory specific to that task.
+2. **Synchronizes Environment:** Safely inherits untracked files (like `.env` or `node_modules`) so the worker's build environment is fully functional.
+3. **Applies Overlays:** If the plan has dependencies (e.g., Task B relies on Task A), Spur cherry-picks Task A's commits into Task B's worktree *before* starting Task B.
+4. **Executes in Isolation:** The worker agent (e.g., Claude Code, Codex) is "chrooted" into this directory. It is completely unaware of your main workspace.
+5. **Extracts and Cleans Up:** Once the worker completes and you approve the review, Spur extracts the diff, merges the commits cleanly onto your main branch, and automatically deletes the temporary worktree.
+
+### Why this is a Superpower
+* **Massive Concurrency:** Spur can run 5 worker agents in parallel on 5 different tasks because they operate in 5 distinct directories.
+* **Safe Exploration:** If a worker hallucinates and destroys the codebase, your main IDE checkout remains completely untouched. You simply reject the task in the Plan Inspector, and the tainted worktree is instantly deleted.
+* **Uninterrupted Flow:** You can continue coding, running your local dev server, and pushing commits in your main directory while Spur agents work quietly in the background.
+
+### End-to-End Plan Execution Flow
+
+When you ask Spur to build a complex feature or execute an entire Epic, the Brain goes through a distinct lifecycle of planning, parallel dispatch, and continuous reconciliation. Here is how Spur orchestrates a complete plan:
+
+```mermaid
+stateDiagram-v2
+    %% Define styles
+    classDef brainState fill:#1f6feb,color:#fff,stroke:#113d8f,stroke-width:2px;
+    classDef workerState fill:#238636,color:#fff,stroke:#2ea043,stroke-width:2px;
+    classDef systemState fill:#444,color:#fff,stroke:#222,stroke-width:2px;
+    classDef userState fill:#9e6a03,color:#fff,stroke:#d29922,stroke-width:2px;
+
+    state "User Request (Execute Epic or Feature)" as Request:::userState
+    state "Brain Analyzes & Plans" as Planning:::brainState
+    state "Plan DAG Generated" as DAG:::systemState
+    
+    state "The Reconciler Loop" as Reconciler {
+        state "Check Dependencies" as CheckDeps
+        state "Dispatch Ready Tasks" as Dispatch:::systemState
+        
+        state "Worker Execution" as Executing {
+            state "Create Worktree" as WT:::systemState
+            state "Worker Solves Task" as Worker:::workerState
+            WT --> Worker
+        }
+        
+        state "Brain Review (Gate 1)" as BrainReview:::brainState
+        state "User Escalation (Gate 2)" as UserEscalation:::userState
+        
+        CheckDeps --> Dispatch : Dependencies Met
+        Dispatch --> Executing : delegate_to_worker()
+        Executing --> BrainReview : Worker completes
+        
+        BrainReview --> CheckDeps : Brain Approves (Unblocks)
+        BrainReview --> Executing : Brain Requests Changes (Retry)
+        BrainReview --> UserEscalation : Critical Blocker / Scope Drift
+        
+        UserEscalation --> CheckDeps : User Approves
+        UserEscalation --> Executing : User Requests Changes
+    }
+    
+    state "All Tasks Approved" as Complete:::systemState
+    state "Merge Plan to Main" as Merge:::brainState
+
+    Request --> Planning
+    Planning --> DAG : submit_plan()
+    DAG --> Reconciler
+    
+    Reconciler --> Complete : DAG Fully Traversed
+    Complete --> Merge : merge_plan()
+```
+
+**The Plan Execution Stages:**
+1. **Planning Phase:** The Brain receives your request, analyzes the requirements, and breaks the work down into a series of smaller, manageable tasks.
+2. **DAG Generation:** The Brain submits these tasks to the Orchestrator via the `submit_plan` tool. Crucially, it defines the *dependencies* between these tasks, forming a Directed Acyclic Graph (DAG).
+3. **The Reconciler Loop:** This is Spur's autonomous engine. It constantly evaluates the DAG. If a task has no uncompleted dependencies, the Reconciler immediately dispatches it. 
+4. **Execution & The Two-Tier Gate:** Dispatched tasks run in isolated worktrees (see below). When a worker finishes, it passes through a **Two-Tier Review Gate**:
+   * **Gate 1 (The Brain):** The Brain agent automatically uses the `get_task_diff` tool to inspect the worker's output. It acts as the first line of defense, either approving the work or rejecting/requesting changes (sending the worker back to try again).
+   * **Gate 2 (The User):** You do not need to micro-manage every task. If the worker repeatedly fails, experiences scope drift, or encounters a critical blocker, the Brain will escalate to you. You act as the final authority to resolve complex blockers.
+5. **Final Merge:** Once the Reconciler confirms every task in the DAG is successfully approved, the Brain executes a final deterministic merge, integrating the entire feature back into your main branch.
+
+### Graph-Strict (G-Strict) Execution & Merge Strategy
+
+Spur achieves effective parallel execution through a **Graph-Strict (G-Strict)** dependency and merge strategy. When the Brain creates a plan, it forms a Directed Acyclic Graph (DAG) of tasks. Spur uses this DAG to perfectly orchestrate isolated worktrees and eliminate merge conflicts:
+
+```mermaid
+graph TD
+    classDef mainBranch fill:#1f6feb,stroke:#113d8f,stroke-width:2px,color:#fff;
+    classDef worktree fill:#238636,stroke:#2ea043,stroke-width:2px,color:#fff;
+    classDef review fill:#9e6a03,stroke:#d29922,stroke-width:2px,color:#fff;
+
+    Main((Main Branch)):::mainBranch
+
+    subgraph Plan [Dependency Graph / DAG]
+        T1[Task 1: Auth API]
+        T2[Task 2: UI Theme]
+        T3[Task 3: Login Page]
+        
+        T1 -->|Blocks| T3
+    end
+
+    subgraph Parallel Execution [Isolated Worktrees]
+        W1[Worktree 1<br/>Base: Main]:::worktree
+        W2[Worktree 2<br/>Base: Main]:::worktree
+        W3[Worktree 3<br/>Base: Main + T1 Overlay]:::worktree
+    end
+
+    Main -.-> W1
+    Main -.-> W2
+    Main -.-> W3
+
+    T1 -->|Dispatched immediately| W1
+    T2 -->|Dispatched immediately| W2
+    T3 -->|Waits for T1 approval| W3
+
+    subgraph Review & Merge [G-Strict Merge]
+        R1{Review T1}:::review
+        R2{Review T2}:::review
+        R3{Review T3}:::review
+    end
+
+    W1 --> R1
+    W2 --> R2
+    R1 -->|1. Merged| Main
+    
+    R1 -.->|Cherry-picked as Overlay| W3
+    W3 --> R3
+    
+    R2 -->|2. Merged| Main
+    R3 -->|3. Merged| Main
+```
+
+**How the G-Strict Flow Works:**
+1. **Parallel Dispatch:** `Task 1` and `Task 2` have no dependencies, so Spur spawns `Worktree 1` and `Worktree 2` simultaneously. They both branch off the current `Main` commit.
+2. **Overlay Application:** `Task 3` depends on `Task 1`. Spur will not dispatch `Task 3` until `Task 1` is approved. Once approved, `Worktree 3` is created, and Spur automatically applies `Task 1`'s commits as an "overlay" so the worker can build upon the new Auth API.
+3. **Deterministic Merging:** By strictly honoring the graph's topological order during the merge phase, Spur guarantees that dependent tasks are always merged *after* their prerequisites. This prevents the classic "integration hell" that usually occurs when multiple developers (or AI agents) work in parallel.
+
+### The Worker Worktree Lifecycle
+
+To understand what exactly happens when a worker operates on a task, here is the lifecycle of a single worker session:
+
+```mermaid
+sequenceDiagram
+    participant Brain as Orchestrator (Brain)
+    participant WA as Worktree Authority
+    participant Worker as Worker Agent (e.g. Claude)
+    participant Git as Local Git Repo
+
+    Brain->>WA: delegate_task(base, task_instructions)
+    activate WA
+    
+    WA->>Git: git worktree add .spur/worktrees/worker-xyz <base>
+    WA->>WA: Copy untracked files (.env, node_modules)
+    
+    opt Has Dependencies
+        WA->>Git: git cherry-pick <overlay_commits>
+    end
+    
+    WA-->>Brain: Return isolated path
+    deactivate WA
+    
+    Brain->>Worker: Spawn in CWD: .spur/worktrees/worker-xyz
+    activate Worker
+    Worker->>Worker: Reads files, executes commands
+    Worker->>Git: Commits changes locally in worktree
+    Worker-->>Brain: Return Task Result & Diff
+    deactivate Worker
+    
+    Brain->>Brain: Await User Review
+    
+    alt User Approves
+        Brain->>Git: Merge worker-xyz commits to Main
+        Brain->>WA: Delete worktree worker-xyz
+    else User Rejects
+        Brain->>WA: Delete worktree worker-xyz (Discard changes)
+    end
+```
+
+This sequence ensures that the worker is physically "chrooted" into its isolated environment (`CWD: .spur/worktrees/worker-xyz`). It can safely run `npm install`, compile code, or even delete files without any risk to your primary developer checkout.
+
 ## Mermaid Diagram Visualization
 
 > 🎥 **Video Placeholder:** [Show an agent generating a Mermaid block, the placeholder transforming to the ready state, and pressing Alt-v to render the visual graph inline.]

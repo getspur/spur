@@ -696,14 +696,10 @@ impl PersistedSubmitFixture {
     }
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn persisted_submit_plan_does_not_enqueue_delegation_request() {
-    if !br_available() {
-        eprintln!(
-            "skipping persisted_submit_plan_does_not_enqueue_delegation_request: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let mut fixture = persisted_submit_fixture().await;
     fixture.submit_persisted_plan().await;

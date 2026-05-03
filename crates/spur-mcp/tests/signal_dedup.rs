@@ -308,14 +308,10 @@ async fn inject_cycle_when_children_exist(repo: PathBuf, mutation_id: Uuid) -> R
     Err("timed out waiting for mutation children before injecting cycle".into())
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn duplicate_signal_comments_with_same_signal_id_commit_once() {
-    if !br_available() {
-        eprintln!(
-            "skipping duplicate_signal_comments_with_same_signal_id_commit_once: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
@@ -371,14 +367,10 @@ async fn duplicate_signal_comments_with_same_signal_id_commit_once() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn watcher_skips_signal_task_without_ready_for_review_label() {
-    if !br_available() {
-        eprintln!(
-            "skipping watcher_skips_signal_task_without_ready_for_review_label: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
@@ -412,12 +404,10 @@ async fn watcher_skips_signal_task_without_ready_for_review_label() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn watcher_projects_real_plan_state_for_scoring() {
-    if !br_available() {
-        eprintln!("skipping watcher_projects_real_plan_state_for_scoring: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
@@ -461,12 +451,10 @@ async fn watcher_projects_real_plan_state_for_scoring() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn watcher_processes_only_one_signal_per_task_per_tick() {
-    if !br_available() {
-        eprintln!("skipping watcher_processes_only_one_signal_per_task_per_tick: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
@@ -524,14 +512,10 @@ async fn watcher_processes_only_one_signal_per_task_per_tick() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn watcher_skips_review_rejected_tasks_even_if_signal_label_exists() {
-    if !br_available() {
-        eprintln!(
-            "skipping watcher_skips_review_rejected_tasks_even_if_signal_label_exists: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
@@ -574,20 +558,11 @@ async fn watcher_skips_review_rejected_tasks_even_if_signal_label_exists() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn watcher_retries_signal_after_invariant_violation_without_marking_processed() {
-    if !br_available() {
-        eprintln!(
-            "skipping watcher_retries_signal_after_invariant_violation_without_marking_processed: `br` not on PATH"
-        );
-        return;
-    }
-    if !sqlite_available() {
-        eprintln!(
-            "skipping watcher_retries_signal_after_invariant_violation_without_marking_processed: `sqlite3` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(sqlite_available(), "this test requires `sqlite3` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
@@ -692,14 +667,10 @@ async fn watcher_retries_signal_after_invariant_violation_without_marking_proces
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn distinct_signal_on_task_with_prior_processed_label_is_not_skipped() {
-    if !br_available() {
-        eprintln!(
-            "skipping distinct_signal_on_task_with_prior_processed_label_is_not_skipped: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");

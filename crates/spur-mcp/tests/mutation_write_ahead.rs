@@ -79,14 +79,10 @@ fn mutation_batch(
     .expect("MutationBatch JSON must deserialize")
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn write_ahead_comment_persists_when_rewire_validation_fails() {
-    if !br_available() {
-        eprintln!(
-            "skipping write_ahead_comment_persists_when_rewire_validation_fails: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
@@ -171,14 +167,10 @@ async fn write_ahead_comment_persists_when_rewire_validation_fails() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn compensate_mutation_orphans_emits_violation_breadcrumb() {
-    if !br_available() {
-        eprintln!(
-            "skipping compensate_mutation_orphans_emits_violation_breadcrumb: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
