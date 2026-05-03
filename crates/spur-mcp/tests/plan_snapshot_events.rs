@@ -181,12 +181,10 @@ fn snapshot_events(events: &[SpurEvent]) -> Vec<(SessionId, &spur_acp::PlanSnaps
         .collect()
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn persisted_submit_plan_emits_plan_snapshot_updated() {
-    if !br_available() {
-        eprintln!("skipping persisted_submit_plan_emits_plan_snapshot_updated: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let fixture = PersistedFixture::new().await;
     let (plan_id, _task_map) = fixture.submit_persisted_plan().await;
@@ -205,12 +203,10 @@ async fn persisted_submit_plan_emits_plan_snapshot_updated() {
     assert_eq!(latest.tasks.len(), 1);
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn review_task_emits_refreshed_plan_snapshot() {
-    if !br_available() {
-        eprintln!("skipping review_task_emits_refreshed_plan_snapshot: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let fixture = PersistedFixture::new().await;
     let (plan_id, task_map) = fixture.submit_persisted_plan().await;
@@ -253,12 +249,10 @@ async fn review_task_emits_refreshed_plan_snapshot() {
     assert_eq!(latest.counts.approved, 1);
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn recover_persisted_plans_emits_plan_snapshot_updated() {
-    if !br_available() {
-        eprintln!("skipping recover_persisted_plans_emits_plan_snapshot_updated: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let fixture = PersistedFixture::new().await;
     let (plan_id, _task_map) = fixture.submit_persisted_plan().await;
@@ -287,14 +281,10 @@ async fn recover_persisted_plans_emits_plan_snapshot_updated() {
     assert_eq!(latest.plan_id, plan_id);
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn recover_persisted_plans_uses_legacy_session_fallback_when_missing() {
-    if !br_available() {
-        eprintln!(
-            "skipping recover_persisted_plans_uses_legacy_session_fallback_when_missing: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
@@ -362,14 +352,10 @@ async fn recover_persisted_plans_uses_legacy_session_fallback_when_missing() {
     assert_eq!(latest.plan_id, "legacy-plan");
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn reconciler_dispatch_and_completion_emit_refreshed_snapshots() {
-    if !br_available() {
-        eprintln!(
-            "skipping reconciler_dispatch_and_completion_emit_refreshed_snapshots: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let fixture = PersistedFixture::new().await;
     let (plan_id, task_map) = fixture.submit_persisted_plan().await;

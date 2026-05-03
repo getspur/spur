@@ -55,14 +55,10 @@ async fn beads_pm(repo: &Path) -> Arc<PmService> {
     )
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn beads_backed_start_requires_repo_root_before_listener_boot() {
-    if !br_available() {
-        eprintln!(
-            "skipping beads_backed_start_requires_repo_root_before_listener_boot: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -89,14 +85,10 @@ async fn beads_backed_start_requires_repo_root_before_listener_boot() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn dropping_server_handle_releases_pidfile_for_next_start() {
-    if !br_available() {
-        eprintln!(
-            "skipping dropping_server_handle_releases_pidfile_for_next_start: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
     skip_if_no_loopback!("dropping_server_handle_releases_pidfile_for_next_start");
 
     let dir = TempDir::new().expect("tempdir");
