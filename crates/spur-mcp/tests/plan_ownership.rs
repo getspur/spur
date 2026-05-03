@@ -771,6 +771,76 @@ async fn execute_epic_refuses_plan_owned_by_other_brain() {
 
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
+async fn execute_epic_refuses_plan_with_ambiguous_owners() {
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init");
+    let pm = beads_pm(dir.path()).await;
+    let feature_gate = common::server_builder::pro_feature_gate();
+    let plan_id = "plan-execute-refuse-ambiguous";
+    let subgraph = spur_mcp::build_epic_subgraph(
+        pm.as_ref(),
+        feature_gate.as_ref(),
+        plan_id,
+        "Execute Refuse Ambiguous",
+        None,
+        &one_task(),
+    )
+    .await
+    .expect("build epic subgraph");
+    pm.update_issue(
+        &subgraph.epic_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![
+                labels::plan_owner("brain-current"),
+                labels::plan_owner("other-brain"),
+            ],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("seed ambiguous owner labels");
+
+    let session_id = BrainSessionId::new(SessionId("brain-current".into()));
+    let (mut server, _channel) = McpCallbackServer::new(
+        &session_id,
+        Some(Arc::clone(&pm)),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        common::server_builder::pro_feature_gate(),
+    );
+    server.set_workers(vec![spur_mcp::WorkerInfo {
+        name: "codex".into(),
+        ..Default::default()
+    }]);
+
+    let response = server
+        .__test_call_execute_epic(&subgraph.epic_id, Some("codex"))
+        .await;
+    let msg = error_message(&response);
+    assert!(
+        msg.contains("execute_epic") && msg.contains("ambiguous owner labels"),
+        "execute_epic must refuse plans with ambiguous owner labels: {response}"
+    );
+
+    let sentinels = collect_epic_sentinels(pm.as_ref(), &subgraph.epic_id).await;
+    let transfers = sentinels
+        .iter()
+        .filter(|s| matches!(s, AuditSentinelKind::PlanOwnershipTransferred { .. }))
+        .count();
+    assert_eq!(
+        transfers, 0,
+        "refused execute_epic must not emit PlanOwnershipTransferred"
+    );
+}
+
+#[ignore = "requires br on PATH; run with --ignored"]
+#[tokio::test]
 async fn execute_epic_allows_unowned_plan() {
     assert!(
         br_available(),
