@@ -43,6 +43,9 @@ fn sample_snapshot(plan_id: &str, status: &str, tasks: Vec<PlanSnapshotTask>) ->
                 .count() as u32,
         },
         tasks,
+        owner_brain_session_id: None,
+        owner_token: None,
+        owner_acquired_at: None,
     }
 }
 

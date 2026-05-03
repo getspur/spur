@@ -23,6 +23,26 @@ pub fn build_plan_snapshot(state: &PlanState) -> PlanSnapshot {
             .iter()
             .map(|task| build_task_snapshot(state, task))
             .collect(),
+        owner_brain_session_id: owner_brain_session_id_from_state(state),
+        // TODO: populate from latest PlanOwnershipAcquired/Transferred audit sentinel.
+        // Derivation requires scanning the epic audit history, which the snapshot
+        // builder does not currently access — left as None for this slice.
+        owner_token: None,
+        owner_acquired_at: None,
+    }
+}
+
+/// Derive `PlanSnapshot.owner_brain_session_id` from the brain session id on
+/// `PlanState`. Returns `None` for the projector's `persisted-plan:*` fallback
+/// (used when no `PlanSubmit` audit recorded a brain session id), which
+/// indicates the original submitter is unknown rather than asserting an owner
+/// that never existed.
+fn owner_brain_session_id_from_state(state: &PlanState) -> Option<String> {
+    let raw = &state.brain_session_id.as_session_id().0;
+    if raw.starts_with("persisted-plan:") {
+        None
+    } else {
+        Some(raw.clone())
     }
 }
 
@@ -400,6 +420,42 @@ mod tests {
         assert!(
             leaf.blocked_by.is_empty(),
             "superseded parents should not block"
+        );
+    }
+
+    #[test]
+    fn build_plan_snapshot_populates_owner_brain_session_id_from_state() {
+        let pending = sample_entry("task-1", &[], PlanTaskStatus::Pending);
+        let snapshot = build_plan_snapshot(&sample_state(vec![pending]));
+        assert_eq!(
+            snapshot.owner_brain_session_id.as_deref(),
+            Some("brain-1"),
+            "owner_brain_session_id should mirror PlanState.brain_session_id",
+        );
+        assert!(
+            snapshot.owner_token.is_none(),
+            "owner_token is a None placeholder for this slice"
+        );
+        assert!(
+            snapshot.owner_acquired_at.is_none(),
+            "owner_acquired_at is a None placeholder for this slice"
+        );
+    }
+
+    #[test]
+    fn build_plan_snapshot_omits_owner_for_persisted_plan_fallback() {
+        // Mirrors the projector fallback when no PlanSubmit audit recorded a brain
+        // session id: state.brain_session_id is `persisted-plan:<plan_id>`. That
+        // value is a placeholder, not a real owner — the snapshot must surface
+        // None so consumers don't render a fictitious owner label.
+        let pending = sample_entry("task-1", &[], PlanTaskStatus::Pending);
+        let mut state = sample_state(vec![pending]);
+        state.brain_session_id =
+            BrainSessionId::new(SessionId("persisted-plan:plan-1".into()));
+        let snapshot = build_plan_snapshot(&state);
+        assert!(
+            snapshot.owner_brain_session_id.is_none(),
+            "persisted-plan:* fallback must not surface as an owner"
         );
     }
 }
