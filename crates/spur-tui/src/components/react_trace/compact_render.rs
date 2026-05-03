@@ -12,6 +12,8 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
+use crate::components::trace_format::terminal_safe_text;
+
 use super::types::{ActStatus, TraceEntry, TraceKind};
 use super::ReactTrace;
 
@@ -188,8 +190,8 @@ fn compact_kind_tag(k: &TraceKind) -> &'static str {
 
 fn compact_prefix_style(k: &TraceKind) -> (&'static str, Style) {
     match k {
-        TraceKind::Think => ("  · ", Style::default().fg(Color::DarkGray)),
-        TraceKind::AgentMessage { .. } => ("  ▸ ", Style::default().fg(Color::White)),
+        TraceKind::Think => ("  - ", Style::default().fg(Color::DarkGray)),
+        TraceKind::AgentMessage { .. } => ("  @ ", Style::default().fg(Color::White)),
         TraceKind::Act { status, .. } => {
             let color = match status {
                 ActStatus::Pending | ActStatus::InProgress { .. } => Color::Yellow,
@@ -197,13 +199,13 @@ fn compact_prefix_style(k: &TraceKind) -> (&'static str, Style) {
                 ActStatus::Failed(_) => Color::Red,
             };
             (
-                "  ▶ ",
+                "  * ",
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             )
         }
-        TraceKind::Observe { .. } => ("  ◂ ", Style::default().fg(Color::DarkGray)),
+        TraceKind::Observe { .. } => ("  < ", Style::default().fg(Color::DarkGray)),
         TraceKind::Delegate { .. } => (
-            "  ⇲ ",
+            "  = ",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -270,7 +272,7 @@ fn build_compact_lines_from(
     let w = width as usize;
     if entries.is_empty() && seed_prev_kind_tag.is_none() {
         let placeholder = vec![Line::from(Span::styled(
-            "(waiting for worker output…)",
+            "(waiting for worker output...)",
             Style::default().fg(Color::DarkGray),
         ))];
         return (placeholder, Vec::new());
@@ -287,8 +289,8 @@ fn build_compact_lines_from(
             if pk != kind_tag {
                 let sep: String = match w {
                     0 => String::new(),
-                    1 => "─".to_string(),
-                    _ => " ".chars().chain(std::iter::repeat_n('─', w - 1)).collect(),
+                    1 => "-".to_string(),
+                    _ => " ".chars().chain(std::iter::repeat_n('-', w - 1)).collect(),
                 };
                 lines.push(Line::from(Span::styled(
                     sep,
@@ -321,12 +323,13 @@ fn build_compact_lines_from(
             .chars()
             .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
             .collect();
+        let text_single_line = terminal_safe_text(&text_single_line);
 
         if w < MINIMUM_COMPACT_WIDTH {
             let placeholder = if w == 0 {
                 String::new()
             } else {
-                "…".to_string()
+                ".".to_string()
             };
             lines.push(Line::from(Span::styled(placeholder, style)));
             row += 1;
@@ -372,5 +375,83 @@ fn truncate_to_width(s: &str, max_cols: usize) -> String {
         cols += cw;
         end = i + ch.len_utf8();
     }
-    format!("{}…", &s[..end])
+    format!("{}...", &s[..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_prefixes_are_ascii_terminal_chrome() {
+        let entries = [
+            TraceEntry {
+                kind: TraceKind::Think,
+                text: String::new(),
+                timestamp: "00:00".into(),
+                markdown: None,
+            },
+            TraceEntry {
+                kind: TraceKind::AgentMessage {
+                    agent: "agent".into(),
+                },
+                text: String::new(),
+                timestamp: "00:00".into(),
+                markdown: None,
+            },
+            TraceEntry {
+                kind: TraceKind::Act {
+                    tool: "read".into(),
+                    family: spur_acp::adapter::ToolFamily::Read,
+                    input: spur_acp::adapter::ToolInputDisplay::Empty,
+                    tool_call_id: None,
+                    status: ActStatus::Completed(None),
+                },
+                text: String::new(),
+                timestamp: "00:00".into(),
+                markdown: None,
+            },
+            TraceEntry {
+                kind: TraceKind::Observe { payload: None },
+                text: String::new(),
+                timestamp: "00:00".into(),
+                markdown: None,
+            },
+            TraceEntry {
+                kind: TraceKind::Delegate {
+                    agent: "worker".into(),
+                    task: String::new(),
+                    status: String::new(),
+                    request_id: None,
+                    executor_id: None,
+                },
+                text: String::new(),
+                timestamp: "00:00".into(),
+                markdown: None,
+            },
+            TraceEntry {
+                kind: TraceKind::UserMessage,
+                text: String::new(),
+                timestamp: "00:00".into(),
+                markdown: None,
+            },
+            TraceEntry {
+                kind: TraceKind::Permission {
+                    description: "approve".into(),
+                    pending: true,
+                    countdown: 0,
+                },
+                text: String::new(),
+                timestamp: "00:00".into(),
+                markdown: None,
+            },
+        ];
+
+        for entry in entries {
+            assert!(
+                compact_prefix_style(&entry.kind).0.is_ascii(),
+                "compact prefix must be ASCII"
+            );
+        }
+    }
 }

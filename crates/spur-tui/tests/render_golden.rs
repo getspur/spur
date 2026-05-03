@@ -192,7 +192,7 @@ fn claude_edit_collapsed_renders_one_line_summary() {
         "expected path in collapsed line, got:\n{actual}"
     );
     assert!(
-        actual.contains("✅"),
+        actual.contains("ok"),
         "expected success glyph in collapsed line, got:\n{actual}"
     );
     assert!(
