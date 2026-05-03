@@ -304,3 +304,209 @@ async fn resume_plan_refuses_mixed_current_and_other_owner_labels() {
         "resume_plan must refuse mixed current and other owner labels: {response}"
     );
 }
+
+#[tokio::test]
+async fn merge_plan_refuses_plan_owned_by_other_brain() {
+    if !br_available() {
+        eprintln!("skipping merge_plan_refuses_plan_owned_by_other_brain: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init");
+    let pm = beads_pm(dir.path()).await;
+    let feature_gate = common::server_builder::pro_feature_gate();
+    let plan_id = "plan-merge-refuse";
+    let subgraph = spur_mcp::build_epic_subgraph(
+        pm.as_ref(),
+        feature_gate.as_ref(),
+        plan_id,
+        "Plan Merge Refuse",
+        None,
+        &one_task(),
+    )
+    .await
+    .expect("build epic subgraph");
+    pm.update_issue(
+        &subgraph.epic_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![labels::plan_owner("other-brain")],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("add other owner label");
+
+    let session_id = BrainSessionId::new(SessionId("brain-current".into()));
+    let (server, _channel) = McpCallbackServer::new(
+        &session_id,
+        Some(Arc::clone(&pm)),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        common::server_builder::pro_feature_gate(),
+    );
+
+    let response = server
+        .__test_call_tool("merge_plan", json!({ "plan_id": plan_id }))
+        .await;
+    let msg = error_message(&response);
+    assert!(
+        msg.contains("merge_plan")
+            && msg.contains("active handoff is not implemented in MVP"),
+        "merge_plan must refuse plans owned by another brain: {response}"
+    );
+}
+
+#[tokio::test]
+async fn merge_plan_refuses_unowned_plan() {
+    if !br_available() {
+        eprintln!("skipping merge_plan_refuses_unowned_plan: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init");
+    let pm = beads_pm(dir.path()).await;
+    let feature_gate = common::server_builder::pro_feature_gate();
+    let plan_id = "plan-merge-unowned";
+    spur_mcp::build_epic_subgraph(
+        pm.as_ref(),
+        feature_gate.as_ref(),
+        plan_id,
+        "Plan Merge Unowned",
+        None,
+        &one_task(),
+    )
+    .await
+    .expect("build epic subgraph");
+
+    let session_id = BrainSessionId::new(SessionId("brain-current".into()));
+    let (server, _channel) = McpCallbackServer::new(
+        &session_id,
+        Some(Arc::clone(&pm)),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        common::server_builder::pro_feature_gate(),
+    );
+
+    let response = server
+        .__test_call_tool("merge_plan", json!({ "plan_id": plan_id }))
+        .await;
+    let msg = error_message(&response);
+    assert!(
+        msg.contains("merge_plan") && msg.contains("unowned"),
+        "merge_plan must refuse unowned plans (no auto-claim): {response}"
+    );
+}
+
+#[tokio::test]
+async fn review_task_refuses_plan_owned_by_other_brain() {
+    if !br_available() {
+        eprintln!("skipping review_task_refuses_plan_owned_by_other_brain: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init");
+    let pm = beads_pm(dir.path()).await;
+    let feature_gate = common::server_builder::pro_feature_gate();
+    let plan_id = "plan-review-refuse";
+    let subgraph = spur_mcp::build_epic_subgraph(
+        pm.as_ref(),
+        feature_gate.as_ref(),
+        plan_id,
+        "Plan Review Refuse",
+        None,
+        &one_task(),
+    )
+    .await
+    .expect("build epic subgraph");
+    pm.update_issue(
+        &subgraph.epic_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![labels::plan_owner("other-brain")],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("add other owner label");
+
+    let session_id = BrainSessionId::new(SessionId("brain-current".into()));
+    let (server, _channel) = McpCallbackServer::new(
+        &session_id,
+        Some(Arc::clone(&pm)),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        common::server_builder::pro_feature_gate(),
+    );
+
+    let response = server
+        .__test_call_tool(
+            "review_task",
+            json!({
+                "plan_id": plan_id,
+                "task_id": "t1",
+                "decision": "approve",
+            }),
+        )
+        .await;
+    let msg = error_message(&response);
+    assert!(
+        msg.contains("review_task")
+            && msg.contains("active handoff is not implemented in MVP"),
+        "review_task must refuse plans owned by another brain: {response}"
+    );
+}
+
+#[tokio::test]
+async fn review_task_refuses_unowned_plan() {
+    if !br_available() {
+        eprintln!("skipping review_task_refuses_unowned_plan: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init");
+    let pm = beads_pm(dir.path()).await;
+    let feature_gate = common::server_builder::pro_feature_gate();
+    let plan_id = "plan-review-unowned";
+    spur_mcp::build_epic_subgraph(
+        pm.as_ref(),
+        feature_gate.as_ref(),
+        plan_id,
+        "Plan Review Unowned",
+        None,
+        &one_task(),
+    )
+    .await
+    .expect("build epic subgraph");
+
+    let session_id = BrainSessionId::new(SessionId("brain-current".into()));
+    let (server, _channel) = McpCallbackServer::new(
+        &session_id,
+        Some(Arc::clone(&pm)),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        common::server_builder::pro_feature_gate(),
+    );
+
+    let response = server
+        .__test_call_tool(
+            "review_task",
+            json!({
+                "plan_id": plan_id,
+                "task_id": "t1",
+                "decision": "approve",
+            }),
+        )
+        .await;
+    let msg = error_message(&response);
+    assert!(
+        msg.contains("review_task") && msg.contains("unowned"),
+        "review_task must refuse unowned plans (no auto-claim): {response}"
+    );
+}

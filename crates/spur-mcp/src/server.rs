@@ -2453,13 +2453,22 @@ impl McpCallbackServer {
             "get_reconciler_status" => self.handle_get_reconciler_status(id).await,
             "get_task_diff" => self.handle_get_task_diff(id, arguments).await,
             "preview_task_base" => self.handle_preview_task_base(id, arguments).await,
-            "review_task" => match self.handle_review_task(&arguments).await {
-                Ok(text) => JsonRpcResponse::success(
-                    id,
-                    json!({ "content": [{ "type": "text", "text": text }] }),
-                ),
-                Err(e) => JsonRpcResponse::internal_error(id, e),
-            },
+            "review_task" => {
+                if let Some(plan_id) = arguments.get("plan_id").and_then(|v| v.as_str()) {
+                    if let Err((code, message)) =
+                        self.check_plan_owner_for_op(plan_id, "review_task").await
+                    {
+                        return JsonRpcResponse::error(id, code, message);
+                    }
+                }
+                match self.handle_review_task(&arguments).await {
+                    Ok(text) => JsonRpcResponse::success(
+                        id,
+                        json!({ "content": [{ "type": "text", "text": text }] }),
+                    ),
+                    Err(e) => JsonRpcResponse::internal_error(id, e),
+                }
+            }
             "report_progress" => self.handle_report_progress(id, arguments).await,
             _ => JsonRpcResponse::error(id, -32601, format!("Unknown tool: {tool_name}")),
         }
@@ -3397,11 +3406,100 @@ impl McpCallbackServer {
             .await
     }
 
+    /// Refuse the operation unless the current brain owns the epic for `plan_id`.
+    ///
+    /// Returns `Ok(())` only when (a) PM service is unavailable (in-memory-only
+    /// paths have no durable epic to gate on, so we stay permissive) or
+    /// (b) the epic exists and `classify_owner` resolves to `OwnedByCurrent`.
+    /// Any other state (`OwnedByOther`, `Ambiguous`, `Unowned`,
+    /// missing/duplicate epic, lookup failure) yields `Err((code, message))`
+    /// for the caller to wrap into a `JsonRpcResponse` with its own request id.
+    ///
+    /// Mirrors the gating shape used at the top of `handle_resume_plan`.
+    /// Unlike `handle_resume_plan`, we do NOT auto-claim on `Unowned` here:
+    /// these endpoints are mid-lifecycle operations, not entry points, and
+    /// auto-claiming would mask bugs where a plan reaches review/merge with
+    /// no recorded owner.
+    async fn check_plan_owner_for_op(
+        &self,
+        plan_id: &str,
+        op_name: &str,
+    ) -> Result<(), (i64, String)> {
+        let Some(pm) = self.pm_service.as_deref() else {
+            return Ok(());
+        };
+
+        let epics = pm
+            .list_issues(IssueFilter {
+                labels: vec![crate::plan::labels::plan_id(plan_id)],
+                issue_type: Some("epic".to_string()),
+                include_closed: true,
+                limit: Some(10),
+                ..Default::default()
+            })
+            .await
+            .map_err(|error| (-32603, format!("{op_name}: failed to find plan: {error}")))?;
+
+        let Some(epic_summary) = epics.first() else {
+            return Err((-32004, format!("{op_name}: plan not found: {plan_id}")));
+        };
+        if epics.len() > 1 {
+            let epic_ids = epics
+                .iter()
+                .map(|epic| epic.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err((
+                -32009,
+                format!(
+                    "{op_name}: ambiguous plan lookup for {plan_id}; multiple epics matched: {epic_ids}"
+                ),
+            ));
+        }
+        let epic_id = epic_summary.id.clone();
+        let epic = pm.get_issue(&epic_id).await.map_err(|error| {
+            (
+                -32603,
+                format!("{op_name}: failed to load epic {epic_id}: {error}"),
+            )
+        })?;
+
+        match crate::plan::ownership::classify_owner(
+            &epic.labels,
+            self.brain_session_id.as_session_id(),
+        ) {
+            crate::plan::ownership::PlanOwnerMatch::OwnedByCurrent => Ok(()),
+            crate::plan::ownership::PlanOwnerMatch::OwnedByOther { owner } => Err((
+                -32009,
+                format!(
+                    "{op_name}: plan {plan_id} is owned by {owner}; active handoff is not implemented in MVP"
+                ),
+            )),
+            crate::plan::ownership::PlanOwnerMatch::Ambiguous { owners } => Err((
+                -32009,
+                format!(
+                    "{op_name}: plan {plan_id} has ambiguous owner labels: {}",
+                    owners.join(", ")
+                ),
+            )),
+            crate::plan::ownership::PlanOwnerMatch::Unowned => Err((
+                -32009,
+                format!(
+                    "{op_name}: plan {plan_id} is unowned; claim it via execute_epic or resume_plan first"
+                ),
+            )),
+        }
+    }
+
     async fn handle_merge_plan(&self, id: Value, args: Value) -> JsonRpcResponse {
         let plan_id = match args.get("plan_id").and_then(|v| v.as_str()) {
             Some(p) => p.to_string(),
             None => return JsonRpcResponse::invalid_params(id, "Missing required field 'plan_id'"),
         };
+
+        if let Err((code, message)) = self.check_plan_owner_for_op(&plan_id, "merge_plan").await {
+            return JsonRpcResponse::error(id, code, message);
+        }
 
         match self.merge_plan_impl(&plan_id).await {
             Ok(merge_state) => {
@@ -6695,6 +6793,15 @@ mod merge_plan_tests {
         )
         .await
         .expect("build epic subgraph");
+        pm.update_issue(
+            &subgraph.epic_id,
+            spur_pm::IssueUpdate {
+                add_labels: vec![crate::plan::labels::plan_owner("brain")],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("stamp plan_owner label on fixture epic");
         super::require_feature(
             spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
             feature_gate.as_ref(),
@@ -6887,6 +6994,15 @@ mod merge_plan_tests {
         )
         .await
         .expect("build epic subgraph");
+        pm.update_issue(
+            &subgraph.epic_id,
+            spur_pm::IssueUpdate {
+                add_labels: vec![crate::plan::labels::plan_owner("brain")],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("stamp plan_owner label on fixture epic");
         super::require_feature(
             spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
             feature_gate.as_ref(),
@@ -7102,6 +7218,15 @@ mod merge_plan_tests {
         )
         .await
         .expect("build epic subgraph");
+        pm.update_issue(
+            &subgraph.epic_id,
+            spur_pm::IssueUpdate {
+                add_labels: vec![crate::plan::labels::plan_owner("brain")],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("stamp plan_owner label on fixture epic");
 
         let task_a_issue_id = subgraph
             .task_map
