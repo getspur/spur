@@ -87,6 +87,25 @@ Next to the task title, you may see **Meta Chips** providing live context:
 *   **Retries** (e.g., `retry 2/3`): Shows if a task failed previously and is being re-attempted.
 *   **Conflicts**: Explicit warnings if setup overlays conflicted (e.g., `2 files conflict with T1`).
 
+## Worktree Isolation Discipline (The Spur Advantage)
+
+A major challenge with AI coding agents is that they mutate files in your repository as they work. If you run two agents simultaneously, or try to continue your own coding while an agent is thinking, you will face file collisions, broken builds, and git conflicts.
+
+**Spur solves this completely using automated Git Worktrees.**
+
+Whenever the Brain orchestrator dispatches a task to a Worker agent, it does **not** run the worker in your main directory. Instead, Spur:
+
+1. **Creates an Isolated Clone:** Automatically runs `git worktree add` to generate a temporary, hidden directory specific to that task.
+2. **Synchronizes Environment:** Safely inherits untracked files (like `.env` or `node_modules`) so the worker's build environment is fully functional.
+3. **Applies Overlays:** If the plan has dependencies (e.g., Task B relies on Task A), Spur cherry-picks Task A's commits into Task B's worktree *before* starting Task B.
+4. **Executes in Isolation:** The worker agent (e.g., Claude Code, Codex) is "chrooted" into this directory. It is completely unaware of your main workspace.
+5. **Extracts and Cleans Up:** Once the worker completes and you approve the review, Spur extracts the diff, merges the commits cleanly onto your main branch, and automatically deletes the temporary worktree.
+
+### Why this is a Superpower
+* **Massive Concurrency:** Spur can run 5 worker agents in parallel on 5 different tasks because they operate in 5 distinct directories.
+* **Safe Exploration:** If a worker hallucinates and destroys the codebase, your main IDE checkout remains completely untouched. You simply reject the task in the Plan Inspector, and the tainted worktree is instantly deleted.
+* **Uninterrupted Flow:** You can continue coding, running your local dev server, and pushing commits in your main directory while Spur agents work quietly in the background.
+
 ## Mermaid Diagram Visualization
 
 > 🎥 **Video Placeholder:** [Show an agent generating a Mermaid block, the placeholder transforming to the ready state, and pressing Alt-v to render the visual graph inline.]
