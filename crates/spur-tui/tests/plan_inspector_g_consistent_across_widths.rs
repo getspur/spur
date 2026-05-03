@@ -33,6 +33,9 @@ fn plan_store() -> PlanProjectionStore {
                 task("s2-b", 2),
                 task("s2-c", 2),
             ],
+            owner_brain_session_id: None,
+            owner_token: None,
+            owner_acquired_at: None,
         }),
     }));
     store
