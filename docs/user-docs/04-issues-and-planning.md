@@ -162,6 +162,49 @@ graph TD
 2. **Overlay Application:** `Task 3` depends on `Task 1`. Spur will not dispatch `Task 3` until `Task 1` is approved. Once approved, `Worktree 3` is created, and Spur automatically applies `Task 1`'s commits as an "overlay" so the worker can build upon the new Auth API.
 3. **Deterministic Merging:** By strictly honoring the graph's topological order during the merge phase, Spur guarantees that dependent tasks are always merged *after* their prerequisites. This prevents the classic "integration hell" that usually occurs when multiple developers (or AI agents) work in parallel.
 
+### The Worker Worktree Lifecycle
+
+To understand what exactly happens when a worker operates on a task, here is the lifecycle of a single worker session:
+
+```mermaid
+sequenceDiagram
+    participant Brain as Orchestrator (Brain)
+    participant WA as Worktree Authority
+    participant Worker as Worker Agent (e.g. Claude)
+    participant Git as Local Git Repo
+
+    Brain->>WA: delegate_task(base, task_instructions)
+    activate WA
+    
+    WA->>Git: git worktree add .spur/worktrees/worker-xyz <base>
+    WA->>WA: Copy untracked files (.env, node_modules)
+    
+    opt Has Dependencies
+        WA->>Git: git cherry-pick <overlay_commits>
+    end
+    
+    WA-->>Brain: Return isolated path
+    deactivate WA
+    
+    Brain->>Worker: Spawn in CWD: .spur/worktrees/worker-xyz
+    activate Worker
+    Worker->>Worker: Reads files, executes commands
+    Worker->>Git: Commits changes locally in worktree
+    Worker-->>Brain: Return Task Result & Diff
+    deactivate Worker
+    
+    Brain->>Brain: Await User Review
+    
+    alt User Approves
+        Brain->>Git: Merge worker-xyz commits to Main
+        Brain->>WA: Delete worktree worker-xyz
+    else User Rejects
+        Brain->>WA: Delete worktree worker-xyz (Discard changes)
+    end
+```
+
+This sequence ensures that the worker is physically "chrooted" into its isolated environment (`CWD: .spur/worktrees/worker-xyz`). It can safely run `npm install`, compile code, or even delete files without any risk to your primary developer checkout.
+
 ## Mermaid Diagram Visualization
 
 > 🎥 **Video Placeholder:** [Show an agent generating a Mermaid block, the placeholder transforming to the ready state, and pressing Alt-v to render the visual graph inline.]
