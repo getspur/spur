@@ -3073,11 +3073,26 @@ impl Orchestrator {
 
                     // ── ResumePlan ────────────────────────────────────────
                     InteractiveInput::ResumePlan { plan_id } => {
-                        self.funnel.emit(SpurEventBody::PlanCommandError {
-                            operation: "ResumePlan".into(),
-                            plan_id: Some(plan_id),
-                            error: "resume_plan is not supported by the orchestrator TUI bridge yet; use the MCP resume_plan tool from an active brain session when server support is available".into(),
-                        });
+                        let server = brain
+                            .as_ref()
+                            .and_then(|b| b.mcp_server.as_ref())
+                            .map(Arc::clone);
+                        if let Some(server) = server {
+                            if let Err(error) = server.call_resume_plan(&plan_id).await {
+                                self.funnel.emit(SpurEventBody::PlanCommandError {
+                                    operation: "ResumePlan".into(),
+                                    plan_id: Some(plan_id),
+                                    error,
+                                });
+                            }
+                            // On success, the reconciler emits PlanSnapshotUpdated downstream.
+                        } else {
+                            self.funnel.emit(SpurEventBody::PlanCommandError {
+                                operation: "ResumePlan".into(),
+                                plan_id: Some(plan_id),
+                                error: "No active brain session with MCP server".into(),
+                            });
+                        }
                     }
 
                     // ── GetIssueDetail ────────────────────────────────────

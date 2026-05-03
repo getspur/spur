@@ -3741,6 +3741,18 @@ impl McpCallbackServer {
         }
     }
 
+    /// Public bridge for orchestrator/TUI: invoke `resume_plan` and reduce the
+    /// JSON-RPC response to a simple Result. Error message is verbatim from the
+    /// MCP tool's `JsonRpcError.message`.
+    pub async fn call_resume_plan(&self, plan_id: &str) -> Result<(), String> {
+        let args = serde_json::json!({ "plan_id": plan_id });
+        let resp = self.handle_resume_plan(serde_json::Value::Null, args).await;
+        match resp.error {
+            Some(e) => Err(e.message),
+            None => Ok(()),
+        }
+    }
+
     async fn handle_resume_plan(&self, id: Value, args: Value) -> JsonRpcResponse {
         let plan_id = match args.get("plan_id").and_then(|value| value.as_str()) {
             Some(plan_id) => plan_id,

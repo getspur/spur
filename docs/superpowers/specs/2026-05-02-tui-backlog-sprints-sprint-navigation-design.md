@@ -627,7 +627,7 @@ deeper layers (see Deferred Work for the specific gaps).
 | Flow | Status |
 | --- | --- |
 | 1. `Backlog -> execute_epic -> Sprints` | **partial** — `execute_epic` works; auto-navigate from `IssueBrowser` to `PlanBrowser` is missing (`PlanSnapshotUpdated` is in `app.rs`'s no-op match arm at line ~2516) |
-| 2. `Sprints -> resume unowned -> Sprints` | **stub** — TUI routing wired correctly; the orchestrator `ResumePlan` bridge in `crates/spur-core/src/orchestrator.rs` (line ~3075) emits `PlanCommandError` "not supported by orchestrator TUI bridge yet" instead of calling MCP `resume_plan` |
+| 2. `Sprints -> resume unowned -> Sprints` | **done** — TUI routing wired correctly; the orchestrator `ResumePlan` bridge calls `McpCallbackServer::call_resume_plan` and emits `PlanCommandError` only on failure |
 | 3. `Sprints (Mine) -> Sprint (PlanInspector)` | done |
 
 Status snapshot:
@@ -638,7 +638,7 @@ Status snapshot:
 | Plan list refresh and request path | done | `crates/spur-tui/src/action.rs`, `crates/spur-tui/src/app.rs` |
 | `PlanBrowserView` and owner-state rendering | done | `crates/spur-tui/src/views/plan_browser.rs` |
 | Resume action for `Unowned` only — TUI routing layer | done | `crates/spur-tui/src/action.rs`, `crates/spur-tui/src/views/plan_browser.rs`, `crates/spur-tui/src/app.rs` |
-| Resume action for `Unowned` only — orchestrator bridge to MCP | **stub** — emits `PlanCommandError` | `crates/spur-core/src/orchestrator.rs` (line ~3075) |
+| Resume action for `Unowned` only — orchestrator bridge to MCP | done — calls `McpCallbackServer::call_resume_plan`; emits `PlanCommandError` only on error | `crates/spur-core/src/orchestrator.rs` (line ~3075), `crates/spur-mcp/src/server.rs` |
 | Backlog -> Sprints auto-navigate after `execute_epic` | **not implemented** — `PlanSnapshotUpdated` is a no-op in `app.rs` | `crates/spur-tui/src/app.rs` (line ~2516) |
 | App-level `PlanCommandError` routing when `PlanBrowserView` is not active | **not implemented** — events silently dropped | `crates/spur-tui/src/app.rs` |
 | Active-plan cardinality guard (single active nonterminal per brain) | done | `crates/spur-mcp/src/server.rs` (`current_brain_active_owned_plan`) |
@@ -662,10 +662,9 @@ Status snapshot:
    - In `PlanBrowserView`, with one active `mine` plan, place cursor on an `unowned` row and press `R`.
    - Expectation: no ownership change; row remains `unowned`; user hint explains resume blocked.
 
-4. **Resume allowed when free** *(blocked on orchestrator bridge stub; see Deferred Work)*
+4. **Resume allowed when free**
    - With no active `mine` plan, select an `unowned` row and press `R`.
    - Expectation: MCP adds owner label; row flips to `mine`; `Open` uses current session plan path.
-   - **Current reality:** unexecutable from the TUI. `UserInput::ResumePlan` reaches the orchestrator, but the handler at `crates/spur-core/src/orchestrator.rs` (line ~3075) emits `PlanCommandError` with the message *"resume_plan is not supported by the orchestrator TUI bridge yet; use the MCP resume_plan tool from an active brain session when server support is available"*. The MCP `resume_plan` tool itself is fully implemented; the bridge that would call it from the TUI is the missing piece.
 
 5. **Blocked handoff paths**
    - For `Other` or `Ambiguous` rows, `Enter` and `R` are rejected.
@@ -716,7 +715,7 @@ sequenceDiagram
 
 **Ship-blocking gaps surfaced during 3-reviewer audit on 2026-05-03 (see `docs/superpowers/specs/2026-05-03-tui-backlog-sprints-merged-review-verdict.md`):**
 
-- **K1 — Orchestrator `ResumePlan` bridge.** `crates/spur-core/src/orchestrator.rs` (line ~3075) currently emits a `PlanCommandError` instead of calling the MCP `resume_plan` tool. Until this lands, `R` in `PlanBrowserView` always errors. **This is a ship-blocker for merging this branch to `main`** because shipping a discoverable broken button degrades trust in the TUI surface.
+- ~~**K1 — Orchestrator `ResumePlan` bridge.**~~ **Resolved.** `McpCallbackServer::call_resume_plan` public wrapper added in `crates/spur-mcp/src/server.rs`; the `InteractiveInput::ResumePlan` arm in `crates/spur-core/src/orchestrator.rs` now calls it and emits `PlanCommandError` only on failure.
 - **K2 — `PlanSnapshotUpdated` auto-navigate.** `crates/spur-tui/src/app.rs` (line ~2516) routes `PlanSnapshotUpdated` to the no-op match arm. Spec User Journey 1 requires auto-navigating from `IssueBrowser` to `PlanBrowser` after `execute_epic` succeeds. Annoying, not ship-blocking — operator can manually navigate.
 - **App-level `PlanCommandError` routing.** `PlanCommandError` is consumed only inside `PlanBrowserView::handle_spur_event`. When the user is on a different view (e.g., Dashboard), errors are silently dropped. Needs an `app.rs`-level handler to surface as a `TransientHint` regardless of active view.
 
