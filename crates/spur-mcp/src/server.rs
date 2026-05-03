@@ -3880,6 +3880,9 @@ impl McpCallbackServer {
         let new_owner = self.brain_session_id.to_string();
         let token = uuid::Uuid::new_v4().to_string();
 
+        if let Err(error) = self.require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED) {
+            return JsonRpcResponse::mcp_error(id, error);
+        }
         if let Some(adv) = pm.advanced() {
             let audit = crate::plan::audit_sentinel::AuditSentinelKind::PlanForceReclaimed {
                 plan_id: plan_id.to_string(),
