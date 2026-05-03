@@ -194,6 +194,9 @@ fn plan_snapshot_updated_roundtrips() {
                 superseded_by: Vec::new(),
                 next_action: "review".into(),
             }],
+            owner_brain_session_id: None,
+            owner_token: None,
+            owner_acquired_at: None,
         }),
     });
 
@@ -235,6 +238,46 @@ fn plan_snapshot_updated_rejects_malformed_payload() {
         result.is_err(),
         "missing required plan_id must fail to deserialize"
     );
+}
+
+#[test]
+fn plan_snapshot_deserializes_without_owner_fields_for_backward_compat() {
+    // Pre-feature snapshots persisted in NDJSON event logs (~/.kiro/sessions/cli/*.jsonl)
+    // omit the owner_* fields entirely. They must continue to deserialize cleanly,
+    // with the owner_* fields defaulting to None.
+    let json = r#"{
+        "occurred_at": {"secs_since_epoch": 1000, "nanos_since_epoch": 0},
+        "body": {"PlanSnapshotUpdated": {
+            "session_id": "brain-1",
+            "snapshot": {
+                "plan_id": "plan-pre-feature",
+                "status": "running",
+                "progress": "0/1 done",
+                "next_action": "wait",
+                "ready_to_merge": false,
+                "counts": {
+                    "pending": 1,
+                    "ready": 0,
+                    "dispatched": 0,
+                    "awaiting_review": 0,
+                    "approved": 0,
+                    "rejected": 0,
+                    "failed": 0,
+                    "cancelled": 0
+                },
+                "tasks": []
+            }
+        }}
+    }"#;
+    let event: SpurEvent = serde_json::from_str(json)
+        .expect("pre-feature PlanSnapshot without owner fields must deserialize");
+    let spur_acp::SpurEventBody::PlanSnapshotUpdated { snapshot, .. } = event.body else {
+        panic!("expected PlanSnapshotUpdated body");
+    };
+    assert_eq!(snapshot.plan_id, "plan-pre-feature");
+    assert!(snapshot.owner_brain_session_id.is_none());
+    assert!(snapshot.owner_token.is_none());
+    assert!(snapshot.owner_acquired_at.is_none());
 }
 
 #[test]
