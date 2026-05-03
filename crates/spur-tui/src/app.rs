@@ -3546,17 +3546,25 @@ impl App {
                 // so pass `FocusGraph` — selects the row in the left pane and
                 // arms the detail-fetch handler to flip to Graph mode after
                 // both `IssueDetailFetched` and `IssueSubgraphLoaded` arrive.
-                let pending = self.issue_browser.as_mut().and_then(|browser| {
-                    browser.open_external_detail(
-                        id.clone(),
-                        crate::views::issue_browser::OpenMode::FocusGraph,
-                    );
-                    browser.take_pending_action()
-                });
+                let (pending, needs_refresh) = self
+                    .issue_browser
+                    .as_mut()
+                    .map(|browser| {
+                        browser.open_external_detail(
+                            id.clone(),
+                            crate::views::issue_browser::OpenMode::FocusGraph,
+                        );
+                        (browser.take_pending_action(), browser.has_pending_select())
+                    })
+                    .unwrap_or((None, false));
                 self.navigate_to(ViewId::IssueBrowser);
                 if let Some(ref tx) = self.user_input_tx {
                     let _ = tx.try_send(UserInput::GetIssueDetail { id });
-                    if just_created {
+                    // Refresh on first creation OR when the requested id
+                    // wasn't found in the cached list — otherwise pending_select
+                    // would sit forever and the left-pane row would never align
+                    // with the right-pane detail.
+                    if just_created || needs_refresh {
                         let _ = tx.try_send(UserInput::RefreshIssues);
                     }
                 }
@@ -5092,7 +5100,12 @@ mod view_history_tests {
         });
         assert_eq!(app.current_view, ViewId::IssueBrowser);
 
-        app.process_action(Action::NavigateBack);
+        // Drive a real Esc keystroke through the crossterm path so the
+        // IssueBrowser view's own handler is exercised (not just the action
+        // it should produce). This is the regression hook: previously the
+        // view returned NavigateTo(Dashboard) here, which silently bypassed
+        // view_history and skipped past PlanBrowser entirely.
+        app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(
             app.current_view,
             ViewId::PlanBrowser,

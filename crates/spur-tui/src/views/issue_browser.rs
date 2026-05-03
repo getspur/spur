@@ -126,6 +126,11 @@ pub struct IssueBrowserView {
     /// can't dispatch actions, only stash them for the app to pick up via
     /// `take_pending_action`.
     pending_action: Option<Action>,
+    /// Error from the most recent `list_issues` failure surfaced via
+    /// `IssueCommandError` (e.g. corrupt `.beads/issues.jsonl`). Rendered in
+    /// the empty-list pane so the user sees the cause instead of a misleading
+    /// "No issues loaded" placeholder. Cleared on the next `IssuesLoaded`.
+    last_refresh_error: Option<String>,
 }
 
 impl Default for IssueBrowserView {
@@ -150,6 +155,7 @@ impl IssueBrowserView {
             pending_select: None,
             post_load_mode: None,
             pending_action: None,
+            last_refresh_error: None,
         }
     }
 
@@ -159,6 +165,15 @@ impl IssueBrowserView {
     /// through `process_action` (the only way to actually execute it).
     pub fn take_pending_action(&mut self) -> Option<Action> {
         self.pending_action.take()
+    }
+
+    /// True when `open_external_detail` armed `pending_select` because the
+    /// requested id wasn't yet in `tracked_issues`. The app uses this to
+    /// fire `RefreshIssues` so the queued id actually lands in the list and
+    /// the row gets selected — otherwise the right-pane detail and the
+    /// left-pane selection would stay out of sync.
+    pub fn has_pending_select(&self) -> bool {
+        self.pending_select.is_some()
     }
 
     /// Inc 3 (bd-d587.3) follow-up: drain all armed `open_external_detail`
@@ -385,7 +400,11 @@ impl IssueBrowserView {
                     self.detail_mode = DetailMode::Text;
                     None
                 } else {
-                    Some(Action::NavigateTo(ViewId::Dashboard))
+                    // NavigateBack pops the view_history stack so we return to
+                    // the actual previous view (e.g. PlanBrowser when entered
+                    // via the 'e' epic shortcut). NavigateTo(Dashboard) would
+                    // clear the stack and skip past PlanBrowser entirely.
+                    Some(Action::NavigateBack)
                 }
             }
             KeyCode::Char('q') if key.modifiers.is_empty() => Some(Action::Quit),
@@ -504,14 +523,26 @@ impl IssueBrowserView {
 
         // ── Issues panel ──────────────────────────────────────────────────
         if issue_count == 0 {
+            let (title, body, fg) = if let Some(err) = &self.last_refresh_error {
+                (
+                    " Issues — load failed ",
+                    format!("Failed to load issues: {err}\nPress 'r' to retry."),
+                    Color::Red,
+                )
+            } else {
+                (
+                    " Issues ",
+                    "No issues loaded. Press 'r' to refresh.".to_string(),
+                    Color::DarkGray,
+                )
+            };
             let block = Block::default()
-                .title(" Issues ")
+                .title(title)
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray));
+                .border_style(Style::default().fg(fg));
             let inner = block.inner(chunks[0]);
             frame.render_widget(block, chunks[0]);
-            let msg = Paragraph::new("No issues loaded. Press 'r' to refresh.")
-                .style(Style::default().fg(Color::DarkGray));
+            let msg = Paragraph::new(body).style(Style::default().fg(fg));
             frame.render_widget(msg, inner);
         } else {
             self.issues_panel
@@ -635,6 +666,35 @@ impl View for IssueBrowserView {
         match &event.body {
             spur_acp::SpurEventBody::IssuesLoaded { issues } => {
                 self.invalidate_graph_cache();
+                self.last_refresh_error = None;
+
+                // Capture id-to-preserve BEFORE replacing tracked_issues so
+                // we can keep the same logical row (not the same numerical
+                // index) selected across refreshes. Priority order:
+                //   1. pending_select — armed by open_external_detail when
+                //      the requested id wasn't yet in tracked_issues.
+                //   2. The id of the open detail (Loading / Loaded). Keeps
+                //      the left list consistent with what the right pane is
+                //      currently showing — e.g. PlanBrowser View-Epic 'e'
+                //      should leave the epic row highlighted, not idx 0.
+                //   3. The previously-selected row's id (read from the OLD
+                //      tracked_issues, not the new one) so user-driven
+                //      scrolling survives passive refreshes.
+                let preferred_id: Option<String> = self
+                    .pending_select
+                    .clone()
+                    .or_else(|| match &self.issue_focus {
+                        IssueFocus::Loading { id } | IssueFocus::Loaded { id, .. } => {
+                            Some(id.clone())
+                        }
+                        IssueFocus::None => None,
+                    })
+                    .or_else(|| {
+                        self.issues_panel
+                            .selected_id(&self.tracked_issues)
+                            .map(String::from)
+                    });
+
                 self.tracked_issues = issues
                     .iter()
                     .map(|i| spur_pm::IssueSummary {
@@ -654,26 +714,24 @@ impl View for IssueBrowserView {
                         assignee: i.assignee.clone(),
                     })
                     .collect();
-                // Reset selection if it would now be out of bounds
+
                 if !self.tracked_issues.is_empty() {
-                    let idx = self
-                        .issues_panel
-                        .selected_id(&self.tracked_issues)
-                        .and_then(|id| self.tracked_issues.iter().position(|i| i.id == id))
-                        .unwrap_or(0);
-                    self.issues_panel.select_first(); // will be overridden by select_next below
-                    for _ in 0..idx {
-                        self.issues_panel.select_next(1, self.tracked_issues.len());
+                    let selected = preferred_id.as_deref().is_some_and(|id| {
+                        self.issues_panel.select_by_id(id, &self.tracked_issues)
+                    });
+                    if !selected {
+                        self.issues_panel.select_first();
                     }
-                }
-                // Inc 3 (bd-d587.3): drain pending_select if the queued id is
-                // now present in tracked_issues.
-                if let Some(pending) = self.pending_select.clone() {
-                    if self
-                        .issues_panel
-                        .select_by_id(&pending, &self.tracked_issues)
-                    {
-                        self.pending_select = None;
+                    // Drain pending_select once it lands in tracked_issues —
+                    // the selection above already moved if the id matched.
+                    if let Some(pending) = self.pending_select.as_deref() {
+                        if self
+                            .tracked_issues
+                            .iter()
+                            .any(|i| i.id == pending)
+                        {
+                            self.pending_select = None;
+                        }
                     }
                 }
             }
@@ -750,7 +808,7 @@ impl View for IssueBrowserView {
                 self.graph_error = None;
             }
 
-            spur_acp::SpurEventBody::IssueCommandError { error, .. } => {
+            spur_acp::SpurEventBody::IssueCommandError { error, operation, .. } => {
                 if self.graph_loading.is_some() {
                     self.graph_error = Some(error.clone());
                     self.graph_loading = None;
@@ -762,6 +820,8 @@ impl View for IssueBrowserView {
                     self.issue_focus = IssueFocus::None;
                     // bd-d587.3 follow-up: same rationale on detail-fetch error.
                     self.reset_armed_state();
+                } else if operation == "list_issues" || operation == "RefreshIssues" {
+                    self.last_refresh_error = Some(error.clone());
                 }
             }
 
