@@ -97,14 +97,10 @@ fn extract_submit_plan_task_issue_id(response: &Value, task_id: &str) -> String 
         .unwrap_or_else(|| panic!("submit_plan task_map must include '{task_id}'"))
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn get_plan_status_reprojects_persisted_plan_instead_of_trusting_corrupted_cache() {
-    if !br_available() {
-        eprintln!(
-            "skipping get_plan_status_reprojects_persisted_plan_instead_of_trusting_corrupted_cache: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -161,14 +157,10 @@ async fn get_plan_status_reprojects_persisted_plan_instead_of_trusting_corrupted
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn get_plan_status_preserves_in_progress_persisted_children() {
-    if !br_available() {
-        eprintln!(
-            "skipping get_plan_status_preserves_in_progress_persisted_children: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");

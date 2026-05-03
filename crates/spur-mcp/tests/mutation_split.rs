@@ -79,14 +79,10 @@ fn mutation_batch(
     .expect("MutationBatch JSON must deserialize")
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn split_task_happy_path_rewires_downstream_and_commits() {
-    if !br_available() {
-        eprintln!(
-            "skipping split_task_happy_path_rewires_downstream_and_commits: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");

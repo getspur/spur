@@ -159,14 +159,8 @@ mod perf_regressions {
     #[tokio::test]
     #[ignore = "heavy: bulk-inserts 10k+ issues to guard the old list_issues cap; run with `cargo test -- --ignored`"]
     async fn mutation_scans_paginate_past_10k_issues() {
-        if !br_available() {
-            eprintln!("skipping mutation_scans_paginate_past_10k_issues: `br` not on PATH");
-            return;
-        }
-        if !sqlite_available() {
-            eprintln!("skipping mutation_scans_paginate_past_10k_issues: `sqlite3` not on PATH");
-            return;
-        }
+        assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+        assert!(sqlite_available(), "this test requires `sqlite3` on PATH; run with `cargo test -- --ignored`");
 
         let dir = TempDir::new().expect("tempdir");
         run_br(dir.path(), &["init"]).expect("br init failed");

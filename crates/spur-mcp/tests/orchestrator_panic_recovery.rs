@@ -8,12 +8,10 @@ mod common;
 
 use common::g_strict_harness::{br_available, FaultInjectionHooks, TestHarness};
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn orchestrator_panic_mid_oid_send_fails_loud() {
-    if !br_available() {
-        eprintln!("skipping orchestrator_panic_mid_oid_send_fails_loud: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let mut harness = TestHarness::new().await;
     let plan_id = harness

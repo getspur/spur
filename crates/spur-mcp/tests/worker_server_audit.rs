@@ -113,12 +113,10 @@ async fn call_jsonrpc(
     resp.json().await.expect("response is JSON")
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn update_issue_success_emits_worker_write_audit_sentinel() {
-    if !br_available() {
-        eprintln!("skipping: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let pm = pm_service_fixture(dir.path()).await;
@@ -194,12 +192,10 @@ async fn update_issue_success_emits_worker_write_audit_sentinel() {
 
 // ─── T20: per-delegation read-audit aggregation buffer ────────────────────
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn read_tool_calls_append_to_buffer() {
-    if !br_available() {
-        eprintln!("skipping: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let pm = pm_service_fixture(dir.path()).await;
@@ -288,12 +284,10 @@ async fn drop_buffer_after_receiver_dropped_does_not_panic() {
     drop(buf);
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn update_issue_without_id_arg_does_not_emit_audit() {
-    if !br_available() {
-        eprintln!("skipping: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let pm = pm_service_fixture(dir.path()).await;

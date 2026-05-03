@@ -10,12 +10,10 @@ mod common;
 
 use common::g_strict_harness::{br_available, TestHarness};
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn g_strict_prevents_bd_2dww_class_loss() {
-    if !br_available() {
-        eprintln!("skipping g_strict_prevents_bd_2dww_class_loss: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let mut harness = TestHarness::new().await;
     let plan_id = harness.submit_plan().await;
@@ -92,12 +90,10 @@ async fn g_strict_prevents_bd_2dww_class_loss() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn g_strict_diamond_dag_closure_walks_both_parents() {
-    if !br_available() {
-        eprintln!("skipping g_strict_diamond_dag_closure_walks_both_parents: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let mut harness = TestHarness::new().await;
     let plan_id = harness.submit_diamond_plan().await;
@@ -179,12 +175,10 @@ async fn g_strict_diamond_dag_closure_walks_both_parents() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn g_strict_grandparent_depth_chain_walks_full_closure() {
-    if !br_available() {
-        eprintln!("skipping g_strict_grandparent_depth_chain_walks_full_closure: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let mut harness = TestHarness::new().await;
     let plan_id = harness.submit_grandparent_plan().await;
