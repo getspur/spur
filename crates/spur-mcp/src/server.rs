@@ -4270,7 +4270,12 @@ impl McpCallbackServer {
         };
 
         let mut rollback_updates: Vec<(String, spur_pm::IssueUpdate)> = Vec::new();
+        let mut prior_owner_match: Option<crate::plan::ownership::PlanOwnerMatch> = None;
         if let Ok(epic_issue) = pm.get_issue(&epic_id).await {
+            prior_owner_match = Some(crate::plan::ownership::classify_owner(
+                &epic_issue.labels,
+                self.brain_session_id.as_session_id(),
+            ));
             let mut remove_labels = Vec::new();
             let owner_label =
                 crate::plan::labels::plan_owner(&self.brain_session_id.as_session_id().0);
@@ -4359,6 +4364,53 @@ impl McpCallbackServer {
                 Some(self.brain_session_id.as_session_id()),
             )
             .await;
+
+            if let Some(prior) = prior_owner_match.as_ref() {
+                let audit = match prior {
+                    crate::plan::ownership::PlanOwnerMatch::Unowned
+                    | crate::plan::ownership::PlanOwnerMatch::OwnedByCurrent => Some(
+                        crate::plan::audit_sentinel::AuditSentinelKind::PlanOwnershipAcquired {
+                            plan_id: plan_id.clone(),
+                            owner: self.brain_session_id.to_string(),
+                            token: uuid::Uuid::new_v4().to_string(),
+                            reason: "execute_epic".to_string(),
+                        },
+                    ),
+                    crate::plan::ownership::PlanOwnerMatch::OwnedByOther { owner } => Some(
+                        crate::plan::audit_sentinel::AuditSentinelKind::PlanOwnershipTransferred {
+                            plan_id: plan_id.clone(),
+                            from: owner.clone(),
+                            to: self.brain_session_id.to_string(),
+                            mode: "execute_epic".to_string(),
+                            previous_token: String::new(),
+                            new_token: uuid::Uuid::new_v4().to_string(),
+                        },
+                    ),
+                    crate::plan::ownership::PlanOwnerMatch::Ambiguous { owners } => {
+                        tracing::warn!(
+                            target: "spur.audit.emit_skip",
+                            epic_id = %epic_id,
+                            plan_id = %plan_id,
+                            owners = ?owners,
+                            "execute_epic: prior epic labels ambiguous; skipping ownership audit emission"
+                        );
+                        None
+                    }
+                };
+                if let Some(audit) = audit {
+                    let kind_str = audit.kind_str();
+                    let body = crate::plan::audit_sentinel::encode_comment(&audit);
+                    if let Err(e) = adv.add_comment(&epic_id, &body).await {
+                        tracing::warn!(
+                            target: "spur.audit.emit_failure",
+                            kind = kind_str,
+                            epic_id = %epic_id,
+                            plan_id = %plan_id,
+                            "execute_epic ownership audit comment emission failed (owner label is persisted; audit missing): {e}"
+                        );
+                    }
+                }
+            }
         }
 
         // Insert into active_plans first (no registry lock held here).
