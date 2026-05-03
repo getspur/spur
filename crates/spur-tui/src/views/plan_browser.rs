@@ -450,9 +450,23 @@ impl View for PlanBrowserView {
                 plan_id,
                 error,
             } => {
+                // MCP errors are conventionally prefixed with "<tool_name>: " (e.g.
+                // "resume_plan: ..."). Strip the redundant prefix so the hint reads
+                // "ResumePlan blocked for plan-X: <message>" instead of
+                // "ResumePlan blocked for plan-X: resume_plan: <message>".
+                let display_error = error
+                    .split_once(": ")
+                    .map(|(prefix, rest)| {
+                        if prefix.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+                            rest
+                        } else {
+                            error.as_str()
+                        }
+                    })
+                    .unwrap_or(error.as_str());
                 self.hint = Some(match plan_id {
-                    Some(plan_id) => format!("{operation} blocked for {plan_id}: {error}"),
-                    None => format!("{operation} blocked: {error}"),
+                    Some(plan_id) => format!("{operation} blocked for {plan_id}: {display_error}"),
+                    None => format!("{operation} blocked: {display_error}"),
                 });
             }
             _ => {}

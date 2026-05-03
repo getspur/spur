@@ -3868,7 +3868,7 @@ impl McpCallbackServer {
                     id,
                     -32009,
                     format!(
-                        "resume_plan: plan {plan_id} is owned by {owner}; active handoff is not implemented in MVP"
+                        "resume_plan: plan {plan_id} is owned by {owner}; active handoff is not supported"
                     ),
                 )
             }
