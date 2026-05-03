@@ -4116,32 +4116,42 @@ impl McpCallbackServer {
         // (claim) and OwnedByCurrent (re-issue) proceed. The
         // PlanOwnershipTransferred audit branch downstream stays intact as
         // defense-in-depth for a future force-reclaim path.
-        if let Ok(epic_issue) = pm.get_issue(&epic_id).await {
-            match crate::plan::ownership::classify_owner(
-                &epic_issue.labels,
-                self.brain_session_id.as_session_id(),
-            ) {
-                crate::plan::ownership::PlanOwnerMatch::Unowned
-                | crate::plan::ownership::PlanOwnerMatch::OwnedByCurrent => {}
-                crate::plan::ownership::PlanOwnerMatch::OwnedByOther { owner } => {
-                    return JsonRpcResponse::error(
-                        id,
-                        -32009,
-                        format!(
-                            "execute_epic: epic {epic_id} is owned by {owner}; active handoff is not implemented in MVP"
-                        ),
-                    );
-                }
-                crate::plan::ownership::PlanOwnerMatch::Ambiguous { owners } => {
-                    return JsonRpcResponse::error(
-                        id,
-                        -32009,
-                        format!(
-                            "execute_epic: epic {epic_id} has ambiguous owner labels: {}",
-                            owners.join(", ")
-                        ),
-                    );
-                }
+        // Fail fast on PM fetch error so a transient beads outage cannot
+        // silently bypass the gate (mirrors check_plan_owner_for_op).
+        let epic_issue = match pm.get_issue(&epic_id).await {
+            Ok(issue) => issue,
+            Err(error) => {
+                return JsonRpcResponse::error(
+                    id,
+                    -32603,
+                    format!("execute_epic: failed to load epic {epic_id}: {error}"),
+                );
+            }
+        };
+        match crate::plan::ownership::classify_owner(
+            &epic_issue.labels,
+            self.brain_session_id.as_session_id(),
+        ) {
+            crate::plan::ownership::PlanOwnerMatch::Unowned
+            | crate::plan::ownership::PlanOwnerMatch::OwnedByCurrent => {}
+            crate::plan::ownership::PlanOwnerMatch::OwnedByOther { owner } => {
+                return JsonRpcResponse::error(
+                    id,
+                    -32009,
+                    format!(
+                        "execute_epic: epic {epic_id} is owned by {owner}; active handoff is not implemented in MVP"
+                    ),
+                );
+            }
+            crate::plan::ownership::PlanOwnerMatch::Ambiguous { owners } => {
+                return JsonRpcResponse::error(
+                    id,
+                    -32009,
+                    format!(
+                        "execute_epic: epic {epic_id} has ambiguous owner labels: {}",
+                        owners.join(", ")
+                    ),
+                );
             }
         }
 
