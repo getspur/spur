@@ -4,8 +4,17 @@
 //! These tests exercise parse_parallel_tasks by calling it directly and
 //! asserting each DelegationRequest carries the right per-task fields.
 
-use serde_json::json;
+use rmcp::{
+    model::{CallToolRequestParams, JsonObject},
+    serve_server, ServiceExt,
+};
+use serde_json::{json, Value};
+use spur_acp::{BrainSessionId, SessionId};
 use spur_mcp::tools::{BaseSpec, BaseTarget, OverlayCommit};
+use spur_mcp::{server::DetachedContinuationCtx, McpCallbackServer};
+use std::sync::Arc;
+
+mod common;
 
 #[test]
 fn per_task_context_files_survive_to_delegation_requests() {
@@ -241,5 +250,100 @@ fn per_task_delegation_plan_rejects_malformed_object() {
     assert!(
         err.contains("expected a string"),
         "error should preserve the serde message: {err}",
+    );
+}
+
+// ─── bd-1u8p: rmcp transport regression for stringified per-task `base` ───
+//
+// Mirrors `base_branch_survives_when_sent_as_string` in
+// `delegate_to_worker_fields.rs`. The other per-task BaseSpec tests above
+// call `parse_parallel_tasks` directly; this one drives `delegate_parallel`
+// over the rmcp duplex transport so any layer that might re-stringify or
+// reject the field (envelope deserialization, schema validation, args
+// shaping) is also covered.
+
+fn json_object(value: Value) -> JsonObject {
+    value
+        .as_object()
+        .cloned()
+        .expect("tool arguments must be a JSON object")
+}
+
+fn mock_server() -> (McpCallbackServer, spur_mcp::DelegationChannel) {
+    let brain_sid = BrainSessionId::new(SessionId::new());
+    McpCallbackServer::new(
+        &brain_sid,
+        None,
+        None,
+        DetachedContinuationCtx {
+            on_complete: Arc::new(|_, _| Box::pin(async {})),
+        },
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        common::server_builder::community_feature_gate(),
+    )
+}
+
+async fn call_delegate_parallel(args: Value) -> Vec<spur_mcp::tools::DelegationRequest> {
+    let (server, mut channel) = mock_server();
+    let server = Arc::new(server);
+    let (client_io, server_io) = tokio::io::duplex(16 * 1024);
+
+    let server_service_task = tokio::spawn({
+        let server = Arc::clone(&server);
+        async move { serve_server(server, server_io).await }
+    });
+
+    let mut client = ().serve(client_io).await.expect("client init");
+
+    let task_count = args
+        .get("tasks")
+        .and_then(|t| t.as_array())
+        .map(|a| a.len())
+        .expect("args must include a `tasks` array");
+
+    let _result = client
+        .call_tool(CallToolRequestParams::new("delegate_parallel").with_arguments(json_object(args)))
+        .await
+        .expect("call_tool should succeed");
+
+    let mut requests = Vec::with_capacity(task_count);
+    for _ in 0..task_count {
+        let req = channel
+            .request_rx
+            .recv()
+            .await
+            .expect("delegation request should be sent");
+        requests.push(req);
+    }
+
+    let _ = client.close().await;
+    let mut server_service = server_service_task
+        .await
+        .expect("server bootstrap must not panic")
+        .expect("server service ok");
+    let _ = server_service.close().await;
+
+    requests
+}
+
+#[tokio::test]
+async fn per_task_base_branch_survives_when_sent_as_string() {
+    let requests = call_delegate_parallel(json!({
+        "tasks": [
+            {
+                "agent": "claude-code-acp",
+                "task": "test task",
+                "base": "{\"kind\":\"branch\",\"name\":\"feat/from-string\"}"
+            }
+        ]
+    }))
+    .await;
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].base,
+        Some(BaseSpec::Branch {
+            name: "feat/from-string".into()
+        })
     );
 }
