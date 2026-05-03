@@ -564,6 +564,31 @@ fn resume_plan_def() -> ToolDefinition {
     }
 }
 
+fn force_reclaim_plan_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "force_reclaim_plan".into(),
+        description: "Operator-initiated force-takeover of plan ownership. Removes any existing `spur:plan-owner:*` labels and stamps the current brain as the owner. Intended only for stuck/dead owners or governance-driven takeover; clobbers any concurrent owner brain's in-flight state. Requires explicit `confirm: true`. See docs/multi-brain-operations.md.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "plan_id": {
+                    "type": "string",
+                    "description": "The plan_id whose ownership to force-reclaim"
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "description": "Must be `true` to acknowledge that this clobbers any concurrent owner brain's in-flight state. `false` or missing returns an error."
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Optional human-readable reason recorded in the audit sentinel for accountability"
+                }
+            },
+            "required": ["plan_id", "confirm"]
+        }),
+    }
+}
+
 fn check_delegation_status_def() -> ToolDefinition {
     ToolDefinition {
         name: "check_delegation_status".into(),
@@ -1046,6 +1071,7 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         create_pr_def(),
         merge_plan_def(),
         resume_plan_def(),
+        force_reclaim_plan_def(),
         graph_triage_def(),
         graph_plan_def(),
         graph_insights_def(),
