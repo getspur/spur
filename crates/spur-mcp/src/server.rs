@@ -3773,6 +3773,12 @@ impl McpCallbackServer {
             }
         };
 
+        if let Some(response) =
+            self.require_feature_response(id.clone(), FeatureKey::PM_PRO_BEADS_ADVANCED)
+        {
+            return response;
+        }
+
         let epics = match pm
             .list_issues(IssueFilter {
                 labels: vec![crate::plan::labels::plan_id(plan_id)],
