@@ -106,9 +106,11 @@ Whenever the Brain orchestrator dispatches a task to a Worker agent, it does **n
 * **Safe Exploration:** If a worker hallucinates and destroys the codebase, your main IDE checkout remains completely untouched. You simply reject the task in the Plan Inspector, and the tainted worktree is instantly deleted.
 * **Uninterrupted Flow:** You can continue coding, running your local dev server, and pushing commits in your main directory while Spur agents work quietly in the background.
 
-### End-to-End Plan Execution Flow
+### End-to-End Plan Execution Flow (Autonomous Mode)
 
-When you ask Spur to build a complex feature or execute an entire Epic, the Brain goes through a distinct lifecycle of planning, parallel dispatch, and continuous reconciliation. Here is how Spur orchestrates a complete plan:
+When you ask Spur to build a complex feature or execute an entire Epic, the Brain goes through a distinct lifecycle of planning, parallel dispatch, and continuous reconciliation. In **Autonomous Mode**, Spur attempts to resolve the entire plan with minimal human intervention.
+
+Here is how Spur orchestrates a complete plan:
 
 ```mermaid
 stateDiagram-v2
@@ -132,19 +134,18 @@ stateDiagram-v2
             WT --> Worker
         }
         
-        state "Brain Review (Gate 1)" as BrainReview:::brainState
-        state "User Escalation (Gate 2)" as UserEscalation:::userState
+        state "Brain Review (via get_task_diff)" as BrainReview:::brainState
+        state "User Escalation" as UserEscalation:::userState
         
         CheckDeps --> Dispatch : Dependencies Met
         Dispatch --> Executing : delegate_to_worker()
         Executing --> BrainReview : Worker completes
         
-        BrainReview --> CheckDeps : Brain Approves (Unblocks)
-        BrainReview --> Executing : Brain Requests Changes (Retry)
-        BrainReview --> UserEscalation : Critical Blocker / Scope Drift
+        BrainReview --> CheckDeps : review_task('approve')
+        BrainReview --> Executing : review_task('request_changes')<br/>(Retry: max 3 attempts)
+        BrainReview --> UserEscalation : review_task('reject')<br/>(Failed 3x / Critical Blocker)
         
-        UserEscalation --> CheckDeps : User Approves
-        UserEscalation --> Executing : User Requests Changes
+        UserEscalation --> CheckDeps : User Manually Resolves
     }
     
     state "All Tasks Approved" as Complete:::systemState
@@ -162,9 +163,10 @@ stateDiagram-v2
 1. **Planning Phase:** The Brain receives your request, analyzes the requirements, and breaks the work down into a series of smaller, manageable tasks.
 2. **DAG Generation:** The Brain submits these tasks to the Orchestrator via the `submit_plan` tool. Crucially, it defines the *dependencies* between these tasks, forming a Directed Acyclic Graph (DAG).
 3. **The Reconciler Loop:** This is Spur's autonomous engine. It constantly evaluates the DAG. If a task has no uncompleted dependencies, the Reconciler immediately dispatches it. 
-4. **Execution & The Two-Tier Gate:** Dispatched tasks run in isolated worktrees (see below). When a worker finishes, it passes through a **Two-Tier Review Gate**:
-   * **Gate 1 (The Brain):** The Brain agent automatically uses the `get_task_diff` tool to inspect the worker's output. It acts as the first line of defense, either approving the work or rejecting/requesting changes (sending the worker back to try again).
-   * **Gate 2 (The User):** You do not need to micro-manage every task. If the worker repeatedly fails, experiences scope drift, or encounters a critical blocker, the Brain will escalate to you. You act as the final authority to resolve complex blockers.
+4. **Execution & Autonomous Review:** Dispatched tasks run in isolated worktrees (see below). When a worker finishes, the plan enters the review phase:
+   * **The Brain Review Loop:** In Autonomous Mode, the Brain acts as the primary code reviewer. It uses the `get_task_diff` tool to inspect the worker's output. If the code looks good, it calls `review_task('approve')`, which unblocks downstream dependencies.
+   * **Automated Retries:** If the code is flawed, the Brain calls `review_task('request_changes')`, providing feedback and sending the worker back to try again (up to a maximum of 3 attempts).
+   * **User Escalation:** If the worker fails all 3 attempts, or if the Brain detects a severe scope drift or critical blocker, it calls `review_task('reject')`. The system pauses execution of that specific task branch and escalates to the User (you). You can manually review the failure in the TUI and intervene to unblock the flow.
 5. **Final Merge:** Once the Reconciler confirms every task in the DAG is successfully approved, the Brain executes a final deterministic merge, integrating the entire feature back into your main branch.
 
 ### Graph-Strict (G-Strict) Execution & Merge Strategy
