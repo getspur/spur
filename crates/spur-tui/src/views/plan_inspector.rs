@@ -317,14 +317,15 @@ impl View for PlanInspectorView {
                         });
                     }
                 }
-                KeyCode::Char('e') if key.modifiers.is_empty() => {
+                KeyCode::Char('o') if key.modifiers.is_empty() => {
                     if let Some(epic_id) = plan.epic_id.as_ref() {
                         return Some(Action::OpenIssueInBacklog {
                             id: epic_id.clone(),
                         });
                     }
                     return Some(Action::FlashHint {
-                        message: "No epic linked to this implementation plan snapshot".into(),
+                        message: "No source work item linked to this implementation plan snapshot"
+                            .into(),
                     });
                 }
                 _ => {}
@@ -487,8 +488,8 @@ impl View for PlanInspectorView {
             let epic_text = plan
                 .epic_id
                 .as_deref()
-                .map(|epic_id| format!("epic: {epic_id}"))
-                .unwrap_or_else(|| "epic: --".into());
+                .map(|epic_id| format!("work item: {epic_id}"))
+                .unwrap_or_else(|| "work item: --".into());
             let owner_text = plan
                 .owner_brain_session_id
                 .as_deref()
@@ -604,7 +605,7 @@ impl View for PlanInspectorView {
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
                 format!(
-                    " h/l: lane  j/k: task  {}  e: epic graph  g/G: ends  Alt+P/Esc: close {}",
+                    " h/l: lane  j/k: task  {}  o: work item  g/G: ends  Alt+P/Esc: close {}",
                     enter_hint, scroll_hint
                 ),
                 Style::default().fg(Color::DarkGray),
@@ -719,7 +720,7 @@ mod tests {
     }
 
     #[test]
-    fn e_opens_source_epic_graph_from_plan_inspector() {
+    fn o_opens_source_work_item_from_plan_inspector() {
         let session_id = SessionId("brain-1".into());
         let projection = projection_with_epic(&session_id);
         let lineage = ExecutorLineage::new();
@@ -727,7 +728,7 @@ mod tests {
         let ctx = ctx(&lineage, &projection, &synopsis);
         let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
 
-        let action = view.handle_key(key(KeyCode::Char('e')), &ctx);
+        let action = view.handle_key(key(KeyCode::Char('o')), &ctx);
 
         assert!(matches!(
             action,

@@ -148,7 +148,7 @@ impl PlanBrowserView {
 
     fn open_selected(&self, ctx: &ViewContext<'_>) -> Option<Action> {
         if self.detail_peek == DetailPeek::Epic {
-            return self.open_selected_epic();
+            return self.open_selected_work_item();
         }
         self.open_selected_implementation_plan(ctx)
     }
@@ -276,7 +276,7 @@ impl PlanBrowserView {
         }
     }
 
-    fn view_selected_epic(&mut self) -> Option<Action> {
+    fn view_selected_work_item(&mut self) -> Option<Action> {
         if self.selected_plan().is_none() {
             return Some(Action::FlashHint {
                 message: "No plan selected".into(),
@@ -289,16 +289,16 @@ impl PlanBrowserView {
             return None;
         }
 
-        self.open_selected_epic()
+        self.open_selected_work_item()
     }
 
-    fn open_selected_epic(&self) -> Option<Action> {
+    fn open_selected_work_item(&self) -> Option<Action> {
         self.selected_plan()
             .map(|plan| Action::OpenIssueInBacklog {
-                // The epic is the user's durable entry point for the plan.
-                // IssueBrowser/PM resolves plan-backed epics to the full
-                // `spur:plan-id:<id>` graph scope; PlanBrowser should not
-                // expose that implementation detail to the user.
+                // This is the user's durable work-item entry point for the
+                // plan. Today the snapshot field is still named `epic_id`,
+                // but the UI treats it as the source work item so the flow is
+                // not epic-only.
                 id: plan.epic_id.clone(),
             })
             .or(Some(Action::FlashHint {
@@ -376,7 +376,7 @@ impl PlanBrowserView {
         let lines = vec![
             Line::from(self.active_slot_line(ctx)),
             Line::from(
-                "p Implementation plan/open   e Epic graph/open   c Claim   s Start/Resume   Enter Open visible   r Refresh",
+                "p Implementation plan/open   o Work item/open   c Claim   s Start/Resume   Enter Open visible   r Refresh",
             ),
         ];
         let block = Block::default()
@@ -409,7 +409,7 @@ impl PlanBrowserView {
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "Epic         ",
+                "Work item    ",
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -468,9 +468,9 @@ impl PlanBrowserView {
 
     fn render_detail(&self, frame: &mut Frame, area: Rect) {
         let title = match self.detail_peek {
-            DetailPeek::Summary => " Plan / Epic Summary ",
+            DetailPeek::Summary => " Plan / Work Item Summary ",
             DetailPeek::Plan => " Implementation Plan ",
-            DetailPeek::Epic => " Epic Scope ",
+            DetailPeek::Epic => " Work Item Scope ",
         };
         let block = Block::default()
             .title(title)
@@ -523,13 +523,11 @@ impl PlanBrowserView {
     fn render_summary_lines(&self, plan: &PlanSummaryEvent) -> Vec<Line<'static>> {
         vec![
             Self::field_line("Plan", plan.plan_id.clone()),
-            Self::field_line("Epic", plan.epic_id.clone()),
+            Self::field_line("Work item", plan.epic_id.clone()),
             Self::field_line("Title", plan.title.clone()),
             Self::field_line("State", Self::lifecycle_label(plan.lifecycle)),
             Self::field_line("Progress", Self::progress_text(plan.counts.as_ref())),
-            Self::action_line(
-                "p: implementation plan   e: epic graph   c: claim   s: start/resume",
-            ),
+            Self::action_line("p: implementation plan   o: work item   c: claim   s: start/resume"),
         ]
     }
 
@@ -706,7 +704,7 @@ impl View for PlanBrowserView {
             }
             KeyCode::Char('c') if key.modifiers.is_empty() => self.claim_selected(ctx),
             KeyCode::Char('s') if key.modifiers.is_empty() => self.start_selected(ctx),
-            KeyCode::Char('e') if key.modifiers.is_empty() => self.view_selected_epic(),
+            KeyCode::Char('o') if key.modifiers.is_empty() => self.view_selected_work_item(),
             KeyCode::Char('b') if key.modifiers.is_empty() => {
                 Some(Action::NavigateTo(ViewId::IssueBrowser))
             }
@@ -1022,7 +1020,7 @@ mod tests {
     }
 
     #[test]
-    fn second_e_opens_selected_epic_issue_graph() {
+    fn second_o_opens_selected_source_work_item() {
         let session_id = SessionId("brain-1".into());
         let projection = PlanProjectionStore::new();
         let lineage = ExecutorLineage::new();
@@ -1036,10 +1034,10 @@ mod tests {
             &ctx,
         );
 
-        let first = view.handle_key(key(KeyCode::Char('e')), &ctx);
-        assert!(first.is_none(), "first e should show epic detail");
+        let first = view.handle_key(key(KeyCode::Char('o')), &ctx);
+        assert!(first.is_none(), "first o should show work item detail");
 
-        let action = view.handle_key(key(KeyCode::Char('e')), &ctx);
+        let action = view.handle_key(key(KeyCode::Char('o')), &ctx);
 
         assert!(matches!(
             action,
