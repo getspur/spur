@@ -233,14 +233,10 @@ impl McpEventSink for CaptureSink {
     }
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn tick_once_does_not_dispatch_partial_plan_after_child_create_failure() {
-    if !br_available() {
-        eprintln!(
-            "skipping tick_once_does_not_dispatch_partial_plan_after_child_create_failure: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -301,14 +297,10 @@ async fn tick_once_does_not_dispatch_partial_plan_after_child_create_failure() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn tick_once_dispatches_ready_task_with_approved_dep_overlay() {
-    if !br_available() {
-        eprintln!(
-            "skipping tick_once_dispatches_ready_task_with_approved_dep_overlay: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     init_git_repo(dir.path());
@@ -482,14 +474,10 @@ async fn tick_once_dispatches_ready_task_with_approved_dep_overlay() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn overlay_conflict_routes_to_blocked_on_setup_conflict() {
-    if !br_available() {
-        eprintln!(
-            "skipping overlay_conflict_routes_to_blocked_on_setup_conflict: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     init_git_repo(dir.path());
@@ -647,12 +635,10 @@ async fn overlay_conflict_routes_to_blocked_on_setup_conflict() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn observe_ready_returns_unblocked_task_only() {
-    if !br_available() {
-        eprintln!("skipping reconciler_tick: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -753,12 +739,10 @@ async fn observe_ready_returns_unblocked_task_only() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn observe_ready_summaries_preserve_plan_labels() {
-    if !br_available() {
-        eprintln!("skipping observe_ready_summaries_preserve_plan_labels: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -815,12 +799,10 @@ async fn observe_ready_summaries_preserve_plan_labels() {
     }));
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn pending_label_on_closed_epic_blocks_dispatch() {
-    if !br_available() {
-        eprintln!("skipping pending_label_on_closed_epic_blocks_dispatch: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -889,12 +871,10 @@ async fn pending_label_on_closed_epic_blocks_dispatch() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn plan_enumeration_finds_tasks_buried_under_backlog() {
-    if !br_available() {
-        eprintln!("skipping plan_enumeration_finds_tasks_buried_under_backlog: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -986,12 +966,10 @@ async fn plan_enumeration_finds_tasks_buried_under_backlog() {
 /// This test bypasses the bv primary path and calls the br fallback helper
 /// directly. It verifies that task-level `br ready` candidates are filtered
 /// through the plan epic's activation labels.
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn observe_ready_via_br_returns_ready_tasks() {
-    if !br_available() {
-        eprintln!("skipping observe_ready_via_br: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -1093,14 +1071,10 @@ async fn observe_ready_via_br_returns_ready_tasks() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn observe_ready_via_br_suppresses_tasks_for_closed_complete_epic() {
-    if !br_available() {
-        eprintln!(
-            "skipping observe_ready_via_br_suppresses_tasks_for_closed_complete_epic: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -1169,12 +1143,10 @@ async fn observe_ready_via_br_suppresses_tasks_for_closed_complete_epic() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn epic_closes_when_scoped_children_terminal() {
-    if !br_available() {
-        eprintln!("skipping epic_closes_when_scoped_children_terminal: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -1278,12 +1250,10 @@ async fn epic_closes_when_scoped_children_terminal() {
     )));
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn all_approved_epic_emits_plan_ready_to_merge() {
-    if !br_available() {
-        eprintln!("skipping all_approved_epic_emits_plan_ready_to_merge: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -1383,12 +1353,10 @@ async fn all_approved_epic_emits_plan_ready_to_merge() {
     )));
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn tick_once_persists_dispatch_before_queue_send() {
-    if !br_available() {
-        eprintln!("skipping tick_once_persists_dispatch_before_queue_send: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -1452,14 +1420,10 @@ async fn tick_once_persists_dispatch_before_queue_send() {
     assert_eq!(request.issue_id.as_deref(), Some(task_id.as_str()));
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn tick_once_persists_failed_completion_when_respond_to_drops() {
-    if !br_available() {
-        eprintln!(
-            "skipping tick_once_persists_failed_completion_when_respond_to_drops: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -1582,12 +1546,10 @@ async fn tick_once_persists_failed_completion_when_respond_to_drops() {
     )));
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn tick_once_reclaims_expired_lease_dispatch() {
-    if !br_available() {
-        eprintln!("skipping tick_once_reclaims_expired_lease_dispatch: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -1720,12 +1682,10 @@ async fn tick_once_reclaims_expired_lease_dispatch() {
     )));
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn worker_success_after_orphan_clear_is_superseded() {
-    if !br_available() {
-        eprintln!("skipping worker_success_after_orphan_clear_is_superseded: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -1826,12 +1786,10 @@ async fn worker_success_after_orphan_clear_is_superseded() {
     assert!(!issue.labels.contains(&labels::delegation_id(delegation_id)));
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn tick_once_does_not_reclaim_live_lease() {
-    if !br_available() {
-        eprintln!("skipping tick_once_does_not_reclaim_live_lease: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -1911,12 +1869,10 @@ async fn tick_once_does_not_reclaim_live_lease() {
         .any(|event| matches!(event.body, SpurEventBody::DispatchLeaseExpired { .. })));
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn tick_once_clears_dispatch_label_when_send_fails() {
-    if !br_available() {
-        eprintln!("skipping tick_once_clears_dispatch_label_when_send_fails: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -1984,14 +1940,10 @@ async fn tick_once_clears_dispatch_label_when_send_fails() {
         .any(|label| label.starts_with("spur:delegation-id:")));
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn tick_once_skips_broken_plan_and_dispatches_other_ready_work() {
-    if !br_available() {
-        eprintln!(
-            "skipping tick_once_skips_broken_plan_and_dispatches_other_ready_work: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -2074,14 +2026,10 @@ async fn tick_once_skips_broken_plan_and_dispatches_other_ready_work() {
     assert_eq!(request.issue_id.as_deref(), Some(valid_task_id.as_str()));
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn resolve_dispatch_orphan_emits_breadcrumb_and_clears_label() {
-    if !br_available() {
-        eprintln!(
-            "skipping resolve_dispatch_orphan_emits_breadcrumb_and_clears_label: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -2140,14 +2088,10 @@ async fn resolve_dispatch_orphan_emits_breadcrumb_and_clears_label() {
     )));
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn resolve_dispatch_orphan_preserves_legacy_ready_for_review_marker() {
-    if !br_available() {
-        eprintln!(
-            "skipping resolve_dispatch_orphan_preserves_legacy_ready_for_review_marker: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -2195,12 +2139,10 @@ async fn resolve_dispatch_orphan_preserves_legacy_ready_for_review_marker() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn execute_epic_persists_execution_scope_labels_on_epic_and_tasks() {
-    if !br_available() {
-        eprintln!("skipping execute_epic_persists_execution_scope_labels_on_epic_and_tasks: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -2296,14 +2238,10 @@ async fn execute_epic_persists_execution_scope_labels_on_epic_and_tasks() {
     }
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn execute_epic_reprojects_persisted_non_terminal_state_before_starting_fresh_run() {
-    if !br_available() {
-        eprintln!(
-            "skipping execute_epic_reprojects_persisted_non_terminal_state_before_starting_fresh_run: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -2407,14 +2345,10 @@ async fn execute_epic_reprojects_persisted_non_terminal_state_before_starting_fr
 /// label was wiped — causing the next dispatch tick to error with
 /// `no agent for task; set spur:agent:<name>` and fall back to the hardcoded
 /// `"codex"` default in projector.rs.
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn execute_epic_preserves_pre_existing_agent_label_on_child_task() {
-    if !br_available() {
-        eprintln!(
-            "skipping execute_epic_preserves_pre_existing_agent_label_on_child_task: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -2488,12 +2422,10 @@ async fn execute_epic_preserves_pre_existing_agent_label_on_child_task() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn execute_epic_rolls_back_epic_scope_when_task_scope_persist_fails() {
-    if !br_available() {
-        eprintln!("skipping execute_epic_rolls_back_epic_scope_when_task_scope_persist_fails: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -2569,14 +2501,10 @@ async fn execute_epic_rolls_back_epic_scope_when_task_scope_persist_fails() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn submit_plan_default_notify_path_dispatches_ready_task() {
-    if !br_available() {
-        eprintln!(
-            "skipping submit_plan_default_notify_path_dispatches_ready_task: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
     skip_if_no_loopback!("submit_plan_default_notify_path_dispatches_ready_task");
 
     let dir = TempDir::new().expect("tempdir");
@@ -2634,14 +2562,10 @@ async fn submit_plan_default_notify_path_dispatches_ready_task() {
     assert_eq!(request.issue_id.as_deref(), Some(task_id.as_str()));
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn execute_epic_default_notify_path_dispatches_ready_task() {
-    if !br_available() {
-        eprintln!(
-            "skipping execute_epic_default_notify_path_dispatches_ready_task: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
     skip_if_no_loopback!("execute_epic_default_notify_path_dispatches_ready_task");
 
     let dir = TempDir::new().expect("tempdir");
@@ -2737,14 +2661,10 @@ async fn execute_epic_default_notify_path_dispatches_ready_task() {
     assert_eq!(request.issue_id.as_deref(), Some(task_a_id.as_str()));
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn execute_epic_shutdown_abort_does_not_emit_plan_snapshot() {
-    if !br_available() {
-        eprintln!(
-            "skipping execute_epic_shutdown_abort_does_not_emit_plan_snapshot: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -2833,14 +2753,12 @@ async fn execute_epic_shutdown_abort_does_not_emit_plan_snapshot() {
 /// always in flight, let it run for a brief warm-up, then fire cancel. With
 /// the fix in place the spawned task must complete within the 1-second
 /// timeout budget.
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn reconciler_cancels_during_tick() {
     use std::time::Duration;
 
-    if !br_available() {
-        eprintln!("skipping reconciler_cancels_during_tick: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -2900,14 +2818,12 @@ async fn reconciler_cancels_during_tick() {
 /// Hybrid wake equivalence: a fast-forward signal causes the reconciler to tick
 /// and produce the same observable dispatch as a direct `tick_once()` call.
 /// The journal wake is optional and does not change `tick_once()` semantics.
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn hybrid_fast_forward_matches_polling_projection() {
     use std::time::Duration;
 
-    if !br_available() {
-        eprintln!("skipping hybrid_fast_forward_matches_polling_projection: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);

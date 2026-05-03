@@ -83,12 +83,10 @@ fn test_deps(pm: Arc<PmService>) -> WorkerMcpDeps {
     }
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn start_binds_listener_and_returns_url() {
-    if !br_available() {
-        eprintln!("skipping: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -202,12 +200,10 @@ impl McpEventSink for DelayingSink {
     }
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn active_count_tracks_concurrent_dispatch_entry_and_exit() {
-    if !br_available() {
-        eprintln!("skipping: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -281,12 +277,10 @@ async fn active_count_tracks_concurrent_dispatch_entry_and_exit() {
     server.shutdown(Duration::from_secs(5)).await;
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn shutdown_blocks_until_active_count_reaches_zero() {
-    if !br_available() {
-        eprintln!("skipping: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -430,12 +424,10 @@ impl Visit for WarnVisitor {
     }
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn shutdown_returns_drained_quickly_when_no_in_flight_dispatchers() {
-    if !br_available() {
-        eprintln!("skipping: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let pm = test_pm_service_empty(dir.path()).await;
@@ -460,12 +452,10 @@ async fn shutdown_returns_drained_quickly_when_no_in_flight_dispatchers() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn shutdown_warns_and_returns_undrained_when_deadline_elapses() {
-    if !br_available() {
-        eprintln!("skipping: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);

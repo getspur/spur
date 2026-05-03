@@ -198,14 +198,10 @@ async fn assert_has_sweep_comment(pm: &PmService, issue_id: &str) {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn startup_sweep_resumes_after_prior_partial_child_quarantine() {
-    if !br_available() {
-        eprintln!(
-            "skipping startup_sweep_resumes_after_prior_partial_child_quarantine: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
     skip_if_no_loopback!("startup_sweep_resumes_after_prior_partial_child_quarantine");
 
     let dir = TempDir::new().expect("tempdir");
@@ -258,12 +254,10 @@ async fn startup_sweep_resumes_after_prior_partial_child_quarantine() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn startup_sweep_honors_plan_pending_grace_boundary() {
-    if !br_available() {
-        eprintln!("skipping startup_sweep_honors_plan_pending_grace_boundary: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
     skip_if_no_loopback!("startup_sweep_honors_plan_pending_grace_boundary");
 
     let dir = TempDir::new().expect("tempdir");
@@ -292,14 +286,10 @@ async fn startup_sweep_honors_plan_pending_grace_boundary() {
     assert_eq!(fresh_child.status, "open");
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn startup_sweep_quarantines_all_plan_children_with_comments() {
-    if !br_available() {
-        eprintln!(
-            "skipping startup_sweep_quarantines_all_plan_children_with_comments: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
     skip_if_no_loopback!("startup_sweep_quarantines_all_plan_children_with_comments");
 
     let dir = TempDir::new().expect("tempdir");
@@ -322,14 +312,10 @@ async fn startup_sweep_quarantines_all_plan_children_with_comments() {
     }
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn startup_sweep_skips_pending_epic_without_plan_id_and_emits_event() {
-    if !br_available() {
-        eprintln!(
-            "skipping startup_sweep_skips_pending_epic_without_plan_id_and_emits_event: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
     skip_if_no_loopback!("startup_sweep_skips_pending_epic_without_plan_id_and_emits_event");
 
     let dir = TempDir::new().expect("tempdir");

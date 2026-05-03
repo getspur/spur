@@ -101,12 +101,10 @@ fn scope_drift_signal(signal_id: Uuid) -> WorkerSignal {
     }
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn report_signal_on_open_task_records_all_artifacts() {
-    if !br_available() {
-        eprintln!("skipping: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
@@ -188,12 +186,10 @@ async fn report_signal_on_open_task_records_all_artifacts() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn report_signal_on_terminal_task_records_late_arrival() {
-    if !br_available() {
-        eprintln!("skipping: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
@@ -280,12 +276,10 @@ async fn report_signal_on_terminal_task_records_late_arrival() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn report_signal_threads_worker_call_context() {
-    if !br_available() {
-        eprintln!("skipping: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
