@@ -3542,15 +3542,26 @@ impl App {
                     view.seed_issues(self.dashboard.tracked_issues().to_vec());
                     self.issue_browser = Some(view);
                 }
-                if let Some(browser) = self.issue_browser.as_mut() {
-                    browser.open_external_detail(id.clone());
-                }
+                // Inc 3 (bd-d587.3): only caller today is PlanBrowser View-Epic,
+                // so pass `FocusGraph` — selects the row in the left pane and
+                // arms the detail-fetch handler to flip to Graph mode after
+                // both `IssueDetailFetched` and `IssueSubgraphLoaded` arrive.
+                let pending = self.issue_browser.as_mut().and_then(|browser| {
+                    browser.open_external_detail(
+                        id.clone(),
+                        crate::views::issue_browser::OpenMode::FocusGraph,
+                    );
+                    browser.take_pending_action()
+                });
                 self.navigate_to(ViewId::IssueBrowser);
                 if let Some(ref tx) = self.user_input_tx {
                     let _ = tx.try_send(UserInput::GetIssueDetail { id });
                     if just_created {
                         let _ = tx.try_send(UserInput::RefreshIssues);
                     }
+                }
+                if let Some(action) = pending {
+                    self.process_action(action);
                 }
             }
             Action::GetIssueGraph { id } => {

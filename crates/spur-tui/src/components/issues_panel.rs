@@ -61,6 +61,18 @@ impl IssuesPanel {
         issues.get(idx).map(|i| i.id.as_str())
     }
 
+    /// Inc 3 (bd-d587.3): select the row whose id matches `id`. Returns `true`
+    /// if the id was found and selection was moved; `false` otherwise (caller
+    /// can stash the id for a later retry once `tracked_issues` is updated).
+    pub fn select_by_id(&mut self, id: &str, issues: &[IssueSummary]) -> bool {
+        if let Some(idx) = issues.iter().position(|i| i.id == id) {
+            self.table_state.select(Some(idx));
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn render(&mut self, issues: &[IssueSummary], frame: &mut Frame, area: Rect) {
         if issues.is_empty() {
             return;

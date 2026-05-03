@@ -59,6 +59,19 @@ pub enum DetailMode {
     Graph,
 }
 
+/// Inc 3 (bd-d587.3): caller-supplied intent for `open_external_detail`.
+/// `Default`/`FocusText` open the detail in Text mode (palette-style entry,
+/// no graph). `FocusGraph` arms the post-load mode flip so that once the
+/// detail + subgraph have arrived, the right pane shows Graph view —
+/// matching the "View Epic" intent from PlanBrowser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OpenMode {
+    #[default]
+    Default,
+    FocusText,
+    FocusGraph,
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 /// Convert spur_acp mirror type back to spur_pm::Issue for TUI rendering.
@@ -99,6 +112,20 @@ pub struct IssueBrowserView {
     graph_loading: Option<String>,
     graph_error: Option<String>,
     execute_modal: Option<ExecuteModal>,
+    /// Inc 3 (bd-d587.3): id to select in the left list once it appears in
+    /// `tracked_issues`. Set by `open_external_detail` when the id isn't yet
+    /// present; drained on the next `IssuesLoaded` that contains it.
+    pending_select: Option<String>,
+    /// Inc 3 (bd-d587.3): mode to apply when `IssueDetailFetched` transitions
+    /// `Loading -> Loaded`. Replaces the hardcoded `DetailMode::Text` reset
+    /// so the View-Epic intent (`OpenMode::FocusGraph`) survives the fetch.
+    post_load_mode: Option<DetailMode>,
+    /// Inc 3 (bd-d587.3): action to drain after `handle_spur_event`. Used
+    /// when `open_external_detail(_, FocusGraph)` needs to fire
+    /// `Action::GetIssueGraph` once the detail has loaded — the view itself
+    /// can't dispatch actions, only stash them for the app to pick up via
+    /// `take_pending_action`.
+    pending_action: Option<Action>,
 }
 
 impl Default for IssueBrowserView {
@@ -120,7 +147,29 @@ impl IssueBrowserView {
             graph_loading: None,
             graph_error: None,
             execute_modal: None,
+            pending_select: None,
+            post_load_mode: None,
+            pending_action: None,
         }
+    }
+
+    /// Inc 3 (bd-d587.3): drain the pending follow-up action stashed by
+    /// `open_external_detail` / `IssueDetailFetched`. The app polls this
+    /// after dispatching events to the view so it can route the action
+    /// through `process_action` (the only way to actually execute it).
+    pub fn take_pending_action(&mut self) -> Option<Action> {
+        self.pending_action.take()
+    }
+
+    /// Inc 3 (bd-d587.3) follow-up: drain all armed `open_external_detail`
+    /// state so that a subsequent fresh detail open or error tear-down does
+    /// not inherit stale `post_load_mode` / `pending_select` / `pending_action`
+    /// / `graph_loading` from a previous (possibly errored) external open.
+    fn reset_armed_state(&mut self) {
+        self.pending_select = None;
+        self.post_load_mode = None;
+        self.pending_action = None;
+        self.graph_loading = None;
     }
 
     pub fn tracked_issues(&self) -> &[spur_pm::IssueSummary] {
@@ -162,11 +211,39 @@ impl IssueBrowserView {
         &mut self.issues_panel
     }
 
-    pub fn open_external_detail(&mut self, id: String) {
-        self.issue_focus = IssueFocus::Loading { id };
+    /// Inc 3 (bd-d587.3): open a detail pane on `id` from outside this view
+    /// (e.g., PlanBrowser View-Epic). `mode` controls the post-load detail
+    /// mode and arms graph pre-fetch when applicable.
+    ///
+    /// - `OpenMode::Default` / `OpenMode::FocusText`: detail shown in Text
+    ///   mode; user can press `v` to flip to Graph.
+    /// - `OpenMode::FocusGraph`: list-row selected immediately if id is
+    ///   present (else queued via `pending_select` for next `IssuesLoaded`),
+    ///   `Action::GetIssueGraph` stashed in `pending_action` for the app to
+    ///   drain, and `post_load_mode` armed so `IssueDetailFetched` flips to
+    ///   Graph mode.
+    pub fn open_external_detail(&mut self, id: String, mode: OpenMode) {
+        // bd-d587.3 follow-up: clear any state armed by a previous external
+        // open so non-FocusGraph calls don't inherit stale Graph mode.
+        self.reset_armed_state();
+        // Move the left-list selection if the id is already tracked; else
+        // stash for the next IssuesLoaded.
+        if !self.issues_panel.select_by_id(&id, &self.tracked_issues) {
+            self.pending_select = Some(id.clone());
+        }
+
+        self.issue_focus = IssueFocus::Loading { id: id.clone() };
         self.detail_mode = DetailMode::Text;
         self.issue_detail_pane.reset();
         self.graph_error = None;
+
+        if matches!(mode, OpenMode::FocusGraph) {
+            self.post_load_mode = Some(DetailMode::Graph);
+            // Eagerly request the graph so the cache is populated by the
+            // time IssueDetailFetched flips to Graph mode.
+            self.graph_loading = Some(id.clone());
+            self.pending_action = Some(Action::GetIssueGraph { id });
+        }
     }
 
     fn selected_issue_id(&self) -> Option<String> {
@@ -202,6 +279,9 @@ impl IssueBrowserView {
     }
 
     fn request_selected_detail(&mut self) -> Option<Action> {
+        // bd-d587.3 follow-up: a fresh user-driven detail open must not
+        // inherit `post_load_mode` from a prior external open.
+        self.reset_armed_state();
         let selected = self.selected_issue_id();
         match (&self.issue_focus, selected) {
             (
@@ -586,6 +666,16 @@ impl View for IssueBrowserView {
                         self.issues_panel.select_next(1, self.tracked_issues.len());
                     }
                 }
+                // Inc 3 (bd-d587.3): drain pending_select if the queued id is
+                // now present in tracked_issues.
+                if let Some(pending) = self.pending_select.clone() {
+                    if self
+                        .issues_panel
+                        .select_by_id(&pending, &self.tracked_issues)
+                    {
+                        self.pending_select = None;
+                    }
+                }
             }
 
             spur_acp::SpurEventBody::IssueUpdated {
@@ -629,7 +719,13 @@ impl View for IssueBrowserView {
                             id: requested_id.clone(),
                             issue: Box::new(pm_issue),
                         };
-                        self.detail_mode = DetailMode::Text;
+                        // Inc 3 (bd-d587.3): apply the post-load mode armed
+                        // by `open_external_detail(_, FocusGraph)`. Falls back
+                        // to Text for the default palette-style entry path.
+                        self.detail_mode = self
+                            .post_load_mode
+                            .take()
+                            .unwrap_or(DetailMode::Text);
                     }
                 }
             }
@@ -658,8 +754,14 @@ impl View for IssueBrowserView {
                 if self.graph_loading.is_some() {
                     self.graph_error = Some(error.clone());
                     self.graph_loading = None;
+                    // bd-d587.3 follow-up: a graph-fetch error must not leave
+                    // post_load_mode armed for a future unrelated detail fetch.
+                    self.post_load_mode = None;
+                    self.pending_action = None;
                 } else if matches!(self.issue_focus, IssueFocus::Loading { .. }) {
                     self.issue_focus = IssueFocus::None;
+                    // bd-d587.3 follow-up: same rationale on detail-fetch error.
+                    self.reset_armed_state();
                 }
             }
 
