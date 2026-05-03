@@ -195,6 +195,11 @@ pub enum AuditSentinelKind {
         previous_token: String,
         new_token: String,
     },
+    /// Reserved for the active-handoff path planned in
+    /// `docs/superpowers/plans/2026-05-02-plan-ownership-cas-hardening.md`
+    /// (bullet 5). Currently exercised only by round-trip tests; production
+    /// emission lands when a brain explicitly hands a plan off mid-execution
+    /// rather than via the inactive-reclaim transfer that emits `PlanOwnershipTransferred`.
     PlanHandoffReady {
         plan_id: String,
         owner: String,
