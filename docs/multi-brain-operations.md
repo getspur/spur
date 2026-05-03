@@ -41,7 +41,7 @@ To see who currently owns a plan, look up the plan's epic and grep for the
 br list --label spur:plan-id:<plan_id>
 
 # Inspect the labels on the epic.
-br issue show <epic-id> | grep 'spur:plan-owner:'
+br show <epic-id> | grep 'spur:plan-owner:'
 ```
 
 A healthy plan carries exactly one such label. **Zero** owner labels means the
