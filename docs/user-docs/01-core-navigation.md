@@ -14,6 +14,8 @@ When you start Spur, you'll land on the **Dashboard**. This is your command cent
 
 The Dashboard operates in two distinct modes to keep navigation separate from typing:
 
+> 🎥 **Video Placeholder:** [Demonstrate switching between Navigation Mode and Compose Mode using the Tab key, showing how the UI focus border shifts.]
+
 * **[NAV] Navigation Mode:** When the input bar has a gray border, your keystrokes control the application. You can scroll, switch panels, or jump to specific views.
 * **[INSERT] Compose Mode:** When the input bar has a cyan border, everything you type goes into the input field.
 

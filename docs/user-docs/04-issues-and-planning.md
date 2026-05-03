@@ -6,6 +6,8 @@ Spur TUI provides powerful built-in tools for visualizing and managing your proj
 
 The Issue Browser is your central hub for exploring tasks and epics. It synchronizes with your connected project management tracker (like GitHub, Linear, Plane, or local Beads) and displays issues alongside their metadata.
 
+> 🎥 **Video Placeholder:** [Demonstrate opening the Issue Browser, navigating the list with j/k, and pressing Enter to open the detail view of a specific issue.]
+
 ### Navigation and Detail Views
 
 *   **`j` / `k`** or **Up / Down**: Navigate through the list of tracked issues.
@@ -35,6 +37,8 @@ You can trigger agent actions or update issue states directly from the browser:
 ## Issue Dependency Graphs
 
 When you press **`v`** while viewing an issue, the TUI switches to **Graph Mode**. The graph pane visualizes the dependency tree (what the current issue blocks, or is blocked by) using a visual depth-first search (DFS) tree.
+
+> 🎥 **Video Placeholder:** [Demonstrate pressing `v` on an issue with dependencies to switch into Graph Mode, showing the DFS tree layout.]
 
 The tree helps you identify execution order and potential circular dependencies:
 

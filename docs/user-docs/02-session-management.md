@@ -48,6 +48,8 @@ Pressing `P` (capital P) opens a detailed **Preview Pane** below the list for th
 
 When you select a session (or start a new one), you are taken to the **Session Detail** view. This is your primary workspace for interacting with the brain.
 
+> 🎥 **Video Placeholder:** [Demonstrate jumping into a session, streaming markdown in real-time, and toggling/scrolling the ReAct trace pane on the right side.]
+
 ### The ReAct Trace Explained
 Spur agents use a **ReAct (Reasoning and Acting)** loop. Instead of just giving you a final answer, the agent streams its internal thought process and tool execution in real-time. This is represented in the **Trace Pane**.
 

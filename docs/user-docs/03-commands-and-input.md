@@ -50,6 +50,8 @@ If you've configured Vim mode, the input bar provides a fully featured modal edi
 
 To provide context to the agent, you can "mention" specific files or other worker agents.
 
+> 🎥 **Video Placeholder:** [Show typing `@` to trigger the mention picker, fuzzy searching for a file, hitting enter, and seeing it turn into a Protected Atom.]
+
 Type `@` anywhere in the input bar to open the **Mention Picker**.
 *   **Empty Query (`@`)**: Shows pinned worker agents at the top, followed by a list of files in your workspace.
 *   **Typing to Filter (`@Cargo`)**: The picker uses fuzzy matching to instantly narrow down the list.
