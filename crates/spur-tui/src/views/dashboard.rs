@@ -2174,8 +2174,8 @@ impl View for DashboardView {
                 max_attempts,
             } => {
                 let (icon, label, kind) = match decision.as_str() {
-                    "approve" => ("✓", "approved", LogEntryKind::Complete),
-                    "reject" => ("✗", "rejected", LogEntryKind::Error),
+                    "approve" => ("✅", "approved", LogEntryKind::Complete),
+                    "reject" => ("❌", "rejected", LogEntryKind::Error),
                     "request_changes" => ("↻", "requested changes on", LogEntryKind::Act),
                     _ => ("?", "reviewed", LogEntryKind::Info),
                 };

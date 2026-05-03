@@ -315,7 +315,11 @@ impl ReactTrace {
             base_title.to_string()
         };
         if !self.observe_collapsed {
-            title.push_str("· ⊞ expanded ");
+            // Use EAW=W bullet (📂) or pure ASCII to avoid iTerm2 font-fallback
+            // cursor desync (see tests/expanded_mode_ghost_text_repro.rs).
+            // EAW=N `⊞` was the source of the original ghost-text bug visible
+            // in the title bar.
+            title.push_str("· expanded ");
         }
         (title, accent)
     }
@@ -963,8 +967,8 @@ impl ReactTrace {
                                 format!("{} {}", glyph, stats)
                             }
                         }
-                        ActStatus::Completed(None) => "✓".to_string(),
-                        ActStatus::Failed(_) => "✗".to_string(),
+                        ActStatus::Completed(None) => "✅".to_string(),
+                        ActStatus::Failed(_) => "❌".to_string(),
                     };
                     lines.push(format!(
                         "{} {} {}  {}",
@@ -985,7 +989,7 @@ impl ReactTrace {
                 }
 
                 TraceKind::AgentMessage { agent } => {
-                    lines.push(format!("{} ✉ {}", entry.timestamp, agent));
+                    lines.push(format!("{} 📨 {}", entry.timestamp, agent));
 
                     #[cfg(feature = "markdown")]
                     let used_markdown = if let Some(stream) = entry.markdown.as_ref() {
@@ -2036,7 +2040,7 @@ mod tests {
         });
         let lines = trace.render_to_strings().join("\n");
         assert!(
-            lines.contains("✓"),
+            lines.contains("✅"),
             "expected success glyph in collapsed render, got:\n{lines}"
         );
         for frame in spinner::BRAILLE {
