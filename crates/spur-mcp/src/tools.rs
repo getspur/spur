@@ -13,7 +13,7 @@ use tokio::sync::{oneshot, watch};
 ///
 /// Non-recursive sum type. Used as the inner `base` of `BaseSpec::WithOverlay`
 /// to enforce that overlay chains cannot nest.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BaseTarget {
     /// Snapshot from the orchestrator's repo_root HEAD (legacy default).
@@ -22,6 +22,33 @@ pub enum BaseTarget {
     Branch { name: String },
     /// Pinned commit OID.
     Commit { oid: String },
+}
+
+// Tolerant deserializer: accepts the canonical object form AND a JSON-string
+// form (e.g. `"{\"kind\":\"branch\",\"name\":\"x\"}"`). Some MCP clients
+// (notably the Claude Code harness) JSON-stringify nested object arguments
+// before transmitting them; without this adapter the server rejects such
+// requests with `invalid type: string ..., expected internally tagged enum`.
+impl<'de> serde::Deserialize<'de> for BaseTarget {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case")]
+        enum Inner {
+            RepoMain,
+            Branch { name: String },
+            Commit { oid: String },
+        }
+        let v = Value::deserialize(d)?;
+        let inner: Inner = match v {
+            Value::String(s) => serde_json::from_str(&s).map_err(serde::de::Error::custom)?,
+            other => serde_json::from_value(other).map_err(serde::de::Error::custom)?,
+        };
+        Ok(match inner {
+            Inner::RepoMain => BaseTarget::RepoMain,
+            Inner::Branch { name } => BaseTarget::Branch { name },
+            Inner::Commit { oid } => BaseTarget::Commit { oid },
+        })
+    }
 }
 
 /// Where a worker's worktree should be based.
@@ -35,7 +62,7 @@ pub enum BaseTarget {
 /// "Recommendation: flatten; nesting offers no operational benefit and
 /// adds parsing complexity." This eliminates JSON-schema `$ref` recursion
 /// that breaks MCP tool-calling in many LLM clients.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BaseSpec {
     /// Snapshot from the orchestrator's repo_root HEAD (legacy default).
@@ -49,6 +76,37 @@ pub enum BaseSpec {
         base: BaseTarget,
         overlays: Vec<OverlayCommit>,
     },
+}
+
+// Tolerant deserializer: see the matching impl on `BaseTarget` above for the
+// rationale. The `Inner::WithOverlay.base` field is typed as `BaseTarget`, so
+// recursion picks up `BaseTarget`'s tolerant impl automatically — a stringified
+// `WithOverlay` whose nested `base` is also a string still parses correctly.
+impl<'de> serde::Deserialize<'de> for BaseSpec {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case")]
+        enum Inner {
+            RepoMain,
+            Branch { name: String },
+            Commit { oid: String },
+            WithOverlay {
+                base: BaseTarget,
+                overlays: Vec<OverlayCommit>,
+            },
+        }
+        let v = Value::deserialize(d)?;
+        let inner: Inner = match v {
+            Value::String(s) => serde_json::from_str(&s).map_err(serde::de::Error::custom)?,
+            other => serde_json::from_value(other).map_err(serde::de::Error::custom)?,
+        };
+        Ok(match inner {
+            Inner::RepoMain => BaseSpec::RepoMain,
+            Inner::Branch { name } => BaseSpec::Branch { name },
+            Inner::Commit { oid } => BaseSpec::Commit { oid },
+            Inner::WithOverlay { base, overlays } => BaseSpec::WithOverlay { base, overlays },
+        })
+    }
 }
 
 /// One overlay commit range to cherry-pick onto a base.
@@ -169,6 +227,125 @@ mod base_spec_tests {
             }
             _ => panic!("expected WithOverlay, got {:?}", parsed.base),
         }
+    }
+
+    // Tolerant-string-form coverage: some MCP clients JSON-stringify nested
+    // object arguments before transmission. The custom Deserialize impls on
+    // BaseSpec / BaseTarget must accept that shape too.
+
+    #[test]
+    fn basespec_string_form_repo_main() {
+        let v = Value::String(r#"{"kind":"repo_main"}"#.into());
+        let parsed: BaseSpec = serde_json::from_value(v).unwrap();
+        assert_eq!(parsed, BaseSpec::RepoMain);
+    }
+
+    #[test]
+    fn basespec_string_form_branch() {
+        let v = Value::String(r#"{"kind":"branch","name":"feat/foo"}"#.into());
+        let parsed: BaseSpec = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            parsed,
+            BaseSpec::Branch {
+                name: "feat/foo".into()
+            }
+        );
+    }
+
+    #[test]
+    fn basespec_string_form_commit() {
+        let oid = "0123456789012345678901234567890123456789";
+        let v = Value::String(format!(r#"{{"kind":"commit","oid":"{}"}}"#, oid));
+        let parsed: BaseSpec = serde_json::from_value(v).unwrap();
+        assert_eq!(parsed, BaseSpec::Commit { oid: oid.into() });
+    }
+
+    #[test]
+    fn basespec_string_form_with_overlay() {
+        let v = Value::String(
+            r#"{"kind":"with_overlay","base":{"kind":"branch","name":"x"},"overlays":[]}"#.into(),
+        );
+        let parsed: BaseSpec = serde_json::from_value(v).unwrap();
+        match parsed {
+            BaseSpec::WithOverlay { base, overlays } => {
+                assert_eq!(
+                    base,
+                    BaseTarget::Branch {
+                        name: "x".into()
+                    }
+                );
+                assert!(overlays.is_empty());
+            }
+            other => panic!("expected WithOverlay, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn basespec_string_form_with_overlay_nested_string() {
+        // Even the inner BaseTarget arrives stringified — recursion through
+        // the BaseTarget tolerant impl must still parse it.
+        let v = Value::String(
+            r#"{"kind":"with_overlay","base":"{\"kind\":\"branch\",\"name\":\"x\"}","overlays":[]}"#
+                .into(),
+        );
+        let parsed: BaseSpec = serde_json::from_value(v).unwrap();
+        match parsed {
+            BaseSpec::WithOverlay { base, overlays } => {
+                assert_eq!(
+                    base,
+                    BaseTarget::Branch {
+                        name: "x".into()
+                    }
+                );
+                assert!(overlays.is_empty());
+            }
+            other => panic!("expected WithOverlay, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn basespec_malformed_string_errors() {
+        let v = Value::String("this is not json".into());
+        let err = serde_json::from_value::<BaseSpec>(v).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("expected") || msg.contains("invalid"),
+            "expected serde parse error, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn basespec_string_form_unknown_kind_errors() {
+        let v = Value::String(r#"{"kind":"unknown_thing"}"#.into());
+        assert!(serde_json::from_value::<BaseSpec>(v).is_err());
+    }
+
+    #[test]
+    fn basetarget_string_form_branch() {
+        let v = Value::String(r#"{"kind":"branch","name":"feat/foo"}"#.into());
+        let parsed: BaseTarget = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            parsed,
+            BaseTarget::Branch {
+                name: "feat/foo".into()
+            }
+        );
+    }
+
+    #[test]
+    fn basetarget_string_form_repo_main() {
+        let v = Value::String(r#"{"kind":"repo_main"}"#.into());
+        let parsed: BaseTarget = serde_json::from_value(v).unwrap();
+        assert_eq!(parsed, BaseTarget::RepoMain);
+    }
+
+    #[test]
+    fn basetarget_string_form_commit() {
+        let oid = "0123456789012345678901234567890123456789";
+        let v = Value::String(format!(r#"{{"kind":"commit","oid":"{}"}}"#, oid));
+        let parsed: BaseTarget = serde_json::from_value(v).unwrap();
+        assert_eq!(parsed, BaseTarget::Commit { oid: oid.into() });
     }
 }
 
