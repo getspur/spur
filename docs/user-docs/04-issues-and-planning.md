@@ -106,6 +106,59 @@ Whenever the Brain orchestrator dispatches a task to a Worker agent, it does **n
 * **Safe Exploration:** If a worker hallucinates and destroys the codebase, your main IDE checkout remains completely untouched. You simply reject the task in the Plan Inspector, and the tainted worktree is instantly deleted.
 * **Uninterrupted Flow:** You can continue coding, running your local dev server, and pushing commits in your main directory while Spur agents work quietly in the background.
 
+### End-to-End Plan Execution Flow
+
+When you ask Spur to build a complex feature or execute an entire Epic, the Brain goes through a distinct lifecycle of planning, parallel dispatch, and continuous reconciliation. Here is how Spur orchestrates a complete plan:
+
+```mermaid
+stateDiagram-v2
+    %% Define styles
+    classDef brainState fill:#1f6feb,color:#fff,stroke:#113d8f,stroke-width:2px;
+    classDef workerState fill:#238636,color:#fff,stroke:#2ea043,stroke-width:2px;
+    classDef systemState fill:#444,color:#fff,stroke:#222,stroke-width:2px;
+    classDef userState fill:#9e6a03,color:#fff,stroke:#d29922,stroke-width:2px;
+
+    state "User Request (Execute Epic or Feature)" as Request:::userState
+    state "Brain Analyzes & Plans" as Planning:::brainState
+    state "Plan DAG Generated" as DAG:::systemState
+    
+    state "The Reconciler Loop" as Reconciler {
+        state "Check Dependencies" as CheckDeps
+        state "Dispatch Ready Tasks" as Dispatch:::systemState
+        
+        state "Worker Execution" as Executing {
+            state "Create Worktree" as WT:::systemState
+            state "Worker Solves Task" as Worker:::workerState
+            WT --> Worker
+        }
+        
+        state "Awaiting User Review" as Review:::userState
+        
+        CheckDeps --> Dispatch : Dependencies Met
+        Dispatch --> Executing : delegate_to_worker()
+        Executing --> Review : Worker completes
+        Review --> CheckDeps : Approved (Unblocks next tasks)
+        Review --> Executing : Rejected (Redispatch to Worker)
+    }
+    
+    state "All Tasks Approved" as Complete:::systemState
+    state "Merge Plan to Main" as Merge:::brainState
+
+    Request --> Planning
+    Planning --> DAG : submit_plan()
+    DAG --> Reconciler
+    
+    Reconciler --> Complete : DAG Fully Traversed
+    Complete --> Merge : merge_plan()
+```
+
+**The Plan Execution Stages:**
+1. **Planning Phase:** The Brain receives your request, analyzes the requirements, and breaks the work down into a series of smaller, manageable tasks.
+2. **DAG Generation:** The Brain submits these tasks to the Orchestrator via the `submit_plan` tool. Crucially, it defines the *dependencies* between these tasks, forming a Directed Acyclic Graph (DAG).
+3. **The Reconciler Loop:** This is Spur's autonomous engine. It constantly evaluates the DAG. If a task has no uncompleted dependencies, the Reconciler immediately dispatches it. 
+4. **Execution & Review:** Dispatched tasks run in isolated worktrees (see below). When they finish, they pause for your review. Approving a task tells the Reconciler to mark it complete, which then unblocks any downstream tasks waiting on it.
+5. **Final Merge:** Once the Reconciler confirms every task in the DAG is successfully approved, the Brain executes a final deterministic merge, integrating the entire feature back into your main branch.
+
 ### Graph-Strict (G-Strict) Execution & Merge Strategy
 
 Spur achieves effective parallel execution through a **Graph-Strict (G-Strict)** dependency and merge strategy. When the Brain creates a plan, it forms a Directed Acyclic Graph (DAG) of tasks. Spur uses this DAG to perfectly orchestrate isolated worktrees and eliminate merge conflicts:
