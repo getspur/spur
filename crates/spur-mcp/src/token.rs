@@ -42,7 +42,8 @@ pub fn validate_token(
 
     let mut mac = HmacSha256::new_from_slice(key).map_err(|_| TokenError::BadSignature)?;
     mac.update(payload_b64.as_bytes());
-    mac.verify_slice(&sig).map_err(|_| TokenError::BadSignature)?;
+    mac.verify_slice(&sig)
+        .map_err(|_| TokenError::BadSignature)?;
 
     let payload_bytes =
         Base64UrlUnpadded::decode_vec(payload_b64).map_err(|_| TokenError::Malformed)?;
