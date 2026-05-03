@@ -1,6 +1,8 @@
 //! Verifies new executor lineage events round-trip through serde JSON.
 
+use chrono::{TimeZone, Utc};
 use spur_acp::{
+    PlanLifecycleEvent, PlanOwnerStateEvent, PlanSummaryCountsEvent, PlanSummaryEvent,
     ReviewDecision, ReviewKind, ReviewPayload, Role, SessionId, SpurEvent, SpurEventBody,
 };
 
@@ -378,6 +380,100 @@ fn issue_command_error_with_id_roundtrips() {
             assert_eq!(id, Some("bd-root".into()));
         }
         other => panic!("expected IssueCommandError, got {other:?}"),
+    }
+}
+
+#[test]
+fn plans_loaded_roundtrips_plan_summary_contract() {
+    let ev = SpurEvent::now(SpurEventBody::PlansLoaded {
+        plans: vec![
+            PlanSummaryEvent {
+                plan_id: "plan-a1".into(),
+                epic_id: "bd-120".into(),
+                title: "Auth migration".into(),
+                owner_state: PlanOwnerStateEvent::Mine,
+                lifecycle: PlanLifecycleEvent::Running,
+                counts: Some(PlanSummaryCountsEvent {
+                    total: 7,
+                    pending: 1,
+                    ready: 2,
+                    running: 1,
+                    awaiting_review: 1,
+                    approved: 2,
+                    rejected: 0,
+                    failed: 0,
+                    cancelled: 0,
+                }),
+                updated_at: Some(Utc.with_ymd_and_hms(2026, 5, 2, 10, 0, 0).unwrap()),
+            },
+            PlanSummaryEvent {
+                plan_id: "plan-c3".into(),
+                epic_id: "bd-130".into(),
+                title: "Owned elsewhere".into(),
+                owner_state: PlanOwnerStateEvent::Other {
+                    owner: "other-brain".into(),
+                },
+                lifecycle: PlanLifecycleEvent::AwaitingReview,
+                counts: None,
+                updated_at: None,
+            },
+            PlanSummaryEvent {
+                plan_id: "plan-d4".into(),
+                epic_id: "bd-140".into(),
+                title: "Ambiguous ownership".into(),
+                owner_state: PlanOwnerStateEvent::Ambiguous {
+                    owners: vec!["brain-a".into(), "brain-b".into()],
+                },
+                lifecycle: PlanLifecycleEvent::Unknown,
+                counts: None,
+                updated_at: None,
+            },
+        ],
+    });
+
+    let json = serde_json::to_string(&ev).unwrap();
+    let round: SpurEvent = serde_json::from_str(&json).unwrap();
+
+    match round.body {
+        SpurEventBody::PlansLoaded { plans } => {
+            assert_eq!(plans.len(), 3);
+            assert!(matches!(plans[0].owner_state, PlanOwnerStateEvent::Mine));
+            assert!(matches!(
+                plans[1].owner_state,
+                PlanOwnerStateEvent::Other { .. }
+            ));
+            assert!(matches!(
+                plans[2].owner_state,
+                PlanOwnerStateEvent::Ambiguous { .. }
+            ));
+            assert_eq!(plans[0].counts.as_ref().unwrap().total, 7);
+        }
+        other => panic!("expected PlansLoaded, got {other:?}"),
+    }
+}
+
+#[test]
+fn plan_command_error_roundtrips() {
+    let ev = SpurEvent::now(SpurEventBody::PlanCommandError {
+        operation: "ResumePlan".into(),
+        plan_id: Some("plan-b2".into()),
+        error: "resume_plan is not supported by this backend".into(),
+    });
+
+    let json = serde_json::to_string(&ev).unwrap();
+    let round: SpurEvent = serde_json::from_str(&json).unwrap();
+
+    match round.body {
+        SpurEventBody::PlanCommandError {
+            operation,
+            plan_id,
+            error,
+        } => {
+            assert_eq!(operation, "ResumePlan");
+            assert_eq!(plan_id, Some("plan-b2".into()));
+            assert_eq!(error, "resume_plan is not supported by this backend");
+        }
+        other => panic!("expected PlanCommandError, got {other:?}"),
     }
 }
 

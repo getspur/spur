@@ -183,8 +183,18 @@ pub enum Action {
     },
     /// Refresh the tracked issues list from the PM backend.
     RefreshIssues,
+    /// Refresh persisted plan summaries from the PM backend.
+    RefreshPlans,
+    /// Resume a persisted plan.
+    ResumePlan {
+        plan_id: String,
+    },
     /// Fetch the dependency subgraph for an issue from the PM backend.
     GetIssueGraph {
+        id: String,
+    },
+    /// Navigate to Backlog and open issue detail for the given issue id.
+    OpenIssueInBacklog {
         id: String,
     },
     /// Show a short status-bar hint owned by the App transient hint channel.
@@ -224,6 +234,7 @@ pub enum PermissionChoice {
 pub enum ViewId {
     Dashboard,
     IssueBrowser,
+    PlanBrowser,
     SessionDetail(SessionId),
     SessionPicker,
     PlanInspector(SessionId),

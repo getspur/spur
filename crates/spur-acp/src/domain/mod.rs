@@ -22,7 +22,8 @@ pub use delegation::{
 pub use events::{
     GraphEdgeEvent, GraphNodeEvent, HistoryEntry, IssueDetailEvent, IssueSummaryEvent,
     LicenseBindingMode, LicensePlan, LicenseStateEvent, LicenseStatusEvent, LicenseSubjectKind,
-    SpurEvent, SpurEventBody,
+    PlanLifecycleEvent, PlanOwnerStateEvent, PlanSummaryCountsEvent, PlanSummaryEvent, SpurEvent,
+    SpurEventBody,
 };
 pub use outcome::{BackendTag, OutcomeKey, OutcomeRef};
 pub use peer_message::{
