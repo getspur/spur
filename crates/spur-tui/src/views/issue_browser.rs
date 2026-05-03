@@ -38,15 +38,14 @@ const GRAPH_STATUS_HINT_PLAN_EPIC: &str =
     "[Graph] j/k: Nav  p: Open Plan  v: Text Mode  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
 const GRAPH_STATUS_HINT_PLAN_EPIC_COMPACT: &str = "[Graph] j/k: Nav  p: Plan  v: Text";
 const LIST_STATUS_HINT: &str =
-    "[List] j/k: Nav  Enter: Open Detail  v: View Graph  W: Work  r: Refresh  q: Quit";
-const LIST_STATUS_HINT_COMPACT: &str = "[List] j/k: Nav  Enter: Detail  W: Work  r: Refresh";
+    "[List] j/k: Nav  Enter/o: Open Detail  v: View Graph  W: Work  r: Refresh  q: Quit";
+const LIST_STATUS_HINT_COMPACT: &str = "[List] j/k: Nav  o: Open  W: Work  r: Refresh";
 const LIST_STATUS_HINT_EPIC: &str =
-    "[List] j/k: Nav  Enter: Open Detail  v: View Graph  E: Execute Epic  W: Work  r: Refresh  q: Quit";
-const LIST_STATUS_HINT_EPIC_COMPACT: &str =
-    "[List] j/k: Nav  Enter: Detail  E: Execute Epic  W: Work";
+    "[List] j/k: Nav  Enter/o: Open Detail  v: View Graph  E: Execute Epic  W: Work  r: Refresh  q: Quit";
+const LIST_STATUS_HINT_EPIC_COMPACT: &str = "[List] j/k: Nav  o: Open  E: Execute Epic  W: Work";
 const LIST_STATUS_HINT_PLAN_EPIC: &str =
-    "[List] j/k: Nav  Enter: Detail  v: Graph  p: Open Plan  W: Work  r: Refresh  q: Quit";
-const LIST_STATUS_HINT_PLAN_EPIC_COMPACT: &str = "[List] j/k: Nav  Enter: Detail  p: Plan  W: Work";
+    "[List] j/k: Nav  Enter/o: Open Detail  v: Graph  p: Open Plan  W: Work  r: Refresh  q: Quit";
+const LIST_STATUS_HINT_PLAN_EPIC_COMPACT: &str = "[List] j/k: Nav  o: Open  p: Plan  W: Work";
 
 // ── Issue focus state machine ───────────────────────────────────────────
 
@@ -294,12 +293,9 @@ impl IssueBrowserView {
             .is_some_and(|issue| issue.issue_type.as_deref() == Some("epic"))
     }
 
-    fn selected_plan_backed_epic_plan_id(&self) -> Option<String> {
+    fn selected_implementation_plan_id(&self) -> Option<String> {
         let selected_id = self.selected_issue_id()?;
         let selected = self.selected_issue()?;
-        if selected.issue_type.as_deref() != Some("epic") {
-            return None;
-        }
 
         find_plan_id_label(&selected.labels)
             .or_else(|| match &self.issue_focus {
@@ -312,7 +308,7 @@ impl IssueBrowserView {
     }
 
     fn open_selected_plan(&self) -> Option<Action> {
-        self.selected_plan_backed_epic_plan_id()
+        self.selected_implementation_plan_id()
             .map(|plan_id| Action::OpenPlanInBrowser { plan_id })
             .or(Some(Action::FlashHint {
                 message: "Selected issue has no implementation plan".into(),
@@ -411,7 +407,7 @@ impl IssueBrowserView {
                 ),
             });
         }
-        if let Some(plan_id) = self.selected_plan_backed_epic_plan_id() {
+        if let Some(plan_id) = self.selected_implementation_plan_id() {
             return Some(Action::FlashHint {
                 message: format!(
                     "Epic {} already has implementation plan {}; press p to open it",
@@ -457,7 +453,7 @@ impl IssueBrowserView {
                 } else {
                     // NavigateBack pops the view_history stack so we return to
                     // the actual previous view (e.g. PlanBrowser when entered
-                    // via the 'e' epic shortcut). NavigateTo(Dashboard) would
+                    // via the 'o' work-item shortcut). NavigateTo(Dashboard) would
                     // clear the stack and skip past PlanBrowser entirely.
                     Some(Action::NavigateBack)
                 }
@@ -496,9 +492,10 @@ impl IssueBrowserView {
             // to closing any open detail so the pane never lingers without a
             // corresponding row.
             KeyCode::Enter if key.modifiers.is_empty() => self.request_selected_detail(),
+            KeyCode::Char('o') if key.modifiers.is_empty() => self.request_selected_detail(),
 
             // Status actions
-            KeyCode::Char('o') if key.modifiers.is_empty() => self.update_status("open", false),
+            KeyCode::Char('O') if key.modifiers.is_empty() => self.update_status("open", false),
             KeyCode::Char('w') if key.modifiers.is_empty() => {
                 self.update_status("in_progress", false)
             }
@@ -651,7 +648,7 @@ impl IssueBrowserView {
         }
 
         // ── Status bar ────────────────────────────────────────────────────
-        let has_plan = self.selected_plan_backed_epic_plan_id().is_some();
+        let has_plan = self.selected_implementation_plan_id().is_some();
         let has_execute = self.selected_issue_is_epic() && !has_plan;
         let mode_hint = match self.issue_focus {
             IssueFocus::Loaded { .. } | IssueFocus::Loading { .. } => {
@@ -945,6 +942,25 @@ mod tests {
         view.set_issues_for_test(vec![issue(
             "bd-1",
             "epic",
+            vec!["spur:plan-id:plan-1".into(), "spur:plan-complete".into()],
+        )]);
+
+        let action = view.handle_key(key(KeyCode::Char('p')), &ctx);
+
+        assert!(matches!(
+            action,
+            Some(Action::OpenPlanInBrowser { plan_id }) if plan_id == "plan-1"
+        ));
+    }
+
+    #[test]
+    fn p_opens_plan_browser_for_plan_backed_bug() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.set_issues_for_test(vec![issue(
+            "bd-1",
+            "bug",
             vec!["spur:plan-id:plan-1".into(), "spur:plan-complete".into()],
         )]);
 
