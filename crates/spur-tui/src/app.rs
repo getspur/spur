@@ -3483,6 +3483,9 @@ impl App {
                 }
             }
             Action::ResumePlan { plan_id } => {
+                // Immediate user feedback: the orchestrator → MCP round-trip can take
+                // 1–3s; without this hint the TUI looks frozen and invites double-press.
+                self.flash_hint_short(format!("Resuming plan {plan_id}..."));
                 if let Some(ref tx) = self.user_input_tx {
                     let _ = tx.try_send(UserInput::ResumePlan { plan_id });
                 }

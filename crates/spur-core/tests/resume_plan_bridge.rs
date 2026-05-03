@@ -6,7 +6,7 @@
 //!
 //! | Test | Condition | Expected event |
 //! |------|-----------|----------------|
-//! | `no_brain_session_emits_plan_command_error` | No active brain session | `PlanCommandError { operation: "ResumePlan", error: "No active brain session with MCP server" }` |
+//! | `no_brain_session_emits_plan_command_error` | No active brain session | `PlanCommandError { operation: "ResumePlan", error: "No active brain session — start one to resume plans" }` |
 //! | `mcp_server_plan_owned_by_other_emits_plan_command_error` | Brain with MCP server; plan owned by different session | `PlanCommandError` with ownership-conflict message from `call_resume_plan` |
 //!
 //! ## Harness note
@@ -117,7 +117,7 @@ async fn no_brain_session_emits_plan_command_error() {
                 }
                 if operation == "ResumePlan"
                     && pid.as_str() == plan_id
-                    && error == "No active brain session with MCP server"
+                    && error == "No active brain session — start one to resume plans"
             )
         })
         .collect();
@@ -241,7 +241,7 @@ async fn mcp_server_plan_owned_by_other_emits_plan_command_error() {
     let error_msg = result.unwrap_err();
     let expected_owner = spur_mcp::plan::labels::compact_label_component(other_session);
     let expected_fragment = format!(
-        "resume_plan: plan {plan_id} is owned by {expected_owner}; active handoff is not implemented in MVP"
+        "resume_plan: plan {plan_id} is owned by {expected_owner}; active handoff is not supported"
     );
 
     assert_eq!(

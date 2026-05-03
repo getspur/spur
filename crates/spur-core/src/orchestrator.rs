@@ -3087,10 +3087,17 @@ impl Orchestrator {
                             }
                             // On success, the reconciler emits PlanSnapshotUpdated downstream.
                         } else {
+                            // Distinguish "no brain" from "brain mid-init" so the user knows
+                            // whether to start a session or just wait a moment.
+                            let error = if brain.is_some() {
+                                "Brain session initializing — try again in a moment".into()
+                            } else {
+                                "No active brain session — start one to resume plans".into()
+                            };
                             self.funnel.emit(SpurEventBody::PlanCommandError {
                                 operation: "ResumePlan".into(),
                                 plan_id: Some(plan_id),
-                                error: "No active brain session with MCP server".into(),
+                                error,
                             });
                         }
                     }
