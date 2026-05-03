@@ -2,9 +2,12 @@
 //!
 //! Uses `fs2::FileExt::try_lock_exclusive` — non-blocking, advisory. On
 //! acquire success the file contains the current PID; on drop, the lock
-//! releases. The file remains on disk and is overwritten by the next holder,
-//! which avoids false single-session breakage when one process drops its lock
-//! while another has already reacquired it.
+//! releases but the file remains on disk and is overwritten by the next
+//! holder, which avoids false single-session breakage when one process drops
+//! its lock while another has already reacquired it. If the holder process
+//! crashes, the OS releases the lock and the file persists with a stale PID;
+//! `acquire` treats stale-PID files as acquirable and overwrites them on next
+//! acquire.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -107,6 +110,20 @@ mod tests {
         {
             let _g = PidFileGuard::acquire(&path).unwrap();
         }
+        let _g2 = PidFileGuard::acquire(&path).unwrap();
+    }
+
+    #[test]
+    fn drop_keeps_pidfile_for_next_holder() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(".spur-brain.pid");
+        {
+            let _g = PidFileGuard::acquire(&path).unwrap();
+        }
+        assert!(
+            path.exists(),
+            "pidfile should remain so next holder can reuse it"
+        );
         let _g2 = PidFileGuard::acquire(&path).unwrap();
     }
 

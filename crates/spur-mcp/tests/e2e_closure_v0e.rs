@@ -146,6 +146,7 @@ async fn seed_all_approved_epic(
     for issue_id in [&epic_id, &task_a_id, &task_b_id] {
         label_issue(repo, issue_id, &plan_label);
     }
+    label_issue(repo, &epic_id, &labels::plan_owner("brain"));
     label_issue(repo, &epic_id, labels::PLAN_COMPLETE);
 
     (beads_pm(repo).await, epic_id, task_a_id, task_b_id)
@@ -211,7 +212,7 @@ async fn t_v0e_2_auto_merge_pr_is_opt_in() {
             ReconcilerConfig::default(),
             Arc::clone(&pm),
             Arc::new(Notify::new()),
-            None,
+            Some(test_dispatch_ctx()),
             Some("P1".into()),
             common::server_builder::pro_feature_gate(),
         );
@@ -244,7 +245,7 @@ async fn t_v0e_2_auto_merge_pr_is_opt_in() {
             ReconcilerConfig::default(),
             Arc::clone(&pm),
             Arc::new(Notify::new()),
-            None,
+            Some(test_dispatch_ctx()),
             Some("P1".into()),
             common::server_builder::pro_feature_gate(),
         );
@@ -297,7 +298,7 @@ async fn t_v0e_2_auto_merge_pr_is_opt_in() {
             ReconcilerConfig::default(),
             Arc::clone(&pm),
             Arc::new(Notify::new()),
-            None,
+            Some(test_dispatch_ctx()),
             Some("P1".into()),
             common::server_builder::pro_feature_gate(),
         );
@@ -347,6 +348,18 @@ fn continuation_ctx() -> DetachedContinuationCtx {
     }
 }
 
+fn test_dispatch_ctx() -> ReconcilerDispatchCtx {
+    let (delegation_tx, _delegation_rx) = tokio::sync::mpsc::channel(1);
+    ReconcilerDispatchCtx {
+        delegation_tx,
+        task_tracker: TaskTracker::new(),
+        brain_session_id: BrainSessionId::new(SessionId("brain".into())),
+        event_sink: None,
+        materializer: test_materializer(),
+        continuation_ctx: common::server_builder::continuation_ctx_arc(),
+    }
+}
+
 fn seed_ready_task(repo: &Path, plan_id: &str) -> (String, String) {
     let epic_id = parse_id_from_create(&run_br_json(
         repo,
@@ -373,6 +386,7 @@ fn seed_ready_task(repo: &Path, plan_id: &str) -> (String, String) {
         ],
     ));
     label_issue(repo, &epic_id, &labels::plan_id(plan_id));
+    label_issue(repo, &epic_id, &labels::plan_owner("brain"));
     label_issue(repo, &task_id, &labels::plan_id(plan_id));
     label_issue(repo, &task_id, &labels::plan_task_id("t1"));
     label_issue(repo, &task_id, &labels::agent("codex"));
@@ -646,7 +660,7 @@ async fn t_v0e_3_fast_forward_matches_polling() {
         ReconcilerConfig::default(),
         Arc::clone(&pm_term_poll),
         Arc::new(Notify::new()),
-        None,
+        Some(test_dispatch_ctx()),
         Some(plan_id.into()),
         common::server_builder::pro_feature_gate(),
     );
@@ -691,7 +705,7 @@ async fn t_v0e_3_fast_forward_matches_polling() {
         },
         Arc::clone(&pm_term_ff),
         Arc::clone(&term_fast_forward),
-        None,
+        Some(test_dispatch_ctx()),
         Some(plan_id.into()),
         common::server_builder::pro_feature_gate(),
     );

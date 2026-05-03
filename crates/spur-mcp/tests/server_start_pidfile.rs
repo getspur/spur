@@ -87,6 +87,55 @@ async fn beads_backed_start_requires_repo_root_before_listener_boot() {
 
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
+async fn beads_backed_start_allows_concurrent_brain_servers() {
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    skip_if_no_loopback!("beads_backed_start_allows_concurrent_brain_servers");
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let pm = beads_pm(dir.path()).await;
+    let first_brain_sid = BrainSessionId::new(SessionId::new());
+    let second_brain_sid = BrainSessionId::new(SessionId::new());
+
+    let (mut first_server, _first_channel) = McpCallbackServer::new(
+        &first_brain_sid,
+        Some(pm.clone()),
+        None,
+        test_continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        common::server_builder::pro_feature_gate(),
+    );
+    first_server.set_repo_root(dir.path().to_path_buf());
+    first_server.set_reconciler_enabled(true, None);
+
+    let (_first_url, first_handle) = Arc::new(first_server)
+        .start()
+        .await
+        .expect("first start should succeed");
+
+    let (mut second_server, _second_channel) = McpCallbackServer::new(
+        &second_brain_sid,
+        Some(pm.clone()),
+        None,
+        test_continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        common::server_builder::pro_feature_gate(),
+    );
+    second_server.set_repo_root(dir.path().to_path_buf());
+    second_server.set_reconciler_enabled(true, None);
+
+    let (_second_url, second_handle) = Arc::new(second_server)
+        .start()
+        .await
+        .expect("second start should succeed while the first server is still running");
+
+    drop(second_handle);
+    drop(first_handle);
+}
+
+#[ignore = "requires br on PATH; run with --ignored"]
+#[tokio::test]
 async fn dropping_server_handle_releases_pidfile_for_next_start() {
     assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
     skip_if_no_loopback!("dropping_server_handle_releases_pidfile_for_next_start");
