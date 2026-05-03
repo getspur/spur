@@ -297,8 +297,8 @@ async fn resume_plan_refuses_plan_owned_by_other_brain() {
         .__test_call_tool("resume_plan", json!({ "plan_id": plan_id }))
         .await;
     assert!(
-        error_message(&response).contains("active handoff is not implemented in MVP"),
-        "resume_plan must refuse active owners with MVP handoff message: {response}"
+        error_message(&response).contains("active handoff is not supported"),
+        "resume_plan must refuse active owners with handoff-not-supported message: {response}"
     );
 }
 
