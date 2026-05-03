@@ -967,8 +967,8 @@ impl ReactTrace {
                                 format!("{} {}", glyph, stats)
                             }
                         }
-                        ActStatus::Completed(None) => "✅".to_string(),
-                        ActStatus::Failed(_) => "❌".to_string(),
+                        ActStatus::Completed(None) => "ok".to_string(),
+                        ActStatus::Failed(_) => "err".to_string(),
                     };
                     lines.push(format!(
                         "{} {} {}  {}",
@@ -982,14 +982,14 @@ impl ReactTrace {
 
             match &entry.kind {
                 TraceKind::Think => {
-                    lines.push(format!("{} 🧠 THINK", entry.timestamp));
+                    lines.push(format!("{} THINK", entry.timestamp));
                     for text_line in entry.text.lines() {
                         lines.push(format!("   {}", text_line));
                     }
                 }
 
                 TraceKind::AgentMessage { agent } => {
-                    lines.push(format!("{} 📨 {}", entry.timestamp, agent));
+                    lines.push(format!("{} MSG {}", entry.timestamp, agent));
 
                     #[cfg(feature = "markdown")]
                     let used_markdown = if let Some(stream) = entry.markdown.as_ref() {
@@ -1014,7 +1014,7 @@ impl ReactTrace {
                                                 .collect::<String>()
                                         })
                                         .unwrap_or_else(|| {
-                                            format!("[📊 mermaid #{} · press Alt-v to view]", id.0)
+                                            format!("[mermaid #{} - press Alt-v to view]", id.0)
                                         });
                                     lines.push(format!("   {}", placeholder));
                                 }
@@ -1082,7 +1082,7 @@ impl ReactTrace {
                         }
                         ActStatus::Failed(Some(p)) => {
                             let verb = observe_verb(p);
-                            lines.push(format!("{} ✗ {}", entry.timestamp, verb));
+                            lines.push(format!("{} err {}", entry.timestamp, verb));
                             for l in observe_payload_lines(p, self.observe_collapsed) {
                                 let joined: String =
                                     l.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -1090,10 +1090,10 @@ impl ReactTrace {
                             }
                         }
                         ActStatus::Completed(None) => {
-                            lines.push(format!("{} ✓ done", entry.timestamp));
+                            lines.push(format!("{} ok done", entry.timestamp));
                         }
                         ActStatus::Failed(None) => {
-                            lines.push(format!("{} ✗ failed", entry.timestamp));
+                            lines.push(format!("{} err failed", entry.timestamp));
                         }
                         ActStatus::Pending | ActStatus::InProgress { .. } => {}
                     }
@@ -1110,7 +1110,7 @@ impl ReactTrace {
                             lines.push(joined);
                         }
                     } else {
-                        lines.push(format!("{} 👁 OBSERVE", entry.timestamp));
+                        lines.push(format!("{} OBSERVE", entry.timestamp));
                         for text_line in entry.text.lines() {
                             lines.push(format!("   {}", text_line));
                         }
@@ -1124,7 +1124,7 @@ impl ReactTrace {
                     request_id: _,
                     executor_id: _,
                 } => {
-                    lines.push(format!("{} → DELEGATE to {}", entry.timestamp, agent));
+                    lines.push(format!("{} DELEGATE to {}", entry.timestamp, agent));
                     if !task.is_empty() {
                         lines.push(format!("   {}", task));
                     }
@@ -1134,7 +1134,7 @@ impl ReactTrace {
                 }
 
                 TraceKind::UserMessage => {
-                    lines.push(format!("{} 💬 YOU", entry.timestamp));
+                    lines.push(format!("{} YOU", entry.timestamp));
                     for text_line in entry.text.lines() {
                         lines.push(format!("   {}", text_line));
                     }
@@ -1145,7 +1145,7 @@ impl ReactTrace {
                     pending,
                     countdown,
                 } => {
-                    lines.push(format!("{} ⚠ PERMISSION: {}", entry.timestamp, description));
+                    lines.push(format!("{} PERMISSION: {}", entry.timestamp, description));
                     if *pending {
                         if *countdown > 0 {
                             lines.push(format!(
@@ -2040,7 +2040,7 @@ mod tests {
         });
         let lines = trace.render_to_strings().join("\n");
         assert!(
-            lines.contains("✅"),
+            lines.contains("ok"),
             "expected success glyph in collapsed render, got:\n{lines}"
         );
         for frame in spinner::BRAILLE {

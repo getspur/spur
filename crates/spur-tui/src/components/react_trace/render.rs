@@ -371,14 +371,14 @@ pub(crate) fn render_partial_card(
         first_row_within == 0,
         first_row_within.saturating_add(run_len) >= total_rows,
     ) {
-        (true, false) => "▼ scroll down",
-        (false, true) => "▲ scroll up",
-        _ => "▲▼ scroll for more",
+        (true, false) => "scroll down",
+        (false, true) => "scroll up",
+        _ => "scroll for more",
     };
 
     let lines: Vec<Line<'static>> = match run_len {
         1 => vec![Line::from(Span::styled(
-            format!("[📊 mermaid #{} · {}% · {}]", id.0, visible_pct, direction),
+            format!("[mermaid #{} - {}% - {}]", id.0, visible_pct, direction),
             Style::default()
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
@@ -386,7 +386,7 @@ pub(crate) fn render_partial_card(
         2 => vec![
             Line::from(Span::styled(
                 format!(
-                    "📊 mermaid #{} · {}% visible · {}",
+                    "mermaid #{} - {}% visible - {}",
                     id.0, visible_pct, direction
                 ),
                 Style::default()
@@ -405,7 +405,7 @@ pub(crate) fn render_partial_card(
             vec![
                 Line::from(Span::styled(
                     format!(
-                        "📊 mermaid #{} · {}% visible · {}",
+                        "mermaid #{} - {}% visible - {}",
                         id.0, visible_pct, direction
                     ),
                     Style::default()
@@ -499,7 +499,7 @@ impl ReactTrace {
         focused: bool,
     ) {
         let following_indicator = if self.is_following() {
-            " ▼ following "
+            " v following "
         } else {
             ""
         };
@@ -619,7 +619,7 @@ impl ReactTrace {
         focused: bool,
     ) {
         let following_indicator = if self.is_following() {
-            " ▼ following "
+            " v following "
         } else {
             ""
         };
@@ -813,9 +813,9 @@ impl ReactTrace {
                                 Some(crate::components::mermaid::MermaidState::Error {
                                     ..
                                 }) => {
-                                    format!("   [⚠ mermaid #{} error · Alt-v to view]", id.0)
+                                    format!("   [mermaid #{} error - Alt-v to view]", id.0)
                                 }
-                                _ => format!("   [⏳ mermaid #{} rendering…]", id.0),
+                                _ => format!("   [mermaid #{} rendering...]", id.0),
                             };
                             let line = Line::from(Span::styled(
                                 msg,
@@ -1347,7 +1347,7 @@ mod card_tests {
         });
         let joined = lines.join("\n");
         assert!(
-            joined.contains("▼ scroll down"),
+            joined.contains("scroll down"),
             "expected scroll-down indicator: {joined}"
         );
     }
@@ -1360,7 +1360,7 @@ mod card_tests {
         });
         let joined = lines.join("\n");
         assert!(
-            joined.contains("▲ scroll up"),
+            joined.contains("scroll up"),
             "expected scroll-up indicator: {joined}"
         );
     }
@@ -1373,7 +1373,7 @@ mod card_tests {
         });
         let joined = lines.join("\n");
         assert!(
-            joined.contains("▲▼ scroll for more"),
+            joined.contains("scroll for more"),
             "expected mid-window indicator: {joined}"
         );
     }
