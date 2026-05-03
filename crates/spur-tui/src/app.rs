@@ -284,8 +284,19 @@ impl Default for LiveCostCache {
     }
 }
 
+/// Inc 2 (bd-d587.2): cap on `App::view_history`. Sized for typical TUI nav
+/// depth (Dashboard → SessionDetail → PlanBrowser → PlanInspector / IssueBrowser);
+/// older entries fall off the front when exceeded so cyclic navigation can't
+/// grow unboundedly.
+const NAV_HISTORY_MAX: usize = 16;
+
 pub struct App {
     current_view: ViewId,
+    /// Inc 2 (bd-d587.2): bounded LIFO of recently-left views, capped at
+    /// `NAV_HISTORY_MAX`. `navigate_to` pushes the leaving view; `navigate_back`
+    /// pops it. Dashboard is the canonical root and clears the stack on entry.
+    /// Modal overlays (palette, help, modals) never touch this stack.
+    view_history: Vec<ViewId>,
     dashboard: DashboardView,
     session_detail: Option<SessionDetailView>,
     session_picker: Option<SessionPickerView>,
@@ -594,6 +605,7 @@ impl App {
 
         let mut app = Self {
             current_view,
+            view_history: Vec::new(),
             dashboard,
             session_detail: None,
             session_picker,
@@ -1398,7 +1410,7 @@ impl App {
                 tracing::warn!(target: "spur_tui::insights", error = %format!("{e:#}"), "insights init failed");
                 self.show_user_warning(format!("Analytics unavailable: {e:#}"));
                 if matches!(self.current_view, ViewId::Insights) {
-                    self.current_view = ViewId::Dashboard;
+                    self.navigate_to(ViewId::Dashboard);
                 }
                 self.dirty = true;
             }
@@ -1422,7 +1434,7 @@ impl App {
                     "Analytics init worker exited before reporting a result".to_string(),
                 );
                 if matches!(self.current_view, ViewId::Insights) {
-                    self.current_view = ViewId::Dashboard;
+                    self.navigate_to(ViewId::Dashboard);
                 }
                 self.dirty = true;
             }
@@ -2413,7 +2425,7 @@ impl App {
 
                 // Auto-navigate from Dashboard or SessionPicker
                 if matches!(self.current_view, ViewId::Dashboard | ViewId::SessionPicker) {
-                    self.current_view = ViewId::SessionDetail(session.clone());
+                    self.navigate_to(ViewId::SessionDetail(session.clone()));
                 }
             }
             SpurEventBody::AgentSessionReady {
@@ -2594,6 +2606,68 @@ impl App {
         self.sync_brain_status();
     }
 
+    /// Inc 2 (bd-d587.2): switch to `view`, recording the leaving view in
+    /// `view_history` so a subsequent `navigate_back()` returns to it.
+    /// Dashboard is the canonical root and clears the stack on entry. Calls
+    /// where `current_view == view` are no-ops (no self-push, no dirty flip).
+    fn navigate_to(&mut self, view: ViewId) {
+        if self.current_view == view {
+            return;
+        }
+        if matches!(view, ViewId::Dashboard) {
+            self.view_history.clear();
+        } else {
+            self.push_history(self.current_view.clone());
+        }
+        self.current_view = view;
+        self.dirty = true;
+    }
+
+    /// Push `view` onto `view_history`, respecting cap and no-dup-top invariants.
+    /// Used internally by `navigate_to`; exposed via that method only.
+    fn push_history(&mut self, view: ViewId) {
+        if self.view_history.last() == Some(&view) {
+            return;
+        }
+        if self.view_history.len() >= NAV_HISTORY_MAX {
+            self.view_history.remove(0);
+        }
+        self.view_history.push(view);
+    }
+
+    /// Pop the last view from `view_history` and switch to it. When the stack
+    /// is empty: from Dashboard, fall back to the active session detail (the
+    /// natural "back" from the activity log) if one exists; from any other
+    /// view, fall back to Dashboard. Nulls overlay state when leaving an
+    /// overlay view (PlanInspector, MermaidOverlay).
+    fn navigate_back(&mut self) {
+        let leaving = self.current_view.clone();
+        let next = self.view_history.pop().or_else(|| {
+            if matches!(leaving, ViewId::Dashboard) {
+                self.session_detail
+                    .as_ref()
+                    .map(|d| ViewId::SessionDetail(d.session_id().clone()))
+            } else {
+                Some(ViewId::Dashboard)
+            }
+        });
+        let Some(next) = next else {
+            return;
+        };
+        self.current_view = next;
+        match leaving {
+            #[cfg(feature = "markdown")]
+            ViewId::MermaidOverlay(_) => {
+                self.mermaid_viewer = None;
+            }
+            ViewId::PlanInspector(_) => {
+                self.plan_inspector = None;
+            }
+            _ => {}
+        }
+        self.dirty = true;
+    }
+
     /// Process a single Action returned by a view.
     pub(crate) fn process_action(&mut self, action: Action) {
         #[cfg(any(test, debug_assertions))]
@@ -2608,25 +2682,24 @@ impl App {
             Action::NavigateTo(ViewId::SessionDetail(ref session_id)) => {
                 if self.session_detail.is_some() {
                     // Just switch view — don't recreate. BrainSpawned is the only creator.
-                    self.current_view = ViewId::SessionDetail(session_id.clone());
+                    self.navigate_to(ViewId::SessionDetail(session_id.clone()));
                 }
                 // If no session_detail exists (no brain spawned), ignore.
             }
 
             Action::NavigateTo(ViewId::Dashboard) => {
-                self.current_view = ViewId::Dashboard;
-                self.dirty = true;
-                // session_detail kept alive (same as NavigateBack)
+                // navigate_to(Dashboard) clears view_history (canonical root).
+                // session_detail kept alive (same as NavigateBack).
+                self.navigate_to(ViewId::Dashboard);
             }
 
             Action::NavigateTo(ViewId::SessionPicker) => {
-                self.current_view = ViewId::SessionPicker;
+                self.navigate_to(ViewId::SessionPicker);
             }
 
             Action::NavigateTo(ViewId::PlanInspector(ref session)) => {
                 self.plan_inspector = Some(PlanInspectorView::new(session.clone()));
-                self.current_view = ViewId::PlanInspector(session.clone());
-                self.dirty = true;
+                self.navigate_to(ViewId::PlanInspector(session.clone()));
             }
 
             Action::NavigateTo(ViewId::PlanBrowser) => {
@@ -2650,8 +2723,7 @@ impl App {
                 if let Some(browser) = self.plan_browser.as_mut() {
                     session_changed = browser.set_current_session(current_session);
                 }
-                self.current_view = ViewId::PlanBrowser;
-                self.dirty = true;
+                self.navigate_to(ViewId::PlanBrowser);
                 if just_created || session_changed {
                     self.process_action(Action::RefreshPlans);
                 }
@@ -2664,8 +2736,7 @@ impl App {
                     view.seed_issues(self.dashboard.tracked_issues().to_vec());
                     self.issue_browser = Some(view);
                 }
-                self.current_view = ViewId::IssueBrowser;
-                self.dirty = true;
+                self.navigate_to(ViewId::IssueBrowser);
                 if just_created {
                     // Background refresh - guarantees user sees fresh data after the
                     // dashboard's startup snapshot. No-op when pm_service is None
@@ -2677,54 +2748,22 @@ impl App {
             Action::OpenInsights | Action::NavigateTo(ViewId::Insights) => {
                 #[cfg(feature = "analytics")]
                 self.start_insights_init();
-                self.current_view = ViewId::Insights;
-                self.dirty = true;
+                self.navigate_to(ViewId::Insights);
             }
 
             #[cfg(feature = "markdown")]
             Action::NavigateTo(ViewId::MermaidOverlay(ref session)) => {
                 use crate::views::mermaid_viewer::MermaidViewerView;
                 self.mermaid_viewer = Some(MermaidViewerView::new(session.clone()));
-                self.current_view = ViewId::MermaidOverlay(session.clone());
-                self.dirty = true;
+                self.navigate_to(ViewId::MermaidOverlay(session.clone()));
             }
 
             Action::NavigateBack => {
-                #[cfg(feature = "markdown")]
-                if let ViewId::MermaidOverlay(ref session) = self.current_view {
-                    self.current_view = ViewId::SessionDetail(session.clone());
-                    self.mermaid_viewer = None;
-                    self.dirty = true;
-                    return;
-                }
-                if let ViewId::PlanInspector(ref session) = self.current_view {
-                    self.current_view = ViewId::SessionDetail(session.clone());
-                    self.plan_inspector = None;
-                    self.dirty = true;
-                    return;
-                }
-                if matches!(self.current_view, ViewId::PlanBrowser) {
-                    self.current_view = ViewId::Dashboard;
-                    self.dirty = true;
-                    return;
-                }
-                if matches!(self.current_view, ViewId::IssueBrowser) {
-                    self.current_view = ViewId::Dashboard;
-                    self.dirty = true;
-                    return;
-                }
-                // From Dashboard: if an active session exists, return to it
-                // (the natural "back" from the activity log). Otherwise do
-                // nothing — quitting is now an explicit Ctrl+C flow.
-                if matches!(self.current_view, ViewId::Dashboard) {
-                    if let Some(ref detail) = self.session_detail {
-                        self.current_view = ViewId::SessionDetail(detail.session_id().clone());
-                        self.dirty = true;
-                    }
-                    return;
-                }
-                // From SessionDetail (or any other view): go to Dashboard.
-                self.current_view = ViewId::Dashboard;
+                // Inc 2 (bd-d587.2): pop view_history. When empty, falls back to
+                // Dashboard (or to active SessionDetail if leaving Dashboard).
+                // Overlay state (PlanInspector, MermaidOverlay) is nulled
+                // automatically when leaving those views.
+                self.navigate_back();
                 // Note: session_detail is intentionally kept alive so it
                 // continues accumulating events while the Dashboard is shown.
             }
@@ -2963,8 +3002,7 @@ impl App {
                     .map(|n| n.id.clone());
                 self.dashboard.set_focused_panel(Panel::Agents);
                 self.dashboard.set_focused_node(priority);
-                self.current_view = ViewId::Dashboard;
-                self.dirty = true;
+                self.navigate_to(ViewId::Dashboard);
             }
 
             Action::RequestSessions => {
@@ -2978,11 +3016,10 @@ impl App {
                     self.session_picker = Some(SessionPickerView::new());
                 }
                 self.refresh_picker_metadata();
-                self.current_view = ViewId::SessionPicker;
+                self.navigate_to(ViewId::SessionPicker);
                 if let Some(ref tx) = self.user_input_tx {
                     let _ = tx.try_send(UserInput::ListSessions);
                 }
-                self.dirty = true;
             }
 
             Action::ResumeSession { session_id } => {
@@ -2994,7 +3031,7 @@ impl App {
                 let sid = SessionId(session_id.clone());
                 self.session_detail =
                     Some(crate::views::session_detail::SessionDetailView::for_session(sid.clone()));
-                self.current_view = ViewId::SessionDetail(sid);
+                self.navigate_to(ViewId::SessionDetail(sid));
                 if let Some(ref tx) = self.user_input_tx {
                     let _ = tx.try_send(UserInput::ResumeSession { session_id });
                 }
@@ -3156,8 +3193,7 @@ impl App {
                         interrupt: false,
                     });
                 }
-                self.current_view = ViewId::Dashboard;
-                self.dirty = true;
+                self.navigate_to(ViewId::Dashboard);
             }
 
             Action::TogglePlanMode => {
@@ -3228,7 +3264,9 @@ impl App {
                 self.palette_state.reset();
                 self.tombstones.cancel_all_without_dispatch();
                 // Wire per 2026-04-28-tui-destructive-undo-design.md §4.7.
-                self.current_view = ViewId::Dashboard;
+                // Inc 2 (bd-d587.2): navigate_to(Dashboard) also clears view_history,
+                // matching the panic-reset intent of returning to a clean root.
+                self.navigate_to(ViewId::Dashboard);
                 self.dashboard.reset_to_root();
                 if let Some(detail) = self.session_detail.as_mut() {
                     detail.reset_to_root();
@@ -3507,8 +3545,7 @@ impl App {
                 if let Some(browser) = self.issue_browser.as_mut() {
                     browser.open_external_detail(id.clone());
                 }
-                self.current_view = ViewId::IssueBrowser;
-                self.dirty = true;
+                self.navigate_to(ViewId::IssueBrowser);
                 if let Some(ref tx) = self.user_input_tx {
                     let _ = tx.try_send(UserInput::GetIssueDetail { id });
                     if just_created {
@@ -4875,6 +4912,188 @@ mod plan_browser_navigation_tests {
             Ok(_) => panic!("expected ResumePlan from R key, got different user input"),
             Err(err) => panic!("expected ResumePlan from R key, got {err}"),
         }
+    }
+}
+
+/// Inc 2 (bd-d587.2): unit tests for the view_history stack semantics.
+/// Drives `navigate_to` / `navigate_back` directly (not via Action arms)
+/// so the invariants are tested in isolation from action-routing logic.
+#[cfg(test)]
+mod view_history_tests {
+    use super::*;
+    use spur_acp::SessionId;
+
+    fn seed_session(app: &mut App, sid: &str) {
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::BrainSpawned {
+            agent: "test-brain".into(),
+            session: SessionId(sid.into()),
+        }));
+    }
+
+    #[test]
+    fn navigate_to_pushes_leaving_view_then_back_pops_it() {
+        let mut app = App::new_for_tests();
+        seed_session(&mut app, "brain-1");
+        // BrainSpawned auto-navigated us into SessionDetail. Stack should be [Dashboard].
+        assert_eq!(app.view_history, vec![ViewId::Dashboard]);
+
+        app.navigate_to(ViewId::IssueBrowser);
+        assert_eq!(app.current_view, ViewId::IssueBrowser);
+        assert_eq!(
+            app.view_history,
+            vec![ViewId::Dashboard, ViewId::SessionDetail(SessionId("brain-1".into()))],
+        );
+
+        app.navigate_back();
+        assert_eq!(
+            app.current_view,
+            ViewId::SessionDetail(SessionId("brain-1".into()))
+        );
+        assert_eq!(app.view_history, vec![ViewId::Dashboard]);
+
+        app.navigate_back();
+        assert_eq!(app.current_view, ViewId::Dashboard);
+        assert!(app.view_history.is_empty());
+    }
+
+    #[test]
+    fn navigate_to_dashboard_clears_history() {
+        let mut app = App::new_for_tests();
+        seed_session(&mut app, "brain-1");
+        app.navigate_to(ViewId::IssueBrowser);
+        app.navigate_to(ViewId::SessionPicker);
+        assert!(app.view_history.len() >= 2);
+
+        app.navigate_to(ViewId::Dashboard);
+
+        assert_eq!(app.current_view, ViewId::Dashboard);
+        assert!(
+            app.view_history.is_empty(),
+            "Dashboard is canonical root and must clear history"
+        );
+    }
+
+    #[test]
+    fn navigate_to_same_view_is_no_op() {
+        let mut app = App::new_for_tests();
+        seed_session(&mut app, "brain-1");
+        let history_before = app.view_history.clone();
+
+        app.navigate_to(ViewId::SessionDetail(SessionId("brain-1".into())));
+
+        assert_eq!(
+            app.view_history, history_before,
+            "navigate_to(current_view) must not push or mutate history"
+        );
+    }
+
+    #[test]
+    fn push_history_skips_duplicate_top() {
+        let mut app = App::new_for_tests();
+        app.view_history.push(ViewId::IssueBrowser);
+        app.push_history(ViewId::IssueBrowser);
+        assert_eq!(app.view_history, vec![ViewId::IssueBrowser]);
+    }
+
+    #[test]
+    fn push_history_caps_at_max_evicting_oldest() {
+        let mut app = App::new_for_tests();
+        // Pre-fill exactly to the cap with a non-Dashboard, non-current view.
+        for _ in 0..NAV_HISTORY_MAX {
+            app.view_history.push(ViewId::IssueBrowser);
+            // Defeat the no-dup-top guard by alternating — easier to use raw push for this test.
+        }
+        // Force overflow via the public API.
+        app.push_history(ViewId::SessionPicker);
+
+        assert_eq!(app.view_history.len(), NAV_HISTORY_MAX);
+        assert_eq!(
+            app.view_history.last(),
+            Some(&ViewId::SessionPicker),
+            "newest entry must remain at the top"
+        );
+    }
+
+    #[test]
+    fn navigate_back_from_dashboard_with_active_session_falls_back_to_session_detail() {
+        let mut app = App::new_for_tests();
+        seed_session(&mut app, "brain-1");
+        // Land back on Dashboard with empty history.
+        app.navigate_to(ViewId::Dashboard);
+        assert!(app.view_history.is_empty());
+        assert_eq!(app.current_view, ViewId::Dashboard);
+
+        app.navigate_back();
+
+        assert_eq!(
+            app.current_view,
+            ViewId::SessionDetail(SessionId("brain-1".into())),
+            "Dashboard back-with-empty-history returns to active session detail"
+        );
+    }
+
+    #[test]
+    fn navigate_back_from_dashboard_with_no_session_is_no_op() {
+        let mut app = App::new_for_tests();
+        assert_eq!(app.current_view, ViewId::Dashboard);
+        assert!(app.view_history.is_empty());
+        assert!(app.session_detail.is_none());
+
+        app.navigate_back();
+
+        assert_eq!(
+            app.current_view,
+            ViewId::Dashboard,
+            "no session + empty history must not move the user anywhere"
+        );
+    }
+
+    #[test]
+    fn navigate_back_nulls_plan_inspector_overlay_state() {
+        let mut app = App::new_for_tests();
+        seed_session(&mut app, "brain-1");
+        app.process_action(Action::NavigateTo(ViewId::PlanInspector(SessionId(
+            "brain-1".into(),
+        ))));
+        assert!(app.plan_inspector.is_some());
+
+        app.process_action(Action::NavigateBack);
+
+        assert!(
+            app.plan_inspector.is_none(),
+            "leaving PlanInspector via navigate_back must null the overlay state"
+        );
+    }
+
+    #[test]
+    fn end_to_end_dashboard_to_sprints_to_issue_browser_back_chain() {
+        // Reproduces the user-reported flow: Dashboard \u2192 SessionDetail \u2192 PlanBrowser
+        // \u2192 (e for view-epic) IssueBrowser \u2192 Esc must land back at PlanBrowser
+        // (not Dashboard, which was the pre-Inc-2 bug).
+        let mut app = App::new_for_tests();
+        seed_session(&mut app, "brain-1");
+
+        app.process_action(Action::NavigateTo(ViewId::PlanBrowser));
+        assert_eq!(app.current_view, ViewId::PlanBrowser);
+
+        app.process_action(Action::OpenIssueInBacklog {
+            id: "bd-epic-1".into(),
+        });
+        assert_eq!(app.current_view, ViewId::IssueBrowser);
+
+        app.process_action(Action::NavigateBack);
+        assert_eq!(
+            app.current_view,
+            ViewId::PlanBrowser,
+            "Esc from IssueBrowser must return to PlanBrowser, not Dashboard"
+        );
+
+        app.process_action(Action::NavigateBack);
+        assert_eq!(
+            app.current_view,
+            ViewId::SessionDetail(SessionId("brain-1".into())),
+            "Esc from PlanBrowser must return to SessionDetail"
+        );
     }
 }
 
