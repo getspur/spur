@@ -102,6 +102,27 @@ async fn base_branch_survives() {
     );
 }
 
+// Regression: some MCP clients (notably the Claude Code harness)
+// JSON-stringify nested object arguments before transmission, so `base`
+// arrives as a Value::String containing JSON text instead of a Value::Object.
+// The tolerant Deserialize impl on BaseSpec must accept this shape.
+#[tokio::test]
+async fn base_branch_survives_when_sent_as_string() {
+    let request = call_delegate_to_worker(json!({
+        "agent": "claude-code-acp",
+        "task": "test task",
+        "base": "{\"kind\":\"branch\",\"name\":\"feat/from-string\"}"
+    }))
+    .await;
+
+    assert_eq!(
+        request.base,
+        Some(BaseSpec::Branch {
+            name: "feat/from-string".into()
+        })
+    );
+}
+
 #[tokio::test]
 async fn base_commit_survives() {
     let oid = "0000000000000000000000000000000000000000";
