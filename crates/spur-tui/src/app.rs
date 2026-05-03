@@ -4938,6 +4938,9 @@ mod plan_projection_tests {
                     superseded_by: Vec::new(),
                     next_action: "wait".into(),
                 }],
+                owner_brain_session_id: None,
+                owner_token: None,
+                owner_acquired_at: None,
             }),
         })
     }

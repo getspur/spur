@@ -53,6 +53,9 @@ fn sample_plan_store() -> PlanProjectionStore {
                     "pending",
                 ),
             ],
+            owner_brain_session_id: None,
+            owner_token: None,
+            owner_acquired_at: None,
         }),
     }));
     store
@@ -73,6 +76,9 @@ fn plan_store_with_selected_task_without_issue() -> PlanProjectionStore {
                 ..Default::default()
             },
             tasks: vec![task("task-no-issue", 0, &[], None, "pending")],
+            owner_brain_session_id: None,
+            owner_token: None,
+            owner_acquired_at: None,
         }),
     }));
     store
@@ -120,6 +126,9 @@ fn out_of_stage_order_plan_store() -> PlanProjectionStore {
                     "pending",
                 ),
             ],
+            owner_brain_session_id: None,
+            owner_token: None,
+            owner_acquired_at: None,
         }),
     }));
     store
@@ -275,6 +284,9 @@ fn plan_store_with_selected_task_app() -> PlanProjectionStore {
                 ..Default::default()
             },
             tasks: vec![task("task-app", 0, &[], Some("bd-3"), "dispatched")],
+            owner_brain_session_id: None,
+            owner_token: None,
+            owner_acquired_at: None,
         }),
     }));
     store
@@ -1086,6 +1098,9 @@ fn plan_store_with_blocked_and_retry() -> PlanProjectionStore {
                     next_action: "wait".into(),
                 },
             ],
+            owner_brain_session_id: None,
+            owner_token: None,
+            owner_acquired_at: None,
         }),
     }));
     store
