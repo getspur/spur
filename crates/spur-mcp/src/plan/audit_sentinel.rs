@@ -206,6 +206,21 @@ pub enum AuditSentinelKind {
         token: String,
         progress_cursor: String,
     },
+    /// Operator-initiated takeover via the `force_reclaim_plan` MCP tool.
+    /// `prior_owner` is `None` when the plan was Unowned at reclaim time,
+    /// `Some(<single owner>)` for the normal single-owner takeover, or
+    /// `Some("a,b")` for the rare ambiguous-multi-owner case (the audit
+    /// preserves the comma-joined list verbatim for forensics). See
+    /// `docs/multi-brain-operations.md` for the operator playbook.
+    PlanForceReclaimed {
+        plan_id: String,
+        #[serde(default)]
+        prior_owner: Option<String>,
+        new_owner: String,
+        token: String,
+        #[serde(default)]
+        reason: Option<String>,
+    },
     WorkerWrite {
         delegation_id: String,
         tool: String,
@@ -265,6 +280,7 @@ impl AuditSentinelKind {
             Self::PlanOwnershipAcquired { .. } => "plan-ownership-acquired",
             Self::PlanOwnershipTransferred { .. } => "plan-ownership-transferred",
             Self::PlanHandoffReady { .. } => "plan-handoff-ready",
+            Self::PlanForceReclaimed { .. } => "plan-force-reclaimed",
             Self::WorkerWrite { .. } => "worker-write",
             Self::ReadAggregate { .. } => "read-aggregate",
             Self::Unknown => "unknown",
@@ -451,6 +467,13 @@ mod tests {
                 token: "token-A".into(),
                 progress_cursor: "cursor-1".into(),
             },
+            AuditSentinelKind::PlanForceReclaimed {
+                plan_id: "P1".into(),
+                prior_owner: Some("brain-A".into()),
+                new_owner: "brain-B".into(),
+                token: "token-R".into(),
+                reason: Some("operator takeover".into()),
+            },
             AuditSentinelKind::WorkerWrite {
                 delegation_id: "del-A".into(),
                 tool: "update_issue".into(),
@@ -601,6 +624,13 @@ mod tests {
                 token: "token-A".into(),
                 progress_cursor: "cursor-1".into(),
             },
+            AuditSentinelKind::PlanForceReclaimed {
+                plan_id: "P1".into(),
+                prior_owner: None,
+                new_owner: "brain-A".into(),
+                token: "token-R".into(),
+                reason: None,
+            },
             AuditSentinelKind::WorkerWrite {
                 delegation_id: "del-A".into(),
                 tool: "update_issue".into(),
@@ -619,6 +649,32 @@ mod tests {
             let json = serde_json::to_value(&k).unwrap();
             assert_eq!(json["kind"].as_str(), Some(k.kind_str()));
         }
+    }
+
+    #[test]
+    fn plan_force_reclaimed_variant_round_trips() {
+        let with_prior = AuditSentinelKind::PlanForceReclaimed {
+            plan_id: "P1".into(),
+            prior_owner: Some("brain-A".into()),
+            new_owner: "brain-B".into(),
+            token: "token-R".into(),
+            reason: Some("owner stuck".into()),
+        };
+        let parsed = parse_comment(&encode_comment(&with_prior)).unwrap().unwrap();
+        assert_eq!(parsed, with_prior);
+        assert_eq!(parsed.kind_str(), "plan-force-reclaimed");
+
+        let from_unowned = AuditSentinelKind::PlanForceReclaimed {
+            plan_id: "P2".into(),
+            prior_owner: None,
+            new_owner: "brain-B".into(),
+            token: "token-R2".into(),
+            reason: None,
+        };
+        let parsed = parse_comment(&encode_comment(&from_unowned))
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed, from_unowned);
     }
 
     #[test]
