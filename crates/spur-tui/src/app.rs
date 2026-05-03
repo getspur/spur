@@ -2630,11 +2630,18 @@ impl App {
             }
 
             Action::NavigateTo(ViewId::PlanBrowser) => {
-                let current_session = self
+                // Inc 1 (bd-d587.1): without an active brain session, no plan can ever
+                // classify as Mine (every row is Unowned/Other), so Inspect/Resume have
+                // no actionable target. Block-with-hint instead of opening an empty browser.
+                let Some(current_session) = self
                     .session_detail
                     .as_ref()
                     .map(|detail| detail.session_id().clone())
-                    .unwrap_or_else(|| SessionId(String::new()));
+                else {
+                    return self.process_action(Action::FlashHint {
+                        message: "Select a brain session first (S)".into(),
+                    });
+                };
                 let just_created = self.plan_browser.is_none();
                 let mut session_changed = false;
                 if self.plan_browser.is_none() {
@@ -4692,6 +4699,11 @@ mod plan_browser_navigation_tests {
     fn navigate_to_plan_browser_lazily_creates_and_refreshes_once() {
         let (tx, mut rx) = mpsc::channel(8);
         let mut app = App::new(Some(tx), false);
+        // Inc 1 (bd-d587.1): NavigateTo(PlanBrowser) requires an active session.
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("brain-1".into()),
+        }));
 
         app.process_action(Action::NavigateTo(ViewId::PlanBrowser));
 
@@ -4716,6 +4728,26 @@ mod plan_browser_navigation_tests {
     }
 
     #[test]
+    fn navigate_to_plan_browser_without_session_blocks_with_hint() {
+        // Inc 1 (bd-d587.1): without an active brain session, opening PlanBrowser
+        // would yield a list where no row can ever classify as Mine. We block-with-hint
+        // instead of opening an empty browser.
+        let mut app = App::new_for_tests();
+
+        app.process_action(Action::NavigateTo(ViewId::PlanBrowser));
+
+        assert_eq!(
+            app.current_view(),
+            &ViewId::Dashboard,
+            "navigation must be refused when no session is active"
+        );
+        assert!(
+            app.plan_browser.is_none(),
+            "PlanBrowser must not be created when navigation is refused"
+        );
+    }
+
+    #[test]
     fn resume_plan_action_sends_user_input() {
         let (tx, mut rx) = mpsc::channel(8);
         let mut app = App::new(Some(tx), false);
@@ -4733,21 +4765,28 @@ mod plan_browser_navigation_tests {
 
     #[test]
     fn navigating_existing_plan_browser_updates_current_session() {
+        // Inc 1 (bd-d587.1): seed an initial brain so the first navigation succeeds,
+        // then assert that re-navigating after a session swap updates current_session
+        // on the already-created PlanBrowser.
         let mut app = App::new_for_tests();
+        let first = SessionId("brain-1".into());
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: first.clone(),
+        }));
         app.process_action(Action::NavigateTo(ViewId::PlanBrowser));
         assert_eq!(
             app.plan_browser
                 .as_ref()
                 .expect("PlanBrowser should exist")
-                .current_session_for_test()
-                .0,
-            ""
+                .current_session_for_test(),
+            &first,
         );
 
-        let session = SessionId("brain-2".into());
+        let second = SessionId("brain-2".into());
         app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
             agent: "kiro".into(),
-            session: session.clone(),
+            session: second.clone(),
         }));
         app.process_action(Action::NavigateTo(ViewId::PlanBrowser));
 
@@ -4756,7 +4795,7 @@ mod plan_browser_navigation_tests {
                 .as_ref()
                 .expect("PlanBrowser should still exist")
                 .current_session_for_test(),
-            &session
+            &second
         );
     }
 
@@ -4784,6 +4823,11 @@ mod plan_browser_navigation_tests {
     #[test]
     fn plan_browser_spur_events_route_to_view() {
         let mut app = App::new_for_tests();
+        // Inc 1 (bd-d587.1): NavigateTo(PlanBrowser) requires an active session.
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("brain-1".into()),
+        }));
         app.process_action(Action::NavigateTo(ViewId::PlanBrowser));
 
         app.handle_spur_event(SpurEvent::now(SpurEventBody::PlansLoaded {
@@ -4803,6 +4847,11 @@ mod plan_browser_navigation_tests {
     fn plan_browser_keys_bridge_refresh_and_resume_to_user_input() {
         let (tx, mut rx) = mpsc::channel(8);
         let mut app = App::new(Some(tx), false);
+        // Inc 1 (bd-d587.1): NavigateTo(PlanBrowser) requires an active session.
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: SessionId("brain-1".into()),
+        }));
         app.process_action(Action::NavigateTo(ViewId::PlanBrowser));
         match rx.try_recv() {
             Ok(UserInput::RefreshPlans) => {}
