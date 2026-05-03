@@ -35,19 +35,24 @@ pub(crate) fn family_glyph(f: ToolFamily) -> (&'static str, Color) {
 }
 
 /// Map `ObservePayload` to an outcome glyph + color.
+///
+/// Glyphs MUST be EAW=W (`✅` `❌`) or pure ASCII to avoid the iTerm2
+/// font-fallback cursor desync described in
+/// `tests/expanded_mode_ghost_text_repro.rs`. Do not introduce EAW=N
+/// glyphs (`✓` `✗` `✉` `⊞` etc.) here.
 pub(crate) fn outcome_glyph(p: &ObservePayload) -> (&'static str, Color) {
     match p {
         ObservePayload::CommandOutput {
             exit_code: Some(0), ..
-        } => ("✓", Color::Green),
+        } => ("✅", Color::Green),
         ObservePayload::CommandOutput {
             exit_code: Some(_), ..
-        } => ("✗", Color::Red),
+        } => ("❌", Color::Red),
         ObservePayload::CommandOutput {
             exit_code: None, ..
         } => ("?", Color::Yellow),
-        ObservePayload::Error { .. } => ("✗", Color::Red),
-        _ => ("✓", Color::Green),
+        ObservePayload::Error { .. } => ("❌", Color::Red),
+        _ => ("✅", Color::Green),
     }
 }
 
@@ -89,8 +94,8 @@ pub(crate) fn observe_compact(payload: &ObservePayload) -> (&'static str, Color,
         } => {
             let total = stdout.lines().count() + stderr.lines().count();
             match exit_code {
-                Some(0) => ("✓", Color::Green, format!("{} lines", total)),
-                Some(c) => ("✗", Color::Red, format!("exit {} · {} lines", c, total)),
+                Some(0) => ("✅", Color::Green, format!("{} lines", total)),
+                Some(c) => ("❌", Color::Red, format!("exit {} · {} lines", c, total)),
                 None => ("?", Color::Yellow, format!("{} lines", total)),
             }
         }
@@ -99,32 +104,32 @@ pub(crate) fn observe_compact(payload: &ObservePayload) -> (&'static str, Color,
         } => {
             let n = content.lines().count();
             let suffix = if *truncated { " (truncated)" } else { "" };
-            ("✓", Color::Green, format!("{} lines{}", n, suffix))
+            ("✅", Color::Green, format!("{} lines{}", n, suffix))
         }
         ObservePayload::EditResult {
             replacements, diff, ..
         } => {
             if let Some(n) = replacements {
                 (
-                    "✓",
+                    "✅",
                     Color::Green,
                     format!("{} replacement{}", n, if *n == 1 { "" } else { "s" }),
                 )
             } else if let Some(d) = diff {
                 let plus = d.lines().filter(|l| l.starts_with('+')).count();
                 let minus = d.lines().filter(|l| l.starts_with('-')).count();
-                ("✓", Color::Green, format!("+{}/-{}", plus, minus))
+                ("✅", Color::Green, format!("+{}/-{}", plus, minus))
             } else {
-                ("✓", Color::Green, String::new())
+                ("✅", Color::Green, String::new())
             }
         }
         ObservePayload::Json { pretty } => {
             let n = pretty.lines().count();
-            ("✓", Color::Green, format!("{} lines", n))
+            ("✅", Color::Green, format!("{} lines", n))
         }
         ObservePayload::Text { body } => {
             let n = body.lines().count();
-            ("✓", Color::Green, format!("{} lines", n))
+            ("✅", Color::Green, format!("{} lines", n))
         }
         ObservePayload::Error { message } => {
             let truncated = if message.chars().count() > 60 {
@@ -136,7 +141,7 @@ pub(crate) fn observe_compact(payload: &ObservePayload) -> (&'static str, Color,
             } else {
                 message.clone()
             };
-            ("✗", Color::Red, truncated)
+            ("❌", Color::Red, truncated)
         }
     }
 }
