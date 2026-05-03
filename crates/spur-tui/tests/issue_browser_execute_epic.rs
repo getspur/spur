@@ -15,6 +15,7 @@ fn summary(id: &str, title: &str, issue_type: Option<&str>) -> IssueSummaryEvent
         source: "beads".into(),
         title: title.into(),
         status: "open".into(),
+        labels: Vec::new(),
         priority: Some(1),
         issue_type: issue_type.map(String::from),
         assignee: None,

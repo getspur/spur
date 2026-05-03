@@ -20,12 +20,12 @@
 #![cfg(feature = "markdown")]
 
 use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+use spur_acp::adapter::{ObservePayload, ToolFamily, ToolInputDisplay};
+use spur_acp::AgentKind;
 use spur_tui::components::image_cache::ImageCache;
 use spur_tui::components::react_trace::{
     ActStatus, ReactTrace, RenderContext, TraceEntry, TraceKind,
 };
-use spur_acp::adapter::{ObservePayload, ToolFamily, ToolInputDisplay};
-use spur_acp::AgentKind;
 use std::collections::HashMap;
 use unicode_width::UnicodeWidthStr;
 
@@ -277,7 +277,10 @@ fn iterm2_eaw_n_fontfallback_desync_repro() {
     }
 
     let total_desync = f1_diff.len() + f2_diff.len() + f3_diff.len();
-    eprintln!("\n>>> TOTAL DESYNC under iTerm2 wide-render assumption: {} <<<", total_desync);
+    eprintln!(
+        "\n>>> TOTAL DESYNC under iTerm2 wide-render assumption: {} <<<",
+        total_desync
+    );
 
     // Diagnostic-only: print confirmation but do not assert. The fix path
     // (replace EAW=N glyphs OR wrap backend to disable MoveTo-skip) is a

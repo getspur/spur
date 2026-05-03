@@ -353,8 +353,7 @@ async fn merge_plan_refuses_plan_owned_by_other_brain() {
         .await;
     let msg = error_message(&response);
     assert!(
-        msg.contains("merge_plan")
-            && msg.contains("active handoff is not implemented in MVP"),
+        msg.contains("merge_plan") && msg.contains("active handoff is not implemented in MVP"),
         "merge_plan must refuse plans owned by another brain: {response}"
     );
 }
@@ -456,8 +455,7 @@ async fn review_task_refuses_plan_owned_by_other_brain() {
         .await;
     let msg = error_message(&response);
     assert!(
-        msg.contains("review_task")
-            && msg.contains("active handoff is not implemented in MVP"),
+        msg.contains("review_task") && msg.contains("active handoff is not implemented in MVP"),
         "review_task must refuse plans owned by another brain: {response}"
     );
 }
@@ -512,10 +510,7 @@ async fn review_task_refuses_unowned_plan() {
     );
 }
 
-async fn collect_epic_sentinels(
-    pm: &spur_pm::PmService,
-    epic_id: &str,
-) -> Vec<AuditSentinelKind> {
+async fn collect_epic_sentinels(pm: &spur_pm::PmService, epic_id: &str) -> Vec<AuditSentinelKind> {
     let adv = pm
         .advanced()
         .expect("beads-backed PmService must return advanced()");
@@ -753,8 +748,7 @@ async fn execute_epic_refuses_plan_owned_by_other_brain() {
         .await;
     let msg = error_message(&response);
     assert!(
-        msg.contains("execute_epic")
-            && msg.contains("active handoff is not implemented in MVP"),
+        msg.contains("execute_epic") && msg.contains("active handoff is not implemented in MVP"),
         "execute_epic must refuse plans owned by another brain: {response}"
     );
 
@@ -1128,7 +1122,12 @@ async fn force_reclaim_plan_takes_over_from_other_brain() {
         .filter(|label| labels::parse_plan_owner(label).is_some())
         .collect();
     let expected_owner = labels::plan_owner(&session_id.as_session_id().0);
-    assert_eq!(owners.len(), 1, "epic must carry exactly one owner label after reclaim; labels={:?}", epic.labels);
+    assert_eq!(
+        owners.len(),
+        1,
+        "epic must carry exactly one owner label after reclaim; labels={:?}",
+        epic.labels
+    );
     assert_eq!(
         owners[0], &expected_owner,
         "epic must carry only the new owner label after reclaim"
@@ -1218,7 +1217,10 @@ async fn force_reclaim_plan_handles_unowned_plan() {
         body["prior_owner"].is_null(),
         "prior_owner must be null when reclaiming an unowned plan; body={body}"
     );
-    assert_eq!(body["new_owner"].as_str(), Some(session_id.to_string().as_str()));
+    assert_eq!(
+        body["new_owner"].as_str(),
+        Some(session_id.to_string().as_str())
+    );
     let audit_token = body["audit_token"].as_str().expect("audit_token string");
     assert!(!audit_token.is_empty());
 
@@ -1240,7 +1242,11 @@ async fn force_reclaim_plan_handles_unowned_plan() {
         .iter()
         .filter(|s| matches!(s, AuditSentinelKind::PlanForceReclaimed { .. }))
         .collect();
-    assert_eq!(reclaims.len(), 1, "expected one PlanForceReclaimed sentinel");
+    assert_eq!(
+        reclaims.len(),
+        1,
+        "expected one PlanForceReclaimed sentinel"
+    );
     let AuditSentinelKind::PlanForceReclaimed {
         prior_owner,
         new_owner,
@@ -1251,7 +1257,10 @@ async fn force_reclaim_plan_handles_unowned_plan() {
     else {
         unreachable!("filtered to PlanForceReclaimed");
     };
-    assert!(prior_owner.is_none(), "prior_owner must be None for unowned plan");
+    assert!(
+        prior_owner.is_none(),
+        "prior_owner must be None for unowned plan"
+    );
     assert_eq!(new_owner, &session_id.to_string());
     assert_eq!(token, audit_token);
     assert!(reason.is_none(), "reason must be None when not supplied");

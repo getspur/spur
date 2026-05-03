@@ -12,12 +12,12 @@
 #![cfg(feature = "markdown")]
 
 use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+use spur_acp::adapter::{ObservePayload, ToolFamily, ToolInputDisplay};
+use spur_acp::AgentKind;
 use spur_tui::components::image_cache::ImageCache;
 use spur_tui::components::react_trace::{
     ActStatus, ReactTrace, RenderContext, TraceEntry, TraceKind,
 };
-use spur_acp::adapter::{ObservePayload, ToolFamily, ToolInputDisplay};
-use spur_acp::AgentKind;
 use std::collections::HashMap;
 use unicode_width::UnicodeWidthStr;
 
@@ -194,7 +194,10 @@ fn full_user_repro_with_real_terminal_simulation() {
 
     // Apply emission to simulated terminal: starting from frame 1's display.
     let terminal_after_2 = simulate_terminal_after_emission(&buf_1, &buf_2, &intended_1);
-    print_grid("Terminal display after emission for frame 2", &terminal_after_2);
+    print_grid(
+        "Terminal display after emission for frame 2",
+        &terminal_after_2,
+    );
 
     eprintln!("=== Diff intended_2 vs terminal_after_2 (frame 1 → 2) ===");
     let diffs_12 = diff_grids(&intended_2, &terminal_after_2);
@@ -223,7 +226,10 @@ fn full_user_repro_with_real_terminal_simulation() {
     print_grid("Intended frame 3 (after scroll_up_by(5))", &intended_3);
 
     let terminal_after_3 = simulate_terminal_after_emission(&buf_2, &buf_3, &terminal_after_2);
-    print_grid("Terminal display after emission for frame 3", &terminal_after_3);
+    print_grid(
+        "Terminal display after emission for frame 3",
+        &terminal_after_3,
+    );
 
     eprintln!("=== Diff intended_3 vs terminal_after_3 (frame 2 → 3) ===");
     let diffs_23 = diff_grids(&intended_3, &terminal_after_3);
@@ -253,7 +259,11 @@ fn full_user_repro_with_real_terminal_simulation() {
         }
         let intended = snap(&term);
         let buf = term.backend().buffer().clone();
-        let terminal = simulate_terminal_after_emission(&buf, &term.backend().buffer().clone(), &prev_terminal);
+        let terminal = simulate_terminal_after_emission(
+            &buf,
+            &term.backend().buffer().clone(),
+            &prev_terminal,
+        );
         // Wait — that's wrong. simulate from prev_buf to current buf, applied to prev_terminal.
         let terminal = simulate_terminal_after_emission(&prev_buf, &buf, &prev_terminal);
         eprintln!("=== Scroll iter {} ===", i);
@@ -266,5 +276,8 @@ fn full_user_repro_with_real_terminal_simulation() {
         prev_terminal = terminal;
     }
 
-    eprintln!("\n=== TOTAL DESYNC COUNT: {} ===", total_desyncs + diffs_12 + diffs_23);
+    eprintln!(
+        "\n=== TOTAL DESYNC COUNT: {} ===",
+        total_desyncs + diffs_12 + diffs_23
+    );
 }

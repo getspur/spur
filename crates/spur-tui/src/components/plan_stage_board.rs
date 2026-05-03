@@ -405,10 +405,12 @@ mod tests {
         let plan = TrackedPlan {
             session_id: SessionId("brain-1".into()),
             plan_id: "bd-1dwm".into(),
+            epic_id: None,
             status: "running".into(),
             progress: "0/2 reviewed".into(),
             next_action: "inspect".into(),
             ready_to_merge: false,
+            owner_brain_session_id: None,
             counts: PlanSnapshotCounts::default(),
             tasks: vec![blocked, failed],
             updated_at: std::time::SystemTime::UNIX_EPOCH,

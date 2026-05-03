@@ -1192,8 +1192,17 @@ pub enum InteractiveInput {
     RefreshIssues,
     /// Refresh persisted plan summaries and emit PlansLoaded.
     RefreshPlans,
+    /// Claim a persisted plan for this brain without starting execution.
+    ClaimPlan {
+        plan_id: String,
+    },
     /// Resume a persisted plan.
     ResumePlan {
+        plan_id: String,
+    },
+    /// Load/project a persisted implementation plan and emit PlanSnapshotUpdated.
+    /// This is read-only and must not claim plan ownership.
+    InspectPlan {
         plan_id: String,
     },
     /// Fetch full issue detail and emit IssueDetailFetched.
@@ -1228,6 +1237,7 @@ fn to_summary_event(
         source: source.into(),
         title: issue.title.clone(),
         status: issue.status.clone(),
+        labels: issue.labels.clone(),
         priority: issue.priority,
         issue_type: issue.issue_type.clone(),
         assignee: issue.assignee.clone(),
@@ -1632,17 +1642,14 @@ trait IssueGraphPm {
 #[async_trait::async_trait]
 impl IssueGraphPm for spur_pm::PmService {
     fn analyzer_available(&self) -> bool {
-        self.analyzer().is_some()
+        self.issue_graph_available()
     }
 
     async fn issue_subgraph_json(
         &self,
         id: &str,
     ) -> anyhow::Result<spur_pm::graph::DependencyGraph> {
-        self.analyzer()
-            .ok_or_else(|| anyhow::anyhow!("bv unavailable; install bv to view dependency graph"))?
-            .subgraph(id, Some(2), Some("json"))
-            .await
+        spur_pm::PmService::issue_subgraph_json(self, id).await
     }
 }
 
@@ -1663,7 +1670,7 @@ async fn handle_get_issue_graph<P: IssueGraphPm + ?Sized>(
     if !pm.analyzer_available() {
         funnel.emit(SpurEventBody::IssueCommandError {
             operation: "GetIssueGraph".into(),
-            error: "bv unavailable; install bv to view dependency graph".into(),
+            error: "Issue graph unavailable for configured issue tracker".into(),
             id: Some(id),
         });
         return;
@@ -3083,6 +3090,48 @@ impl Orchestrator {
                         }
                     }
 
+                    // ── ClaimPlan ─────────────────────────────────────────
+                    InteractiveInput::ClaimPlan { plan_id } => {
+                        let server = brain
+                            .as_ref()
+                            .and_then(|b| b.mcp_server.as_ref())
+                            .map(Arc::clone);
+                        if let Some(server) = server {
+                            if let Err(error) = server.call_claim_plan(&plan_id).await {
+                                self.funnel.emit(SpurEventBody::PlanCommandError {
+                                    operation: "ClaimPlan".into(),
+                                    plan_id: Some(plan_id),
+                                    error,
+                                });
+                            } else if let Some(pm) = &self.pm_service {
+                                let current_session = brain.as_ref().map(|b| &b.spur_session_id);
+                                match load_plan_summaries(pm, current_session).await {
+                                    Ok(plans) => {
+                                        self.funnel.emit(SpurEventBody::PlansLoaded { plans });
+                                    }
+                                    Err(error) => {
+                                        self.funnel.emit(SpurEventBody::PlanCommandError {
+                                            operation: "RefreshPlans".into(),
+                                            plan_id: None,
+                                            error: error.to_string(),
+                                        });
+                                    }
+                                }
+                            }
+                        } else {
+                            let error = if brain.is_some() {
+                                "Brain session initializing - try again in a moment".into()
+                            } else {
+                                "No active brain session - start one to claim plans".into()
+                            };
+                            self.funnel.emit(SpurEventBody::PlanCommandError {
+                                operation: "ClaimPlan".into(),
+                                plan_id: Some(plan_id),
+                                error,
+                            });
+                        }
+                    }
+
                     // ── ResumePlan ────────────────────────────────────────
                     InteractiveInput::ResumePlan { plan_id } => {
                         let server = brain
@@ -3108,6 +3157,34 @@ impl Orchestrator {
                             };
                             self.funnel.emit(SpurEventBody::PlanCommandError {
                                 operation: "ResumePlan".into(),
+                                plan_id: Some(plan_id),
+                                error,
+                            });
+                        }
+                    }
+
+                    // ── InspectPlan ───────────────────────────────────────
+                    InteractiveInput::InspectPlan { plan_id } => {
+                        let server = brain
+                            .as_ref()
+                            .and_then(|b| b.mcp_server.as_ref())
+                            .map(Arc::clone);
+                        if let Some(server) = server {
+                            if let Err(error) = server.call_inspect_plan(&plan_id).await {
+                                self.funnel.emit(SpurEventBody::PlanCommandError {
+                                    operation: "InspectPlan".into(),
+                                    plan_id: Some(plan_id),
+                                    error,
+                                });
+                            }
+                        } else {
+                            let error = if brain.is_some() {
+                                "Brain session initializing - try again in a moment".into()
+                            } else {
+                                "No active brain session - start one to inspect plans".into()
+                            };
+                            self.funnel.emit(SpurEventBody::PlanCommandError {
+                                operation: "InspectPlan".into(),
                                 plan_id: Some(plan_id),
                                 error,
                             });
@@ -8097,7 +8174,10 @@ mod issue_graph_handler_tests {
                 id,
             } => {
                 assert_eq!(operation, "GetIssueGraph");
-                assert_eq!(error, "bv unavailable; install bv to view dependency graph");
+                assert_eq!(
+                    error,
+                    "Issue graph unavailable for configured issue tracker"
+                );
                 assert_eq!(id, Some("bd-root".into()));
             }
             other => panic!("expected IssueCommandError, got {other:?}"),

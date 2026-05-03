@@ -13,6 +13,7 @@ fn snapshot_event(session_id: &SessionId, snapshot: PlanSnapshot) -> SpurEvent {
 fn sample_snapshot(plan_id: &str, status: &str, tasks: Vec<PlanSnapshotTask>) -> PlanSnapshot {
     PlanSnapshot {
         plan_id: plan_id.to_string(),
+        epic_id: None,
         status: status.to_string(),
         progress: "1/1 done".to_string(),
         next_action: "review".to_string(),

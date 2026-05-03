@@ -161,6 +161,7 @@ fn plan_snapshot_updated_roundtrips() {
         session_id: SessionId("brain-1".into()),
         snapshot: Box::new(PlanSnapshot {
             plan_id: "p-123".into(),
+            epic_id: None,
             status: "running".into(),
             progress: "1/3 reviewed, 1 running, 1 pending".into(),
             next_action: "Workers still running. Poll get_plan_status to monitor.".into(),

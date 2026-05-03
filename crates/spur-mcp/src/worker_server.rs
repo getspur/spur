@@ -252,7 +252,11 @@ pub struct DelegationDispatchGuard {
 }
 
 impl DelegationDispatchGuard {
-    pub fn new(delegation_id: String, brain_session_id: String, funnel: Arc<dyn McpEventSink>) -> Self {
+    pub fn new(
+        delegation_id: String,
+        brain_session_id: String,
+        funnel: Arc<dyn McpEventSink>,
+    ) -> Self {
         Self {
             delegation_id,
             brain_session_id,
@@ -390,8 +394,7 @@ impl WorkerMcpServer {
             Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
         let (flush_tx, flush_rx) = mpsc::unbounded_channel::<FlushMessage>();
         let active_delegations = Arc::new(AtomicU32::new(0));
-        let delegation_guards =
-            Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
+        let delegation_guards = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
         let dispatcher_deps = Arc::new(DispatcherDeps {
             pm_service: deps.pm_service,
             feature_gate: deps.feature_gate,
@@ -1538,7 +1541,10 @@ mod tests {
                 panic!("emit must not be called — try_emit should be used");
             }
 
-            fn try_emit(&self, event: spur_acp::SpurEventBody) -> Result<(), spur_acp::SpurEventBody> {
+            fn try_emit(
+                &self,
+                event: spur_acp::SpurEventBody,
+            ) -> Result<(), spur_acp::SpurEventBody> {
                 if self.full.load(Ordering::SeqCst) {
                     return Err(event);
                 }
@@ -1596,6 +1602,9 @@ mod tests {
         guard2.record_tool_call();
         guard2.completed.store(true, Ordering::Relaxed);
         drop(guard2);
-        assert!(sink2.events.lock().unwrap().is_empty(), "event must be dropped when sink is full");
+        assert!(
+            sink2.events.lock().unwrap().is_empty(),
+            "event must be dropped when sink is full"
+        );
     }
 }

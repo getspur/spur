@@ -51,7 +51,10 @@ fn extract_id(json: &str) -> String {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[test]
 fn every_label_constructor_is_accepted_by_br() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
     let dir = TempDir::new().unwrap();
     run_br(dir.path(), &["init"]).unwrap();
     let create_out = run_br(dir.path(), &["create", "t", "-t", "task"]).unwrap();
@@ -102,7 +105,10 @@ fn every_label_constructor_is_accepted_by_br() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[test]
 fn parsers_round_trip_through_real_br_labels() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
     let dir = TempDir::new().unwrap();
     run_br(dir.path(), &["init"]).unwrap();
     let id = extract_id(&run_br(dir.path(), &["create", "t", "-t", "task"]).unwrap());
@@ -162,7 +168,10 @@ fn parsers_round_trip_through_real_br_labels() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[test]
 fn br_create_enforces_50_char_cap_but_label_add_does_not() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
     let dir = TempDir::new().unwrap();
     run_br(dir.path(), &["init"]).unwrap();
 
@@ -194,7 +203,10 @@ fn br_create_enforces_50_char_cap_but_label_add_does_not() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[test]
 fn mutation_id_label_fits_under_br_create_cap() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
     let dir = TempDir::new().unwrap();
     run_br(dir.path(), &["init"]).unwrap();
 

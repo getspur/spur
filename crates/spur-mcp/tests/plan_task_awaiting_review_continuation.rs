@@ -120,7 +120,10 @@ fn continuation_ctx(
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn run_plan_pushes_continuation_and_event_for_awaiting_review_task() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);

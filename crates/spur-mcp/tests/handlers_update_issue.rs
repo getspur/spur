@@ -55,7 +55,10 @@ async fn create_issue(pm: &PmService, title: &str, body: &str) -> String {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn update_issue_writes_comment_via_pm() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -92,7 +95,10 @@ async fn update_issue_writes_comment_via_pm() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn update_issue_missing_id_invalid_params() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -113,7 +119,10 @@ async fn update_issue_missing_id_invalid_params() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn update_issue_propagates_priority_and_assignee() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);

@@ -109,7 +109,10 @@ fn decode_tool_response(response: &Value) -> Value {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0d_3_merge_plan_works_after_restart_on_persisted_plan() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = init_repo().await;
     run_br(dir.path(), &["init"]).expect("br init");

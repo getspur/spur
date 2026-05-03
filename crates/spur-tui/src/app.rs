@@ -121,8 +121,16 @@ pub enum UserInput {
     RefreshIssues,
     /// Request the orchestrator to refresh persisted plan summaries.
     RefreshPlans,
+    /// Request the orchestrator to claim a persisted plan without starting execution.
+    ClaimPlan {
+        plan_id: String,
+    },
     /// Request the orchestrator to resume a persisted plan.
     ResumePlan {
+        plan_id: String,
+    },
+    /// Request a read-only persisted implementation-plan snapshot.
+    InspectPlan {
         plan_id: String,
     },
     /// Request full issue detail from the PM backend.
@@ -2702,6 +2710,49 @@ impl App {
                 self.navigate_to(ViewId::PlanInspector(session.clone()));
             }
 
+            Action::InspectPlan {
+                ref session_id,
+                ref plan_id,
+            } => {
+                if self.plan_projection.plan(plan_id).is_none() {
+                    if let Some(ref tx) = self.user_input_tx {
+                        let _ = tx.try_send(UserInput::InspectPlan {
+                            plan_id: plan_id.clone(),
+                        });
+                    }
+                }
+                self.plan_inspector = Some(PlanInspectorView::new_for_plan(
+                    session_id.clone(),
+                    plan_id.clone(),
+                ));
+                self.navigate_to(ViewId::PlanInspector(session_id.clone()));
+            }
+
+            Action::OpenPlanInBrowser { ref plan_id } => {
+                let Some(current_session) = self
+                    .session_detail
+                    .as_ref()
+                    .map(|detail| detail.session_id().clone())
+                else {
+                    return self.process_action(Action::FlashHint {
+                        message: "Select a brain session first (S)".into(),
+                    });
+                };
+                let just_created = self.plan_browser.is_none();
+                let mut session_changed = false;
+                if self.plan_browser.is_none() {
+                    self.plan_browser = Some(PlanBrowserView::new(current_session.clone()));
+                }
+                if let Some(browser) = self.plan_browser.as_mut() {
+                    session_changed = browser.set_current_session(current_session);
+                    browser.focus_plan_id(plan_id.clone());
+                }
+                self.navigate_to(ViewId::PlanBrowser);
+                if just_created || session_changed {
+                    self.process_action(Action::RefreshPlans);
+                }
+            }
+
             Action::NavigateTo(ViewId::PlanBrowser) => {
                 // Inc 1 (bd-d587.1): without an active brain session, no plan can ever
                 // classify as Mine (every row is Unowned/Other), so Inspect/Resume have
@@ -3527,10 +3578,16 @@ impl App {
                     let _ = tx.try_send(UserInput::RefreshPlans);
                 }
             }
+            Action::ClaimPlan { plan_id } => {
+                self.flash_hint_short(format!("Claiming plan {plan_id}..."));
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::ClaimPlan { plan_id });
+                }
+            }
             Action::ResumePlan { plan_id } => {
                 // Immediate user feedback: the orchestrator → MCP round-trip can take
                 // 1–3s; without this hint the TUI looks frozen and invites double-press.
-                self.flash_hint_short(format!("Resuming plan {plan_id}..."));
+                self.flash_hint_short(format!("Starting plan {plan_id}..."));
                 if let Some(ref tx) = self.user_input_tx {
                     let _ = tx.try_send(UserInput::ResumePlan { plan_id });
                 }
@@ -4683,6 +4740,7 @@ mod issue_browser_navigation_tests {
             source: "beads".into(),
             title: title.into(),
             status: "open".into(),
+            labels: Vec::new(),
             priority: Some(1),
             issue_type: Some("bug".into()),
             assignee: None,
@@ -4820,6 +4878,22 @@ mod plan_browser_navigation_tests {
     }
 
     #[test]
+    fn claim_plan_action_sends_user_input() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut app = App::new(Some(tx), false);
+
+        app.process_action(Action::ClaimPlan {
+            plan_id: "plan-42".into(),
+        });
+
+        match rx.try_recv() {
+            Ok(UserInput::ClaimPlan { plan_id }) => assert_eq!(plan_id, "plan-42"),
+            Ok(_) => panic!("expected ClaimPlan, got different user input"),
+            Err(err) => panic!("expected ClaimPlan user input, got {err}"),
+        }
+    }
+
+    #[test]
     fn navigating_existing_plan_browser_updates_current_session() {
         // Inc 1 (bd-d587.1): seed an initial brain so the first navigation succeeds,
         // then assert that re-navigating after a session swap updates current_session
@@ -4900,7 +4974,7 @@ mod plan_browser_navigation_tests {
     }
 
     #[test]
-    fn plan_browser_keys_bridge_refresh_and_resume_to_user_input() {
+    fn plan_browser_keys_bridge_refresh_claim_and_start_to_user_input() {
         let (tx, mut rx) = mpsc::channel(8);
         let mut app = App::new(Some(tx), false);
         // Inc 1 (bd-d587.1): NavigateTo(PlanBrowser) requires an active session.
@@ -4919,7 +4993,8 @@ mod plan_browser_navigation_tests {
         }));
 
         app.handle_crossterm_event_for_test(key(KeyCode::Char('r')));
-        app.handle_crossterm_event_for_test(key(KeyCode::Char('R')));
+        app.handle_crossterm_event_for_test(key(KeyCode::Char('c')));
+        app.handle_crossterm_event_for_test(key(KeyCode::Enter));
 
         match rx.try_recv() {
             Ok(UserInput::RefreshPlans) => {}
@@ -4927,9 +5002,9 @@ mod plan_browser_navigation_tests {
             Err(err) => panic!("expected RefreshPlans from r key, got {err}"),
         }
         match rx.try_recv() {
-            Ok(UserInput::ResumePlan { plan_id }) => assert_eq!(plan_id, "plan-1"),
-            Ok(_) => panic!("expected ResumePlan from R key, got different user input"),
-            Err(err) => panic!("expected ResumePlan from R key, got {err}"),
+            Ok(UserInput::ClaimPlan { plan_id }) => assert_eq!(plan_id, "plan-1"),
+            Ok(_) => panic!("expected ClaimPlan from c confirm, got different user input"),
+            Err(err) => panic!("expected ClaimPlan from c confirm, got {err}"),
         }
     }
 }
@@ -4960,7 +5035,10 @@ mod view_history_tests {
         assert_eq!(app.current_view, ViewId::IssueBrowser);
         assert_eq!(
             app.view_history,
-            vec![ViewId::Dashboard, ViewId::SessionDetail(SessionId("brain-1".into()))],
+            vec![
+                ViewId::Dashboard,
+                ViewId::SessionDetail(SessionId("brain-1".into()))
+            ],
         );
 
         app.navigate_back();
@@ -5455,6 +5533,7 @@ mod plan_projection_tests {
             session_id: session.clone(),
             snapshot: Box::new(PlanSnapshot {
                 plan_id: "p-1".into(),
+                epic_id: None,
                 status: "running".into(),
                 progress: "0/1 done".into(),
                 next_action:

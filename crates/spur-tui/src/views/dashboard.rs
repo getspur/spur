@@ -2014,7 +2014,7 @@ impl View for DashboardView {
                         },
                         title: i.title.clone(),
                         status: i.status.clone(),
-                        labels: Vec::new(),
+                        labels: i.labels.clone(),
                         url: String::new(),
                         priority: i.priority,
                         issue_type: i.issue_type.clone(),
