@@ -4,6 +4,7 @@ use crate::adapter::{IssueTracker, PrService};
 use crate::beads::BeadsAdapter;
 use crate::bv::BvAdapter;
 use crate::github::GitHubAdapter;
+use crate::graph::DependencyGraph;
 use crate::types::*;
 
 /// Resolve the beads "closed" status string. Default is `"closed"` — the
@@ -192,6 +193,25 @@ impl PmService {
     /// Returns the graph analyzer if `bv` (beads_viewer) is available.
     pub fn analyzer(&self) -> Option<&BvAdapter> {
         self.bv.as_ref()
+    }
+
+    pub fn issue_graph_available(&self) -> bool {
+        self.bv.is_some()
+    }
+
+    pub async fn issue_subgraph_json(&self, id: &str) -> anyhow::Result<DependencyGraph> {
+        let bv = self
+            .bv
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("bv unavailable for issue graph"))?;
+
+        if let PmBackendInner::Beads { beads, .. } = &self.inner {
+            if let Some(plan_label) = beads.plan_id_label_for_epic(id).await? {
+                return bv.graph_by_label(&plan_label, Some("json")).await;
+            }
+        }
+
+        bv.subgraph(id, Some(2), Some("json")).await
     }
 
     /// Returns the beads-advanced extension surface if the backend is beads.

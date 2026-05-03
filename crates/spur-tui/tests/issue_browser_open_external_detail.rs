@@ -29,6 +29,7 @@ fn sample_summary(id: &str, title: &str, issue_type: &str) -> IssueSummaryEvent 
         source: "beads".into(),
         title: title.into(),
         status: "open".into(),
+        labels: Vec::new(),
         priority: Some(1),
         issue_type: Some(issue_type.into()),
         assignee: None,
@@ -273,9 +274,7 @@ fn open_existing_browser_with_uncached_id_triggers_refresh_and_aligns_selection(
     let inputs = drain(&mut rx);
     let dump = labels(&inputs);
     assert!(
-        inputs
-            .iter()
-            .any(|u| matches!(u, UserInput::RefreshIssues)),
+        inputs.iter().any(|u| matches!(u, UserInput::RefreshIssues)),
         "uncached id must trigger RefreshIssues even when browser already \
          existed; got {dump}",
     );
@@ -305,6 +304,71 @@ fn open_existing_browser_with_uncached_id_triggers_refresh_and_aligns_selection(
         has_get_issue_detail(&after_enter, "bd-epic-fresh"),
         "Enter must target bd-epic-fresh (selection aligned to detail), \
          got {dump2}",
+    );
+}
+
+#[test]
+fn focus_graph_survives_issue_refresh_before_graph_response() {
+    // Regression: PlanBrowser 'e' opens an epic through OpenIssueInBacklog,
+    // which arms graph_loading and also requests RefreshIssues when the epic
+    // is not in the cached list. If IssuesLoaded arrived before
+    // IssueSubgraphLoaded, the old handler called invalidate_graph_cache(),
+    // clearing graph_loading while the graph request was still in flight.
+    // The subsequent detail fetch flipped to Graph mode and rendered the
+    // fallback "Graph not loaded" error instead of the loading state.
+    let (mut app, mut rx) = spur_tui::test_support::app_with_user_input_tx();
+
+    // Create an IssueBrowser with stale cached data that does not include
+    // the plan epic we are about to open.
+    spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
+    let _ = drain(&mut rx);
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssuesLoaded {
+            issues: vec![sample_summary("bd-stale", "Stale cached", "task")],
+        }),
+    );
+    spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::Dashboard));
+    let _ = drain(&mut rx);
+
+    spur_tui::test_support::process_action(
+        &mut app,
+        Action::OpenIssueInBacklog {
+            id: "bd-epic-fresh".into(),
+        },
+    );
+    let inputs = drain(&mut rx);
+    let dump = labels(&inputs);
+    assert!(
+        has_get_issue_graph(&inputs, "bd-epic-fresh"),
+        "FocusGraph must request graph data; got {dump}",
+    );
+    assert!(
+        inputs.iter().any(|u| matches!(u, UserInput::RefreshIssues)),
+        "uncached epic must request issue refresh; got {dump}",
+    );
+
+    // The refresh returns before graph data and still does not contain the
+    // epic. This must not cancel the already in-flight graph request.
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssuesLoaded {
+            issues: vec![sample_summary("bd-stale", "Still stale", "task")],
+        }),
+    );
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssueDetailFetched {
+            requested_id: "bd-epic-fresh".into(),
+            issue: sample_detail("bd-epic-fresh", "Fresh epic"),
+        }),
+    );
+
+    let mut terminal = Terminal::new(TestBackend::new(140, 28)).unwrap();
+    let rendered = render_text(&mut app, &mut terminal);
+    assert!(
+        !rendered.contains("Graph not loaded; switch to Text then Graph to reload"),
+        "issue refresh must not cancel in-flight graph load:\n{rendered}",
     );
 }
 

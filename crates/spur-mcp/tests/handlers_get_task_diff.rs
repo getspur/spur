@@ -155,7 +155,10 @@ fn make_plan_needing_recovery(plan_id: &str) -> PlanState {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn get_task_diff_returns_cached_diff_shape() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -232,7 +235,10 @@ async fn get_task_diff_cached_result_succeeds_without_pm_or_repo_root() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn get_task_diff_unauthorized_when_recovery_needs_pro_feature() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -266,7 +272,10 @@ async fn get_task_diff_unauthorized_when_recovery_needs_pro_feature() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn get_task_diff_missing_plan_id_invalid_params() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);

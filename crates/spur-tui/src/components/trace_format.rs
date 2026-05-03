@@ -24,7 +24,11 @@ use spur_acp::{
 /// In a contiguous diff stream that leaves stale cells behind, which matches
 /// the ghost characters visible after numbered file-output rows.
 pub(crate) fn terminal_safe_text(input: &str) -> String {
-    if !input.as_bytes().iter().any(|b| is_terminal_control_byte(*b)) {
+    if !input
+        .as_bytes()
+        .iter()
+        .any(|b| is_terminal_control_byte(*b))
+    {
         return input.to_string();
     }
 
@@ -33,12 +37,7 @@ pub(crate) fn terminal_safe_text(input: &str) -> String {
         match ch {
             '\t' => out.push_str("    "),
             '\x1b' => out.push_str("^["),
-            '\x00'..='\x08'
-            | '\x0b'..='\x0c'
-            | '\x0e'..='\x1f'
-            | '\x7f'
-            | '\r'
-            | '\n' => {
+            '\x00'..='\x08' | '\x0b'..='\x0c' | '\x0e'..='\x1f' | '\x7f' | '\r' | '\n' => {
                 out.push('^');
                 out.push(control_name(ch));
             }
@@ -61,8 +60,6 @@ fn control_name(ch: char) -> char {
         '\x1e' => '^',
         '\x1f' => '_',
         '\x7f' => '?',
-        '\r' => 'M',
-        '\n' => 'J',
         _ => '?',
     }
 }
@@ -226,7 +223,9 @@ mod tests {
             assert_ascii(family_glyph(family).0);
         }
 
-        let ok_payload = ObservePayload::Text { body: String::new() };
+        let ok_payload = ObservePayload::Text {
+            body: String::new(),
+        };
         assert_ascii(outcome_glyph(&ok_payload).0);
         assert_ascii(observe_compact(&ok_payload).0);
 
@@ -484,7 +483,7 @@ pub(crate) fn observe_payload_lines(
             } else if let Some(p) = path {
                 lines.push(Line::from(vec![
                     Span::raw("   "),
-                Span::styled(terminal_safe_text(p), Style::default().fg(Color::DarkGray)),
+                    Span::styled(terminal_safe_text(p), Style::default().fg(Color::DarkGray)),
                 ]));
             }
         }

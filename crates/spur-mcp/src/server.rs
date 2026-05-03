@@ -26,7 +26,7 @@ use tracing::{debug, error, info};
 
 use spur_acp::*;
 use spur_license::FeatureKey;
-use spur_pm::{IssueFilter, IssueUpdate, PmService, PrParams};
+use spur_pm::{IssueFilter, IssueSummary, IssueUpdate, PmService, PrParams};
 use spur_worktree::manager::WorktreeError;
 use spur_worktree::WorktreeManager;
 
@@ -769,6 +769,101 @@ struct ActiveOwnedPlan {
     epic_id: String,
 }
 
+async fn find_plan_epic(
+    pm: &PmService,
+    plan_id: &str,
+    operation: &str,
+) -> Result<IssueSummary, String> {
+    let epics = pm
+        .list_issues(IssueFilter {
+            labels: vec![crate::plan::labels::plan_id(plan_id)],
+            issue_type: Some("epic".to_string()),
+            include_closed: true,
+            limit: Some(10),
+            ..Default::default()
+        })
+        .await
+        .map_err(|error| format!("{operation}: failed to find plan: {error}"))?;
+
+    if epics.is_empty() {
+        return Err(format!("{operation}: plan not found: {plan_id}"));
+    }
+
+    if epics.len() == 1 {
+        return Ok(epics.into_iter().next().expect("non-empty epics"));
+    }
+
+    if let Some(advanced) = pm.advanced() {
+        let candidate_ids = epics
+            .iter()
+            .map(|epic| epic.id.clone())
+            .collect::<HashSet<_>>();
+        let mut canonical_ids = HashSet::new();
+
+        for epic in &epics {
+            match advanced.list_comments(&epic.id).await {
+                Ok(comments) => {
+                    let audits =
+                        crate::plan::projector::collect_sorted_audits_for_issue(&epic.id, comments);
+                    for audit in audits {
+                        if let crate::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
+                            plan_id: audit_plan_id,
+                            epic_issue_id,
+                            ..
+                        } = audit
+                        {
+                            if audit_plan_id == plan_id && candidate_ids.contains(&epic_issue_id) {
+                                canonical_ids.insert(epic_issue_id);
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        epic_id = %epic.id,
+                        plan_id = %plan_id,
+                        operation = %operation,
+                        error = %error,
+                        "failed to inspect plan-submit audits while resolving duplicate plan epics"
+                    );
+                }
+            }
+        }
+
+        if canonical_ids.len() == 1 {
+            let canonical_id = canonical_ids
+                .into_iter()
+                .next()
+                .expect("canonical_ids has one entry");
+            if let Some(epic) = epics.iter().find(|epic| epic.id == canonical_id).cloned() {
+                tracing::warn!(
+                    plan_id = %plan_id,
+                    operation = %operation,
+                    canonical_epic = %epic.id,
+                    "resolved duplicate plan epics via PlanSubmit audit canonical epic"
+                );
+                return Ok(epic);
+            }
+        } else if !canonical_ids.is_empty() {
+            let mut ids = canonical_ids.into_iter().collect::<Vec<_>>();
+            ids.sort();
+            return Err(format!(
+                "{operation}: ambiguous plan lookup for {plan_id}; PlanSubmit audits disagree on canonical epics: {}",
+                ids.join(", ")
+            ));
+        }
+    }
+
+    let epic_ids = epics
+        .iter()
+        .map(|epic| epic.id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "{operation}: ambiguous plan lookup for {plan_id}; multiple epics matched: {epic_ids}"
+    ))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PersistedTaskCompletion {
     pub(crate) worker_branch: Option<String>,
@@ -1050,6 +1145,29 @@ fn replace_task_execution_labels(
 fn filter_remove_labels(remove_labels: &mut Vec<String>, add_labels: &[String]) {
     let add_set: std::collections::HashSet<&str> = add_labels.iter().map(String::as_str).collect();
     remove_labels.retain(|label| !add_set.contains(label.as_str()));
+}
+
+fn persisted_plan_epic_plan_id(issue: &spur_pm::Issue) -> Option<&str> {
+    if issue.issue_type.as_deref() != Some("epic") {
+        return None;
+    }
+
+    let is_persisted_plan_scope = issue
+        .labels
+        .iter()
+        .any(|label| label == crate::plan::labels::PLAN_COMPLETE)
+        || issue
+            .labels
+            .iter()
+            .any(|label| label == crate::plan::labels::PLAN_PENDING);
+    if !is_persisted_plan_scope {
+        return None;
+    }
+
+    issue
+        .labels
+        .iter()
+        .find_map(|label| crate::plan::labels::parse_plan_id(label))
 }
 
 fn invert_label_update(update: &spur_pm::IssueUpdate) -> spur_pm::IssueUpdate {
@@ -3655,14 +3773,143 @@ impl McpCallbackServer {
     /// MCP tool's `JsonRpcError.message`.
     pub async fn call_resume_plan(&self, plan_id: &str) -> Result<(), String> {
         let args = serde_json::json!({ "plan_id": plan_id });
-        let resp = self.handle_resume_plan(serde_json::Value::Null, args).await;
+        let resp = self
+            .handle_resume_plan_with(serde_json::Value::Null, args, false)
+            .await;
         match resp.error {
             Some(e) => Err(e.message),
             None => Ok(()),
         }
     }
 
+    /// Public bridge for orchestrator/TUI: claim ownership for a persisted plan
+    /// without starting dispatch. The pending gate keeps the reconciler from
+    /// observing ready work until `call_resume_plan` explicitly starts it.
+    pub async fn call_claim_plan(&self, plan_id: &str) -> Result<(), String> {
+        let pm = self
+            .pm_service
+            .as_deref()
+            .ok_or_else(|| "claim_plan requires PM service".to_string())?;
+
+        let epic_summary = find_plan_epic(pm, plan_id, "claim_plan").await?;
+        let epic_id = epic_summary.id.clone();
+        let epic = pm
+            .get_issue(&epic_id)
+            .await
+            .map_err(|error| format!("claim_plan: failed to load epic {epic_id}: {error}"))?;
+
+        match crate::plan::ownership::classify_owner(
+            &epic.labels,
+            self.brain_session_id.as_session_id(),
+        ) {
+            crate::plan::ownership::PlanOwnerMatch::OwnedByCurrent => {
+                if let Some(active) = self
+                    .current_brain_active_owned_plan(pm, Some(plan_id), Some(&epic_id))
+                    .await?
+                {
+                    return Err(format!(
+                        "claim_plan: current brain session already owns active plan {} (epic {}); cannot claim different active plan {plan_id}",
+                        active.plan_id, active.epic_id
+                    ));
+                }
+                Ok(())
+            }
+            crate::plan::ownership::PlanOwnerMatch::OwnedByOther { owner } => Err(format!(
+                "claim_plan: plan {plan_id} is owned by {owner}; active handoff is not supported"
+            )),
+            crate::plan::ownership::PlanOwnerMatch::Ambiguous { owners } => Err(format!(
+                "claim_plan: plan {plan_id} has ambiguous owner labels: {}",
+                owners.join(", ")
+            )),
+            crate::plan::ownership::PlanOwnerMatch::Unowned => {
+                let _active_plan_claim_guard = self.active_plan_claim_lock.lock().await;
+                if let Some(active) = self.current_brain_active_owned_plan(pm, None, None).await? {
+                    return Err(format!(
+                        "claim_plan: current brain session already owns active plan {} (epic {}); finish it before claiming plan {plan_id}",
+                        active.plan_id, active.epic_id
+                    ));
+                }
+
+                let owner_label =
+                    crate::plan::labels::plan_owner(&self.brain_session_id.as_session_id().0);
+                apply_issue_update(
+                    pm,
+                    &epic_id,
+                    IssueUpdate {
+                        add_labels: vec![
+                            owner_label.clone(),
+                            crate::plan::labels::PLAN_PENDING.to_string(),
+                        ],
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(|error| format!("claim_plan: failed to claim plan: {error}"))?;
+
+                let epic = pm.get_issue(&epic_id).await.map_err(|error| {
+                    format!("claim_plan: failed to reload claimed epic {epic_id}: {error}")
+                })?;
+                match crate::plan::ownership::classify_owner(
+                    &epic.labels,
+                    self.brain_session_id.as_session_id(),
+                ) {
+                    crate::plan::ownership::PlanOwnerMatch::OwnedByCurrent => Ok(()),
+                    crate::plan::ownership::PlanOwnerMatch::OwnedByOther { owner } => {
+                        let _ = apply_issue_update(
+                            pm,
+                            &epic_id,
+                            IssueUpdate {
+                                remove_labels: vec![owner_label],
+                                ..Default::default()
+                            },
+                        )
+                        .await;
+                        Err(format!(
+                            "claim_plan: failed to claim plan {plan_id}; plan is owned by {owner}"
+                        ))
+                    }
+                    crate::plan::ownership::PlanOwnerMatch::Ambiguous { owners } => {
+                        let _ = apply_issue_update(
+                            pm,
+                            &epic_id,
+                            IssueUpdate {
+                                remove_labels: vec![owner_label],
+                                ..Default::default()
+                            },
+                        )
+                        .await;
+                        Err(format!(
+                            "claim_plan: failed to claim plan {plan_id}; ambiguous owner labels: {}",
+                            owners.join(", ")
+                        ))
+                    }
+                    crate::plan::ownership::PlanOwnerMatch::Unowned => Err(format!(
+                        "claim_plan: failed to claim plan {plan_id}; plan remains unowned"
+                    )),
+                }
+            }
+        }
+    }
+
+    /// Public bridge for orchestrator/TUI: project a persisted plan and emit a
+    /// `PlanSnapshotUpdated` without claiming ownership or changing plan state.
+    pub async fn call_inspect_plan(&self, plan_id: &str) -> Result<(), String> {
+        let plan = self.load_or_project_plan(plan_id).await?;
+        let state = plan.lock().await;
+        crate::plan::snapshot::emit_plan_snapshot(self.event_sink.as_deref(), &state);
+        Ok(())
+    }
+
     async fn handle_resume_plan(&self, id: Value, args: Value) -> JsonRpcResponse {
+        self.handle_resume_plan_with(id, args, true).await
+    }
+
+    async fn handle_resume_plan_with(
+        &self,
+        id: Value,
+        args: Value,
+        allow_claim_unowned: bool,
+    ) -> JsonRpcResponse {
         let plan_id = match args.get("plan_id").and_then(|value| value.as_str()) {
             Some(plan_id) => plan_id,
             None => return JsonRpcResponse::invalid_params(id, "resume_plan: missing plan_id"),
@@ -3672,45 +3919,18 @@ impl McpCallbackServer {
             None => return JsonRpcResponse::internal_error(id, "resume_plan requires PM service"),
         };
 
-        let epics = match pm
-            .list_issues(IssueFilter {
-                labels: vec![crate::plan::labels::plan_id(plan_id)],
-                issue_type: Some("epic".to_string()),
-                include_closed: true,
-                limit: Some(10),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(epics) => epics,
+        let epic_summary = match find_plan_epic(pm, plan_id, "resume_plan").await {
+            Ok(epic) => epic,
             Err(error) => {
-                return JsonRpcResponse::internal_error(
-                    id,
-                    format!("resume_plan: failed to find plan: {error}"),
-                )
+                return if error.contains("plan not found") {
+                    JsonRpcResponse::error(id, -32004, error)
+                } else if error.contains("ambiguous plan lookup") {
+                    JsonRpcResponse::error(id, -32009, error)
+                } else {
+                    JsonRpcResponse::internal_error(id, error)
+                }
             }
         };
-        let Some(epic_summary) = epics.first() else {
-            return JsonRpcResponse::error(
-                id,
-                -32004,
-                format!("resume_plan: plan not found: {plan_id}"),
-            );
-        };
-        if epics.len() > 1 {
-            let epic_ids = epics
-                .iter()
-                .map(|epic| epic.id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            return JsonRpcResponse::error(
-                id,
-                -32009,
-                format!(
-                    "resume_plan: ambiguous plan lookup for {plan_id}; multiple epics matched: {epic_ids}"
-                ),
-            );
-        }
         let epic_id = epic_summary.id.clone();
         let epic = match pm.get_issue(&epic_id).await {
             Ok(epic) => epic,
@@ -3760,8 +3980,31 @@ impl McpCallbackServer {
                         )
                     }
                 }
+                let was_pending = epic
+                    .labels
+                    .iter()
+                    .any(|label| label == crate::plan::labels::PLAN_PENDING);
+                if was_pending {
+                    if let Err(error) = apply_issue_update(
+                        pm,
+                        &epic_id,
+                        IssueUpdate {
+                            add_labels: vec![crate::plan::labels::PLAN_COMPLETE.to_string()],
+                            remove_labels: vec![crate::plan::labels::PLAN_PENDING.to_string()],
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    {
+                        return JsonRpcResponse::internal_error(
+                            id,
+                            format!("resume_plan: failed to start plan: {error}"),
+                        );
+                    }
+                }
+                self.fast_forward_reconciler();
                 let result = json!({
-                    "status": "already_owner",
+                    "status": if was_pending { "started" } else { "already_owner" },
                     "plan_id": plan_id,
                     "epic_id": epic_id,
                 });
@@ -3790,6 +4033,13 @@ impl McpCallbackServer {
                 ),
             ),
             crate::plan::ownership::PlanOwnerMatch::Unowned => {
+                if !allow_claim_unowned {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32009,
+                        format!("resume_plan: plan {plan_id} is unowned; claim it before starting"),
+                    );
+                }
                 let _active_plan_claim_guard = self.active_plan_claim_lock.lock().await;
                 match self.current_brain_active_owned_plan(pm, None, None).await {
                     Ok(Some(active)) => {
@@ -3932,7 +4182,10 @@ impl McpCallbackServer {
                 return JsonRpcResponse::invalid_params(id, "force_reclaim_plan: missing plan_id")
             }
         };
-        let confirm = args.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false);
+        let confirm = args
+            .get("confirm")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if !confirm {
             return JsonRpcResponse::invalid_params(
                 id,
@@ -4092,10 +4345,7 @@ impl McpCallbackServer {
             "audit_token": token,
         });
         let text = serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
-        JsonRpcResponse::success(
-            id,
-            json!({ "content": [{ "type": "text", "text": text }] }),
-        )
+        JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
     }
 
     // ─── Graph analysis handlers (bv robot protocol) ───────────────
@@ -4490,6 +4740,15 @@ impl McpCallbackServer {
                 );
             }
         };
+        if let Some(existing_plan_id) = persisted_plan_epic_plan_id(&epic_issue) {
+            return JsonRpcResponse::error(
+                id,
+                -32009,
+                format!(
+                    "execute_epic: epic {epic_id} is already a persisted plan epic for plan {existing_plan_id}; use claim/start/resume plan instead"
+                ),
+            );
+        }
         match crate::plan::ownership::classify_owner(
             &epic_issue.labels,
             self.brain_session_id.as_session_id(),
@@ -8658,6 +8917,53 @@ mod reconciler_fast_forward_tests {
             "replace_task_execution_labels must also filter the plan-id label: {:?}",
             task_update.remove_labels
         );
+    }
+
+    #[test]
+    fn persisted_plan_epic_blocks_execute_epic_relabeling() {
+        let issue = spur_pm::Issue {
+            id: "bd-1".into(),
+            source: spur_pm::PmSource::Beads,
+            title: "Persisted plan epic".into(),
+            body: String::new(),
+            status: "open".into(),
+            labels: vec![
+                crate::plan::labels::plan_id("plan-1"),
+                crate::plan::labels::PLAN_COMPLETE.to_string(),
+            ],
+            assignee: None,
+            url: "beads://bd-1".into(),
+            priority: Some(2),
+            issue_type: Some("epic".into()),
+            blocked_by: Vec::new(),
+            due_at: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        assert_eq!(super::persisted_plan_epic_plan_id(&issue), Some("plan-1"));
+    }
+
+    #[test]
+    fn ordinary_epic_can_still_be_executed() {
+        let issue = spur_pm::Issue {
+            id: "bd-1".into(),
+            source: spur_pm::PmSource::Beads,
+            title: "Product epic".into(),
+            body: String::new(),
+            status: "open".into(),
+            labels: vec![],
+            assignee: None,
+            url: "beads://bd-1".into(),
+            priority: Some(2),
+            issue_type: Some("epic".into()),
+            blocked_by: Vec::new(),
+            due_at: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        assert_eq!(super::persisted_plan_epic_plan_id(&issue), None);
     }
 
     #[tokio::test]

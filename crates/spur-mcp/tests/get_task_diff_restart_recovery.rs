@@ -99,7 +99,10 @@ fn decode_tool_response(response: &Value) -> Value {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0d_4_get_task_diff_works_after_restart_for_latest_attempt() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = init_repo().await;
     run_br(dir.path(), &["init"]).expect("br init");

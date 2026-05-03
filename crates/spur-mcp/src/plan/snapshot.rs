@@ -10,6 +10,7 @@ pub fn build_plan_snapshot(state: &PlanState) -> PlanSnapshot {
     let status = build_plan_status(&state.plan_id, state);
     PlanSnapshot {
         plan_id: state.plan_id.clone(),
+        epic_id: state.epic_id.clone(),
         status: status["status"].as_str().unwrap_or("partial").to_string(),
         progress: status["progress"].as_str().unwrap_or_default().to_string(),
         next_action: status["next_action"]
@@ -450,8 +451,7 @@ mod tests {
         // None so consumers don't render a fictitious owner label.
         let pending = sample_entry("task-1", &[], PlanTaskStatus::Pending);
         let mut state = sample_state(vec![pending]);
-        state.brain_session_id =
-            BrainSessionId::new(SessionId("persisted-plan:plan-1".into()));
+        state.brain_session_id = BrainSessionId::new(SessionId("persisted-plan:plan-1".into()));
         let snapshot = build_plan_snapshot(&state);
         assert!(
             snapshot.owner_brain_session_id.is_none(),

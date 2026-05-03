@@ -84,9 +84,9 @@ fn test_deps(pm: Arc<PmService>) -> WorkerMcpDeps {
         feature_gate: test_feature_gate(),
         funnel: Arc::new(NullSink),
         plan_resolver: Arc::new(NullPlanResolver),
-        reconciler_outcomes: Arc::new(Mutex::new(
-            spur_mcp::plan::outcomes::OutcomeStore::default(),
-        )),
+        reconciler_outcomes: Arc::new(
+            Mutex::new(spur_mcp::plan::outcomes::OutcomeStore::default()),
+        ),
         outcome_store: Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
         repo_root: None,
     }
@@ -116,7 +116,10 @@ async fn call_jsonrpc(
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn update_issue_success_emits_worker_write_audit_sentinel() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let pm = pm_service_fixture(dir.path()).await;
@@ -195,7 +198,10 @@ async fn update_issue_success_emits_worker_write_audit_sentinel() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn read_tool_calls_append_to_buffer() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let pm = pm_service_fixture(dir.path()).await;
@@ -287,7 +293,10 @@ async fn drop_buffer_after_receiver_dropped_does_not_panic() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn update_issue_without_id_arg_does_not_emit_audit() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let pm = pm_service_fixture(dir.path()).await;

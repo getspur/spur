@@ -7,11 +7,9 @@
 //! render path is compact, not full.
 
 use ratatui::{backend::TestBackend, layout::Rect, Terminal};
-use spur_tui::components::react_trace::{
-    ActStatus, ReactTrace, TraceEntry, TraceKind,
-};
 use spur_acp::adapter::{ObservePayload, ToolFamily, ToolInputDisplay};
 use spur_acp::AgentKind;
+use spur_tui::components::react_trace::{ActStatus, ReactTrace, TraceEntry, TraceKind};
 use unicode_width::UnicodeWidthStr;
 
 const W: u16 = 100;
@@ -148,17 +146,72 @@ fn dashboard_compact_user_repro_dynamic() {
     let mut total_desync = 0;
     let steps: Vec<(&str, Box<dyn Fn(&mut ReactTrace)>)> = vec![
         ("init compact (collapsed)", Box::new(|_t| {})),
-        ("Ctrl+O toggle (expand)", Box::new(|t| { t.toggle_observe_collapsed(); })),
-        ("scroll_up_by(2)", Box::new(|t| { t.scroll_up_by(2); })),
-        ("scroll_up_by(3)", Box::new(|t| { t.scroll_up_by(3); })),
-        ("scroll_up_by(5)", Box::new(|t| { t.scroll_up_by(5); })),
-        ("scroll_down_by(2)", Box::new(|t| { t.scroll_down_by(2); })),
-        ("Ctrl+O collapse", Box::new(|t| { t.toggle_observe_collapsed(); })),
-        ("scroll_up_by(3)", Box::new(|t| { t.scroll_up_by(3); })),
-        ("Ctrl+O re-expand", Box::new(|t| { t.toggle_observe_collapsed(); })),
-        ("scroll_up_by(10)", Box::new(|t| { t.scroll_up_by(10); })),
-        ("scroll_to_bottom", Box::new(|t| { t.scroll_to_bottom(); })),
-        ("scroll_up_by(7)", Box::new(|t| { t.scroll_up_by(7); })),
+        (
+            "Ctrl+O toggle (expand)",
+            Box::new(|t| {
+                t.toggle_observe_collapsed();
+            }),
+        ),
+        (
+            "scroll_up_by(2)",
+            Box::new(|t| {
+                t.scroll_up_by(2);
+            }),
+        ),
+        (
+            "scroll_up_by(3)",
+            Box::new(|t| {
+                t.scroll_up_by(3);
+            }),
+        ),
+        (
+            "scroll_up_by(5)",
+            Box::new(|t| {
+                t.scroll_up_by(5);
+            }),
+        ),
+        (
+            "scroll_down_by(2)",
+            Box::new(|t| {
+                t.scroll_down_by(2);
+            }),
+        ),
+        (
+            "Ctrl+O collapse",
+            Box::new(|t| {
+                t.toggle_observe_collapsed();
+            }),
+        ),
+        (
+            "scroll_up_by(3)",
+            Box::new(|t| {
+                t.scroll_up_by(3);
+            }),
+        ),
+        (
+            "Ctrl+O re-expand",
+            Box::new(|t| {
+                t.toggle_observe_collapsed();
+            }),
+        ),
+        (
+            "scroll_up_by(10)",
+            Box::new(|t| {
+                t.scroll_up_by(10);
+            }),
+        ),
+        (
+            "scroll_to_bottom",
+            Box::new(|t| {
+                t.scroll_to_bottom();
+            }),
+        ),
+        (
+            "scroll_up_by(7)",
+            Box::new(|t| {
+                t.scroll_up_by(7);
+            }),
+        ),
     ];
 
     for (i, (label, mutate)) in steps.iter().enumerate() {
@@ -169,10 +222,7 @@ fn dashboard_compact_user_repro_dynamic() {
         let terminal_view = sim.snapshot();
         let diffs = diff_grids(&intended, &terminal_view);
         if !diffs.is_empty() {
-            eprintln!(
-                "  step {} '{}': DESYNC on {} rows",
-                i, label, diffs.len()
-            );
+            eprintln!("  step {} '{}': DESYNC on {} rows", i, label, diffs.len());
             for (y, a, b) in diffs.iter().take(5) {
                 eprintln!("    row {} INTENDED: {}", y, a);
                 eprintln!("    row {} TERMINAL: {}", y, b);
@@ -224,7 +274,8 @@ fn dashboard_compact_with_cjk_and_control_chars() {
                     "café résumé naïve façade",
                     "👨‍👩‍👧‍👦 family emoji + 👋🏽 wave with skin tone",
                     "🇯🇵 🇺🇸 🇨🇳 flags",
-                ].join("\n"),
+                ]
+                .join("\n"),
                 stderr: String::new(),
             })),
         },
@@ -241,12 +292,42 @@ fn dashboard_compact_with_cjk_and_control_chars() {
 
     let actions: Vec<(&str, Box<dyn Fn(&mut ReactTrace)>)> = vec![
         ("init", Box::new(|_t| {})),
-        ("expand", Box::new(|t| { t.toggle_observe_collapsed(); })),
-        ("scroll up 3", Box::new(|t| { t.scroll_up_by(3); })),
-        ("scroll up 5", Box::new(|t| { t.scroll_up_by(5); })),
-        ("collapse", Box::new(|t| { t.toggle_observe_collapsed(); })),
-        ("re-expand", Box::new(|t| { t.toggle_observe_collapsed(); })),
-        ("scroll down 4", Box::new(|t| { t.scroll_down_by(4); })),
+        (
+            "expand",
+            Box::new(|t| {
+                t.toggle_observe_collapsed();
+            }),
+        ),
+        (
+            "scroll up 3",
+            Box::new(|t| {
+                t.scroll_up_by(3);
+            }),
+        ),
+        (
+            "scroll up 5",
+            Box::new(|t| {
+                t.scroll_up_by(5);
+            }),
+        ),
+        (
+            "collapse",
+            Box::new(|t| {
+                t.toggle_observe_collapsed();
+            }),
+        ),
+        (
+            "re-expand",
+            Box::new(|t| {
+                t.toggle_observe_collapsed();
+            }),
+        ),
+        (
+            "scroll down 4",
+            Box::new(|t| {
+                t.scroll_down_by(4);
+            }),
+        ),
     ];
 
     for (i, (label, mutate)) in actions.iter().enumerate() {
@@ -284,9 +365,9 @@ fn dashboard_compact_with_cjk_and_control_chars() {
 /// stream pane, including any wrapper / context.
 #[test]
 fn dashboard_compact_long_acp_stream_simulation() {
-    use std::collections::HashMap;
     use spur_tui::components::image_cache::ImageCache;
     use spur_tui::components::react_trace::RenderContext;
+    use std::collections::HashMap;
 
     // Use SessionDetailView's render path via render_with_ctx, since
     // dashboard MAY actually use that for its expanded session preview.
@@ -296,8 +377,14 @@ fn dashboard_compact_long_acp_stream_simulation() {
 
     // Long realistic session
     for round in 0..5 {
-        trace.append_user_message(&format!("round {} input", round), format!("10:{:02}", round * 2));
-        trace.append_think(&format!("thinking round {}", round), format!("10:{:02}", round * 2));
+        trace.append_user_message(
+            &format!("round {} input", round),
+            format!("10:{:02}", round * 2),
+        );
+        trace.append_think(
+            &format!("thinking round {}", round),
+            format!("10:{:02}", round * 2),
+        );
         trace.push(TraceEntry {
             kind: TraceKind::Act {
                 tool: "shell".into(),
@@ -320,7 +407,11 @@ fn dashboard_compact_long_acp_stream_simulation() {
             timestamp: format!("10:{:02}", round * 2 + 1),
             markdown: None,
         });
-        trace.append_message(&format!("response for round {}", round), "claude", format!("10:{:02}", round * 2 + 1));
+        trace.append_message(
+            &format!("response for round {}", round),
+            "claude",
+            format!("10:{:02}", round * 2 + 1),
+        );
     }
 
     // Test with BOTH render paths
@@ -332,15 +423,60 @@ fn dashboard_compact_long_acp_stream_simulation() {
 
     let actions: Vec<(&str, Box<dyn Fn(&mut ReactTrace)>)> = vec![
         ("init", Box::new(|_t| {})),
-        ("expand", Box::new(|t| { t.toggle_observe_collapsed(); })),
-        ("scroll up 3", Box::new(|t| { t.scroll_up_by(3); })),
-        ("scroll up 5", Box::new(|t| { t.scroll_up_by(5); })),
-        ("scroll up 10", Box::new(|t| { t.scroll_up_by(10); })),
-        ("scroll down 5", Box::new(|t| { t.scroll_down_by(5); })),
-        ("collapse", Box::new(|t| { t.toggle_observe_collapsed(); })),
-        ("scroll up 8", Box::new(|t| { t.scroll_up_by(8); })),
-        ("re-expand", Box::new(|t| { t.toggle_observe_collapsed(); })),
-        ("scroll up 15", Box::new(|t| { t.scroll_up_by(15); })),
+        (
+            "expand",
+            Box::new(|t| {
+                t.toggle_observe_collapsed();
+            }),
+        ),
+        (
+            "scroll up 3",
+            Box::new(|t| {
+                t.scroll_up_by(3);
+            }),
+        ),
+        (
+            "scroll up 5",
+            Box::new(|t| {
+                t.scroll_up_by(5);
+            }),
+        ),
+        (
+            "scroll up 10",
+            Box::new(|t| {
+                t.scroll_up_by(10);
+            }),
+        ),
+        (
+            "scroll down 5",
+            Box::new(|t| {
+                t.scroll_down_by(5);
+            }),
+        ),
+        (
+            "collapse",
+            Box::new(|t| {
+                t.toggle_observe_collapsed();
+            }),
+        ),
+        (
+            "scroll up 8",
+            Box::new(|t| {
+                t.scroll_up_by(8);
+            }),
+        ),
+        (
+            "re-expand",
+            Box::new(|t| {
+                t.toggle_observe_collapsed();
+            }),
+        ),
+        (
+            "scroll up 15",
+            Box::new(|t| {
+                t.scroll_up_by(15);
+            }),
+        ),
     ];
 
     for (i, (label, mutate)) in actions.iter().enumerate() {
@@ -376,10 +512,30 @@ fn dashboard_compact_long_acp_stream_simulation() {
 
         let actions2: Vec<(&str, Box<dyn Fn(&mut ReactTrace)>)> = vec![
             ("init full", Box::new(|_t| {})),
-            ("scroll up 5", Box::new(|t| { t.scroll_up_by(5); })),
-            ("collapse", Box::new(|t| { t.toggle_observe_collapsed(); })),
-            ("re-expand", Box::new(|t| { t.toggle_observe_collapsed(); })),
-            ("scroll up 5", Box::new(|t| { t.scroll_up_by(5); })),
+            (
+                "scroll up 5",
+                Box::new(|t| {
+                    t.scroll_up_by(5);
+                }),
+            ),
+            (
+                "collapse",
+                Box::new(|t| {
+                    t.toggle_observe_collapsed();
+                }),
+            ),
+            (
+                "re-expand",
+                Box::new(|t| {
+                    t.toggle_observe_collapsed();
+                }),
+            ),
+            (
+                "scroll up 5",
+                Box::new(|t| {
+                    t.scroll_up_by(5);
+                }),
+            ),
         ];
 
         for (i, (label, mutate)) in actions2.iter().enumerate() {

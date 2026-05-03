@@ -180,7 +180,10 @@ impl ReconcilerAutomation for RecordingAutomation {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0e_2_auto_merge_pr_is_opt_in() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -399,7 +402,10 @@ fn seed_ready_task(repo: &Path, plan_id: &str) -> (String, String) {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0e_1_no_persisted_direct_dispatch() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
@@ -551,7 +557,10 @@ async fn t_v0e_1_no_persisted_direct_dispatch() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0e_3_fast_forward_matches_polling() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let plan_id = "P-wake";
 

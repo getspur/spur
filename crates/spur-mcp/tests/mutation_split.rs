@@ -82,7 +82,10 @@ fn mutation_batch(
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn split_task_happy_path_rewires_downstream_and_commits() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");

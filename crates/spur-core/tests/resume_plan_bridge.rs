@@ -72,8 +72,7 @@ fn build_orchestrator() -> (
     tokio::spawn(async move {
         let _ = orch
             .run_interactive(
-                input_rx,
-                None, // brain_override
+                input_rx, None, // brain_override
                 None, // permission_tx
                 overflow,
             )

@@ -236,7 +236,10 @@ impl McpEventSink for CaptureSink {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn tick_once_does_not_dispatch_partial_plan_after_child_create_failure() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -538,7 +541,10 @@ async fn tick_once_does_not_reclaim_expired_lease_owned_by_another_brain() {
 
 #[tokio::test]
 async fn tick_once_dispatches_ready_task_with_approved_dep_overlay() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     init_git_repo(dir.path());
@@ -716,7 +722,10 @@ async fn tick_once_dispatches_ready_task_with_approved_dep_overlay() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn overlay_conflict_routes_to_blocked_on_setup_conflict() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     init_git_repo(dir.path());
@@ -878,7 +887,10 @@ async fn overlay_conflict_routes_to_blocked_on_setup_conflict() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn observe_ready_returns_unblocked_task_only() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -982,7 +994,10 @@ async fn observe_ready_returns_unblocked_task_only() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn observe_ready_summaries_preserve_plan_labels() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -1042,7 +1057,10 @@ async fn observe_ready_summaries_preserve_plan_labels() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn pending_label_on_closed_epic_blocks_dispatch() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -1114,7 +1132,10 @@ async fn pending_label_on_closed_epic_blocks_dispatch() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn plan_enumeration_finds_tasks_buried_under_backlog() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -1209,7 +1230,10 @@ async fn plan_enumeration_finds_tasks_buried_under_backlog() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn observe_ready_via_br_returns_ready_tasks() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -1314,7 +1338,10 @@ async fn observe_ready_via_br_returns_ready_tasks() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn observe_ready_via_br_suppresses_tasks_for_closed_complete_epic() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -1386,7 +1413,10 @@ async fn observe_ready_via_br_suppresses_tasks_for_closed_complete_epic() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn epic_closes_when_scoped_children_terminal() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -1501,7 +1531,10 @@ async fn epic_closes_when_scoped_children_terminal() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn all_approved_epic_emits_plan_ready_to_merge() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -1605,7 +1638,10 @@ async fn all_approved_epic_emits_plan_ready_to_merge() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn tick_once_persists_dispatch_before_queue_send() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -1673,7 +1709,10 @@ async fn tick_once_persists_dispatch_before_queue_send() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn tick_once_persists_failed_completion_when_respond_to_drops() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -1800,7 +1839,10 @@ async fn tick_once_persists_failed_completion_when_respond_to_drops() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn tick_once_reclaims_expired_lease_dispatch() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -1937,7 +1979,10 @@ async fn tick_once_reclaims_expired_lease_dispatch() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn worker_success_after_orphan_clear_is_superseded() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -2041,7 +2086,10 @@ async fn worker_success_after_orphan_clear_is_superseded() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn tick_once_does_not_reclaim_live_lease() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -2125,7 +2173,10 @@ async fn tick_once_does_not_reclaim_live_lease() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn tick_once_clears_dispatch_label_when_send_fails() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -2197,7 +2248,10 @@ async fn tick_once_clears_dispatch_label_when_send_fails() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn tick_once_skips_broken_plan_and_dispatches_other_ready_work() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -2284,7 +2338,10 @@ async fn tick_once_skips_broken_plan_and_dispatches_other_ready_work() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn resolve_dispatch_orphan_emits_breadcrumb_and_clears_label() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -2346,7 +2403,10 @@ async fn resolve_dispatch_orphan_emits_breadcrumb_and_clears_label() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn resolve_dispatch_orphan_preserves_legacy_ready_for_review_marker() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -2397,7 +2457,10 @@ async fn resolve_dispatch_orphan_preserves_legacy_ready_for_review_marker() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn execute_epic_persists_execution_scope_labels_on_epic_and_tasks() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -2526,7 +2589,10 @@ async fn execute_epic_persists_execution_scope_labels_on_epic_and_tasks() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn execute_epic_reprojects_persisted_non_terminal_state_before_starting_fresh_run() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -2633,7 +2699,10 @@ async fn execute_epic_reprojects_persisted_non_terminal_state_before_starting_fr
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn execute_epic_preserves_pre_existing_agent_label_on_child_task() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -2710,7 +2779,10 @@ async fn execute_epic_preserves_pre_existing_agent_label_on_child_task() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn execute_epic_rolls_back_epic_scope_when_task_scope_persist_fails() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -2789,7 +2861,10 @@ async fn execute_epic_rolls_back_epic_scope_when_task_scope_persist_fails() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn submit_plan_default_notify_path_dispatches_ready_task() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
     skip_if_no_loopback!("submit_plan_default_notify_path_dispatches_ready_task");
 
     let dir = TempDir::new().expect("tempdir");
@@ -2850,7 +2925,10 @@ async fn submit_plan_default_notify_path_dispatches_ready_task() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn execute_epic_default_notify_path_dispatches_ready_task() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
     skip_if_no_loopback!("execute_epic_default_notify_path_dispatches_ready_task");
 
     let dir = TempDir::new().expect("tempdir");
@@ -2950,7 +3028,10 @@ async fn execute_epic_default_notify_path_dispatches_ready_task() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn execute_epic_shutdown_abort_does_not_emit_plan_snapshot() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -3044,7 +3125,10 @@ async fn execute_epic_shutdown_abort_does_not_emit_plan_snapshot() {
 async fn reconciler_cancels_during_tick() {
     use std::time::Duration;
 
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -3109,7 +3193,10 @@ async fn reconciler_cancels_during_tick() {
 async fn hybrid_fast_forward_matches_polling_projection() {
     use std::time::Duration;
 
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);

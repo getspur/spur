@@ -1095,8 +1095,14 @@ fn tui_input_to_interactive(input: spur_tui::UserInput) -> spur_core::Interactiv
         }
         spur_tui::UserInput::RefreshIssues => spur_core::InteractiveInput::RefreshIssues,
         spur_tui::UserInput::RefreshPlans => spur_core::InteractiveInput::RefreshPlans,
+        spur_tui::UserInput::ClaimPlan { plan_id } => {
+            spur_core::InteractiveInput::ClaimPlan { plan_id }
+        }
         spur_tui::UserInput::ResumePlan { plan_id } => {
             spur_core::InteractiveInput::ResumePlan { plan_id }
+        }
+        spur_tui::UserInput::InspectPlan { plan_id } => {
+            spur_core::InteractiveInput::InspectPlan { plan_id }
         }
         spur_tui::UserInput::GetIssueDetail { id } => {
             spur_core::InteractiveInput::GetIssueDetail { id }

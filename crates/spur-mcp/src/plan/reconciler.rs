@@ -807,8 +807,11 @@ impl Reconciler {
             let task_text = if task.history.is_empty() {
                 task.spec.task.clone()
             } else {
-                let current_feedback =
-                    task.history.last().map(|r| r.feedback.as_str()).unwrap_or("");
+                let current_feedback = task
+                    .history
+                    .last()
+                    .map(|r| r.feedback.as_str())
+                    .unwrap_or("");
                 crate::plan::build_enriched_task(
                     &task.spec.task,
                     &task.history,

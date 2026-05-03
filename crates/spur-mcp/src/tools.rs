@@ -88,8 +88,12 @@ impl<'de> serde::Deserialize<'de> for BaseSpec {
         #[serde(tag = "kind", rename_all = "snake_case")]
         enum Inner {
             RepoMain,
-            Branch { name: String },
-            Commit { oid: String },
+            Branch {
+                name: String,
+            },
+            Commit {
+                oid: String,
+            },
             WithOverlay {
                 base: BaseTarget,
                 overlays: Vec<OverlayCommit>,
@@ -268,12 +272,7 @@ mod base_spec_tests {
         let parsed: BaseSpec = serde_json::from_value(v).unwrap();
         match parsed {
             BaseSpec::WithOverlay { base, overlays } => {
-                assert_eq!(
-                    base,
-                    BaseTarget::Branch {
-                        name: "x".into()
-                    }
-                );
+                assert_eq!(base, BaseTarget::Branch { name: "x".into() });
                 assert!(overlays.is_empty());
             }
             other => panic!("expected WithOverlay, got {:?}", other),
@@ -291,12 +290,7 @@ mod base_spec_tests {
         let parsed: BaseSpec = serde_json::from_value(v).unwrap();
         match parsed {
             BaseSpec::WithOverlay { base, overlays } => {
-                assert_eq!(
-                    base,
-                    BaseTarget::Branch {
-                        name: "x".into()
-                    }
-                );
+                assert_eq!(base, BaseTarget::Branch { name: "x".into() });
                 assert!(overlays.is_empty());
             }
             other => panic!("expected WithOverlay, got {:?}", other),
@@ -1202,12 +1196,11 @@ mod worker_tools_subset_tests {
 
     #[test]
     fn worker_tools_list_contains_exactly_the_curated_set() {
-        let actual: Vec<String> = worker_tools_list()
+        let actual: Vec<String> = worker_tools_list().iter().map(|t| t.name.clone()).collect();
+        let expected: Vec<String> = EXPECTED_WORKER_TOOLS
             .iter()
-            .map(|t| t.name.clone())
+            .map(|s| s.to_string())
             .collect();
-        let expected: Vec<String> =
-            EXPECTED_WORKER_TOOLS.iter().map(|s| s.to_string()).collect();
         assert_eq!(
             actual, expected,
             "worker_tools_list drift; update EXPECTED_WORKER_TOOLS in same commit if intentional",
@@ -1216,10 +1209,7 @@ mod worker_tools_subset_tests {
 
     #[test]
     fn worker_tools_list_excludes_brain_only_tools() {
-        let actual: Vec<String> = worker_tools_list()
-            .iter()
-            .map(|t| t.name.clone())
-            .collect();
+        let actual: Vec<String> = worker_tools_list().iter().map(|t| t.name.clone()).collect();
         let forbidden = [
             "delegate_to_worker",
             "delegate_parallel",

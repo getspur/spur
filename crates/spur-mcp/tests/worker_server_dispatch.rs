@@ -151,9 +151,9 @@ fn test_deps_with_funnel(pm: Arc<PmService>, funnel: Arc<dyn McpEventSink>) -> W
         feature_gate: test_feature_gate(),
         funnel,
         plan_resolver: Arc::new(NullPlanResolver),
-        reconciler_outcomes: Arc::new(Mutex::new(
-            spur_mcp::plan::outcomes::OutcomeStore::default(),
-        )),
+        reconciler_outcomes: Arc::new(
+            Mutex::new(spur_mcp::plan::outcomes::OutcomeStore::default()),
+        ),
         outcome_store: Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
         repo_root: None,
     }
@@ -212,7 +212,10 @@ async fn call_jsonrpc(
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn tools_list_returns_8_curated_tools() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
     let (_dir, server) = test_server_with_real_pm().await;
     let token = server.issue_token("d-1", Duration::from_secs(60));
     let body = call_jsonrpc(&server, &token, "tools/list", serde_json::json!({})).await;
@@ -235,7 +238,10 @@ async fn tools_list_returns_8_curated_tools() {
         "report_signal",
         "report_progress",
     ] {
-        assert!(names.contains(&expected), "missing curated tool: {expected}");
+        assert!(
+            names.contains(&expected),
+            "missing curated tool: {expected}"
+        );
     }
     server.shutdown(Duration::from_secs(5)).await;
 }
@@ -245,7 +251,10 @@ async fn tools_list_returns_8_curated_tools() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn dispatcher_drop_emits_summary_event_with_correct_counts() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let pm = pm_service_fixture(dir.path()).await;
@@ -334,11 +343,17 @@ async fn dispatcher_drop_emits_summary_event_with_correct_counts() {
     {
         assert_eq!(delegation_id, "d-summary");
         assert_eq!(brain_session_id, "session-summary");
-        assert_eq!(*tool_calls, 2, "expected 2 tool calls (get_issue + update_issue)");
+        assert_eq!(
+            *tool_calls, 2,
+            "expected 2 tool calls (get_issue + update_issue)"
+        );
         assert_eq!(*audits_emitted, 1, "expected 1 audit (update_issue)");
         assert_eq!(outcome, "success");
     } else {
-        panic!("expected WorkerMcpDelegationSummary, got: {:?}", summaries[0]);
+        panic!(
+            "expected WorkerMcpDelegationSummary, got: {:?}",
+            summaries[0]
+        );
     }
 
     server.shutdown(Duration::from_secs(5)).await;
@@ -347,7 +362,10 @@ async fn dispatcher_drop_emits_summary_event_with_correct_counts() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn report_progress_disabled_returns_success_without_calling_handler() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let pm = pm_service_fixture(dir.path()).await;
@@ -382,7 +400,10 @@ async fn report_progress_disabled_returns_success_without_calling_handler() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn report_progress_full_bus_silently_drops_and_returns_success() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let pm = pm_service_fixture(dir.path()).await;
@@ -417,8 +438,13 @@ async fn report_progress_full_bus_silently_drops_and_returns_success() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn report_progress_enabled_with_capacity_emits_event() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
-    let sink = Arc::new(CountingSink { count: AtomicUsize::new(0) });
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
+    let sink = Arc::new(CountingSink {
+        count: AtomicUsize::new(0),
+    });
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let pm = pm_service_fixture(dir.path()).await;
@@ -454,7 +480,10 @@ async fn report_progress_enabled_with_capacity_emits_event() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn tools_call_get_issue_routes_to_handler() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
     let (_dir, server, issue_id) = test_server_with_issue().await;
     let token = server.issue_token("d-1", Duration::from_secs(60));
     let body = call_jsonrpc(
@@ -476,7 +505,10 @@ async fn tools_call_get_issue_routes_to_handler() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn tools_call_unknown_tool_returns_method_not_found() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
     let (_dir, server) = test_server_with_real_pm().await;
     let token = server.issue_token("d-1", Duration::from_secs(60));
     let body = call_jsonrpc(
@@ -497,7 +529,10 @@ async fn tools_call_unknown_tool_returns_method_not_found() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn json_rpc_batched_request_rejected() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
     let (_dir, server) = test_server_with_real_pm().await;
     let token = server.issue_token("d-1", Duration::from_secs(60));
     let url = format!("{}?token={}", server.url(), token);

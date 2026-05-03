@@ -183,6 +183,8 @@ pub struct IssueSummaryEvent {
     pub source: String,
     pub title: String,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -293,6 +295,8 @@ pub struct GraphEdgeEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PlanSnapshot {
     pub plan_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epic_id: Option<String>,
     pub status: String,
     pub progress: String,
     pub next_action: String,

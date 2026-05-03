@@ -254,6 +254,27 @@ impl BeadsAdapter {
         Ok(adapter)
     }
 
+    async fn issue_details(&self, id: &str) -> anyhow::Result<BrIssueDetails> {
+        let output = self.run_br(vec!["show".into(), id.to_string()]).await?;
+        let mut items: Vec<BrIssueDetails> = serde_json::from_str(&output)
+            .map_err(|e| anyhow::anyhow!("Failed to parse `br show` output: {e}\nRaw: {output}"))?;
+        items
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("`br show {id}` returned empty result"))
+    }
+
+    pub(crate) async fn plan_id_label_for_epic(&self, id: &str) -> anyhow::Result<Option<String>> {
+        let issue = self.issue_details(id).await?;
+        if !issue.issue_type.eq_ignore_ascii_case("epic") {
+            return Ok(None);
+        }
+
+        Ok(issue
+            .labels
+            .into_iter()
+            .find(|label| label.starts_with("spur:plan-id:")))
+    }
+
     /// Run `br` once, returning stdout or a classified error.
     async fn run_br_once(&self, args: &[String]) -> Result<String, BrCallError> {
         let mut cmd = Command::new("br");
@@ -532,13 +553,7 @@ impl BeadsAdapter {
 #[async_trait]
 impl IssueTracker for BeadsAdapter {
     async fn get_issue(&self, id: &str) -> anyhow::Result<Issue> {
-        let output = self.run_br(vec!["show".into(), id.to_string()]).await?;
-        let mut items: Vec<BrIssueDetails> = serde_json::from_str(&output)
-            .map_err(|e| anyhow::anyhow!("Failed to parse `br show` output: {e}\nRaw: {output}"))?;
-        let details = items
-            .pop()
-            .ok_or_else(|| anyhow::anyhow!("`br show {id}` returned empty result"))?;
-        Ok(Issue::from(details))
+        Ok(Issue::from(self.issue_details(id).await?))
     }
 
     async fn list_issues(&self, filter: IssueFilter) -> anyhow::Result<Vec<IssueSummary>> {

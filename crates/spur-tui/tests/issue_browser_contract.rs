@@ -33,6 +33,7 @@ fn sample_summary(id: &str, title: &str, status: &str) -> IssueSummaryEvent {
         source: "github".into(),
         title: title.into(),
         status: status.into(),
+        labels: Vec::new(),
         priority: None,
         issue_type: None,
         assignee: None,

@@ -8,7 +8,7 @@ use spur_acp::{
     PlanSummaryCountsEvent, PlanSummaryEvent, SessionId, SpurEvent, SpurEventBody,
 };
 use spur_core::{ExecutorLineage, PlanProjectionStore, SessionSynopsisProjection};
-use spur_tui::action::{Action, ViewId};
+use spur_tui::action::Action;
 use spur_tui::app::BrainStatus;
 use spur_tui::views::plan_browser::PlanBrowserView;
 use spur_tui::views::{View, ViewContext};
@@ -52,6 +52,7 @@ fn plan_store_with_current(plan_id: &str) -> PlanProjectionStore {
         session_id: SessionId("brain-1".into()),
         snapshot: Box::new(PlanSnapshot {
             plan_id: plan_id.into(),
+            epic_id: None,
             status: "running".into(),
             progress: "2/7 done".into(),
             next_action: "review next task".into(),
@@ -199,7 +200,7 @@ fn renders_empty_state_and_empty_current_sprint_slot() {
 }
 
 #[test]
-fn blocked_resume_when_current_brain_already_has_active_mine_plan() {
+fn blocked_claim_when_current_brain_already_has_active_mine_plan() {
     let mut view = PlanBrowserView::new(SessionId("brain-1".into()));
     let lineage = ExecutorLineage::new();
     let plans = plan_store_with_current("plan-a1");
@@ -207,7 +208,7 @@ fn blocked_resume_when_current_brain_already_has_active_mine_plan() {
     view.handle_spur_event(&loaded_event(), &ctx);
 
     view.handle_key(key(KeyCode::Char('j')), &ctx);
-    let action = view.handle_key(key(KeyCode::Char('R')), &ctx);
+    let action = view.handle_key(key(KeyCode::Char('c')), &ctx);
 
     match action {
         Some(Action::FlashHint { message }) => {
@@ -230,14 +231,17 @@ fn enter_on_active_mine_plan_opens_current_session_sprint() {
     assert!(
         matches!(
             action,
-            Some(Action::NavigateTo(ViewId::PlanInspector(SessionId(ref id)))) if id == "brain-1"
+            Some(Action::InspectPlan {
+                session_id: SessionId(ref id),
+                ref plan_id
+            }) if id == "brain-1" && plan_id == "plan-a1"
         ),
-        "expected PlanInspector navigation, got {action:?}"
+        "expected pinned PlanInspector navigation, got {action:?}"
     );
 }
 
 #[test]
-fn enter_on_persisted_mine_without_projection_opens_current_session_sprint() {
+fn enter_on_persisted_mine_without_projection_inspects_plan() {
     let mut view = PlanBrowserView::new(SessionId("brain-1".into()));
     let lineage = ExecutorLineage::new();
     let plans = PlanProjectionStore::default();
@@ -249,14 +253,17 @@ fn enter_on_persisted_mine_without_projection_opens_current_session_sprint() {
     assert!(
         matches!(
             action,
-            Some(Action::NavigateTo(ViewId::PlanInspector(SessionId(ref id)))) if id == "brain-1"
+            Some(Action::InspectPlan {
+                session_id: SessionId(ref id),
+                ref plan_id
+            }) if id == "brain-1" && plan_id == "plan-a1"
         ),
-        "expected PlanInspector navigation from persisted Mine row, got {action:?}"
+        "expected read-only InspectPlan from persisted Mine row, got {action:?}"
     );
 }
 
 #[test]
-fn persisted_mine_row_blocks_resume_even_without_projection() {
+fn start_on_unowned_plan_requires_claim_even_without_projection() {
     let mut view = PlanBrowserView::new(SessionId("brain-1".into()));
     let lineage = ExecutorLineage::new();
     let plans = PlanProjectionStore::default();
@@ -264,11 +271,11 @@ fn persisted_mine_row_blocks_resume_even_without_projection() {
     view.handle_spur_event(&loaded_event(), &ctx);
 
     view.handle_key(key(KeyCode::Char('j')), &ctx);
-    let action = view.handle_key(key(KeyCode::Char('R')), &ctx);
+    let action = view.handle_key(key(KeyCode::Char('s')), &ctx);
 
     match action {
         Some(Action::FlashHint { message }) => {
-            assert!(message.contains("already owns active sprint"), "{message}");
+            assert!(message.contains("press c to claim first"), "{message}");
         }
         other => panic!("expected blocked FlashHint, got {other:?}"),
     }

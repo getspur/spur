@@ -8,12 +8,12 @@
 #![cfg(feature = "markdown")]
 
 use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+use spur_acp::adapter::{ObservePayload, ToolFamily, ToolInputDisplay};
+use spur_acp::AgentKind;
 use spur_tui::components::image_cache::ImageCache;
 use spur_tui::components::react_trace::{
     ActStatus, ReactTrace, RenderContext, TraceEntry, TraceKind,
 };
-use spur_acp::adapter::{ObservePayload, ToolFamily, ToolInputDisplay};
-use spur_acp::AgentKind;
 use std::collections::HashMap;
 
 const W: u16 = 100;
@@ -60,7 +60,10 @@ fn build_trace_with_tools() -> ReactTrace {
             tool_call_id: None,
             status: ActStatus::Completed(Some(ObservePayload::FileRead {
                 path: Some("src/main.rs".into()),
-                content: (0..25).map(|i| format!("fn line_{}() {{ /* body */ }}", i)).collect::<Vec<_>>().join("\n"),
+                content: (0..25)
+                    .map(|i| format!("fn line_{}() {{ /* body */ }}", i))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
                 truncated: false,
             })),
         },
@@ -116,7 +119,7 @@ fn incremental_rebuild_matches_full_rebuild() {
     let mut cache_b = ImageCache::new();
 
     trace_b.toggle_observe_collapsed(); // start as expanded directly
-    // Force the same anchor as trace_a (Following → scroll up by 8 rows from bottom)
+                                        // Force the same anchor as trace_a (Following → scroll up by 8 rows from bottom)
     let (_, _) = render_and_capture(&mut trace_b, &mut term_b, &mut cache_b); // populates last_visible_height etc
     trace_b.scroll_up_by(8);
     let (snap_b, buf_b) = render_and_capture(&mut trace_b, &mut term_b, &mut cache_b);
@@ -139,7 +142,12 @@ fn incremental_rebuild_matches_full_rebuild() {
             let a_style = buf_a[(x, y)].style();
             let b_style = buf_b[(x, y)].style();
             if a_sym != b_sym || a_style != b_style {
-                diffs.push((y as usize, x as usize, format!("{}|{:?}", a_sym, a_style), format!("{}|{:?}", b_sym, b_style)));
+                diffs.push((
+                    y as usize,
+                    x as usize,
+                    format!("{}|{:?}", a_sym, a_style),
+                    format!("{}|{:?}", b_sym, b_style),
+                ));
             }
         }
     }

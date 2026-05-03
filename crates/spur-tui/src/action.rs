@@ -185,8 +185,21 @@ pub enum Action {
     RefreshIssues,
     /// Refresh persisted plan summaries from the PM backend.
     RefreshPlans,
+    /// Claim a persisted plan for the current brain session without starting execution.
+    ClaimPlan {
+        plan_id: String,
+    },
     /// Resume a persisted plan.
     ResumePlan {
+        plan_id: String,
+    },
+    /// Open a persisted implementation-plan snapshot by plan id.
+    InspectPlan {
+        session_id: SessionId,
+        plan_id: String,
+    },
+    /// Navigate to Sprints and focus a persisted implementation plan.
+    OpenPlanInBrowser {
         plan_id: String,
     },
     /// Fetch the dependency subgraph for an issue from the PM backend.

@@ -138,7 +138,10 @@ async fn add_labels_individually(pm: &spur_pm::PmService, issue_id: &str, labels
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn plan_audit_coverage_all_four_sentinels() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
@@ -344,7 +347,10 @@ async fn plan_audit_coverage_all_four_sentinels() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn epic_completion_audit_round_trips_through_collect_sentinels() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
@@ -393,7 +399,10 @@ async fn epic_completion_audit_round_trips_through_collect_sentinels() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn dispatch_intent_includes_lease_label() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
@@ -450,7 +459,10 @@ async fn dispatch_intent_includes_lease_label() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn completion_success_writes_ready_for_review_and_completion_audit() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
@@ -505,7 +517,10 @@ async fn completion_success_writes_ready_for_review_and_completion_audit() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn completion_failed_closes_issue_and_emits_completion_audit() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
@@ -578,7 +593,10 @@ async fn completion_failed_closes_issue_and_emits_completion_audit() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn completion_cancelled_closes_issue_and_emits_completion_audit() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
@@ -653,7 +671,10 @@ async fn completion_cancelled_closes_issue_and_emits_completion_audit() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn reject_closes_issue_and_adds_review_rejected_label() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
@@ -790,7 +811,10 @@ async fn reject_closes_issue_and_adds_review_rejected_label() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn request_changes_leaves_issue_open_and_not_review_ready() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
@@ -881,7 +905,10 @@ async fn request_changes_leaves_issue_open_and_not_review_ready() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn request_changes_does_not_emit_dispatch_audit() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
@@ -967,7 +994,10 @@ async fn request_changes_does_not_emit_dispatch_audit() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn approve_closes_issue_and_clears_ready_for_review() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
