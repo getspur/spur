@@ -4111,6 +4111,40 @@ impl McpCallbackServer {
             return response;
         }
 
+        // Owner-classification gate. Refuses takeover (OwnedByOther) and
+        // ambiguous owner labels before reserving the registry slot. Unowned
+        // (claim) and OwnedByCurrent (re-issue) proceed. The
+        // PlanOwnershipTransferred audit branch downstream stays intact as
+        // defense-in-depth for a future force-reclaim path.
+        if let Ok(epic_issue) = pm.get_issue(&epic_id).await {
+            match crate::plan::ownership::classify_owner(
+                &epic_issue.labels,
+                self.brain_session_id.as_session_id(),
+            ) {
+                crate::plan::ownership::PlanOwnerMatch::Unowned
+                | crate::plan::ownership::PlanOwnerMatch::OwnedByCurrent => {}
+                crate::plan::ownership::PlanOwnerMatch::OwnedByOther { owner } => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32009,
+                        format!(
+                            "execute_epic: epic {epic_id} is owned by {owner}; active handoff is not implemented in MVP"
+                        ),
+                    );
+                }
+                crate::plan::ownership::PlanOwnerMatch::Ambiguous { owners } => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32009,
+                        format!(
+                            "execute_epic: epic {epic_id} has ambiguous owner labels: {}",
+                            owners.join(", ")
+                        ),
+                    );
+                }
+            }
+        }
+
         // Sentinel value used to reserve a registry slot while the PmService
         // fetch is in flight. Concurrent callers that see this value return an
         // "already in progress" error instead of racing into double-dispatch.

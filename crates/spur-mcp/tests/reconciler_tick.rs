@@ -2463,12 +2463,12 @@ async fn execute_epic_persists_execution_scope_labels_on_epic_and_tasks() {
     pm.update_issue(
         &epic_id,
         spur_pm::IssueUpdate {
-            add_labels: vec![labels::plan_owner("other-brain")],
+            add_labels: vec![labels::plan_owner(&brain_sid.as_session_id().0)],
             ..Default::default()
         },
     )
     .await
-    .expect("pre-seed prior owner label");
+    .expect("pre-seed current owner label");
 
     let response = server
         .__test_call_execute_epic(&epic_id, Some("codex"))
