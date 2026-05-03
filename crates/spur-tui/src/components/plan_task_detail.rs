@@ -115,6 +115,15 @@ pub fn render_task_detail(
         lines.push(section_header("Issue"));
         lines.push(kv("id", &issue.id));
         lines.push(kv("title", &issue.title));
+        lines.push(kv(
+            "source",
+            match issue.source {
+                spur_pm::PmSource::GitHub => "github",
+                spur_pm::PmSource::Linear => "linear",
+                spur_pm::PmSource::Plane => "plane",
+                _ => "beads",
+            },
+        ));
         lines.push(kv("status", &issue.status));
         lines.push(kv(
             "priority",
@@ -134,6 +143,14 @@ pub fn render_task_detail(
                 .due_at
                 .map(|due_at| due_at.format("%Y-%m-%d").to_string())
                 .unwrap_or_else(|| "--".to_string()),
+        ));
+        lines.push(kv(
+            "created",
+            &issue.created_at.format("%Y-%m-%d").to_string(),
+        ));
+        lines.push(kv(
+            "updated",
+            &issue.updated_at.format("%Y-%m-%d").to_string(),
         ));
         if !issue.labels.is_empty() {
             lines.push(kv("labels", &issue.labels.join(", ")));
@@ -155,15 +172,39 @@ pub fn render_task_detail(
         }
     }
 
-    let scroll_offset = match u16::try_from(scroll_offset) {
+    let visible_lines = area.height.saturating_sub(2) as usize;
+    let total_lines = lines.len();
+    let mut scroll_offset = match u16::try_from(scroll_offset) {
         Ok(offset) => offset,
         Err(_) => u16::MAX,
     };
+
+    if visible_lines > 0 && total_lines > visible_lines {
+        let max_scroll = total_lines - visible_lines;
+        scroll_offset = scroll_offset.min(max_scroll as u16);
+    } else {
+        scroll_offset = 0;
+    }
+
+    let title = if visible_lines == 0 || total_lines <= visible_lines {
+        "Task detail".to_string()
+    } else {
+        let start_line = (scroll_offset as usize).saturating_add(1);
+        let end_line = ((scroll_offset as usize).saturating_add(visible_lines)).min(total_lines);
+        let max_scroll = total_lines - visible_lines;
+        let percent = if max_scroll == 0 {
+            100
+        } else {
+            ((scroll_offset as usize).saturating_mul(100)) / max_scroll
+        };
+        format!("Task detail ({start_line}-{end_line}/{total_lines}) {percent}%")
+    };
+
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .scroll((scroll_offset, 0))
-            .block(Block::default().borders(Borders::ALL).title("Task detail")),
+            .block(Block::default().borders(Borders::ALL).title(title)),
         area,
     );
 }

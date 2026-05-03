@@ -300,6 +300,9 @@ impl StatusBar {
                 ViewId::IssueBrowser => {
                     " [j/k]navigate [Enter]detail [o/w/b/x]status [W]work [Esc]back [?]help"
                 }
+                ViewId::PlanBrowser => {
+                    " [j/k]navigate [Enter]open [R]resume [e]epic [r]refresh [b]backlog [Esc]back"
+                }
                 ViewId::SessionDetail(_) => {
                     hint_for_session_detail(props.stream_in_flight, props.esc_consumed_by_composer)
                 }

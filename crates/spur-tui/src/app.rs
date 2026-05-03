@@ -38,6 +38,7 @@ use crate::session_metadata::{ReadOnlyFutureSchema, SessionMetadataStore};
 use crate::tui;
 use crate::views::dashboard::{DashboardMode, DashboardView};
 use crate::views::issue_browser::IssueBrowserView;
+use crate::views::plan_browser::PlanBrowserView;
 use crate::views::plan_inspector::PlanInspectorView;
 use crate::views::session_detail::SessionDetailView;
 use crate::views::session_picker::SessionPickerView;
@@ -118,6 +119,12 @@ pub enum UserInput {
     },
     /// Request the orchestrator to refresh the issue list and re-emit IssuesLoaded.
     RefreshIssues,
+    /// Request the orchestrator to refresh persisted plan summaries.
+    RefreshPlans,
+    /// Request the orchestrator to resume a persisted plan.
+    ResumePlan {
+        plan_id: String,
+    },
     /// Request full issue detail from the PM backend.
     GetIssueDetail {
         id: String,
@@ -282,6 +289,7 @@ pub struct App {
     dashboard: DashboardView,
     session_detail: Option<SessionDetailView>,
     session_picker: Option<SessionPickerView>,
+    plan_browser: Option<PlanBrowserView>,
     plan_inspector: Option<PlanInspectorView>,
     issue_browser: Option<IssueBrowserView>,
     help_visible: bool,
@@ -589,6 +597,7 @@ impl App {
             dashboard,
             session_detail: None,
             session_picker,
+            plan_browser: None,
             plan_inspector: None,
             issue_browser: None,
             help_visible: false,
@@ -1586,7 +1595,10 @@ impl App {
             }
             #[cfg(feature = "markdown")]
             ViewId::MermaidOverlay(session) => guard.by_session.contains_key(session),
-            ViewId::SessionPicker | ViewId::IssueBrowser | ViewId::Insights => false,
+            ViewId::SessionPicker
+            | ViewId::IssueBrowser
+            | ViewId::PlanBrowser
+            | ViewId::Insights => false,
         }
     }
 
@@ -1832,6 +1844,10 @@ impl App {
                         .plan_inspector
                         .as_mut()
                         .and_then(|view| view.handle_key(key, &ctx)),
+                    ViewId::PlanBrowser => self
+                        .plan_browser
+                        .as_mut()
+                        .and_then(|view| view.handle_key(key, &ctx)),
                     ViewId::IssueBrowser => self
                         .issue_browser
                         .as_mut()
@@ -1937,6 +1953,7 @@ impl App {
                         }
                     }
                     ViewId::PlanInspector(_) => {}
+                    ViewId::PlanBrowser => {}
                     ViewId::IssueBrowser => {}
                     ViewId::Insights => {}
                     #[cfg(feature = "markdown")]
@@ -2126,6 +2143,7 @@ impl App {
                 // No mouse scroll in v1 picker.
             }
             ViewId::PlanInspector(_) => {}
+            ViewId::PlanBrowser => {}
             ViewId::IssueBrowser => {
                 if let Some(ref mut browser) = self.issue_browser {
                     if browser.issue_detail_visible() {
@@ -2565,6 +2583,9 @@ impl App {
         if let Some(ref mut inspector) = self.plan_inspector {
             inspector.handle_spur_event(&event, &ctx);
         }
+        if let Some(ref mut browser) = self.plan_browser {
+            browser.handle_spur_event(&event, &ctx);
+        }
         if let Some(ref mut browser) = self.issue_browser {
             browser.handle_spur_event(&event, &ctx);
         }
@@ -2606,6 +2627,27 @@ impl App {
                 self.plan_inspector = Some(PlanInspectorView::new(session.clone()));
                 self.current_view = ViewId::PlanInspector(session.clone());
                 self.dirty = true;
+            }
+
+            Action::NavigateTo(ViewId::PlanBrowser) => {
+                let current_session = self
+                    .session_detail
+                    .as_ref()
+                    .map(|detail| detail.session_id().clone())
+                    .unwrap_or_else(|| SessionId(String::new()));
+                let just_created = self.plan_browser.is_none();
+                let mut session_changed = false;
+                if self.plan_browser.is_none() {
+                    self.plan_browser = Some(PlanBrowserView::new(current_session.clone()));
+                }
+                if let Some(browser) = self.plan_browser.as_mut() {
+                    session_changed = browser.set_current_session(current_session);
+                }
+                self.current_view = ViewId::PlanBrowser;
+                self.dirty = true;
+                if just_created || session_changed {
+                    self.process_action(Action::RefreshPlans);
+                }
             }
 
             Action::NavigateTo(ViewId::IssueBrowser) => {
@@ -2651,6 +2693,11 @@ impl App {
                 if let ViewId::PlanInspector(ref session) = self.current_view {
                     self.current_view = ViewId::SessionDetail(session.clone());
                     self.plan_inspector = None;
+                    self.dirty = true;
+                    return;
+                }
+                if matches!(self.current_view, ViewId::PlanBrowser) {
+                    self.current_view = ViewId::Dashboard;
                     self.dirty = true;
                     return;
                 }
@@ -3430,6 +3477,38 @@ impl App {
                     let _ = tx.try_send(UserInput::RefreshIssues);
                 }
             }
+            Action::RefreshPlans => {
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::RefreshPlans);
+                }
+            }
+            Action::ResumePlan { plan_id } => {
+                // Immediate user feedback: the orchestrator → MCP round-trip can take
+                // 1–3s; without this hint the TUI looks frozen and invites double-press.
+                self.flash_hint_short(format!("Resuming plan {plan_id}..."));
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::ResumePlan { plan_id });
+                }
+            }
+            Action::OpenIssueInBacklog { id } => {
+                let just_created = self.issue_browser.is_none();
+                if just_created {
+                    let mut view = IssueBrowserView::new();
+                    view.seed_issues(self.dashboard.tracked_issues().to_vec());
+                    self.issue_browser = Some(view);
+                }
+                if let Some(browser) = self.issue_browser.as_mut() {
+                    browser.open_external_detail(id.clone());
+                }
+                self.current_view = ViewId::IssueBrowser;
+                self.dirty = true;
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::GetIssueDetail { id });
+                    if just_created {
+                        let _ = tx.try_send(UserInput::RefreshIssues);
+                    }
+                }
+            }
             Action::GetIssueGraph { id } => {
                 if let Some(ref tx) = self.user_input_tx {
                     let _ = tx.try_send(UserInput::GetIssueGraph { id });
@@ -3874,6 +3953,11 @@ impl App {
                     view.tick();
                 }
             }
+            ViewId::PlanBrowser => {
+                if let Some(view) = self.plan_browser.as_mut() {
+                    view.tick();
+                }
+            }
             ViewId::IssueBrowser => {
                 if let Some(view) = self.issue_browser.as_mut() {
                     view.tick();
@@ -3955,6 +4039,11 @@ impl App {
             }
             ViewId::PlanInspector(_) => {
                 if let Some(ref mut view) = self.plan_inspector {
+                    view.render(frame, view_area, &ctx);
+                }
+            }
+            ViewId::PlanBrowser => {
+                if let Some(ref mut view) = self.plan_browser {
                     view.render(frame, view_area, &ctx);
                 }
             }
@@ -4570,6 +4659,173 @@ mod issue_browser_navigation_tests {
             rx.try_recv().is_err(),
             "existing IssueBrowser should not request another refresh on navigation"
         );
+    }
+}
+
+#[cfg(test)]
+mod plan_browser_navigation_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use spur_acp::{PlanLifecycleEvent, PlanOwnerStateEvent, PlanSummaryEvent};
+
+    fn plan_summary(plan_id: &str, owner_state: PlanOwnerStateEvent) -> PlanSummaryEvent {
+        PlanSummaryEvent {
+            plan_id: plan_id.into(),
+            epic_id: format!("bd-{plan_id}"),
+            title: format!("Plan {plan_id}"),
+            owner_state,
+            lifecycle: PlanLifecycleEvent::Pending,
+            counts: None,
+            updated_at: None,
+        }
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn wrap(body: SpurEventBody) -> SpurEvent {
+        SpurEvent::now(body)
+    }
+
+    #[test]
+    fn navigate_to_plan_browser_lazily_creates_and_refreshes_once() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut app = App::new(Some(tx), false);
+
+        app.process_action(Action::NavigateTo(ViewId::PlanBrowser));
+
+        assert_eq!(app.current_view(), &ViewId::PlanBrowser);
+        assert!(
+            app.plan_browser.is_some(),
+            "navigation should lazily create PlanBrowser"
+        );
+        match rx.try_recv() {
+            Ok(UserInput::RefreshPlans) => {}
+            Ok(_) => panic!("expected RefreshPlans, got different user input"),
+            Err(err) => panic!("expected RefreshPlans after first navigation, got {err}"),
+        }
+
+        app.process_action(Action::NavigateTo(ViewId::Dashboard));
+        app.process_action(Action::NavigateTo(ViewId::PlanBrowser));
+
+        assert!(
+            rx.try_recv().is_err(),
+            "existing PlanBrowser should not request another refresh on navigation"
+        );
+    }
+
+    #[test]
+    fn resume_plan_action_sends_user_input() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut app = App::new(Some(tx), false);
+
+        app.process_action(Action::ResumePlan {
+            plan_id: "plan-42".into(),
+        });
+
+        match rx.try_recv() {
+            Ok(UserInput::ResumePlan { plan_id }) => assert_eq!(plan_id, "plan-42"),
+            Ok(_) => panic!("expected ResumePlan, got different user input"),
+            Err(err) => panic!("expected ResumePlan user input, got {err}"),
+        }
+    }
+
+    #[test]
+    fn navigating_existing_plan_browser_updates_current_session() {
+        let mut app = App::new_for_tests();
+        app.process_action(Action::NavigateTo(ViewId::PlanBrowser));
+        assert_eq!(
+            app.plan_browser
+                .as_ref()
+                .expect("PlanBrowser should exist")
+                .current_session_for_test()
+                .0,
+            ""
+        );
+
+        let session = SessionId("brain-2".into());
+        app.handle_spur_event(wrap(SpurEventBody::BrainSpawned {
+            agent: "kiro".into(),
+            session: session.clone(),
+        }));
+        app.process_action(Action::NavigateTo(ViewId::PlanBrowser));
+
+        assert_eq!(
+            app.plan_browser
+                .as_ref()
+                .expect("PlanBrowser should still exist")
+                .current_session_for_test(),
+            &session
+        );
+    }
+
+    #[test]
+    fn open_issue_in_backlog_navigates_and_fetches_detail() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut app = App::new(Some(tx), false);
+
+        app.process_action(Action::OpenIssueInBacklog {
+            id: "bd-plan-1".into(),
+        });
+
+        assert_eq!(app.current_view(), &ViewId::IssueBrowser);
+        assert!(
+            app.issue_browser.is_some(),
+            "OpenIssueInBacklog should create IssueBrowser"
+        );
+        match rx.try_recv() {
+            Ok(UserInput::GetIssueDetail { id }) => assert_eq!(id, "bd-plan-1"),
+            Ok(_) => panic!("expected GetIssueDetail for backlog epic, got different user input"),
+            Err(err) => panic!("expected GetIssueDetail for backlog epic, got {err}"),
+        }
+    }
+
+    #[test]
+    fn plan_browser_spur_events_route_to_view() {
+        let mut app = App::new_for_tests();
+        app.process_action(Action::NavigateTo(ViewId::PlanBrowser));
+
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::PlansLoaded {
+            plans: vec![plan_summary("plan-1", PlanOwnerStateEvent::Unowned)],
+        }));
+
+        let plans = app
+            .plan_browser
+            .as_ref()
+            .expect("PlanBrowser should exist")
+            .plans();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].plan_id, "plan-1");
+    }
+
+    #[test]
+    fn plan_browser_keys_bridge_refresh_and_resume_to_user_input() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut app = App::new(Some(tx), false);
+        app.process_action(Action::NavigateTo(ViewId::PlanBrowser));
+        match rx.try_recv() {
+            Ok(UserInput::RefreshPlans) => {}
+            Ok(_) => panic!("expected initial RefreshPlans, got different user input"),
+            Err(err) => panic!("expected initial RefreshPlans, got {err}"),
+        }
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::PlansLoaded {
+            plans: vec![plan_summary("plan-1", PlanOwnerStateEvent::Unowned)],
+        }));
+
+        app.handle_crossterm_event_for_test(key(KeyCode::Char('r')));
+        app.handle_crossterm_event_for_test(key(KeyCode::Char('R')));
+
+        match rx.try_recv() {
+            Ok(UserInput::RefreshPlans) => {}
+            Ok(_) => panic!("expected RefreshPlans from r key, got different user input"),
+            Err(err) => panic!("expected RefreshPlans from r key, got {err}"),
+        }
+        match rx.try_recv() {
+            Ok(UserInput::ResumePlan { plan_id }) => assert_eq!(plan_id, "plan-1"),
+            Ok(_) => panic!("expected ResumePlan from R key, got different user input"),
+            Err(err) => panic!("expected ResumePlan from R key, got {err}"),
+        }
     }
 }
 

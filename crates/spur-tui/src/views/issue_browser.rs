@@ -162,6 +162,13 @@ impl IssueBrowserView {
         &mut self.issues_panel
     }
 
+    pub fn open_external_detail(&mut self, id: String) {
+        self.issue_focus = IssueFocus::Loading { id };
+        self.detail_mode = DetailMode::Text;
+        self.issue_detail_pane.reset();
+        self.graph_error = None;
+    }
+
     fn selected_issue_id(&self) -> Option<String> {
         self.issues_panel
             .selected_id(&self.tracked_issues)

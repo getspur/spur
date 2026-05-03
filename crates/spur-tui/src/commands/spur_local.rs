@@ -107,6 +107,16 @@ impl SpurLocalSource {
                 dispatch: Dispatch::SpurLocal(Action::RefreshIssues),
                 arg_picker_spec: None,
             },
+            CommandEntry {
+                name: "sprints".into(),
+                description: "Open sprint plan browser".into(),
+                hint: None,
+                source: CommandSource::Spur,
+                dispatch: Dispatch::SpurLocal(Action::NavigateTo(
+                    crate::action::ViewId::PlanBrowser,
+                )),
+                arg_picker_spec: None,
+            },
         ]
     }
 }

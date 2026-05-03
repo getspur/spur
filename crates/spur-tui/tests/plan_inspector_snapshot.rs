@@ -701,12 +701,26 @@ fn plan_inspector_detail_scroll_reset_when_switching_tasks() {
         .draw(|frame| view.render(frame, frame.area(), &ctx))
         .unwrap();
     let b_open = terminal.backend().buffer().clone();
+    assert!(!buffer_contains(&b_open, "A-body-line-020"));
     assert!(
-        buffer_contains(&b_open, "B-body-line-000"),
-        "switching tasks should reset detail scroll to top"
+        !buffer_contains(&b_open, "B-body-line-000"),
+        "switching tasks should reset detail scroll near top"
+    );
+
+    let down_after_switch =
+        view.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE), &ctx);
+    assert!(matches!(down_after_switch, Some(Action::ScrollDown)));
+
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let b_scrolled = terminal.backend().buffer().clone();
+    assert!(
+        buffer_contains(&b_scrolled, "B-body-line-000"),
+        "after one page down, switched task body should start at top due reset scroll"
     );
     assert!(
-        !buffer_contains(&b_open, "B-body-line-020"),
+        !buffer_contains(&b_scrolled, "A-body-line-020"),
         "switched task detail should not inherit previous task's scroll position"
     );
 
@@ -724,8 +738,20 @@ fn plan_inspector_detail_scroll_reset_when_switching_tasks() {
         .unwrap();
     let b_reopen = terminal.backend().buffer().clone();
     assert!(
-        buffer_contains(&b_reopen, "B-body-line-000"),
-        "reopening after close should keep top-of-detail reset state"
+        !buffer_contains(&b_reopen, "A-body-line-020"),
+        "reopening after close should keep switched task content"
+    );
+    assert!(!buffer_contains(&b_reopen, "B-body-line-000"));
+
+    let reopen_down = view.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE), &ctx);
+    assert!(matches!(reopen_down, Some(Action::ScrollDown)));
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let b_reopen_scrolled = terminal.backend().buffer().clone();
+    assert!(
+        buffer_contains(&b_reopen_scrolled, "B-body-line-000"),
+        "reopening after close should reset scroll to top"
     );
 
     let first_back_action = view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &ctx);
