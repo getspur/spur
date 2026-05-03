@@ -219,7 +219,10 @@ async fn t_v0d_3_merge_plan_works_after_restart_on_persisted_plan() {
     pm.update_issue(
         &subgraph.epic_id,
         IssueUpdate {
-            add_labels: vec![labels::INTEGRATION_PENDING.to_string()],
+            add_labels: vec![
+                labels::INTEGRATION_PENDING.to_string(),
+                labels::plan_owner("brain"),
+            ],
             ..Default::default()
         },
     )
