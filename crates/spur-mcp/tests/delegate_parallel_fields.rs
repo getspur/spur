@@ -302,7 +302,9 @@ async fn call_delegate_parallel(args: Value) -> Vec<spur_mcp::tools::DelegationR
         .expect("args must include a `tasks` array");
 
     let _result = client
-        .call_tool(CallToolRequestParams::new("delegate_parallel").with_arguments(json_object(args)))
+        .call_tool(
+            CallToolRequestParams::new("delegate_parallel").with_arguments(json_object(args)),
+        )
         .await
         .expect("call_tool should succeed");
 

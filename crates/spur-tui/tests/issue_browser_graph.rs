@@ -18,6 +18,7 @@ fn sample_summary(id: &str, title: &str) -> IssueSummaryEvent {
         source: "beads".into(),
         title: title.into(),
         status: "open".into(),
+        labels: Vec::new(),
         priority: Some(1),
         issue_type: Some("task".into()),
         assignee: None,

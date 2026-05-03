@@ -1797,7 +1797,7 @@ impl View for SessionDetailView {
                 self.react_trace.push(TraceEntry {
                     kind: TraceKind::Observe { payload: None },
                     text: format!(
-                        "Warning: continuation dropped for {}: {:?}",
+                        "Warning: Continuation dropped for {}: {:?}",
                         delegation_id, reason
                     ),
                     timestamp: Self::now_stamp(),
@@ -3567,6 +3567,7 @@ mod composer_routing_tests {
                     session_id: spur_acp::SessionId("s".into()),
                     snapshot: Box::new(PlanSnapshot {
                         plan_id: "plan-1".into(),
+                epic_id: None,
                         status: "running".into(),
                         progress: "0/1 done".into(),
                         next_action:

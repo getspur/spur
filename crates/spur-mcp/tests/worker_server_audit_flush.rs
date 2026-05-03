@@ -20,8 +20,8 @@ use spur_mcp::worker_server::{
     ReadAuditEntry, WorkerMcpDeps, WorkerMcpServer, WorkerMcpServerConfig,
 };
 use spur_pm::{IssueCreate, PmService};
-use tempfile::TempDir;
 use std::sync::Mutex;
+use tempfile::TempDir;
 use tokio::sync::Mutex as TokioMutex;
 use tracing::field::{Field, Visit};
 
@@ -74,7 +74,10 @@ struct NullPlanResolver;
 
 #[async_trait]
 impl PlanResolver for NullPlanResolver {
-    async fn load_or_project_plan(&self, plan_id: &str) -> Result<Arc<TokioMutex<PlanState>>, String> {
+    async fn load_or_project_plan(
+        &self,
+        plan_id: &str,
+    ) -> Result<Arc<TokioMutex<PlanState>>, String> {
         Err(format!("test resolver: unknown plan_id '{plan_id}'"))
     }
 }
@@ -85,9 +88,9 @@ fn test_deps(pm: Arc<PmService>) -> WorkerMcpDeps {
         feature_gate: test_feature_gate(),
         funnel: Arc::new(NullSink),
         plan_resolver: Arc::new(NullPlanResolver),
-        reconciler_outcomes: Arc::new(
-            TokioMutex::new(spur_mcp::plan::outcomes::OutcomeStore::default()),
-        ),
+        reconciler_outcomes: Arc::new(TokioMutex::new(
+            spur_mcp::plan::outcomes::OutcomeStore::default(),
+        )),
         outcome_store: Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
         repo_root: None,
     }
@@ -145,7 +148,10 @@ impl Visit for StringVisitor {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn flusher_emits_sentinel_for_stale_entry() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -221,7 +227,10 @@ async fn flusher_emits_sentinel_for_stale_entry() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn flusher_exits_within_1s_of_cancellation() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -250,7 +259,10 @@ async fn flusher_exits_within_1s_of_cancellation() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn flusher_warns_when_all_entries_have_no_target_issue_id() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let warnings = CapturedWarnings::default();
     let _guard = tracing::subscriber::set_default(warnings.clone());
@@ -264,13 +276,10 @@ async fn flusher_warns_when_all_entries_have_no_target_issue_id() {
         scan_interval: Duration::from_millis(50),
     };
 
-    let server = WorkerMcpServer::start_with_config(
-        "session-flush-lossy".into(),
-        test_deps(pm),
-        config,
-    )
-    .await
-    .expect("start must succeed");
+    let server =
+        WorkerMcpServer::start_with_config("session-flush-lossy".into(), test_deps(pm), config)
+            .await
+            .expect("start must succeed");
 
     // Inject a buffer where every entry has target_issue_id=None (e.g. list_issues).
     let buf = server.inject_read_buffer_for_test("d-lossy");

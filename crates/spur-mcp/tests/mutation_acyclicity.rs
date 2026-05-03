@@ -181,8 +181,14 @@ async fn inject_cycle_when_children_exist(repo: PathBuf, mutation_id: Uuid) -> R
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn cycle_detection_emits_violation_and_rolls_back() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
-    assert!(sqlite_available(), "this test requires `sqlite3` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
+    assert!(
+        sqlite_available(),
+        "this test requires `sqlite3` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");

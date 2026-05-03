@@ -159,7 +159,10 @@ impl ReactTrace {
                     for text_line in entry.text.lines() {
                         lines.push(Line::from(vec![
                             Span::raw("   "),
-                            Span::styled(terminal_safe_text(text_line), Style::default().fg(Color::White)),
+                            Span::styled(
+                                terminal_safe_text(text_line),
+                                Style::default().fg(Color::White),
+                            ),
                         ]));
                     }
                 }
@@ -342,7 +345,10 @@ impl ReactTrace {
                     for text_line in entry.text.lines() {
                         lines.push(Line::from(vec![
                             Span::raw("   "),
-                            Span::styled(terminal_safe_text(text_line), Style::default().fg(Color::Yellow)),
+                            Span::styled(
+                                terminal_safe_text(text_line),
+                                Style::default().fg(Color::Yellow),
+                            ),
                         ]));
                     }
                 }
@@ -634,7 +640,7 @@ impl ReactTrace {
                         Line::from(vec![
                             ts_span.clone(),
                             Span::styled(
-                            "THINK",
+                                "THINK",
                                 Style::default()
                                     .fg(Color::DarkGray)
                                     .add_modifier(Modifier::BOLD),

@@ -17,6 +17,7 @@ use super::View;
 
 pub struct PlanInspectorView {
     session_id: SessionId,
+    pinned_plan_id: Option<String>,
     selected_task_id: Option<String>,
     stacked_mode: bool,
     open_issue_id: Option<String>,
@@ -35,6 +36,19 @@ impl PlanInspectorView {
     pub fn new(session_id: SessionId) -> Self {
         Self {
             session_id,
+            pinned_plan_id: None,
+            selected_task_id: None,
+            stacked_mode: false,
+            open_issue_id: None,
+            issue_states: HashMap::new(),
+            task_detail_scroll: 0,
+        }
+    }
+
+    pub fn new_for_plan(session_id: SessionId, plan_id: String) -> Self {
+        Self {
+            session_id,
+            pinned_plan_id: Some(plan_id),
             selected_task_id: None,
             stacked_mode: false,
             open_issue_id: None,
@@ -45,6 +59,13 @@ impl PlanInspectorView {
 
     pub fn session_id(&self) -> &SessionId {
         &self.session_id
+    }
+
+    fn active_plan<'a>(&self, ctx: &'a super::ViewContext<'_>) -> Option<&'a TrackedPlan> {
+        match self.pinned_plan_id.as_deref() {
+            Some(plan_id) => ctx.plan_projection.plan(plan_id),
+            None => ctx.plan_projection.current_for_session(&self.session_id),
+        }
     }
 
     fn set_selected_task_id(&mut self, task_id: Option<String>) {
@@ -245,7 +266,7 @@ impl PlanInspectorView {
 impl View for PlanInspectorView {
     fn handle_key(&mut self, key: KeyEvent, ctx: &super::ViewContext) -> Option<Action> {
         let key = super::normalize_macos_option(key);
-        let plan = ctx.plan_projection.current_for_session(&self.session_id);
+        let plan = self.active_plan(ctx);
         if let Some(plan) = plan {
             self.ensure_selection(plan);
 
@@ -295,6 +316,16 @@ impl View for PlanInspectorView {
                             message: "No issue linked to selected task".to_string(),
                         });
                     }
+                }
+                KeyCode::Char('e') if key.modifiers.is_empty() => {
+                    if let Some(epic_id) = plan.epic_id.as_ref() {
+                        return Some(Action::OpenIssueInBacklog {
+                            id: epic_id.clone(),
+                        });
+                    }
+                    return Some(Action::FlashHint {
+                        message: "No epic linked to this implementation plan snapshot".into(),
+                    });
                 }
                 _ => {}
             }
@@ -364,16 +395,14 @@ impl View for PlanInspectorView {
 
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &super::ViewContext) {
         let chunks = Layout::vertical([
-            Constraint::Length(2),
+            Constraint::Length(3),
             Constraint::Min(3),
             Constraint::Length(1),
         ])
         .split(area);
         self.stacked_mode = area.width < 90;
 
-        let selected_task_has_issue = if let Some(plan) =
-            ctx.plan_projection.current_for_session(&self.session_id)
-        {
+        let selected_task_has_issue = if let Some(plan) = self.active_plan(ctx) {
             self.ensure_selection(plan);
             let selected = self.selected_task(plan);
             let selected_stage_idx = selected.map(|t| t.stage_idx).unwrap_or(0);
@@ -392,8 +421,12 @@ impl View for PlanInspectorView {
                 .unwrap_or((None, None));
 
             // ── Header ──────────────────────────────────────────────────────
-            let header_rows =
-                Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(chunks[0]);
+            let header_rows = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(chunks[0]);
             let header_cols =
                 Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
                     .split(header_rows[0]);
@@ -449,6 +482,26 @@ impl View for PlanInspectorView {
                     )),
                 ])),
                 header_rows[1],
+            );
+
+            let epic_text = plan
+                .epic_id
+                .as_deref()
+                .map(|epic_id| format!("epic: {epic_id}"))
+                .unwrap_or_else(|| "epic: --".into());
+            let owner_text = plan
+                .owner_brain_session_id
+                .as_deref()
+                .map(|owner| format!("owner: {owner}"))
+                .unwrap_or_else(|| "owner: --".into());
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(" source: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(epic_text),
+                    Span::styled("  ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(owner_text),
+                ])),
+                header_rows[2],
             );
 
             if !self.stacked_mode {
@@ -522,9 +575,15 @@ impl View for PlanInspectorView {
 
             selected.and_then(|task| task.issue_id.as_deref()).is_some()
         } else {
+            let message = self
+                .pinned_plan_id
+                .as_ref()
+                .map(|plan_id| {
+                    format!("No tracked implementation plan snapshot for {plan_id} yet.")
+                })
+                .unwrap_or_else(|| "No tracked plan for this session yet.".into());
             frame.render_widget(
-                Paragraph::new("No tracked plan for this session yet.")
-                    .block(Block::default().borders(Borders::ALL)),
+                Paragraph::new(message).block(Block::default().borders(Borders::ALL)),
                 chunks[1],
             );
             false
@@ -545,7 +604,7 @@ impl View for PlanInspectorView {
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
                 format!(
-                    " h/l: lane  j/k: task  {}  g/G: ends  Alt+P/Esc: close {}",
+                    " h/l: lane  j/k: task  {}  e: epic graph  g/G: ends  Alt+P/Esc: close {}",
                     enter_hint, scroll_hint
                 ),
                 Style::default().fg(Color::DarkGray),
@@ -578,4 +637,101 @@ fn truncate_display(s: &str, max: usize) -> String {
     let mut out = s[..end].trim_end().to_string();
     out.push('…');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use spur_acp::{
+        PlanSnapshot, PlanSnapshotCounts, PlanSnapshotTask, SessionId, SpurEvent, SpurEventBody,
+    };
+    use spur_core::{ExecutorLineage, PlanProjectionStore, SessionSynopsisProjection};
+
+    use crate::action::Action;
+    use crate::app::BrainStatus;
+    use crate::views::{View, ViewContext};
+
+    use super::*;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctx<'a>(
+        lineage: &'a ExecutorLineage,
+        projection: &'a PlanProjectionStore,
+        synopsis: &'a SessionSynopsisProjection,
+    ) -> ViewContext<'a> {
+        ViewContext {
+            lineage,
+            plan_projection: projection,
+            synopsis,
+            brain_status: &BrainStatus::Idle,
+            license_badge: None,
+            flag_summary: None,
+            tombstone: None,
+            transient_hint_override: None,
+        }
+    }
+
+    fn projection_with_epic(session_id: &SessionId) -> PlanProjectionStore {
+        let mut projection = PlanProjectionStore::new();
+        projection.apply(&SpurEvent::now(SpurEventBody::PlanSnapshotUpdated {
+            session_id: session_id.clone(),
+            snapshot: Box::new(PlanSnapshot {
+                plan_id: "plan-1".into(),
+                epic_id: Some("bd-epic".into()),
+                status: "running".into(),
+                progress: "0/1 done".into(),
+                next_action: "dispatch first stage".into(),
+                ready_to_merge: false,
+                counts: PlanSnapshotCounts {
+                    pending: 1,
+                    ..Default::default()
+                },
+                tasks: vec![PlanSnapshotTask {
+                    task_id: "stage-a".into(),
+                    task_name: "Stage A".into(),
+                    agent: "codex".into(),
+                    issue_id: Some("bd-epic.1".into()),
+                    status: "pending".into(),
+                    attempt: 0,
+                    max_attempts: 3,
+                    depends_on: Vec::new(),
+                    blocked_by: Vec::new(),
+                    unblocks: Vec::new(),
+                    summary: None,
+                    feedback: None,
+                    error: None,
+                    worker_branch: None,
+                    delegation_id: None,
+                    diff_summary: None,
+                    mutation_id: None,
+                    superseded_by: Vec::new(),
+                    next_action: "wait".into(),
+                }],
+                owner_brain_session_id: Some(session_id.0.clone()),
+                owner_token: None,
+                owner_acquired_at: None,
+            }),
+        }));
+        projection
+    }
+
+    #[test]
+    fn e_opens_source_epic_graph_from_plan_inspector() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic(&session_id);
+        let lineage = ExecutorLineage::new();
+        let synopsis = SessionSynopsisProjection::new();
+        let ctx = ctx(&lineage, &projection, &synopsis);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        let action = view.handle_key(key(KeyCode::Char('e')), &ctx);
+
+        assert!(matches!(
+            action,
+            Some(Action::OpenIssueInBacklog { id }) if id == "bd-epic"
+        ));
+    }
 }

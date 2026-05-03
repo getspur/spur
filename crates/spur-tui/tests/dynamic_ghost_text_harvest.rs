@@ -13,12 +13,12 @@
 #![cfg(feature = "markdown")]
 
 use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+use spur_acp::adapter::{ObservePayload, ToolFamily, ToolInputDisplay};
+use spur_acp::AgentKind;
 use spur_tui::components::image_cache::ImageCache;
 use spur_tui::components::react_trace::{
     ActStatus, ReactTrace, RenderContext, TraceEntry, TraceKind,
 };
-use spur_acp::adapter::{ObservePayload, ToolFamily, ToolInputDisplay};
-use spur_acp::AgentKind;
 use std::collections::HashMap;
 use unicode_width::UnicodeWidthStr;
 
@@ -121,31 +121,58 @@ where
 
     let mut total_desync = 0;
     let mut steps: Vec<(&str, Box<dyn Fn(&mut ReactTrace)>)> = vec![
-        ("init render (collapsed)", Box::new(|_t: &mut ReactTrace| {})),
-        ("Ctrl+O toggle (expand)", Box::new(|t: &mut ReactTrace| {
-            t.toggle_observe_collapsed();
-        })),
-        ("scroll_up_by(3)", Box::new(|t: &mut ReactTrace| {
-            t.scroll_up_by(3);
-        })),
-        ("scroll_up_by(5)", Box::new(|t: &mut ReactTrace| {
-            t.scroll_up_by(5);
-        })),
-        ("tick (spinner advance)", Box::new(|t: &mut ReactTrace| {
-            t.tick();
-        })),
-        ("scroll_down_by(2)", Box::new(|t: &mut ReactTrace| {
-            t.scroll_down_by(2);
-        })),
-        ("Ctrl+O toggle (collapse)", Box::new(|t: &mut ReactTrace| {
-            t.toggle_observe_collapsed();
-        })),
-        ("Ctrl+O toggle (re-expand)", Box::new(|t: &mut ReactTrace| {
-            t.toggle_observe_collapsed();
-        })),
-        ("scroll_up_by(10)", Box::new(|t: &mut ReactTrace| {
-            t.scroll_up_by(10);
-        })),
+        (
+            "init render (collapsed)",
+            Box::new(|_t: &mut ReactTrace| {}),
+        ),
+        (
+            "Ctrl+O toggle (expand)",
+            Box::new(|t: &mut ReactTrace| {
+                t.toggle_observe_collapsed();
+            }),
+        ),
+        (
+            "scroll_up_by(3)",
+            Box::new(|t: &mut ReactTrace| {
+                t.scroll_up_by(3);
+            }),
+        ),
+        (
+            "scroll_up_by(5)",
+            Box::new(|t: &mut ReactTrace| {
+                t.scroll_up_by(5);
+            }),
+        ),
+        (
+            "tick (spinner advance)",
+            Box::new(|t: &mut ReactTrace| {
+                t.tick();
+            }),
+        ),
+        (
+            "scroll_down_by(2)",
+            Box::new(|t: &mut ReactTrace| {
+                t.scroll_down_by(2);
+            }),
+        ),
+        (
+            "Ctrl+O toggle (collapse)",
+            Box::new(|t: &mut ReactTrace| {
+                t.toggle_observe_collapsed();
+            }),
+        ),
+        (
+            "Ctrl+O toggle (re-expand)",
+            Box::new(|t: &mut ReactTrace| {
+                t.toggle_observe_collapsed();
+            }),
+        ),
+        (
+            "scroll_up_by(10)",
+            Box::new(|t: &mut ReactTrace| {
+                t.scroll_up_by(10);
+            }),
+        ),
     ];
 
     for (i, (label, mutate)) in steps.drain(..).enumerate() {
@@ -156,12 +183,7 @@ where
         let terminal_view = sim.snapshot();
         let diffs = diff_grids(&intended, &terminal_view);
         if !diffs.is_empty() {
-            eprintln!(
-                "  step {} '{}': DESYNC on {} rows",
-                i,
-                label,
-                diffs.len()
-            );
+            eprintln!("  step {} '{}': DESYNC on {} rows", i, label, diffs.len());
             for (y, a, b) in diffs.iter().take(3) {
                 eprintln!("    row {} INTENDED: {}", y, a);
                 eprintln!("    row {} TERMINAL: {}", y, b);
@@ -173,7 +195,10 @@ where
         prev_buf = next_buf;
     }
 
-    eprintln!("  >>> TOTAL DESYNC for '{}': {} rows <<<", name, total_desync);
+    eprintln!(
+        "  >>> TOTAL DESYNC for '{}': {} rows <<<",
+        name, total_desync
+    );
     total_desync
 }
 
@@ -247,7 +272,8 @@ fn scenario_cjk_wide_chars_in_tool_output() -> ReactTrace {
                     "混合 mixed ascii と 日本語 contents",
                     "table | header | 列1 | 列2",
                     "row1  | data   | 値1  | 値2",
-                ].join("\n"),
+                ]
+                .join("\n"),
                 stderr: String::new(),
             })),
         },
@@ -280,7 +306,8 @@ fn scenario_control_chars_in_tool_output() -> ReactTrace {
                     "\x07Bell ring",
                     "Backspace\x08\x08\x08gone",
                     "Plain line",
-                ].join("\n"),
+                ]
+                .join("\n"),
                 stderr: String::new(),
             })),
         },
@@ -346,10 +373,17 @@ fn scenario_super_long_lines_no_wrap_chars() -> ReactTrace {
                     // 500-char line with no spaces
                     format!("a{}", "b".repeat(499)),
                     // 200-char line with spaces every 5 chars (wraps cleanly)
-                    (0..40).map(|i| format!("word{}", i)).collect::<Vec<_>>().join(" "),
+                    (0..40)
+                        .map(|i| format!("word{}", i))
+                        .collect::<Vec<_>>()
+                        .join(" "),
                     // Pathologically long URL-like
-                    format!("https://example.com/{}", "very/deep/path/segment/".repeat(20)),
-                ].join("\n"),
+                    format!(
+                        "https://example.com/{}",
+                        "very/deep/path/segment/".repeat(20)
+                    ),
+                ]
+                .join("\n"),
                 stderr: String::new(),
             })),
         },
@@ -368,15 +402,21 @@ fn scenario_mixed_widths_at_boundary() -> ReactTrace {
         kind: TraceKind::Act {
             tool: "shell".into(),
             family: ToolFamily::Execute,
-            input: ToolInputDisplay::Command { cmd: "x".into(), cwd: None },
+            input: ToolInputDisplay::Command {
+                cmd: "x".into(),
+                cwd: None,
+            },
             tool_call_id: None,
             status: ActStatus::Completed(Some(ObservePayload::CommandOutput {
                 exit_code: Some(0),
                 // Each line ends with a wide char near the right edge
-                stdout: (0..10).map(|i| {
-                    let pad = "x".repeat((90 + i) % 95);
-                    format!("{}日", pad)  // 日 is EAW=W
-                }).collect::<Vec<_>>().join("\n"),
+                stdout: (0..10)
+                    .map(|i| {
+                        let pad = "x".repeat((90 + i) % 95);
+                        format!("{}日", pad) // 日 is EAW=W
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
                 stderr: String::new(),
             })),
         },
@@ -391,12 +431,42 @@ fn scenario_mixed_widths_at_boundary() -> ReactTrace {
 fn dynamic_harvest() {
     let mut grand_total = 0;
 
-    grand_total += run_scenario("active_spinner_during_expand", W, H, scenario_active_spinner_during_expand);
-    grand_total += run_scenario("cjk_wide_chars_in_tool_output", W, H, scenario_cjk_wide_chars_in_tool_output);
-    grand_total += run_scenario("control_chars_in_tool_output", W, H, scenario_control_chars_in_tool_output);
-    grand_total += run_scenario("combining_diacritics_and_zwj_emoji", W, H, scenario_combining_diacritics_and_zwj_emoji);
-    grand_total += run_scenario("super_long_lines_no_wrap_chars", W, H, scenario_super_long_lines_no_wrap_chars);
-    grand_total += run_scenario("mixed_widths_at_boundary", W, H, scenario_mixed_widths_at_boundary);
+    grand_total += run_scenario(
+        "active_spinner_during_expand",
+        W,
+        H,
+        scenario_active_spinner_during_expand,
+    );
+    grand_total += run_scenario(
+        "cjk_wide_chars_in_tool_output",
+        W,
+        H,
+        scenario_cjk_wide_chars_in_tool_output,
+    );
+    grand_total += run_scenario(
+        "control_chars_in_tool_output",
+        W,
+        H,
+        scenario_control_chars_in_tool_output,
+    );
+    grand_total += run_scenario(
+        "combining_diacritics_and_zwj_emoji",
+        W,
+        H,
+        scenario_combining_diacritics_and_zwj_emoji,
+    );
+    grand_total += run_scenario(
+        "super_long_lines_no_wrap_chars",
+        W,
+        H,
+        scenario_super_long_lines_no_wrap_chars,
+    );
+    grand_total += run_scenario(
+        "mixed_widths_at_boundary",
+        W,
+        H,
+        scenario_mixed_widths_at_boundary,
+    );
 
     // Width-change scenarios: render at one width, then resize, then continue
     eprintln!("\n========== SCENARIO: width_change_during_expand ==========");
@@ -441,6 +511,9 @@ fn dynamic_harvest() {
     }
 
     eprintln!("\n=================================================");
-    eprintln!(">>> GRAND TOTAL DESYNC across all scenarios: {} <<<", grand_total);
+    eprintln!(
+        ">>> GRAND TOTAL DESYNC across all scenarios: {} <<<",
+        grand_total
+    );
     eprintln!("=================================================");
 }

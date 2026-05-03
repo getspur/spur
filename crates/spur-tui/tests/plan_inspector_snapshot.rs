@@ -17,6 +17,7 @@ fn sample_plan_store() -> PlanProjectionStore {
         session_id: SessionId("brain-1".into()),
         snapshot: Box::new(PlanSnapshot {
             plan_id: "plan-1".into(),
+                epic_id: None,
             status: "running".into(),
             progress: "1/4 done".into(),
             next_action:
@@ -67,6 +68,7 @@ fn plan_store_with_selected_task_without_issue() -> PlanProjectionStore {
         session_id: SessionId("brain-1".into()),
         snapshot: Box::new(PlanSnapshot {
             plan_id: "plan-1".into(),
+            epic_id: None,
             status: "running".into(),
             progress: "0/1 done".into(),
             next_action: "No issue IDs in this plan; use this to validate Enter feedback.".into(),
@@ -90,6 +92,7 @@ fn out_of_stage_order_plan_store() -> PlanProjectionStore {
         session_id: SessionId("brain-1".into()),
         snapshot: Box::new(PlanSnapshot {
             plan_id: "plan-1".into(),
+                epic_id: None,
             status: "running".into(),
             progress: "1/4 done".into(),
             next_action:
@@ -273,6 +276,7 @@ fn plan_store_with_selected_task_app() -> PlanProjectionStore {
         session_id: SessionId("brain-1".into()),
         snapshot: Box::new(PlanSnapshot {
             plan_id: "plan-1".into(),
+                epic_id: None,
             status: "running".into(),
             progress: "1/1 done".into(),
             next_action:
@@ -1072,6 +1076,7 @@ fn plan_store_with_blocked_and_retry() -> PlanProjectionStore {
         session_id: SessionId("brain-1".into()),
         snapshot: Box::new(PlanSnapshot {
             plan_id: "plan-1".into(),
+            epic_id: None,
             status: "running".into(),
             progress: "0/2 done".into(),
             next_action: "waiting for dependencies".into(),

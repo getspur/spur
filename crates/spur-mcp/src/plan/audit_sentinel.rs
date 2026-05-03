@@ -660,7 +660,9 @@ mod tests {
             token: "token-R".into(),
             reason: Some("owner stuck".into()),
         };
-        let parsed = parse_comment(&encode_comment(&with_prior)).unwrap().unwrap();
+        let parsed = parse_comment(&encode_comment(&with_prior))
+            .unwrap()
+            .unwrap();
         assert_eq!(parsed, with_prior);
         assert_eq!(parsed.kind_str(), "plan-force-reclaimed");
 

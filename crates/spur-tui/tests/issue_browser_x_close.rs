@@ -14,6 +14,7 @@ fn sample_summary(id: &str) -> IssueSummaryEvent {
         source: "github".into(),
         title: format!("issue {id}"),
         status: "open".into(),
+        labels: Vec::new(),
         priority: None,
         issue_type: None,
         assignee: None,

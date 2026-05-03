@@ -132,10 +132,12 @@ mod tests {
         TrackedPlan {
             session_id: SessionId("brain-1".into()),
             plan_id: "p-123".into(),
+            epic_id: None,
             status: "running".into(),
             progress: "1/3 reviewed, 1 running, 1 pending".into(),
             next_action: next_action.into(),
             ready_to_merge: false,
+            owner_brain_session_id: None,
             counts: PlanSnapshotCounts {
                 pending: 1,
                 dispatched: 1,

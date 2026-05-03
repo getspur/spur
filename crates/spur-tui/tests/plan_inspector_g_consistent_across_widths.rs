@@ -14,6 +14,7 @@ fn plan_store() -> PlanProjectionStore {
         session_id: SessionId("brain-1".into()),
         snapshot: Box::new(PlanSnapshot {
             plan_id: "plan-gg".into(),
+            epic_id: None,
             status: "running".into(),
             progress: "0/9 done".into(),
             next_action: "keep moving".into(),

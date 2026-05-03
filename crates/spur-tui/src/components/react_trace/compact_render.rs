@@ -375,7 +375,7 @@ fn truncate_to_width(s: &str, max_cols: usize) -> String {
         cols += cw;
         end = i + ch.len_utf8();
     }
-    format!("{}...", &s[..end])
+    format!("{}…", &s[..end])
 }
 
 #[cfg(test)]

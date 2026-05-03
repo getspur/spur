@@ -154,6 +154,27 @@ impl BvAdapter {
 
         self.run_robot(&args, "graph").await
     }
+
+    /// Dependency graph for all issues matching a label.
+    ///
+    /// This is the correct projection for a plan-backed epic: the epic issue
+    /// is the durable anchor, while `spur:plan-id:<id>` is the scope that
+    /// includes all child issues and their DAG edges.
+    pub async fn graph_by_label(
+        &self,
+        label: &str,
+        format: Option<&str>,
+    ) -> anyhow::Result<DependencyGraph> {
+        let mut args = vec!["--robot-graph", "--label", label];
+
+        let fmt_str;
+        if let Some(f) = format {
+            fmt_str = format!("--graph-format={f}");
+            args.push(&fmt_str);
+        }
+
+        self.run_robot(&args, "graph").await
+    }
 }
 
 // ─── HasRaw trait for populating the raw field ───────────────────────

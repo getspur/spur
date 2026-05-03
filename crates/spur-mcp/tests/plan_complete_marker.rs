@@ -70,7 +70,10 @@ fn minimal_tasks() -> Vec<PlanTask> {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn build_epic_subgraph_emits_plan_complete_on_epic() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");

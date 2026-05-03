@@ -60,7 +60,10 @@ fn run_br(repo: &Path, args: &[&str]) {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn reconciler_shutdown_on_cancel() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);

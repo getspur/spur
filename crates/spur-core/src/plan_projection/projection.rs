@@ -82,10 +82,12 @@ fn tracked_plan_from_snapshot(
     TrackedPlan {
         session_id,
         plan_id: snapshot.plan_id.clone(),
+        epic_id: snapshot.epic_id.clone(),
         status: snapshot.status.clone(),
         progress: snapshot.progress.clone(),
         next_action: snapshot.next_action.clone(),
         ready_to_merge: snapshot.ready_to_merge,
+        owner_brain_session_id: snapshot.owner_brain_session_id.clone(),
         counts: snapshot.counts.clone(),
         tasks: snapshot
             .tasks

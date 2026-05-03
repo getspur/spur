@@ -14,9 +14,9 @@
 #![cfg(feature = "markdown")]
 
 use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+use spur_acp::AgentKind;
 use spur_tui::components::image_cache::ImageCache;
 use spur_tui::components::react_trace::{ReactTrace, RenderContext};
-use spur_acp::AgentKind;
 use std::collections::HashMap;
 use unicode_width::UnicodeWidthStr;
 
@@ -42,9 +42,10 @@ fn snapshot(term: &Terminal<TestBackend>) -> Vec<String> {
 /// MoveTo) or "print" (Print contiguous).
 ///
 /// Mirrors `ratatui-0.29 src/backend/crossterm.rs:151-191`.
-fn simulate_emission(prev: &ratatui::buffer::Buffer, curr: &ratatui::buffer::Buffer)
-    -> Vec<(&'static str, u16, u16, String)>
-{
+fn simulate_emission(
+    prev: &ratatui::buffer::Buffer,
+    curr: &ratatui::buffer::Buffer,
+) -> Vec<(&'static str, u16, u16, String)> {
     let updates = prev.diff(curr);
     let mut out = Vec::new();
     let mut last_pos: Option<(u16, u16)> = None;
@@ -68,11 +69,14 @@ fn apply_emission_with_real_advance(
     initial: &[String],
     ops: &[(&'static str, u16, u16, String)],
 ) -> Vec<String> {
-    let mut grid: Vec<Vec<String>> = initial.iter().map(|row| {
-        let mut cells: Vec<String> = row.chars().map(|c| c.to_string()).collect();
-        cells.resize(width as usize, " ".to_string());
-        cells
-    }).collect();
+    let mut grid: Vec<Vec<String>> = initial
+        .iter()
+        .map(|row| {
+            let mut cells: Vec<String> = row.chars().map(|c| c.to_string()).collect();
+            cells.resize(width as usize, " ".to_string());
+            cells
+        })
+        .collect();
     grid.resize(height as usize, vec![" ".to_string(); width as usize]);
 
     let mut cur_x: u16 = 0;

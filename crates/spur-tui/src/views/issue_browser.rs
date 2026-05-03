@@ -25,12 +25,18 @@ const TEXT_STATUS_HINT_COMPACT: &str = "[Text] j/k: Nav  v: Graph  Esc: Close";
 const TEXT_STATUS_HINT_EPIC: &str =
     "[Text] j/k: Nav  v: Graph Mode  E: Execute Epic  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
 const TEXT_STATUS_HINT_EPIC_COMPACT: &str = "[Text] j/k: Nav  E: Execute Epic  v: Graph";
+const TEXT_STATUS_HINT_PLAN_EPIC: &str =
+    "[Text] j/k: Nav  p: Open Plan  v: Graph Mode  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
+const TEXT_STATUS_HINT_PLAN_EPIC_COMPACT: &str = "[Text] j/k: Nav  p: Plan  v: Graph";
 const GRAPH_STATUS_HINT: &str =
     "[Graph] j/k: Nav  v: Text Mode  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
 const GRAPH_STATUS_HINT_COMPACT: &str = "[Graph] j/k: Nav  v: Text  Esc: Close";
 const GRAPH_STATUS_HINT_EPIC: &str =
     "[Graph] j/k: Nav  v: Text Mode  E: Execute Epic  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
 const GRAPH_STATUS_HINT_EPIC_COMPACT: &str = "[Graph] j/k: Nav  E: Execute Epic  v: Text";
+const GRAPH_STATUS_HINT_PLAN_EPIC: &str =
+    "[Graph] j/k: Nav  p: Open Plan  v: Text Mode  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
+const GRAPH_STATUS_HINT_PLAN_EPIC_COMPACT: &str = "[Graph] j/k: Nav  p: Plan  v: Text";
 const LIST_STATUS_HINT: &str =
     "[List] j/k: Nav  Enter: Open Detail  v: View Graph  W: Work  r: Refresh  q: Quit";
 const LIST_STATUS_HINT_COMPACT: &str = "[List] j/k: Nav  Enter: Detail  W: Work  r: Refresh";
@@ -38,6 +44,9 @@ const LIST_STATUS_HINT_EPIC: &str =
     "[List] j/k: Nav  Enter: Open Detail  v: View Graph  E: Execute Epic  W: Work  r: Refresh  q: Quit";
 const LIST_STATUS_HINT_EPIC_COMPACT: &str =
     "[List] j/k: Nav  Enter: Detail  E: Execute Epic  W: Work";
+const LIST_STATUS_HINT_PLAN_EPIC: &str =
+    "[List] j/k: Nav  Enter: Detail  v: Graph  p: Open Plan  W: Work  r: Refresh  q: Quit";
+const LIST_STATUS_HINT_PLAN_EPIC_COMPACT: &str = "[List] j/k: Nav  Enter: Detail  p: Plan  W: Work";
 
 // ── Issue focus state machine ───────────────────────────────────────────
 
@@ -62,8 +71,12 @@ pub enum DetailMode {
 /// Inc 3 (bd-d587.3): caller-supplied intent for `open_external_detail`.
 /// `Default`/`FocusText` open the detail in Text mode (palette-style entry,
 /// no graph). `FocusGraph` arms the post-load mode flip so that once the
-/// detail + subgraph have arrived, the right pane shows Graph view —
-/// matching the "View Epic" intent from PlanBrowser.
+/// detail + graph have arrived, the right pane shows Graph view.
+///
+/// For plan-backed epics, the PM layer resolves this to the plan label scope
+/// (`spur:plan-id:<id>`) instead of treating the epic as an ordinary
+/// `--graph-root`. That keeps the UI low-friction: users open the epic, and
+/// the backend chooses the correct issue-graph projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OpenMode {
     #[default]
@@ -228,7 +241,9 @@ impl IssueBrowserView {
 
     /// Inc 3 (bd-d587.3): open a detail pane on `id` from outside this view
     /// (e.g., PlanBrowser View-Epic). `mode` controls the post-load detail
-    /// mode and arms graph pre-fetch when applicable.
+    /// mode and arms graph pre-fetch when applicable. Plan-backed epics are
+    /// still opened by epic id; the PM layer maps them to the full plan label
+    /// graph so callers do not need to know the plan UUID.
     ///
     /// - `OpenMode::Default` / `OpenMode::FocusText`: detail shown in Text
     ///   mode; user can press `v` to flip to Graph.
@@ -279,6 +294,31 @@ impl IssueBrowserView {
             .is_some_and(|issue| issue.issue_type.as_deref() == Some("epic"))
     }
 
+    fn selected_plan_backed_epic_plan_id(&self) -> Option<String> {
+        let selected_id = self.selected_issue_id()?;
+        let selected = self.selected_issue()?;
+        if selected.issue_type.as_deref() != Some("epic") {
+            return None;
+        }
+
+        find_plan_id_label(&selected.labels)
+            .or_else(|| match &self.issue_focus {
+                IssueFocus::Loaded { id, issue } if id == &selected_id => {
+                    find_plan_id_label(&issue.labels)
+                }
+                _ => None,
+            })
+            .map(str::to_string)
+    }
+
+    fn open_selected_plan(&self) -> Option<Action> {
+        self.selected_plan_backed_epic_plan_id()
+            .map(|plan_id| Action::OpenPlanInBrowser { plan_id })
+            .or(Some(Action::FlashHint {
+                message: "Selected issue has no implementation plan".into(),
+            }))
+    }
+
     fn hint_override(full: &'static str, compact: &'static str) -> HintOverride<'static> {
         HintOverride {
             full,
@@ -291,6 +331,13 @@ impl IssueBrowserView {
         self.graph_cache.clear();
         self.graph_loading = None;
         self.graph_error = None;
+    }
+
+    fn invalidate_graph_cache_preserving_inflight(&mut self) {
+        self.graph_cache.clear();
+        if self.graph_loading.is_none() {
+            self.graph_error = None;
+        }
     }
 
     fn request_selected_detail(&mut self) -> Option<Action> {
@@ -364,6 +411,14 @@ impl IssueBrowserView {
                 ),
             });
         }
+        if let Some(plan_id) = self.selected_plan_backed_epic_plan_id() {
+            return Some(Action::FlashHint {
+                message: format!(
+                    "Epic {} already has implementation plan {}; press p to open it",
+                    issue.id, plan_id
+                ),
+            });
+        }
 
         self.execute_modal = Some(ExecuteModal {
             epic_id: issue.id.clone(),
@@ -415,6 +470,7 @@ impl IssueBrowserView {
                 Some(Action::RefreshIssues)
             }
             KeyCode::Char('v') if key.modifiers.is_empty() => self.toggle_detail_mode(),
+            KeyCode::Char('p') if key.modifiers.is_empty() => self.open_selected_plan(),
 
             // Navigation
             KeyCode::Char('j') | KeyCode::Down if key.modifiers.is_empty() => {
@@ -595,16 +651,25 @@ impl IssueBrowserView {
         }
 
         // ── Status bar ────────────────────────────────────────────────────
-        let has_execute = self.selected_issue_is_epic();
+        let has_plan = self.selected_plan_backed_epic_plan_id().is_some();
+        let has_execute = self.selected_issue_is_epic() && !has_plan;
         let mode_hint = match self.issue_focus {
             IssueFocus::Loaded { .. } | IssueFocus::Loading { .. } => {
                 Some(match self.detail_mode {
+                    DetailMode::Text if has_plan => Self::hint_override(
+                        TEXT_STATUS_HINT_PLAN_EPIC,
+                        TEXT_STATUS_HINT_PLAN_EPIC_COMPACT,
+                    ),
                     DetailMode::Text if has_execute => {
                         Self::hint_override(TEXT_STATUS_HINT_EPIC, TEXT_STATUS_HINT_EPIC_COMPACT)
                     }
                     DetailMode::Text => {
                         Self::hint_override(TEXT_STATUS_HINT, TEXT_STATUS_HINT_COMPACT)
                     }
+                    DetailMode::Graph if has_plan => Self::hint_override(
+                        GRAPH_STATUS_HINT_PLAN_EPIC,
+                        GRAPH_STATUS_HINT_PLAN_EPIC_COMPACT,
+                    ),
                     DetailMode::Graph if has_execute => {
                         Self::hint_override(GRAPH_STATUS_HINT_EPIC, GRAPH_STATUS_HINT_EPIC_COMPACT)
                     }
@@ -613,6 +678,10 @@ impl IssueBrowserView {
                     }
                 })
             }
+            IssueFocus::None if issue_count > 0 && has_plan => Some(Self::hint_override(
+                LIST_STATUS_HINT_PLAN_EPIC,
+                LIST_STATUS_HINT_PLAN_EPIC_COMPACT,
+            )),
             IssueFocus::None if issue_count > 0 && has_execute => Some(Self::hint_override(
                 LIST_STATUS_HINT_EPIC,
                 LIST_STATUS_HINT_EPIC_COMPACT,
@@ -665,7 +734,7 @@ impl View for IssueBrowserView {
     fn handle_spur_event(&mut self, event: &SpurEvent, _ctx: &super::ViewContext) {
         match &event.body {
             spur_acp::SpurEventBody::IssuesLoaded { issues } => {
-                self.invalidate_graph_cache();
+                self.invalidate_graph_cache_preserving_inflight();
                 self.last_refresh_error = None;
 
                 // Capture id-to-preserve BEFORE replacing tracked_issues so
@@ -707,7 +776,7 @@ impl View for IssueBrowserView {
                         },
                         title: i.title.clone(),
                         status: i.status.clone(),
-                        labels: Vec::new(),
+                        labels: i.labels.clone(),
                         url: String::new(),
                         priority: i.priority,
                         issue_type: i.issue_type.clone(),
@@ -716,20 +785,16 @@ impl View for IssueBrowserView {
                     .collect();
 
                 if !self.tracked_issues.is_empty() {
-                    let selected = preferred_id.as_deref().is_some_and(|id| {
-                        self.issues_panel.select_by_id(id, &self.tracked_issues)
-                    });
+                    let selected = preferred_id
+                        .as_deref()
+                        .is_some_and(|id| self.issues_panel.select_by_id(id, &self.tracked_issues));
                     if !selected {
                         self.issues_panel.select_first();
                     }
                     // Drain pending_select once it lands in tracked_issues —
                     // the selection above already moved if the id matched.
                     if let Some(pending) = self.pending_select.as_deref() {
-                        if self
-                            .tracked_issues
-                            .iter()
-                            .any(|i| i.id == pending)
-                        {
+                        if self.tracked_issues.iter().any(|i| i.id == pending) {
                             self.pending_select = None;
                         }
                     }
@@ -780,10 +845,7 @@ impl View for IssueBrowserView {
                         // Inc 3 (bd-d587.3): apply the post-load mode armed
                         // by `open_external_detail(_, FocusGraph)`. Falls back
                         // to Text for the default palette-style entry path.
-                        self.detail_mode = self
-                            .post_load_mode
-                            .take()
-                            .unwrap_or(DetailMode::Text);
+                        self.detail_mode = self.post_load_mode.take().unwrap_or(DetailMode::Text);
                     }
                 }
             }
@@ -808,8 +870,12 @@ impl View for IssueBrowserView {
                 self.graph_error = None;
             }
 
-            spur_acp::SpurEventBody::IssueCommandError { error, operation, .. } => {
-                if self.graph_loading.is_some() {
+            spur_acp::SpurEventBody::IssueCommandError {
+                error, operation, ..
+            } => {
+                if matches!(operation.as_str(), "GetIssueGraph" | "get_graph")
+                    && self.graph_loading.is_some()
+                {
                     self.graph_error = Some(error.clone());
                     self.graph_loading = None;
                     // bd-d587.3 follow-up: a graph-fetch error must not leave
@@ -835,5 +901,79 @@ impl View for IssueBrowserView {
 
     fn tick(&mut self) {
         // No animation state yet
+    }
+}
+
+fn find_plan_id_label(labels: &[String]) -> Option<&str> {
+    labels
+        .iter()
+        .find_map(|label| label.strip_prefix("spur:plan-id:"))
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use spur_core::ExecutorLineage;
+
+    use crate::views::{View, ViewContext};
+
+    use super::*;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn issue(id: &str, issue_type: &str, labels: Vec<String>) -> spur_pm::IssueSummary {
+        spur_pm::IssueSummary {
+            id: id.into(),
+            source: spur_pm::PmSource::Beads,
+            title: "Epic".into(),
+            status: "open".into(),
+            labels,
+            url: format!("beads://{id}"),
+            priority: Some(1),
+            issue_type: Some(issue_type.into()),
+            assignee: None,
+        }
+    }
+
+    #[test]
+    fn p_opens_plan_browser_for_plan_backed_epic() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.set_issues_for_test(vec![issue(
+            "bd-1",
+            "epic",
+            vec!["spur:plan-id:plan-1".into(), "spur:plan-complete".into()],
+        )]);
+
+        let action = view.handle_key(key(KeyCode::Char('p')), &ctx);
+
+        assert!(matches!(
+            action,
+            Some(Action::OpenPlanInBrowser { plan_id }) if plan_id == "plan-1"
+        ));
+    }
+
+    #[test]
+    fn execute_is_blocked_for_plan_backed_epic() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.set_issues_for_test(vec![issue(
+            "bd-1",
+            "epic",
+            vec!["spur:plan-id:plan-1".into(), "spur:plan-complete".into()],
+        )]);
+
+        let action = view.handle_key(key(KeyCode::Char('E')), &ctx);
+
+        assert!(matches!(
+            action,
+            Some(Action::FlashHint { message })
+                if message.contains("already has implementation plan")
+                    && message.contains("press p")
+        ));
     }
 }

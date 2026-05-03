@@ -30,10 +30,12 @@ pub struct TrackedTask {
 pub struct TrackedPlan {
     pub session_id: SessionId,
     pub plan_id: String,
+    pub epic_id: Option<String>,
     pub status: String,
     pub progress: String,
     pub next_action: String,
     pub ready_to_merge: bool,
+    pub owner_brain_session_id: Option<String>,
     pub counts: PlanSnapshotCounts,
     pub tasks: Vec<TrackedTask>,
     pub updated_at: SystemTime,

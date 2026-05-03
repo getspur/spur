@@ -147,7 +147,10 @@ fn continuation_ctx(
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn run_plan_pushes_continuation_and_event_for_failed_task() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -252,7 +255,10 @@ async fn run_plan_pushes_continuation_and_event_for_failed_task() {
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn event_emission_does_not_race_with_state_update_for_failed_task() {
-    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
