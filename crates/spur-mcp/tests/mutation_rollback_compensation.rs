@@ -180,20 +180,11 @@ async fn inject_partial_rollback_failure(repo: PathBuf, mutation_id: Uuid) -> Re
     Err("timed out waiting to inject partial rollback failure".into())
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0d_6_rollback_audit_payload_enumerates_succeeded_and_failed_compensations() {
-    if !br_available() {
-        eprintln!(
-            "skipping t_v0d_6_rollback_audit_payload_enumerates_succeeded_and_failed_compensations: `br` not on PATH"
-        );
-        return;
-    }
-    if !sqlite_available() {
-        eprintln!(
-            "skipping t_v0d_6_rollback_audit_payload_enumerates_succeeded_and_failed_compensations: `sqlite3` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
+    assert!(sqlite_available(), "this test requires `sqlite3` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");

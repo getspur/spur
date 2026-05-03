@@ -153,14 +153,10 @@ fn persisted_task_with_context(agent: &str, context_files: &[&str]) -> Vec<PlanT
     }]
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0c_1_persisted_submit_path_does_not_direct_dispatch() {
-    if !br_available() {
-        eprintln!(
-            "skipping t_v0c_1_persisted_submit_path_does_not_direct_dispatch: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -194,12 +190,10 @@ async fn t_v0c_1_persisted_submit_path_does_not_direct_dispatch() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0c_2_reconciler_dispatch_writes_label_and_dispatch_audit() {
-    if !br_available() {
-        eprintln!("skipping t_v0c_2_reconciler_dispatch_writes_label_and_dispatch_audit: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -247,12 +241,10 @@ async fn t_v0c_2_reconciler_dispatch_writes_label_and_dispatch_audit() {
         .any(|audit| matches!(audit, AuditSentinelKind::Dispatch { .. })));
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0c_3_completion_success_writes_ready_for_review_and_completion() {
-    if !br_available() {
-        eprintln!("skipping t_v0c_3_completion_success_writes_ready_for_review_and_completion: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -299,12 +291,10 @@ async fn t_v0c_3_completion_success_writes_ready_for_review_and_completion() {
     )));
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0c_4_reject_closes_task_and_blocks_watcher() {
-    if !br_available() {
-        eprintln!("skipping t_v0c_4_reject_closes_task_and_blocks_watcher: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -370,12 +360,10 @@ async fn t_v0c_4_reject_closes_task_and_blocks_watcher() {
     assert!(!issue.labels.contains(&labels::READY_FOR_REVIEW.to_string()));
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0c_5_request_changes_stays_open_and_reconciler_redispatches() {
-    if !br_available() {
-        eprintln!("skipping t_v0c_5_request_changes_stays_open_and_reconciler_redispatches: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -464,14 +452,10 @@ async fn t_v0c_5_request_changes_stays_open_and_reconciler_redispatches() {
     assert_eq!(request.issue_id.as_deref(), Some(task_id.as_str()));
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0c_6_watcher_uses_projected_plan_state_not_stub_state() {
-    if !br_available() {
-        eprintln!(
-            "skipping t_v0c_6_watcher_uses_projected_plan_state_not_stub_state: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -551,14 +535,10 @@ async fn t_v0c_6_watcher_uses_projected_plan_state_not_stub_state() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0c_7_cache_miss_rehydrates_persisted_plan_from_beads() {
-    if !br_available() {
-        eprintln!(
-            "skipping t_v0c_7_cache_miss_rehydrates_persisted_plan_from_beads: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -589,12 +569,10 @@ async fn t_v0c_7_cache_miss_rehydrates_persisted_plan_from_beads() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0c_8_orphaned_dispatch_requeues_and_late_completion_is_superseded() {
-    if !br_available() {
-        eprintln!("skipping t_v0c_8_orphaned_dispatch_requeues_and_late_completion_is_superseded: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -649,12 +627,10 @@ async fn t_v0c_8_orphaned_dispatch_requeues_and_late_completion_is_superseded() 
     )));
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0c_9_orphaned_mutation_plan_is_compensated_before_new_signals() {
-    if !br_available() {
-        eprintln!("skipping t_v0c_9_orphaned_mutation_plan_is_compensated_before_new_signals: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -693,14 +669,10 @@ async fn t_v0c_9_orphaned_mutation_plan_is_compensated_before_new_signals() {
     )));
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0c_10_startup_reclaims_mid_plan_and_continues_dispatch() {
-    if !br_available() {
-        eprintln!(
-            "skipping t_v0c_10_startup_reclaims_mid_plan_and_continues_dispatch: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
     skip_if_no_loopback!("t_v0c_10_startup_reclaims_mid_plan_and_continues_dispatch");
 
     let dir = TempDir::new().expect("tempdir");
@@ -745,14 +717,10 @@ async fn t_v0c_10_startup_reclaims_mid_plan_and_continues_dispatch() {
     assert_eq!(request.issue_id.as_deref(), Some(task_id.as_str()));
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0c_11_startup_reclaim_clears_stale_dispatch_before_redispatch() {
-    if !br_available() {
-        eprintln!(
-            "skipping t_v0c_11_startup_reclaim_clears_stale_dispatch_before_redispatch: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
     skip_if_no_loopback!("t_v0c_11_startup_reclaim_clears_stale_dispatch_before_redispatch");
 
     let dir = TempDir::new().expect("tempdir");

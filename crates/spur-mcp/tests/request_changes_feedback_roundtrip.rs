@@ -70,14 +70,10 @@ fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterialize
     ))
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn request_changes_feedback_survives_reprojection_and_reaches_worker() {
-    if !br_available() {
-        eprintln!(
-            "skipping request_changes_feedback_survives_reprojection_and_reaches_worker: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");

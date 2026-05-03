@@ -176,12 +176,10 @@ impl ReconcilerAutomation for RecordingAutomation {
     }
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0e_2_auto_merge_pr_is_opt_in() {
-    if !br_available() {
-        eprintln!("skipping t_v0e_2_auto_merge_pr_is_opt_in: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -384,12 +382,10 @@ fn seed_ready_task(repo: &Path, plan_id: &str) -> (String, String) {
 
 // ── T-v0e-1: persisted direct-dispatch retirement ───────────────────────
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0e_1_no_persisted_direct_dispatch() {
-    if !br_available() {
-        eprintln!("skipping t_v0e_1_no_persisted_direct_dispatch: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
@@ -538,12 +534,10 @@ async fn t_v0e_1_no_persisted_direct_dispatch() {
 
 // ── T-v0e-3: wakeup equivalence ─────────────────────────────────────────
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0e_3_fast_forward_matches_polling() {
-    if !br_available() {
-        eprintln!("skipping t_v0e_3_fast_forward_matches_polling: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let plan_id = "P-wake";
 
