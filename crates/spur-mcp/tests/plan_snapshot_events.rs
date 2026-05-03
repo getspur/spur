@@ -205,6 +205,27 @@ async fn persisted_submit_plan_emits_plan_snapshot_updated() {
 
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
+async fn persisted_plan_snapshot_carries_owner_brain_session_id() {
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
+
+    let fixture = PersistedFixture::new().await;
+    let (_plan_id, _task_map) = fixture.submit_persisted_plan().await;
+
+    let events = fixture.sink.events.lock().unwrap();
+    let snapshots = snapshot_events(&events);
+    let (_, latest) = snapshots.last().expect("at least one snapshot event");
+    assert_eq!(
+        latest.owner_brain_session_id.as_deref(),
+        Some("brain"),
+        "snapshot must surface the submitting brain's session id as owner"
+    );
+}
+
+#[ignore = "requires br on PATH; run with --ignored"]
+#[tokio::test]
 async fn review_task_emits_refreshed_plan_snapshot() {
     assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 

@@ -253,6 +253,29 @@ pub struct PlanSnapshot {
     pub ready_to_merge: bool,
     pub counts: PlanSnapshotCounts,
     pub tasks: Vec<PlanSnapshotTask>,
+    /// Brain session id observed in the projected `PlanState` at snapshot time.
+    /// Mirrors the `spur:plan-owner:*` label semantics on the epic. Reads from
+    /// `PlanState.brain_session_id`; for projector-rebuilt plans this is the
+    /// original submitter and may lag the live label-derived owner if a
+    /// transfer happened between projector ticks. Tightening to label-derived
+    /// truth requires threading `epic.labels` into the snapshot builder
+    /// (tracked as a follow-up). `None` for plans pre-feature or unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_brain_session_id: Option<String>,
+    /// Most recently emitted ownership token from the
+    /// `PlanOwnershipAcquired` / `PlanOwnershipTransferred` audit sentinel for
+    /// this plan. Currently a `None` placeholder — derivation requires
+    /// scanning the epic audit history, which is out of scope for the snapshot
+    /// builder. TODO: thread the latest token through the projector and
+    /// in-memory ownership acquisition path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_token: Option<String>,
+    /// Wall-clock timestamp of the latest ownership acquisition or transfer,
+    /// derived from the audit sentinel comment timestamp or the brain's
+    /// monotonic-mapped wall time at acquisition. Currently a `None`
+    /// placeholder — see `owner_token` for derivation notes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_acquired_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
