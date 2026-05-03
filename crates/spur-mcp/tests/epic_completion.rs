@@ -120,6 +120,18 @@ async fn beads_pm(repo: &Path) -> Arc<spur_pm::PmService> {
     )
 }
 
+fn test_dispatch_ctx() -> ReconcilerDispatchCtx {
+    let (delegation_tx, _delegation_rx) = tokio::sync::mpsc::channel(1);
+    ReconcilerDispatchCtx {
+        delegation_tx,
+        task_tracker: tokio_util::task::TaskTracker::new(),
+        brain_session_id: BrainSessionId::new(SessionId("brain".into())),
+        event_sink: None,
+        materializer: test_materializer(),
+        continuation_ctx: common::server_builder::continuation_ctx_arc(),
+    }
+}
+
 async fn seed_epic_fixture(
     repo: &Path,
     plan_id: &str,
@@ -165,6 +177,7 @@ async fn seed_epic_fixture(
     for issue_id in [&epic_id, &task_a_id, &task_b_id] {
         label_issue(repo, issue_id, &plan_label);
     }
+    label_issue(repo, &epic_id, &labels::plan_owner("brain"));
     label_issue(repo, &epic_id, labels::PLAN_COMPLETE);
 
     (beads_pm(repo).await, epic_id, task_a_id, task_b_id)
@@ -204,6 +217,7 @@ async fn reconciler_pushes_plan_completed_continuation_after_worker_completion_c
     ));
     let plan_label = labels::plan_id(plan_id);
     label_issue(dir.path(), &epic_id, &plan_label);
+    label_issue(dir.path(), &epic_id, &labels::plan_owner("brain"));
     label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
     label_issue(dir.path(), &task_id, &plan_label);
     label_issue(dir.path(), &task_id, &labels::plan_task_id("t1"));
@@ -309,7 +323,7 @@ async fn t_v0d_1_epic_closes_when_children_terminal() {
         ReconcilerConfig::default(),
         Arc::clone(&pm),
         Arc::new(Notify::new()),
-        None,
+        Some(test_dispatch_ctx()),
         Some("P1".into()),
         common::server_builder::pro_feature_gate(),
     );
@@ -455,6 +469,7 @@ async fn three_task_plan_drops_plan_outcomes_on_epic_close_but_retains_global_ri
     let plan_id = "P-prune";
     let plan_label = labels::plan_id(plan_id);
     label_issue(dir.path(), &epic_id, &plan_label);
+    label_issue(dir.path(), &epic_id, &labels::plan_owner("brain"));
     label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
     for (index, task_id) in task_ids.iter().enumerate() {
         label_issue(dir.path(), task_id, &plan_label);
@@ -611,7 +626,7 @@ async fn epic_completion_backfills_missing_audit_for_closed_terminal_epic() {
         ReconcilerConfig::default(),
         Arc::clone(&pm),
         Arc::new(Notify::new()),
-        None,
+        Some(test_dispatch_ctx()),
         Some("P1".into()),
         common::server_builder::pro_feature_gate(),
     );
@@ -761,7 +776,7 @@ async fn closed_epic_backfill_clears_stale_integration_pending_on_failure() {
         ReconcilerConfig::default(),
         Arc::clone(&pm),
         Arc::new(Notify::new()),
-        None,
+        Some(test_dispatch_ctx()),
         Some("P3".into()),
         common::server_builder::pro_feature_gate(),
     );
@@ -817,7 +832,7 @@ async fn epic_closure_ignores_non_task_plan_scoped_issues() {
         ReconcilerConfig::default(),
         Arc::clone(&pm),
         Arc::new(Notify::new()),
-        None,
+        Some(test_dispatch_ctx()),
         Some("P4".into()),
         common::server_builder::pro_feature_gate(),
     );
