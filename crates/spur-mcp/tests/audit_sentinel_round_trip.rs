@@ -41,12 +41,10 @@ fn extract_id(json: &str) -> String {
         .to_string()
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[test]
 fn every_audit_sentinel_variant_round_trips_through_br_comments() {
-    if !br_available() {
-        eprintln!("skipping: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
     let dir = TempDir::new().unwrap();
     run_br(dir.path(), &["init"]).unwrap();
     let id = extract_id(&run_br(dir.path(), &["create", "t", "-t", "task"]).unwrap());

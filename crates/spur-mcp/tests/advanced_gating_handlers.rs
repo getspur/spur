@@ -53,12 +53,10 @@ fn advanced_submit_args() -> Value {
     })
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn submit_plan_persist_as_epic_returns_not_licensed_for_community_gate() {
-    if !br_available() {
-        eprintln!("skipping submit_plan_persist_as_epic_returns_not_licensed_for_community_gate: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let pm = beads_pm(dir.path()).await;
@@ -79,12 +77,10 @@ async fn submit_plan_persist_as_epic_returns_not_licensed_for_community_gate() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn submit_plan_persist_as_epic_proceeds_for_pro_gate() {
-    if !br_available() {
-        eprintln!("skipping submit_plan_persist_as_epic_proceeds_for_pro_gate: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let pm = beads_pm(dir.path()).await;

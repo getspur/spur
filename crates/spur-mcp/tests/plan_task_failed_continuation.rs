@@ -144,14 +144,10 @@ fn continuation_ctx(
     (ctx, release)
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn run_plan_pushes_continuation_and_event_for_failed_task() {
-    if !br_available() {
-        eprintln!(
-            "skipping run_plan_pushes_continuation_and_event_for_failed_task: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -253,14 +249,10 @@ async fn run_plan_pushes_continuation_and_event_for_failed_task() {
 /// the task is already `failed` at that moment. v2 fails this assertion (sees
 /// `dispatched`); v3 — after moving the event emit into the deferred-push
 /// `deliver()` step — passes.
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn event_emission_does_not_race_with_state_update_for_failed_task() {
-    if !br_available() {
-        eprintln!(
-            "skipping event_emission_does_not_race_with_state_update_for_failed_task: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);

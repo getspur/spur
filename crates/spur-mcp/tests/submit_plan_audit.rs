@@ -74,6 +74,7 @@ fn collect_sentinels(texts: &[String]) -> Vec<AuditSentinelKind> {
         .collect()
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn submit_plan_persists_plan_owner_on_epic() {
     if !br_available() {
@@ -167,10 +168,7 @@ async fn submit_plan_persists_plan_owner_on_epic() {
 
 #[tokio::test]
 async fn emit_plan_submit_audit_writes_sentinel_on_epic() {
-    if !br_available() {
-        eprintln!("skipping: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
@@ -255,12 +253,10 @@ async fn emit_plan_submit_audit_writes_sentinel_on_epic() {
     );
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn plan_submit_audit_includes_brain_session_id() {
-    if !br_available() {
-        eprintln!("skipping plan_submit_audit_includes_brain_session_id: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
@@ -317,14 +313,10 @@ async fn plan_submit_audit_includes_brain_session_id() {
     )));
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn plan_submit_audit_includes_merge_base_and_execution_mode() {
-    if !br_available() {
-        eprintln!(
-            "skipping plan_submit_audit_includes_merge_base_and_execution_mode: `br` not on PATH"
-        );
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
@@ -386,12 +378,10 @@ async fn plan_submit_audit_includes_merge_base_and_execution_mode() {
     )));
 }
 
+#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn plan_submit_sentinel_round_trips_base_snapshot_oid() {
-    if !br_available() {
-        eprintln!("skipping plan_submit_sentinel_round_trips_base_snapshot_oid: `br` not on PATH");
-        return;
-    }
+    assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
