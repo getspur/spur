@@ -942,3 +942,317 @@ async fn execute_epic_allows_re_issue_by_current_brain() {
         "execute_epic must allow re-issue by current brain: {response}"
     );
 }
+
+#[ignore = "requires br on PATH; run with --ignored"]
+#[tokio::test]
+async fn force_reclaim_plan_refuses_without_confirm() {
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init");
+    let pm = beads_pm(dir.path()).await;
+    let feature_gate = common::server_builder::pro_feature_gate();
+    let plan_id = "plan-force-reclaim-no-confirm";
+    let subgraph = spur_mcp::build_epic_subgraph(
+        pm.as_ref(),
+        feature_gate.as_ref(),
+        plan_id,
+        "Force Reclaim No Confirm",
+        None,
+        &one_task(),
+    )
+    .await
+    .expect("build epic subgraph");
+    pm.update_issue(
+        &subgraph.epic_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![labels::plan_owner("other-brain")],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("seed other-brain owner label");
+    let labels_before = pm
+        .get_issue(&subgraph.epic_id)
+        .await
+        .expect("get pre-call epic")
+        .labels;
+
+    let session_id = BrainSessionId::new(SessionId("brain-current".into()));
+    let (server, _channel) = McpCallbackServer::new(
+        &session_id,
+        Some(Arc::clone(&pm)),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        common::server_builder::pro_feature_gate(),
+    );
+
+    // Missing confirm.
+    let response = server
+        .__test_call_tool("force_reclaim_plan", json!({ "plan_id": plan_id }))
+        .await;
+    let msg = error_message(&response);
+    assert!(
+        msg.contains("force_reclaim_plan") && msg.contains("confirm"),
+        "missing confirm must surface a clear safety error: {response}"
+    );
+
+    // Explicit confirm: false.
+    let response = server
+        .__test_call_tool(
+            "force_reclaim_plan",
+            json!({ "plan_id": plan_id, "confirm": false }),
+        )
+        .await;
+    let msg = error_message(&response);
+    assert!(
+        msg.contains("force_reclaim_plan") && msg.contains("confirm"),
+        "confirm:false must surface a clear safety error: {response}"
+    );
+
+    // Labels must be untouched.
+    let labels_after = pm
+        .get_issue(&subgraph.epic_id)
+        .await
+        .expect("get post-call epic")
+        .labels;
+    assert_eq!(
+        labels_before, labels_after,
+        "force_reclaim_plan without confirm must NOT mutate epic labels"
+    );
+
+    // No PlanForceReclaimed audit comment must have been emitted.
+    let sentinels = collect_epic_sentinels(pm.as_ref(), &subgraph.epic_id).await;
+    let reclaims = sentinels
+        .iter()
+        .filter(|s| matches!(s, AuditSentinelKind::PlanForceReclaimed { .. }))
+        .count();
+    assert_eq!(
+        reclaims, 0,
+        "refused force_reclaim_plan must not emit PlanForceReclaimed sentinel"
+    );
+}
+
+fn parse_force_reclaim_response_body(response: &serde_json::Value) -> serde_json::Value {
+    let text = response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("force_reclaim_plan success response must include content[0].text");
+    serde_json::from_str(text).expect("force_reclaim_plan body must be valid JSON")
+}
+
+#[ignore = "requires br on PATH; run with --ignored"]
+#[tokio::test]
+async fn force_reclaim_plan_takes_over_from_other_brain() {
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init");
+    let pm = beads_pm(dir.path()).await;
+    let feature_gate = common::server_builder::pro_feature_gate();
+    let plan_id = "plan-force-reclaim-takeover";
+    let subgraph = spur_mcp::build_epic_subgraph(
+        pm.as_ref(),
+        feature_gate.as_ref(),
+        plan_id,
+        "Force Reclaim Takeover",
+        None,
+        &one_task(),
+    )
+    .await
+    .expect("build epic subgraph");
+    pm.update_issue(
+        &subgraph.epic_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![labels::plan_owner("other-brain")],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("seed other-brain owner label");
+
+    let session_id = BrainSessionId::new(SessionId("brain-current".into()));
+    let (server, _channel) = McpCallbackServer::new(
+        &session_id,
+        Some(Arc::clone(&pm)),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        common::server_builder::pro_feature_gate(),
+    );
+
+    let response = server
+        .__test_call_tool(
+            "force_reclaim_plan",
+            json!({
+                "plan_id": plan_id,
+                "confirm": true,
+                "reason": "takeover test",
+            }),
+        )
+        .await;
+    assert!(
+        response.get("error").is_none(),
+        "force_reclaim_plan must succeed when confirm:true: {response}"
+    );
+    let body = parse_force_reclaim_response_body(&response);
+    assert_eq!(
+        body["prior_owner"].as_str(),
+        Some(labels::compact_label_component("other-brain").as_str()),
+        "prior_owner must reflect the previously stamped owner label value"
+    );
+    assert_eq!(
+        body["new_owner"].as_str(),
+        Some(session_id.to_string().as_str()),
+        "new_owner must equal the current brain session id"
+    );
+    let audit_token = body["audit_token"]
+        .as_str()
+        .expect("audit_token must be a non-empty string");
+    assert!(!audit_token.is_empty(), "audit_token must be non-empty");
+
+    // Epic now carries exactly the new owner label and no other plan-owner labels.
+    let epic = pm
+        .get_issue(&subgraph.epic_id)
+        .await
+        .expect("get post-reclaim epic");
+    let owners: Vec<&String> = epic
+        .labels
+        .iter()
+        .filter(|label| labels::parse_plan_owner(label).is_some())
+        .collect();
+    let expected_owner = labels::plan_owner(&session_id.as_session_id().0);
+    assert_eq!(owners.len(), 1, "epic must carry exactly one owner label after reclaim; labels={:?}", epic.labels);
+    assert_eq!(
+        owners[0], &expected_owner,
+        "epic must carry only the new owner label after reclaim"
+    );
+
+    // Audit sentinel records the takeover with the prior owner, new owner,
+    // operator-supplied reason, and the same token surfaced to the caller.
+    let sentinels = collect_epic_sentinels(pm.as_ref(), &subgraph.epic_id).await;
+    let reclaims: Vec<&AuditSentinelKind> = sentinels
+        .iter()
+        .filter(|s| matches!(s, AuditSentinelKind::PlanForceReclaimed { .. }))
+        .collect();
+    assert_eq!(
+        reclaims.len(),
+        1,
+        "expected exactly one PlanForceReclaimed sentinel; sentinels: {sentinels:?}"
+    );
+    let AuditSentinelKind::PlanForceReclaimed {
+        plan_id: audit_plan_id,
+        prior_owner,
+        new_owner,
+        token,
+        reason,
+    } = reclaims[0]
+    else {
+        unreachable!("filtered to PlanForceReclaimed");
+    };
+    assert_eq!(audit_plan_id, plan_id);
+    assert_eq!(
+        prior_owner.as_deref(),
+        Some(labels::compact_label_component("other-brain").as_str())
+    );
+    assert_eq!(new_owner, &session_id.to_string());
+    assert_eq!(token, audit_token);
+    assert_eq!(reason.as_deref(), Some("takeover test"));
+}
+
+#[ignore = "requires br on PATH; run with --ignored"]
+#[tokio::test]
+async fn force_reclaim_plan_handles_unowned_plan() {
+    assert!(
+        br_available(),
+        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
+    );
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init");
+    let pm = beads_pm(dir.path()).await;
+    let feature_gate = common::server_builder::pro_feature_gate();
+    let plan_id = "plan-force-reclaim-unowned";
+    let subgraph = spur_mcp::build_epic_subgraph(
+        pm.as_ref(),
+        feature_gate.as_ref(),
+        plan_id,
+        "Force Reclaim Unowned",
+        None,
+        &one_task(),
+    )
+    .await
+    .expect("build epic subgraph");
+
+    let session_id = BrainSessionId::new(SessionId("brain-current".into()));
+    let (server, _channel) = McpCallbackServer::new(
+        &session_id,
+        Some(Arc::clone(&pm)),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        common::server_builder::pro_feature_gate(),
+    );
+
+    let response = server
+        .__test_call_tool(
+            "force_reclaim_plan",
+            json!({
+                "plan_id": plan_id,
+                "confirm": true,
+            }),
+        )
+        .await;
+    assert!(
+        response.get("error").is_none(),
+        "force_reclaim_plan must succeed for unowned plans: {response}"
+    );
+    let body = parse_force_reclaim_response_body(&response);
+    assert!(
+        body["prior_owner"].is_null(),
+        "prior_owner must be null when reclaiming an unowned plan; body={body}"
+    );
+    assert_eq!(body["new_owner"].as_str(), Some(session_id.to_string().as_str()));
+    let audit_token = body["audit_token"].as_str().expect("audit_token string");
+    assert!(!audit_token.is_empty());
+
+    // Epic is now stamped with exactly the current brain.
+    let epic = pm
+        .get_issue(&subgraph.epic_id)
+        .await
+        .expect("get post-reclaim epic");
+    let expected_owner = labels::plan_owner(&session_id.as_session_id().0);
+    assert!(
+        epic.labels.iter().any(|label| label == &expected_owner),
+        "epic must carry the current brain owner label after force-reclaim; labels={:?}",
+        epic.labels
+    );
+
+    // Audit sentinel records prior_owner: None, no reason, matching token.
+    let sentinels = collect_epic_sentinels(pm.as_ref(), &subgraph.epic_id).await;
+    let reclaims: Vec<&AuditSentinelKind> = sentinels
+        .iter()
+        .filter(|s| matches!(s, AuditSentinelKind::PlanForceReclaimed { .. }))
+        .collect();
+    assert_eq!(reclaims.len(), 1, "expected one PlanForceReclaimed sentinel");
+    let AuditSentinelKind::PlanForceReclaimed {
+        prior_owner,
+        new_owner,
+        token,
+        reason,
+        ..
+    } = reclaims[0]
+    else {
+        unreachable!("filtered to PlanForceReclaimed");
+    };
+    assert!(prior_owner.is_none(), "prior_owner must be None for unowned plan");
+    assert_eq!(new_owner, &session_id.to_string());
+    assert_eq!(token, audit_token);
+    assert!(reason.is_none(), "reason must be None when not supplied");
+}
