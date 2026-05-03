@@ -2863,7 +2863,7 @@ impl Orchestrator {
                                     self.funnel.emit(SpurEventBody::IssueCommandError {
                                         operation: "GetIssueDetail".into(),
                                         error: e.to_string(),
-                                        id: None,
+                                        id: Some(id),
                                     });
                                 }
                             }
@@ -2871,7 +2871,7 @@ impl Orchestrator {
                             self.funnel.emit(SpurEventBody::IssueCommandError {
                                 operation: "GetIssueDetail".into(),
                                 error: "No issue tracker configured".into(),
-                                id: None,
+                                id: Some(id),
                             });
                         }
                     }

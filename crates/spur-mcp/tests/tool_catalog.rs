@@ -21,6 +21,7 @@ const EXPECTED: &[&str] = &[
     "add_dependency",
     "create_pr",
     "merge_plan",
+    "resume_plan",
     "graph_triage",
     "graph_plan",
     "graph_insights",

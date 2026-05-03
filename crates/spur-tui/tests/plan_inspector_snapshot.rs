@@ -1,10 +1,12 @@
+use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
 use spur_acp::{
-    PlanSnapshot, PlanSnapshotCounts, PlanSnapshotTask, SessionId, SpurEvent, SpurEventBody,
+    IssueDetailEvent, PlanSnapshot, PlanSnapshotCounts, PlanSnapshotTask, SessionId, SpurEvent,
+    SpurEventBody,
 };
 use spur_core::{ExecutorLineage, PlanProjectionStore, SessionSynopsisProjection};
-use spur_tui::action::Action;
+use spur_tui::action::{Action, IssueAction};
 use spur_tui::app::BrainStatus;
 use spur_tui::views::plan_inspector::PlanInspectorView;
 use spur_tui::views::{View, ViewContext};
@@ -51,6 +53,26 @@ fn sample_plan_store() -> PlanProjectionStore {
                     "pending",
                 ),
             ],
+        }),
+    }));
+    store
+}
+
+fn plan_store_with_selected_task_without_issue() -> PlanProjectionStore {
+    let mut store = PlanProjectionStore::default();
+    store.apply(&SpurEvent::now(SpurEventBody::PlanSnapshotUpdated {
+        session_id: SessionId("brain-1".into()),
+        snapshot: Box::new(PlanSnapshot {
+            plan_id: "plan-1".into(),
+            status: "running".into(),
+            progress: "0/1 done".into(),
+            next_action: "No issue IDs in this plan; use this to validate Enter feedback.".into(),
+            ready_to_merge: false,
+            counts: PlanSnapshotCounts {
+                pending: 1,
+                ..Default::default()
+            },
+            tasks: vec![task("task-no-issue", 0, &[], None, "pending")],
         }),
     }));
     store
@@ -269,6 +291,40 @@ fn buffer_contains(buf: &Buffer, needle: &str) -> bool {
     s.contains(needle)
 }
 
+fn sample_issue_detail_event(id: &str, title: &str, status: &str, body: &str) -> IssueDetailEvent {
+    let now = Utc::now();
+    IssueDetailEvent {
+        id: id.into(),
+        source: "github".into(),
+        title: title.into(),
+        body: body.into(),
+        status: status.into(),
+        labels: vec!["label-a".into(), "label-b".into()],
+        assignee: Some("coder".into()),
+        url: "https://example.com/issue".into(),
+        priority: Some(1),
+        issue_type: Some("bug".into()),
+        blocked_by: vec!["blocked-by-1".into()],
+        due_at: None,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+fn long_issue_body() -> String {
+    (0..80)
+        .map(|idx| format!("body-line-{idx:03}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn long_issue_body_with_prefix(prefix: &str) -> String {
+    (0..80)
+        .map(|idx| format!("{prefix}-body-line-{idx:03}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[test]
 fn plan_inspector_renders_wide_lane_board() {
     let backend = TestBackend::new(120, 32);
@@ -418,6 +474,420 @@ fn plan_inspector_alt_p_requests_navigate_back() {
 
     let action = view.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT), &ctx);
     assert!(matches!(action, Some(Action::NavigateBack)));
+}
+
+#[test]
+fn plan_inspector_enter_requests_issue_detail() {
+    let mut view = PlanInspectorView::new(SessionId("brain-1".into()));
+    let plans = sample_plan_store();
+    let lineage = sample_lineage();
+    let synopsis = SessionSynopsisProjection::new();
+    let ctx = ViewContext {
+        lineage: &lineage,
+        plan_projection: &plans,
+        synopsis: &synopsis,
+        brain_status: &BrainStatus::Idle,
+        license_badge: None,
+        flag_summary: None,
+        tombstone: None,
+        transient_hint_override: None,
+    };
+
+    let action = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &ctx);
+    assert!(matches!(
+        action,
+        Some(Action::Issue(IssueAction::ViewDetail { ref id })) if id == "bd-1"
+    ));
+}
+
+#[test]
+fn plan_inspector_enter_no_issue_task_flashes_hint() {
+    let mut view = PlanInspectorView::new(SessionId("brain-1".into()));
+    let plans = plan_store_with_selected_task_without_issue();
+    let lineage = sample_lineage();
+    let synopsis = SessionSynopsisProjection::new();
+    let ctx = ViewContext {
+        lineage: &lineage,
+        plan_projection: &plans,
+        synopsis: &synopsis,
+        brain_status: &BrainStatus::Idle,
+        license_badge: None,
+        flag_summary: None,
+        tombstone: None,
+        transient_hint_override: None,
+    };
+
+    let action = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &ctx);
+    match action {
+        Some(Action::FlashHint { message }) => {
+            assert!(message.contains("No issue linked"));
+        }
+        _ => panic!("expected flash hint when task has no issue id"),
+    }
+}
+
+#[test]
+fn plan_inspector_esc_closes_open_issue_detail() {
+    let mut view = PlanInspectorView::new(SessionId("brain-1".into()));
+    let plans = sample_plan_store();
+    let lineage = sample_lineage();
+    let synopsis = SessionSynopsisProjection::new();
+    let ctx = ViewContext {
+        lineage: &lineage,
+        plan_projection: &plans,
+        synopsis: &synopsis,
+        brain_status: &BrainStatus::Idle,
+        license_badge: None,
+        flag_summary: None,
+        tombstone: None,
+        transient_hint_override: None,
+    };
+
+    let action = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &ctx);
+    assert!(matches!(
+        action,
+        Some(Action::Issue(IssueAction::ViewDetail { ref id })) if id == "bd-1"
+    ));
+
+    let close_action = view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &ctx);
+    assert!(close_action.is_none());
+
+    let back_action = view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &ctx);
+    assert!(matches!(back_action, Some(Action::NavigateBack)));
+}
+
+#[test]
+fn plan_inspector_task_detail_scroll_affordance() {
+    let mut view = PlanInspectorView::new(SessionId("brain-1".into()));
+    let plans = sample_plan_store();
+    let lineage = sample_lineage();
+    let synopsis = SessionSynopsisProjection::new();
+    let ctx = ViewContext {
+        lineage: &lineage,
+        plan_projection: &plans,
+        synopsis: &synopsis,
+        brain_status: &BrainStatus::Idle,
+        license_badge: None,
+        flag_summary: None,
+        tombstone: None,
+        transient_hint_override: None,
+    };
+    let backend = TestBackend::new(120, 32);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let open_action = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &ctx);
+    assert!(matches!(
+        open_action,
+        Some(Action::Issue(IssueAction::ViewDetail { ref id })) if id == "bd-1"
+    ));
+
+    view.handle_spur_event(
+        &SpurEvent::now(SpurEventBody::IssueDetailFetched {
+            requested_id: "bd-1".into(),
+            issue: sample_issue_detail_event("bd-1", "Long body task", "open", &long_issue_body()),
+        }),
+        &ctx,
+    );
+
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let initial = terminal.backend().buffer().clone();
+    assert!(buffer_contains(&initial, "body-line-000"));
+    assert!(!buffer_contains(&initial, "body-line-020"));
+
+    let down_action = view.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE), &ctx);
+    assert!(matches!(down_action, Some(Action::ScrollDown)));
+    let down_action = view.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE), &ctx);
+    assert!(matches!(down_action, Some(Action::ScrollDown)));
+
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let scrolled = terminal.backend().buffer().clone();
+    assert!(buffer_contains(&scrolled, "body-line-020"));
+}
+
+#[test]
+fn plan_inspector_detail_scroll_reset_when_switching_tasks() {
+    let mut view = PlanInspectorView::new(SessionId("brain-1".into()));
+    let plans = sample_plan_store();
+    let lineage = sample_lineage();
+    let synopsis = SessionSynopsisProjection::new();
+    let ctx = ViewContext {
+        lineage: &lineage,
+        plan_projection: &plans,
+        synopsis: &synopsis,
+        brain_status: &BrainStatus::Idle,
+        license_badge: None,
+        flag_summary: None,
+        tombstone: None,
+        transient_hint_override: None,
+    };
+    let backend = TestBackend::new(120, 32);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let open_a = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &ctx);
+    assert!(matches!(
+        open_a,
+        Some(Action::Issue(IssueAction::ViewDetail { ref id })) if id == "bd-1"
+    ));
+
+    view.handle_spur_event(
+        &SpurEvent::now(SpurEventBody::IssueDetailFetched {
+            requested_id: "bd-1".into(),
+            issue: sample_issue_detail_event(
+                "bd-1",
+                "Task A",
+                "open",
+                &long_issue_body_with_prefix("A"),
+            ),
+        }),
+        &ctx,
+    );
+    view.handle_spur_event(
+        &SpurEvent::now(SpurEventBody::IssueDetailFetched {
+            requested_id: "bd-2".into(),
+            issue: sample_issue_detail_event(
+                "bd-2",
+                "Task B",
+                "open",
+                &long_issue_body_with_prefix("B"),
+            ),
+        }),
+        &ctx,
+    );
+
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let a_top = terminal.backend().buffer().clone();
+    assert!(buffer_contains(&a_top, "A-body-line-000"));
+    assert!(!buffer_contains(&a_top, "A-body-line-020"));
+
+    let down_action = view.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE), &ctx);
+    assert!(matches!(down_action, Some(Action::ScrollDown)));
+    let down_action = view.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE), &ctx);
+    assert!(matches!(down_action, Some(Action::ScrollDown)));
+
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let a_scrolled = terminal.backend().buffer().clone();
+    assert!(buffer_contains(&a_scrolled, "A-body-line-020"));
+
+    let lane_right = view.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &ctx);
+    assert!(lane_right.is_none());
+
+    let open_b = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &ctx);
+    assert!(
+        open_b.is_none(),
+        "preloaded issue detail for task B should render immediately when opening"
+    );
+
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let b_open = terminal.backend().buffer().clone();
+    assert!(
+        buffer_contains(&b_open, "B-body-line-000"),
+        "switching tasks should reset detail scroll to top"
+    );
+    assert!(
+        !buffer_contains(&b_open, "B-body-line-020"),
+        "switched task detail should not inherit previous task's scroll position"
+    );
+
+    let close_b = view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &ctx);
+    assert!(close_b.is_none());
+
+    let reopen_b = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &ctx);
+    assert!(
+        reopen_b.is_none(),
+        "reopening loaded issue detail should not reissue request"
+    );
+
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let b_reopen = terminal.backend().buffer().clone();
+    assert!(
+        buffer_contains(&b_reopen, "B-body-line-000"),
+        "reopening after close should keep top-of-detail reset state"
+    );
+
+    let first_back_action = view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &ctx);
+    assert!(first_back_action.is_none());
+
+    let second_back_action = view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &ctx);
+    assert!(matches!(second_back_action, Some(Action::NavigateBack)));
+}
+
+#[test]
+fn plan_inspector_renders_issue_detail_loading_and_fetched() {
+    let mut view = PlanInspectorView::new(SessionId("brain-1".into()));
+    let plans = sample_plan_store();
+    let lineage = sample_lineage();
+    let synopsis = SessionSynopsisProjection::new();
+    let ctx = ViewContext {
+        lineage: &lineage,
+        plan_projection: &plans,
+        synopsis: &synopsis,
+        brain_status: &BrainStatus::Idle,
+        license_badge: None,
+        flag_summary: None,
+        tombstone: None,
+        transient_hint_override: None,
+    };
+
+    let backend = TestBackend::new(120, 32);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let action = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &ctx);
+    assert!(matches!(
+        action,
+        Some(Action::Issue(IssueAction::ViewDetail { ref id })) if id == "bd-1"
+    ));
+
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let loading_buffer = terminal.backend().buffer().clone();
+    assert!(buffer_contains(&loading_buffer, "Loading issue detail..."));
+
+    view.handle_spur_event(
+        &SpurEvent::now(SpurEventBody::IssueDetailFetched {
+            requested_id: "bd-1".into(),
+            issue: sample_issue_detail_event("bd-1", "Contract task", "open", "Detailed\nbody"),
+        }),
+        &ctx,
+    );
+
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let detail_buffer = terminal.backend().buffer().clone();
+    assert!(buffer_contains(&detail_buffer, "Issue"));
+    assert!(buffer_contains(&detail_buffer, "id: bd-1"));
+    assert!(buffer_contains(&detail_buffer, "title: Contract task"));
+    assert!(buffer_contains(&detail_buffer, "status: open"));
+    assert!(buffer_contains(&detail_buffer, "Description"));
+    assert!(buffer_contains(&detail_buffer, "body"));
+    assert!(buffer_contains(&detail_buffer, "Detailed"));
+}
+
+#[test]
+fn plan_inspector_issue_detail_error_without_id_targets_open_issue_when_unique() {
+    let mut view = PlanInspectorView::new(SessionId("brain-1".into()));
+    let plans = sample_plan_store();
+    let lineage = sample_lineage();
+    let synopsis = SessionSynopsisProjection::new();
+    let ctx = ViewContext {
+        lineage: &lineage,
+        plan_projection: &plans,
+        synopsis: &synopsis,
+        brain_status: &BrainStatus::Idle,
+        license_badge: None,
+        flag_summary: None,
+        tombstone: None,
+        transient_hint_override: None,
+    };
+
+    let backend = TestBackend::new(120, 32);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let action = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &ctx);
+    assert!(matches!(
+        action,
+        Some(Action::Issue(IssueAction::ViewDetail { ref id })) if id == "bd-1"
+    ));
+
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let loading_buffer = terminal.backend().buffer().clone();
+    assert!(buffer_contains(&loading_buffer, "Loading issue detail..."));
+
+    view.handle_spur_event(
+        &SpurEvent::now(SpurEventBody::IssueCommandError {
+            operation: "GetIssueDetail".into(),
+            error: "No issue tracker configured".into(),
+            id: None,
+        }),
+        &ctx,
+    );
+
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let error_buffer = terminal.backend().buffer().clone();
+    assert!(!buffer_contains(&error_buffer, "Loading issue detail..."));
+    assert!(buffer_contains(&error_buffer, "Issue"));
+    assert!(buffer_contains(
+        &error_buffer,
+        "No issue tracker configured"
+    ));
+}
+
+#[test]
+fn plan_inspector_issue_detail_error_without_id_ignores_with_multiple_in_flight() {
+    let mut view = PlanInspectorView::new(SessionId("brain-1".into()));
+    let plans = sample_plan_store();
+    let lineage = sample_lineage();
+    let synopsis = SessionSynopsisProjection::new();
+    let ctx = ViewContext {
+        lineage: &lineage,
+        plan_projection: &plans,
+        synopsis: &synopsis,
+        brain_status: &BrainStatus::Idle,
+        license_badge: None,
+        flag_summary: None,
+        tombstone: None,
+        transient_hint_override: None,
+    };
+
+    let backend = TestBackend::new(120, 32);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let open_a = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &ctx);
+    assert!(matches!(
+        open_a,
+        Some(Action::Issue(IssueAction::ViewDetail { ref id })) if id == "bd-1"
+    ));
+
+    let lane_right = view.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &ctx);
+    assert!(lane_right.is_none());
+
+    let open_b = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &ctx);
+    assert!(matches!(
+        open_b,
+        Some(Action::Issue(IssueAction::ViewDetail { ref id })) if id == "bd-2"
+    ));
+
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let loading_buffer = terminal.backend().buffer().clone();
+    assert!(buffer_contains(&loading_buffer, "Loading issue detail..."));
+
+    view.handle_spur_event(
+        &SpurEvent::now(SpurEventBody::IssueCommandError {
+            operation: "GetIssueDetail".into(),
+            error: "No issue tracker configured".into(),
+            id: None,
+        }),
+        &ctx,
+    );
+
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let error_buffer = terminal.backend().buffer().clone();
+    assert!(buffer_contains(&error_buffer, "Loading issue detail..."));
+    assert!(!buffer_contains(
+        &error_buffer,
+        "No issue tracker configured"
+    ));
 }
 
 #[test]

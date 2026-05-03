@@ -299,6 +299,244 @@ async fn tick_once_does_not_dispatch_partial_plan_after_child_create_failure() {
 
 #[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
+async fn tick_once_skips_plan_owned_by_another_brain() {
+    if !br_available() {
+        eprintln!("skipping tick_once_skips_plan_owned_by_another_brain: `br` not on PATH");
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let pm = Arc::new(
+        spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+            .await
+            .expect("PmService::try_new failed")
+            .expect("expected beads pm"),
+    );
+    let feature_gate = common::server_builder::pro_feature_gate();
+    let subgraph = spur_mcp::build_epic_subgraph(
+        pm.as_ref(),
+        feature_gate.as_ref(),
+        "other-owned-plan",
+        "Other Owned Plan",
+        None,
+        &[plan_task("t1")],
+    )
+    .await
+    .expect("build_epic_subgraph");
+    label_issue(
+        dir.path(),
+        &subgraph.epic_id,
+        &labels::plan_owner("other-brain"),
+    );
+
+    let (delegation_tx, mut delegation_rx) = tokio::sync::mpsc::channel(1);
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        Some(ReconcilerDispatchCtx {
+            delegation_tx,
+            task_tracker: tokio_util::task::TaskTracker::new(),
+            brain_session_id: BrainSessionId::new(SessionId("brain".to_string())),
+            event_sink: None,
+            materializer: test_materializer(),
+            continuation_ctx: common::server_builder::continuation_ctx_arc(),
+        }),
+        Some("other-owned-plan".to_string()),
+        feature_gate,
+    );
+
+    let did_work = reconciler.tick_once().await.expect("tick_once");
+    assert!(!did_work, "other-owned plan must not produce dispatch work");
+    assert!(
+        delegation_rx.try_recv().is_err(),
+        "other-owned plan must not enqueue a delegation"
+    );
+}
+
+#[tokio::test]
+async fn tick_once_skips_terminal_epic_owned_by_another_brain() {
+    if !br_available() {
+        eprintln!(
+            "skipping tick_once_skips_terminal_epic_owned_by_another_brain: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected beads pm");
+    let pm = Arc::new(pm);
+    let epic_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Other Terminal Epic",
+            "--priority",
+            "2",
+        ],
+    ));
+    label_issue(dir.path(), &epic_id, &labels::plan_id("other-terminal"));
+    label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
+    label_issue(dir.path(), &epic_id, &labels::plan_owner("other-brain"));
+
+    let task_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Terminal Task",
+            "--priority",
+            "2",
+        ],
+    ));
+    label_issue(dir.path(), &task_id, &labels::plan_id("other-terminal"));
+    pm.update_issue(
+        &task_id,
+        spur_pm::IssueUpdate {
+            status: Some(pm.closed_status().to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("close task");
+
+    let (delegation_tx, _delegation_rx) = tokio::sync::mpsc::channel(1);
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        Some(ReconcilerDispatchCtx {
+            delegation_tx,
+            task_tracker: tokio_util::task::TaskTracker::new(),
+            brain_session_id: BrainSessionId::new(SessionId("brain".to_string())),
+            event_sink: None,
+            materializer: test_materializer(),
+            continuation_ctx: common::server_builder::continuation_ctx_arc(),
+        }),
+        Some("other-terminal".to_string()),
+        common::server_builder::pro_feature_gate(),
+    );
+
+    let did_work = reconciler.tick_once().await.expect("tick_once");
+    assert!(!did_work, "non-owner terminal epic must not be reconciled");
+    let epic = pm.get_issue(&epic_id).await.expect("get epic");
+    assert_eq!(epic.status, "open");
+
+    let sentinels = collect_sentinels(&run_br_json(dir.path(), &["comments", "list", &epic_id]));
+    assert!(!sentinels
+        .iter()
+        .any(|audit| matches!(audit, AuditSentinelKind::EpicCompletion { .. })));
+}
+
+#[tokio::test]
+async fn tick_once_does_not_reclaim_expired_lease_owned_by_another_brain() {
+    if !br_available() {
+        eprintln!(
+            "skipping tick_once_does_not_reclaim_expired_lease_owned_by_another_brain: `br` not on PATH"
+        );
+        return;
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected beads pm");
+    let pm = Arc::new(pm);
+    let epic_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Other Lease Epic",
+            "--priority",
+            "2",
+        ],
+    ));
+    label_issue(dir.path(), &epic_id, &labels::plan_id("other-lease"));
+    label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
+    label_issue(dir.path(), &epic_id, &labels::plan_owner("other-brain"));
+
+    let task_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Other Leased Task",
+            "--priority",
+            "2",
+        ],
+    ));
+    let delegation_id = "del-other-expired";
+    let expired_at = 1;
+    label_issue(dir.path(), &task_id, &labels::plan_id("other-lease"));
+    label_issue(
+        dir.path(),
+        &task_id,
+        &labels::plan_task_id("t-other-expired"),
+    );
+    label_issue(dir.path(), &task_id, &labels::agent("codex"));
+    label_issue(dir.path(), &task_id, &labels::delegation_id(delegation_id));
+    label_issue(dir.path(), &task_id, &labels::lease_expires_at(expired_at));
+
+    let (delegation_tx, _delegation_rx) = tokio::sync::mpsc::channel(1);
+    let sink = Arc::new(CaptureSink {
+        events: std::sync::Mutex::new(Vec::new()),
+    });
+    let event_sink: Arc<dyn McpEventSink> = sink.clone();
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        Some(ReconcilerDispatchCtx {
+            delegation_tx,
+            task_tracker: tokio_util::task::TaskTracker::new(),
+            brain_session_id: BrainSessionId::new(SessionId("brain".to_string())),
+            event_sink: Some(event_sink),
+            materializer: test_materializer(),
+            continuation_ctx: common::server_builder::continuation_ctx_arc(),
+        }),
+        Some("other-lease".to_string()),
+        common::server_builder::pro_feature_gate(),
+    );
+
+    let did_work = reconciler.tick_once().await.expect("tick_once");
+    assert!(!did_work, "non-owner expired lease must not be reclaimed");
+    let issue = pm.get_issue(&task_id).await.expect("get issue");
+    assert_eq!(issue.status, "open");
+    assert!(issue.labels.contains(&labels::delegation_id(delegation_id)));
+    assert!(issue.labels.contains(&labels::lease_expires_at(expired_at)));
+
+    let sentinels = collect_sentinels(&run_br_json(dir.path(), &["comments", "list", &task_id]));
+    assert!(!sentinels.iter().any(|audit| matches!(
+        audit,
+        AuditSentinelKind::Completion { .. } | AuditSentinelKind::DispatchOrphanCleared { .. }
+    )));
+    let events = sink.events.lock().expect("events lock");
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event.body, SpurEventBody::DispatchLeaseExpired { .. })));
+}
+
+#[tokio::test]
 async fn tick_once_dispatches_ready_task_with_approved_dep_overlay() {
     assert!(br_available(), "this test requires `br` on PATH; run with `cargo test -- --ignored`");
 
@@ -326,6 +564,7 @@ async fn tick_once_dispatches_ready_task_with_approved_dep_overlay() {
     )
     .await
     .expect("build_epic_subgraph");
+    label_issue(dir.path(), &subgraph.epic_id, &labels::plan_owner("brain"));
     let task_1_issue = subgraph.task_map["T1"].clone();
     let task_2_issue = subgraph.task_map["T2"].clone();
 
@@ -502,6 +741,7 @@ async fn overlay_conflict_routes_to_blocked_on_setup_conflict() {
     )
     .await
     .expect("build_epic_subgraph");
+    label_issue(dir.path(), &subgraph.epic_id, &labels::plan_owner("brain"));
     let task_1_issue = subgraph.task_map["T1"].clone();
     let task_2_issue = subgraph.task_map["T2"].clone();
 
@@ -1198,6 +1438,7 @@ async fn epic_closes_when_scoped_children_terminal() {
     label_issue(dir.path(), &task_a_id, &plan_label);
     label_issue(dir.path(), &task_b_id, &plan_label);
     label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
+    label_issue(dir.path(), &epic_id, &labels::plan_owner("brain"));
 
     let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
         .await
@@ -1228,7 +1469,14 @@ async fn epic_closes_when_scoped_children_terminal() {
         ReconcilerConfig::default(),
         Arc::clone(&pm),
         Arc::new(Notify::new()),
-        None,
+        Some(ReconcilerDispatchCtx {
+            delegation_tx: tokio::sync::mpsc::channel(1).0,
+            task_tracker: tokio_util::task::TaskTracker::new(),
+            brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
+            event_sink: None,
+            materializer: test_materializer(),
+            continuation_ctx: common::server_builder::continuation_ctx_arc(),
+        }),
         Some("P1".into()),
         common::server_builder::pro_feature_gate(),
     );
@@ -1300,6 +1548,7 @@ async fn all_approved_epic_emits_plan_ready_to_merge() {
     label_issue(dir.path(), &task_a_id, &plan_label);
     label_issue(dir.path(), &task_b_id, &plan_label);
     label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
+    label_issue(dir.path(), &epic_id, &labels::plan_owner("brain"));
 
     let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
         .await
@@ -1380,6 +1629,7 @@ async fn tick_once_persists_dispatch_before_queue_send() {
     ));
     label_issue(dir.path(), &epic_id, &labels::plan_id("plan-1"));
     label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
+    label_issue(dir.path(), &epic_id, &labels::plan_owner("brain"));
 
     let task_id = parse_id_from_create(&run_br_json(
         dir.path(),
@@ -1447,6 +1697,7 @@ async fn tick_once_persists_failed_completion_when_respond_to_drops() {
     ));
     label_issue(dir.path(), &epic_id, &labels::plan_id("plan-1"));
     label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
+    label_issue(dir.path(), &epic_id, &labels::plan_owner("brain"));
 
     let task_id = parse_id_from_create(&run_br_json(
         dir.path(),
@@ -1573,6 +1824,7 @@ async fn tick_once_reclaims_expired_lease_dispatch() {
     ));
     label_issue(dir.path(), &epic_id, &labels::plan_id("plan-lease"));
     label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
+    label_issue(dir.path(), &epic_id, &labels::plan_owner("brain"));
 
     let task_id = parse_id_from_create(&run_br_json(
         dir.path(),
@@ -1813,6 +2065,7 @@ async fn tick_once_does_not_reclaim_live_lease() {
     ));
     label_issue(dir.path(), &epic_id, &labels::plan_id("plan-live"));
     label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
+    label_issue(dir.path(), &epic_id, &labels::plan_owner("brain"));
 
     let task_id = parse_id_from_create(&run_br_json(
         dir.path(),
@@ -1896,6 +2149,7 @@ async fn tick_once_clears_dispatch_label_when_send_fails() {
     ));
     label_issue(dir.path(), &epic_id, &labels::plan_id("plan-1"));
     label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
+    label_issue(dir.path(), &epic_id, &labels::plan_owner("brain"));
 
     let task_id = parse_id_from_create(&run_br_json(
         dir.path(),
@@ -1982,6 +2236,7 @@ async fn tick_once_skips_broken_plan_and_dispatches_other_ready_work() {
     ));
     label_issue(dir.path(), &epic_id, &labels::plan_id("plan-1"));
     label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
+    label_issue(dir.path(), &epic_id, &labels::plan_owner("brain"));
 
     let valid_task_id = parse_id_from_create(&run_br_json(
         dir.path(),
@@ -2205,6 +2460,15 @@ async fn execute_epic_persists_execution_scope_labels_on_epic_and_tasks() {
         name: "codex".into(),
         ..Default::default()
     }]);
+    pm.update_issue(
+        &epic_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![labels::plan_owner("other-brain")],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("pre-seed prior owner label");
 
     let response = server
         .__test_call_execute_epic(&epic_id, Some("codex"))
@@ -2216,6 +2480,27 @@ async fn execute_epic_persists_execution_scope_labels_on_epic_and_tasks() {
     );
 
     let epic = pm.get_issue(&epic_id).await.expect("get epic");
+    assert!(
+        epic.labels
+            .iter()
+            .any(|label| label == &labels::plan_owner(&brain_sid.as_session_id().0)),
+        "execute_epic should stamp current owner label for current brain session"
+    );
+    let owner_labels: Vec<&str> = epic
+        .labels
+        .iter()
+        .filter_map(|label| labels::parse_plan_owner(label))
+        .collect();
+    assert_eq!(
+        owner_labels.len(),
+        1,
+        "execute_epic should replace old owner labels instead of accumulating them; got {owner_labels:?}"
+    );
+    assert_eq!(
+        owner_labels[0],
+        &brain_sid.as_session_id().0.replace('-', ""),
+        "execute_epic should keep exactly current owner"
+    );
     assert!(epic
         .labels
         .iter()
@@ -2616,6 +2901,7 @@ async fn execute_epic_default_notify_path_dispatches_ready_task() {
     run_br(dir.path(), &["dep", "add", &task_a_id, &epic_id]);
     run_br(dir.path(), &["dep", "add", &task_b_id, &epic_id]);
     run_br(dir.path(), &["dep", "add", &task_b_id, &task_a_id]);
+    label_issue(dir.path(), &epic_id, &labels::plan_owner("brain"));
 
     let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
         .await
@@ -2847,6 +3133,12 @@ async fn hybrid_fast_forward_matches_polling_projection() {
     ));
     label_issue(dir.path(), &epic_id, &labels::plan_id("plan-1"));
     label_issue(dir.path(), &epic_id, labels::PLAN_COMPLETE);
+    let brain_sid = BrainSessionId::new(SessionId::new());
+    label_issue(
+        dir.path(),
+        &epic_id,
+        &labels::plan_owner(&brain_sid.as_session_id().0),
+    );
 
     let task_id = parse_id_from_create(&run_br_json(
         dir.path(),
@@ -2879,7 +3171,7 @@ async fn hybrid_fast_forward_matches_polling_projection() {
         Some(ReconcilerDispatchCtx {
             delegation_tx,
             task_tracker: tokio_util::task::TaskTracker::new(),
-            brain_session_id: BrainSessionId::new(SessionId::new()),
+            brain_session_id: brain_sid,
             event_sink: None,
             materializer: test_materializer(),
             continuation_ctx: common::server_builder::continuation_ctx_arc(),
