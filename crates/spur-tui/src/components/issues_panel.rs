@@ -16,6 +16,11 @@ pub struct IssueLineageContext<'a> {
     pub edges: &'a [GraphEdgeEvent],
 }
 
+pub enum IssueLineageView<'a> {
+    Loaded(IssueLineageContext<'a>),
+    Loading { root_id: &'a str },
+}
+
 pub struct IssuesPanel {
     table_state: TableState,
     focused: bool,
@@ -89,7 +94,7 @@ impl IssuesPanel {
     pub fn render_with_lineage(
         &mut self,
         issues: &[IssueSummary],
-        lineage: Option<IssueLineageContext<'_>>,
+        lineage: Option<IssueLineageView<'_>>,
         frame: &mut Frame,
         area: Rect,
     ) {
@@ -98,9 +103,19 @@ impl IssuesPanel {
         }
 
         if let Some(lineage) = lineage {
-            if lineage.nodes.len() > 1 {
-                self.render_lineage(issues, lineage, frame, area);
-                return;
+            match lineage {
+                IssueLineageView::Loaded(lineage) if lineage.nodes.len() > 1 => {
+                    let meta = LineageMeta::new(lineage);
+                    let readiness = meta.readiness();
+                    self.render_lineage(issues, meta, readiness, frame, area);
+                    return;
+                }
+                IssueLineageView::Loading { root_id } => {
+                    let meta = LineageMeta::loading(root_id);
+                    self.render_lineage(issues, meta, "loading work tree".into(), frame, area);
+                    return;
+                }
+                IssueLineageView::Loaded(_) => {}
             }
         }
 
@@ -180,18 +195,13 @@ impl IssuesPanel {
     fn render_lineage(
         &mut self,
         issues: &[IssueSummary],
-        lineage: IssueLineageContext<'_>,
+        meta: LineageMeta<'_>,
+        readiness: String,
         frame: &mut Frame,
         area: Rect,
     ) {
         let selected_idx = self.table_state.selected().unwrap_or(0);
         let total = issues.len();
-        let meta = LineageMeta::new(lineage);
-        let readiness = if meta.open_blockers > 0 {
-            format!("blocked by open upstream ({})", meta.open_blockers)
-        } else {
-            "ready".into()
-        };
         let (border_style, title) = if self.focused {
             (
                 Style::default().fg(Color::Cyan),
@@ -321,6 +331,24 @@ impl<'a> LineageMeta<'a> {
             blocks_by_id,
             node_by_id,
             open_blockers,
+        }
+    }
+
+    fn loading(root_id: &'a str) -> Self {
+        Self {
+            root_id,
+            blockers_by_id: HashMap::new(),
+            blocks_by_id: HashMap::new(),
+            node_by_id: HashMap::new(),
+            open_blockers: 0,
+        }
+    }
+
+    fn readiness(&self) -> String {
+        if self.open_blockers > 0 {
+            format!("blocked by open upstream ({})", self.open_blockers)
+        } else {
+            "ready".into()
         }
     }
 
