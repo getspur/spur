@@ -74,23 +74,6 @@ fn graph_node(id: &str, title: &str) -> GraphNodeEvent {
     }
 }
 
-fn plan_epic_node(id: &str, title: &str) -> GraphNodeEvent {
-    GraphNodeEvent {
-        labels: vec!["spur:plan-complete".into(), "spur:plan-id:plan-1".into()],
-        ..graph_node(id, title)
-    }
-}
-
-fn plan_task_node(id: &str, title: &str) -> GraphNodeEvent {
-    GraphNodeEvent {
-        labels: vec![
-            "spur:plan-id:plan-1".into(),
-            format!("spur:plan-task-id:{id}"),
-        ],
-        ..graph_node(id, title)
-    }
-}
-
 fn graph_edge(from: &str, to: &str) -> GraphEdgeEvent {
     graph_edge_with_type(from, to, "blocks")
 }
@@ -156,6 +139,43 @@ fn expect_get_graph(rx: &mut mpsc::Receiver<UserInput>, expected_id: &str) {
         Ok(_) => panic!("expected GetIssueGraph"),
         Err(err) => panic!("expected GetIssueGraph, got {err}"),
     }
+}
+
+#[test]
+fn issue_browser_filters_plan_artifacts_from_work_item_list() {
+    let (mut app, mut rx) = spur_tui::test_support::app_with_user_input_tx();
+    spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
+    match rx.try_recv() {
+        Ok(UserInput::RefreshIssues) => {}
+        Ok(_) => panic!("expected RefreshIssues, got different user input"),
+        Err(err) => panic!("expected RefreshIssues, got {err}"),
+    }
+
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssuesLoaded {
+            issues: vec![
+                plan_epic_summary("bd-plan", "Persisted plan epic"),
+                plan_task_summary("bd-plan.1", "Plan implementation task"),
+                sample_summary("bd-bug", "Standalone bug"),
+            ],
+        }),
+    );
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    let rendered = render_text(&mut app, &mut terminal);
+    assert!(rendered.contains("bd-bug"), "rendered:\n{rendered}");
+    assert!(
+        !rendered.contains("bd-plan"),
+        "plan artifacts should be owned by PlanBrowser, not IssueBrowser:\n{rendered}"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "single visible work item must not trigger lineage graph prefetch"
+    );
+
+    app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    expect_get_detail(&mut rx, "bd-bug");
 }
 
 #[test]
@@ -248,9 +268,9 @@ fn issue_list_orders_epic_parent_before_children_even_if_backend_sends_child_fir
         &mut app,
         SpurEvent::now(SpurEventBody::IssuesLoaded {
             issues: vec![
-                plan_task_summary("bd-parent.1", "Child first"),
-                plan_epic_summary("bd-parent", "Parent epic"),
-                plan_task_summary("bd-parent.2", "Child second"),
+                sample_summary("bd-parent.1", "Child first"),
+                sample_summary("bd-parent", "Parent epic"),
+                sample_summary("bd-parent.2", "Child second"),
             ],
         }),
     );
@@ -259,9 +279,9 @@ fn issue_list_orders_epic_parent_before_children_even_if_backend_sends_child_fir
         SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
             requested_id: "bd-parent".into(),
             nodes: vec![
-                plan_epic_node("bd-parent", "Parent epic"),
-                plan_task_node("bd-parent.1", "Child first"),
-                plan_task_node("bd-parent.2", "Child second"),
+                graph_node("bd-parent", "Parent epic"),
+                graph_node("bd-parent.1", "Child first"),
+                graph_node("bd-parent.2", "Child second"),
             ],
             edges: vec![
                 graph_edge_with_type("bd-parent.1", "bd-parent", "related"),
@@ -298,9 +318,9 @@ fn issue_list_keeps_panel_height_when_navigating_from_parent_to_child() {
     }
 
     let mut issues = vec![
-        plan_epic_summary("bd-parent", "Parent epic"),
-        plan_task_summary("bd-parent.1", "Child one"),
-        plan_task_summary("bd-parent.2", "Child two"),
+        sample_summary("bd-parent", "Parent epic"),
+        sample_summary("bd-parent.1", "Child one"),
+        sample_summary("bd-parent.2", "Child two"),
     ];
     for idx in 0..20 {
         issues.push(sample_summary(
@@ -318,9 +338,9 @@ fn issue_list_keeps_panel_height_when_navigating_from_parent_to_child() {
         SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
             requested_id: "bd-parent".into(),
             nodes: vec![
-                plan_epic_node("bd-parent", "Parent epic"),
-                plan_task_node("bd-parent.1", "Child one"),
-                plan_task_node("bd-parent.2", "Child two"),
+                graph_node("bd-parent", "Parent epic"),
+                graph_node("bd-parent.1", "Child one"),
+                graph_node("bd-parent.2", "Child two"),
             ],
             edges: vec![
                 graph_edge_with_type("bd-parent.1", "bd-parent", "related"),
@@ -355,8 +375,8 @@ fn issue_list_keeps_panel_height_when_lineage_data_arrives() {
     }
 
     let mut issues = vec![
-        plan_epic_summary("bd-parent", "Parent epic"),
-        plan_task_summary("bd-parent.1", "Child one"),
+        sample_summary("bd-parent", "Parent epic"),
+        sample_summary("bd-parent.1", "Child one"),
     ];
     for idx in 0..20 {
         issues.push(sample_summary(
@@ -378,8 +398,8 @@ fn issue_list_keeps_panel_height_when_lineage_data_arrives() {
         SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
             requested_id: "bd-parent".into(),
             nodes: vec![
-                plan_epic_node("bd-parent", "Parent epic"),
-                plan_task_node("bd-parent.1", "Child one"),
+                graph_node("bd-parent", "Parent epic"),
+                graph_node("bd-parent.1", "Child one"),
             ],
             edges: vec![graph_edge_with_type("bd-parent.1", "bd-parent", "related")],
         }),
@@ -631,8 +651,8 @@ fn issue_list_keeps_non_prefix_child_label_while_graph_loads() {
         &mut app,
         SpurEvent::now(SpurEventBody::IssuesLoaded {
             issues: vec![
-                plan_epic_summary("bd-2pb", "Epic root"),
-                plan_task_summary("bd-work", "Non-prefix child"),
+                sample_summary("bd-2pb", "Epic root"),
+                sample_summary("bd-work", "Non-prefix child"),
             ],
         }),
     );
@@ -642,10 +662,10 @@ fn issue_list_keeps_non_prefix_child_label_while_graph_loads() {
         SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
             requested_id: "bd-2pb".into(),
             nodes: vec![
-                plan_epic_node("bd-2pb", "Epic root"),
-                plan_task_node("bd-work", "Non-prefix child"),
+                graph_node("bd-2pb", "Epic root"),
+                graph_node("bd-work", "Non-prefix child"),
             ],
-            edges: vec![graph_edge_with_type("bd-work", "bd-2pb", "related")],
+            edges: vec![graph_edge_with_type("bd-work", "bd-2pb", "parent-child")],
         }),
     );
 
@@ -735,8 +755,8 @@ fn issue_list_does_not_treat_sibling_related_edge_as_parent() {
         &mut app,
         SpurEvent::now(SpurEventBody::IssuesLoaded {
             issues: vec![
-                plan_task_summary("bd-2pb.1", "First sibling"),
-                plan_task_summary("bd-2pb.2", "Second sibling"),
+                sample_summary("bd-2pb.1", "First sibling"),
+                sample_summary("bd-2pb.2", "Second sibling"),
             ],
         }),
     );
@@ -746,8 +766,8 @@ fn issue_list_does_not_treat_sibling_related_edge_as_parent() {
         SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
             requested_id: "bd-2pb.1".into(),
             nodes: vec![
-                plan_task_node("bd-2pb.1", "First sibling"),
-                plan_task_node("bd-2pb.2", "Second sibling"),
+                graph_node("bd-2pb.1", "First sibling"),
+                graph_node("bd-2pb.2", "Second sibling"),
             ],
             edges: vec![graph_edge_with_type("bd-2pb.1", "bd-2pb.2", "related")],
         }),
