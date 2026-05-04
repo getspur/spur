@@ -18,8 +18,8 @@ use crate::components::status_bar::{HintOverride, StatusBar, StatusBarProps};
 use super::{View, ViewContext};
 
 const STATUS_HINT: &str =
-    " [j/k]navigate [p]plan peek/open [e]epic peek/open [c]claim [s]start/resume [r]refresh [Esc]back";
-const STATUS_HINT_COMPACT: &str = " [j/k]nav [p]plan [e]epic [c]claim [s]start [Esc]back";
+    " [j/k]navigate [p]plan peek/open [o]work item peek/open [c]claim [s]start/resume [r]refresh [Esc]summary/back";
+const STATUS_HINT_COMPACT: &str = " [j/k]nav [p]plan [o]item [c]claim [s]start [Esc]back";
 
 #[derive(Debug, Clone)]
 pub struct PlanBrowserView {
@@ -36,7 +36,7 @@ pub struct PlanBrowserView {
 enum DetailPeek {
     Summary,
     Plan,
-    Epic,
+    WorkItem,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,7 +147,7 @@ impl PlanBrowserView {
     }
 
     fn open_selected(&self, ctx: &ViewContext<'_>) -> Option<Action> {
-        if self.detail_peek == DetailPeek::Epic {
+        if self.detail_peek == DetailPeek::WorkItem {
             return self.open_selected_work_item();
         }
         self.open_selected_implementation_plan(ctx)
@@ -283,8 +283,8 @@ impl PlanBrowserView {
             });
         }
 
-        if self.detail_peek != DetailPeek::Epic {
-            self.detail_peek = DetailPeek::Epic;
+        if self.detail_peek != DetailPeek::WorkItem {
+            self.detail_peek = DetailPeek::WorkItem;
             self.hint = None;
             return None;
         }
@@ -470,7 +470,7 @@ impl PlanBrowserView {
         let title = match self.detail_peek {
             DetailPeek::Summary => " Plan / Work Item Summary ",
             DetailPeek::Plan => " Implementation Plan ",
-            DetailPeek::Epic => " Work Item Scope ",
+            DetailPeek::WorkItem => " Work Item Scope ",
         };
         let block = Block::default()
             .title(title)
@@ -483,7 +483,7 @@ impl PlanBrowserView {
             let mut lines = match self.detail_peek {
                 DetailPeek::Summary => self.render_summary_lines(plan),
                 DetailPeek::Plan => self.render_plan_lines(plan),
-                DetailPeek::Epic => self.render_epic_lines(plan),
+                DetailPeek::WorkItem => self.render_work_item_lines(plan),
             };
             if let Some(hint) = self.hint.as_ref() {
                 lines.push(Line::from(Span::styled(
@@ -525,8 +525,13 @@ impl PlanBrowserView {
             Self::field_line("Plan", plan.plan_id.clone()),
             Self::field_line("Work item", plan.epic_id.clone()),
             Self::field_line("Title", plan.title.clone()),
-            Self::field_line("State", Self::lifecycle_label(plan.lifecycle)),
+            Self::field_line("Description", Self::body_preview_text(plan)),
+            Self::field_line("Owner", Self::owner_detail(&plan.owner_state)),
+            Self::field_line("Lifecycle", Self::lifecycle_label(plan.lifecycle)),
             Self::field_line("Progress", Self::progress_text(plan.counts.as_ref())),
+            Self::field_line("Tasks", Self::task_counts_text(plan.counts.as_ref())),
+            Self::field_line("Updated", Self::updated_text(plan)),
+            Self::field_line("Next", Self::next_action_text(plan)),
             Self::action_line("p: implementation plan   o: work item   c: claim   s: start/resume"),
         ]
     }
@@ -534,18 +539,21 @@ impl PlanBrowserView {
     fn render_plan_lines(&self, plan: &PlanSummaryEvent) -> Vec<Line<'static>> {
         vec![
             Self::field_line("Plan", plan.plan_id.clone()),
+            Self::field_line("Work item", plan.epic_id.clone()),
+            Self::field_line("Title", plan.title.clone()),
             Self::field_line("Owner", Self::owner_detail(&plan.owner_state)),
             Self::field_line("Lifecycle", Self::lifecycle_label(plan.lifecycle)),
             Self::field_line("Progress", Self::progress_text(plan.counts.as_ref())),
             Self::field_line("Tasks", Self::task_counts_text(plan.counts.as_ref())),
             Self::field_line("Updated", Self::updated_text(plan)),
+            Self::field_line("Description", Self::body_preview_text(plan)),
             Self::action_line("Press p again to open the implementation plan board"),
         ]
     }
 
-    fn render_epic_lines(&self, plan: &PlanSummaryEvent) -> Vec<Line<'static>> {
+    fn render_work_item_lines(&self, plan: &PlanSummaryEvent) -> Vec<Line<'static>> {
         vec![
-            Self::field_line("Epic", plan.epic_id.clone()),
+            Self::field_line("Work item", plan.epic_id.clone()),
             Self::field_line("Title", plan.title.clone()),
             Self::field_line("Plan", plan.plan_id.clone()),
             Self::field_line(
@@ -553,8 +561,34 @@ impl PlanBrowserView {
                 format!("spur:plan-id:{}", plan.plan_id),
             ),
             Self::field_line("Lifecycle", Self::lifecycle_label(plan.lifecycle)),
-            Self::action_line("Press e again to open the epic issue graph"),
+            Self::field_line("Description", Self::body_preview_text(plan)),
+            Self::action_line("Press o again to open the source work item"),
         ]
+    }
+
+    fn body_preview_text(plan: &PlanSummaryEvent) -> String {
+        plan.source_body_preview
+            .as_deref()
+            .map(str::trim)
+            .filter(|body| !body.is_empty())
+            .unwrap_or("--")
+            .to_string()
+    }
+
+    fn next_action_text(plan: &PlanSummaryEvent) -> String {
+        match &plan.owner_state {
+            PlanOwnerStateEvent::Unowned if plan_is_active(plan) => "claim with c".into(),
+            PlanOwnerStateEvent::Unowned => "terminal/unclaimable".into(),
+            PlanOwnerStateEvent::Mine if plan_is_active(plan) => "start or resume with s".into(),
+            PlanOwnerStateEvent::Mine => "terminal".into(),
+            PlanOwnerStateEvent::Other { owner } => format!("owned by {owner}"),
+            PlanOwnerStateEvent::Ambiguous { owners } if owners.is_empty() => {
+                "ambiguous ownership".into()
+            }
+            PlanOwnerStateEvent::Ambiguous { owners } => {
+                format!("ambiguous ownership: {}", owners.join(", "))
+            }
+        }
     }
 
     fn task_counts_text(counts: Option<&PlanSummaryCountsEvent>) -> String {
@@ -707,6 +741,11 @@ impl View for PlanBrowserView {
             KeyCode::Char('o') if key.modifiers.is_empty() => self.view_selected_work_item(),
             KeyCode::Char('b') if key.modifiers.is_empty() => {
                 Some(Action::NavigateTo(ViewId::IssueBrowser))
+            }
+            KeyCode::Esc if key.modifiers.is_empty() && self.detail_peek != DetailPeek::Summary => {
+                self.detail_peek = DetailPeek::Summary;
+                self.hint = None;
+                None
             }
             KeyCode::Esc | KeyCode::Char('q') if key.modifiers.is_empty() => {
                 Some(Action::NavigateBack)
@@ -876,6 +915,10 @@ mod tests {
             plan_id: plan_id.into(),
             epic_id: "bd-epic".into(),
             title: "Epic implementation".into(),
+            source_body_preview: Some(
+                "Source work item describes the implementation context and acceptance constraints."
+                    .into(),
+            ),
             owner_state: PlanOwnerStateEvent::Unowned,
             lifecycle: PlanLifecycleEvent::Running,
             counts: Some(PlanSummaryCountsEvent {
@@ -1043,6 +1086,34 @@ mod tests {
             action,
             Some(Action::OpenIssueInBacklog { id }) if id == "bd-epic"
         ));
+    }
+
+    #[test]
+    fn esc_returns_detail_peek_to_summary_before_leaving_plan_browser() {
+        let session_id = SessionId("brain-1".into());
+        let projection = PlanProjectionStore::new();
+        let lineage = ExecutorLineage::new();
+        let synopsis = SessionSynopsisProjection::new();
+        let ctx = ctx(&lineage, &projection, &synopsis);
+        let mut view = PlanBrowserView::new(session_id);
+        view.handle_spur_event(
+            &SpurEvent::now(SpurEventBody::PlansLoaded {
+                plans: vec![summary("plan-1")],
+            }),
+            &ctx,
+        );
+
+        assert!(view.handle_key(key(KeyCode::Char('o')), &ctx).is_none());
+        assert_eq!(view.detail_peek, DetailPeek::WorkItem);
+
+        let first_esc = view.handle_key(key(KeyCode::Esc), &ctx);
+
+        assert!(first_esc.is_none());
+        assert_eq!(view.detail_peek, DetailPeek::Summary);
+
+        let second_esc = view.handle_key(key(KeyCode::Esc), &ctx);
+
+        assert!(matches!(second_esc, Some(Action::NavigateBack)));
     }
 
     #[test]

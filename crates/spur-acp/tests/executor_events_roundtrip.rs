@@ -392,6 +392,7 @@ fn plans_loaded_roundtrips_plan_summary_contract() {
                 plan_id: "plan-a1".into(),
                 epic_id: "bd-120".into(),
                 title: "Auth migration".into(),
+                source_body_preview: Some("Move auth persistence behind the new adapter.".into()),
                 owner_state: PlanOwnerStateEvent::Mine,
                 lifecycle: PlanLifecycleEvent::Running,
                 counts: Some(PlanSummaryCountsEvent {
@@ -411,6 +412,7 @@ fn plans_loaded_roundtrips_plan_summary_contract() {
                 plan_id: "plan-c3".into(),
                 epic_id: "bd-130".into(),
                 title: "Owned elsewhere".into(),
+                source_body_preview: None,
                 owner_state: PlanOwnerStateEvent::Other {
                     owner: "other-brain".into(),
                 },
@@ -422,6 +424,7 @@ fn plans_loaded_roundtrips_plan_summary_contract() {
                 plan_id: "plan-d4".into(),
                 epic_id: "bd-140".into(),
                 title: "Ambiguous ownership".into(),
+                source_body_preview: None,
                 owner_state: PlanOwnerStateEvent::Ambiguous {
                     owners: vec!["brain-a".into(), "brain-b".into()],
                 },

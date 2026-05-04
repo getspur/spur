@@ -297,7 +297,7 @@ fn status_keys_emit_update_actions() {
     seed_issues(&mut view);
 
     let cases: Vec<(char, &str, bool)> = vec![
-        ('o', "open", false),
+        ('O', "open", false),
         ('w', "in_progress", false),
         ('b', "blocked", false),
         ('x', "closed", false),
