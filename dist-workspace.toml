@@ -32,6 +32,8 @@ npm-shrinkwrap = true
 publish-jobs = ["npm"]
 # Which actions to run on pull requests
 pr-run-mode = "plan"
+# release.yml carries intentional manual env injection for LicenseSeat builds.
+allow-dirty = ["ci"]
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
 # Whether to install an updater program
