@@ -3776,24 +3776,16 @@ impl App {
                             });
                         }
                     }
-                    crate::action::IssueAction::ExecuteEpic { id } => {
+                    crate::action::IssueAction::Execute { id } => {
                         let issue = self
                             .dashboard
                             .tracked_issues()
                             .iter()
                             .find(|issue| issue.id == id);
 
-                        if let Some(issue) = issue {
-                            if issue.issue_type.as_deref() != Some("epic") {
-                                self.flash_hint_short(format!(
-                                    "Cannot execute: {} is not an epic. Use 'W' to WorkOn a task.",
-                                    id
-                                ));
-                                return;
-                            }
-                        }
+                        // Removed constraint: any issue type can now be executed.
 
-                        let (title, status, pri) = issue
+                        let (title, status, pri, issue_type) = issue
                             .map(|issue| {
                                 (
                                     issue.title.clone(),
@@ -3802,15 +3794,24 @@ impl App {
                                         .priority
                                         .map(|p| format!("P{}", p))
                                         .unwrap_or_default(),
+                                    issue.issue_type.clone().unwrap_or_else(|| "task".into()),
                                 )
                             })
-                            .unwrap_or_else(|| (String::new(), "unknown".into(), String::new()));
+                            .unwrap_or_else(|| {
+                                (
+                                    String::new(),
+                                    "unknown".into(),
+                                    String::new(),
+                                    "unknown".into(),
+                                )
+                            });
+
                         let prompt = format!(
-                            "Execute this epic using the execute_epic MCP tool.\n\n\
-                             Epic: {} \u{2014} {}\n\
-                             Type: epic | Status: {} | Priority: {}\n\n\
+                            "Execute this work item using the execute_epic MCP tool (it accepts any issue type, not just epics).\n\n\
+                             Item: {} \u{2014} {}\n\
+                             Type: {} | Status: {} | Priority: {}\n\n\
                              Call execute_epic with epic_id=\"{}\".",
-                            id, title, status, pri, id,
+                            id, title, issue_type, status, pri, id,
                         );
 
                         let blocks = vec![spur_acp::ContentBlock::Text(

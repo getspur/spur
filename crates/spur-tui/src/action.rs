@@ -14,7 +14,7 @@ pub enum IssueAction {
     WorkOn {
         id: String,
     },
-    ExecuteEpic {
+    Execute {
         id: String,
     },
 }

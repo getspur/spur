@@ -30,7 +30,7 @@ fn confirm_variant_renders_execute_epic_prompt() {
         variant: ExecuteModalVariant::Confirm,
     });
 
-    assert!(rendered.contains("Execute Epic"), "{rendered}");
+    assert!(rendered.contains("Execute Item"), "{rendered}");
     assert!(rendered.contains("bd-plan"), "{rendered}");
     assert!(rendered.contains("Auth refactor"), "{rendered}");
     assert!(
@@ -53,7 +53,7 @@ fn already_executing_variant_renders_session_prompt() {
 
     assert!(rendered.contains("Already Executing"), "{rendered}");
     assert!(
-        rendered.contains("Epic bd-plan is already executing."),
+        rendered.contains("Work item bd-plan is already executing."),
         "{rendered}"
     );
     assert!(rendered.contains("Plan-id: PLN-abc"), "{rendered}");
