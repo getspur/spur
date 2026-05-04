@@ -268,17 +268,19 @@ impl IssueBrowserView {
 
     fn cached_parent_by_child_id(&self) -> HashMap<&str, &str> {
         let mut parent_by_child_id = HashMap::new();
-        for edge in self
-            .graph_cache
-            .values()
-            .flat_map(|(_, edges)| edges)
-            .filter(|edge| Self::is_lineage_parent_edge(edge.edge_type.as_deref()))
-        {
-            Self::insert_parent_id(
-                &mut parent_by_child_id,
-                edge.from.as_str(),
-                edge.to.as_str(),
-            );
+        for (nodes, edges) in self.graph_cache.values() {
+            let node_by_id: HashMap<&str, &GraphNodeEvent> =
+                nodes.iter().map(|node| (node.id.as_str(), node)).collect();
+            for edge in edges
+                .iter()
+                .filter(|edge| Self::is_lineage_parent_edge(edge, &node_by_id))
+            {
+                Self::insert_parent_id(
+                    &mut parent_by_child_id,
+                    edge.from.as_str(),
+                    edge.to.as_str(),
+                );
+            }
         }
         parent_by_child_id
     }
@@ -310,13 +312,47 @@ impl IssueBrowserView {
                 selected_id
                     .strip_prefix(issue.id.as_str())
                     .is_some_and(|suffix| suffix.starts_with('.'))
+                    && is_lineage_root_candidate(issue)
             })
             .min_by_key(|issue| issue.id.len())
             .map(|issue| issue.id.as_str())
     }
 
-    fn is_lineage_parent_edge(edge_type: Option<&str>) -> bool {
-        matches!(edge_type, Some("parent-child") | Some("related"))
+    fn is_lineage_parent_edge(
+        edge: &GraphEdgeEvent,
+        node_by_id: &HashMap<&str, &GraphNodeEvent>,
+    ) -> bool {
+        match edge.edge_type.as_deref() {
+            Some("parent-child") => true,
+            Some("related") => Self::is_structural_related_edge(edge, node_by_id),
+            _ => false,
+        }
+    }
+
+    fn is_structural_related_edge(
+        edge: &GraphEdgeEvent,
+        node_by_id: &HashMap<&str, &GraphNodeEvent>,
+    ) -> bool {
+        descendant_depth(edge.to.as_str(), edge.from.as_str()).is_some()
+            || Self::is_plan_membership_edge(edge, node_by_id)
+    }
+
+    fn is_plan_membership_edge(
+        edge: &GraphEdgeEvent,
+        node_by_id: &HashMap<&str, &GraphNodeEvent>,
+    ) -> bool {
+        let Some(child) = node_by_id.get(edge.from.as_str()) else {
+            return false;
+        };
+        let Some(parent) = node_by_id.get(edge.to.as_str()) else {
+            return false;
+        };
+        let Some(child_plan_id) = find_plan_id_label(&child.labels) else {
+            return false;
+        };
+        find_plan_id_label(&parent.labels) == Some(child_plan_id)
+            && has_plan_task_label(&child.labels)
+            && is_graph_plan_root(parent)
     }
 
     fn insert_parent_id<'a>(
@@ -1067,6 +1103,33 @@ fn find_plan_id_label(labels: &[String]) -> Option<&str> {
     labels
         .iter()
         .find_map(|label| label.strip_prefix("spur:plan-id:"))
+}
+
+fn is_lineage_root_candidate(issue: &spur_pm::IssueSummary) -> bool {
+    issue.issue_type.as_deref() == Some("epic")
+        || has_label(&issue.labels, "spur:plan-complete")
+        || (find_plan_id_label(&issue.labels).is_some() && !has_plan_task_label(&issue.labels))
+}
+
+fn is_graph_plan_root(node: &GraphNodeEvent) -> bool {
+    has_label(&node.labels, "spur:plan-complete")
+        || (find_plan_id_label(&node.labels).is_some() && !has_plan_task_label(&node.labels))
+}
+
+fn has_plan_task_label(labels: &[String]) -> bool {
+    labels
+        .iter()
+        .any(|label| label.starts_with("spur:plan-task-id:"))
+}
+
+fn has_label(labels: &[String], expected: &str) -> bool {
+    labels.iter().any(|label| label == expected)
+}
+
+fn descendant_depth(root_id: &str, id: &str) -> Option<usize> {
+    let suffix = id.strip_prefix(root_id)?;
+    let suffix = suffix.strip_prefix('.')?;
+    Some(suffix.split('.').count())
 }
 
 #[cfg(test)]
