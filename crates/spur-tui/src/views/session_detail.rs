@@ -19,7 +19,7 @@ use crate::input_history::InputHistoryEntry;
 
 use super::View;
 
-const READY_BANNER_TEXT: &str = "Session cleared - your next prompt starts a fresh brain.";
+const READY_BANNER_TEXT: &str = "✨ Session cleared — your next prompt starts a fresh brain.";
 const CANCEL_HINT_TEXT: &str = "Esc cancelled the active turn. Press Esc again to go back.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1796,10 +1796,7 @@ impl View for SessionDetailView {
                 // promised continuation was lost.
                 self.react_trace.push(TraceEntry {
                     kind: TraceKind::Observe { payload: None },
-                    text: format!(
-                        "Warning: Continuation dropped for {}: {:?}",
-                        delegation_id, reason
-                    ),
+                    text: format!("⚠ Continuation dropped for {}: {:?}", delegation_id, reason),
                     timestamp: Self::now_stamp(),
                     #[cfg(feature = "markdown")]
                     markdown: None,

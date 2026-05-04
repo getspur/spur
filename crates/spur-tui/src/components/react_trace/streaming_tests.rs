@@ -1679,7 +1679,7 @@ fn build_display_lines_completed_shows_outcome_glyph() {
         .iter()
         .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref().to_string()))
         .collect();
-    assert!(joined.contains("ok"), "expected success glyph: {joined}");
+    assert!(joined.contains("✓"), "expected success glyph: {joined}");
     for f in spinner::BRAILLE {
         assert!(
             !joined.contains(f),
@@ -1728,7 +1728,7 @@ fn virtual_rows_collapsed_completed_act_shows_outcome_no_spinner() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        txt.contains("ok"),
+        txt.contains("✓"),
         "virtual rows must contain outcome: {txt}"
     );
 }
@@ -1764,7 +1764,7 @@ fn build_display_lines_expanded_completed_renders_outcome_body() {
         .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref().to_string()))
         .collect();
     assert!(joined.contains("hi"), "expected stdout body: {joined}");
-    assert!(joined.contains("ok"), "expected success glyph: {joined}");
+    assert!(joined.contains("✓"), "expected success glyph: {joined}");
 }
 
 #[cfg(feature = "markdown")]
@@ -1971,8 +1971,8 @@ fn failed_status_renders_failure_glyph_even_with_non_error_payload() {
     });
     let joined = trace.render_to_strings().join("\n");
     assert!(
-        joined.contains("err"),
-        "Failed must use err regardless of payload shape: {joined}"
+        joined.contains("✗"),
+        "Failed must use ✗ regardless of payload shape: {joined}"
     );
 }
 

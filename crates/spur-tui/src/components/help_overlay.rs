@@ -154,26 +154,29 @@ impl HelpOverlay {
             out.push(Line::from(""));
         }
 
-        // Mouse capture is enabled so the scroll wheel works, which means
-        // the terminal no longer owns drag events for native text selection.
-        // Every major terminal supports a modifier-drag bypass — hold the
-        // modifier while dragging to hand drag events back to the terminal
-        // so you can select and copy text as usual.
+        // Mouse capture is enabled by default so the scroll wheel reaches SPUR
+        // instead of the terminal scrollback. Users can opt out if native drag
+        // selection is more important than wheel scrolling.
         out.push(header(" Text Selection (copy/paste)"));
+        out.push(Line::from(
+            "  SPUR_TUI_MOUSE_CAPTURE=0  disable wheel capture",
+        ));
+        out.push(Line::from(
+            "  drag               Terminal-owned selection when capture is off",
+        ));
         out.push(Line::from(
             "  Option+drag        iTerm2 / WezTerm / Ghostty (macOS)",
         ));
-        out.push(Line::from("  Fn+drag            macOS Terminal.app"));
         out.push(Line::from(
             "  Shift+drag         Kitty / Alacritty / GNOME / Konsole",
         ));
         out.push(Line::from("  Alt+drag           Windows Terminal"));
         out.push(Line::from(Span::styled(
-            "  (mouse capture intercepts drag so the wheel can scroll;",
+            "  (when mouse capture is on, drag goes to SPUR for scrolling;",
             Style::default().fg(Color::DarkGray),
         )));
         out.push(Line::from(Span::styled(
-            "   the modifier tells your terminal to keep the drag locally)",
+            "   the modifier tells your terminal to keep selection locally)",
             Style::default().fg(Color::DarkGray),
         )));
         out.push(Line::from(""));
@@ -272,6 +275,10 @@ mod tests {
         );
         assert!(joined.contains("Option+drag"), "must mention Option+drag");
         assert!(joined.contains("Shift+drag"), "must mention Shift+drag");
+        assert!(
+            joined.contains("SPUR_TUI_MOUSE_CAPTURE=0"),
+            "must mention mouse-capture opt-out: {joined}"
+        );
     }
 
     #[test]
