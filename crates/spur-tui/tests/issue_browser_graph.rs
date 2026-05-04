@@ -25,6 +25,24 @@ fn sample_summary(id: &str, title: &str) -> IssueSummaryEvent {
     }
 }
 
+fn plan_epic_summary(id: &str, title: &str) -> IssueSummaryEvent {
+    IssueSummaryEvent {
+        issue_type: Some("epic".into()),
+        labels: vec!["spur:plan-complete".into(), "spur:plan-id:plan-1".into()],
+        ..sample_summary(id, title)
+    }
+}
+
+fn plan_task_summary(id: &str, title: &str) -> IssueSummaryEvent {
+    IssueSummaryEvent {
+        labels: vec![
+            "spur:plan-id:plan-1".into(),
+            format!("spur:plan-task-id:{id}"),
+        ],
+        ..sample_summary(id, title)
+    }
+}
+
 fn sample_detail(id: &str, title: &str) -> IssueDetailEvent {
     let now = Utc::now();
     IssueDetailEvent {
@@ -53,6 +71,23 @@ fn graph_node(id: &str, title: &str) -> GraphNodeEvent {
         priority: Some(1),
         labels: vec![],
         pagerank: Some(0.42),
+    }
+}
+
+fn plan_epic_node(id: &str, title: &str) -> GraphNodeEvent {
+    GraphNodeEvent {
+        labels: vec!["spur:plan-complete".into(), "spur:plan-id:plan-1".into()],
+        ..graph_node(id, title)
+    }
+}
+
+fn plan_task_node(id: &str, title: &str) -> GraphNodeEvent {
+    GraphNodeEvent {
+        labels: vec![
+            "spur:plan-id:plan-1".into(),
+            format!("spur:plan-task-id:{id}"),
+        ],
+        ..graph_node(id, title)
     }
 }
 
@@ -349,8 +384,8 @@ fn issue_list_keeps_non_prefix_child_label_while_graph_loads() {
         &mut app,
         SpurEvent::now(SpurEventBody::IssuesLoaded {
             issues: vec![
-                sample_summary("bd-2pb", "Epic root"),
-                sample_summary("bd-work", "Non-prefix child"),
+                plan_epic_summary("bd-2pb", "Epic root"),
+                plan_task_summary("bd-work", "Non-prefix child"),
             ],
         }),
     );
@@ -360,8 +395,8 @@ fn issue_list_keeps_non_prefix_child_label_while_graph_loads() {
         SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
             requested_id: "bd-2pb".into(),
             nodes: vec![
-                graph_node("bd-2pb", "Epic root"),
-                graph_node("bd-work", "Non-prefix child"),
+                plan_epic_node("bd-2pb", "Epic root"),
+                plan_task_node("bd-work", "Non-prefix child"),
             ],
             edges: vec![graph_edge_with_type("bd-work", "bd-2pb", "related")],
         }),
@@ -383,6 +418,104 @@ fn issue_list_keeps_non_prefix_child_label_while_graph_loads() {
     assert!(
         loading.contains("├─ ○ bd-work") || loading.contains("└─ ○ bd-work"),
         "non-prefix child must keep its child label while graph loads:\n{loading}"
+    );
+}
+
+#[test]
+fn issue_list_does_not_infer_unrelated_dot_prefix_parent() {
+    let (mut app, mut rx) = spur_tui::test_support::app_with_user_input_tx();
+    spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
+    match rx.try_recv() {
+        Ok(UserInput::RefreshIssues) => {}
+        Ok(_) => panic!("expected RefreshIssues, got different user input"),
+        Err(err) => panic!("expected RefreshIssues, got {err}"),
+    }
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssuesLoaded {
+            issues: vec![
+                sample_summary("bd-2", "Unrelated issue"),
+                sample_summary("bd-2.1", "Dot-prefixed but unrelated"),
+            ],
+        }),
+    );
+    expect_get_graph(&mut rx, "bd-2");
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
+            requested_id: "bd-2".into(),
+            nodes: vec![
+                graph_node("bd-2", "Unrelated issue"),
+                graph_node("bd-x", "Other"),
+            ],
+            edges: vec![graph_edge("bd-x", "bd-2")],
+        }),
+    );
+
+    app.handle_crossterm_event_for_test(key('j'));
+
+    expect_get_graph(&mut rx, "bd-2.1");
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    let loading = render_text(&mut app, &mut terminal);
+    assert!(
+        loading.contains("loading work tree"),
+        "lineage pane should stay open while graph loads:\n{loading}"
+    );
+    assert!(
+        loading.contains("> ○ bd-2.1"),
+        "dot-prefix fallback must not promote an unrelated non-epic issue:\n{loading}"
+    );
+    assert!(
+        !loading.contains("> ○ bd-2 "),
+        "unrelated issue must not become the loading lineage root:\n{loading}"
+    );
+}
+
+#[test]
+fn issue_list_does_not_treat_sibling_related_edge_as_parent() {
+    let (mut app, mut rx) = spur_tui::test_support::app_with_user_input_tx();
+    spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
+    match rx.try_recv() {
+        Ok(UserInput::RefreshIssues) => {}
+        Ok(_) => panic!("expected RefreshIssues, got different user input"),
+        Err(err) => panic!("expected RefreshIssues, got {err}"),
+    }
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssuesLoaded {
+            issues: vec![
+                plan_task_summary("bd-2pb.1", "First sibling"),
+                plan_task_summary("bd-2pb.2", "Second sibling"),
+            ],
+        }),
+    );
+    expect_get_graph(&mut rx, "bd-2pb.1");
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
+            requested_id: "bd-2pb.1".into(),
+            nodes: vec![
+                plan_task_node("bd-2pb.1", "First sibling"),
+                plan_task_node("bd-2pb.2", "Second sibling"),
+            ],
+            edges: vec![graph_edge_with_type("bd-2pb.1", "bd-2pb.2", "related")],
+        }),
+    );
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+
+    let rendered = render_text(&mut app, &mut terminal);
+
+    assert!(
+        rendered.contains("Work Item Lineage"),
+        "rendered:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("> ○ bd-2pb.1"),
+        "selected sibling must remain root for non-structural related edge:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("> ○ bd-2pb.2"),
+        "related sibling must not become structural root:\n{rendered}"
     );
 }
 

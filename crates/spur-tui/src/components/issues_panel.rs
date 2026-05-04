@@ -333,7 +333,18 @@ impl<'a> LineageMeta<'a> {
                         .or_default()
                         .push(edge.from.as_str());
                 }
-                Some("parent-child") | Some("related") => {
+                Some("parent-child") => {
+                    insert_parent_id(
+                        &mut parent_by_child_id,
+                        edge.from.as_str(),
+                        edge.to.as_str(),
+                    );
+                    children_by_parent_id
+                        .entry(edge.to.as_str())
+                        .or_default()
+                        .push(edge.from.as_str());
+                }
+                Some("related") if is_structural_related_edge(edge, &node_by_id) => {
                     insert_parent_id(
                         &mut parent_by_child_id,
                         edge.from.as_str(),
@@ -421,7 +432,7 @@ fn resolve_lineage_root<'a>(
     parent_by_child_id: &HashMap<&'a str, &'a str>,
     node_by_id: &HashMap<&'a str, &'a GraphNodeEvent>,
 ) -> &'a str {
-    shortest_prefix_ancestor(requested_root_id, node_by_id.keys().copied())
+    shortest_prefix_ancestor(requested_root_id, node_by_id.values().copied())
         .unwrap_or_else(|| walk_parent_chain(requested_root_id, parent_by_child_id))
 }
 
@@ -457,12 +468,62 @@ fn walk_parent_chain<'a>(
 
 fn shortest_prefix_ancestor<'a>(
     id: &str,
-    candidates: impl IntoIterator<Item = &'a str>,
+    candidates: impl IntoIterator<Item = &'a GraphNodeEvent>,
 ) -> Option<&'a str> {
     candidates
         .into_iter()
-        .filter(|candidate| descendant_depth(candidate, id).is_some())
-        .min_by_key(|candidate| candidate.len())
+        .filter(|candidate| {
+            is_plan_root_node(candidate) && descendant_depth(candidate.id.as_str(), id).is_some()
+        })
+        .min_by_key(|candidate| candidate.id.len())
+        .map(|candidate| candidate.id.as_str())
+}
+
+fn is_structural_related_edge(
+    edge: &GraphEdgeEvent,
+    node_by_id: &HashMap<&str, &GraphNodeEvent>,
+) -> bool {
+    descendant_depth(edge.to.as_str(), edge.from.as_str()).is_some()
+        || is_plan_membership_edge(edge, node_by_id)
+}
+
+fn is_plan_membership_edge(
+    edge: &GraphEdgeEvent,
+    node_by_id: &HashMap<&str, &GraphNodeEvent>,
+) -> bool {
+    let Some(child) = node_by_id.get(edge.from.as_str()) else {
+        return false;
+    };
+    let Some(parent) = node_by_id.get(edge.to.as_str()) else {
+        return false;
+    };
+    let Some(child_plan_id) = plan_id_label(&child.labels) else {
+        return false;
+    };
+    plan_id_label(&parent.labels) == Some(child_plan_id)
+        && has_plan_task_label(&child.labels)
+        && is_plan_root_node(parent)
+}
+
+fn is_plan_root_node(node: &GraphNodeEvent) -> bool {
+    has_label(&node.labels, "spur:plan-complete")
+        || (plan_id_label(&node.labels).is_some() && !has_plan_task_label(&node.labels))
+}
+
+fn plan_id_label(labels: &[String]) -> Option<&str> {
+    labels
+        .iter()
+        .find_map(|label| label.strip_prefix("spur:plan-id:"))
+}
+
+fn has_plan_task_label(labels: &[String]) -> bool {
+    labels
+        .iter()
+        .any(|label| label.starts_with("spur:plan-task-id:"))
+}
+
+fn has_label(labels: &[String], expected: &str) -> bool {
+    labels.iter().any(|label| label == expected)
 }
 
 fn descendant_depth(root_id: &str, id: &str) -> Option<usize> {
