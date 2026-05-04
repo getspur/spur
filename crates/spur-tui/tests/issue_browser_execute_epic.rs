@@ -81,11 +81,11 @@ fn e_on_epic_opens_modal_and_enter_dispatches_active_session_prompt() {
     spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
 
     let initial = render_text(&mut app, &mut terminal);
-    assert!(initial.contains("E: Execute Epic"), "rendered:\n{initial}");
+    assert!(initial.contains("E: Execute Item"), "rendered:\n{initial}");
 
     app.handle_crossterm_event_for_test(key('E'));
     let modal = render_text(&mut app, &mut terminal);
-    assert!(modal.contains("Execute Epic"), "rendered:\n{modal}");
+    assert!(modal.contains("Execute Item"), "rendered:\n{modal}");
     assert!(modal.contains("bd-epic"), "rendered:\n{modal}");
     assert!(modal.contains("Launch migration"), "rendered:\n{modal}");
     assert!(
@@ -104,11 +104,11 @@ fn e_on_epic_opens_modal_and_enter_dispatches_active_session_prompt() {
             assert!(!interrupt);
             let prompt = text_from_blocks(&blocks);
             assert!(
-                prompt.contains("Execute this epic using the execute_epic MCP tool."),
+                prompt.contains("Execute this work item using the execute_epic MCP tool"),
                 "prompt:\n{prompt}"
             );
             assert!(
-                prompt.contains("Epic: bd-epic — Launch migration"),
+                prompt.contains("Item: bd-epic — Launch migration"),
                 "prompt:\n{prompt}"
             );
             assert!(
@@ -126,26 +126,50 @@ fn e_on_epic_opens_modal_and_enter_dispatches_active_session_prompt() {
 }
 
 #[test]
-fn e_on_non_epic_flashes_hint_without_modal_or_dispatch() {
+fn e_on_non_epic_opens_modal_and_enter_dispatches_active_session_prompt() {
     let (mut app, mut rx, mut terminal) =
         seeded_issue_browser_app(vec![summary("bd-task", "Task item", Some("task"))]);
 
-    app.handle_crossterm_event_for_test(key('E'));
+    spur_tui::test_support::process_action(
+        &mut app,
+        Action::ResumeSession {
+            session_id: "active-session".into(),
+        },
+    );
+    match rx.try_recv() {
+        Ok(UserInput::ResumeSession { session_id }) => assert_eq!(session_id, "active-session"),
+        Ok(_) => panic!("expected ResumeSession after test setup"),
+        Err(err) => panic!("expected ResumeSession after test setup, got {err}"),
+    }
+    spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
 
-    assert_eq!(
-        app.transient_hint_for_test().map(|hint| hint.text.as_str()),
-        Some("Cannot execute: bd-task is not an epic. Use 'W' to WorkOn a task.")
-    );
-    let rendered = render_text(&mut app, &mut terminal);
-    assert!(!rendered.contains("Execute Epic"), "rendered:\n{rendered}");
-    assert!(
-        !rendered.contains("E: Execute Epic"),
-        "non-epic status hint must not advertise execute:\n{rendered}"
-    );
-    assert!(
-        rx.try_recv().is_err(),
-        "non-epic execute guard must not dispatch"
-    );
+    let initial = render_text(&mut app, &mut terminal);
+    assert!(initial.contains("E: Execute Item"), "rendered:\n{initial}");
+
+    app.handle_crossterm_event_for_test(key('E'));
+    let modal = render_text(&mut app, &mut terminal);
+    assert!(modal.contains("Execute Item"), "rendered:\n{modal}");
+
+    app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    match rx.try_recv() {
+        Ok(UserInput::Message { blocks, .. }) => {
+            let prompt = text_from_blocks(&blocks);
+            assert!(
+                prompt.contains("Execute this work item using the execute_epic MCP tool"),
+                "prompt:\n{prompt}"
+            );
+            assert!(
+                prompt.contains("Item: bd-task — Task item"),
+                "prompt:\n{prompt}"
+            );
+            assert!(
+                prompt.contains("Type: task | Status: open | Priority: P1"),
+                "prompt:\n{prompt}"
+            );
+        }
+        Ok(_) => panic!("expected Message after confirming execute modal"),
+        Err(err) => panic!("expected Message after confirming execute modal, got {err}"),
+    }
 }
 
 #[test]
@@ -155,7 +179,7 @@ fn esc_in_execute_modal_dismisses_without_dispatch() {
 
     app.handle_crossterm_event_for_test(key('E'));
     let modal = render_text(&mut app, &mut terminal);
-    assert!(modal.contains("Execute Epic"), "rendered:\n{modal}");
+    assert!(modal.contains("Execute Item"), "rendered:\n{modal}");
 
     app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     let dismissed = render_text(&mut app, &mut terminal);

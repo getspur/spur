@@ -24,8 +24,8 @@ const TEXT_STATUS_HINT: &str =
     "[Text] j/k: Nav  v: Graph Mode  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
 const TEXT_STATUS_HINT_COMPACT: &str = "[Text] j/k: Nav  v: Graph  Esc: Close";
 const TEXT_STATUS_HINT_EPIC: &str =
-    "[Text] j/k: Nav  v: Graph Mode  E: Execute Epic  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
-const TEXT_STATUS_HINT_EPIC_COMPACT: &str = "[Text] j/k: Nav  E: Execute Epic  v: Graph";
+    "[Text] j/k: Nav  v: Graph Mode  E: Execute Item  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
+const TEXT_STATUS_HINT_EPIC_COMPACT: &str = "[Text] j/k: Nav  E: Execute Item  v: Graph";
 const TEXT_STATUS_HINT_PLAN_EPIC: &str =
     "[Text] j/k: Nav  p: Open Plan  v: Graph Mode  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
 const TEXT_STATUS_HINT_PLAN_EPIC_COMPACT: &str = "[Text] j/k: Nav  p: Plan  v: Graph";
@@ -33,8 +33,8 @@ const GRAPH_STATUS_HINT: &str =
     "[Graph] j/k: Nav  v: Text Mode  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
 const GRAPH_STATUS_HINT_COMPACT: &str = "[Graph] j/k: Nav  v: Text  Esc: Close";
 const GRAPH_STATUS_HINT_EPIC: &str =
-    "[Graph] j/k: Nav  v: Text Mode  E: Execute Epic  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
-const GRAPH_STATUS_HINT_EPIC_COMPACT: &str = "[Graph] j/k: Nav  E: Execute Epic  v: Text";
+    "[Graph] j/k: Nav  v: Text Mode  E: Execute Item  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
+const GRAPH_STATUS_HINT_EPIC_COMPACT: &str = "[Graph] j/k: Nav  E: Execute Item  v: Text";
 const GRAPH_STATUS_HINT_PLAN_EPIC: &str =
     "[Graph] j/k: Nav  p: Open Plan  v: Text Mode  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
 const GRAPH_STATUS_HINT_PLAN_EPIC_COMPACT: &str = "[Graph] j/k: Nav  p: Plan  v: Text";
@@ -42,8 +42,8 @@ const LIST_STATUS_HINT: &str =
     "[List] j/k: Nav  Enter/o: Open Detail  v: View Graph  W: Work  r: Refresh  q: Quit";
 const LIST_STATUS_HINT_COMPACT: &str = "[List] j/k: Nav  o: Open  W: Work  r: Refresh";
 const LIST_STATUS_HINT_EPIC: &str =
-    "[List] j/k: Nav  Enter/o: Open Detail  v: View Graph  E: Execute Epic  W: Work  r: Refresh  q: Quit";
-const LIST_STATUS_HINT_EPIC_COMPACT: &str = "[List] j/k: Nav  o: Open  E: Execute Epic  W: Work";
+    "[List] j/k: Nav  Enter/o: Open Detail  v: View Graph  E: Execute Item  W: Work  r: Refresh  q: Quit";
+const LIST_STATUS_HINT_EPIC_COMPACT: &str = "[List] j/k: Nav  o: Open  E: Execute Item  W: Work";
 const LIST_STATUS_HINT_PLAN_EPIC: &str =
     "[List] j/k: Nav  Enter/o: Open Detail  v: Graph  p: Open Plan  W: Work  r: Refresh  q: Quit";
 const LIST_STATUS_HINT_PLAN_EPIC_COMPACT: &str = "[List] j/k: Nav  o: Open  p: Plan  W: Work";
@@ -514,11 +514,6 @@ impl IssueBrowserView {
             .find(|issue| issue.id == selected_id)
     }
 
-    fn selected_issue_is_epic(&self) -> bool {
-        self.selected_issue()
-            .is_some_and(|issue| issue.issue_type.as_deref() == Some("epic"))
-    }
-
     fn selected_implementation_plan_id(&self) -> Option<String> {
         let selected_id = self.selected_issue_id()?;
         let selected = self.selected_issue()?;
@@ -625,18 +620,11 @@ impl IssueBrowserView {
 
     fn open_execute_modal(&mut self) -> Option<Action> {
         let issue = self.selected_issue()?;
-        if issue.issue_type.as_deref() != Some("epic") {
-            return Some(Action::FlashHint {
-                message: format!(
-                    "Cannot execute: {} is not an epic. Use 'W' to WorkOn a task.",
-                    issue.id
-                ),
-            });
-        }
+        // Removed type check: execution is now generalized to any work item type.
         if let Some(plan_id) = self.selected_implementation_plan_id() {
             return Some(Action::FlashHint {
                 message: format!(
-                    "Epic {} already has implementation plan {}; press p to open it",
+                    "Work item {} already has implementation plan {}; press p to open it",
                     issue.id, plan_id
                 ),
             });
@@ -660,7 +648,7 @@ impl IssueBrowserView {
                 KeyCode::Enter => {
                     let id = modal.epic_id.clone();
                     self.execute_modal = None;
-                    Some(Action::Issue(IssueAction::ExecuteEpic { id }))
+                    Some(Action::Issue(IssueAction::Execute { id }))
                 }
                 KeyCode::Esc => {
                     self.execute_modal = None;
@@ -937,7 +925,7 @@ impl IssueBrowserView {
 
         // ── Status bar ────────────────────────────────────────────────────
         let has_plan = self.selected_implementation_plan_id().is_some();
-        let has_execute = self.selected_issue_is_epic() && !has_plan;
+        let has_execute = self.selected_issue().is_some() && !has_plan;
         let mode_hint = match self.issue_focus {
             IssueFocus::Loaded { .. } | IssueFocus::Loading { .. } => {
                 Some(match self.detail_mode {
@@ -1292,7 +1280,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_is_blocked_for_plan_backed_epic() {
+    fn execute_is_blocked_for_plan_backed_item() {
         let lineage = ExecutorLineage::new();
         let ctx = ViewContext::test_ctx(&lineage);
         let mut view = IssueBrowserView::new();
