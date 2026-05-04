@@ -14,6 +14,9 @@ use crate::action::{Action, IssueAction, ViewId};
 use crate::components::execute_modal::{ExecuteModal, ExecuteModalVariant};
 use crate::components::issue_detail_pane::IssueDetailPane;
 use crate::components::issue_graph_pane::IssueGraphPane;
+use crate::components::issue_utils::{
+    descendant_depth, find_plan_id_label, has_label, has_plan_task_label, insert_parent_id,
+};
 use crate::components::issues_panel::{IssueLineageContext, IssueLineageView, IssuesPanel};
 use crate::components::status_bar::{HintOverride, StatusBar, StatusBarProps};
 use crate::components::tombstone::Tombstone;
@@ -331,7 +334,7 @@ impl IssueBrowserView {
                 .iter()
                 .filter(|edge| Self::is_lineage_parent_edge(edge, &node_by_id))
             {
-                Self::insert_parent_id(
+                insert_parent_id(
                     &mut parent_by_child_id,
                     edge.from.as_str(),
                     edge.to.as_str(),
@@ -429,21 +432,6 @@ impl IssueBrowserView {
         find_plan_id_label(&parent.labels) == Some(child_plan_id)
             && has_plan_task_label(&child.labels)
             && is_graph_plan_root(parent)
-    }
-
-    fn insert_parent_id<'a>(
-        parent_by_child_id: &mut HashMap<&'a str, &'a str>,
-        child_id: &'a str,
-        parent_id: &'a str,
-    ) {
-        parent_by_child_id
-            .entry(child_id)
-            .and_modify(|existing_parent_id| {
-                if parent_id < *existing_parent_id {
-                    *existing_parent_id = parent_id;
-                }
-            })
-            .or_insert(parent_id);
     }
 
     pub fn scroll_issue_detail_up_by(&mut self, lines: u16) {
@@ -1181,12 +1169,6 @@ impl View for IssueBrowserView {
     }
 }
 
-fn find_plan_id_label(labels: &[String]) -> Option<&str> {
-    labels
-        .iter()
-        .find_map(|label| label.strip_prefix("spur:plan-id:"))
-}
-
 fn is_lineage_root_candidate(issue: &spur_pm::IssueSummary) -> bool {
     issue.issue_type.as_deref() == Some("epic")
         || has_label(&issue.labels, "spur:plan-complete")
@@ -1202,22 +1184,6 @@ fn is_plan_artifact_summary(issue: &spur_acp::IssueSummaryEvent) -> bool {
     issue.issue_type.as_deref() == Some("plan")
         || has_label(&issue.labels, "spur:plan-complete")
         || has_plan_task_label(&issue.labels)
-}
-
-fn has_plan_task_label(labels: &[String]) -> bool {
-    labels
-        .iter()
-        .any(|label| label.starts_with("spur:plan-task-id:"))
-}
-
-fn has_label(labels: &[String], expected: &str) -> bool {
-    labels.iter().any(|label| label == expected)
-}
-
-fn descendant_depth(root_id: &str, id: &str) -> Option<usize> {
-    let suffix = id.strip_prefix(root_id)?;
-    let suffix = suffix.strip_prefix('.')?;
-    Some(suffix.split('.').count())
 }
 
 #[cfg(test)]

@@ -174,10 +174,7 @@ pub fn render_task_detail(
 
     let visible_lines = area.height.saturating_sub(2) as usize;
     let total_lines = lines.len();
-    let mut scroll_offset = match u16::try_from(scroll_offset) {
-        Ok(offset) => offset,
-        Err(_) => u16::MAX,
-    };
+    let mut scroll_offset = u16::try_from(scroll_offset).unwrap_or(u16::MAX);
 
     if visible_lines > 0 && total_lines > visible_lines {
         let max_scroll = total_lines - visible_lines;

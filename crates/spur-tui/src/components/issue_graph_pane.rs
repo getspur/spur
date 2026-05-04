@@ -10,6 +10,8 @@ use ratatui::{
 use spur_acp::{GraphEdgeEvent, GraphNodeEvent};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::components::issue_utils::status_icon;
+
 const LEGEND: &str = "Legend: ○ open  ● in_progress  ! blocked  ✓ closed";
 
 pub struct IssueGraphPane {
@@ -273,16 +275,6 @@ fn format_node_line(
         line.push_str(" ↻ cycle");
     }
     line
-}
-
-fn status_icon(status: &str) -> &'static str {
-    match status {
-        "open" => "○",
-        "in_progress" => "●",
-        "blocked" => "!",
-        "closed" => "✓",
-        _ => "○",
-    }
 }
 
 fn viewport_lines(lines: &[Line<'static>], scroll: u16, height: u16) -> Vec<Line<'static>> {

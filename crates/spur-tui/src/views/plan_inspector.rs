@@ -28,7 +28,7 @@ pub struct PlanInspectorView {
 #[derive(Debug)]
 enum TaskIssueState {
     Loading,
-    Loaded(spur_pm::Issue),
+    Loaded(Box<spur_pm::Issue>),
     Error(String),
 }
 
@@ -139,7 +139,7 @@ impl PlanInspectorView {
         }
 
         match self.issue_states.get(issue_id) {
-            Some(TaskIssueState::Loaded(issue)) => (Some(issue), None),
+            Some(TaskIssueState::Loaded(issue)) => (Some(issue.as_ref()), None),
             Some(TaskIssueState::Loading) => (None, Some("Loading issue detail...")),
             Some(TaskIssueState::Error(error)) => (None, Some(error.as_str())),
             None => (None, None),
@@ -355,7 +355,7 @@ impl View for PlanInspectorView {
             } => {
                 self.issue_states.insert(
                     requested_id.clone(),
-                    TaskIssueState::Loaded(Self::detail_event_to_issue(issue)),
+                    TaskIssueState::Loaded(Box::new(Self::detail_event_to_issue(issue))),
                 );
             }
             spur_acp::SpurEventBody::IssueCommandError {
