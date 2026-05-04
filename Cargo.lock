@@ -4558,7 +4558,7 @@ dependencies = [
 
 [[package]]
 name = "spur-acp"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -4589,7 +4589,7 @@ dependencies = [
 
 [[package]]
 name = "spur-blob-store"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4606,7 +4606,7 @@ dependencies = [
 
 [[package]]
 name = "spur-bot"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -4628,7 +4628,7 @@ dependencies = [
 
 [[package]]
 name = "spur-cli"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -4659,7 +4659,7 @@ dependencies = [
 
 [[package]]
 name = "spur-context"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4678,7 +4678,7 @@ dependencies = [
 
 [[package]]
 name = "spur-core"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -4713,7 +4713,7 @@ dependencies = [
 
 [[package]]
 name = "spur-cost"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4730,7 +4730,7 @@ dependencies = [
 
 [[package]]
 name = "spur-interactive"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "spur-acp",
@@ -4741,7 +4741,7 @@ dependencies = [
 
 [[package]]
 name = "spur-license"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
@@ -4767,7 +4767,7 @@ dependencies = [
 
 [[package]]
 name = "spur-license-admin"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "base64",
@@ -4786,7 +4786,7 @@ dependencies = [
 
 [[package]]
 name = "spur-mcp"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4822,7 +4822,7 @@ dependencies = [
 
 [[package]]
 name = "spur-pm"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4839,7 +4839,7 @@ dependencies = [
 
 [[package]]
 name = "spur-tui"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -4878,7 +4878,7 @@ dependencies = [
 
 [[package]]
 name = "spur-worktree"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "async-trait",
