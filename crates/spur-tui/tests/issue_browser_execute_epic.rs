@@ -81,9 +81,9 @@ fn e_on_epic_opens_modal_and_enter_dispatches_active_session_prompt() {
     spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
 
     let initial = render_text(&mut app, &mut terminal);
-    assert!(initial.contains("E: Execute Item"), "rendered:\n{initial}");
+    assert!(initial.contains("e: Execute Item"), "rendered:\n{initial}");
 
-    app.handle_crossterm_event_for_test(key('E'));
+    app.handle_crossterm_event_for_test(key('e'));
     let modal = render_text(&mut app, &mut terminal);
     assert!(modal.contains("Execute Item"), "rendered:\n{modal}");
     assert!(modal.contains("bd-epic"), "rendered:\n{modal}");
@@ -144,9 +144,9 @@ fn e_on_non_epic_opens_modal_and_enter_dispatches_active_session_prompt() {
     spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
 
     let initial = render_text(&mut app, &mut terminal);
-    assert!(initial.contains("E: Execute Item"), "rendered:\n{initial}");
+    assert!(initial.contains("e: Execute Item"), "rendered:\n{initial}");
 
-    app.handle_crossterm_event_for_test(key('E'));
+    app.handle_crossterm_event_for_test(key('e'));
     let modal = render_text(&mut app, &mut terminal);
     assert!(modal.contains("Execute Item"), "rendered:\n{modal}");
 
@@ -177,7 +177,7 @@ fn esc_in_execute_modal_dismisses_without_dispatch() {
     let (mut app, mut rx, mut terminal) =
         seeded_issue_browser_app(vec![summary("bd-epic", "Launch migration", Some("epic"))]);
 
-    app.handle_crossterm_event_for_test(key('E'));
+    app.handle_crossterm_event_for_test(key('e'));
     let modal = render_text(&mut app, &mut terminal);
     assert!(modal.contains("Execute Item"), "rendered:\n{modal}");
 

@@ -24,8 +24,8 @@ const TEXT_STATUS_HINT: &str =
     "[Text] j/k: Nav  v: Graph Mode  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
 const TEXT_STATUS_HINT_COMPACT: &str = "[Text] j/k: Nav  v: Graph  Esc: Close";
 const TEXT_STATUS_HINT_EPIC: &str =
-    "[Text] j/k: Nav  v: Graph Mode  E: Execute Item  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
-const TEXT_STATUS_HINT_EPIC_COMPACT: &str = "[Text] j/k: Nav  E: Execute Item  v: Graph";
+    "[Text] j/k: Nav  v: Graph Mode  e: Execute Item  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
+const TEXT_STATUS_HINT_EPIC_COMPACT: &str = "[Text] j/k: Nav  e: Execute Item  v: Graph";
 const TEXT_STATUS_HINT_PLAN_EPIC: &str =
     "[Text] j/k: Nav  p: Open Plan  v: Graph Mode  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
 const TEXT_STATUS_HINT_PLAN_EPIC_COMPACT: &str = "[Text] j/k: Nav  p: Plan  v: Graph";
@@ -33,8 +33,8 @@ const GRAPH_STATUS_HINT: &str =
     "[Graph] j/k: Nav  v: Text Mode  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
 const GRAPH_STATUS_HINT_COMPACT: &str = "[Graph] j/k: Nav  v: Text  Esc: Close";
 const GRAPH_STATUS_HINT_EPIC: &str =
-    "[Graph] j/k: Nav  v: Text Mode  E: Execute Item  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
-const GRAPH_STATUS_HINT_EPIC_COMPACT: &str = "[Graph] j/k: Nav  E: Execute Item  v: Text";
+    "[Graph] j/k: Nav  v: Text Mode  e: Execute Item  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
+const GRAPH_STATUS_HINT_EPIC_COMPACT: &str = "[Graph] j/k: Nav  e: Execute Item  v: Text";
 const GRAPH_STATUS_HINT_PLAN_EPIC: &str =
     "[Graph] j/k: Nav  p: Open Plan  v: Text Mode  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
 const GRAPH_STATUS_HINT_PLAN_EPIC_COMPACT: &str = "[Graph] j/k: Nav  p: Plan  v: Text";
@@ -42,8 +42,8 @@ const LIST_STATUS_HINT: &str =
     "[List] j/k: Nav  Enter/o: Open Detail  v: View Graph  W: Work  r: Refresh  q: Quit";
 const LIST_STATUS_HINT_COMPACT: &str = "[List] j/k: Nav  o: Open  W: Work  r: Refresh";
 const LIST_STATUS_HINT_EPIC: &str =
-    "[List] j/k: Nav  Enter/o: Open Detail  v: View Graph  E: Execute Item  W: Work  r: Refresh  q: Quit";
-const LIST_STATUS_HINT_EPIC_COMPACT: &str = "[List] j/k: Nav  o: Open  E: Execute Item  W: Work";
+    "[List] j/k: Nav  Enter/o: Open Detail  v: View Graph  e: Execute Item  W: Work  r: Refresh  q: Quit";
+const LIST_STATUS_HINT_EPIC_COMPACT: &str = "[List] j/k: Nav  o: Open  e: Execute Item  W: Work";
 const LIST_STATUS_HINT_PLAN_EPIC: &str =
     "[List] j/k: Nav  Enter/o: Open Detail  v: Graph  p: Open Plan  W: Work  r: Refresh  q: Quit";
 const LIST_STATUS_HINT_PLAN_EPIC_COMPACT: &str = "[List] j/k: Nav  o: Open  p: Plan  W: Work";
@@ -730,7 +730,7 @@ impl IssueBrowserView {
                 };
                 id.map(|id| Action::Issue(IssueAction::WorkOn { id }))
             }
-            KeyCode::Char('E') if key.modifiers.is_empty() => self.open_execute_modal(),
+            KeyCode::Char('e') if key.modifiers.is_empty() => self.open_execute_modal(),
 
             // Detail scroll (when loaded)
             KeyCode::PageUp if matches!(self.issue_focus, IssueFocus::Loaded { .. }) => {
@@ -1290,7 +1290,7 @@ mod tests {
             vec!["spur:plan-id:plan-1".into(), "spur:plan-complete".into()],
         )]);
 
-        let action = view.handle_key(key(KeyCode::Char('E')), &ctx);
+        let action = view.handle_key(key(KeyCode::Char('e')), &ctx);
 
         assert!(matches!(
             action,
