@@ -714,13 +714,18 @@ impl IssueBrowserView {
         let selected_graph_loading = selected_id
             .as_deref()
             .is_some_and(|id| self.graph_loading.as_deref() == Some(id));
+        let selected_graph_sparse = selected_id.as_deref().is_some_and(|id| {
+            self.graph_cache
+                .get(id)
+                .is_some_and(|(nodes, _)| nodes.len() <= 1)
+        });
 
         let lineage_height = selected_id
             .as_deref()
             .and_then(|id| self.graph_cache.get(id).map(|(nodes, _)| nodes.len()))
             .filter(|count| *count > 1)
             .or_else(|| {
-                if lineage_mode_active && selected_graph_loading {
+                if lineage_mode_active && (selected_graph_loading || selected_graph_sparse) {
                     Some(issue_count)
                 } else {
                     None
@@ -774,11 +779,23 @@ impl IssueBrowserView {
         } else {
             let lineage = if let Some(id) = selected_id.as_deref() {
                 if let Some((nodes, edges)) = self.graph_cache.get(id) {
-                    Some(IssueLineageView::Loaded(IssueLineageContext {
-                        root_id: id,
-                        nodes,
-                        edges,
-                    }))
+                    if nodes.len() > 1 || !lineage_mode_active {
+                        Some(IssueLineageView::Loaded(IssueLineageContext {
+                            root_id: id,
+                            nodes,
+                            edges,
+                        }))
+                    } else {
+                        let root_id = self.lineage_loading_root_id(id);
+                        let (nodes, edges) =
+                            Self::cached_lineage_context(&self.graph_cache, id, root_id.as_str())
+                                .unwrap_or((nodes.as_slice(), edges.as_slice()));
+                        Some(IssueLineageView::Cached {
+                            root_id,
+                            nodes,
+                            edges,
+                        })
+                    }
                 } else if lineage_mode_active && self.graph_loading.as_deref() == Some(id) {
                     let root_id = self.lineage_loading_root_id(id);
                     let (nodes, edges) =
