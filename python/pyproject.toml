@@ -3,7 +3,7 @@
 #
 # Build locally:
 #   cd python && maturin build --release --manifest-path ../crates/spur-cli/Cargo.toml
-# Build in CI: handled by .github/workflows/release-python.yml
+# PyPI publishing is disabled; release publishing is handled by npm via cargo-dist.
 #
 # End users install via:
 #   uvx spur-cli ...           # ephemeral
@@ -17,7 +17,7 @@ build-backend = "maturin"
 
 [project]
 name = "spur-cli"
-version = "1.0.3"
+version = "1.0.4"
 description = "Spur — agent orchestration CLI"
 requires-python = ">=3.8"
 license = { text = "Proprietary" }

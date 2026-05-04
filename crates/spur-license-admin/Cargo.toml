@@ -11,6 +11,9 @@ publish = false
 name = "spur-license-admin"
 path = "src/main.rs"
 
+[package.metadata.dist]
+dist = false
+
 [dependencies]
 spur-license = { path = "../spur-license" }
 
