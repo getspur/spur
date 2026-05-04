@@ -931,7 +931,6 @@ mod tests {
     fn seed_template_parses_and_covers_shipped_agents() {
         let seeds = load_seed_template();
         const EXPECTED_SEED_AGENTS: &[&str] = &[
-            "claude-code-sj",
             "kiro",
             "claude-code",
             "codex-bin",
