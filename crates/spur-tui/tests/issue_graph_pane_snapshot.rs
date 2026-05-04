@@ -125,7 +125,7 @@ fn renders_small_dependency_tree() {
     assert_snapshot(
         render_graph(&mut pane, &nodes, &edges, "bd-root"),
         &[
-            "┌ Issue Graph: bd-root  5 nodes ───────────────────────────────────────┐",
+            "┌ Issue Graph: bd-root (5 nodes) ──────────────────────────────────────┐",
             "│● Ship issue graph pane (bd-root)                                     │",
             "│  ✓ Define graph events (bd-api)                                      │",
             "│  ○ Render adjacency tree (bd-render)                                 │",
@@ -158,7 +158,7 @@ fn renders_cycle_once_and_stops_expansion() {
     assert_snapshot(
         render_graph(&mut pane, &nodes, &edges, "bd-root"),
         &[
-            "┌ Issue Graph: bd-root  3 nodes ───────────────────────────────────────┐",
+            "┌ Issue Graph: bd-root (3 nodes) ──────────────────────────────────────┐",
             "│○ Root (bd-root)                                                      │",
             "│  ● First dependency (bd-a)                                           │",
             "│    ✓ Back edge (bd-b)                                                │",
@@ -234,7 +234,7 @@ fn scroll_down_past_end_clamps_to_content_height() {
     assert_snapshot(
         render_graph_at(&mut pane, &nodes, &edges, "bd-root", 72, 10),
         &[
-            "┌ Issue Graph: bd-root  30 nodes ──────────────────────────────────────┐",
+            "┌ Issue Graph: bd-root (30 nodes) ─────────────────────────────────────┐",
             "│  ○ Dependency 21 (bd-21)                                             │",
             "│  ○ Dependency 22 (bd-22)                                             │",
             "│  ○ Dependency 23 (bd-23)                                             │",
@@ -257,4 +257,24 @@ fn cjk_title_truncation_pads_to_right_border() {
         render_graph_at(&mut pane, &nodes, &[], "bd-日本語", 21, 2),
         &["┌ Issue Graph: bd-日 ┐", "└───────────────────┘"],
     );
+}
+
+#[test]
+fn renders_deep_chain_without_panicking() {
+    let mut pane = IssueGraphPane::new();
+    let depth = 150;
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+
+    for i in 0..=depth {
+        let id = format!("bd-{i:03}");
+        nodes.push(node(&id, &format!("Dependency {i:03}"), "open"));
+        if i > 0 {
+            edges.push(edge(&format!("bd-{:03}", i - 1), &id, "blocks"));
+        }
+    }
+
+    let rendered = render_graph_at(&mut pane, &nodes, &edges, "bd-000", 72, 12);
+
+    assert_eq!(rendered.len(), H as usize);
 }
