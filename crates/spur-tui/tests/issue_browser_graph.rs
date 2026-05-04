@@ -236,6 +236,164 @@ fn issue_list_renders_lineage_context_from_selected_graph_cache() {
 }
 
 #[test]
+fn issue_list_orders_epic_parent_before_children_even_if_backend_sends_child_first() {
+    let (mut app, mut rx) = spur_tui::test_support::app_with_user_input_tx();
+    spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
+    match rx.try_recv() {
+        Ok(UserInput::RefreshIssues) => {}
+        Ok(_) => panic!("expected RefreshIssues, got different user input"),
+        Err(err) => panic!("expected RefreshIssues, got {err}"),
+    }
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssuesLoaded {
+            issues: vec![
+                plan_task_summary("bd-parent.1", "Child first"),
+                plan_epic_summary("bd-parent", "Parent epic"),
+                plan_task_summary("bd-parent.2", "Child second"),
+            ],
+        }),
+    );
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
+            requested_id: "bd-parent".into(),
+            nodes: vec![
+                plan_epic_node("bd-parent", "Parent epic"),
+                plan_task_node("bd-parent.1", "Child first"),
+                plan_task_node("bd-parent.2", "Child second"),
+            ],
+            edges: vec![
+                graph_edge_with_type("bd-parent.1", "bd-parent", "related"),
+                graph_edge_with_type("bd-parent.2", "bd-parent", "related"),
+            ],
+        }),
+    );
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+
+    let rendered = render_text(&mut app, &mut terminal);
+    let parent_line = rendered
+        .lines()
+        .position(|line| line.contains("bd-parent ") && line.contains("Parent epic"))
+        .expect("parent epic should render");
+    let child_line = rendered
+        .lines()
+        .position(|line| line.contains("bd-parent.1") && line.contains("Child first"))
+        .expect("child should render");
+
+    assert!(
+        parent_line < child_line,
+        "parent epic must render before its children:\n{rendered}"
+    );
+}
+
+#[test]
+fn issue_list_keeps_panel_height_when_navigating_from_parent_to_child() {
+    let (mut app, mut rx) = spur_tui::test_support::app_with_user_input_tx();
+    spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
+    match rx.try_recv() {
+        Ok(UserInput::RefreshIssues) => {}
+        Ok(_) => panic!("expected RefreshIssues, got different user input"),
+        Err(err) => panic!("expected RefreshIssues, got {err}"),
+    }
+
+    let mut issues = vec![
+        plan_epic_summary("bd-parent", "Parent epic"),
+        plan_task_summary("bd-parent.1", "Child one"),
+        plan_task_summary("bd-parent.2", "Child two"),
+    ];
+    for idx in 0..20 {
+        issues.push(sample_summary(
+            &format!("bd-other-{idx}"),
+            "Unrelated issue",
+        ));
+    }
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssuesLoaded { issues }),
+    );
+    let _ = rx.try_recv();
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
+            requested_id: "bd-parent".into(),
+            nodes: vec![
+                plan_epic_node("bd-parent", "Parent epic"),
+                plan_task_node("bd-parent.1", "Child one"),
+                plan_task_node("bd-parent.2", "Child two"),
+            ],
+            edges: vec![
+                graph_edge_with_type("bd-parent.1", "bd-parent", "related"),
+                graph_edge_with_type("bd-parent.2", "bd-parent", "related"),
+            ],
+        }),
+    );
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+
+    let parent_render = render_text(&mut app, &mut terminal);
+    let parent_height = issue_panel_height(&parent_render);
+
+    app.handle_crossterm_event_for_test(key('j'));
+    expect_get_graph(&mut rx, "bd-parent.1");
+    let child_render = render_text(&mut app, &mut terminal);
+    let child_height = issue_panel_height(&child_render);
+
+    assert_eq!(
+        parent_height, child_height,
+        "issue pane height must remain stable while navigating parent/child:\nparent:\n{parent_render}\nchild:\n{child_render}"
+    );
+}
+
+#[test]
+fn issue_list_keeps_panel_height_when_lineage_data_arrives() {
+    let (mut app, mut rx) = spur_tui::test_support::app_with_user_input_tx();
+    spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
+    match rx.try_recv() {
+        Ok(UserInput::RefreshIssues) => {}
+        Ok(_) => panic!("expected RefreshIssues, got different user input"),
+        Err(err) => panic!("expected RefreshIssues, got {err}"),
+    }
+
+    let mut issues = vec![
+        plan_epic_summary("bd-parent", "Parent epic"),
+        plan_task_summary("bd-parent.1", "Child one"),
+    ];
+    for idx in 0..20 {
+        issues.push(sample_summary(
+            &format!("bd-other-{idx}"),
+            "Unrelated issue",
+        ));
+    }
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssuesLoaded { issues }),
+    );
+    let _ = rx.try_recv();
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    let flat_render = render_text(&mut app, &mut terminal);
+    let flat_height = issue_panel_height(&flat_render);
+
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
+            requested_id: "bd-parent".into(),
+            nodes: vec![
+                plan_epic_node("bd-parent", "Parent epic"),
+                plan_task_node("bd-parent.1", "Child one"),
+            ],
+            edges: vec![graph_edge_with_type("bd-parent.1", "bd-parent", "related")],
+        }),
+    );
+    let lineage_render = render_text(&mut app, &mut terminal);
+    let lineage_height = issue_panel_height(&lineage_render);
+
+    assert_eq!(
+        flat_height, lineage_height,
+        "lineage data must not resize the issue pane:\nflat:\n{flat_render}\nlineage:\n{lineage_render}"
+    );
+}
+
+#[test]
 fn issue_list_keeps_lineage_panel_while_selected_graph_is_loading() {
     let (mut app, mut rx) = spur_tui::test_support::app_with_user_input_tx();
     spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));

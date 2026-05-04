@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -111,6 +112,54 @@ fn detail_event_to_issue(e: &spur_acp::IssueDetailEvent) -> spur_pm::Issue {
     }
 }
 
+fn sort_issues_parent_first(issues: &mut [spur_pm::IssueSummary]) {
+    issues.sort_by(compare_issue_parent_first);
+}
+
+fn compare_issue_parent_first(a: &spur_pm::IssueSummary, b: &spur_pm::IssueSummary) -> Ordering {
+    let a_root = issue_root_id(&a.id);
+    let b_root = issue_root_id(&b.id);
+
+    if a_root == b_root {
+        if is_issue_ancestor(&a.id, &b.id) {
+            return Ordering::Less;
+        }
+        if is_issue_ancestor(&b.id, &a.id) {
+            return Ordering::Greater;
+        }
+
+        let type_order = match (a.issue_type.as_deref(), b.issue_type.as_deref()) {
+            (Some("epic"), other) if other != Some("epic") => Ordering::Less,
+            (other, Some("epic")) if other != Some("epic") => Ordering::Greater,
+            _ => Ordering::Equal,
+        };
+        if type_order != Ordering::Equal {
+            return type_order;
+        }
+
+        let depth_order = issue_depth(&a.id).cmp(&issue_depth(&b.id));
+        if depth_order != Ordering::Equal {
+            return depth_order;
+        }
+    }
+
+    Ordering::Equal
+}
+
+fn issue_root_id(id: &str) -> &str {
+    id.split_once('.').map(|(root, _)| root).unwrap_or(id)
+}
+
+fn issue_depth(id: &str) -> usize {
+    id.matches('.').count()
+}
+
+fn is_issue_ancestor(parent: &str, child: &str) -> bool {
+    child
+        .strip_prefix(parent)
+        .is_some_and(|suffix| suffix.starts_with('.'))
+}
+
 // ── View ────────────────────────────────────────────────────────────────
 
 pub struct IssueBrowserView {
@@ -203,8 +252,9 @@ impl IssueBrowserView {
         &self.tracked_issues
     }
 
-    pub fn seed_issues(&mut self, issues: Vec<spur_pm::IssueSummary>) {
+    pub fn seed_issues(&mut self, mut issues: Vec<spur_pm::IssueSummary>) {
         self.invalidate_graph_cache();
+        sort_issues_parent_first(&mut issues);
         self.tracked_issues = issues;
         if !self.tracked_issues.is_empty() {
             self.issues_panel.select_first();
@@ -711,43 +761,9 @@ impl IssueBrowserView {
         let issue_count = self.tracked_issues.len();
         let selected_id = self.selected_issue_id();
         let lineage_mode_active = self.graph_cache.values().any(|(nodes, _)| nodes.len() > 1);
-        let selected_graph_loading = selected_id
-            .as_deref()
-            .is_some_and(|id| self.graph_loading.as_deref() == Some(id));
-        let selected_graph_sparse = selected_id.as_deref().is_some_and(|id| {
-            self.graph_cache
-                .get(id)
-                .is_some_and(|(nodes, _)| nodes.len() <= 1)
-        });
-        let cached_lineage_count = selected_id.as_deref().and_then(|id| {
-            if lineage_mode_active && (selected_graph_loading || selected_graph_sparse) {
-                let root_id = self.lineage_loading_root_id(id);
-                Self::cached_lineage_context(&self.graph_cache, id, root_id.as_str())
-                    .map(|(nodes, _)| nodes.len())
-                    .filter(|count| *count > 1)
-            } else {
-                None
-            }
-        });
-
-        let lineage_height = selected_id
-            .as_deref()
-            .and_then(|id| self.graph_cache.get(id).map(|(nodes, _)| nodes.len()))
-            .filter(|count| *count > 1)
-            .or(cached_lineage_count)
-            .or_else(|| {
-                if lineage_mode_active && (selected_graph_loading || selected_graph_sparse) {
-                    Some(issue_count)
-                } else {
-                    None
-                }
-            })
-            .map(|count| (count as u16).saturating_add(6));
 
         let issues_height = if issue_count == 0 {
             3u16 // placeholder height
-        } else if let Some(lineage_height) = lineage_height {
-            lineage_height.max(8).min((area.height * 55 / 100).max(8))
         } else {
             IssuesPanel::computed_height(issue_count, area.height)
                 .max(4)
@@ -994,8 +1010,9 @@ impl View for IssueBrowserView {
                             .map(String::from)
                     });
 
-                self.tracked_issues = issues
+                let mut loaded_issues = issues
                     .iter()
+                    .filter(|i| i.issue_type.as_deref() != Some("plan"))
                     .map(|i| spur_pm::IssueSummary {
                         id: i.id.clone(),
                         source: match i.source.as_str() {
@@ -1012,7 +1029,9 @@ impl View for IssueBrowserView {
                         issue_type: i.issue_type.clone(),
                         assignee: i.assignee.clone(),
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
+                sort_issues_parent_first(&mut loaded_issues);
+                self.tracked_issues = loaded_issues;
 
                 if !self.tracked_issues.is_empty() {
                     let selected = preferred_id
