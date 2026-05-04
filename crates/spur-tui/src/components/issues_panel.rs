@@ -273,7 +273,7 @@ impl IssuesPanel {
             (
                 Style::default().fg(Color::Cyan),
                 format!(
-                    " Work Item Lineage {}/{} · {} — [j/k] select · [Enter] detail · [E] execute ",
+                    " Work Item Lineage {}/{} · {} — [j/k] select · [Enter] detail · [e] execute ",
                     selected_idx + 1,
                     total,
                     readiness
