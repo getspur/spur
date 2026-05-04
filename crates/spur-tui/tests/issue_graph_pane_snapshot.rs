@@ -127,7 +127,7 @@ fn renders_small_dependency_tree() {
         &[
             "┌ Issue Graph: bd-root  5 nodes ───────────────────────────────────────┐",
             "│● Ship issue graph pane (bd-root)                                     │",
-            "│  ✅  Define graph events (bd-api)                                     │",
+            "│  ✓ Define graph events (bd-api)                                      │",
             "│  ○ Render adjacency tree (bd-render)                                 │",
             "│    ! Detect cycles (bd-cycle)                                        │",
             "│    ○ Clamp viewport (bd-scroll)                                      │",
@@ -135,7 +135,7 @@ fn renders_small_dependency_tree() {
             "│                                                                      │",
             "│                                                                      │",
             "│                                                                      │",
-            "│Legend: ○ open  ● in_progress  ! blocked  ✅  closed                   │",
+            "│Legend: ○ open  ● in_progress  ! blocked  ✓ closed                    │",
             "└──────────────────────────────────────────────────────────────────────┘",
         ],
     );
@@ -161,14 +161,14 @@ fn renders_cycle_once_and_stops_expansion() {
             "┌ Issue Graph: bd-root  3 nodes ───────────────────────────────────────┐",
             "│○ Root (bd-root)                                                      │",
             "│  ● First dependency (bd-a)                                           │",
-            "│    ✅  Back edge (bd-b)                                               │",
+            "│    ✓ Back edge (bd-b)                                                │",
             "│      ○ Root (bd-root) ↻ cycle                                        │",
             "│                                                                      │",
             "│                                                                      │",
             "│                                                                      │",
             "│                                                                      │",
             "│                                                                      │",
-            "│Legend: ○ open  ● in_progress  ! blocked  ✅  closed                   │",
+            "│Legend: ○ open  ● in_progress  ! blocked  ✓ closed                    │",
             "└──────────────────────────────────────────────────────────────────────┘",
         ],
     );
@@ -242,7 +242,7 @@ fn scroll_down_past_end_clamps_to_content_height() {
             "│  ○ Dependency 25 (bd-25)                                             │",
             "│  ○ Dependency 26 (bd-26)                                             │",
             "│↓ 3 more dependencies (PageDown)                                      │",
-            "│Legend: ○ open  ● in_progress  ! blocked  ✅  closed                   │",
+            "│Legend: ○ open  ● in_progress  ! blocked  ✓ closed                    │",
             "└──────────────────────────────────────────────────────────────────────┘",
         ],
     );

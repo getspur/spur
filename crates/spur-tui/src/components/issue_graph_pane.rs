@@ -10,7 +10,7 @@ use ratatui::{
 use spur_acp::{GraphEdgeEvent, GraphNodeEvent};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-const LEGEND: &str = "Legend: ○ open  ● in_progress  ! blocked  ✅ closed";
+const LEGEND: &str = "Legend: ○ open  ● in_progress  ! blocked  ✓ closed";
 
 pub struct IssueGraphPane {
     scroll: u16,
@@ -280,7 +280,7 @@ fn status_icon(status: &str) -> &'static str {
         "open" => "○",
         "in_progress" => "●",
         "blocked" => "!",
-        "closed" => "✅",
+        "closed" => "✓",
         _ => "○",
     }
 }

@@ -76,7 +76,7 @@ impl ReactTrace {
                         }
                         ActStatus::Completed(None) => {
                             spans.push(Span::styled(
-                                "✅".to_string(),
+                                "✓".to_string(),
                                 Style::default()
                                     .fg(Color::Green)
                                     .add_modifier(Modifier::BOLD),
@@ -84,7 +84,7 @@ impl ReactTrace {
                         }
                         ActStatus::Failed(_) => {
                             spans.push(Span::styled(
-                                "❌".to_string(),
+                                "✗".to_string(),
                                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                             ));
                         }
@@ -101,7 +101,7 @@ impl ReactTrace {
                     lines.push(Line::from(vec![
                         ts_span.clone(),
                         Span::styled(
-                            "THINK",
+                            "🧠 THINK",
                             Style::default()
                                 .fg(Color::DarkGray)
                                 .add_modifier(Modifier::BOLD),
@@ -122,7 +122,7 @@ impl ReactTrace {
                     lines.push(Line::from(vec![
                         ts_span.clone(),
                         Span::styled(
-                            format!("MSG {}", agent),
+                            format!("📨 {}", agent),
                             Style::default()
                                 .fg(Color::Cyan)
                                 .add_modifier(Modifier::BOLD),
@@ -217,7 +217,7 @@ impl ReactTrace {
                             lines.push(Line::from(vec![
                                 ts_span.clone(),
                                 Span::styled(
-                                    format!("err {}", verb),
+                                    format!("✗ {}", verb),
                                     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                                 ),
                             ]));
@@ -227,7 +227,7 @@ impl ReactTrace {
                             lines.push(Line::from(vec![
                                 ts_span.clone(),
                                 Span::styled(
-                                    "ok done".to_string(),
+                                    "✓ done".to_string(),
                                     Style::default()
                                         .fg(Color::Green)
                                         .add_modifier(Modifier::BOLD),
@@ -238,7 +238,7 @@ impl ReactTrace {
                             lines.push(Line::from(vec![
                                 ts_span.clone(),
                                 Span::styled(
-                                    "err failed".to_string(),
+                                    "✗ failed".to_string(),
                                     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                                 ),
                             ]));
@@ -265,7 +265,7 @@ impl ReactTrace {
                         lines.push(Line::from(vec![
                             ts_span.clone(),
                             Span::styled(
-                                "OBSERVE",
+                                "👁 OBSERVE",
                                 Style::default()
                                     .fg(Color::Green)
                                     .add_modifier(Modifier::BOLD),
@@ -293,7 +293,7 @@ impl ReactTrace {
                     lines.push(Line::from(vec![
                         ts_span.clone(),
                         Span::styled(
-                            format!("DELEGATE to {}", agent),
+                            format!("→ DELEGATE to {}", agent),
                             Style::default()
                                 .fg(Color::Cyan)
                                 .add_modifier(Modifier::BOLD),
@@ -336,7 +336,7 @@ impl ReactTrace {
                     lines.push(Line::from(vec![
                         ts_span.clone(),
                         Span::styled(
-                            "YOU",
+                            "💬 YOU",
                             Style::default()
                                 .fg(Color::Yellow)
                                 .add_modifier(Modifier::BOLD),
@@ -361,7 +361,7 @@ impl ReactTrace {
                     lines.push(Line::from(vec![
                         ts_span.clone(),
                         Span::styled(
-                            format!("PERMISSION: {}", description),
+                            format!("⚠ PERMISSION: {}", description),
                             Style::default()
                                 .fg(Color::Yellow)
                                 .add_modifier(Modifier::BOLD),
@@ -595,7 +595,7 @@ impl ReactTrace {
                         }
                         ActStatus::Completed(None) => {
                             spans.push(Span::styled(
-                                "✅".to_string(),
+                                "✓".to_string(),
                                 Style::default()
                                     .fg(Color::Green)
                                     .add_modifier(Modifier::BOLD),
@@ -603,7 +603,7 @@ impl ReactTrace {
                         }
                         ActStatus::Failed(_) => {
                             spans.push(Span::styled(
-                                "❌".to_string(),
+                                "✗".to_string(),
                                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                             ));
                         }
@@ -640,7 +640,7 @@ impl ReactTrace {
                         Line::from(vec![
                             ts_span.clone(),
                             Span::styled(
-                                "THINK",
+                                "🧠 THINK",
                                 Style::default()
                                     .fg(Color::DarkGray)
                                     .add_modifier(Modifier::BOLD),
@@ -671,7 +671,7 @@ impl ReactTrace {
                         Line::from(vec![
                             ts_span.clone(),
                             Span::styled(
-                                format!("MSG {}", agent),
+                                format!("📨 {}", agent),
                                 Style::default()
                                     .fg(Color::Cyan)
                                     .add_modifier(Modifier::BOLD),
@@ -803,7 +803,7 @@ impl ReactTrace {
                                 Line::from(vec![
                                     ts_span.clone(),
                                     Span::styled(
-                                        format!("err {}", verb),
+                                        format!("✗ {}", verb),
                                         Style::default()
                                             .fg(Color::Red)
                                             .add_modifier(Modifier::BOLD),
@@ -822,7 +822,7 @@ impl ReactTrace {
                                 Line::from(vec![
                                     ts_span.clone(),
                                     Span::styled(
-                                        "ok done".to_string(),
+                                        "✓ done".to_string(),
                                         Style::default()
                                             .fg(Color::Green)
                                             .add_modifier(Modifier::BOLD),
@@ -838,7 +838,7 @@ impl ReactTrace {
                                 Line::from(vec![
                                     ts_span.clone(),
                                     Span::styled(
-                                        "err failed".to_string(),
+                                        "✗ failed".to_string(),
                                         Style::default()
                                             .fg(Color::Red)
                                             .add_modifier(Modifier::BOLD),
@@ -879,7 +879,7 @@ impl ReactTrace {
                             Line::from(vec![
                                 ts_span.clone(),
                                 Span::styled(
-                                    "OBSERVE",
+                                    "👁 OBSERVE",
                                     Style::default()
                                         .fg(Color::Green)
                                         .add_modifier(Modifier::BOLD),
@@ -917,7 +917,7 @@ impl ReactTrace {
                         Line::from(vec![
                             ts_span.clone(),
                             Span::styled(
-                                format!("DELEGATE to {}", agent),
+                                format!("→ DELEGATE to {}", agent),
                                 Style::default()
                                     .fg(Color::Cyan)
                                     .add_modifier(Modifier::BOLD),
@@ -975,7 +975,7 @@ impl ReactTrace {
                         Line::from(vec![
                             ts_span.clone(),
                             Span::styled(
-                                "YOU",
+                                "💬 YOU",
                                 Style::default()
                                     .fg(Color::Yellow)
                                     .add_modifier(Modifier::BOLD),
@@ -1010,7 +1010,7 @@ impl ReactTrace {
                         Line::from(vec![
                             ts_span.clone(),
                             Span::styled(
-                                format!("PERMISSION: {}", description),
+                                format!("⚠ PERMISSION: {}", description),
                                 Style::default()
                                     .fg(Color::Yellow)
                                     .add_modifier(Modifier::BOLD),

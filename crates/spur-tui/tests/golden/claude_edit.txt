@@ -1,7 +1,7 @@
-12:00:00 edits Edit
+12:00:00 ✎ edits Edit
    /tmp/foo.rs
    -a
    +b
 
-12:00:01 ok edited
+12:00:01 ✓ edited
    1 replacement

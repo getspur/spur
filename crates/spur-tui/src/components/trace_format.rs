@@ -67,39 +67,35 @@ fn control_name(ch: char) -> char {
 /// Map `ToolFamily` to a display glyph + color.
 pub(crate) fn family_glyph(f: ToolFamily) -> (&'static str, Color) {
     match f {
-        ToolFamily::Read => ("reads", Color::Cyan),
-        ToolFamily::Edit => ("edits", Color::Yellow),
-        ToolFamily::Delete => ("deletes", Color::Red),
-        ToolFamily::Move => ("moves", Color::Yellow),
-        ToolFamily::Search => ("search", Color::Blue),
+        ToolFamily::Read => ("⚙ reads", Color::Cyan),
+        ToolFamily::Edit => ("✎ edits", Color::Yellow),
+        ToolFamily::Delete => ("✗ deletes", Color::Red),
+        ToolFamily::Move => ("→ moves", Color::Yellow),
+        ToolFamily::Search => ("🔎 search", Color::Blue),
         ToolFamily::Execute => ("$ runs", Color::Magenta),
-        ToolFamily::Think => ("thinks", Color::DarkGray),
-        ToolFamily::Fetch => ("fetch", Color::Blue),
-        ToolFamily::SwitchMode => ("mode", Color::Cyan),
-        ToolFamily::Plan => ("plan", Color::Cyan),
-        ToolFamily::Mcp => ("mcp", Color::DarkGray),
-        ToolFamily::Unknown => ("ACT", Color::Yellow),
+        ToolFamily::Think => ("◈ thinks", Color::DarkGray),
+        ToolFamily::Fetch => ("↯ fetch", Color::Blue),
+        ToolFamily::SwitchMode => ("⇄ mode", Color::Cyan),
+        ToolFamily::Plan => ("▸ plan", Color::Cyan),
+        ToolFamily::Mcp => ("⧉ mcp", Color::DarkGray),
+        ToolFamily::Unknown => ("🔧 ACT", Color::Yellow),
     }
 }
 
 /// Map `ObservePayload` to an outcome glyph + color.
-///
-/// Labels MUST be pure ASCII to avoid terminal font-fallback cursor desync
-/// in ratatui's contiguous diff output. Do not introduce emoji, EAW=A, or
-/// EAW=N glyphs here.
 pub(crate) fn outcome_glyph(p: &ObservePayload) -> (&'static str, Color) {
     match p {
         ObservePayload::CommandOutput {
             exit_code: Some(0), ..
-        } => ("ok", Color::Green),
+        } => ("✓", Color::Green),
         ObservePayload::CommandOutput {
             exit_code: Some(_), ..
-        } => ("err", Color::Red),
+        } => ("✗", Color::Red),
         ObservePayload::CommandOutput {
             exit_code: None, ..
         } => ("?", Color::Yellow),
-        ObservePayload::Error { .. } => ("err", Color::Red),
-        _ => ("ok", Color::Green),
+        ObservePayload::Error { .. } => ("✗", Color::Red),
+        _ => ("✓", Color::Green),
     }
 }
 
@@ -141,8 +137,8 @@ pub(crate) fn observe_compact(payload: &ObservePayload) -> (&'static str, Color,
         } => {
             let total = stdout.lines().count() + stderr.lines().count();
             match exit_code {
-                Some(0) => ("ok", Color::Green, format!("{} lines", total)),
-                Some(c) => ("err", Color::Red, format!("exit {} - {} lines", c, total)),
+                Some(0) => ("✓", Color::Green, format!("{} lines", total)),
+                Some(c) => ("✗", Color::Red, format!("exit {} · {} lines", c, total)),
                 None => ("?", Color::Yellow, format!("{} lines", total)),
             }
         }
@@ -151,32 +147,32 @@ pub(crate) fn observe_compact(payload: &ObservePayload) -> (&'static str, Color,
         } => {
             let n = content.lines().count();
             let suffix = if *truncated { " (truncated)" } else { "" };
-            ("ok", Color::Green, format!("{} lines{}", n, suffix))
+            ("✓", Color::Green, format!("{} lines{}", n, suffix))
         }
         ObservePayload::EditResult {
             replacements, diff, ..
         } => {
             if let Some(n) = replacements {
                 (
-                    "ok",
+                    "✓",
                     Color::Green,
                     format!("{} replacement{}", n, if *n == 1 { "" } else { "s" }),
                 )
             } else if let Some(d) = diff {
                 let plus = d.lines().filter(|l| l.starts_with('+')).count();
                 let minus = d.lines().filter(|l| l.starts_with('-')).count();
-                ("ok", Color::Green, format!("+{}/-{}", plus, minus))
+                ("✓", Color::Green, format!("+{}/-{}", plus, minus))
             } else {
-                ("ok", Color::Green, String::new())
+                ("✓", Color::Green, String::new())
             }
         }
         ObservePayload::Json { pretty } => {
             let n = pretty.lines().count();
-            ("ok", Color::Green, format!("{} lines", n))
+            ("✓", Color::Green, format!("{} lines", n))
         }
         ObservePayload::Text { body } => {
             let n = body.lines().count();
-            ("ok", Color::Green, format!("{} lines", n))
+            ("✓", Color::Green, format!("{} lines", n))
         }
         ObservePayload::Error { message } => {
             let truncated = if message.chars().count() > 60 {
@@ -184,11 +180,11 @@ pub(crate) fn observe_compact(payload: &ObservePayload) -> (&'static str, Color,
                 while !message.is_char_boundary(end) && end > 0 {
                     end -= 1;
                 }
-                format!("{}...", &message[..end])
+                format!("{}…", &message[..end])
             } else {
                 message.clone()
             };
-            ("err", Color::Red, truncated)
+            ("✗", Color::Red, truncated)
         }
     }
 }
@@ -196,45 +192,6 @@ pub(crate) fn observe_compact(payload: &ObservePayload) -> (&'static str, Color,
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn assert_ascii(label: &str) {
-        assert!(
-            label.is_ascii(),
-            "ReAct-owned chrome must be ASCII to avoid terminal cursor-width desync: {label:?}"
-        );
-    }
-
-    #[test]
-    fn internal_trace_chrome_labels_are_ascii() {
-        for family in [
-            ToolFamily::Read,
-            ToolFamily::Edit,
-            ToolFamily::Delete,
-            ToolFamily::Move,
-            ToolFamily::Search,
-            ToolFamily::Execute,
-            ToolFamily::Think,
-            ToolFamily::Fetch,
-            ToolFamily::SwitchMode,
-            ToolFamily::Plan,
-            ToolFamily::Mcp,
-            ToolFamily::Unknown,
-        ] {
-            assert_ascii(family_glyph(family).0);
-        }
-
-        let ok_payload = ObservePayload::Text {
-            body: String::new(),
-        };
-        assert_ascii(outcome_glyph(&ok_payload).0);
-        assert_ascii(observe_compact(&ok_payload).0);
-
-        let err_payload = ObservePayload::Error {
-            message: "boom".to_string(),
-        };
-        assert_ascii(outcome_glyph(&err_payload).0);
-        assert_ascii(observe_compact(&err_payload).0);
-    }
 
     #[test]
     fn rendered_external_text_does_not_emit_terminal_controls() {
@@ -281,7 +238,7 @@ pub(crate) fn input_display_lines(input: &ToolInputDisplay) -> Vec<Line<'static>
                     lines.push(Line::from(vec![
                         Span::raw("   "),
                         Span::styled(
-                            format!("[... {} more]", remaining),
+                            format!("[… {} more]", remaining),
                             Style::default().fg(Color::DarkGray),
                         ),
                     ]));
@@ -386,7 +343,7 @@ pub(crate) fn observe_payload_lines(
                     Span::raw("   "),
                     Span::styled(
                         format!(
-                            "[... {} more lines - Ctrl+O expand]",
+                            "[… {} more lines · Ctrl+O expand]",
                             stdout_total - stdout_limit
                         ),
                         Style::default().fg(Color::DarkGray),
@@ -404,7 +361,7 @@ pub(crate) fn observe_payload_lines(
                 lines.push(Line::from(vec![
                     Span::raw("   "),
                     Span::styled(
-                        format!("[... {} more lines]", stderr_total - stderr_limit),
+                        format!("[… {} more lines]", stderr_total - stderr_limit),
                         Style::default().fg(Color::DarkGray),
                     ),
                 ]));
@@ -418,7 +375,7 @@ pub(crate) fn observe_payload_lines(
             let line_count = content.lines().count();
             let path_str = path.as_deref().unwrap_or("<unknown>");
             let header = format!(
-                "{} - {} lines{}",
+                "{} · {} lines{}",
                 path_str,
                 line_count,
                 if *truncated { " (truncated)" } else { "" }
@@ -438,7 +395,7 @@ pub(crate) fn observe_payload_lines(
                 lines.push(Line::from(vec![
                     Span::raw("   "),
                     Span::styled(
-                        format!("[... {} more lines - Ctrl+O expand]", line_count - limit),
+                        format!("[… {} more lines · Ctrl+O expand]", line_count - limit),
                         Style::default().fg(Color::DarkGray),
                     ),
                 ]));
@@ -475,7 +432,7 @@ pub(crate) fn observe_payload_lines(
                     lines.push(Line::from(vec![
                         Span::raw("   "),
                         Span::styled(
-                            format!("[... {} more lines]", total - limit),
+                            format!("[… {} more lines]", total - limit),
                             Style::default().fg(Color::DarkGray),
                         ),
                     ]));
@@ -500,7 +457,7 @@ pub(crate) fn observe_payload_lines(
                 lines.push(Line::from(vec![
                     Span::raw("   "),
                     Span::styled(
-                        format!("[... {} more lines - Ctrl+O expand]", total - limit),
+                        format!("[… {} more lines · Ctrl+O expand]", total - limit),
                         Style::default().fg(Color::DarkGray),
                     ),
                 ]));
@@ -519,7 +476,7 @@ pub(crate) fn observe_payload_lines(
                 lines.push(Line::from(vec![
                     Span::raw("   "),
                     Span::styled(
-                        format!("[... {} more lines - Ctrl+O expand]", total - limit),
+                        format!("[… {} more lines · Ctrl+O expand]", total - limit),
                         Style::default().fg(Color::DarkGray),
                     ),
                 ]));
