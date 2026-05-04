@@ -17,7 +17,7 @@ build-backend = "maturin"
 
 [project]
 name = "spur-cli"
-version = "0.1.0"
+version = "1.0.1"
 description = "Spur — agent orchestration CLI"
 requires-python = ">=3.8"
 license = { text = "Proprietary" }
