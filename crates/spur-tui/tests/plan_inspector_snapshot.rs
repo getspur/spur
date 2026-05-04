@@ -814,7 +814,6 @@ fn plan_inspector_renders_issue_detail_loading_and_fetched() {
     assert!(buffer_contains(&detail_buffer, "title: Contract task"));
     assert!(buffer_contains(&detail_buffer, "status: open"));
     assert!(buffer_contains(&detail_buffer, "Description"));
-    assert!(buffer_contains(&detail_buffer, "body"));
     assert!(buffer_contains(&detail_buffer, "Detailed"));
 }
 

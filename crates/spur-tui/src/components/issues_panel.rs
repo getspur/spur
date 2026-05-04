@@ -32,14 +32,18 @@ pub enum IssueLineageView<'a> {
 
 pub struct IssuesPanel {
     table_state: TableState,
+    lineage_table_state: TableState,
     focused: bool,
+    display_order: Vec<usize>,
 }
 
 impl IssuesPanel {
     pub fn new() -> Self {
         Self {
             table_state: TableState::default(),
+            lineage_table_state: TableState::default(),
             focused: false,
+            display_order: Vec::new(),
         }
     }
 
@@ -55,8 +59,20 @@ impl IssuesPanel {
         if issue_count == 0 {
             return;
         }
-        let current = self.table_state.selected().unwrap_or(0);
-        let next = (current + count) % issue_count;
+        let current = self
+            .table_state
+            .selected()
+            .unwrap_or(0)
+            .min(issue_count.saturating_sub(1));
+        let next = if let Some(display_order) = self.valid_display_order(issue_count) {
+            let visual_idx = display_order
+                .iter()
+                .position(|idx| *idx == current)
+                .unwrap_or(0);
+            display_order[(visual_idx + count) % issue_count]
+        } else {
+            (current + count) % issue_count
+        };
         self.table_state.select(Some(next));
     }
 
@@ -64,8 +80,21 @@ impl IssuesPanel {
         if issue_count == 0 {
             return;
         }
-        let current = self.table_state.selected().unwrap_or(0);
-        let prev = (current + issue_count - (count % issue_count)) % issue_count;
+        let current = self
+            .table_state
+            .selected()
+            .unwrap_or(0)
+            .min(issue_count.saturating_sub(1));
+        let prev = if let Some(display_order) = self.valid_display_order(issue_count) {
+            let visual_idx = display_order
+                .iter()
+                .position(|idx| *idx == current)
+                .unwrap_or(0);
+            let step = count % issue_count;
+            display_order[(visual_idx + issue_count - step) % issue_count]
+        } else {
+            (current + issue_count - (count % issue_count)) % issue_count
+        };
         self.table_state.select(Some(prev));
     }
 
@@ -82,6 +111,12 @@ impl IssuesPanel {
     pub fn selected_id<'a>(&self, issues: &'a [IssueSummary]) -> Option<&'a str> {
         let idx = self.table_state.selected()?;
         issues.get(idx).map(|i| i.id.as_str())
+    }
+
+    fn valid_display_order(&self, issue_count: usize) -> Option<&[usize]> {
+        (self.display_order.len() == issue_count
+            && self.display_order.iter().all(|idx| *idx < issue_count))
+        .then_some(self.display_order.as_slice())
     }
 
     /// Inc 3 (bd-d587.3): select the row whose id matches `id`. Returns `true`
@@ -152,6 +187,7 @@ impl IssuesPanel {
 
         let header = Row::new(["ID", "P", "Type", "Status", "Assignee", "Title"])
             .style(Style::default().bold());
+        self.display_order = (0..issues.len()).collect();
 
         let rows: Vec<Row> = issues
             .iter()
@@ -257,9 +293,16 @@ impl IssuesPanel {
 
         let header = Row::new(["Lineage", "P", "Type", "Status", "Assignee", "Title"])
             .style(Style::default().bold());
-        let rows: Vec<Row> = issues
+        let ordered_issues = meta.ordered_issues(issues);
+        self.display_order = ordered_issues.iter().map(|(idx, _)| *idx).collect();
+        let display_selected_idx = ordered_issues
             .iter()
-            .map(|issue| {
+            .position(|(issue_idx, _)| *issue_idx == selected_idx)
+            .unwrap_or_else(|| selected_idx.min(ordered_issues.len().saturating_sub(1)));
+
+        let rows: Vec<Row> = ordered_issues
+            .iter()
+            .map(|(_, issue)| {
                 let priority_cell = match issue.priority {
                     Some(0) => Cell::from("P0").fg(Color::Red),
                     Some(1) => Cell::from("P1").fg(Color::Yellow),
@@ -305,7 +348,8 @@ impl IssuesPanel {
                     .add_modifier(Modifier::BOLD),
             );
 
-        frame.render_stateful_widget(table, area, &mut self.table_state);
+        self.lineage_table_state.select(Some(display_selected_idx));
+        frame.render_stateful_widget(table, area, &mut self.lineage_table_state);
     }
 
     pub fn computed_height(issue_count: usize, available_height: u16) -> u16 {
@@ -444,6 +488,68 @@ impl<'a> LineageMeta<'a> {
 
         format!("  {icon} {}", issue.id)
     }
+
+    fn ordered_issues<'b>(&self, issues: &'b [IssueSummary]) -> Vec<(usize, &'b IssueSummary)> {
+        let mut ordered: Vec<(usize, &IssueSummary)> = issues.iter().enumerate().collect();
+        ordered.sort_by(|(left_idx, left), (right_idx, right)| {
+            self.issue_display_rank(left)
+                .cmp(&self.issue_display_rank(right))
+                .then_with(|| left_idx.cmp(right_idx))
+        });
+        ordered
+    }
+
+    fn issue_display_rank(&self, issue: &IssueSummary) -> (usize, usize) {
+        if issue.id == self.root_id {
+            return (0, 0);
+        }
+
+        if let Some(depth) = self.family_depth(issue.id.as_str()) {
+            return (1, depth);
+        }
+
+        if self
+            .children_by_parent_id
+            .get(self.root_id)
+            .is_some_and(|ids| ids.iter().any(|id| *id == issue.id))
+        {
+            return (1, 1);
+        }
+
+        if self
+            .blockers_by_id
+            .get(self.root_id)
+            .is_some_and(|ids| ids.iter().any(|id| *id == issue.id))
+        {
+            return (2, 0);
+        }
+
+        if self
+            .blocks_by_id
+            .get(self.root_id)
+            .is_some_and(|ids| ids.iter().any(|id| *id == issue.id))
+        {
+            return (3, 0);
+        }
+
+        if self.node_by_id.contains_key(issue.id.as_str()) {
+            return (4, 0);
+        }
+
+        (5, 0)
+    }
+
+    fn family_depth(&self, issue_id: &str) -> Option<usize> {
+        if let Some(depth) = descendant_depth(self.root_id, issue_id) {
+            return Some(depth);
+        }
+
+        let family_root = issue_family_root(self.root_id);
+        if family_root == self.root_id {
+            return None;
+        }
+        descendant_depth(family_root, issue_id)
+    }
 }
 
 fn resolve_lineage_root<'a>(
@@ -549,6 +655,10 @@ fn descendant_depth(root_id: &str, id: &str) -> Option<usize> {
     let suffix = id.strip_prefix(root_id)?;
     let suffix = suffix.strip_prefix('.')?;
     Some(suffix.split('.').count())
+}
+
+fn issue_family_root(id: &str) -> &str {
+    id.rsplit_once('.').map(|(root, _)| root).unwrap_or(id)
 }
 
 fn lineage_prefix(depth: usize) -> String {
