@@ -10,25 +10,6 @@
 # To add a new seed agent: append an [[agents.entries]] block below. No
 # Rust changes are required. See docs/spur/agent-onboarding-cookbook.md.
 
-# ── claude-code-sj (stream-json fallback) ─────────────────────────
-[[agents.entries]]
-name = "claude-code-sj"
-command = "claude"
-args = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-mode", "acceptEdits"]
-transport = "stream-json"
-kind = "claude-stream-json"
-role = "both"
-cost_tier = "medium"
-
-[agents.entries.display]
-handle = "claude-sj"
-
-[agents.entries.commands]
-dispatch = "prompt_text"
-
-[agents.entries.permissions]
-args = ["--dangerously-skip-permissions"]
-
 # ── kiro ──────────────────────────────────────────────────────────
 [[agents.entries]]
 name = "kiro"

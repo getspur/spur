@@ -16,7 +16,6 @@ fn install_hints_cover_all_seed_agents() {
     // would be cleaner, but spur-cli is a binary-only crate and adding
     // a lib target just for this is overkill. Keep the parallel list.
     let expected_names: &[&str] = &[
-        "claude-code-sj",
         "kiro",
         "claude-code",
         "codex-bin",
@@ -43,6 +42,21 @@ fn install_hints_cover_all_seed_agents() {
             "expected_names has `{expected}` but it's not in seed template"
         );
     }
+}
+
+#[test]
+fn seed_agents_do_not_include_legacy_claude_stream_json() {
+    let seeds = spur_acp::config::load_seed_template();
+    let names: Vec<_> = seeds.entries.iter().map(|a| a.name.as_str()).collect();
+
+    assert!(
+        !names.contains(&"claude-code-sj"),
+        "spur init should no longer offer claude-code-sj; only claude-code is supported"
+    );
+    assert!(
+        !names.contains(&"claude-code-js"),
+        "spur init should not offer the legacy claude-code-js alias"
+    );
 }
 
 use std::fs;
@@ -117,7 +131,7 @@ enabled = true
 operator_user_id = 12345
 "#;
     fs::write(tmp.path().join(".spur/config.toml"), existing).unwrap();
-    stub_binary(tmp.path(), "claude");
+    stub_binary(tmp.path(), "npx");
 
     let status = spur()
         .current_dir(tmp.path())
@@ -129,9 +143,9 @@ operator_user_id = 12345
     assert!(status.success(), "merge init should exit 0");
     let after = fs::read_to_string(tmp.path().join(".spur/config.toml")).unwrap();
 
-    // Should merge the discovered claude agent.
+    // Should merge the discovered Claude Code agent.
     assert!(
-        after.contains(r#"name = "claude-code-sj""#),
+        after.contains(r#"name = "claude-code""#),
         "should merge discovered agent; got:\n{after}"
     );
 
@@ -145,9 +159,9 @@ operator_user_id = 12345
         "should preserve bot operator; got:\n{after}"
     );
 
-    // Brain should be recomputed (kiro is not on PATH here, claude-code-sj is).
+    // Brain should be recomputed (kiro is not on PATH here, claude-code is).
     assert!(
-        after.contains(r#"default = "claude-code-sj""#),
+        after.contains(r#"default = "claude-code""#),
         "should recompute brain to discovered agent; got:\n{after}"
     );
 }
@@ -208,5 +222,33 @@ operator_user_id = 99999
     assert!(
         after.contains(r#"default = "kiro""#),
         "brain should adapt to kiro; got:\n{after}"
+    );
+}
+
+#[test]
+fn init_prefers_claude_code_as_default_brain() {
+    let _g = LOCK.lock().unwrap();
+    let tmp = TempDir::new().unwrap();
+
+    stub_binary(tmp.path(), "kiro-cli");
+    stub_binary(tmp.path(), "npx");
+
+    let status = spur()
+        .current_dir(tmp.path())
+        .env("PATH", format!("{}:/usr/bin", tmp.path().display()))
+        .arg("init")
+        .status()
+        .expect("spawn spur init");
+
+    assert!(status.success(), "init should exit 0");
+    let after = fs::read_to_string(tmp.path().join(".spur/config.toml")).unwrap();
+
+    assert!(
+        after.contains(r#"default = "claude-code""#),
+        "claude-code should be the default brain when available; got:\n{after}"
+    );
+    assert!(
+        after.contains(r#"    "kiro","#),
+        "kiro should become a fallback brain; got:\n{after}"
     );
 }
