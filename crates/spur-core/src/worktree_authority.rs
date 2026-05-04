@@ -305,9 +305,7 @@ impl WorktreeAuthority {
         let _ = tokio::fs::remove_file(&probe_path).await;
         matches!(
             result,
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::Unsupported)
-                || e.raw_os_error() == Some(libc::ENOLCK)
-                || e.raw_os_error() == Some(libc::ENOTSUP)
+            Err(e) if is_lock_unsupported_error(&e)
         )
     }
 
@@ -342,6 +340,23 @@ impl WorktreeAuthority {
                 }
             }
         })
+    }
+}
+
+fn is_lock_unsupported_error(e: &std::io::Error) -> bool {
+    if matches!(e.kind(), std::io::ErrorKind::Unsupported) {
+        return true;
+    }
+
+    #[cfg(unix)]
+    {
+        let raw = e.raw_os_error();
+        raw == Some(libc::ENOLCK) || raw == Some(libc::ENOTSUP)
+    }
+
+    #[cfg(not(unix))]
+    {
+        false
     }
 }
 

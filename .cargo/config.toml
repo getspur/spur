@@ -3,10 +3,9 @@
 # Required by perf (Linux) and greatly improves DTrace (macOS) output quality.
 rustflags = ["-C", "force-frame-pointers=yes"]
 
-# sccache wrapper that dynamically sets SCCACHE_BASEDIRS per worktree so
-# identical workspace source files hash the same across all worktrees.
-# See: docs/rca/2026-04-27-sccache-worktree-cache-miss.md
-rustc-wrapper = "scripts/sccache-worktree.sh"
+# scripts/spur-cargo injects the sccache worktree wrapper for local Unix-like
+# builds. Do not set rustc-wrapper here: cargo-dist and Windows CI inherit this
+# file and cannot execute the shell wrapper.
 
 [alias]
 # One-step profiling build alias

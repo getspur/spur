@@ -120,7 +120,8 @@ def test_sccache_worktree_uses_sccache_when_available(tmp_path):
 def test_project_cargo_config_does_not_force_unix_rustc_wrapper():
     cargo_config = ROOT / ".cargo" / "config.toml"
 
-    assert "rustc-wrapper" not in cargo_config.read_text()
+    for line in cargo_config.read_text().splitlines():
+        assert not line.strip().startswith("rustc-wrapper")
 
 
 def test_spur_cargo_sets_worktree_wrapper_when_unset(tmp_path):

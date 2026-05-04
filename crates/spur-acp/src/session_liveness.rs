@@ -112,9 +112,20 @@ fn lock_path_for(repo_root: &Path, target: &BrainSessionId) -> PathBuf {
 
 fn is_enotsup_or_enolck(e: &io::Error) -> bool {
     use std::io::ErrorKind;
-    matches!(e.kind(), ErrorKind::Unsupported)
-        || e.raw_os_error() == Some(libc::ENOLCK)
-        || e.raw_os_error() == Some(libc::ENOTSUP)
+    if matches!(e.kind(), ErrorKind::Unsupported) {
+        return true;
+    }
+
+    #[cfg(unix)]
+    {
+        let raw = e.raw_os_error();
+        raw == Some(libc::ENOLCK) || raw == Some(libc::ENOTSUP)
+    }
+
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 
 #[cfg(test)]
