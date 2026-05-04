@@ -254,9 +254,9 @@ impl AgentsTree {
             LifecycleState::Running | LifecycleState::Spawning => {
                 spinner::frame(spinner::BRAILLE, self.tick_counter as u32)
             }
-            LifecycleState::AwaitingReview => "❗",
+            LifecycleState::AwaitingReview => "⚠",
             LifecycleState::Succeeded => "●",
-            LifecycleState::Failed => "❌",
+            LifecycleState::Failed => "✗",
             LifecycleState::Cancelled => "○",
             LifecycleState::Resuming => "↻",
         };

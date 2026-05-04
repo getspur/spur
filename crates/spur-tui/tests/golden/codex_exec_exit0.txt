@@ -1,6 +1,6 @@
 12:00:00 $ runs exec_command
    $ cargo build
 
-12:00:01 ok ran
+12:00:01 ✓ ran
    $ exit 0
    done

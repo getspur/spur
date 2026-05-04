@@ -190,8 +190,8 @@ fn compact_kind_tag(k: &TraceKind) -> &'static str {
 
 fn compact_prefix_style(k: &TraceKind) -> (&'static str, Style) {
     match k {
-        TraceKind::Think => ("  - ", Style::default().fg(Color::DarkGray)),
-        TraceKind::AgentMessage { .. } => ("  @ ", Style::default().fg(Color::White)),
+        TraceKind::Think => ("  · ", Style::default().fg(Color::DarkGray)),
+        TraceKind::AgentMessage { .. } => ("  ▸ ", Style::default().fg(Color::White)),
         TraceKind::Act { status, .. } => {
             let color = match status {
                 ActStatus::Pending | ActStatus::InProgress { .. } => Color::Yellow,
@@ -199,13 +199,13 @@ fn compact_prefix_style(k: &TraceKind) -> (&'static str, Style) {
                 ActStatus::Failed(_) => Color::Red,
             };
             (
-                "  * ",
+                "  ▶ ",
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             )
         }
-        TraceKind::Observe { .. } => ("  < ", Style::default().fg(Color::DarkGray)),
+        TraceKind::Observe { .. } => ("  ◂ ", Style::default().fg(Color::DarkGray)),
         TraceKind::Delegate { .. } => (
-            "  = ",
+            "  ⇲ ",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -329,7 +329,7 @@ fn build_compact_lines_from(
             let placeholder = if w == 0 {
                 String::new()
             } else {
-                ".".to_string()
+                "…".to_string()
             };
             lines.push(Line::from(Span::styled(placeholder, style)));
             row += 1;
@@ -383,75 +383,93 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compact_prefixes_are_ascii_terminal_chrome() {
+    fn compact_prefixes_match_trace_kind() {
         let entries = [
-            TraceEntry {
-                kind: TraceKind::Think,
-                text: String::new(),
-                timestamp: "00:00".into(),
-                markdown: None,
-            },
-            TraceEntry {
-                kind: TraceKind::AgentMessage {
-                    agent: "agent".into(),
+            (
+                TraceEntry {
+                    kind: TraceKind::Think,
+                    text: String::new(),
+                    timestamp: "00:00".into(),
+                    markdown: None,
                 },
-                text: String::new(),
-                timestamp: "00:00".into(),
-                markdown: None,
-            },
-            TraceEntry {
-                kind: TraceKind::Act {
-                    tool: "read".into(),
-                    family: spur_acp::adapter::ToolFamily::Read,
-                    input: spur_acp::adapter::ToolInputDisplay::Empty,
-                    tool_call_id: None,
-                    status: ActStatus::Completed(None),
+                "  · ",
+            ),
+            (
+                TraceEntry {
+                    kind: TraceKind::AgentMessage {
+                        agent: "agent".into(),
+                    },
+                    text: String::new(),
+                    timestamp: "00:00".into(),
+                    markdown: None,
                 },
-                text: String::new(),
-                timestamp: "00:00".into(),
-                markdown: None,
-            },
-            TraceEntry {
-                kind: TraceKind::Observe { payload: None },
-                text: String::new(),
-                timestamp: "00:00".into(),
-                markdown: None,
-            },
-            TraceEntry {
-                kind: TraceKind::Delegate {
-                    agent: "worker".into(),
-                    task: String::new(),
-                    status: String::new(),
-                    request_id: None,
-                    executor_id: None,
+                "  ▸ ",
+            ),
+            (
+                TraceEntry {
+                    kind: TraceKind::Act {
+                        tool: "read".into(),
+                        family: spur_acp::adapter::ToolFamily::Read,
+                        input: spur_acp::adapter::ToolInputDisplay::Empty,
+                        tool_call_id: None,
+                        status: ActStatus::Completed(None),
+                    },
+                    text: String::new(),
+                    timestamp: "00:00".into(),
+                    markdown: None,
                 },
-                text: String::new(),
-                timestamp: "00:00".into(),
-                markdown: None,
-            },
-            TraceEntry {
-                kind: TraceKind::UserMessage,
-                text: String::new(),
-                timestamp: "00:00".into(),
-                markdown: None,
-            },
-            TraceEntry {
-                kind: TraceKind::Permission {
-                    description: "approve".into(),
-                    pending: true,
-                    countdown: 0,
+                "  ▶ ",
+            ),
+            (
+                TraceEntry {
+                    kind: TraceKind::Observe { payload: None },
+                    text: String::new(),
+                    timestamp: "00:00".into(),
+                    markdown: None,
                 },
-                text: String::new(),
-                timestamp: "00:00".into(),
-                markdown: None,
-            },
+                "  ◂ ",
+            ),
+            (
+                TraceEntry {
+                    kind: TraceKind::Delegate {
+                        agent: "worker".into(),
+                        task: String::new(),
+                        status: String::new(),
+                        request_id: None,
+                        executor_id: None,
+                    },
+                    text: String::new(),
+                    timestamp: "00:00".into(),
+                    markdown: None,
+                },
+                "  ⇲ ",
+            ),
+            (
+                TraceEntry {
+                    kind: TraceKind::UserMessage,
+                    text: String::new(),
+                    timestamp: "00:00".into(),
+                    markdown: None,
+                },
+                "  > ",
+            ),
+            (
+                TraceEntry {
+                    kind: TraceKind::Permission {
+                        description: "approve".into(),
+                        pending: true,
+                        countdown: 0,
+                    },
+                    text: String::new(),
+                    timestamp: "00:00".into(),
+                    markdown: None,
+                },
+                "  ? ",
+            ),
         ];
 
-        for entry in entries {
-            assert!(
-                compact_prefix_style(&entry.kind).0.is_ascii(),
-                "compact prefix must be ASCII"
-            );
+        for (entry, expected) in entries {
+            assert_eq!(compact_prefix_style(&entry.kind).0, expected);
         }
     }
 }
