@@ -237,6 +237,39 @@ impl IssueBrowserView {
         self.pending_action = Some(Action::GetIssueGraph { id });
     }
 
+    fn lineage_loading_root_id(&self, selected_id: &str) -> String {
+        self.cached_lineage_parent_id(selected_id)
+            .or_else(|| self.prefix_lineage_parent_id(selected_id))
+            .unwrap_or(selected_id)
+            .to_string()
+    }
+
+    fn cached_lineage_parent_id<'a>(&'a self, selected_id: &str) -> Option<&'a str> {
+        self.graph_cache
+            .values()
+            .flat_map(|(_, edges)| edges)
+            .find(|edge| {
+                edge.from == selected_id && Self::is_lineage_parent_edge(edge.edge_type.as_deref())
+            })
+            .map(|edge| edge.to.as_str())
+    }
+
+    fn prefix_lineage_parent_id<'a>(&'a self, selected_id: &str) -> Option<&'a str> {
+        self.tracked_issues
+            .iter()
+            .filter(|issue| {
+                selected_id
+                    .strip_prefix(issue.id.as_str())
+                    .is_some_and(|suffix| suffix.starts_with('.'))
+            })
+            .max_by_key(|issue| issue.id.len())
+            .map(|issue| issue.id.as_str())
+    }
+
+    fn is_lineage_parent_edge(edge_type: Option<&str>) -> bool {
+        matches!(edge_type, Some("parent-child") | Some("related"))
+    }
+
     pub fn scroll_issue_detail_up_by(&mut self, lines: u16) {
         match self.detail_mode {
             DetailMode::Text => self.issue_detail_pane.scroll_up_by(lines),
@@ -639,7 +672,7 @@ impl IssueBrowserView {
             let msg = Paragraph::new(body).style(Style::default().fg(fg));
             frame.render_widget(msg, inner);
         } else {
-            let lineage = selected_id.as_deref().and_then(|id| {
+            let lineage = if let Some(id) = selected_id.as_deref() {
                 if let Some((nodes, edges)) = self.graph_cache.get(id) {
                     Some(IssueLineageView::Loaded(IssueLineageContext {
                         root_id: id,
@@ -647,11 +680,14 @@ impl IssueBrowserView {
                         edges,
                     }))
                 } else if lineage_mode_active && self.graph_loading.as_deref() == Some(id) {
-                    Some(IssueLineageView::Loading { root_id: id })
+                    let root_id = self.lineage_loading_root_id(id);
+                    Some(IssueLineageView::Loading { root_id })
                 } else {
                     None
                 }
-            });
+            } else {
+                None
+            };
             self.issues_panel
                 .render_with_lineage(&self.tracked_issues, lineage, frame, chunks[0]);
         }

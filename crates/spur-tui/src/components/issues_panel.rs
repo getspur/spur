@@ -18,7 +18,7 @@ pub struct IssueLineageContext<'a> {
 
 pub enum IssueLineageView<'a> {
     Loaded(IssueLineageContext<'a>),
-    Loading { root_id: &'a str },
+    Loading { root_id: String },
 }
 
 pub struct IssuesPanel {
@@ -111,7 +111,7 @@ impl IssuesPanel {
                     return;
                 }
                 IssueLineageView::Loading { root_id } => {
-                    let meta = LineageMeta::loading(root_id);
+                    let meta = LineageMeta::loading(root_id.as_str());
                     self.render_lineage(issues, meta, "loading work tree".into(), frame, area);
                     return;
                 }
@@ -293,6 +293,7 @@ struct LineageMeta<'a> {
     root_id: &'a str,
     blockers_by_id: HashMap<&'a str, Vec<&'a str>>,
     blocks_by_id: HashMap<&'a str, Vec<&'a str>>,
+    children_by_parent_id: HashMap<&'a str, Vec<&'a str>>,
     node_by_id: HashMap<&'a str, &'a GraphNodeEvent>,
     open_blockers: usize,
 }
@@ -306,29 +307,46 @@ impl<'a> LineageMeta<'a> {
             .collect();
         let mut blockers_by_id: HashMap<&str, Vec<&str>> = HashMap::new();
         let mut blocks_by_id: HashMap<&str, Vec<&str>> = HashMap::new();
+        let mut parent_by_child_id: HashMap<&str, &str> = HashMap::new();
+        let mut children_by_parent_id: HashMap<&str, Vec<&str>> = HashMap::new();
         for edge in lineage.edges {
-            if edge.edge_type.as_deref() == Some("blocks") || edge.edge_type.is_none() {
-                blocks_by_id
-                    .entry(edge.from.as_str())
-                    .or_default()
-                    .push(edge.to.as_str());
-                blockers_by_id
-                    .entry(edge.to.as_str())
-                    .or_default()
-                    .push(edge.from.as_str());
+            match edge.edge_type.as_deref() {
+                Some("blocks") | None => {
+                    blocks_by_id
+                        .entry(edge.from.as_str())
+                        .or_default()
+                        .push(edge.to.as_str());
+                    blockers_by_id
+                        .entry(edge.to.as_str())
+                        .or_default()
+                        .push(edge.from.as_str());
+                }
+                Some("parent-child") | Some("related") => {
+                    parent_by_child_id.insert(edge.from.as_str(), edge.to.as_str());
+                    children_by_parent_id
+                        .entry(edge.to.as_str())
+                        .or_default()
+                        .push(edge.from.as_str());
+                }
+                Some(_) => {}
             }
         }
-        let open_blockers = blockers_by_id
+        let root_id = parent_by_child_id
             .get(lineage.root_id)
+            .copied()
+            .unwrap_or(lineage.root_id);
+        let open_blockers = blockers_by_id
+            .get(root_id)
             .into_iter()
             .flatten()
             .filter(|id| !is_closed(node_by_id.get(**id).copied()))
             .count();
 
         Self {
-            root_id: lineage.root_id,
+            root_id,
             blockers_by_id,
             blocks_by_id,
+            children_by_parent_id,
             node_by_id,
             open_blockers,
         }
@@ -339,6 +357,7 @@ impl<'a> LineageMeta<'a> {
             root_id,
             blockers_by_id: HashMap::new(),
             blocks_by_id: HashMap::new(),
+            children_by_parent_id: HashMap::new(),
             node_by_id: HashMap::new(),
             open_blockers: 0,
         }
@@ -357,6 +376,18 @@ impl<'a> LineageMeta<'a> {
         if issue.id == self.root_id {
             let icon = if self.open_blockers > 0 { "!" } else { icon };
             return format!("> {icon} {}", issue.id);
+        }
+
+        if self
+            .children_by_parent_id
+            .get(self.root_id)
+            .is_some_and(|ids| ids.iter().any(|id| *id == issue.id))
+            || issue
+                .id
+                .strip_prefix(self.root_id)
+                .is_some_and(|suffix| suffix.starts_with('.'))
+        {
+            return format!("├─ {icon} {}", issue.id);
         }
 
         if self
