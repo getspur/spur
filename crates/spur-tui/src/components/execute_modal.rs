@@ -13,7 +13,7 @@ const ALREADY_EXECUTING_HEIGHT: u16 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecuteModal {
-    pub epic_id: String,
+    pub epic_id: String, // Kept as epic_id for now to match struct definition, but conceptually it's an item_id
     pub epic_title: String,
     pub variant: ExecuteModalVariant,
 }
@@ -35,7 +35,7 @@ impl ExecuteModal {
         frame.render_widget(Clear, popup);
 
         let (title, border_color) = match self.variant {
-            ExecuteModalVariant::Confirm => (" Execute Epic ", Color::Green),
+            ExecuteModalVariant::Confirm => (" Execute Item ", Color::Green),
             ExecuteModalVariant::AlreadyExecuting { .. } => (" Already Executing ", Color::Yellow),
         };
         let block = Block::default()
@@ -74,7 +74,10 @@ impl ExecuteModal {
                 ),
             ],
             ExecuteModalVariant::AlreadyExecuting { plan_id } => vec![
-                Line::from(format!("  Epic {} is already executing.", self.epic_id)),
+                Line::from(format!(
+                    "  Work item {} is already executing.",
+                    self.epic_id
+                )),
                 Line::from(format!("  Plan-id: {plan_id}")),
                 Line::from(""),
                 action_line(
