@@ -2606,8 +2606,14 @@ impl App {
         if let Some(ref mut browser) = self.plan_browser {
             browser.handle_spur_event(&event, &ctx);
         }
-        if let Some(ref mut browser) = self.issue_browser {
+        let issue_browser_pending = if let Some(ref mut browser) = self.issue_browser {
             browser.handle_spur_event(&event, &ctx);
+            browser.take_pending_action()
+        } else {
+            None
+        };
+        if let Some(action) = issue_browser_pending {
+            self.process_action(action);
         }
 
         // Sync status to InputBars
@@ -3384,13 +3390,33 @@ impl App {
             }
 
             Action::SelectNextBy(n) => {
-                for _ in 0..n {
-                    self.dashboard.agents_tree_mut().select_next(&self.lineage);
+                if matches!(&self.current_view, ViewId::IssueBrowser) {
+                    if let Some(action) = self
+                        .issue_browser
+                        .as_mut()
+                        .and_then(|view| view.take_pending_action())
+                    {
+                        self.process_action(action);
+                    }
+                } else {
+                    for _ in 0..n {
+                        self.dashboard.agents_tree_mut().select_next(&self.lineage);
+                    }
                 }
             }
             Action::SelectPrevBy(n) => {
-                for _ in 0..n {
-                    self.dashboard.agents_tree_mut().select_prev(&self.lineage);
+                if matches!(&self.current_view, ViewId::IssueBrowser) {
+                    if let Some(action) = self
+                        .issue_browser
+                        .as_mut()
+                        .and_then(|view| view.take_pending_action())
+                    {
+                        self.process_action(action);
+                    }
+                } else {
+                    for _ in 0..n {
+                        self.dashboard.agents_tree_mut().select_prev(&self.lineage);
+                    }
                 }
             }
             Action::FocusNode => {
@@ -4794,6 +4820,7 @@ mod plan_browser_navigation_tests {
             plan_id: plan_id.into(),
             epic_id: format!("bd-{plan_id}"),
             title: format!("Plan {plan_id}"),
+            source_body_preview: None,
             owner_state,
             lifecycle: PlanLifecycleEvent::Pending,
             counts: None,

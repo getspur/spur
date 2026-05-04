@@ -113,6 +113,83 @@ fn expect_get_graph(rx: &mut mpsc::Receiver<UserInput>, expected_id: &str) {
 }
 
 #[test]
+fn issue_list_prefetches_dependency_graph_when_browsing_selection() {
+    let (mut app, mut rx) = spur_tui::test_support::app_with_user_input_tx();
+    spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
+    match rx.try_recv() {
+        Ok(UserInput::RefreshIssues) => {}
+        Ok(_) => panic!("expected RefreshIssues, got different user input"),
+        Err(err) => panic!("expected RefreshIssues, got {err}"),
+    }
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssuesLoaded {
+            issues: vec![
+                sample_summary("issue-1", "First issue"),
+                sample_summary("issue-2", "Second issue"),
+            ],
+        }),
+    );
+
+    expect_get_graph(&mut rx, "issue-1");
+
+    app.handle_crossterm_event_for_test(key('j'));
+
+    expect_get_graph(&mut rx, "issue-2");
+}
+
+#[test]
+fn issue_list_renders_lineage_context_from_selected_graph_cache() {
+    let (mut app, mut rx) = spur_tui::test_support::app_with_user_input_tx();
+    spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
+    match rx.try_recv() {
+        Ok(UserInput::RefreshIssues) => {}
+        Ok(_) => panic!("expected RefreshIssues, got different user input"),
+        Err(err) => panic!("expected RefreshIssues, got {err}"),
+    }
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssuesLoaded {
+            issues: vec![
+                sample_summary("issue-A", "Selected issue"),
+                sample_summary("issue-B", "Upstream blocker"),
+                sample_summary("issue-C", "Downstream work"),
+            ],
+        }),
+    );
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
+            requested_id: "issue-A".into(),
+            nodes: vec![
+                graph_node("issue-A", "Selected issue"),
+                graph_node("issue-B", "Upstream blocker"),
+                graph_node("issue-C", "Downstream work"),
+            ],
+            edges: vec![
+                graph_edge("issue-B", "issue-A"),
+                graph_edge("issue-A", "issue-C"),
+            ],
+        }),
+    );
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+
+    let rendered = render_text(&mut app, &mut terminal);
+
+    assert!(
+        rendered.contains("Work Item Lineage"),
+        "rendered:\n{rendered}"
+    );
+    assert!(rendered.contains("issue-B"), "rendered:\n{rendered}");
+    assert!(rendered.contains("issue-A"), "rendered:\n{rendered}");
+    assert!(rendered.contains("issue-C"), "rendered:\n{rendered}");
+    assert!(
+        rendered.contains("blocked by open upstream"),
+        "rendered:\n{rendered}"
+    );
+}
+
+#[test]
 fn graph_toggle_flow_fetches_renders_uses_cache_and_closes() {
     let (mut app, mut rx, mut terminal) = seeded_issue_browser_app();
 

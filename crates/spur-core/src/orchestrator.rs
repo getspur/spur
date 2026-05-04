@@ -1559,10 +1559,24 @@ async fn load_plan_summaries(
             }
         };
 
+        let source_body_preview = match pm.get_issue(&epic.id).await {
+            Ok(issue) => issue_body_preview(&issue.body),
+            Err(err) => {
+                warn!(
+                    plan_id = %plan_id,
+                    epic_id = %epic.id,
+                    error = %err,
+                    "failed to load plan source issue body preview"
+                );
+                None
+            }
+        };
+
         plans.push(PlanSummaryEvent {
             plan_id,
             epic_id: epic.id.clone(),
             title: epic.title.clone(),
+            source_body_preview,
             owner_state: plan_owner_state_from_labels(&epic.labels, current_brain_session),
             lifecycle: lifecycle_from_plan(&epic, counts.as_ref()),
             counts,
@@ -1571,6 +1585,19 @@ async fn load_plan_summaries(
     }
 
     Ok(plans)
+}
+
+fn issue_body_preview(body: &str) -> Option<String> {
+    let body = body.trim();
+    if body.is_empty() {
+        return None;
+    }
+
+    let mut preview: String = body.chars().take(500).collect();
+    if body.chars().count() > 500 {
+        preview.push_str("...");
+    }
+    Some(preview)
 }
 
 /// Convert spur_pm::Issue to the spur_acp mirror type for event bus transmission.

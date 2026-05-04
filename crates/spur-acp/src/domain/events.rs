@@ -199,6 +199,8 @@ pub struct PlanSummaryEvent {
     pub plan_id: String,
     pub epic_id: String,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_body_preview: Option<String>,
     pub owner_state: PlanOwnerStateEvent,
     pub lifecycle: PlanLifecycleEvent,
     #[serde(default, skip_serializing_if = "Option::is_none")]
