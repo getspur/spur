@@ -719,11 +719,22 @@ impl IssueBrowserView {
                 .get(id)
                 .is_some_and(|(nodes, _)| nodes.len() <= 1)
         });
+        let cached_lineage_count = selected_id.as_deref().and_then(|id| {
+            if lineage_mode_active && (selected_graph_loading || selected_graph_sparse) {
+                let root_id = self.lineage_loading_root_id(id);
+                Self::cached_lineage_context(&self.graph_cache, id, root_id.as_str())
+                    .map(|(nodes, _)| nodes.len())
+                    .filter(|count| *count > 1)
+            } else {
+                None
+            }
+        });
 
         let lineage_height = selected_id
             .as_deref()
             .and_then(|id| self.graph_cache.get(id).map(|(nodes, _)| nodes.len()))
             .filter(|count| *count > 1)
+            .or(cached_lineage_count)
             .or_else(|| {
                 if lineage_mode_active && (selected_graph_loading || selected_graph_sparse) {
                     Some(issue_count)
@@ -801,11 +812,19 @@ impl IssueBrowserView {
                     let (nodes, edges) =
                         Self::cached_lineage_context(&self.graph_cache, id, root_id.as_str())
                             .unwrap_or((&[], &[]));
-                    Some(IssueLineageView::Loading {
-                        root_id,
-                        nodes,
-                        edges,
-                    })
+                    if nodes.len() > 1 {
+                        Some(IssueLineageView::Cached {
+                            root_id,
+                            nodes,
+                            edges,
+                        })
+                    } else {
+                        Some(IssueLineageView::Loading {
+                            root_id,
+                            nodes,
+                            edges,
+                        })
+                    }
                 } else {
                     None
                 }
