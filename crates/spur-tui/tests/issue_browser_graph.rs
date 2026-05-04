@@ -190,6 +190,58 @@ fn issue_list_renders_lineage_context_from_selected_graph_cache() {
 }
 
 #[test]
+fn issue_list_keeps_lineage_panel_while_selected_graph_is_loading() {
+    let (mut app, mut rx) = spur_tui::test_support::app_with_user_input_tx();
+    spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
+    match rx.try_recv() {
+        Ok(UserInput::RefreshIssues) => {}
+        Ok(_) => panic!("expected RefreshIssues, got different user input"),
+        Err(err) => panic!("expected RefreshIssues, got {err}"),
+    }
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssuesLoaded {
+            issues: vec![
+                sample_summary("issue-A", "Selected issue"),
+                sample_summary("issue-B", "Next issue"),
+                sample_summary("issue-C", "Downstream work"),
+            ],
+        }),
+    );
+    expect_get_graph(&mut rx, "issue-A");
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
+            requested_id: "issue-A".into(),
+            nodes: vec![
+                graph_node("issue-A", "Selected issue"),
+                graph_node("issue-C", "Downstream work"),
+            ],
+            edges: vec![graph_edge("issue-A", "issue-C")],
+        }),
+    );
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    let before_nav = render_text(&mut app, &mut terminal);
+    assert!(
+        before_nav.contains("Work Item Lineage"),
+        "rendered:\n{before_nav}"
+    );
+
+    app.handle_crossterm_event_for_test(key('j'));
+
+    expect_get_graph(&mut rx, "issue-B");
+    let after_nav = render_text(&mut app, &mut terminal);
+    assert!(
+        after_nav.contains("Work Item Lineage"),
+        "lineage mode should persist while the newly-selected graph loads:\n{after_nav}"
+    );
+    assert!(
+        after_nav.contains("loading work tree"),
+        "loading state should be explicit instead of falling back to the flat list:\n{after_nav}"
+    );
+}
+
+#[test]
 fn graph_toggle_flow_fetches_renders_uses_cache_and_closes() {
     let (mut app, mut rx, mut terminal) = seeded_issue_browser_app();
 

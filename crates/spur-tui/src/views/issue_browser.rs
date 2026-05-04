@@ -13,7 +13,7 @@ use crate::action::{Action, IssueAction, ViewId};
 use crate::components::execute_modal::{ExecuteModal, ExecuteModalVariant};
 use crate::components::issue_detail_pane::IssueDetailPane;
 use crate::components::issue_graph_pane::IssueGraphPane;
-use crate::components::issues_panel::{IssueLineageContext, IssuesPanel};
+use crate::components::issues_panel::{IssueLineageContext, IssueLineageView, IssuesPanel};
 use crate::components::status_bar::{HintOverride, StatusBar, StatusBarProps};
 use crate::components::tombstone::Tombstone;
 
@@ -576,11 +576,23 @@ impl IssueBrowserView {
         view_hint_override: Option<HintOverride<'_>>,
     ) {
         let issue_count = self.tracked_issues.len();
+        let selected_id = self.selected_issue_id();
+        let lineage_mode_active = self.graph_cache.values().any(|(nodes, _)| nodes.len() > 1);
+        let selected_graph_loading = selected_id
+            .as_deref()
+            .is_some_and(|id| self.graph_loading.as_deref() == Some(id));
 
-        let lineage_height = self
-            .selected_issue_id()
-            .and_then(|id| self.graph_cache.get(&id).map(|(nodes, _)| nodes.len()))
+        let lineage_height = selected_id
+            .as_deref()
+            .and_then(|id| self.graph_cache.get(id).map(|(nodes, _)| nodes.len()))
             .filter(|count| *count > 1)
+            .or_else(|| {
+                if lineage_mode_active && selected_graph_loading {
+                    Some(issue_count)
+                } else {
+                    None
+                }
+            })
             .map(|count| (count as u16).saturating_add(6));
 
         let issues_height = if issue_count == 0 {
@@ -627,15 +639,18 @@ impl IssueBrowserView {
             let msg = Paragraph::new(body).style(Style::default().fg(fg));
             frame.render_widget(msg, inner);
         } else {
-            let selected_id = self.selected_issue_id();
             let lineage = selected_id.as_deref().and_then(|id| {
-                self.graph_cache
-                    .get(id)
-                    .map(|(nodes, edges)| IssueLineageContext {
+                if let Some((nodes, edges)) = self.graph_cache.get(id) {
+                    Some(IssueLineageView::Loaded(IssueLineageContext {
                         root_id: id,
                         nodes,
                         edges,
-                    })
+                    }))
+                } else if lineage_mode_active && self.graph_loading.as_deref() == Some(id) {
+                    Some(IssueLineageView::Loading { root_id: id })
+                } else {
+                    None
+                }
             });
             self.issues_panel
                 .render_with_lineage(&self.tracked_issues, lineage, frame, chunks[0]);
