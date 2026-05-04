@@ -129,10 +129,11 @@ fn read_holder_info(path: &Path) -> Option<HolderInfo> {
 fn classify_lock_error(e: std::io::Error, _path: &Path) -> AcquireOutcome {
     use std::io::ErrorKind;
 
-    let raw = e.raw_os_error();
-
     #[cfg(unix)]
-    let is_unsupported = raw == Some(libc::ENOTSUP) || raw == Some(libc::ENOLCK);
+    let is_unsupported = {
+        let raw = e.raw_os_error();
+        raw == Some(libc::ENOTSUP) || raw == Some(libc::ENOLCK)
+    };
     #[cfg(not(unix))]
     let is_unsupported = false;
 

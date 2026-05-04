@@ -117,6 +117,24 @@ mod linux {
     }
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+mod unsupported {
+    use super::*;
+
+    pub struct UnsupportedInspector;
+    impl ProcessInspector for UnsupportedInspector {
+        fn starttime_of(&self, _pid: i32) -> Option<i64> {
+            None
+        }
+
+        fn cmd_of(&self, _pid: i32) -> Option<String> {
+            None
+        }
+
+        fn killpg(&self, _pgid: i32, _signal: Signal) {}
+    }
+}
+
 pub fn production_inspector() -> Box<dyn ProcessInspector> {
     #[cfg(target_os = "macos")]
     {
@@ -125,6 +143,10 @@ pub fn production_inspector() -> Box<dyn ProcessInspector> {
     #[cfg(target_os = "linux")]
     {
         Box::new(linux::LinuxInspector)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Box::new(unsupported::UnsupportedInspector)
     }
 }
 
