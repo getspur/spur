@@ -7,6 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 WRAPPER = ROOT / "scripts" / "sccache-worktree.sh"
+SPUR_CARGO = ROOT / "scripts" / "spur-cargo"
 
 
 def make_isolated_bin(tmp_path):
@@ -114,3 +115,77 @@ def test_sccache_worktree_uses_sccache_when_available(tmp_path):
         "-vV",
         f"basedirs={worktree_root}:{ROOT}",
     ]
+
+
+def test_project_cargo_config_does_not_force_unix_rustc_wrapper():
+    cargo_config = ROOT / ".cargo" / "config.toml"
+
+    assert "rustc-wrapper" not in cargo_config.read_text()
+
+
+def test_spur_cargo_sets_worktree_wrapper_when_unset(tmp_path):
+    bin_dir = make_isolated_bin(tmp_path)
+
+    cargo_log = tmp_path / "cargo.log"
+    cargo = bin_dir / "cargo"
+    cargo.write_text(
+        "\n".join(
+            [
+                "#!/bin/sh",
+                f"printf 'wrapper=%s\\n' \"${{RUSTC_WRAPPER-}}\" > {shlex.quote(str(cargo_log))}",
+                f"printf 'args=%s\\n' \"$*\" >> {shlex.quote(str(cargo_log))}",
+            ]
+        )
+        + "\n"
+    )
+    cargo.chmod(0o755)
+
+    env = os.environ.copy()
+    env["PATH"] = str(bin_dir)
+    env.pop("RUSTC_WRAPPER", None)
+
+    result = subprocess.run(
+        [str(SPUR_CARGO), "metadata", "--version"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert cargo_log.read_text().splitlines() == [
+        f"wrapper={WRAPPER}",
+        "args=metadata --version",
+    ]
+
+
+def test_spur_cargo_preserves_explicit_rustc_wrapper_override(tmp_path):
+    bin_dir = make_isolated_bin(tmp_path)
+
+    cargo_log = tmp_path / "cargo.log"
+    cargo = bin_dir / "cargo"
+    cargo.write_text(
+        "\n".join(
+            [
+                "#!/bin/sh",
+                f"printf 'wrapper=%s\\n' \"${{RUSTC_WRAPPER-}}\" > {shlex.quote(str(cargo_log))}",
+            ]
+        )
+        + "\n"
+    )
+    cargo.chmod(0o755)
+
+    env = os.environ.copy()
+    env["PATH"] = str(bin_dir)
+    env["RUSTC_WRAPPER"] = ""
+
+    result = subprocess.run(
+        [str(SPUR_CARGO), "metadata"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert cargo_log.read_text().splitlines() == ["wrapper="]
