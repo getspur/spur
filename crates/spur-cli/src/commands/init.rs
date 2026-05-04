@@ -14,7 +14,6 @@ use std::path::PathBuf;
 /// Contract: every agent in `spur_acp::config::load_seed_template()`
 /// must have an entry here. Enforced by `tests/init_ux.rs`.
 pub const INSTALL_HINTS: &[(&str, &str)] = &[
-    ("claude-code-sj", "npm install -g @anthropic-ai/claude-code"),
     ("kiro", "brew install kiro-cli"),
     (
         "claude-code",
@@ -131,38 +130,45 @@ pub async fn run(repo_root: PathBuf, force: bool, skills: bool) -> Result<()> {
         println!("  Note: .beads/ found but br is missing — issue tracking will not work.");
     }
 
-    // ── Phase 7: Bot setup (interactive only in TTY) ───────────────────
+    // ── Phase 7: Brain selection (interactive only in TTY) ─────────────
+    if std::io::stdin().is_terminal() {
+        if let Err(e) = prompt_default_brain_selection(&mut config) {
+            eprintln!("[spur] default brain prompt failed: {e}; continuing");
+        }
+    }
+
+    // ── Phase 8: Bot setup (interactive only in TTY) ───────────────────
     if std::io::stdin().is_terminal() {
         if let Err(e) = maybe_prompt_bot_setup(&mut config) {
             eprintln!("[spur] bot setup prompt failed: {e}; continuing");
         }
     }
 
-    // ── Phase 8: Validate before write ─────────────────────────────────
+    // ── Phase 9: Validate before write ─────────────────────────────────
     if let Err(e) = validate_all_agents(&config) {
         eprintln!("[spur] config validation failed: {e}");
         return Err(e);
     }
 
-    // ── Phase 9: Early exit if no agents and no prior config ───────────
+    // ── Phase 10: Early exit if no agents and no prior config ──────────
     if config.agents.entries.is_empty() && !existed_before {
         println!();
         println!("No agents found. Install one of the above and re-run `spur init`.");
         return Ok(());
     }
 
-    // ── Phase 10: Permission-bypass safety prompt (TTY only) ───────────
+    // ── Phase 11: Permission-bypass safety prompt (TTY only) ───────────
     if std::io::stdin().is_terminal() {
         if let Err(e) = prompt_permission_bypass(&mut config) {
             eprintln!("[spur] permission bypass prompt failed: {e}; continuing");
         }
     }
 
-    // ── Phase 11: Atomic persist ───────────────────────────────────────
+    // ── Phase 12: Atomic persist ───────────────────────────────────────
     std::fs::create_dir_all(config_path.parent().unwrap())?;
     std::fs::write(&config_path, toml::to_string_pretty(&config)?)?;
 
-    // ── Phase 12: Skills install (only when explicitly requested) ──────
+    // ── Phase 13: Skills install (only when explicitly requested) ──────
     if skills {
         if let Err(e) = run_skills_init(&repo_root) {
             eprintln!("[spur] warning: skills install failed: {e}");
@@ -170,7 +176,7 @@ pub async fn run(repo_root: PathBuf, force: bool, skills: bool) -> Result<()> {
         }
     }
 
-    // ── Phase 13: Summary ──────────────────────────────────────────────
+    // ── Phase 14: Summary ──────────────────────────────────────────────
     print_summary(&config);
 
     Ok(())
@@ -233,7 +239,12 @@ fn recompute_brain_and_fallback(config: &mut SpurConfig) {
 
     let brain_name = entries
         .iter()
-        .find(|a| matches!(a.role, AgentRole::Brain | AgentRole::Both))
+        .find(|a| a.name == "claude-code" && matches!(a.role, AgentRole::Brain | AgentRole::Both))
+        .or_else(|| {
+            entries
+                .iter()
+                .find(|a| matches!(a.role, AgentRole::Brain | AgentRole::Both))
+        })
         .map(|a| a.name.clone())
         .unwrap_or_else(|| {
             if !entries.is_empty() {
@@ -256,6 +267,62 @@ fn recompute_brain_and_fallback(config: &mut SpurConfig) {
 
     config.brain.default = brain_name;
     config.brain.fallback = fallbacks;
+}
+
+fn prompt_default_brain_selection(config: &mut SpurConfig) -> Result<()> {
+    let brain_agents: Vec<String> = config
+        .agents
+        .entries
+        .iter()
+        .filter(|a| matches!(a.role, AgentRole::Brain | AgentRole::Both))
+        .map(|a| a.name.clone())
+        .collect();
+
+    if brain_agents.is_empty() {
+        return Ok(());
+    }
+
+    let default_index = brain_agents
+        .iter()
+        .position(|name| name == &config.brain.default)
+        .unwrap_or(0);
+
+    println!();
+    println!(
+        "Select default brain [default: {}]:",
+        brain_agents[default_index]
+    );
+    for (idx, name) in brain_agents.iter().enumerate() {
+        println!("  {}) {}", idx + 1, name);
+    }
+    eprint!("> ");
+    std::io::stderr().flush()?;
+
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    let selected = match line.trim() {
+        "" => brain_agents[default_index].clone(),
+        input => match input.parse::<usize>() {
+            Ok(choice) if (1..=brain_agents.len()).contains(&choice) => {
+                brain_agents[choice - 1].clone()
+            }
+            _ => {
+                println!(
+                    "Invalid selection; keeping {}.",
+                    brain_agents[default_index]
+                );
+                brain_agents[default_index].clone()
+            }
+        },
+    };
+
+    config.brain.default = selected.clone();
+    config.brain.fallback = brain_agents
+        .into_iter()
+        .filter(|name| name != &selected)
+        .collect();
+
+    Ok(())
 }
 
 fn maybe_prompt_bot_setup(config: &mut SpurConfig) -> Result<()> {
