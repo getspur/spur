@@ -10,6 +10,11 @@ use ratatui::{
 use spur_acp::{GraphEdgeEvent, GraphNodeEvent};
 use spur_pm::IssueSummary;
 
+use crate::components::issue_utils::{
+    descendant_depth, find_plan_id_label, has_label, has_plan_task_label, insert_parent_id,
+    status_icon,
+};
+
 pub struct IssueLineageContext<'a> {
     pub root_id: &'a str,
     pub nodes: &'a [GraphNodeEvent],
@@ -561,21 +566,6 @@ fn resolve_lineage_root<'a>(
         .unwrap_or_else(|| walk_parent_chain(requested_root_id, parent_by_child_id))
 }
 
-fn insert_parent_id<'a>(
-    parent_by_child_id: &mut HashMap<&'a str, &'a str>,
-    child_id: &'a str,
-    parent_id: &'a str,
-) {
-    parent_by_child_id
-        .entry(child_id)
-        .and_modify(|existing_parent_id| {
-            if parent_id < *existing_parent_id {
-                *existing_parent_id = parent_id;
-            }
-        })
-        .or_insert(parent_id);
-}
-
 fn walk_parent_chain<'a>(
     start_id: &'a str,
     parent_by_child_id: &HashMap<&'a str, &'a str>,
@@ -622,39 +612,17 @@ fn is_plan_membership_edge(
     let Some(parent) = node_by_id.get(edge.to.as_str()) else {
         return false;
     };
-    let Some(child_plan_id) = plan_id_label(&child.labels) else {
+    let Some(child_plan_id) = find_plan_id_label(&child.labels) else {
         return false;
     };
-    plan_id_label(&parent.labels) == Some(child_plan_id)
+    find_plan_id_label(&parent.labels) == Some(child_plan_id)
         && has_plan_task_label(&child.labels)
         && is_plan_root_node(parent)
 }
 
 fn is_plan_root_node(node: &GraphNodeEvent) -> bool {
     has_label(&node.labels, "spur:plan-complete")
-        || (plan_id_label(&node.labels).is_some() && !has_plan_task_label(&node.labels))
-}
-
-fn plan_id_label(labels: &[String]) -> Option<&str> {
-    labels
-        .iter()
-        .find_map(|label| label.strip_prefix("spur:plan-id:"))
-}
-
-fn has_plan_task_label(labels: &[String]) -> bool {
-    labels
-        .iter()
-        .any(|label| label.starts_with("spur:plan-task-id:"))
-}
-
-fn has_label(labels: &[String], expected: &str) -> bool {
-    labels.iter().any(|label| label == expected)
-}
-
-fn descendant_depth(root_id: &str, id: &str) -> Option<usize> {
-    let suffix = id.strip_prefix(root_id)?;
-    let suffix = suffix.strip_prefix('.')?;
-    Some(suffix.split('.').count())
+        || (find_plan_id_label(&node.labels).is_some() && !has_plan_task_label(&node.labels))
 }
 
 fn issue_family_root(id: &str) -> &str {
@@ -666,15 +634,6 @@ fn lineage_prefix(depth: usize) -> String {
         return "├─".into();
     }
     format!("{}├─", "│ ".repeat(depth.saturating_sub(1)))
-}
-
-fn status_icon(status: &str) -> &'static str {
-    match status {
-        "closed" => "✅",
-        "in_progress" => "●",
-        "blocked" => "!",
-        _ => "○",
-    }
 }
 
 fn is_closed(node: Option<&GraphNodeEvent>) -> bool {
