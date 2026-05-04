@@ -281,6 +281,66 @@ fn issue_list_keeps_lineage_panel_while_selected_graph_is_loading() {
 }
 
 #[test]
+fn issue_list_keeps_lineage_panel_after_selected_graph_loads_without_edges() {
+    let (mut app, mut rx) = spur_tui::test_support::app_with_user_input_tx();
+    spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
+    match rx.try_recv() {
+        Ok(UserInput::RefreshIssues) => {}
+        Ok(_) => panic!("expected RefreshIssues, got different user input"),
+        Err(err) => panic!("expected RefreshIssues, got {err}"),
+    }
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssuesLoaded {
+            issues: vec![
+                sample_summary("bd-2pb", "Epic root"),
+                sample_summary("bd-2pb.1", "Child with sparse graph"),
+            ],
+        }),
+    );
+    expect_get_graph(&mut rx, "bd-2pb");
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
+            requested_id: "bd-2pb".into(),
+            nodes: vec![
+                graph_node("bd-2pb", "Epic root"),
+                graph_node("bd-2pb.1", "Child with sparse graph"),
+            ],
+            edges: vec![graph_edge_with_type("bd-2pb.1", "bd-2pb", "related")],
+        }),
+    );
+
+    app.handle_crossterm_event_for_test(key('j'));
+
+    expect_get_graph(&mut rx, "bd-2pb.1");
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
+            requested_id: "bd-2pb.1".into(),
+            nodes: vec![graph_node("bd-2pb.1", "Child with sparse graph")],
+            edges: vec![],
+        }),
+    );
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+
+    let rendered = render_text(&mut app, &mut terminal);
+
+    assert!(
+        rendered.contains("Work Item Lineage"),
+        "lineage mode should not fall back to the flat Issues table after a sparse graph load:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("> ○ bd-2pb"),
+        "cached work-tree context should keep the epic root after sparse graph load:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("├─ ○ bd-2pb.1") || rendered.contains("└─ ○ bd-2pb.1"),
+        "selected child should remain under the cached epic root:\n{rendered}"
+    );
+}
+
+#[test]
 fn issue_list_keeps_plan_epic_as_root_when_child_is_selected() {
     let (mut app, mut rx) = spur_tui::test_support::app_with_user_input_tx();
     spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));

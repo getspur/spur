@@ -18,6 +18,11 @@ pub struct IssueLineageContext<'a> {
 
 pub enum IssueLineageView<'a> {
     Loaded(IssueLineageContext<'a>),
+    Cached {
+        root_id: String,
+        nodes: &'a [GraphNodeEvent],
+        edges: &'a [GraphEdgeEvent],
+    },
     Loading {
         root_id: String,
         nodes: &'a [GraphNodeEvent],
@@ -110,6 +115,20 @@ impl IssuesPanel {
             match lineage {
                 IssueLineageView::Loaded(lineage) if lineage.nodes.len() > 1 => {
                     let meta = LineageMeta::new(lineage);
+                    let readiness = meta.readiness();
+                    self.render_lineage(issues, meta, readiness, frame, area);
+                    return;
+                }
+                IssueLineageView::Cached {
+                    root_id,
+                    nodes,
+                    edges,
+                } => {
+                    let meta = LineageMeta::new(IssueLineageContext {
+                        root_id: root_id.as_str(),
+                        nodes,
+                        edges,
+                    });
                     let readiness = meta.readiness();
                     self.render_lineage(issues, meta, readiness, frame, area);
                     return;
