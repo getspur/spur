@@ -57,10 +57,14 @@ fn graph_node(id: &str, title: &str) -> GraphNodeEvent {
 }
 
 fn graph_edge(from: &str, to: &str) -> GraphEdgeEvent {
+    graph_edge_with_type(from, to, "blocks")
+}
+
+fn graph_edge_with_type(from: &str, to: &str, edge_type: &str) -> GraphEdgeEvent {
     GraphEdgeEvent {
         from: from.into(),
         to: to.into(),
-        edge_type: Some("blocks".into()),
+        edge_type: Some(edge_type.into()),
     }
 }
 
@@ -238,6 +242,97 @@ fn issue_list_keeps_lineage_panel_while_selected_graph_is_loading() {
     assert!(
         after_nav.contains("loading work tree"),
         "loading state should be explicit instead of falling back to the flat list:\n{after_nav}"
+    );
+}
+
+#[test]
+fn issue_list_keeps_plan_epic_as_root_when_child_is_selected() {
+    let (mut app, mut rx) = spur_tui::test_support::app_with_user_input_tx();
+    spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
+    match rx.try_recv() {
+        Ok(UserInput::RefreshIssues) => {}
+        Ok(_) => panic!("expected RefreshIssues, got different user input"),
+        Err(err) => panic!("expected RefreshIssues, got {err}"),
+    }
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssuesLoaded {
+            issues: vec![
+                sample_summary("bd-2pb", "Epic root"),
+                sample_summary("bd-2pb.1", "P2 child"),
+                sample_summary("bd-2pb.2", "P3 child"),
+            ],
+        }),
+    );
+    expect_get_graph(&mut rx, "bd-2pb");
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
+            requested_id: "bd-2pb".into(),
+            nodes: vec![
+                graph_node("bd-2pb", "Epic root"),
+                graph_node("bd-2pb.1", "P2 child"),
+                graph_node("bd-2pb.2", "P3 child"),
+            ],
+            edges: vec![
+                graph_edge_with_type("bd-2pb.1", "bd-2pb", "related"),
+                graph_edge_with_type("bd-2pb.2", "bd-2pb", "related"),
+                graph_edge("bd-2pb.2", "bd-2pb.1"),
+            ],
+        }),
+    );
+
+    app.handle_crossterm_event_for_test(key('j'));
+
+    expect_get_graph(&mut rx, "bd-2pb.1");
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    let loading = render_text(&mut app, &mut terminal);
+    assert!(
+        loading.contains("loading work tree"),
+        "selected child should keep the lineage pane during graph loading:\n{loading}"
+    );
+    assert!(
+        loading.contains("> ○ bd-2pb"),
+        "epic must remain the lineage root during child graph loading:\n{loading}"
+    );
+    assert!(
+        loading.contains("├─ ○ bd-2pb.1") || loading.contains("└─ ○ bd-2pb.1"),
+        "selected child must remain under the epic root during graph loading:\n{loading}"
+    );
+    assert!(
+        !loading.contains("> ○ bd-2pb.1"),
+        "selected child must not become the loading lineage root:\n{loading}"
+    );
+
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
+            requested_id: "bd-2pb.1".into(),
+            nodes: vec![
+                graph_node("bd-2pb", "Epic root"),
+                graph_node("bd-2pb.1", "P2 child"),
+            ],
+            edges: vec![graph_edge_with_type("bd-2pb.1", "bd-2pb", "related")],
+        }),
+    );
+
+    let rendered = render_text(&mut app, &mut terminal);
+
+    assert!(
+        rendered.contains("Work Item Lineage"),
+        "rendered:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("> ○ bd-2pb"),
+        "epic must remain the lineage root when a child row is selected:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("├─ ○ bd-2pb.1") || rendered.contains("└─ ○ bd-2pb.1"),
+        "selected child must render under the epic root:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("> ○ bd-2pb.1"),
+        "selected child must not become the lineage root:\n{rendered}"
     );
 }
 
