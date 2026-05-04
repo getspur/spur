@@ -34,7 +34,7 @@ fn confirm_variant_renders_execute_epic_prompt() {
     assert!(rendered.contains("bd-plan"), "{rendered}");
     assert!(rendered.contains("Auth refactor"), "{rendered}");
     assert!(
-        rendered.contains("execute_epic(epic_id=\"bd-plan\")"),
+        rendered.contains("This sends a prompt asking the brain to analyze"),
         "{rendered}"
     );
     assert!(rendered.contains("[Enter] confirm"), "{rendered}");

@@ -104,7 +104,7 @@ fn e_on_epic_opens_modal_and_enter_dispatches_active_session_prompt() {
             assert!(!interrupt);
             let prompt = text_from_blocks(&blocks);
             assert!(
-                prompt.contains("Execute this work item using the execute_epic MCP tool"),
+                prompt.contains("The user wants to execute this work item."),
                 "prompt:\n{prompt}"
             );
             assert!(
@@ -116,7 +116,7 @@ fn e_on_epic_opens_modal_and_enter_dispatches_active_session_prompt() {
                 "prompt:\n{prompt}"
             );
             assert!(
-                prompt.contains("Call execute_epic with epic_id=\"bd-epic\"."),
+                prompt.contains("Please analyze this item, gather necessary information, and determine how to execute it."),
                 "prompt:\n{prompt}"
             );
         }
@@ -155,7 +155,7 @@ fn e_on_non_epic_opens_modal_and_enter_dispatches_active_session_prompt() {
         Ok(UserInput::Message { blocks, .. }) => {
             let prompt = text_from_blocks(&blocks);
             assert!(
-                prompt.contains("Execute this work item using the execute_epic MCP tool"),
+                prompt.contains("The user wants to execute this work item."),
                 "prompt:\n{prompt}"
             );
             assert!(
@@ -184,7 +184,7 @@ fn esc_in_execute_modal_dismisses_without_dispatch() {
     app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     let dismissed = render_text(&mut app, &mut terminal);
     assert!(
-        !dismissed.contains("This sends a prompt asking the brain to call"),
+        !dismissed.contains("This sends a prompt asking the brain to analyze"),
         "modal should be dismissed:\n{dismissed}"
     );
     assert!(

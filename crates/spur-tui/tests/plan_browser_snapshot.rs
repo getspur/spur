@@ -4,8 +4,9 @@ use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::TestBackend, Terminal};
 use spur_acp::{
-    PlanLifecycleEvent, PlanOwnerStateEvent, PlanSnapshot, PlanSnapshotCounts,
-    PlanSummaryCountsEvent, PlanSummaryEvent, SessionId, SpurEvent, SpurEventBody,
+    PlanLifecycleEvent, PlanLoadWarningEvent, PlanOwnerStateEvent, PlanSnapshot,
+    PlanSnapshotCounts, PlanSummaryCountsEvent, PlanSummaryEvent, SessionId, SpurEvent,
+    SpurEventBody,
 };
 use spur_core::{ExecutorLineage, PlanProjectionStore, SessionSynopsisProjection};
 use spur_tui::action::Action;
@@ -138,6 +139,7 @@ fn loaded_event() -> SpurEvent {
                 0,
             ),
         ],
+        warnings: Vec::new(),
     })
 }
 
@@ -194,6 +196,55 @@ fn renders_empty_state_and_empty_current_sprint_slot() {
         "Execution slot: empty",
         "No plans found.",
         "Press b to open Backlog and execute an epic.",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "expected {expected:?} in rendered output:\n{rendered}"
+        );
+    }
+}
+
+#[test]
+fn renders_plan_load_warning_for_stale_duplicate_epic() {
+    let mut view = PlanBrowserView::new(SessionId("brain-1".into()));
+    let lineage = ExecutorLineage::new();
+    let plans = PlanProjectionStore::default();
+    let ctx = view_ctx(&lineage, &plans);
+    view.handle_spur_event(
+        &SpurEvent::now(SpurEventBody::PlansLoaded {
+            plans: vec![summary(
+                "9e102092-3dae-40ad-b667-c4dc26ffdc90",
+                PlanOwnerStateEvent::Other {
+                    owner: "647b42389c5648ef88e67840f1167472".into(),
+                },
+                PlanLifecycleEvent::Pending,
+                0,
+                8,
+            )],
+            warnings: vec![PlanLoadWarningEvent {
+                plan_id: "9e102092-3dae-40ad-b667-c4dc26ffdc90".into(),
+                canonical_epic_id: Some("bd-2pb".into()),
+                stale_epic_ids: vec!["bd-2e0".into()],
+                canonical_owner_state: Some(PlanOwnerStateEvent::Other {
+                    owner: "647b42389c5648ef88e67840f1167472".into(),
+                }),
+                message: "Plan 9e102092-3dae-40ad-b667-c4dc26ffdc90 has stale duplicate epic bd-2e0; using canonical epic bd-2pb.".into(),
+            }],
+        }),
+        &ctx,
+    );
+
+    let backend = TestBackend::new(120, 22);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let rendered = rendered_text(&terminal);
+
+    for expected in [
+        "stale duplicate epic bd-2e0",
+        "canonical epic bd-2pb",
+        "647b42389c5648ef88e67840f1167472",
     ] {
         assert!(
             rendered.contains(expected),
@@ -302,7 +353,10 @@ fn selected_row_remains_visible_when_list_is_longer_than_viewport() {
         })
         .collect();
     view.handle_spur_event(
-        &SpurEvent::now(SpurEventBody::PlansLoaded { plans: long_plans }),
+        &SpurEvent::now(SpurEventBody::PlansLoaded {
+            plans: long_plans,
+            warnings: Vec::new(),
+        }),
         &ctx,
     );
     view.handle_key(key(KeyCode::Char('G')), &ctx);
