@@ -135,6 +135,13 @@ fn render_text(app: &mut App, terminal: &mut Terminal<TestBackend>) -> String {
     out
 }
 
+fn issue_panel_height(rendered: &str) -> usize {
+    rendered
+        .lines()
+        .position(|line| line.contains("┌ Issue Detail"))
+        .expect("issue detail panel should be rendered")
+}
+
 fn expect_get_detail(rx: &mut mpsc::Receiver<UserInput>, expected_id: &str) {
     match rx.try_recv() {
         Ok(UserInput::GetIssueDetail { id }) => assert_eq!(id, expected_id),
@@ -289,14 +296,14 @@ fn issue_list_keeps_lineage_panel_after_selected_graph_loads_without_edges() {
         Ok(_) => panic!("expected RefreshIssues, got different user input"),
         Err(err) => panic!("expected RefreshIssues, got {err}"),
     }
+    let mut issues = vec![
+        sample_summary("bd-2pb", "Epic root"),
+        sample_summary("bd-2pb.1", "Child with sparse graph"),
+    ];
+    issues.extend((0..30).map(|idx| sample_summary(&format!("bd-extra-{idx}"), "Extra issue")));
     spur_tui::test_support::push_event(
         &mut app,
-        SpurEvent::now(SpurEventBody::IssuesLoaded {
-            issues: vec![
-                sample_summary("bd-2pb", "Epic root"),
-                sample_summary("bd-2pb.1", "Child with sparse graph"),
-            ],
-        }),
+        SpurEvent::now(SpurEventBody::IssuesLoaded { issues }),
     );
     expect_get_graph(&mut rx, "bd-2pb");
     spur_tui::test_support::push_event(
@@ -310,10 +317,24 @@ fn issue_list_keeps_lineage_panel_after_selected_graph_loads_without_edges() {
             edges: vec![graph_edge_with_type("bd-2pb.1", "bd-2pb", "related")],
         }),
     );
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    let before_nav = render_text(&mut app, &mut terminal);
+    let before_height = issue_panel_height(&before_nav);
 
     app.handle_crossterm_event_for_test(key('j'));
 
     expect_get_graph(&mut rx, "bd-2pb.1");
+    let loading = render_text(&mut app, &mut terminal);
+    assert!(
+        !loading.contains("loading work tree"),
+        "cached work-tree context should avoid title flicker while sparse graph loads:\n{loading}"
+    );
+    assert_eq!(
+        issue_panel_height(&loading),
+        before_height,
+        "cached loading state should keep issue panel height stable:\n{loading}"
+    );
+
     spur_tui::test_support::push_event(
         &mut app,
         SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
@@ -322,7 +343,6 @@ fn issue_list_keeps_lineage_panel_after_selected_graph_loads_without_edges() {
             edges: vec![],
         }),
     );
-    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
 
     let rendered = render_text(&mut app, &mut terminal);
 
@@ -337,6 +357,11 @@ fn issue_list_keeps_lineage_panel_after_selected_graph_loads_without_edges() {
     assert!(
         rendered.contains("├─ ○ bd-2pb.1") || rendered.contains("└─ ○ bd-2pb.1"),
         "selected child should remain under the cached epic root:\n{rendered}"
+    );
+    assert_eq!(
+        issue_panel_height(&rendered),
+        before_height,
+        "cached sparse graph should keep issue panel height stable:\n{rendered}"
     );
 }
 
@@ -383,8 +408,12 @@ fn issue_list_keeps_plan_epic_as_root_when_child_is_selected() {
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
     let loading = render_text(&mut app, &mut terminal);
     assert!(
-        loading.contains("loading work tree"),
+        loading.contains("Work Item Lineage"),
         "selected child should keep the lineage pane during graph loading:\n{loading}"
+    );
+    assert!(
+        !loading.contains("loading work tree"),
+        "cached work-tree context should avoid title flicker during child graph loading:\n{loading}"
     );
     assert!(
         loading.contains("> ○ bd-2pb"),
@@ -468,8 +497,12 @@ fn issue_list_keeps_non_prefix_child_label_while_graph_loads() {
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
     let loading = render_text(&mut app, &mut terminal);
     assert!(
-        loading.contains("loading work tree"),
+        loading.contains("Work Item Lineage"),
         "selected child should keep the lineage pane during graph loading:\n{loading}"
+    );
+    assert!(
+        !loading.contains("loading work tree"),
+        "cached work-tree context should avoid title flicker during child graph loading:\n{loading}"
     );
     assert!(
         loading.contains("> ○ bd-2pb"),
@@ -623,8 +656,12 @@ fn issue_list_keeps_ultimate_plan_epic_as_root_for_grandchild() {
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
     let loading = render_text(&mut app, &mut terminal);
     assert!(
-        loading.contains("loading work tree"),
+        loading.contains("Work Item Lineage"),
         "selected grandchild should keep the lineage pane during graph loading:\n{loading}"
+    );
+    assert!(
+        !loading.contains("loading work tree"),
+        "cached work-tree context should avoid title flicker during grandchild graph loading:\n{loading}"
     );
     assert!(
         loading.contains("> ○ bd-2pb"),
