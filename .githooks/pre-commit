@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+
+# Format the workspace before committing, then re-stage only paths that were
+# already staged when the hook began. This prevents unrelated working-tree or
+# untracked files from being pulled into the commit by the formatter.
+
+staged_file=$(mktemp)
+trap 'rm -f "$staged_file"' EXIT INT HUP TERM
+
+git diff --cached --name-only --diff-filter=ACMR -z > "$staged_file"
+
+scripts/spur-cargo fmt --all
+
+if [ -s "$staged_file" ]; then
+  xargs -0 git add -- < "$staged_file"
+fi

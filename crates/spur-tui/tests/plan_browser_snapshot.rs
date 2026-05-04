@@ -82,6 +82,9 @@ fn summary(
         plan_id: plan_id.into(),
         epic_id: format!("bd-{plan_id}"),
         title: format!("Plan {plan_id}"),
+        source_body_preview: Some(format!(
+            "Work item {plan_id} needs enough source context to recall the problem and why it matters."
+        )),
         owner_state,
         lifecycle,
         counts: Some(PlanSummaryCountsEvent {
@@ -154,7 +157,7 @@ fn renders_all_owner_state_rows_with_lifecycle_and_progress() {
     let rendered = rendered_text(&terminal);
 
     for expected in [
-        "Current Sprint: plan-a1 running 2/7 done",
+        "Execution slot: plan-a1 running 2/7 done",
         "plan-a1",
         "mine",
         "running",
@@ -188,7 +191,7 @@ fn renders_empty_state_and_empty_current_sprint_slot() {
     let rendered = rendered_text(&terminal);
 
     for expected in [
-        "No sprint owned by this brain.",
+        "Execution slot: empty",
         "No plans found.",
         "Press b to open Backlog and execute an epic.",
     ] {

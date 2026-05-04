@@ -13,7 +13,7 @@ use crate::action::{Action, IssueAction, ViewId};
 use crate::components::execute_modal::{ExecuteModal, ExecuteModalVariant};
 use crate::components::issue_detail_pane::IssueDetailPane;
 use crate::components::issue_graph_pane::IssueGraphPane;
-use crate::components::issues_panel::IssuesPanel;
+use crate::components::issues_panel::{IssueLineageContext, IssuesPanel};
 use crate::components::status_bar::{HintOverride, StatusBar, StatusBarProps};
 use crate::components::tombstone::Tombstone;
 
@@ -218,6 +218,23 @@ impl IssueBrowserView {
 
     pub fn issue_detail_visible(&self) -> bool {
         matches!(self.issue_focus, IssueFocus::Loaded { .. })
+    }
+
+    fn prefetch_selected_graph(&mut self) {
+        if self.tracked_issues.len() < 2 {
+            return;
+        }
+        let Some(id) = self.selected_issue_id() else {
+            return;
+        };
+        if self.graph_cache.contains_key(&id) || self.graph_loading.as_deref() == Some(id.as_str())
+        {
+            return;
+        }
+
+        self.graph_error = None;
+        self.graph_loading = Some(id.clone());
+        self.pending_action = Some(Action::GetIssueGraph { id });
     }
 
     pub fn scroll_issue_detail_up_by(&mut self, lines: u16) {
@@ -471,19 +488,23 @@ impl IssueBrowserView {
             // Navigation
             KeyCode::Char('j') | KeyCode::Down if key.modifiers.is_empty() => {
                 self.issues_panel.select_next(1, self.tracked_issues.len());
+                self.prefetch_selected_graph();
                 Some(Action::SelectNextBy(1))
             }
             KeyCode::Char('k') | KeyCode::Up if key.modifiers.is_empty() => {
                 self.issues_panel.select_prev(1, self.tracked_issues.len());
+                self.prefetch_selected_graph();
                 Some(Action::SelectPrevBy(1))
             }
             KeyCode::Char('g') if key.modifiers.is_empty() => {
                 self.issues_panel.select_first();
+                self.prefetch_selected_graph();
                 None
             }
             KeyCode::Char('G') if key.modifiers.is_empty() => {
                 let count = self.tracked_issues.len();
                 self.issues_panel.select_last(count);
+                self.prefetch_selected_graph();
                 None
             }
 
@@ -556,8 +577,16 @@ impl IssueBrowserView {
     ) {
         let issue_count = self.tracked_issues.len();
 
+        let lineage_height = self
+            .selected_issue_id()
+            .and_then(|id| self.graph_cache.get(&id).map(|(nodes, _)| nodes.len()))
+            .filter(|count| *count > 1)
+            .map(|count| (count as u16).saturating_add(6));
+
         let issues_height = if issue_count == 0 {
             3u16 // placeholder height
+        } else if let Some(lineage_height) = lineage_height {
+            lineage_height.max(8).min((area.height * 55 / 100).max(8))
         } else {
             IssuesPanel::computed_height(issue_count, area.height)
                 .max(4)
@@ -598,8 +627,18 @@ impl IssueBrowserView {
             let msg = Paragraph::new(body).style(Style::default().fg(fg));
             frame.render_widget(msg, inner);
         } else {
+            let selected_id = self.selected_issue_id();
+            let lineage = selected_id.as_deref().and_then(|id| {
+                self.graph_cache
+                    .get(id)
+                    .map(|(nodes, edges)| IssueLineageContext {
+                        root_id: id,
+                        nodes,
+                        edges,
+                    })
+            });
             self.issues_panel
-                .render(&self.tracked_issues, frame, chunks[0]);
+                .render_with_lineage(&self.tracked_issues, lineage, frame, chunks[0]);
         }
 
         // ── Detail or placeholder ────────────────────────────────────────
@@ -795,6 +834,7 @@ impl View for IssueBrowserView {
                             self.pending_select = None;
                         }
                     }
+                    self.prefetch_selected_graph();
                 }
             }
 
