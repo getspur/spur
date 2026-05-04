@@ -337,6 +337,138 @@ fn issue_list_keeps_plan_epic_as_root_when_child_is_selected() {
 }
 
 #[test]
+fn issue_list_keeps_non_prefix_child_label_while_graph_loads() {
+    let (mut app, mut rx) = spur_tui::test_support::app_with_user_input_tx();
+    spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
+    match rx.try_recv() {
+        Ok(UserInput::RefreshIssues) => {}
+        Ok(_) => panic!("expected RefreshIssues, got different user input"),
+        Err(err) => panic!("expected RefreshIssues, got {err}"),
+    }
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssuesLoaded {
+            issues: vec![
+                sample_summary("bd-2pb", "Epic root"),
+                sample_summary("bd-work", "Non-prefix child"),
+            ],
+        }),
+    );
+    expect_get_graph(&mut rx, "bd-2pb");
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
+            requested_id: "bd-2pb".into(),
+            nodes: vec![
+                graph_node("bd-2pb", "Epic root"),
+                graph_node("bd-work", "Non-prefix child"),
+            ],
+            edges: vec![graph_edge_with_type("bd-work", "bd-2pb", "related")],
+        }),
+    );
+
+    app.handle_crossterm_event_for_test(key('j'));
+
+    expect_get_graph(&mut rx, "bd-work");
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    let loading = render_text(&mut app, &mut terminal);
+    assert!(
+        loading.contains("loading work tree"),
+        "selected child should keep the lineage pane during graph loading:\n{loading}"
+    );
+    assert!(
+        loading.contains("> ○ bd-2pb"),
+        "epic must remain root while non-prefix child graph loads:\n{loading}"
+    );
+    assert!(
+        loading.contains("├─ ○ bd-work") || loading.contains("└─ ○ bd-work"),
+        "non-prefix child must keep its child label while graph loads:\n{loading}"
+    );
+}
+
+#[test]
+fn issue_list_keeps_ultimate_plan_epic_as_root_for_grandchild() {
+    let (mut app, mut rx) = spur_tui::test_support::app_with_user_input_tx();
+    spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
+    match rx.try_recv() {
+        Ok(UserInput::RefreshIssues) => {}
+        Ok(_) => panic!("expected RefreshIssues, got different user input"),
+        Err(err) => panic!("expected RefreshIssues, got {err}"),
+    }
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssuesLoaded {
+            issues: vec![
+                sample_summary("bd-2pb", "Epic root"),
+                sample_summary("bd-2pb.1", "Child"),
+                sample_summary("bd-2pb.1.1", "Grandchild"),
+            ],
+        }),
+    );
+    expect_get_graph(&mut rx, "bd-2pb");
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
+            requested_id: "bd-2pb".into(),
+            nodes: vec![
+                graph_node("bd-2pb", "Epic root"),
+                graph_node("bd-2pb.1", "Child"),
+                graph_node("bd-2pb.1.1", "Grandchild"),
+            ],
+            edges: vec![
+                graph_edge_with_type("bd-2pb.1", "bd-2pb", "related"),
+                graph_edge_with_type("bd-2pb.1.1", "bd-2pb.1", "related"),
+            ],
+        }),
+    );
+
+    app.handle_crossterm_event_for_test(key('j'));
+    expect_get_graph(&mut rx, "bd-2pb.1");
+    app.handle_crossterm_event_for_test(key('j'));
+    expect_get_graph(&mut rx, "bd-2pb.1.1");
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    let loading = render_text(&mut app, &mut terminal);
+    assert!(
+        loading.contains("loading work tree"),
+        "selected grandchild should keep the lineage pane during graph loading:\n{loading}"
+    );
+    assert!(
+        loading.contains("> ○ bd-2pb"),
+        "ultimate epic must remain root while grandchild graph loads:\n{loading}"
+    );
+    assert!(
+        !loading.contains("> ○ bd-2pb.1"),
+        "intermediate child must not become loading root:\n{loading}"
+    );
+
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
+            requested_id: "bd-2pb.1.1".into(),
+            nodes: vec![
+                graph_node("bd-2pb", "Epic root"),
+                graph_node("bd-2pb.1", "Child"),
+                graph_node("bd-2pb.1.1", "Grandchild"),
+            ],
+            edges: vec![
+                graph_edge_with_type("bd-2pb.1", "bd-2pb", "related"),
+                graph_edge_with_type("bd-2pb.1.1", "bd-2pb.1", "related"),
+            ],
+        }),
+    );
+    let rendered = render_text(&mut app, &mut terminal);
+    assert!(
+        rendered.contains("> ○ bd-2pb"),
+        "ultimate epic must remain root after grandchild graph loads:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("> ○ bd-2pb.1"),
+        "intermediate child must not become loaded root:\n{rendered}"
+    );
+}
+
+#[test]
 fn graph_toggle_flow_fetches_renders_uses_cache_and_closes() {
     let (mut app, mut rx, mut terminal) = seeded_issue_browser_app();
 
