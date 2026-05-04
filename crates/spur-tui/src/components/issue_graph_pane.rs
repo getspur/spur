@@ -4,11 +4,10 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Style},
     text::Line,
-    widgets::{Block, Paragraph},
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
 use spur_acp::{GraphEdgeEvent, GraphNodeEvent};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::components::issue_utils::status_icon;
 
@@ -18,6 +17,8 @@ pub struct IssueGraphPane {
     scroll: u16,
     last_total_lines: u16,
     last_visible_height: u16,
+    cached_lines: Vec<Line<'static>>,
+    cache_key: Option<(String, usize, usize)>,
 }
 
 impl IssueGraphPane {
@@ -26,11 +27,15 @@ impl IssueGraphPane {
             scroll: 0,
             last_total_lines: 0,
             last_visible_height: 0,
+            cached_lines: Vec::new(),
+            cache_key: None,
         }
     }
 
     pub fn reset(&mut self) {
         self.scroll = 0;
+        self.cached_lines = Vec::new();
+        self.cache_key = None;
     }
 
     pub fn render(
@@ -41,12 +46,20 @@ impl IssueGraphPane {
         frame: &mut Frame,
         area: Rect,
     ) {
-        let graph_lines = build_graph_lines(nodes, edges, requested_id);
-        let block = graph_block();
+        let cache_key = (requested_id.to_string(), nodes.len(), edges.len());
+        if self.cache_key.as_ref() != Some(&cache_key) {
+            self.cached_lines = build_graph_lines(nodes, edges, requested_id);
+            self.cache_key = Some(cache_key);
+        }
+
+        let block = graph_block(format!(
+            " Issue Graph: {} ({} nodes) ",
+            requested_id,
+            nodes.len()
+        ));
         let inner = block.inner(area);
-        self.remember_content_height(graph_lines.len(), inner.height.saturating_sub(1));
+        self.remember_content_height(self.cached_lines.len(), inner.height.saturating_sub(1));
         frame.render_widget(block, area);
-        render_title_bar(requested_id, Some(nodes.len()), frame, area);
 
         if inner.height == 0 {
             return;
@@ -59,7 +72,7 @@ impl IssueGraphPane {
 
         let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner);
 
-        let viewport = viewport_lines(&graph_lines, self.scroll, chunks[0].height);
+        let viewport = viewport_lines(&self.cached_lines, self.scroll, chunks[0].height);
         frame.render_widget(Paragraph::new(viewport), chunks[0]);
         frame.render_widget(Paragraph::new(LEGEND), chunks[1]);
     }
@@ -111,19 +124,11 @@ impl Default for IssueGraphPane {
     }
 }
 
-fn graph_block() -> Block<'static> {
-    Block::bordered().border_style(Style::default().fg(Color::Magenta))
-}
-
-fn render_title_bar(root_id: &str, node_count: Option<usize>, frame: &mut Frame, area: Rect) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-
-    frame.render_widget(
-        Paragraph::new(title_bar(root_id, node_count, area.width)),
-        Rect::new(area.x, area.y, area.width, 1),
-    );
+fn graph_block(title: String) -> Block<'static> {
+    Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta))
 }
 
 fn render_centered_state(
@@ -133,10 +138,9 @@ fn render_centered_state(
     frame: &mut Frame,
     area: Rect,
 ) {
-    let block = graph_block();
+    let block = graph_block(format!(" Issue Graph: {root_id} "));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    render_title_bar(root_id, None, frame, area);
 
     if inner.height == 0 {
         return;
@@ -154,45 +158,6 @@ fn render_centered_state(
             .style(Style::default().fg(color)),
         chunks[1],
     );
-}
-
-fn title_bar(root_id: &str, node_count: Option<usize>, width: u16) -> String {
-    let width = width as usize;
-    if width == 0 {
-        return String::new();
-    }
-
-    let prefix = match node_count {
-        Some(count) => format!("┌ Issue Graph: {root_id}  {count} nodes "),
-        None => format!("┌ Issue Graph: {root_id} "),
-    };
-    let max_width = width.saturating_sub(1);
-    let prefix_width = UnicodeWidthStr::width(prefix.as_str());
-    if prefix_width <= max_width {
-        return format!("{prefix}{}┐", "─".repeat(max_width - prefix_width));
-    }
-
-    let mut truncated = truncate_to_width(&prefix, max_width);
-    let padded_width = UnicodeWidthStr::width(truncated.as_str());
-    if padded_width < max_width {
-        truncated.push_str(&"─".repeat(max_width - padded_width));
-    }
-    truncated.push('┐');
-    truncated
-}
-
-fn truncate_to_width(text: &str, max_width: usize) -> String {
-    let mut out = String::new();
-    let mut width = 0;
-    for ch in text.chars() {
-        let ch_width = ch.width().unwrap_or(0);
-        if width + ch_width > max_width {
-            break;
-        }
-        width += ch_width;
-        out.push(ch);
-    }
-    out
 }
 
 fn build_graph_lines(
@@ -214,40 +179,47 @@ fn build_graph_lines(
 
     let mut lines = Vec::new();
     let mut path = HashSet::new();
-    push_dfs_lines(
-        root_id,
-        0,
-        &node_by_id,
-        &children_by_id,
-        &mut path,
-        &mut lines,
-    );
+    push_dfs_lines(root_id, &node_by_id, &children_by_id, &mut path, &mut lines);
     lines
 }
 
 fn push_dfs_lines<'a>(
-    id: &'a str,
-    depth: usize,
+    root_id: &'a str,
     node_by_id: &HashMap<&'a str, &'a GraphNodeEvent>,
     children_by_id: &HashMap<&'a str, Vec<&'a str>>,
     path: &mut HashSet<&'a str>,
     lines: &mut Vec<Line<'static>>,
 ) {
-    if path.contains(id) {
-        lines.push(Line::from(format_node_line(id, depth, node_by_id, true)));
-        return;
+    enum Frame<'a> {
+        Enter(&'a str, usize),
+        Exit(&'a str),
     }
 
-    path.insert(id);
-    lines.push(Line::from(format_node_line(id, depth, node_by_id, false)));
+    let mut stack = vec![Frame::Enter(root_id, 0)];
 
-    if let Some(children) = children_by_id.get(id) {
-        for child in children {
-            push_dfs_lines(child, depth + 1, node_by_id, children_by_id, path, lines);
+    while let Some(frame) = stack.pop() {
+        match frame {
+            Frame::Enter(id, depth) => {
+                if path.contains(id) {
+                    lines.push(Line::from(format_node_line(id, depth, node_by_id, true)));
+                    continue;
+                }
+
+                path.insert(id);
+                lines.push(Line::from(format_node_line(id, depth, node_by_id, false)));
+                stack.push(Frame::Exit(id));
+
+                if let Some(children) = children_by_id.get(id) {
+                    for child in children.iter().rev() {
+                        stack.push(Frame::Enter(child, depth + 1));
+                    }
+                }
+            }
+            Frame::Exit(id) => {
+                path.remove(id);
+            }
         }
     }
-
-    path.remove(id);
 }
 
 fn format_node_line(
