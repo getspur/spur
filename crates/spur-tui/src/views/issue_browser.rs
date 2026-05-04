@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -238,23 +238,72 @@ impl IssueBrowserView {
     }
 
     fn lineage_loading_root_id(&self, selected_id: &str) -> String {
-        self.cached_lineage_parent_id(selected_id)
-            .or_else(|| self.prefix_lineage_parent_id(selected_id))
-            .unwrap_or(selected_id)
-            .to_string()
+        let cached_root_id = self.cached_lineage_root_id(selected_id);
+        let prefix_root_id = cached_root_id
+            .as_deref()
+            .and_then(|id| self.prefix_lineage_root_id(id))
+            .or_else(|| self.prefix_lineage_root_id(selected_id));
+
+        prefix_root_id
+            .map(str::to_string)
+            .or(cached_root_id)
+            .unwrap_or_else(|| selected_id.to_string())
     }
 
-    fn cached_lineage_parent_id<'a>(&'a self, selected_id: &str) -> Option<&'a str> {
-        self.graph_cache
+    fn cached_lineage_root_id(&self, selected_id: &str) -> Option<String> {
+        let parent_by_child_id = self.cached_parent_by_child_id();
+        let mut current_id = selected_id;
+        let mut found_parent = false;
+        let mut seen = HashSet::new();
+        while let Some(parent_id) = parent_by_child_id.get(current_id).copied() {
+            if !seen.insert(current_id) || seen.contains(parent_id) {
+                break;
+            }
+            found_parent = true;
+            current_id = parent_id;
+        }
+
+        found_parent.then(|| current_id.to_string())
+    }
+
+    fn cached_parent_by_child_id(&self) -> HashMap<&str, &str> {
+        let mut parent_by_child_id = HashMap::new();
+        for edge in self
+            .graph_cache
             .values()
             .flat_map(|(_, edges)| edges)
-            .find(|edge| {
-                edge.from == selected_id && Self::is_lineage_parent_edge(edge.edge_type.as_deref())
-            })
-            .map(|edge| edge.to.as_str())
+            .filter(|edge| Self::is_lineage_parent_edge(edge.edge_type.as_deref()))
+        {
+            Self::insert_parent_id(
+                &mut parent_by_child_id,
+                edge.from.as_str(),
+                edge.to.as_str(),
+            );
+        }
+        parent_by_child_id
     }
 
-    fn prefix_lineage_parent_id<'a>(&'a self, selected_id: &str) -> Option<&'a str> {
+    fn cached_lineage_context<'a>(
+        graph_cache: &'a HashMap<String, (Vec<GraphNodeEvent>, Vec<GraphEdgeEvent>)>,
+        selected_id: &str,
+        root_id: &str,
+    ) -> Option<(&'a [GraphNodeEvent], &'a [GraphEdgeEvent])> {
+        if let Some((nodes, edges)) = graph_cache.get(root_id) {
+            return Some((nodes, edges));
+        }
+
+        graph_cache
+            .values()
+            .find(|(nodes, edges)| {
+                nodes.iter().any(|node| node.id == selected_id)
+                    || edges
+                        .iter()
+                        .any(|edge| edge.from == selected_id || edge.to == selected_id)
+            })
+            .map(|(nodes, edges)| (nodes.as_slice(), edges.as_slice()))
+    }
+
+    fn prefix_lineage_root_id<'a>(&'a self, selected_id: &str) -> Option<&'a str> {
         self.tracked_issues
             .iter()
             .filter(|issue| {
@@ -262,12 +311,27 @@ impl IssueBrowserView {
                     .strip_prefix(issue.id.as_str())
                     .is_some_and(|suffix| suffix.starts_with('.'))
             })
-            .max_by_key(|issue| issue.id.len())
+            .min_by_key(|issue| issue.id.len())
             .map(|issue| issue.id.as_str())
     }
 
     fn is_lineage_parent_edge(edge_type: Option<&str>) -> bool {
         matches!(edge_type, Some("parent-child") | Some("related"))
+    }
+
+    fn insert_parent_id<'a>(
+        parent_by_child_id: &mut HashMap<&'a str, &'a str>,
+        child_id: &'a str,
+        parent_id: &'a str,
+    ) {
+        parent_by_child_id
+            .entry(child_id)
+            .and_modify(|existing_parent_id| {
+                if parent_id < *existing_parent_id {
+                    *existing_parent_id = parent_id;
+                }
+            })
+            .or_insert(parent_id);
     }
 
     pub fn scroll_issue_detail_up_by(&mut self, lines: u16) {
@@ -681,7 +745,14 @@ impl IssueBrowserView {
                     }))
                 } else if lineage_mode_active && self.graph_loading.as_deref() == Some(id) {
                     let root_id = self.lineage_loading_root_id(id);
-                    Some(IssueLineageView::Loading { root_id })
+                    let (nodes, edges) =
+                        Self::cached_lineage_context(&self.graph_cache, id, root_id.as_str())
+                            .unwrap_or((&[], &[]));
+                    Some(IssueLineageView::Loading {
+                        root_id,
+                        nodes,
+                        edges,
+                    })
                 } else {
                     None
                 }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ratatui::{
     layout::{Constraint, Rect},
@@ -18,7 +18,11 @@ pub struct IssueLineageContext<'a> {
 
 pub enum IssueLineageView<'a> {
     Loaded(IssueLineageContext<'a>),
-    Loading { root_id: String },
+    Loading {
+        root_id: String,
+        nodes: &'a [GraphNodeEvent],
+        edges: &'a [GraphEdgeEvent],
+    },
 }
 
 pub struct IssuesPanel {
@@ -110,8 +114,16 @@ impl IssuesPanel {
                     self.render_lineage(issues, meta, readiness, frame, area);
                     return;
                 }
-                IssueLineageView::Loading { root_id } => {
-                    let meta = LineageMeta::loading(root_id.as_str());
+                IssueLineageView::Loading {
+                    root_id,
+                    nodes,
+                    edges,
+                } => {
+                    let meta = LineageMeta::new(IssueLineageContext {
+                        root_id: root_id.as_str(),
+                        nodes,
+                        edges,
+                    });
                     self.render_lineage(issues, meta, "loading work tree".into(), frame, area);
                     return;
                 }
@@ -322,7 +334,11 @@ impl<'a> LineageMeta<'a> {
                         .push(edge.from.as_str());
                 }
                 Some("parent-child") | Some("related") => {
-                    parent_by_child_id.insert(edge.from.as_str(), edge.to.as_str());
+                    insert_parent_id(
+                        &mut parent_by_child_id,
+                        edge.from.as_str(),
+                        edge.to.as_str(),
+                    );
                     children_by_parent_id
                         .entry(edge.to.as_str())
                         .or_default()
@@ -331,10 +347,7 @@ impl<'a> LineageMeta<'a> {
                 Some(_) => {}
             }
         }
-        let root_id = parent_by_child_id
-            .get(lineage.root_id)
-            .copied()
-            .unwrap_or(lineage.root_id);
+        let root_id = resolve_lineage_root(lineage.root_id, &parent_by_child_id, &node_by_id);
         let open_blockers = blockers_by_id
             .get(root_id)
             .into_iter()
@@ -349,17 +362,6 @@ impl<'a> LineageMeta<'a> {
             children_by_parent_id,
             node_by_id,
             open_blockers,
-        }
-    }
-
-    fn loading(root_id: &'a str) -> Self {
-        Self {
-            root_id,
-            blockers_by_id: HashMap::new(),
-            blocks_by_id: HashMap::new(),
-            children_by_parent_id: HashMap::new(),
-            node_by_id: HashMap::new(),
-            open_blockers: 0,
         }
     }
 
@@ -378,14 +380,14 @@ impl<'a> LineageMeta<'a> {
             return format!("> {icon} {}", issue.id);
         }
 
+        if let Some(depth) = descendant_depth(self.root_id, issue.id.as_str()) {
+            return format!("{} {icon} {}", lineage_prefix(depth), issue.id);
+        }
+
         if self
             .children_by_parent_id
             .get(self.root_id)
             .is_some_and(|ids| ids.iter().any(|id| *id == issue.id))
-            || issue
-                .id
-                .strip_prefix(self.root_id)
-                .is_some_and(|suffix| suffix.starts_with('.'))
         {
             return format!("├─ {icon} {}", issue.id);
         }
@@ -412,6 +414,68 @@ impl<'a> LineageMeta<'a> {
 
         format!("  {icon} {}", issue.id)
     }
+}
+
+fn resolve_lineage_root<'a>(
+    requested_root_id: &'a str,
+    parent_by_child_id: &HashMap<&'a str, &'a str>,
+    node_by_id: &HashMap<&'a str, &'a GraphNodeEvent>,
+) -> &'a str {
+    shortest_prefix_ancestor(requested_root_id, node_by_id.keys().copied())
+        .unwrap_or_else(|| walk_parent_chain(requested_root_id, parent_by_child_id))
+}
+
+fn insert_parent_id<'a>(
+    parent_by_child_id: &mut HashMap<&'a str, &'a str>,
+    child_id: &'a str,
+    parent_id: &'a str,
+) {
+    parent_by_child_id
+        .entry(child_id)
+        .and_modify(|existing_parent_id| {
+            if parent_id < *existing_parent_id {
+                *existing_parent_id = parent_id;
+            }
+        })
+        .or_insert(parent_id);
+}
+
+fn walk_parent_chain<'a>(
+    start_id: &'a str,
+    parent_by_child_id: &HashMap<&'a str, &'a str>,
+) -> &'a str {
+    let mut current_id = start_id;
+    let mut seen = HashSet::new();
+    while let Some(parent_id) = parent_by_child_id.get(current_id).copied() {
+        if !seen.insert(current_id) || seen.contains(parent_id) {
+            break;
+        }
+        current_id = parent_id;
+    }
+    current_id
+}
+
+fn shortest_prefix_ancestor<'a>(
+    id: &str,
+    candidates: impl IntoIterator<Item = &'a str>,
+) -> Option<&'a str> {
+    candidates
+        .into_iter()
+        .filter(|candidate| descendant_depth(candidate, id).is_some())
+        .min_by_key(|candidate| candidate.len())
+}
+
+fn descendant_depth(root_id: &str, id: &str) -> Option<usize> {
+    let suffix = id.strip_prefix(root_id)?;
+    let suffix = suffix.strip_prefix('.')?;
+    Some(suffix.split('.').count())
+}
+
+fn lineage_prefix(depth: usize) -> String {
+    if depth <= 1 {
+        return "├─".into();
+    }
+    format!("{}├─", "│ ".repeat(depth.saturating_sub(1)))
 }
 
 fn status_icon(status: &str) -> &'static str {
