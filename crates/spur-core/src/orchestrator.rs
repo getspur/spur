@@ -148,6 +148,7 @@ mod session_attach_guard_transfer_tests {
     use futures::Stream;
     use std::path::PathBuf;
     use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
 
     struct NoopConnection;
 
@@ -177,6 +178,56 @@ mod session_attach_guard_transfer_tests {
         }
 
         async fn cancel(&mut self, _session_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn health(&self) -> AgentHealth {
+            AgentHealth::Ready
+        }
+    }
+
+    struct RecordingCancelConnection {
+        cancelled_sessions: Arc<Mutex<Vec<String>>>,
+        fail_cancel: bool,
+    }
+
+    #[async_trait]
+    impl AgentConnection for RecordingCancelConnection {
+        async fn initialize(
+            &mut self,
+            _request: InitializeRequest,
+        ) -> anyhow::Result<agent_client_protocol::schema::InitializeResponse> {
+            unimplemented!()
+        }
+
+        async fn new_session(
+            &mut self,
+            _cwd: PathBuf,
+            _mcp_servers: Vec<McpServer>,
+        ) -> anyhow::Result<agent_client_protocol::schema::NewSessionResponse> {
+            unimplemented!()
+        }
+
+        async fn prompt(
+            &mut self,
+            _request: PromptRequest,
+        ) -> anyhow::Result<Pin<Box<dyn Stream<Item = spur_acp::SessionNotification> + Send>>>
+        {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        async fn cancel(&mut self, session_id: &str) -> anyhow::Result<()> {
+            self.cancelled_sessions
+                .lock()
+                .expect("cancel recorder poisoned")
+                .push(session_id.to_string());
+            if self.fail_cancel {
+                return Err(anyhow::anyhow!("cancel not supported"));
+            }
             Ok(())
         }
 
@@ -290,6 +341,238 @@ mod session_attach_guard_transfer_tests {
         let mut active = active.expect("retired brain should cache active connection");
         assert!(active.attach_guard.is_some());
         active.transport.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn retire_active_brain_dispatches_one_best_effort_cancel_for_acp_transport() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = SpurConfig::default();
+        config.cost.db_path = tmp.path().join("cost.db").display().to_string();
+        config.agents.entries = vec![spur_acp::AgentConfig::with_defaults("test-brain")];
+        let mut orchestrator = Orchestrator::new(tmp.path().to_path_buf(), config, None).unwrap();
+
+        let cancelled_sessions = Arc::new(Mutex::new(Vec::new()));
+        let mut brain = Some(BrainSession {
+            connection: Box::new(RecordingCancelConnection {
+                cancelled_sessions: Arc::clone(&cancelled_sessions),
+                fail_cancel: false,
+            }),
+            acp_session_id: "acp-retired-session".to_string(),
+            spur_session_id: SessionId("spur-retired-session".to_string()),
+            brain_name: "test-brain".to_string(),
+            delegation_handle: tokio::spawn(async {}),
+            mcp_server: None,
+            mcp_guard: None,
+            notification_pump_handle: None,
+            attach_guard: None,
+            fs_unsafe: false,
+            started_at: std::time::Instant::now(),
+            config_options: Vec::new(),
+            spur_agent_caps: None,
+            session_info: None,
+            init_response: agent_client_protocol::schema::InitializeResponse::new(
+                agent_client_protocol::schema::ProtocolVersion::LATEST,
+            ),
+        });
+        let mut active = None;
+        let mut scheduler = crate::scheduler::BrainScheduler::new(
+            None,
+            std::sync::Arc::new(orchestrator.funnel.clone()),
+        );
+        let overflow =
+            std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::new()));
+
+        orchestrator
+            .retire_active_brain(
+                &mut brain,
+                &mut active,
+                &mut scheduler,
+                &overflow,
+                spur_acp::domain::events::BrainRetireReason::UserClear,
+                None,
+            )
+            .await;
+
+        assert_eq!(
+            *cancelled_sessions.lock().expect("cancel recorder poisoned"),
+            vec!["acp-retired-session".to_string()]
+        );
+
+        let mut active = active.expect("retired brain should cache active connection");
+        active.transport.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn retire_active_brain_skips_cancel_for_process_kill_transport() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = SpurConfig::default();
+        config.cost.db_path = tmp.path().join("cost.db").display().to_string();
+        let mut agent = spur_acp::AgentConfig::with_defaults("test-brain");
+        agent.transport = TransportKind::CliWrap;
+        config.agents.entries = vec![agent];
+        let mut orchestrator = Orchestrator::new(tmp.path().to_path_buf(), config, None).unwrap();
+
+        let cancelled_sessions = Arc::new(Mutex::new(Vec::new()));
+        let mut brain = Some(BrainSession {
+            connection: Box::new(RecordingCancelConnection {
+                cancelled_sessions: Arc::clone(&cancelled_sessions),
+                fail_cancel: false,
+            }),
+            acp_session_id: "acp-retired-session".to_string(),
+            spur_session_id: SessionId("spur-retired-session".to_string()),
+            brain_name: "test-brain".to_string(),
+            delegation_handle: tokio::spawn(async {}),
+            mcp_server: None,
+            mcp_guard: None,
+            notification_pump_handle: None,
+            attach_guard: None,
+            fs_unsafe: false,
+            started_at: std::time::Instant::now(),
+            config_options: Vec::new(),
+            spur_agent_caps: None,
+            session_info: None,
+            init_response: agent_client_protocol::schema::InitializeResponse::new(
+                agent_client_protocol::schema::ProtocolVersion::LATEST,
+            ),
+        });
+        let mut active = None;
+        let mut scheduler = crate::scheduler::BrainScheduler::new(
+            None,
+            std::sync::Arc::new(orchestrator.funnel.clone()),
+        );
+        let overflow =
+            std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::new()));
+
+        orchestrator
+            .retire_active_brain(
+                &mut brain,
+                &mut active,
+                &mut scheduler,
+                &overflow,
+                spur_acp::domain::events::BrainRetireReason::UserClear,
+                None,
+            )
+            .await;
+
+        assert!(
+            cancelled_sessions
+                .lock()
+                .expect("cancel recorder poisoned")
+                .is_empty(),
+            "process-kill transports must not be cancelled during retire"
+        );
+
+        let mut active = active.expect("retired brain should cache active connection");
+        active.transport.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn retire_active_brain_swallows_best_effort_cancel_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = SpurConfig::default();
+        config.cost.db_path = tmp.path().join("cost.db").display().to_string();
+        config.agents.entries = vec![spur_acp::AgentConfig::with_defaults("test-brain")];
+        let mut orchestrator = Orchestrator::new(tmp.path().to_path_buf(), config, None).unwrap();
+
+        let cancelled_sessions = Arc::new(Mutex::new(Vec::new()));
+        let mut brain = Some(BrainSession {
+            connection: Box::new(RecordingCancelConnection {
+                cancelled_sessions: Arc::clone(&cancelled_sessions),
+                fail_cancel: true,
+            }),
+            acp_session_id: "acp-retired-session".to_string(),
+            spur_session_id: SessionId("spur-retired-session".to_string()),
+            brain_name: "test-brain".to_string(),
+            delegation_handle: tokio::spawn(async {}),
+            mcp_server: None,
+            mcp_guard: None,
+            notification_pump_handle: None,
+            attach_guard: None,
+            fs_unsafe: false,
+            started_at: std::time::Instant::now(),
+            config_options: Vec::new(),
+            spur_agent_caps: None,
+            session_info: None,
+            init_response: agent_client_protocol::schema::InitializeResponse::new(
+                agent_client_protocol::schema::ProtocolVersion::LATEST,
+            ),
+        });
+        let mut active = None;
+        let mut scheduler = crate::scheduler::BrainScheduler::new(
+            None,
+            std::sync::Arc::new(orchestrator.funnel.clone()),
+        );
+        let overflow =
+            std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::new()));
+
+        orchestrator
+            .retire_active_brain(
+                &mut brain,
+                &mut active,
+                &mut scheduler,
+                &overflow,
+                spur_acp::domain::events::BrainRetireReason::UserClear,
+                None,
+            )
+            .await;
+
+        assert_eq!(
+            *cancelled_sessions.lock().expect("cancel recorder poisoned"),
+            vec!["acp-retired-session".to_string()]
+        );
+
+        let mut active = active.expect("retired brain should still cache active connection");
+        active.transport.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_active_brain_emits_brain_retired_shutdown() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = SpurConfig::default();
+        config.cost.db_path = tmp.path().join("cost.db").display().to_string();
+        let mut orchestrator = Orchestrator::new(tmp.path().to_path_buf(), config, None).unwrap();
+        let mut event_rx = orchestrator.subscribe();
+
+        let retired_session = SessionId("shutdown-session".to_string());
+        let mut brain = Some(fixture_brain_session(retired_session.0.as_str()));
+        let mut agent_connection = None;
+        let mut scheduler = crate::scheduler::BrainScheduler::new(
+            Some(retired_session.clone().into()),
+            std::sync::Arc::new(orchestrator.funnel.clone()),
+        );
+        let overflow =
+            std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::new()));
+
+        orchestrator
+            .shutdown_active_brain(&mut brain, &mut agent_connection, &mut scheduler, &overflow)
+            .await;
+
+        assert!(brain.is_none());
+        assert!(agent_connection.is_none());
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut saw_shutdown_retire = false;
+        while tokio::time::Instant::now() < deadline && !saw_shutdown_retire {
+            let remaining = deadline - tokio::time::Instant::now();
+            match tokio::time::timeout(remaining, event_rx.recv()).await {
+                Ok(Ok(event)) => {
+                    saw_shutdown_retire = matches!(
+                        event.body,
+                        SpurEventBody::BrainRetired {
+                            session,
+                            reason: spur_acp::domain::events::BrainRetireReason::Shutdown,
+                        } if session == retired_session
+                    );
+                }
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                _ => break,
+            }
+        }
+
+        assert!(
+            saw_shutdown_retire,
+            "live-brain shutdown must emit BrainRetired{{Shutdown}}"
+        );
     }
 
     #[test]
@@ -3932,24 +4215,14 @@ impl Orchestrator {
         }
 
         // ── Cleanup ─────────────────────────────────────────────────────
-        if let Some(mut b) = brain.take() {
-            b.delegation_handle.abort();
-            if let Some(h) = b.notification_pump_handle.take() {
-                h.abort();
-            }
-            self.self_held
-                .remove(&spur_acp::BrainSessionId::from(b.spur_session_id.clone()));
-            retire_brain_session(
-                &self.funnel,
-                &b.spur_session_id,
-                &mut b.mcp_server,
-                Some(&mut b.mcp_guard),
+        if brain.is_some() {
+            self.shutdown_active_brain(
+                &mut brain,
+                &mut agent_connection,
                 &mut scheduler,
                 &overflow_continuations,
-                None,
             )
             .await;
-            let _ = b.connection.shutdown().await;
         }
         // Drop any pre-connected but unused connection.
         if let Some(ActiveConnection {
@@ -4101,8 +4374,11 @@ impl Orchestrator {
     /// initialized ACP connection in `agent_connection` for reuse by the
     /// next `load_brain_session` / `create_brain_session`.
     ///
-    /// Called at the top of any arm that replaces the current brain
-    /// (`ResumeSession`, `NewSessionWithMessage`). Saves the cost of
+    /// Called by any path that retires the current brain:
+    /// `NewSessionWithMessage` (`/clear`), `ResumeSession`, and
+    /// `shutdown_active_brain` during interactive shutdown. The first two
+    /// paths preserve the initialized ACP connection for reuse by the next
+    /// `load_brain_session` / `create_brain_session`, saving the cost of
     /// tearing down and reinitializing the agent subprocess on every
     /// session switch — for claude-code-acp that's ~1-3s of node startup
     /// per switch.
@@ -4113,9 +4389,10 @@ impl Orchestrator {
     /// Drains the notification pump with a bounded grace (100 ms) before
     /// aborting, so late notifications still reach the projection.
     ///
-    /// The old ACP session id on the agent side is abandoned silently;
-    /// the ACP protocol has no `close_session`. Followup issue tracks a
-    /// best-effort `session/cancel` dispatch per transport.
+    /// For ACP-soft transports, sends a best-effort `session/cancel` for the
+    /// retired ACP session id. Other transports no-op here because their
+    /// `cancel()` implementations terminate the subprocess instead of freeing
+    /// one cooperative ACP session.
     async fn retire_active_brain(
         &mut self,
         brain: &mut Option<BrainSession>,
@@ -4159,6 +4436,45 @@ impl Orchestrator {
             session: b.spur_session_id.clone(),
             reason,
         }));
+
+        if self
+            .registry
+            .get(&b.brain_name)
+            .is_some_and(|cfg| cancel_mode_for(cfg.transport) == CancelMode::AcpSoft)
+        {
+            match tokio::time::timeout(
+                Duration::from_millis(10),
+                b.connection.cancel(&b.acp_session_id),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    debug!(
+                        session = %b.spur_session_id.0,
+                        acp_session = %b.acp_session_id,
+                        brain = %b.brain_name,
+                        "sent best-effort ACP session cancel during brain retire"
+                    );
+                }
+                Ok(Err(error)) => {
+                    debug!(
+                        session = %b.spur_session_id.0,
+                        acp_session = %b.acp_session_id,
+                        brain = %b.brain_name,
+                        %error,
+                        "best-effort ACP session cancel failed during brain retire"
+                    );
+                }
+                Err(_) => {
+                    debug!(
+                        session = %b.spur_session_id.0,
+                        acp_session = %b.acp_session_id,
+                        brain = %b.brain_name,
+                        "best-effort ACP session cancel timed out during brain retire"
+                    );
+                }
+            }
+        }
 
         // 2. Close the cost ledger. Best-effort: `end_session` is fallible
         //    when the sqlite row is missing (e.g. cost tracking disabled
@@ -4214,6 +4530,32 @@ impl Orchestrator {
             self.emit(SpurEvent::now(SpurEventBody::SessionRetireComplete {
                 session: from,
             }));
+        }
+    }
+
+    async fn shutdown_active_brain(
+        &mut self,
+        brain: &mut Option<BrainSession>,
+        agent_connection: &mut Option<ActiveConnection>,
+        scheduler: &mut crate::scheduler::BrainScheduler,
+        overflow: &crate::continuation_bridge::OverflowBuf,
+    ) {
+        self.retire_active_brain(
+            brain,
+            agent_connection,
+            scheduler,
+            overflow,
+            spur_acp::domain::events::BrainRetireReason::Shutdown,
+            None,
+        )
+        .await;
+
+        if let Some(ActiveConnection {
+            transport: mut conn,
+            ..
+        }) = agent_connection.take()
+        {
+            let _ = conn.shutdown().await;
         }
     }
 
