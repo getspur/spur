@@ -40,7 +40,9 @@ jobs:
             manylinux: "2_17"
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            manylinux: "2_17"
+            # aws-lc/ring need a newer aarch64 cross toolchain than
+            # manylinux_2_17 provides.
+            manylinux: "2_28"
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             manylinux: "musllinux_1_2"

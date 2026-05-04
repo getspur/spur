@@ -1,12 +1,23 @@
 #!/usr/bin/env bash
 # spur-cargo — project-standard cargo wrapper.
 #
-# Previously ran sccache-sync-basedirs.sh to enumerate worktrees in the
-# server's SCCACHE_BASEDIRS. This is now handled dynamically by
-# scripts/sccache-worktree.sh (set as rustc-wrapper in .cargo/config.toml),
-# so this wrapper is a thin pass-through kept for backward compatibility.
+# Injects scripts/sccache-worktree.sh as RUSTC_WRAPPER unless the caller already
+# set RUSTC_WRAPPER. Keeping this out of .cargo/config.toml prevents cargo-dist
+# and Windows CI from inheriting a Unix shell wrapper.
 #
 # See: docs/rca/2026-04-27-sccache-worktree-cache-miss.md
 set -euo pipefail
+
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+SCRIPT_DIR="${SCRIPT_PATH%/*}"
+if [[ "$SCRIPT_DIR" == "$SCRIPT_PATH" ]]; then
+    SCRIPT_DIR="."
+fi
+SCRIPT_DIR=$(cd "$SCRIPT_DIR" && pwd -P)
+WRAPPER="$SCRIPT_DIR/sccache-worktree.sh"
+
+if [[ -z "${RUSTC_WRAPPER+x}" ]]; then
+    export RUSTC_WRAPPER="$WRAPPER"
+fi
 
 exec cargo "$@"

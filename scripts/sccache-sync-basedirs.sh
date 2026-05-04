@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # sccache-sync-basedirs.sh
 #
-# DEPRECATED: Superseded by `scripts/sccache-worktree.sh`, which is now set as
-# `rustc-wrapper` in `.cargo/config.toml`. The wrapper dynamically sets
-# SCCACHE_BASEDIRS per invocation, eliminating the need to enumerate all
-# worktrees and restart the server.
+# DEPRECATED: Superseded by `scripts/sccache-worktree.sh`, which is injected by
+# `scripts/spur-cargo`. The wrapper dynamically sets SCCACHE_BASEDIRS per
+# invocation, eliminating the need to enumerate all worktrees and restart the
+# server.
 #
 # Kept for reference and emergency fallback only.
 #
