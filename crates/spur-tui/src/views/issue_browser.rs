@@ -1039,7 +1039,7 @@ impl View for IssueBrowserView {
 
                 let mut loaded_issues = issues
                     .iter()
-                    .filter(|i| i.issue_type.as_deref() != Some("plan"))
+                    .filter(|issue| !is_plan_artifact_summary(issue))
                     .map(|i| spur_pm::IssueSummary {
                         id: i.id.clone(),
                         source: match i.source.as_str() {
@@ -1196,6 +1196,12 @@ fn is_lineage_root_candidate(issue: &spur_pm::IssueSummary) -> bool {
 fn is_graph_plan_root(node: &GraphNodeEvent) -> bool {
     has_label(&node.labels, "spur:plan-complete")
         || (find_plan_id_label(&node.labels).is_some() && !has_plan_task_label(&node.labels))
+}
+
+fn is_plan_artifact_summary(issue: &spur_acp::IssueSummaryEvent) -> bool {
+    issue.issue_type.as_deref() == Some("plan")
+        || has_label(&issue.labels, "spur:plan-complete")
+        || has_plan_task_label(&issue.labels)
 }
 
 fn has_plan_task_label(labels: &[String]) -> bool {
