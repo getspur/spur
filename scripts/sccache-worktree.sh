@@ -19,9 +19,16 @@ if command -v git >/dev/null 2>&1; then
     GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
 fi
 
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+SCRIPT_DIR="${SCRIPT_PATH%/*}"
+if [[ "$SCRIPT_DIR" == "$SCRIPT_PATH" ]]; then
+    SCRIPT_DIR="."
+fi
+
 # Always include the main SPUR repo root as a fallback so registry caches and
 # shared artifacts normalize consistently.
-SPUR_ROOT="${SPUR_ROOT:-/Volumes/Projects/spur}"
+REPO_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd -P)
+SPUR_ROOT="${SPUR_ROOT:-$REPO_ROOT}"
 
 if [[ -n "$GIT_ROOT" && "$GIT_ROOT" != "$SPUR_ROOT" ]]; then
     # Worktree: strip to the worktree root first (longest-prefix wins).
@@ -31,4 +38,8 @@ else
     export SCCACHE_BASEDIRS="${SPUR_ROOT}"
 fi
 
-exec sccache "$@"
+if command -v sccache >/dev/null 2>&1; then
+    exec sccache "$@"
+fi
+
+exec "$@"
