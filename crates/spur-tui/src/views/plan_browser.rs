@@ -8,8 +8,8 @@ use ratatui::{
     Frame,
 };
 use spur_acp::{
-    PlanLifecycleEvent, PlanOwnerStateEvent, PlanSummaryCountsEvent, PlanSummaryEvent, SessionId,
-    SpurEvent, SpurEventBody,
+    PlanLifecycleEvent, PlanLoadWarningEvent, PlanOwnerStateEvent, PlanSummaryCountsEvent,
+    PlanSummaryEvent, SessionId, SpurEvent, SpurEventBody,
 };
 
 use crate::action::{Action, ViewId};
@@ -25,6 +25,7 @@ const STATUS_HINT_COMPACT: &str = " [j/k]nav [p]plan [o]item [c]claim [s]start [
 pub struct PlanBrowserView {
     current_session: SessionId,
     plans: Vec<PlanSummaryEvent>,
+    warnings: Vec<PlanLoadWarningEvent>,
     selected: usize,
     detail_peek: DetailPeek,
     confirm: Option<PlanConfirm>,
@@ -50,6 +51,7 @@ impl PlanBrowserView {
         Self {
             current_session,
             plans: Vec::new(),
+            warnings: Vec::new(),
             selected: 0,
             detail_peek: DetailPeek::Summary,
             confirm: None,
@@ -485,11 +487,22 @@ impl PlanBrowserView {
                 DetailPeek::Plan => self.render_plan_lines(plan),
                 DetailPeek::WorkItem => self.render_work_item_lines(plan),
             };
-            if let Some(hint) = self.hint.as_ref() {
-                lines.push(Line::from(Span::styled(
+            let notice = if let Some(hint) = self.hint.as_ref() {
+                Some(Line::from(Span::styled(
                     hint.clone(),
                     Style::default().fg(Color::Red),
-                )));
+                )))
+            } else {
+                self.warnings.first().map(|warning| {
+                    Line::from(Span::styled(
+                        format!("Warning: {}", warning.message),
+                        Style::default().fg(Color::Yellow),
+                    ))
+                })
+            };
+            if let Some(notice) = notice {
+                lines.insert(0, Line::from(""));
+                lines.insert(0, notice);
             }
             lines
         } else if let Some(hint) = self.hint.as_ref() {
@@ -756,9 +769,10 @@ impl View for PlanBrowserView {
 
     fn handle_spur_event(&mut self, event: &SpurEvent, _ctx: &ViewContext) {
         match &event.body {
-            SpurEventBody::PlansLoaded { plans } => {
+            SpurEventBody::PlansLoaded { plans, warnings } => {
                 let selected_plan_id = self.selected_plan().map(|plan| plan.plan_id.clone());
                 self.plans = plans.clone();
+                self.warnings = warnings.clone();
                 self.selected = self
                     .pending_focus_plan_id
                     .as_ref()
@@ -1015,6 +1029,7 @@ mod tests {
         view.handle_spur_event(
             &SpurEvent::now(SpurEventBody::PlansLoaded {
                 plans: vec![summary("plan-1")],
+                warnings: Vec::new(),
             }),
             &ctx,
         );
@@ -1044,6 +1059,7 @@ mod tests {
         view.handle_spur_event(
             &SpurEvent::now(SpurEventBody::PlansLoaded {
                 plans: vec![summary("plan-1")],
+                warnings: Vec::new(),
             }),
             &ctx,
         );
@@ -1073,6 +1089,7 @@ mod tests {
         view.handle_spur_event(
             &SpurEvent::now(SpurEventBody::PlansLoaded {
                 plans: vec![summary("plan-1")],
+                warnings: Vec::new(),
             }),
             &ctx,
         );
@@ -1099,6 +1116,7 @@ mod tests {
         view.handle_spur_event(
             &SpurEvent::now(SpurEventBody::PlansLoaded {
                 plans: vec![summary("plan-1")],
+                warnings: Vec::new(),
             }),
             &ctx,
         );
@@ -1129,6 +1147,7 @@ mod tests {
         view.handle_spur_event(
             &SpurEvent::now(SpurEventBody::PlansLoaded {
                 plans: vec![summary("plan-1"), summary("plan-2")],
+                warnings: Vec::new(),
             }),
             &ctx,
         );
@@ -1154,6 +1173,7 @@ mod tests {
         view.handle_spur_event(
             &SpurEvent::now(SpurEventBody::PlansLoaded {
                 plans: vec![summary("plan-1")],
+                warnings: Vec::new(),
             }),
             &ctx,
         );
@@ -1180,6 +1200,7 @@ mod tests {
         view.handle_spur_event(
             &SpurEvent::now(SpurEventBody::PlansLoaded {
                 plans: vec![summary("plan-1")],
+                warnings: Vec::new(),
             }),
             &ctx,
         );
@@ -1202,6 +1223,7 @@ mod tests {
         view.handle_spur_event(
             &SpurEvent::now(SpurEventBody::PlansLoaded {
                 plans: vec![summary_with_owner("plan-1", PlanOwnerStateEvent::Mine)],
+                warnings: Vec::new(),
             }),
             &ctx,
         );

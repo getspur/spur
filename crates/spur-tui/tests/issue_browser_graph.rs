@@ -433,15 +433,15 @@ fn issue_list_keeps_lineage_panel_while_selected_graph_is_loading() {
 
     app.handle_crossterm_event_for_test(key('j'));
 
-    expect_get_graph(&mut rx, "issue-B");
+    expect_get_graph(&mut rx, "issue-C");
     let after_nav = render_text(&mut app, &mut terminal);
     assert!(
         after_nav.contains("Work Item Lineage"),
         "lineage mode should persist while the newly-selected graph loads:\n{after_nav}"
     );
     assert!(
-        after_nav.contains("loading work tree"),
-        "loading state should be explicit instead of falling back to the flat list:\n{after_nav}"
+        after_nav.contains("issue-C") && after_nav.contains("issue-A"),
+        "cached lineage context should stay visible while the selected graph refreshes:\n{after_nav}"
     );
 }
 
