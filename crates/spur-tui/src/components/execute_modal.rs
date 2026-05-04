@@ -61,8 +61,8 @@ impl ExecuteModal {
                     Style::default().fg(Color::White),
                 )),
                 Line::from(""),
-                Line::from("  This sends a prompt asking the brain to call"),
-                Line::from(format!("  execute_epic(epic_id=\"{}\").", self.epic_id)),
+                Line::from("  This sends a prompt asking the brain to analyze"),
+                Line::from("  this item and determine how to execute it."),
                 Line::from(""),
                 action_line(
                     "[Enter]",

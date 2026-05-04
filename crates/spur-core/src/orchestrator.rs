@@ -23,8 +23,8 @@ use spur_acp::types::*;
 use spur_acp::{
     CancellationControl, DelegationAbortHandle, DelegationAbortReason, DelegationResult,
     DelegationStatus, GraphEdgeEvent, GraphNodeEvent, LifecycleState, PlanLifecycleEvent,
-    PlanOwnerStateEvent, PlanSummaryCountsEvent, PlanSummaryEvent, ReviewKind, ReviewPayload,
-    SpurEvent, SpurEventBody, TimeoutFallback,
+    PlanLoadWarningEvent, PlanOwnerStateEvent, PlanSummaryCountsEvent, PlanSummaryEvent,
+    ReviewKind, ReviewPayload, SpurEvent, SpurEventBody, TimeoutFallback,
 };
 use spur_pm::{Issue, IssueSummary};
 
@@ -1519,10 +1519,134 @@ fn lifecycle_from_plan(
     }
 }
 
+#[derive(Debug, Clone)]
+struct PlanSummaryCandidate {
+    summary: PlanSummaryEvent,
+    canonical_epic_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PlanSummaryLoad {
+    plans: Vec<PlanSummaryEvent>,
+    warnings: Vec<PlanLoadWarningEvent>,
+}
+
+fn owner_state_text(owner_state: &PlanOwnerStateEvent) -> String {
+    match owner_state {
+        PlanOwnerStateEvent::Mine => "owned by this brain".into(),
+        PlanOwnerStateEvent::Unowned => "unowned".into(),
+        PlanOwnerStateEvent::Other { owner } => format!("owned by {owner}"),
+        PlanOwnerStateEvent::Ambiguous { owners } if owners.is_empty() => {
+            "ambiguous ownership".into()
+        }
+        PlanOwnerStateEvent::Ambiguous { owners } => {
+            format!("ambiguous ownership: {}", owners.join(", "))
+        }
+    }
+}
+
+fn duplicate_plan_warning(
+    plan_id: &str,
+    stale_epic_ids: Vec<String>,
+    canonical_summary: Option<&PlanSummaryEvent>,
+) -> PlanLoadWarningEvent {
+    let stale_text = stale_epic_ids.join(", ");
+    let canonical_epic_id = canonical_summary.map(|summary| summary.epic_id.clone());
+    let canonical_owner_state = canonical_summary.map(|summary| summary.owner_state.clone());
+    let message = if let Some(summary) = canonical_summary {
+        let noun = if stale_epic_ids.len() == 1 {
+            "epic"
+        } else {
+            "epics"
+        };
+        format!(
+            "Plan {plan_id} has stale duplicate {noun} {stale_text}; using canonical epic {} ({})",
+            summary.epic_id,
+            owner_state_text(&summary.owner_state)
+        )
+    } else {
+        format!(
+            "Plan {plan_id} has duplicate epics {stale_text}, but no canonical PlanSubmit audit; claim/resume may be blocked"
+        )
+    };
+
+    PlanLoadWarningEvent {
+        plan_id: plan_id.to_string(),
+        canonical_epic_id,
+        stale_epic_ids,
+        canonical_owner_state,
+        message,
+    }
+}
+
+fn canonicalize_plan_summary_candidates(candidates: Vec<PlanSummaryCandidate>) -> PlanSummaryLoad {
+    let mut grouped: std::collections::BTreeMap<String, Vec<PlanSummaryCandidate>> =
+        std::collections::BTreeMap::new();
+    for candidate in candidates {
+        grouped
+            .entry(candidate.summary.plan_id.clone())
+            .or_default()
+            .push(candidate);
+    }
+
+    let mut load = PlanSummaryLoad::default();
+    for (plan_id, mut group) in grouped {
+        group.sort_by(|left, right| left.summary.epic_id.cmp(&right.summary.epic_id));
+        if group.len() == 1 {
+            load.plans.push(group.remove(0).summary);
+            continue;
+        }
+
+        let epic_ids = group
+            .iter()
+            .map(|candidate| candidate.summary.epic_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let canonical_ids = group
+            .iter()
+            .filter_map(|candidate| candidate.canonical_epic_id.as_ref())
+            .filter(|epic_id| epic_ids.contains(*epic_id))
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+
+        if canonical_ids.len() == 1 {
+            let canonical_epic_id = canonical_ids
+                .into_iter()
+                .next()
+                .expect("one canonical id exists");
+            let canonical_index = group
+                .iter()
+                .position(|candidate| candidate.summary.epic_id == canonical_epic_id)
+                .expect("canonical id came from group candidate ids");
+            let canonical = group.remove(canonical_index);
+            let stale_epic_ids = group
+                .iter()
+                .map(|candidate| candidate.summary.epic_id.clone())
+                .collect::<Vec<_>>();
+            load.warnings.push(duplicate_plan_warning(
+                &plan_id,
+                stale_epic_ids,
+                Some(&canonical.summary),
+            ));
+            load.plans.push(canonical.summary);
+        } else {
+            let duplicate_epic_ids = group
+                .iter()
+                .map(|candidate| candidate.summary.epic_id.clone())
+                .collect::<Vec<_>>();
+            load.warnings
+                .push(duplicate_plan_warning(&plan_id, duplicate_epic_ids, None));
+            load.plans
+                .extend(group.into_iter().map(|candidate| candidate.summary));
+        }
+    }
+
+    load
+}
+
 async fn load_plan_summaries(
     pm: &PmService,
     current_brain_session: Option<&SessionId>,
-) -> anyhow::Result<Vec<PlanSummaryEvent>> {
+) -> anyhow::Result<PlanSummaryLoad> {
     let epics = pm
         .list_issues(spur_pm::IssueFilter {
             issue_type: Some("epic".into()),
@@ -1532,7 +1656,7 @@ async fn load_plan_summaries(
         })
         .await?;
 
-    let mut plans = Vec::new();
+    let mut candidates = Vec::new();
     for epic in epics {
         let Some(plan_id) = plan_id_from_labels(&epic.labels) else {
             continue;
@@ -1572,19 +1696,86 @@ async fn load_plan_summaries(
             }
         };
 
-        plans.push(PlanSummaryEvent {
-            plan_id,
-            epic_id: epic.id.clone(),
-            title: epic.title.clone(),
-            source_body_preview,
-            owner_state: plan_owner_state_from_labels(&epic.labels, current_brain_session),
-            lifecycle: lifecycle_from_plan(&epic, counts.as_ref()),
-            counts,
-            updated_at: None,
+        candidates.push(PlanSummaryCandidate {
+            summary: PlanSummaryEvent {
+                plan_id,
+                epic_id: epic.id.clone(),
+                title: epic.title.clone(),
+                source_body_preview,
+                owner_state: plan_owner_state_from_labels(&epic.labels, current_brain_session),
+                lifecycle: lifecycle_from_plan(&epic, counts.as_ref()),
+                counts,
+                updated_at: None,
+            },
+            canonical_epic_id: None,
         });
     }
 
-    Ok(plans)
+    annotate_plan_summary_canonical_epics(pm, &mut candidates).await;
+
+    Ok(canonicalize_plan_summary_candidates(candidates))
+}
+
+async fn annotate_plan_summary_canonical_epics(
+    pm: &PmService,
+    candidates: &mut [PlanSummaryCandidate],
+) {
+    let duplicate_epics_by_plan = {
+        let mut grouped: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+            std::collections::BTreeMap::new();
+        for candidate in candidates.iter() {
+            grouped
+                .entry(candidate.summary.plan_id.clone())
+                .or_default()
+                .insert(candidate.summary.epic_id.clone());
+        }
+        grouped
+            .into_iter()
+            .filter(|(_, epic_ids)| epic_ids.len() > 1)
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    if duplicate_epics_by_plan.is_empty() {
+        return;
+    }
+
+    let Some(advanced) = pm.advanced() else {
+        return;
+    };
+
+    for candidate in candidates.iter_mut() {
+        let Some(candidate_ids) = duplicate_epics_by_plan.get(&candidate.summary.plan_id) else {
+            continue;
+        };
+        let comments = match advanced.list_comments(&candidate.summary.epic_id).await {
+            Ok(comments) => comments,
+            Err(error) => {
+                warn!(
+                    plan_id = %candidate.summary.plan_id,
+                    epic_id = %candidate.summary.epic_id,
+                    error = %error,
+                    "failed to inspect PlanSubmit audit while loading duplicate plan summaries"
+                );
+                continue;
+            }
+        };
+        let audits = spur_mcp::plan::projector::collect_sorted_audits_for_issue(
+            &candidate.summary.epic_id,
+            comments,
+        );
+        for audit in audits {
+            if let spur_mcp::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
+                plan_id,
+                epic_issue_id,
+                ..
+            } = audit
+            {
+                if plan_id == candidate.summary.plan_id && candidate_ids.contains(&epic_issue_id) {
+                    candidate.canonical_epic_id = Some(epic_issue_id);
+                    break;
+                }
+            }
+        }
+    }
 }
 
 fn issue_body_preview(body: &str) -> Option<String> {
@@ -1598,6 +1789,68 @@ fn issue_body_preview(body: &str) -> Option<String> {
         preview.push_str("...");
     }
     Some(preview)
+}
+
+#[cfg(test)]
+mod plan_summary_warning_tests {
+    use super::*;
+
+    fn candidate(
+        plan_id: &str,
+        epic_id: &str,
+        owner_state: PlanOwnerStateEvent,
+        canonical_epic_id: Option<&str>,
+    ) -> PlanSummaryCandidate {
+        PlanSummaryCandidate {
+            summary: PlanSummaryEvent {
+                plan_id: plan_id.into(),
+                epic_id: epic_id.into(),
+                title: format!("Plan {plan_id}"),
+                source_body_preview: None,
+                owner_state,
+                lifecycle: PlanLifecycleEvent::Pending,
+                counts: None,
+                updated_at: None,
+            },
+            canonical_epic_id: canonical_epic_id.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn canonicalizes_duplicate_plan_epics_and_warns_about_stale_aliases() {
+        let result = canonicalize_plan_summary_candidates(vec![
+            candidate(
+                "plan-dup",
+                "bd-stale",
+                PlanOwnerStateEvent::Unowned,
+                Some("bd-canonical"),
+            ),
+            candidate(
+                "plan-dup",
+                "bd-canonical",
+                PlanOwnerStateEvent::Other {
+                    owner: "brain-42".into(),
+                },
+                None,
+            ),
+        ]);
+
+        assert_eq!(result.plans.len(), 1);
+        assert_eq!(result.plans[0].epic_id, "bd-canonical");
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(result.warnings[0].plan_id, "plan-dup");
+        assert_eq!(
+            result.warnings[0].canonical_epic_id.as_deref(),
+            Some("bd-canonical")
+        );
+        assert_eq!(result.warnings[0].stale_epic_ids, vec!["bd-stale"]);
+        assert!(matches!(
+            result.warnings[0].canonical_owner_state,
+            Some(PlanOwnerStateEvent::Other { ref owner }) if owner == "brain-42"
+        ));
+        assert!(result.warnings[0].message.contains("bd-stale"));
+        assert!(result.warnings[0].message.contains("bd-canonical"));
+    }
 }
 
 /// Convert spur_pm::Issue to the spur_acp mirror type for event bus transmission.
@@ -3097,8 +3350,11 @@ impl Orchestrator {
                         if let Some(pm) = &self.pm_service {
                             let current_session = brain.as_ref().map(|b| &b.spur_session_id);
                             match load_plan_summaries(pm, current_session).await {
-                                Ok(plans) => {
-                                    self.funnel.emit(SpurEventBody::PlansLoaded { plans });
+                                Ok(load) => {
+                                    self.funnel.emit(SpurEventBody::PlansLoaded {
+                                        plans: load.plans,
+                                        warnings: load.warnings,
+                                    });
                                 }
                                 Err(e) => {
                                     self.funnel.emit(SpurEventBody::PlanCommandError {
@@ -3133,8 +3389,11 @@ impl Orchestrator {
                             } else if let Some(pm) = &self.pm_service {
                                 let current_session = brain.as_ref().map(|b| &b.spur_session_id);
                                 match load_plan_summaries(pm, current_session).await {
-                                    Ok(plans) => {
-                                        self.funnel.emit(SpurEventBody::PlansLoaded { plans });
+                                    Ok(load) => {
+                                        self.funnel.emit(SpurEventBody::PlansLoaded {
+                                            plans: load.plans,
+                                            warnings: load.warnings,
+                                        });
                                     }
                                     Err(error) => {
                                         self.funnel.emit(SpurEventBody::PlanCommandError {

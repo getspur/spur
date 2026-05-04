@@ -3807,11 +3807,13 @@ impl App {
                             });
 
                         let prompt = format!(
-                            "Execute this work item using the execute_epic MCP tool (it accepts any issue type, not just epics).\n\n\
+                            "The user wants to execute this work item.\n\n\
                              Item: {} \u{2014} {}\n\
                              Type: {} | Status: {} | Priority: {}\n\n\
-                             Call execute_epic with epic_id=\"{}\".",
-                            id, title, issue_type, status, pri, id,
+                             Please analyze this item, gather necessary information, and determine how to execute it. \
+                             If it requires a multi-step plan, use the appropriate tools to structure it. \
+                             If it's a single task, figure out the best way to get it done.",
+                            id, title, issue_type, status, pri,
                         );
 
                         let blocks = vec![spur_acp::ContentBlock::Text(
@@ -4990,6 +4992,7 @@ mod plan_browser_navigation_tests {
 
         app.handle_spur_event(SpurEvent::now(SpurEventBody::PlansLoaded {
             plans: vec![plan_summary("plan-1", PlanOwnerStateEvent::Unowned)],
+            warnings: Vec::new(),
         }));
 
         let plans = app
@@ -5018,6 +5021,7 @@ mod plan_browser_navigation_tests {
         }
         app.handle_spur_event(SpurEvent::now(SpurEventBody::PlansLoaded {
             plans: vec![plan_summary("plan-1", PlanOwnerStateEvent::Unowned)],
+            warnings: Vec::new(),
         }));
 
         app.handle_crossterm_event_for_test(key(KeyCode::Char('r')));

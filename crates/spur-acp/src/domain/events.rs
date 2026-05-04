@@ -209,6 +209,19 @@ pub struct PlanSummaryEvent {
     pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// Non-fatal issues discovered while loading persisted plan summaries.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlanLoadWarningEvent {
+    pub plan_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_epic_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stale_epic_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_owner_state: Option<PlanOwnerStateEvent>,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PlanSummaryCountsEvent {
     pub total: u32,
@@ -793,6 +806,8 @@ pub enum SpurEventBody {
     /// Emitted when the Sprints surface requests persisted plan summaries.
     PlansLoaded {
         plans: Vec<PlanSummaryEvent>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        warnings: Vec<PlanLoadWarningEvent>,
     },
 
     /// Response to a TUI request for full issue detail.

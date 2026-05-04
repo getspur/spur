@@ -2,8 +2,9 @@
 
 use chrono::{TimeZone, Utc};
 use spur_acp::{
-    PlanLifecycleEvent, PlanOwnerStateEvent, PlanSummaryCountsEvent, PlanSummaryEvent,
-    ReviewDecision, ReviewKind, ReviewPayload, Role, SessionId, SpurEvent, SpurEventBody,
+    PlanLifecycleEvent, PlanLoadWarningEvent, PlanOwnerStateEvent, PlanSummaryCountsEvent,
+    PlanSummaryEvent, ReviewDecision, ReviewKind, ReviewPayload, Role, SessionId, SpurEvent,
+    SpurEventBody,
 };
 
 #[test]
@@ -433,14 +434,30 @@ fn plans_loaded_roundtrips_plan_summary_contract() {
                 updated_at: None,
             },
         ],
+        warnings: vec![PlanLoadWarningEvent {
+            plan_id: "plan-a1".into(),
+            canonical_epic_id: Some("bd-120".into()),
+            stale_epic_ids: vec!["bd-stale".into()],
+            canonical_owner_state: Some(PlanOwnerStateEvent::Mine),
+            message: "Plan plan-a1 has duplicate stale epic bd-stale; using canonical epic bd-120."
+                .into(),
+        }],
     });
 
     let json = serde_json::to_string(&ev).unwrap();
     let round: SpurEvent = serde_json::from_str(&json).unwrap();
 
     match round.body {
-        SpurEventBody::PlansLoaded { plans } => {
+        SpurEventBody::PlansLoaded { plans, warnings } => {
             assert_eq!(plans.len(), 3);
+            assert_eq!(warnings.len(), 1);
+            assert_eq!(warnings[0].plan_id, "plan-a1");
+            assert_eq!(warnings[0].canonical_epic_id.as_deref(), Some("bd-120"));
+            assert_eq!(warnings[0].stale_epic_ids, vec!["bd-stale"]);
+            assert!(matches!(
+                warnings[0].canonical_owner_state,
+                Some(PlanOwnerStateEvent::Mine)
+            ));
             assert!(matches!(plans[0].owner_state, PlanOwnerStateEvent::Mine));
             assert!(matches!(
                 plans[1].owner_state,
