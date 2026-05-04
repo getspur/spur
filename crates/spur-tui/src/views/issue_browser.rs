@@ -160,6 +160,12 @@ fn is_issue_ancestor(parent: &str, child: &str) -> bool {
         .is_some_and(|suffix| suffix.starts_with('.'))
 }
 
+#[derive(Debug, Clone)]
+struct CachedLineageFallback {
+    root_id: String,
+    cache_key: Option<String>,
+}
+
 // ── View ────────────────────────────────────────────────────────────────
 
 pub struct IssueBrowserView {
@@ -335,24 +341,44 @@ impl IssueBrowserView {
         parent_by_child_id
     }
 
-    fn cached_lineage_context<'a>(
-        graph_cache: &'a HashMap<String, (Vec<GraphNodeEvent>, Vec<GraphEdgeEvent>)>,
+    fn cached_lineage_fallback_for_selection(
+        &self,
         selected_id: &str,
-        root_id: &str,
-    ) -> Option<(&'a [GraphNodeEvent], &'a [GraphEdgeEvent])> {
-        if let Some((nodes, edges)) = graph_cache.get(root_id) {
-            return Some((nodes, edges));
+        lineage_mode_active: bool,
+    ) -> Option<CachedLineageFallback> {
+        if !lineage_mode_active {
+            return None;
         }
 
-        graph_cache
-            .values()
-            .find(|(nodes, edges)| {
+        let selected_cache = self.graph_cache.get(selected_id);
+        let selected_cache_sparse = selected_cache.is_some_and(|(nodes, _)| nodes.len() <= 1);
+        let selected_cache_loading =
+            selected_cache.is_none() && self.graph_loading.as_deref() == Some(selected_id);
+
+        if !selected_cache_sparse && !selected_cache_loading {
+            return None;
+        }
+
+        let root_id = self.lineage_loading_root_id(selected_id);
+        let cache_key = self.cached_lineage_context_key(selected_id, root_id.as_str());
+
+        Some(CachedLineageFallback { root_id, cache_key })
+    }
+
+    fn cached_lineage_context_key(&self, selected_id: &str, root_id: &str) -> Option<String> {
+        if self.graph_cache.contains_key(root_id) {
+            return Some(root_id.to_string());
+        }
+
+        self.graph_cache
+            .iter()
+            .find(|(_, (nodes, edges))| {
                 nodes.iter().any(|node| node.id == selected_id)
                     || edges
                         .iter()
                         .any(|edge| edge.from == selected_id || edge.to == selected_id)
             })
-            .map(|(nodes, edges)| (nodes.as_slice(), edges.as_slice()))
+            .map(|(key, _)| key.clone())
     }
 
     fn prefix_lineage_root_id<'a>(&'a self, selected_id: &str) -> Option<&'a str> {
@@ -761,6 +787,9 @@ impl IssueBrowserView {
         let issue_count = self.tracked_issues.len();
         let selected_id = self.selected_issue_id();
         let lineage_mode_active = self.graph_cache.values().any(|(nodes, _)| nodes.len() > 1);
+        let cached_lineage_fallback = selected_id
+            .as_deref()
+            .and_then(|id| self.cached_lineage_fallback_for_selection(id, lineage_mode_active));
 
         let issues_height = if issue_count == 0 {
             3u16 // placeholder height
@@ -812,31 +841,41 @@ impl IssueBrowserView {
                             nodes,
                             edges,
                         }))
-                    } else {
-                        let root_id = self.lineage_loading_root_id(id);
-                        let (nodes, edges) =
-                            Self::cached_lineage_context(&self.graph_cache, id, root_id.as_str())
-                                .unwrap_or((nodes.as_slice(), edges.as_slice()));
+                    } else if let Some(fallback) = cached_lineage_fallback.as_ref() {
+                        let (nodes, edges) = fallback
+                            .cache_key
+                            .as_deref()
+                            .and_then(|key| self.graph_cache.get(key))
+                            .map(|(nodes, edges)| (nodes.as_slice(), edges.as_slice()))
+                            .unwrap_or((nodes.as_slice(), edges.as_slice()));
                         Some(IssueLineageView::Cached {
-                            root_id,
+                            root_id: fallback.root_id.clone(),
+                            nodes,
+                            edges,
+                        })
+                    } else {
+                        Some(IssueLineageView::Cached {
+                            root_id: id.to_string(),
                             nodes,
                             edges,
                         })
                     }
-                } else if lineage_mode_active && self.graph_loading.as_deref() == Some(id) {
-                    let root_id = self.lineage_loading_root_id(id);
-                    let (nodes, edges) =
-                        Self::cached_lineage_context(&self.graph_cache, id, root_id.as_str())
-                            .unwrap_or((&[], &[]));
+                } else if let Some(fallback) = cached_lineage_fallback.as_ref() {
+                    let (nodes, edges) = fallback
+                        .cache_key
+                        .as_deref()
+                        .and_then(|key| self.graph_cache.get(key))
+                        .map(|(nodes, edges)| (nodes.as_slice(), edges.as_slice()))
+                        .unwrap_or((&[], &[]));
                     if nodes.len() > 1 {
                         Some(IssueLineageView::Cached {
-                            root_id,
+                            root_id: fallback.root_id.clone(),
                             nodes,
                             edges,
                         })
                     } else {
                         Some(IssueLineageView::Loading {
-                            root_id,
+                            root_id: fallback.root_id.clone(),
                             nodes,
                             edges,
                         })
