@@ -25,6 +25,8 @@
 //! See `docs/superpowers/specs/2026-04-20-adaptive-plan-repair-design.md`
 //! §Information Flow → Label vocabulary for the authoritative list.
 
+use sha2::{Digest, Sha256};
+
 pub fn plan_id(plan_id: &str) -> String {
     format!("spur:plan-id:{plan_id}")
 }
@@ -104,6 +106,33 @@ pub fn mint_delegation_id() -> String {
     // 128-bit form).
     let high = uuid.as_u128() >> 64;
     format!("{high:016x}")
+}
+
+/// Derive a stable 16-char hex `BrainSessionId` from an ACP `SessionId` via
+/// truncated SHA-256. Deterministic - the same ACP session_id always maps to
+/// the same BrainSessionId, so plan-owner labels match across spur restarts
+/// when the user resumes the same ACP session.
+///
+/// Output: `[0-9a-f]{16}` - `br`-legal under `[A-Za-z0-9_:-]+`. The 19-char
+/// `spur:plan-owner:` prefix + 16 hex = 35 chars, well under the 50-char
+/// `br create --label` cap.
+///
+/// 64 bits of derived entropy from a SHA-256 prefix. Birthday-collision-immune
+/// for any single project's brain-session lifetime.
+pub fn derive_brain_session_id(acp_session_id: &spur_acp::SessionId) -> spur_acp::BrainSessionId {
+    let mut hasher = Sha256::new();
+    hasher.update(acp_session_id.0.as_bytes());
+    let digest = hasher.finalize();
+    // Take first 8 bytes (64 bits) -> 16 lowercase hex chars.
+    let derived = digest
+        .iter()
+        .take(8)
+        .fold(String::with_capacity(16), |mut acc, b| {
+            use std::fmt::Write;
+            let _ = write!(acc, "{b:02x}");
+            acc
+        });
+    spur_acp::BrainSessionId::new(spur_acp::SessionId(derived))
 }
 
 pub fn lease_expires_at(ts: i64) -> String {
@@ -572,6 +601,31 @@ mod tests {
             "ffffffffffff4fff",
             "version nibble lives at hex char index 12; remaining bits stay random"
         );
+    }
+
+    #[test]
+    fn derive_brain_session_id_is_deterministic() {
+        let acp = spur_acp::SessionId("550e8400-e29b-41d4-a716-446655440000".to_string());
+        let a = derive_brain_session_id(&acp);
+        let b = derive_brain_session_id(&acp);
+        assert_eq!(a.as_session_id().0, b.as_session_id().0);
+        assert_eq!(a.as_session_id().0.len(), 16);
+    }
+
+    #[test]
+    fn derive_brain_session_id_distinguishes_different_inputs() {
+        let a = derive_brain_session_id(&spur_acp::SessionId("a".to_string()));
+        let b = derive_brain_session_id(&spur_acp::SessionId("b".to_string()));
+        assert_ne!(a.as_session_id().0, b.as_session_id().0);
+    }
+
+    #[test]
+    fn derive_brain_session_id_label_under_50_chars_and_br_legal() {
+        let acp = spur_acp::SessionId(uuid::Uuid::new_v4().to_string());
+        let derived = derive_brain_session_id(&acp);
+        let label = plan_owner(&derived.as_session_id().0);
+        assert!(label.len() <= 50, "label {} chars: {label}", label.len());
+        assert!(is_br_legal(&label), "label not br-legal: {label}");
     }
 
     #[test]
