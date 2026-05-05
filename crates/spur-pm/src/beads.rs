@@ -97,6 +97,31 @@ struct BrIssueWithCounts {
 }
 
 #[derive(Deserialize)]
+struct BrListEnvelope {
+    issues: Vec<BrIssueWithCounts>,
+    #[serde(default)]
+    has_more: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum BrListOutput {
+    Envelope(BrListEnvelope),
+    Bare(Vec<BrIssueWithCounts>),
+}
+
+struct BrListPage {
+    issues: Vec<BrIssueWithCounts>,
+    has_more: Option<bool>,
+}
+
+impl BrListPage {
+    fn saturated(&self, limit: usize) -> bool {
+        self.has_more.unwrap_or(self.issues.len() == limit)
+    }
+}
+
+#[derive(Deserialize)]
 struct BrIssueDetails {
     id: String,
     title: String,
@@ -182,10 +207,27 @@ impl From<BrIssueWithCounts> for IssueSummary {
     }
 }
 
+#[cfg(test)]
 fn paginate_issue_summaries(issues: Vec<IssueSummary>, filter: &IssueFilter) -> Vec<IssueSummary> {
     let offset = filter.offset.unwrap_or(0);
     let limit = filter.limit.unwrap_or(50);
     issues.into_iter().skip(offset).take(limit).collect()
+}
+
+fn parse_br_list_output(output: &str, command: &str) -> anyhow::Result<BrListPage> {
+    match serde_json::from_str::<BrListOutput>(output) {
+        Ok(BrListOutput::Envelope(envelope)) => Ok(BrListPage {
+            issues: envelope.issues,
+            has_more: envelope.has_more,
+        }),
+        Ok(BrListOutput::Bare(issues)) => Ok(BrListPage {
+            issues,
+            has_more: None,
+        }),
+        Err(e) => Err(anyhow::anyhow!(
+            "Failed to parse `{command}` output: {e}\nRaw: {output}"
+        )),
+    }
 }
 
 // ─── BeadsAdapter ─────────────────────────────────────────────────────
@@ -437,15 +479,13 @@ impl BeadsAdapter {
             ])
             .await?;
 
-        let issues: Vec<BrIssueWithCounts> = serde_json::from_str(&output).map_err(|e| {
-            anyhow::anyhow!("Failed to parse `br list` poll output: {e}\nRaw: {output}")
-        })?;
+        let page = parse_br_list_output(&output, "br list poll")?;
 
         // Saturation sentinel: `br list --limit N` truncates. If the returned
         // batch is exactly `limit` rows, more qualifying rows may exist on the
         // backend with `updated_at <= max(fetched.ts)`. Advancing the cursor
         // past `max(fetched.ts)` would hide those rows forever.
-        let saturated = issues.len() == limit;
+        let saturated = page.saturated(limit);
 
         // Snapshot the cursor under the lock, then release immediately.
         let prior_cursor: Option<PollCursor> = {
@@ -458,7 +498,8 @@ impl BeadsAdapter {
 
         // Apply the boundary-safe filter: emit only items that pass the cursor predicate.
         let had_prior = prior_cursor.is_some();
-        let kept: Vec<BrIssueWithCounts> = issues
+        let kept: Vec<BrIssueWithCounts> = page
+            .issues
             .into_iter()
             .filter(|item| match &prior_cursor {
                 None => true,
@@ -603,16 +644,17 @@ impl IssueTracker for BeadsAdapter {
 
         let requested_limit = filter.limit.unwrap_or(50);
         let offset = filter.offset.unwrap_or(0);
-        let cli_limit = requested_limit.saturating_add(offset);
         args.push("--limit".into());
-        args.push(cli_limit.to_string());
+        args.push(requested_limit.to_string());
+        if offset > 0 {
+            args.push("--offset".into());
+            args.push(offset.to_string());
+        }
 
         let output = self.run_br(args).await?;
-        let issues: Vec<BrIssueWithCounts> = serde_json::from_str(&output)
-            .map_err(|e| anyhow::anyhow!("Failed to parse `br list` output: {e}\nRaw: {output}"))?;
+        let page = parse_br_list_output(&output, "br list")?;
 
-        let summaries: Vec<IssueSummary> = issues.into_iter().map(IssueSummary::from).collect();
-        Ok(paginate_issue_summaries(summaries, &filter))
+        Ok(page.issues.into_iter().map(IssueSummary::from).collect())
     }
 
     async fn create_issue(&self, params: IssueCreate) -> anyhow::Result<String> {
@@ -926,6 +968,16 @@ impl BeadsAdvanced for BeadsAdapter {
 
 #[cfg(test)]
 mod tests {
+    const BR_LIST_ROW: &str = r#"{
+        "id": "bd-1",
+        "title": "Issue 1",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "created_at": "2026-05-05T00:00:00Z",
+        "updated_at": "2026-05-05T00:00:00Z"
+    }"#;
+
     fn summary(id: &str) -> crate::types::IssueSummary {
         crate::types::IssueSummary {
             id: id.to_string(),
@@ -938,6 +990,52 @@ mod tests {
             issue_type: Some("task".into()),
             assignee: None,
         }
+    }
+
+    #[test]
+    fn parse_br_list_accepts_023_envelope() {
+        let raw = format!(
+            r#"{{
+                "issues": [{BR_LIST_ROW}],
+                "total": 1,
+                "limit": 50,
+                "offset": 0,
+                "has_more": false
+            }}"#
+        );
+
+        let page = super::parse_br_list_output(&raw, "br list").expect("parse envelope");
+
+        assert_eq!(page.issues.len(), 1);
+        assert_eq!(page.issues[0].id, "bd-1");
+        assert!(!page.saturated(1));
+    }
+
+    #[test]
+    fn parse_br_list_accepts_empty_023_envelope() {
+        let raw = r#"{
+            "issues": [],
+            "total": 0,
+            "limit": 1000,
+            "offset": 0,
+            "has_more": false
+        }"#;
+
+        let page = super::parse_br_list_output(raw, "br list").expect("parse empty envelope");
+
+        assert!(page.issues.is_empty());
+        assert!(!page.saturated(1_000));
+    }
+
+    #[test]
+    fn parse_br_list_accepts_legacy_bare_array() {
+        let raw = format!("[{BR_LIST_ROW}]");
+
+        let page = super::parse_br_list_output(&raw, "br list").expect("parse bare array");
+
+        assert_eq!(page.issues.len(), 1);
+        assert_eq!(page.issues[0].id, "bd-1");
+        assert!(page.saturated(1));
     }
 
     #[test]
