@@ -12,7 +12,7 @@
 
 ## TL;DR
 
-Replace SPUR's current `Command::new("br")` shellouts with direct linkage of the `beads_rust` 0.2.1 crate. The new in-process adapter exposes four disciplined primitives (`read`, `write`, `batch`, plus a snapshot CAS pair `read_snapshot` / `validate_and_commit`), backed by a small reader connection pool and a single guarded writer connection. Cross-process safety comes from `beads_rust`'s built-in `.beads/.write.lock` advisory flock; intra-process Connection-handle safety comes from the writer Mutex; per-mutation DB-level atomicity comes from `beads_rust`'s internal `with_write_transaction` (multi-statement atomicity is an explicit non-goal — see "Multi-statement atomicity" below). Migration is staged across five phases gated by a compile-time Cargo feature, with shadow validation before cutover and an explicit quiescence protocol around any backend swap.
+Replace SPUR's current `Command::new("br")` shellout with direct linkage of the `beads_rust` 0.2.1 crate. The new in-process adapter exposes four disciplined primitives (`read`, `write`, `batch`, plus a snapshot CAS pair `read_snapshot` / `validate_and_commit`), backed by a small reader connection pool and a single guarded writer connection. Cross-process safety comes from `beads_rust`'s built-in `.beads/.write.lock` advisory flock; intra-process Connection-handle safety comes from the writer Mutex; per-mutation DB-level atomicity comes from `beads_rust`'s internal `with_write_transaction` (multi-statement atomicity is an explicit non-goal — see "Multi-statement atomicity" below). **Pre-launch context**: SPUR has not shipped to users yet, so this is a clean replacement — no feature flag, no shadow validation, no phased cutover, no legacy-binary guard. The existing `BeadsAdapter` shellout is deleted and replaced in one delivery.
 
 ---
 
@@ -388,28 +388,11 @@ Naive `mtime > N seconds → delete` is unsafe (clock skew, NFS, slow legitimate
 
 Runs at adapter `open()` time only. Periodic sweep deferred unless metrics show accumulation.
 
-### Legacy `br` binary guard
+### Legacy `br` binary guard — DROPPED (pre-launch)
 
-Mandatory startup check:
+The original spec mandated detecting an old `br` binary on PATH and refusing to boot. This was important when SPUR ran subprocesses against `br`. Post-replacement, SPUR never invokes the `br` binary, so there is no co-existence risk.
 
-```rust
-fn detect_legacy_br_binary_on_path() -> Result<()> {
-    let Ok(output) = Command::new("br").arg("--version").output() else {
-        return Ok(()); // no br on PATH; fine
-    };
-    let version = parse_version(&output.stdout)?;
-    if version < semver::Version::new(0, 2, 1) {
-        return Err(BeadsError::LegacyBinaryDetected {
-            found: version,
-            min_required: "0.2.1".into(),
-            remediation: "Run: cargo install --git https://github.com/Dicklesworthstone/beads_rust",
-        });
-    }
-    Ok(())
-}
-```
-
-If the user runs an old `br` binary in another terminal while SPUR is running, the old binary ignores `.write.lock` and recreates the corruption pattern from bd-1h3w. SPUR refuses to start in this environment. The check is one-shot at startup; we accept the rare case where a new `br` is installed mid-session.
+If a developer also installs `br ≥ 0.2.1` and uses it manually against the same `.beads/`, that's safe: both paths honor the same `.write.lock` and atomic writer. If a developer installs `br < 0.2.1`, that's their machine's problem; SPUR no longer touches that binary.
 
 ### Filesystem detection
 
@@ -499,84 +482,29 @@ During Phase 3 (see Migration plan), every test that exercises `IssueTracker` ru
 
 ---
 
-## Migration plan
+## Delivery plan
 
-Five phases, each independently verifiable and rollback-able.
+**Pre-launch context:** SPUR has not shipped to users. There is no production traffic to protect, no rollback story required beyond `git revert`, no shadow validation, no feature flag, no quiescence protocol, no co-existence with old binaries. The spec's earlier multi-phase migration sections were written before this constraint was clarified and have been removed.
 
-### Phase 1 — Trait centralization (no engine change)
+What ships in one delivery:
 
-**Action:** refactor the 20 bypass `Command::new("br")` sites in `crates/spur-mcp/src/server.rs` (lines 7483, 9039, 9205, 9270) and `crates/spur-mcp/src/plan/reconciler.rs` (lines 2206–2411 across 16 sites) to go through the existing `IssueTracker` trait in `spur-pm`. Add any missing trait methods.
+1. **Add `beads_rust = "0.2.1"` as a direct Cargo dependency** of `spur-pm`.
+2. **Implement `BeadsCrateAdapter`** with the four primitives, init guards (FS detection, stale-tmp sweep, stale-JSONL detection, schema-migration under flock), backoff policy, snapshot CAS pair, idempotent auto-flush, observability metrics.
+3. **Replace `BeadsAdapter`** in `PmService::try_new` so all production paths use the new adapter. Delete `run_br_once`, the `BrErrorEnvelope` parsing, the install-hint message, and any other shellout machinery.
+4. **Migrate test fixtures** — the 20 `Command::new("br")` calls in `#[cfg(test)]` modules and the 100+ test files that shell out to `br init` / `br create` get replaced by a `TestBeadsWorkspace` helper that uses `beads_rust` directly. Optional: keep one `br`-based smoke test as a "still works under CLI too" sanity check; otherwise drop the runtime `br` requirement entirely.
+5. **Multi-process integration tests** — the matrix from the Testing strategy section (concurrent-write stress, crash-during-write, migration race, snapshot conflict, lock contention escalation, non-local FS detection).
+6. **Audit SPUR-internal single-writer assumptions** — reconciler tick state, lineage snapshots, ready-queue caches; document or fix any that don't survive multi-instance.
 
-**Verification:** all existing tests pass; no behavior change in plan execution.
+What's NOT included:
 
-**Rollback:** trivial git revert.
+- Feature flag — none needed; clean replacement
+- Shadow validation in CI — none needed; not protecting any prior behavior
+- Quiescence protocol for backend swap — none needed; there is no "old backend" to swap from at runtime
+- Legacy `br` binary guard — none needed; SPUR no longer shells out to `br` at all
+- Phased rollout — single delivery
+- bd-1h3w companion items (parser skip+log+continue, periodic integrity check, manual repair docs) — explicitly deferred to companion specs
 
-**Risk:** low.
-
-### Phase 2 — Direct adapter behind compile-time feature
-
-**Action:** implement `BeadsCrateAdapter` (the design above) alongside the existing `BeadsAdapter` (CLI shellout). Both implement `IssueTracker`. Selection via **compile-time Cargo feature** `beads_crate_backend` on the `spur-pm` crate. Default-off in Phase 2; default-on in Phase 4.
-
-**Why compile-time, not env-var:** runtime selection via env var would let different SPUR processes on the same host (TUI, MCP server, background worker) read different env values and run mixed backends against the same `.beads/` dir. Even though both backends honor `.write.lock`, mixing in-process state (long-lived crate connections) with subprocess invocations creates an asymmetry that's hard to reason about. Compile-time feature guarantees a single binary's processes are homogeneous.
-
-**Verification:** all existing tests pass with both feature settings. CI runs the suite under both `--no-default-features` and `--features beads_crate_backend`. New unit tests for each primitive. New multi-process integration tests for the matrix above.
-
-**Rollback:** rebuild with the feature off; ship.
-
-**Risk:** medium. New code path, but isolated behind the feature.
-
-### Phase 3 — Shadow validation in CI
-
-**Action:** dedicated CI job wraps every `IssueTracker` call to run **both** backends and assert byte-equivalent JSONL output. Cover the operation set:
-
-- Issue create / update / delete
-- Status transitions
-- Labels (add/remove)
-- Dependencies (add/remove)
-- Comments (append, including sentinel comments)
-- List / ready filtering
-- Metadata
-- JSONL line ordering and hash stability
-- Error mapping (typed errors equivalent)
-- Lock timeout behavior
-- Idempotency (replay same op → same JSONL state)
-
-**Verification:** CI green for 50 consecutive runs across the operation matrix (concrete threshold; can be tuned based on observed flake rate).
-
-**Rollback:** disable the shadow CI job; production unaffected.
-
-**Risk:** low. Parallel run, no commit to main path.
-
-### Phase 4 — Cutover
-
-**Action:** flip the default Cargo feature so `beads_crate_backend` is on by default. Ship. The CLI path remains compiled in (behind `--no-default-features`) for one release cycle as escape hatch.
-
-**Quiescence protocol (mandatory before any backend swap, including initial rollout and rollback):**
-
-1. **Drain in-flight writes** — stop accepting new `write` / `batch` / `validate_and_commit` calls; wait for all in-flight `spawn_blocking` write closures to complete (with a hard timeout, e.g. 30s).
-2. **Force WAL checkpoint** — call `PRAGMA wal_checkpoint(TRUNCATE)` to flush all WAL pages to the main db file. Verifies the SQLite db is in a clean state.
-3. **Force JSONL flush** — call `auto_flush()` unconditionally so the JSONL is in sync with the SQLite db.
-4. **Close all connections** — drop reader pool, drop writer Mutex, finalize all prepared statements.
-5. **Verify clean shutdown** — confirm no `.beads/.tmp_*` files remain, `.beads/.write.lock` is unheld.
-6. **Restart with new backend.**
-
-This protocol applies to both the cutover (CLI → crate) and the rollback (crate → CLI). Without it, the legacy CLI adapter on rollback would trip over WAL frames or unfinalized statements left behind by the crate adapter.
-
-**Verification:** observability dashboards green for one week. No regressions in plan execution metrics. Quiescence protocol exercised in CI before each release.
-
-**Rollback:** rebuild without the feature, run quiescence protocol, redeploy.
-
-**Risk:** medium. Production traffic on new path.
-
-### Phase 5 — Decommission
-
-**Action:** delete `BeadsAdapter` shellout path. Delete `Command::new("br")` invocations from runtime code and most tests (test fixtures may still use `br` CLI for setup convenience, then progressively migrate). Drop CLI dependency from runtime `Cargo.toml`.
-
-**Verification:** code search returns zero matches for `Command::new("br")` and `run_br` in non-test code.
-
-**Rollback:** revert Phase 5 in git.
-
-**Risk:** low. Only runs after Phase 4 has stabilized.
+**Verification:** existing test suite passes (with test fixtures migrated to the new helper); new unit + integration tests pass; `grep -r 'Command::new("br")' crates/` returns zero matches in non-test (and ideally also in test) code; observability metrics emit values during a manual smoke test.
 
 ---
 
@@ -648,18 +576,9 @@ Concrete operator playbook for the failure modes the metrics surface. Each entry
 
 **Do NOT:** `kill -9` a process holding the lock — this can leave a half-rename in flight. Prefer SIGTERM and wait.
 
-### R5 — Legacy `br` detected at startup, SPUR refuses to boot
+### R5 — (removed)
 
-**Trigger:** SPUR exits at startup with `LegacyBinaryDetected { found: 0.1.x, min_required: 0.2.1 }`.
-
-**Likely cause:** an old `br` binary is on PATH, often from a prior install or a CI image.
-
-**Action:**
-1. Identify the old binary: `which -a br` shows all `br` on PATH.
-2. Upgrade: `cargo install --git https://github.com/Dicklesworthstone/beads_rust --tag v0.2.1` (or higher).
-3. Verify: `br --version` reports ≥ 0.2.1.
-
-**Emergency bypass (USE WITH EXTREME CAUTION):** set `SPUR_BYPASS_LEGACY_BR_CHECK=1` to skip the assertion. **This re-opens the bd-1h3w corruption surface** if the old `br` is actually run against the same `.beads/`. Use only when you can guarantee the old binary will not be invoked (e.g., headless CI where you've audited every script).
+This entry covered the legacy `br` binary guard, which has been dropped (see "Legacy `br` binary guard — DROPPED (pre-launch)" in the Multi-instance correctness section). SPUR no longer shells out to `br`, so co-existence with an old binary is no longer a corruption surface.
 
 ### R6 — Stale JSONL detected at boot
 
