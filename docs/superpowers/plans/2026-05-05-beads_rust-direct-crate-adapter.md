@@ -755,7 +755,10 @@ fn is_jsonl_temp_file(name: &str) -> bool {
 
 /// Sweep stale jsonl temp files older than `min_age`. Returns count removed.
 /// Caller MUST hold .write.lock when calling this; we do not acquire it here.
-pub fn sweep_stale_jsonl_temps(beads_dir: &Path, min_age: Duration) -> std::io::Result<u64> {
+pub(crate) fn sweep_stale_jsonl_temps(
+    beads_dir: &Path,
+    min_age: Duration,
+) -> std::io::Result<u64> {
     let now = SystemTime::now();
     let mut removed = 0;
     let entries = match std::fs::read_dir(beads_dir) {
@@ -768,7 +771,10 @@ pub fn sweep_stale_jsonl_temps(beads_dir: &Path, min_age: Duration) -> std::io::
         let name = entry.file_name();
         let Some(name_str) = name.to_str() else { continue };
         if !is_jsonl_temp_file(name_str) { continue; }
-        let meta = entry.metadata()?;
+        // TOCTOU: the file may have been renamed/unlinked between read_dir and
+        // metadata (e.g., a concurrent atomic write completing). Skip the entry
+        // instead of failing the whole sweep.
+        let Ok(meta) = entry.metadata() else { continue; };
         if let Ok(modified) = meta.modified() {
             if let Ok(age) = now.duration_since(modified) {
                 if age >= min_age {
