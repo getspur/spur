@@ -1602,6 +1602,14 @@ git commit -m "spur-pm: snapshot CAS pair (read_snapshot + validate_and_commit)"
 **Files:**
 - Create: `crates/spur-pm/src/beads_crate/issue_tracker.rs`
 
+> **Plan revision (2026-05-05):** T15 lands an inherent
+> `BeadsCrateAdapter::get_issue` plus `br_to_pm_issue`, not a partial
+> `IssueTracker` impl. Apply the audited drift fixes: use `Status` and
+> `IssueType` Display via `.to_string()`, read `Priority` through `.0`,
+> handle `SqliteStorage::get_issue` returning `Ok(None)` as not found, and
+> construct test `beads_rust::model::Issue` values with a struct literal because
+> `BrIssue::new` does not exist.
+
 - [ ] **Step 1: Type-conversion helpers**
 
 Create `crates/spur-pm/src/beads_crate/issue_tracker.rs`:
