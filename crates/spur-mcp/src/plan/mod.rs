@@ -2264,7 +2264,7 @@ pub async fn run_plan(
                         .iter()
                         .all(|d| completed.contains(d.as_str()))
                 {
-                    let delegation_id = uuid::Uuid::new_v4().to_string();
+                    let delegation_id = crate::plan::labels::mint_delegation_id();
                     let attempt = entry.attempt;
                     entry.status = PlanTaskStatus::Dispatched {
                         delegation_id: delegation_id.clone(),
