@@ -1479,16 +1479,19 @@ git commit -m "spur-pm: BeadsCrateAdapter::batch primitive"
 
 ### Task 14: Snapshot CAS pair (`read_snapshot` + `validate_and_commit`)
 
-> **Plan revision (2026-05-05):** beads_rust 0.2.1 has no public
-> `connection_pragma` / `data_version` accessor. The cleanest path
-> forward is to use `count_issues()` as a coarse data_version proxy
-> for now: it changes on net add/delete (the common cases for our
-> CAS use), and stays stable across pure field updates (limitation
-> documented in code + follow-up issue). When upstream exposes
-> `PRAGMA data_version`, swap in the precise accessor without
-> changing the CAS contract. Same `Issue` constructor drift applies
-> to the test — replace with a closure that takes a coarse snapshot
-> proxy and verifies the CAS path runs end-to-end.
+> **Plan revision (2026-05-05):** Three changes:
+> (1) beads_rust 0.2.1 has no public `connection_pragma` /
+> `data_version` accessor. Use `count_issues()` as a coarse proxy:
+> detects net add/delete between snapshot and commit, misses pure
+> field updates. Documented in code + follow-up to upstream
+> `PRAGMA data_version`.
+> (2) Open-fresh-per-call (consistent with T10): `read_snapshot`
+> opens a fresh `SqliteStorage` for the read; `validate_and_commit`
+> opens a fresh `SqliteStorage` after acquiring `.write.lock`.
+> (3) Two tests: a no-conflict happy path AND a conflict-detection
+> regression test that simulates a concurrent net-add via direct
+> `Issue` struct-literal construction (the CAS rejection path is the
+> safety property worth locking).
 
 **Files:**
 - Modify: `crates/spur-pm/src/beads_crate/adapter.rs`
