@@ -1214,9 +1214,13 @@ git commit -m "spur-pm: BeadsCrateAdapter::open with init guards wired"
 
 ### Task 11: `read` primitive
 
-> **Plan revision (2026-05-05):** `SqliteStorage::list_filters_count` does
-> not exist in beads_rust 0.2.1. Use `count_issues()` (no-arg, returns
-> `Result<usize>`) instead. The test snippet below has been corrected.
+> **Plan revision (2026-05-05):** Two changes from original plan:
+> (1) `SqliteStorage::list_filters_count` doesn't exist — use
+> `count_issues()`. (2) The reader-pool checkout is replaced with
+> open-fresh-per-call (T10 architectural revision): each `read` opens
+> a new `SqliteStorage` inside `spawn_blocking`, runs the closure, and
+> drops the storage on the same blocking thread. The closure result
+> must be `Send`, but the storage never crosses thread boundaries.
 
 **Files:**
 - Modify: `crates/spur-pm/src/beads_crate/adapter.rs`
@@ -1226,19 +1230,22 @@ git commit -m "spur-pm: BeadsCrateAdapter::open with init guards wired"
 In `impl BeadsCrateAdapter`, add:
 
 ```rust
-/// Lock-free snapshot read. WAL gives snapshot isolation.
+/// Lock-free snapshot read. Opens a fresh `SqliteStorage` connection
+/// for the duration of `f` and drops it on return. WAL mode gives
+/// snapshot isolation across concurrent readers and writers.
 pub async fn read<T, F>(&self, f: F) -> anyhow::Result<T>
 where
-    F: FnOnce(&SqliteStorage) -> anyhow::Result<T> + Send + 'static,
+    F: FnOnce(&beads_rust::storage::sqlite::SqliteStorage) -> anyhow::Result<T> + Send + 'static,
     T: Send + 'static,
 {
-    let pool = Arc::clone(&self.reader_pool);
     let metrics = Arc::clone(&self.metrics);
+    let db_path = self.beads_dir.join("beads.db");
     tokio::task::spawn_blocking(move || -> anyhow::Result<T> {
         metrics.incr_read();
-        let guard = pool.checkout()?;
-        f(guard.storage())
-    }).await?
+        let storage = beads_rust::storage::sqlite::SqliteStorage::open(&db_path)?;
+        f(&storage)
+    })
+    .await?
 }
 ```
 
