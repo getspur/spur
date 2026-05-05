@@ -16,6 +16,20 @@ use beads_rust::sync;
 use crate::beads_crate::backoff::BackoffPolicy;
 use crate::beads_crate::init;
 use crate::beads_crate::metrics::ContentionMetrics;
+use crate::beads_crate::snapshot::{Conflict, Snapshot};
+
+/// Coarse data_version proxy. beads_rust 0.2.1 does not expose
+/// `PRAGMA data_version`; until it does, we use `count_issues()`. This
+/// detects net add/delete between snapshot and commit, which covers
+/// the IssueTracker CAS use cases (e.g. "delete iff still present").
+/// It MISSES pure field updates that don't change the row count —
+/// callers who need that level of strictness must not rely on this
+/// proxy yet. Follow-up: expose PRAGMA data_version upstream or
+/// vendor a helper.
+fn read_data_version(s: &beads_rust::storage::sqlite::SqliteStorage) -> anyhow::Result<i64> {
+    let count = s.count_issues()?;
+    Ok(count as i64)
+}
 
 fn acquire_write_lock_with_backoff(
     beads_dir: &Path,
@@ -150,6 +164,74 @@ impl BeadsCrateAdapter {
         .await?
     }
 
+    /// Read a snapshot value plus the current data_version proxy so the
+    /// caller can do async work and then call `validate_and_commit`. The
+    /// snapshot is consistent at read time; if the db changes before
+    /// `validate_and_commit`, the commit returns a `Conflict` error.
+    pub async fn read_snapshot<S, F>(&self, f: F) -> anyhow::Result<Snapshot<S>>
+    where
+        F: FnOnce(&beads_rust::storage::sqlite::SqliteStorage) -> anyhow::Result<S>
+            + Send
+            + 'static,
+        S: Send + 'static,
+    {
+        let metrics = Arc::clone(&self.metrics);
+        let db_path = self.beads_dir.join("beads.db");
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Snapshot<S>> {
+            metrics.incr_read();
+            let storage = beads_rust::storage::sqlite::SqliteStorage::open(&db_path)?;
+            let value = f(&storage)?;
+            let data_version = read_data_version(&storage)?;
+            Ok(Snapshot {
+                value,
+                data_version,
+            })
+        })
+        .await?
+    }
+
+    /// Apply a write conditioned on the snapshot's data_version still
+    /// matching at commit time. Returns a `Conflict` error if the
+    /// underlying state moved between read and validate. The closure
+    /// receives the snapshot's value alongside `&mut SqliteStorage`.
+    pub async fn validate_and_commit<S, T, FW>(
+        &self,
+        snapshot: Snapshot<S>,
+        write: FW,
+    ) -> anyhow::Result<T>
+    where
+        FW: FnOnce(&mut beads_rust::storage::sqlite::SqliteStorage, S) -> anyhow::Result<T>
+            + Send
+            + 'static,
+        S: Send + 'static,
+        T: Send + 'static,
+    {
+        let metrics = Arc::clone(&self.metrics);
+        let beads_dir = self.beads_dir.clone();
+        let backoff = self.config.backoff.clone();
+        let lock_timeout_ms = self.config.lock_timeout_ms;
+        tokio::task::spawn_blocking(move || -> anyhow::Result<T> {
+            let _flock =
+                acquire_write_lock_with_backoff(&beads_dir, &backoff, lock_timeout_ms, &metrics)?;
+            let mut storage = beads_rust::storage::sqlite::SqliteStorage::open_with_timeout(
+                &beads_dir.join("beads.db"),
+                Some(lock_timeout_ms),
+            )?;
+            let current = read_data_version(&storage)?;
+            if current != snapshot.data_version {
+                metrics.incr_conflict();
+                anyhow::bail!(Conflict::data_version(snapshot.data_version, current));
+            }
+            metrics.incr_write();
+            let result = write(&mut storage, snapshot.value);
+            if result.is_err() {
+                metrics.incr_write_error();
+            }
+            result
+        })
+        .await?
+    }
+
     /// Multiple mutations under one flock acquisition. NOT a single DB
     /// transaction — each individual call inside `f` is atomic, but the
     /// batch as a whole is not. See spec "Multi-statement atomicity"
@@ -247,6 +329,107 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             1
         );
+    }
+
+    /// Exercises the CAS rejection path. The data_version proxy is
+    /// `count_issues()`; we simulate a concurrent net-add by running an
+    /// `INSERT INTO issues` directly via the writer between snapshot
+    /// and commit, then verify validate_and_commit aborts with a
+    /// Conflict.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn validate_and_commit_rejects_on_data_version_drift() {
+        let dir = TempDir::new().unwrap();
+        let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
+            .await
+            .unwrap();
+
+        let snap = adapter.read_snapshot(|_s| Ok(())).await.unwrap();
+        // Simulate a concurrent writer bumping the proxy. Construct a
+        // minimal Issue via struct literal — Issue derives no Default.
+        adapter
+            .write(|s| {
+                use beads_rust::model::{Issue, IssueType, Priority, Status};
+                use chrono::Utc;
+                let now = Utc::now();
+                let issue = Issue {
+                    id: "bd-test-cas".into(),
+                    title: "drift".into(),
+                    description: None,
+                    status: Status::Open,
+                    priority: Priority::MEDIUM,
+                    issue_type: IssueType::Task,
+                    created_at: now,
+                    updated_at: now,
+                    assignee: None,
+                    owner: None,
+                    estimated_minutes: None,
+                    due_at: None,
+                    defer_until: None,
+                    external_ref: None,
+                    ephemeral: false,
+                    content_hash: None,
+                    design: None,
+                    acceptance_criteria: None,
+                    notes: None,
+                    created_by: None,
+                    closed_at: None,
+                    close_reason: None,
+                    closed_by_session: None,
+                    source_system: None,
+                    source_repo: None,
+                    deleted_at: None,
+                    deleted_by: None,
+                    delete_reason: None,
+                    original_type: None,
+                    compaction_level: None,
+                    compacted_at: None,
+                    compacted_at_commit: None,
+                    original_size: None,
+                    sender: None,
+                    pinned: false,
+                    is_template: false,
+                    labels: Vec::new(),
+                    dependencies: Vec::new(),
+                    comments: Vec::new(),
+                };
+                s.create_issue(&issue, "test").map_err(Into::into)
+            })
+            .await
+            .unwrap();
+
+        let err = adapter
+            .validate_and_commit(snap, |_s, _| Ok::<i32, anyhow::Error>(99))
+            .await
+            .expect_err("commit must reject after drift");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("snapshot CAS conflict"),
+            "expected Conflict, got: {msg}"
+        );
+        assert_eq!(
+            adapter
+                .metrics()
+                .conflict_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn read_snapshot_then_validate_and_commit_no_conflict() {
+        let dir = TempDir::new().unwrap();
+        let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
+            .await
+            .unwrap();
+        // Snapshot the empty db (count_issues == 0).
+        let snap = adapter.read_snapshot(|_s| Ok(())).await.unwrap();
+        // Validate-and-commit without any concurrent writers — should
+        // succeed because data_version proxy hasn't moved.
+        let result: i32 = adapter
+            .validate_and_commit(snap, |_s, _| Ok(7))
+            .await
+            .unwrap();
+        assert_eq!(result, 7);
     }
 
     #[tokio::test(flavor = "multi_thread")]
