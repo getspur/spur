@@ -70,3 +70,120 @@ mod tests {
         assert!(detect_local_fs(dir.path()).is_ok());
     }
 }
+
+use std::time::{Duration, SystemTime};
+
+/// Pattern matching the temp files beads_rust creates during atomic JSONL writes.
+/// Per beads_rust 0.2.1 `sync::export_temp_path`:
+///
+/// ```ignore
+/// pub(crate) fn export_temp_path(output_path: &Path) -> PathBuf {
+///     output_path.with_extension(format!("jsonl.{}.tmp", std::process::id()))
+/// }
+/// ```
+///
+/// For input `issues.jsonl`, `Path::with_extension` strips `.jsonl` and appends
+/// the new extension, producing `issues.jsonl.<pid>.tmp`. The PID is decimal
+/// digits; there is NO random suffix. We deliberately match strictly so we
+/// never touch SQLite sidecars (`-wal`, `-shm`) or the live `issues.jsonl`.
+fn is_jsonl_temp_file(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("issues.jsonl.") else {
+        return false;
+    };
+    let Some(pid_str) = rest.strip_suffix(".tmp") else {
+        return false;
+    };
+    !pid_str.is_empty() && pid_str.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Sweep stale jsonl temp files older than `min_age`. Returns count removed.
+/// Caller MUST hold .write.lock when calling this; we do not acquire it here.
+pub fn sweep_stale_jsonl_temps(beads_dir: &Path, min_age: Duration) -> std::io::Result<u64> {
+    let now = SystemTime::now();
+    let mut removed = 0;
+    let entries = match std::fs::read_dir(beads_dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else { continue };
+        if !is_jsonl_temp_file(name_str) { continue; }
+        let meta = entry.metadata()?;
+        if let Ok(modified) = meta.modified() {
+            if let Ok(age) = now.duration_since(modified) {
+                if age >= min_age {
+                    if std::fs::remove_file(entry.path()).is_ok() {
+                        removed += 1;
+                    }
+                }
+            }
+        }
+    }
+    Ok(removed)
+}
+
+#[cfg(test)]
+mod sweep_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn ignores_wal_and_shm_sidecars_and_live_jsonl() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("issues.jsonl"), b"x").unwrap();
+        std::fs::write(dir.path().join("issues.jsonl-wal"), b"x").unwrap();
+        std::fs::write(dir.path().join("issues.jsonl-shm"), b"x").unwrap();
+        std::fs::write(dir.path().join("beads.db-wal"), b"x").unwrap();
+        let removed = sweep_stale_jsonl_temps(dir.path(), Duration::ZERO).unwrap();
+        assert_eq!(removed, 0);
+        assert!(dir.path().join("issues.jsonl").exists());
+        assert!(dir.path().join("issues.jsonl-wal").exists());
+        assert!(dir.path().join("beads.db-wal").exists());
+    }
+
+    #[test]
+    fn removes_old_jsonl_tmp_files() {
+        let dir = TempDir::new().unwrap();
+        // beads_rust temp scheme: `issues.jsonl.<pid>.tmp` (decimal digits only)
+        let p = dir.path().join("issues.jsonl.12345.tmp");
+        std::fs::write(&p, b"orphan").unwrap();
+        let removed = sweep_stale_jsonl_temps(dir.path(), Duration::ZERO).unwrap();
+        assert_eq!(removed, 1);
+        assert!(!p.exists());
+    }
+
+    #[test]
+    fn keeps_recent_tmp_files() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("issues.jsonl.99999.tmp");
+        std::fs::write(&p, b"in-flight").unwrap();
+        let removed = sweep_stale_jsonl_temps(dir.path(), Duration::from_secs(3600)).unwrap();
+        assert_eq!(removed, 0);
+        assert!(p.exists());
+    }
+
+    #[test]
+    fn ignores_non_pid_lookalikes() {
+        let dir = TempDir::new().unwrap();
+        // Right shape but non-digit middle — must not be matched.
+        let p1 = dir.path().join("issues.jsonl.abc.tmp");
+        // Right prefix/suffix but empty middle.
+        let p2 = dir.path().join("issues.jsonl..tmp");
+        std::fs::write(&p1, b"x").unwrap();
+        std::fs::write(&p2, b"x").unwrap();
+        let removed = sweep_stale_jsonl_temps(dir.path(), Duration::ZERO).unwrap();
+        assert_eq!(removed, 0);
+        assert!(p1.exists());
+        assert!(p2.exists());
+    }
+
+    #[test]
+    fn tolerates_missing_dir() {
+        let dir = TempDir::new().unwrap();
+        let nonexistent = dir.path().join("does-not-exist");
+        assert_eq!(sweep_stale_jsonl_temps(&nonexistent, Duration::ZERO).unwrap(), 0);
+    }
+}
