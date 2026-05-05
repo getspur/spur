@@ -521,10 +521,6 @@ impl<'a> LineageMeta<'a> {
             return format!("└─ {icon} {}", issue.id);
         }
 
-        if self.node_by_id.contains_key(issue.id.as_str()) {
-            return format!("· {icon} {}", issue.id);
-        }
-
         format!("  {icon} {}", issue.id)
     }
 
@@ -887,6 +883,19 @@ mod tests {
 
         assert_eq!(lineage_cell, "│ │ ├─ ○ bd-ro.1.2.3");
         assert!(!lineage_cell.contains('…'));
+    }
+
+    #[test]
+    fn issue_label_uses_default_indent_for_disconnected_graph_node() {
+        let floating = issue("bd-misc");
+        let nodes = vec![graph_node("bd-root", "open"), graph_node("bd-misc", "open")];
+        let meta = LineageMeta::new(IssueLineageContext {
+            root_id: "bd-root",
+            nodes: &nodes,
+            edges: &[],
+        });
+
+        assert_eq!(meta.issue_label(&floating), "  ○ bd-misc");
     }
 
     #[test]
