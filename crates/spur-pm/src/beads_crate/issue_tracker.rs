@@ -5,7 +5,7 @@ use std::str::FromStr;
 use chrono::Utc;
 
 use crate::beads_crate::adapter::BeadsCrateAdapter;
-use crate::types::{Issue, IssueCreate, IssueFilter, IssueSummary, PmSource};
+use crate::types::{Issue, IssueCreate, IssueFilter, IssueSummary, IssueUpdate, PmSource};
 
 pub(crate) fn br_to_pm_issue(br: beads_rust::model::Issue) -> Issue {
     let url = format!("beads://{}", br.id);
@@ -184,6 +184,48 @@ impl BeadsCrateAdapter {
         })
         .await
     }
+
+    pub async fn update_issue(&self, id: &str, update: IssueUpdate) -> anyhow::Result<()> {
+        let id = id.to_string();
+        self.write(move |s| {
+            let has_field_update =
+                update.status.is_some() || update.priority.is_some() || update.assignee.is_some();
+
+            if has_field_update {
+                let mut br_update = beads_rust::storage::sqlite::IssueUpdate::default();
+                if let Some(status) = update.status.as_deref() {
+                    let parsed = beads_rust::model::Status::from_str(status)
+                        .unwrap_or(beads_rust::model::Status::Open);
+                    br_update.status = Some(parsed);
+                }
+                if let Some(p) = update.priority {
+                    br_update.priority = Some(beads_rust::model::Priority(p));
+                }
+                if let Some(ref a) = update.assignee {
+                    br_update.assignee = if a.is_empty() {
+                        Some(None)
+                    } else {
+                        Some(Some(a.clone()))
+                    };
+                }
+                s.update_issue(&id, &br_update, "spur")?;
+            }
+
+            for label in &update.add_labels {
+                s.add_label(&id, label, "spur")?;
+            }
+            for label in &update.remove_labels {
+                s.remove_label(&id, label, "spur")?;
+            }
+
+            if let Some(comment) = update.comment.as_deref() {
+                s.add_comment(&id, "spur", comment)?;
+            }
+
+            Ok(())
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -290,6 +332,46 @@ mod tests {
             fetched.labels,
             vec!["lbl-a".to_string(), "lbl-b".to_string()]
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn update_issue_changes_status_and_labels() {
+        use crate::types::{IssueCreate, IssueUpdate};
+
+        let dir = TempDir::new().unwrap();
+        let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
+            .await
+            .unwrap();
+
+        let id = adapter
+            .create_issue(IssueCreate {
+                title: "X".into(),
+                labels: vec!["keep".into(), "drop".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        adapter
+            .update_issue(
+                &id,
+                IssueUpdate {
+                    status: Some("closed".into()),
+                    priority: Some(0),
+                    add_labels: vec!["new".into()],
+                    remove_labels: vec!["drop".into()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let after = adapter.get_issue(&id).await.unwrap();
+        assert_eq!(after.status, "closed");
+        assert_eq!(after.priority, Some(0));
+        let mut labels = after.labels;
+        labels.sort();
+        assert_eq!(labels, vec!["keep".to_string(), "new".to_string()]);
     }
 
     #[tokio::test(flavor = "multi_thread")]

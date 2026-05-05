@@ -1976,6 +1976,13 @@ git add crates/spur-pm/src/beads_crate/
 git commit -m "spur-pm: IssueTracker::update_issue via crate adapter"
 ```
 
+> **Plan revision (2026-05-05):** Section D drift fixes applied to T18:
+> - `beads_rust::storage::sqlite::IssueUpdate` has **no** `add_labels`/`remove_labels` fields. Loop over the local `IssueUpdate.add_labels` and call `s.add_label(&id, label, "spur")`; mirror with `s.remove_label(...)`.
+> - `IssueUpdate.priority: Option<Priority>` (newtype) — wrap as `Some(Priority(p))`.
+> - `IssueUpdate.status: Option<Status>` (enum) — parse via `Status::from_str`.
+> - `IssueUpdate.assignee: Option<Option<String>>` — empty-string sentinel maps to `Some(None)` (unassign), non-empty maps to `Some(Some(value))`.
+> - `s.add_comment(issue_id, author, text)` — argument order is (id, author/actor, body). The plan snippet had `(id, body, "spur")`.
+
 ---
 
 ### Task 19: Implement `IssueTracker::add_dependency`
