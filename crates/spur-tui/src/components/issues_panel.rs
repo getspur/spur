@@ -1,11 +1,28 @@
 use ratatui::{
     layout::{Constraint, Rect},
     style::{Color, Modifier, Style, Stylize},
+    text::{Line, Span},
     widgets::{Block, Cell, Row, Table, TableState},
     Frame,
 };
 
 use spur_pm::IssueSummary;
+
+/// Find the longest tracked-issue id that is a dot-prefix ancestor of `id`.
+/// Used to surface "↳ <parent>" annotations in the flat issues panel without
+/// reintroducing the lineage rendering surface (see `bd-2u0n.13`). Pure id
+/// string analysis — no graph_cache dependency, no render-time mutation.
+fn parent_id_for_prefix_child<'a>(id: &str, issues: &'a [IssueSummary]) -> Option<&'a str> {
+    issues
+        .iter()
+        .filter(|other| other.id.as_str() != id)
+        .filter_map(|other| {
+            id.strip_prefix(other.id.as_str())
+                .filter(|suffix| suffix.starts_with('.'))
+                .map(|_| other.id.as_str())
+        })
+        .max_by_key(|parent_id| parent_id.len())
+}
 
 pub struct IssuesPanel {
     // Selection state invariant:
@@ -164,13 +181,24 @@ impl IssuesPanel {
                     other => Cell::from(other.to_string()).fg(Color::White),
                 };
 
+                let title_cell = match parent_id_for_prefix_child(&issue.id, issues) {
+                    Some(parent_id) => Cell::from(Line::from(vec![
+                        Span::raw(issue.title.as_str()),
+                        Span::styled(
+                            format!("  ↳ {parent_id}"),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ])),
+                    None => Cell::from(issue.title.as_str()),
+                };
+
                 Row::new([
                     Cell::from(issue.id.as_str()),
                     priority_cell,
                     Cell::from(issue.issue_type.as_deref().unwrap_or("--")),
                     status_cell,
                     Cell::from(issue.assignee.as_deref().unwrap_or("--")),
-                    Cell::from(issue.title.as_str()),
+                    title_cell,
                 ])
             })
             .collect();
@@ -377,6 +405,99 @@ mod tests {
         for x in status_cells {
             assert_eq!(buf[(x, y)].fg, Color::White, "rendered row: {row}");
         }
+    }
+
+    #[test]
+    fn parent_id_for_prefix_child_returns_longest_ancestor() {
+        let issues = vec![
+            issue("bd-root"),
+            issue("bd-root.1"),
+            issue("bd-root.1.2"),
+            issue("bd-other"),
+            issue("bd-1"),
+            issue("bd-12"),
+        ];
+
+        assert_eq!(
+            parent_id_for_prefix_child("bd-root.1.2", &issues),
+            Some("bd-root.1"),
+            "longest tracked prefix wins (bd-root.1 > bd-root)"
+        );
+        assert_eq!(
+            parent_id_for_prefix_child("bd-root.1", &issues),
+            Some("bd-root")
+        );
+        assert_eq!(
+            parent_id_for_prefix_child("bd-root", &issues),
+            None,
+            "root has no prefix ancestor"
+        );
+        assert_eq!(
+            parent_id_for_prefix_child("bd-other", &issues),
+            None,
+            "unrelated id has no prefix ancestor"
+        );
+        assert_eq!(
+            parent_id_for_prefix_child("bd-12", &issues),
+            None,
+            "bd-1 must not match bd-12 (suffix must start with '.')"
+        );
+        assert_eq!(
+            parent_id_for_prefix_child("bd-root.unknown", &issues),
+            Some("bd-root"),
+            "unseen child still annotates against tracked ancestor"
+        );
+    }
+
+    #[test]
+    fn render_appends_parent_annotation_to_title_for_prefix_child() {
+        let issues = vec![issue("bd-root"), issue("bd-root.1")];
+        let mut panel = IssuesPanel::new();
+        let mut terminal = Terminal::new(TestBackend::new(120, 6)).unwrap();
+
+        terminal
+            .draw(|frame| panel.render(&issues, frame, frame.area()))
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        let mut child_row = String::new();
+        for y in 0..buf.area.height {
+            let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            if row.contains("bd-root.1") && row.contains("↳ bd-root") {
+                child_row = row;
+                break;
+            }
+        }
+
+        assert!(
+            !child_row.is_empty(),
+            "child row should annotate '↳ bd-root' next to its title"
+        );
+    }
+
+    #[test]
+    fn render_does_not_annotate_when_no_ancestor_is_tracked() {
+        let issues = vec![issue("bd-orphan")];
+        let mut panel = IssuesPanel::new();
+        let mut terminal = Terminal::new(TestBackend::new(120, 6)).unwrap();
+
+        terminal
+            .draw(|frame| panel.render(&issues, frame, frame.area()))
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        let mut whole = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                whole.push_str(buf[(x, y)].symbol());
+            }
+            whole.push('\n');
+        }
+
+        assert!(
+            !whole.contains('↳'),
+            "panel must not show a parent annotation when no ancestor is tracked:\n{whole}"
+        );
     }
 
     #[test]
