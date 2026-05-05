@@ -28,6 +28,26 @@ fn press_esc(v: &mut SessionDetailView) -> Option<Action> {
     v.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &test_ctx())
 }
 
+fn press_y(v: &mut SessionDetailView) -> Option<Action> {
+    v.handle_key(
+        KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+        &test_ctx(),
+    )
+}
+
+/// Simulate the full Esc-then-confirm flow: opens the cancel-confirm modal
+/// then immediately dispatches via `y`. Returns the second action (the
+/// confirmation) which is what callers care about. The first Esc returns
+/// `None` (modal opens, no action yet).
+fn esc_then_confirm(v: &mut SessionDetailView) -> Option<Action> {
+    let opened = press_esc(v);
+    assert!(
+        opened.is_none(),
+        "first Esc during stream must open the cancel-confirm modal, not dispatch (got {opened:?})"
+    );
+    press_y(v)
+}
+
 fn render_session_detail(view: &mut SessionDetailView) -> String {
     let backend = TestBackend::new(160, 20);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -53,7 +73,8 @@ fn first_esc_during_stream_emits_cancel_and_sets_hint() {
     let mut detail = mk_view();
     detail.set_stream_in_flight_for_test(true);
 
-    let action = press_esc(&mut detail);
+    // The full user flow: Esc opens the modal, `y` confirms and dispatches.
+    let action = esc_then_confirm(&mut detail);
 
     assert!(matches!(action, Some(Action::CancelStream { .. })));
     assert!(
@@ -74,7 +95,7 @@ fn second_esc_after_cancel_emits_navigate_back_and_clears_hint() {
     let mut detail = mk_view();
     detail.set_stream_in_flight_for_test(true);
     assert!(matches!(
-        press_esc(&mut detail),
+        esc_then_confirm(&mut detail),
         Some(Action::CancelStream { .. })
     ));
 
@@ -102,7 +123,7 @@ fn reset_to_root_clears_cancel_hint() {
     let mut detail = mk_view();
     detail.set_stream_in_flight_for_test(true);
     assert!(matches!(
-        press_esc(&mut detail),
+        esc_then_confirm(&mut detail),
         Some(Action::CancelStream { .. })
     ));
 
