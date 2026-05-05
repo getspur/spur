@@ -142,6 +142,45 @@ fn renders_small_dependency_tree() {
 }
 
 #[test]
+fn rerender_with_same_counts_updates_when_node_status_changes() {
+    let mut pane = IssueGraphPane::new();
+    let edges = vec![edge("bd-root", "bd-child", "blocks")];
+    let open_nodes = vec![
+        node("bd-root", "Root", "open"),
+        node("bd-child", "Child", "open"),
+    ];
+    let updated_nodes = vec![
+        node("bd-root", "Root", "closed"),
+        node("bd-child", "Child", "blocked"),
+    ];
+
+    let initial = render_graph(&mut pane, &open_nodes, &edges, "bd-root");
+    let updated = render_graph(&mut pane, &updated_nodes, &edges, "bd-root");
+
+    assert_ne!(
+        initial, updated,
+        "render cache must invalidate when node content changes without count changes"
+    );
+    assert_snapshot(
+        updated,
+        &[
+            "┌ Issue Graph: bd-root (2 nodes) ──────────────────────────────────────┐",
+            "│✓ Root (bd-root)                                                      │",
+            "│  ! Child (bd-child)                                                  │",
+            "│                                                                      │",
+            "│                                                                      │",
+            "│                                                                      │",
+            "│                                                                      │",
+            "│                                                                      │",
+            "│                                                                      │",
+            "│                                                                      │",
+            "│Legend: ○ open  ● in_progress  ! blocked  ✓ closed                    │",
+            "└──────────────────────────────────────────────────────────────────────┘",
+        ],
+    );
+}
+
+#[test]
 fn renders_cycle_once_and_stops_expansion() {
     let mut pane = IssueGraphPane::new();
     let nodes = vec![
