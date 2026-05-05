@@ -270,7 +270,7 @@ impl IssueBrowserView {
         sort_issues_parent_first(&mut issues);
         self.tracked_issues = issues;
         if !self.tracked_issues.is_empty() {
-            self.issues_panel.select_first();
+            self.issues_panel.select_first(self.tracked_issues.len());
         }
     }
 
@@ -744,7 +744,7 @@ impl IssueBrowserView {
                 Some(Action::SelectPrevBy(1))
             }
             KeyCode::Char('g') if key.modifiers.is_empty() => {
-                self.issues_panel.select_first();
+                self.issues_panel.select_first(self.tracked_issues.len());
                 self.prefetch_selected_graph();
                 self.pending_action.take()
             }
@@ -1115,7 +1115,7 @@ impl View for IssueBrowserView {
                         .as_deref()
                         .is_some_and(|id| self.issues_panel.select_by_id(id, &self.tracked_issues));
                     if !selected {
-                        self.issues_panel.select_first();
+                        self.issues_panel.select_first(self.tracked_issues.len());
                     }
                     // Drain pending_select once it lands in tracked_issues —
                     // the selection above already moved if the id matched.
