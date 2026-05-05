@@ -221,7 +221,7 @@ async fn mcp_server_plan_owned_by_other_emits_plan_command_error() {
     };
 
     let (server, _channel) = spur_mcp::McpCallbackServer::new(
-        &brain_session_id,
+        Some(&brain_session_id),
         Some(Arc::clone(&pm)),
         None,
         ctx,
