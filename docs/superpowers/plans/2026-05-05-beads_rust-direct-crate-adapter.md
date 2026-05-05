@@ -909,6 +909,20 @@ git commit -m "spur-pm: add sweep_stale_jsonl_temps init guard"
 
 ### Task 8: Migration-under-flock helper
 
+> **Plan revision (2026-05-05) - bd-5z7w:** The lock-contract split
+> between `open_writer_under_migration_lock` and
+> `detect_and_force_flush_stale_jsonl` was real and was deferred per
+> bd-5z7w until adapter wiring made the call graph concrete. The fix is
+> design option B: `init::init_writer_with_flush`, a combined operation
+> that holds `.write.lock` across SQLite open, stale JSONL temp sweep, and
+> `sync::auto_flush`. The misleading
+> `force_flush_on_fresh_db_is_no_op` test was replaced by
+> `init_writer_with_flush_runs_clean_on_fresh_dir`. Adapter-level lock
+> timeout coverage lives in
+> `crates/spur-pm/tests/init_writer_with_flush_lock.rs`; no `#[ignore]`
+> deferral was needed because upstream `beads_rust::sync` same-process
+> tests show the held `std::fs::File` lock blocks a second acquisition.
+
 **Files:**
 - Modify: `crates/spur-pm/src/beads_crate/init.rs`
 
@@ -1076,8 +1090,20 @@ git commit -m "spur-pm: add detect_and_force_flush_stale_jsonl init guard"
 > hook (single-thread / `LocalSet` callers can still use it directly)
 > but is NOT held by the adapter. `BeadsCrateAdapter` now stores
 > `beads_dir`, `jsonl_path`, `config`, and `metrics` only — all
-> `Send + Sync`. `init::detect_and_force_flush_stale_jsonl` also takes
-> three args (`storage`, `beads_dir`, `jsonl_path`).
+> `Send + Sync`. bd-5z7w later supersedes the split flush helper with
+> `init::init_writer_with_flush`; see the following callout.
+
+> **Plan revision (2026-05-05) - bd-5z7w:** The Section C `open()` wiring
+> must not compose separate helpers that release `.write.lock` before
+> `auto_flush`. The adapter now calls `init::init_writer_with_flush(...)`
+> once inside the existing `spawn_blocking` init guard, after
+> `detect_local_fs` when non-local filesystems are disallowed. The helper
+> preserves best-effort stale temp sweeping but propagates `auto_flush`
+> errors so JSONL corruption is surfaced. The old
+> `force_flush_on_fresh_db_is_no_op` test was removed in favor of the
+> combined-helper test, and
+> `crates/spur-pm/tests/init_writer_with_flush_lock.rs` covers lock
+> timeout behavior without an ignored cross-process deferral.
 
 **Files:**
 - Create: `crates/spur-pm/src/beads_crate/adapter.rs`

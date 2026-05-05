@@ -121,16 +121,12 @@ impl BeadsCrateAdapter {
             if !cfg_for_init.allow_non_local_fs {
                 init::detect_local_fs(&dir_for_init)?;
             }
-            let mut writer = init::open_writer_under_migration_lock(
-                &dir_for_init,
-                cfg_for_init.lock_timeout_ms,
-            )?;
-            let _ = init::sweep_stale_jsonl_temps(&dir_for_init, cfg_for_init.stale_tmp_min_age);
-            let _ = init::detect_and_force_flush_stale_jsonl(
-                &mut writer,
+            init::init_writer_with_flush(
                 &dir_for_init,
                 &jsonl_for_init,
-            );
+                cfg_for_init.lock_timeout_ms,
+                cfg_for_init.stale_tmp_min_age,
+            )?;
             Ok(())
         })
         .await??;
