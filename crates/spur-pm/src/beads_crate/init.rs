@@ -3,6 +3,8 @@
 //! Each function is a precondition that must hold before `BeadsCrateAdapter`
 //! is allowed to open the writer connection.
 
+use beads_rust::storage::sqlite::SqliteStorage;
+use beads_rust::sync;
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -204,5 +206,42 @@ mod sweep_tests {
             sweep_stale_jsonl_temps(&nonexistent, Duration::ZERO).unwrap(),
             0
         );
+    }
+}
+
+/// Open the writer connection with cross-process serialization. Holds
+/// `.beads/.write.lock` for the duration of schema/migration work.
+///
+/// Returns the opened `SqliteStorage` ready for writes. The flock is released
+/// once the storage is fully initialized (the caller's later writes will
+/// re-acquire it per-write).
+pub fn open_writer_under_migration_lock(
+    beads_dir: &Path,
+    lock_timeout_ms: u64,
+) -> anyhow::Result<SqliteStorage> {
+    // Acquire .write.lock — guards schema migration against other instances
+    // racing the same first-open. `_guard: File` must stay in scope until we
+    // return; dropping it releases the flock.
+    let _guard = sync::blocking_write_lock_with_timeout(beads_dir, Some(lock_timeout_ms))?;
+    // Opening the storage runs schema init / migrations as needed.
+    let db_path = beads_dir.join("beads.db");
+    let storage = SqliteStorage::open_with_timeout(&db_path, Some(lock_timeout_ms))?;
+    // _guard drops here, releasing flock.
+    Ok(storage)
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn opens_writer_in_fresh_dir() {
+        let dir = TempDir::new().unwrap();
+        let _writer =
+            open_writer_under_migration_lock(dir.path(), 5_000).expect("first open should succeed");
+        // Subsequent open in the same process should also succeed
+        let _writer2 = open_writer_under_migration_lock(dir.path(), 5_000)
+            .expect("second open should succeed");
     }
 }
