@@ -233,9 +233,22 @@ pub(crate) fn open_writer_under_migration_lock(
 
 /// Detect whether the SQLite db has writes that haven't been flushed to JSONL,
 /// and force a flush if so. Returns the `AutoFlushResult` for inspection.
-/// Caller MUST hold `.write.lock` (via `open_writer_under_migration_lock` for
-/// first-open path, or via per-write flock acquisition).
-pub fn detect_and_force_flush_stale_jsonl(
+///
+/// # Lock contract
+///
+/// Caller MUST hold `.write.lock` for the duration of the call. `auto_flush`
+/// reads dirty rows from SQLite and rewrites the JSONL file; without a lock,
+/// a concurrent writer could interleave and corrupt the JSONL atomic-write.
+///
+/// Note that `open_writer_under_migration_lock` releases its flock on return.
+/// The intended Section C/D wiring is:
+///   1. Acquire `sync::blocking_write_lock_with_timeout(beads_dir, …)`.
+///   2. Call `detect_and_force_flush_stale_jsonl` while holding it.
+///   3. Drop the lock.
+///
+/// Tracked in bd-5z7w (T8/T9 lock-contract design follow-up).
+#[allow(dead_code)] // wired into Section C/D adapter open path
+pub(crate) fn detect_and_force_flush_stale_jsonl(
     storage: &mut SqliteStorage,
     beads_dir: &Path,
     jsonl_path: &Path,
@@ -264,11 +277,13 @@ mod migration_tests {
     }
 
     #[test]
-    fn force_flush_on_fresh_db_is_safe() {
+    fn force_flush_on_fresh_db_is_no_op() {
         let dir = TempDir::new().unwrap();
         let mut storage = open_writer_under_migration_lock(dir.path(), 5_000).unwrap();
         let jsonl = dir.path().join("issues.jsonl");
-        let _result = detect_and_force_flush_stale_jsonl(&mut storage, dir.path(), &jsonl).unwrap();
-        // Fresh db has no writes; flush is a no-op but must not error.
+        let result = detect_and_force_flush_stale_jsonl(&mut storage, dir.path(), &jsonl).unwrap();
+        // Fresh db has no dirty rows; auto_flush must report no work done.
+        assert!(!result.flushed, "fresh db should not trigger a flush");
+        assert_eq!(result.exported_count, 0, "no rows to export on fresh db");
     }
 }
