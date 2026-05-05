@@ -81,6 +81,26 @@ impl BeadsCrateAdapter {
     pub fn metrics(&self) -> &ContentionMetrics {
         &self.metrics
     }
+
+    /// Lock-free snapshot read. Opens a fresh `SqliteStorage` connection
+    /// for the duration of `f` and drops it on return. WAL mode gives
+    /// snapshot isolation across concurrent readers and writers.
+    pub async fn read<T, F>(&self, f: F) -> anyhow::Result<T>
+    where
+        F: FnOnce(&beads_rust::storage::sqlite::SqliteStorage) -> anyhow::Result<T>
+            + Send
+            + 'static,
+        T: Send + 'static,
+    {
+        let metrics = Arc::clone(&self.metrics);
+        let db_path = self.beads_dir.join("beads.db");
+        tokio::task::spawn_blocking(move || -> anyhow::Result<T> {
+            metrics.incr_read();
+            let storage = beads_rust::storage::sqlite::SqliteStorage::open(&db_path)?;
+            f(&storage)
+        })
+        .await?
+    }
 }
 
 #[cfg(test)]
@@ -95,5 +115,25 @@ mod tests {
             .await
             .expect("adapter opens");
         assert!(adapter.beads_dir.exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn read_returns_count_for_empty_db() {
+        let dir = TempDir::new().unwrap();
+        let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
+            .await
+            .unwrap();
+        let count = adapter
+            .read(|s| Ok(s.count_issues()?))
+            .await
+            .expect("read closure runs");
+        assert_eq!(count, 0);
+        assert_eq!(
+            adapter
+                .metrics()
+                .read_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
     }
 }
