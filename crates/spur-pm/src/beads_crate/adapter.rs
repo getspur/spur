@@ -9,11 +9,59 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use beads_rust::sync;
 
 use crate::beads_crate::backoff::BackoffPolicy;
 use crate::beads_crate::init;
 use crate::beads_crate::metrics::ContentionMetrics;
+
+fn acquire_write_lock_with_backoff(
+    beads_dir: &Path,
+    backoff: &BackoffPolicy,
+    lock_timeout_ms: u64,
+    metrics: &ContentionMetrics,
+) -> anyhow::Result<std::fs::File> {
+    let start = Instant::now();
+    let mut attempt: u32 = 0;
+    loop {
+        let attempt_start = Instant::now();
+        match sync::blocking_write_lock_with_timeout(beads_dir, Some(lock_timeout_ms)) {
+            Ok(file) => {
+                metrics.record_lock_wait(attempt_start.elapsed());
+                return Ok(file);
+            }
+            Err(_) => {
+                metrics.incr_busy();
+                let elapsed = start.elapsed();
+                let rand = fastrand_unit();
+                let Some(delay) = backoff.step(attempt, elapsed, rand) else {
+                    metrics.incr_ceiling();
+                    anyhow::bail!(
+                        "write lock acquisition exceeded ceiling after {:?}",
+                        elapsed
+                    );
+                };
+                std::thread::sleep(delay);
+                attempt += 1;
+            }
+        }
+    }
+}
+
+fn fastrand_unit() -> f64 {
+    use std::cell::Cell;
+    thread_local! { static SEED: Cell<u64> = const { Cell::new(0x9E3779B97F4A7C15) }; }
+    SEED.with(|s| {
+        let mut x = s.get();
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        s.set(x);
+        ((x as u32) as f64) / (u32::MAX as f64)
+    })
+}
 
 #[derive(Debug, Clone)]
 pub struct AdapterConfig {
@@ -101,6 +149,38 @@ impl BeadsCrateAdapter {
         })
         .await?
     }
+
+    /// Single write under cross-process flock. Opens a fresh
+    /// `SqliteStorage` AFTER acquiring `.write.lock`, runs the closure,
+    /// drops both. Each `beads_rust` mutation method is internally
+    /// atomic via the crate's `with_write_transaction`.
+    pub async fn write<T, F>(&self, f: F) -> anyhow::Result<T>
+    where
+        F: FnOnce(&mut beads_rust::storage::sqlite::SqliteStorage) -> anyhow::Result<T>
+            + Send
+            + 'static,
+        T: Send + 'static,
+    {
+        let metrics = Arc::clone(&self.metrics);
+        let beads_dir = self.beads_dir.clone();
+        let backoff = self.config.backoff.clone();
+        let lock_timeout_ms = self.config.lock_timeout_ms;
+        tokio::task::spawn_blocking(move || -> anyhow::Result<T> {
+            let _flock =
+                acquire_write_lock_with_backoff(&beads_dir, &backoff, lock_timeout_ms, &metrics)?;
+            let mut storage = beads_rust::storage::sqlite::SqliteStorage::open_with_timeout(
+                &beads_dir.join("beads.db"),
+                Some(lock_timeout_ms),
+            )?;
+            metrics.incr_write();
+            let result = f(&mut storage);
+            if result.is_err() {
+                metrics.incr_write_error();
+            }
+            result
+        })
+        .await?
+    }
 }
 
 #[cfg(test)]
@@ -132,6 +212,23 @@ mod tests {
             adapter
                 .metrics()
                 .read_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn write_runs_closure_under_flock() {
+        let dir = TempDir::new().unwrap();
+        let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
+            .await
+            .unwrap();
+        let result: i32 = adapter.write(|_s| Ok(42)).await.unwrap();
+        assert_eq!(result, 42);
+        assert_eq!(
+            adapter
+                .metrics()
+                .write_total
                 .load(std::sync::atomic::Ordering::Relaxed),
             1
         );
