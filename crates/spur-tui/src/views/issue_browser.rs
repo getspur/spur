@@ -1799,8 +1799,68 @@ mod tests {
         );
     }
 
+    /// During the prefetch debounce window, navigating from a cached parent
+    /// to a child whose own graph has not been fetched must keep the lineage
+    /// layout on screen rather than briefly flickering to flat. The fallback
+    /// resolves the child's id to the parent's cached subgraph (cache_key =
+    /// "bd-root") and the panel renders `IssueLineageView::Cached` with the
+    /// real multi-node tree.
     #[test]
     fn pending_prefetch_holds_lineage_layout_during_debounce_window() {
+        let lineage_exec = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage_exec);
+        let mut view = IssueBrowserView::new();
+        view.set_issues_for_test(vec![
+            issue("bd-root", "epic", Vec::new()),
+            issue("bd-root.1", "task", Vec::new()),
+        ]);
+
+        view.graph_loading = Some("bd-root".into());
+        view.handle_spur_event(
+            &subgraph_loaded_event(
+                "bd-root",
+                vec![graph_node("bd-root"), graph_node("bd-root.1")],
+            ),
+            &ctx,
+        );
+
+        assert!(view
+            .issues_panel
+            .select_by_id("bd-root.1", &view.tracked_issues));
+        view.prefetch_selected_graph();
+
+        assert!(
+            view.pending_prefetch
+                .as_ref()
+                .is_some_and(|(id, _)| id == "bd-root.1"),
+            "j/k navigation should arm pending_prefetch for the new selection"
+        );
+        assert!(
+            view.graph_loading.is_none(),
+            "graph_loading must be empty before flush_due_prefetch fires"
+        );
+
+        let rendered = rendered_text(&mut view);
+
+        assert!(
+            rendered.contains("Work Item Lineage"),
+            "panel should hold the lineage title during the debounce window:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains(" Issues "),
+            "panel must not flicker back to the flat 'Issues' title:\n{rendered}"
+        );
+    }
+
+    /// Sibling regression guard for the "Rank 0 Teleportation" loop that
+    /// commit 84c505a7 introduced for *unrelated* selections. When the user
+    /// j/k's onto an issue with no cached ancestor, the panel must fall
+    /// through to the flat layout rather than rendering a synthetic
+    /// `IssueLineageView::Loading` with an empty subgraph (which puts the
+    /// new selection at `display_order[0]` and traps navigation in a
+    /// 2-element bounce).
+    #[test]
+    fn pending_prefetch_for_unrelated_selection_falls_through_to_flat() {
         let lineage_exec = ExecutorLineage::new();
         let ctx = ViewContext::test_ctx(&lineage_exec);
         let mut view = IssueBrowserView::new();
@@ -1823,30 +1883,15 @@ mod tests {
             .select_by_id("bd-other", &view.tracked_issues));
         view.prefetch_selected_graph();
 
-        assert!(
-            view.pending_prefetch
-                .as_ref()
-                .is_some_and(|(id, _)| id == "bd-other"),
-            "j/k navigation should arm pending_prefetch for the new selection"
-        );
-        assert!(
-            view.graph_loading.is_none(),
-            "graph_loading must be empty before flush_due_prefetch fires"
-        );
-
         let rendered = rendered_text(&mut view);
 
         assert!(
-            rendered.contains("Work Item Lineage"),
-            "panel should hold the lineage title during the debounce window:\n{rendered}"
+            rendered.contains(" Issues "),
+            "panel must show the flat layout when the selection has no cached ancestor:\n{rendered}"
         );
         assert!(
-            rendered.contains("loading work tree"),
-            "panel should report 'loading work tree' for the uncached selection:\n{rendered}"
-        );
-        assert!(
-            !rendered.contains(" Issues "),
-            "panel must not flicker back to the flat 'Issues' title:\n{rendered}"
+            !rendered.contains("Work Item Lineage"),
+            "panel must not synthesize a Loading lineage over an empty subgraph:\n{rendered}"
         );
     }
 

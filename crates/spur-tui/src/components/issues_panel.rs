@@ -181,6 +181,12 @@ impl IssuesPanel {
             return;
         }
 
+        // A lineage view needs a real subgraph (root + at least one related
+        // node) to be meaningful. With <=1 node, `LineageMeta` would assign
+        // rank `(0, 0)` to a synthetic root and rank `(5, 0)` to every other
+        // tracked issue, teleporting the selection to `display_order[0]` on
+        // every render — `j` then bounces between two ids forever. Fall
+        // through to the flat layout when the subgraph isn't substantial.
         if let Some(lineage) = lineage {
             match lineage {
                 IssueLineageView::Loaded(lineage) if lineage.nodes.len() > 1 => {
@@ -193,7 +199,7 @@ impl IssuesPanel {
                     root_id,
                     nodes,
                     edges,
-                } => {
+                } if nodes.len() > 1 => {
                     let meta = LineageMeta::new(IssueLineageContext {
                         root_id: root_id.as_str(),
                         nodes,
@@ -207,7 +213,7 @@ impl IssuesPanel {
                     root_id,
                     nodes,
                     edges,
-                } => {
+                } if nodes.len() > 1 => {
                     let meta = LineageMeta::new(IssueLineageContext {
                         root_id: root_id.as_str(),
                         nodes,
@@ -216,7 +222,7 @@ impl IssuesPanel {
                     self.render_lineage(issues, meta, "loading work tree".into(), frame, area);
                     return;
                 }
-                IssueLineageView::Loaded(_) => {}
+                _ => {}
             }
         }
 
@@ -994,5 +1000,184 @@ mod tests {
         panel.table_state.select(Some(0));
         panel.select_prev(1, small_issues.len());
         assert_eq!(panel.selected_id(&small_issues), Some("small-4"));
+    }
+
+    /// Grounding test for the user-reported "j/k loops within graph subset" symptom.
+    /// Renders a real lineage view over 150 issues where only 6 are part of the
+    /// graph subgraph, then walks j 200 times. The arithmetic in `select_next`
+    /// must clamp at index 149, not loop within the 6-node subgraph.
+    #[test]
+    fn lineage_render_then_navigate_visits_all_150_source_indices() {
+        let mut issues: Vec<IssueSummary> = Vec::with_capacity(150);
+        issues.push(issue("bd-root"));
+        for i in 1..=5 {
+            issues.push(issue(&format!("bd-root.{i}")));
+        }
+        for i in 0..144 {
+            issues.push(issue(&format!("bd-other-{i:03}")));
+        }
+        assert_eq!(issues.len(), 150);
+
+        let mut graph_nodes: Vec<GraphNodeEvent> = vec![graph_node("bd-root", "open")];
+        for i in 1..=5 {
+            graph_nodes.push(graph_node(&format!("bd-root.{i}"), "open"));
+        }
+        let edges: Vec<GraphEdgeEvent> = (1..=5)
+            .map(|i| graph_edge(&format!("bd-root.{i}"), "bd-root"))
+            .collect();
+
+        let mut panel = IssuesPanel::new();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal
+            .draw(|frame| {
+                panel.render_with_lineage(
+                    &issues,
+                    Some(IssueLineageView::Loaded(IssueLineageContext {
+                        root_id: "bd-root",
+                        nodes: &graph_nodes,
+                        edges: &edges,
+                    })),
+                    frame,
+                    frame.area(),
+                );
+            })
+            .unwrap();
+
+        assert_eq!(
+            panel.display_order.len(),
+            150,
+            "lineage render must populate display_order with every tracked issue"
+        );
+
+        panel.select_first(issues.len());
+        let mut visited = std::collections::HashSet::new();
+        for _ in 0..200 {
+            if let Some(id) = panel.selected_id(&issues) {
+                visited.insert(id.to_string());
+            }
+            panel.select_next(1, issues.len());
+        }
+
+        assert_eq!(
+            visited.len(),
+            150,
+            "j held down should walk through all 150 issues, but only visited {}",
+            visited.len()
+        );
+    }
+
+    /// Grounding test for the viewport hypothesis: after navigating to a far-down
+    /// source index, the table widget must auto-scroll so the selection is on
+    /// screen. If the rendered buffer keeps showing only the lineage subset at
+    /// the top while selection has moved to a `bd-other-*` row, viewport scroll
+    /// is broken and *that* would explain the user-reported "loops within graph
+    /// subset" symptom even though `select_next` is arithmetically correct.
+    #[test]
+    fn lineage_navigation_scrolls_viewport_to_selection() {
+        let mut issues: Vec<IssueSummary> = Vec::with_capacity(150);
+        issues.push(issue("bd-root"));
+        for i in 1..=5 {
+            issues.push(issue(&format!("bd-root.{i}")));
+        }
+        for i in 0..144 {
+            issues.push(issue(&format!("bd-other-{i:03}")));
+        }
+
+        let mut graph_nodes: Vec<GraphNodeEvent> = vec![graph_node("bd-root", "open")];
+        for i in 1..=5 {
+            graph_nodes.push(graph_node(&format!("bd-root.{i}"), "open"));
+        }
+        let edges: Vec<GraphEdgeEvent> = (1..=5)
+            .map(|i| graph_edge(&format!("bd-root.{i}"), "bd-root"))
+            .collect();
+
+        let mut panel = IssuesPanel::new();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+
+        let render = |panel: &mut IssuesPanel, terminal: &mut Terminal<TestBackend>| {
+            terminal
+                .draw(|frame| {
+                    panel.render_with_lineage(
+                        &issues,
+                        Some(IssueLineageView::Loaded(IssueLineageContext {
+                            root_id: "bd-root",
+                            nodes: &graph_nodes,
+                            edges: &edges,
+                        })),
+                        frame,
+                        frame.area(),
+                    );
+                })
+                .unwrap();
+        };
+
+        render(&mut panel, &mut terminal);
+        panel.select_first(issues.len());
+        for _ in 0..100 {
+            panel.select_next(1, issues.len());
+        }
+        render(&mut panel, &mut terminal);
+
+        let selected_id = panel
+            .selected_id(&issues)
+            .expect("selection should be set after 100 j presses")
+            .to_string();
+        assert!(
+            selected_id.starts_with("bd-other-"),
+            "after 100 j from position 0, selection must be in the unrelated tail; got {selected_id}"
+        );
+
+        let buffer_text = render_buffer_text(terminal.backend().buffer());
+        assert!(
+            buffer_text.contains(selected_id.as_str()),
+            "rendered buffer must show the selected id {selected_id} after viewport auto-scroll; rendered:\n{buffer_text}"
+        );
+    }
+
+    /// Failing repro for the "Rank 0 Teleportation" loop introduced by commit
+    /// 84c505a7. When the issues panel renders `IssueLineageView::Loading`
+    /// with an empty subgraph (which happens when `pending_prefetch` arms a
+    /// fallback whose `cache_key` resolves to `None`), `LineageMeta` assigns
+    /// rank `(0, 0)` to the synthetic root, placing the currently-selected id
+    /// at `display_order[0]`. The next `j` advances to `display_order[1]`;
+    /// the next render makes THAT id the new rank-0 root; `j` bounces back.
+    /// Real UX re-renders between every keypress, so this loop is the real
+    /// "j/k seems to loop within graph pane subset" symptom the user reported.
+    #[test]
+    fn loading_lineage_with_empty_subgraph_does_not_trap_navigation() {
+        let issues: Vec<IssueSummary> = (0..150).map(|i| issue(&format!("bd-{i:03}"))).collect();
+        let mut panel = IssuesPanel::new();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        panel.table_state.select(Some(100));
+
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+        visited.insert(panel.selected_id(&issues).unwrap().to_string());
+
+        for _ in 0..20 {
+            let root = panel.selected_id(&issues).unwrap().to_string();
+            terminal
+                .draw(|frame| {
+                    panel.render_with_lineage(
+                        &issues,
+                        Some(IssueLineageView::Loading {
+                            root_id: root,
+                            nodes: &[],
+                            edges: &[],
+                        }),
+                        frame,
+                        frame.area(),
+                    );
+                })
+                .unwrap();
+            panel.select_next(1, issues.len());
+            visited.insert(panel.selected_id(&issues).unwrap().to_string());
+        }
+
+        assert!(
+            visited.len() > 5,
+            "j held over a Loading lineage should walk through many issues, but trapped within {} distinct ids: {:?}",
+            visited.len(),
+            visited
+        );
     }
 }
