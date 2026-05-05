@@ -19,6 +19,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4", "serde"] }
 beads_rust = { git = "https://github.com/getspur/beads_rust", rev = "08dabbb0a558215858d658fca0d426906bac63ba", default-features = false }
+petgraph = { workspace = true }
 semver = "1"
 
 [dev-dependencies]
