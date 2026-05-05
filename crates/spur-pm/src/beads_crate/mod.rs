@@ -5,6 +5,6 @@
 
 pub mod metrics;
 // pub mod backoff;       // Task 3
-// pub mod reader_pool;   // Task 4
+pub mod reader_pool;
 // pub mod init;          // Task 5/6/7/8
 // pub mod snapshot;      // Task 11
