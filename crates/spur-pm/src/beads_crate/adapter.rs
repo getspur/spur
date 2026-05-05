@@ -17,6 +17,7 @@ use crate::beads_crate::backoff::BackoffPolicy;
 use crate::beads_crate::init;
 use crate::beads_crate::metrics::ContentionMetrics;
 use crate::beads_crate::snapshot::{Conflict, Snapshot};
+use crate::poll_cursor::PollCursor;
 
 /// Coarse data_version proxy. beads_rust 0.2.1 does not expose
 /// `PRAGMA data_version`; until it does, we use `count_issues()`. This
@@ -102,6 +103,10 @@ pub struct BeadsCrateAdapter {
     pub(crate) jsonl_path: PathBuf,
     pub(crate) config: AdapterConfig,
     pub(crate) metrics: Arc<ContentionMetrics>,
+    /// Boundary-safe poll cursor; `None` until the first `poll()` call so a
+    /// fresh adapter emits all open issues as `IssueCreated` on first poll
+    /// (matching `BeadsAdapter` semantics in `beads.rs`).
+    pub(crate) cursor: tokio::sync::Mutex<Option<PollCursor>>,
 }
 
 impl BeadsCrateAdapter {
@@ -137,6 +142,7 @@ impl BeadsCrateAdapter {
             jsonl_path,
             config,
             metrics,
+            cursor: tokio::sync::Mutex::new(None),
         })
     }
 
