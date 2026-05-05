@@ -2161,6 +2161,14 @@ git commit -m "spur-pm: IssueTracker::poll via crate adapter (shared PollCursor)
 
 ### Task 21: Build `TestBeadsWorkspace` helper
 
+> **Plan revision (2026-05-06):** The original helper snippet has drifted from
+> the current `beads_rust` API. Construct `Issue` with a struct literal, generate
+> IDs through `beads_rust::util::generate_id(title, None, Some("test"), Utc::now())`,
+> add labels with `SqliteStorage::add_label`, pass `"blocks"` and `"test"` to
+> `add_dependency`, open `SqliteStorage` on `tempdir.path().join("beads.db")`, call
+> `set_labels` after creation for any helper that creates labeled issues, and set
+> close status with `Status::Closed` rather than a string.
+
 **Files:**
 - Create: `crates/spur-pm/src/test_workspace.rs`
 
