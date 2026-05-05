@@ -821,10 +821,33 @@ impl Reconciler {
                 .labels
                 .iter()
                 .any(|label| crate::plan::labels::parse_agent(label).is_some());
-            let base_spec =
-                plan_dispatch_base_spec(&projected, &task.spec.task_id, &self.config.repo_root)
-                    .await?;
-            crate::plan::persist_dispatch_intent(
+            let base_spec = match plan_dispatch_base_spec(
+                &projected,
+                &task.spec.task_id,
+                &self.config.repo_root,
+            )
+            .await
+            {
+                Ok(base_spec) => base_spec,
+                Err(error) => {
+                    tracing::warn!(
+                        issue_id = %summary.id,
+                        %plan_id,
+                        task_id = %task.spec.task_id,
+                        "reconciler skipping ready task after base spec build failed: {error}"
+                    );
+                    self.record_skipped(
+                        Some(plan_id),
+                        &task.spec.task_id,
+                        SkipReason::BaseSpecBuildFailed {
+                            error: error.to_string(),
+                        },
+                    )
+                    .await;
+                    continue;
+                }
+            };
+            if let Err(error) = crate::plan::persist_dispatch_intent(
                 self.pm.as_ref(),
                 &summary.id,
                 self.feature_gate.as_ref(),
@@ -834,7 +857,24 @@ impl Reconciler {
                 task_attempt,
                 self.config.dispatch_lease_duration,
             )
-            .await?;
+            .await
+            {
+                tracing::warn!(
+                    issue_id = %summary.id,
+                    %plan_id,
+                    task_id = %task.spec.task_id,
+                    "reconciler skipping ready task after persist_dispatch_intent failed: {error}"
+                );
+                self.record_skipped(
+                    Some(plan_id),
+                    &task.spec.task_id,
+                    SkipReason::PersistDispatchIntentFailed {
+                        error: error.to_string(),
+                    },
+                )
+                .await;
+                continue;
+            }
 
             let (respond_to, rx) = tokio::sync::oneshot::channel();
             let (dispatched_base_oid_tx, dispatched_base_oid_rx) =
@@ -880,11 +920,32 @@ impl Reconciler {
                     },
                 )
                 .await;
-                crate::plan::clear_dispatch_intent(self.pm.as_ref(), &summary.id, &delegation_id)
-                    .await?;
+                if let Err(e) = crate::plan::clear_dispatch_intent(
+                    self.pm.as_ref(),
+                    &summary.id,
+                    &delegation_id,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        target: "spur.dispatch_intent_cleanup",
+                        %plan_id,
+                        task_id = %task.spec.task_id,
+                        %delegation_id,
+                        "dispatch cleanup failed: {e}"
+                    );
+                }
                 let mut update = crate::plan::dispatch_send_failure_update(&delegation_id, &[]);
                 update.remove_labels.clear();
-                self.pm.update_issue(&summary.id, update).await?;
+                if let Err(e) = self.pm.update_issue(&summary.id, update).await {
+                    tracing::warn!(
+                        target: "spur.dispatch_intent_cleanup",
+                        %plan_id,
+                        task_id = %task.spec.task_id,
+                        %delegation_id,
+                        "dispatch cleanup failed: {e}"
+                    );
+                }
                 tracing::warn!(
                     issue_id = %summary.id,
                     %delegation_id,
@@ -1675,7 +1736,29 @@ impl Reconciler {
         let mut seen_issue_ids = HashSet::new();
         let mut plan_activation_cache = HashMap::new();
         for summary in summaries {
-            let issue = self.pm.get_issue(&summary.id).await?;
+            let issue = match self.pm.get_issue(&summary.id).await {
+                Ok(issue) => issue,
+                Err(error) => {
+                    let plan_id = summary
+                        .labels
+                        .iter()
+                        .find_map(|label| crate::plan::labels::parse_plan_id(label));
+                    tracing::warn!(
+                        issue_id = %summary.id,
+                        plan_id = plan_id.unwrap_or(""),
+                        "reconciler skipping ready summary after get_issue failed: {error}"
+                    );
+                    self.record_skipped(
+                        plan_id,
+                        &summary.id,
+                        SkipReason::HydrationGetIssueFailed {
+                            error: error.to_string(),
+                        },
+                    )
+                    .await;
+                    continue;
+                }
+            };
             match issue.issue_type.as_deref() {
                 Some("task") => {
                     if let Some(plan_id) = issue
@@ -1684,9 +1767,31 @@ impl Reconciler {
                         .find_map(|label| crate::plan::labels::parse_plan_id(label))
                         .map(str::to_string)
                     {
-                        let dispatch_state = self
+                        let dispatch_state = match self
                             .plan_allows_dispatch(&plan_id, &mut plan_activation_cache)
-                            .await?;
+                            .await
+                        {
+                            Ok(state) => state,
+                            Err(error) => {
+                                let task_id =
+                                    task_id_from_labels_or_issue(&issue.labels, &issue.id);
+                                tracing::warn!(
+                                    %plan_id,
+                                    %task_id,
+                                    issue_id = %issue.id,
+                                    "reconciler skipping ready task after plan_allows_dispatch failed: {error}"
+                                );
+                                self.record_skipped(
+                                    Some(&plan_id),
+                                    &task_id,
+                                    SkipReason::PlanAllowsDispatchFailed {
+                                        error: error.to_string(),
+                                    },
+                                )
+                                .await;
+                                continue;
+                            }
+                        };
                         if let Some(reason) = dispatch_state.skip_reason() {
                             let task_id = task_id_from_labels_or_issue(&issue.labels, &issue.id);
                             self.record_skipped(Some(&plan_id), &task_id, reason).await;
@@ -1711,14 +1816,51 @@ impl Reconciler {
                             .await;
                         continue;
                     };
-                    let dispatch_state = self
+                    let dispatch_state = match self
                         .plan_allows_dispatch(&plan_id, &mut plan_activation_cache)
-                        .await?;
+                        .await
+                    {
+                        Ok(state) => state,
+                        Err(error) => {
+                            tracing::warn!(
+                                %plan_id,
+                                issue_id = %issue.id,
+                                "reconciler skipping ready epic after plan_allows_dispatch failed: {error}"
+                            );
+                            self.record_skipped(
+                                Some(&plan_id),
+                                &issue.id,
+                                SkipReason::PlanAllowsDispatchFailed {
+                                    error: error.to_string(),
+                                },
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
                     if let Some(reason) = dispatch_state.skip_reason() {
                         self.record_skipped(Some(&plan_id), &issue.id, reason).await;
                         continue;
                     }
-                    let projected = Arc::new(self.project_plan_from_beads(&plan_id).await?);
+                    let projected = match self.project_plan_from_beads(&plan_id).await {
+                        Ok(projected) => Arc::new(projected),
+                        Err(error) => {
+                            tracing::warn!(
+                                %plan_id,
+                                issue_id = %issue.id,
+                                "reconciler skipping ready epic after plan projection failed: {error}"
+                            );
+                            self.record_skipped(
+                                Some(&plan_id),
+                                &issue.id,
+                                SkipReason::ProjectorFailed {
+                                    error: error.to_string(),
+                                },
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
                     for task in &projected.tasks {
                         if !matches!(task.status, crate::plan::PlanTaskStatus::Ready) {
                             let blocked_by = unresolved_blocker_issue_ids(&projected, task);
@@ -1748,7 +1890,26 @@ impl Reconciler {
                             .await;
                             continue;
                         }
-                        let task_issue = self.pm.get_issue(issue_id).await?;
+                        let task_issue = match self.pm.get_issue(issue_id).await {
+                            Ok(task_issue) => task_issue,
+                            Err(error) => {
+                                tracing::warn!(
+                                    %plan_id,
+                                    task_id = %task.spec.task_id,
+                                    %issue_id,
+                                    "reconciler skipping ready task after get_issue failed: {error}"
+                                );
+                                self.record_skipped(
+                                    Some(&plan_id),
+                                    &task.spec.task_id,
+                                    SkipReason::HydrationGetIssueFailed {
+                                        error: error.to_string(),
+                                    },
+                                )
+                                .await;
+                                continue;
+                            }
+                        };
                         hydrated.push(HydratedReady {
                             summary: issue_to_summary(task_issue),
                             plan_state: Some(Arc::clone(&projected)),

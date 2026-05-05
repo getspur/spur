@@ -59,6 +59,10 @@ pub enum SkipReason {
     DispatchSendFailed { msg: String },
     MissingDispatchLeaseExpiry,
     UnsupportedReadyIssueType { issue_type: Option<String> },
+    BaseSpecBuildFailed { error: String },
+    PersistDispatchIntentFailed { error: String },
+    HydrationGetIssueFailed { error: String },
+    PlanAllowsDispatchFailed { error: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -180,6 +184,10 @@ enum SkipReasonKey {
     DispatchSendFailed,
     MissingDispatchLeaseExpiry,
     UnsupportedReadyIssueType,
+    BaseSpecBuildFailed,
+    PersistDispatchIntentFailed,
+    HydrationGetIssueFailed,
+    PlanAllowsDispatchFailed,
 }
 
 impl From<&SkipReason> for SkipReasonKey {
@@ -201,6 +209,10 @@ impl From<&SkipReason> for SkipReasonKey {
             SkipReason::DispatchSendFailed { .. } => Self::DispatchSendFailed,
             SkipReason::MissingDispatchLeaseExpiry => Self::MissingDispatchLeaseExpiry,
             SkipReason::UnsupportedReadyIssueType { .. } => Self::UnsupportedReadyIssueType,
+            SkipReason::BaseSpecBuildFailed { .. } => Self::BaseSpecBuildFailed,
+            SkipReason::PersistDispatchIntentFailed { .. } => Self::PersistDispatchIntentFailed,
+            SkipReason::HydrationGetIssueFailed { .. } => Self::HydrationGetIssueFailed,
+            SkipReason::PlanAllowsDispatchFailed { .. } => Self::PlanAllowsDispatchFailed,
         }
     }
 }
@@ -509,6 +521,126 @@ mod tests {
             issue_type: Some("feature".into())
         }
     );
+    skip_reason_records_in_latest!(
+        skip_reason_base_spec_build_failed_records_without_error_in_key,
+        SkipReason::BaseSpecBuildFailed {
+            error: "base spec build failed".into()
+        }
+    );
+    skip_reason_records_in_latest!(
+        skip_reason_persist_dispatch_intent_failed_records_without_error_in_key,
+        SkipReason::PersistDispatchIntentFailed {
+            error: "persist intent failed".into()
+        }
+    );
+    skip_reason_records_in_latest!(
+        skip_reason_hydration_get_issue_failed_records_without_error_in_key,
+        SkipReason::HydrationGetIssueFailed {
+            error: "get_issue failed".into()
+        }
+    );
+    skip_reason_records_in_latest!(
+        skip_reason_plan_allows_dispatch_failed_records_without_error_in_key,
+        SkipReason::PlanAllowsDispatchFailed {
+            error: "plan_allows_dispatch failed".into()
+        }
+    );
+
+    #[test]
+    fn skip_reason_base_spec_build_failed_dedup_collapses_distinct_errors() {
+        let mut store = OutcomeStore::default();
+        let first = store.record_skipped(
+            Some("P1"),
+            "task-1",
+            SkipReason::BaseSpecBuildFailed {
+                error: "first".into(),
+            },
+            ts(1),
+        );
+        let second = store.record_skipped(
+            Some("P1"),
+            "task-1",
+            SkipReason::BaseSpecBuildFailed {
+                error: "second".into(),
+            },
+            ts(2),
+        );
+
+        assert!(first.state_changed);
+        assert!(!second.state_changed);
+    }
+
+    #[test]
+    fn skip_reason_persist_dispatch_intent_failed_dedup_collapses_distinct_errors() {
+        let mut store = OutcomeStore::default();
+        let first = store.record_skipped(
+            Some("P1"),
+            "task-1",
+            SkipReason::PersistDispatchIntentFailed {
+                error: "first".into(),
+            },
+            ts(1),
+        );
+        let second = store.record_skipped(
+            Some("P1"),
+            "task-1",
+            SkipReason::PersistDispatchIntentFailed {
+                error: "second".into(),
+            },
+            ts(2),
+        );
+
+        assert!(first.state_changed);
+        assert!(!second.state_changed);
+    }
+
+    #[test]
+    fn skip_reason_hydration_get_issue_failed_dedup_collapses_distinct_errors() {
+        let mut store = OutcomeStore::default();
+        let first = store.record_skipped(
+            Some("P1"),
+            "task-1",
+            SkipReason::HydrationGetIssueFailed {
+                error: "first".into(),
+            },
+            ts(1),
+        );
+        let second = store.record_skipped(
+            Some("P1"),
+            "task-1",
+            SkipReason::HydrationGetIssueFailed {
+                error: "second".into(),
+            },
+            ts(2),
+        );
+
+        assert!(first.state_changed);
+        assert!(!second.state_changed);
+    }
+
+    #[test]
+    fn skip_reason_plan_allows_dispatch_failed_dedup_collapses_distinct_errors() {
+        let mut store = OutcomeStore::default();
+        let first = store.record_skipped(
+            Some("P1"),
+            "task-1",
+            SkipReason::PlanAllowsDispatchFailed {
+                error: "first".into(),
+            },
+            ts(1),
+        );
+        let second = store.record_skipped(
+            Some("P1"),
+            "task-1",
+            SkipReason::PlanAllowsDispatchFailed {
+                error: "second".into(),
+            },
+            ts(2),
+        );
+
+        assert!(first.state_changed);
+        assert!(!second.state_changed);
+    }
 
     #[test]
     fn skip_reason_missing_plan_id_records_as_global_transition() {
