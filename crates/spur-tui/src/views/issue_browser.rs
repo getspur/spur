@@ -408,8 +408,13 @@ impl IssueBrowserView {
         let selected_cache_sparse = selected_cache.is_some_and(|(nodes, _)| nodes.len() <= 1);
         let selected_cache_loading =
             selected_cache.is_none() && self.graph_loading.as_deref() == Some(selected_id);
+        let selected_cache_pending_prefetch = selected_cache.is_none()
+            && self
+                .pending_prefetch
+                .as_ref()
+                .is_some_and(|(id, _)| id.as_str() == selected_id);
 
-        if !selected_cache_sparse && !selected_cache_loading {
+        if !selected_cache_sparse && !selected_cache_loading && !selected_cache_pending_prefetch {
             return None;
         }
 
@@ -1791,6 +1796,57 @@ mod tests {
         assert!(
             view.take_pending_action().is_none(),
             "only the final stable selection should dispatch"
+        );
+    }
+
+    #[test]
+    fn pending_prefetch_holds_lineage_layout_during_debounce_window() {
+        let lineage_exec = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage_exec);
+        let mut view = IssueBrowserView::new();
+        view.set_issues_for_test(vec![
+            issue("bd-root", "epic", Vec::new()),
+            issue("bd-other", "bug", Vec::new()),
+        ]);
+
+        view.graph_loading = Some("bd-root".into());
+        view.handle_spur_event(
+            &subgraph_loaded_event(
+                "bd-root",
+                vec![graph_node("bd-root"), graph_node("bd-child")],
+            ),
+            &ctx,
+        );
+
+        assert!(view
+            .issues_panel
+            .select_by_id("bd-other", &view.tracked_issues));
+        view.prefetch_selected_graph();
+
+        assert!(
+            view.pending_prefetch
+                .as_ref()
+                .is_some_and(|(id, _)| id == "bd-other"),
+            "j/k navigation should arm pending_prefetch for the new selection"
+        );
+        assert!(
+            view.graph_loading.is_none(),
+            "graph_loading must be empty before flush_due_prefetch fires"
+        );
+
+        let rendered = rendered_text(&mut view);
+
+        assert!(
+            rendered.contains("Work Item Lineage"),
+            "panel should hold the lineage title during the debounce window:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("loading work tree"),
+            "panel should report 'loading work tree' for the uncached selection:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains(" Issues "),
+            "panel must not flicker back to the flat 'Issues' title:\n{rendered}"
         );
     }
 
