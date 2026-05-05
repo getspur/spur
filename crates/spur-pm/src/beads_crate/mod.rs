@@ -6,6 +6,7 @@
 pub mod adapter;
 pub mod backoff;
 pub mod init;
+pub mod issue_tracker;
 pub mod metrics;
 pub mod reader_pool;
 pub mod snapshot;
