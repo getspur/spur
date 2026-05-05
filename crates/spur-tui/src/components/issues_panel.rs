@@ -368,11 +368,11 @@ impl IssuesPanel {
             .collect();
 
         let widths = [
-            Constraint::Length(18),
+            Constraint::Length(20),
             Constraint::Length(2),
             Constraint::Length(7),
             Constraint::Length(4),
-            Constraint::Length(10),
+            Constraint::Length(8),
             Constraint::Min(20),
         ];
         let table = Table::new(rows, widths)
@@ -752,6 +752,14 @@ mod tests {
         out
     }
 
+    fn row_text(buf: &Buffer, y: u16) -> String {
+        (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    fn cell_text(buf: &Buffer, y: u16, x: u16, width: u16) -> String {
+        (x..x + width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
     #[test]
     fn issue_label_preserves_root_status_icon_with_blocker_alarm() {
         let mut root = issue("bd-root");
@@ -830,6 +838,55 @@ mod tests {
             lineage.contains("[?]"),
             "lineage title should advertise help:\n{lineage}"
         );
+    }
+
+    #[test]
+    fn lineage_column_preserves_depth_three_dotted_id_without_ellipsis() {
+        const ROOT_ID: &str = "bd-ro";
+        const DEEP_ID: &str = "bd-ro.1.2.3";
+        const DEEP_TITLE: &str = "Deep child row";
+
+        let mut deep_issue = issue(DEEP_ID);
+        deep_issue.title = DEEP_TITLE.into();
+        let issues = vec![
+            issue(ROOT_ID),
+            issue("bd-ro.1"),
+            issue("bd-ro.1.2"),
+            deep_issue,
+        ];
+        let nodes = vec![
+            graph_node(ROOT_ID, "open"),
+            graph_node("bd-ro.1", "open"),
+            graph_node("bd-ro.1.2", "open"),
+            graph_node(DEEP_ID, "open"),
+        ];
+        let edges = Vec::new();
+        let mut panel = IssuesPanel::new();
+        let mut terminal = Terminal::new(TestBackend::new(80, 8)).unwrap();
+
+        terminal
+            .draw(|frame| {
+                panel.render_with_lineage(
+                    &issues,
+                    Some(IssueLineageView::Loaded(IssueLineageContext {
+                        root_id: ROOT_ID,
+                        nodes: &nodes,
+                        edges: &edges,
+                    })),
+                    frame,
+                    frame.area(),
+                );
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        let row_y = (0..buf.area.height)
+            .find(|y| row_text(buf, *y).contains(DEEP_TITLE))
+            .expect("deep lineage row should render");
+        let lineage_cell = cell_text(buf, row_y, 1, 20);
+
+        assert_eq!(lineage_cell, "│ │ ├─ ○ bd-ro.1.2.3");
+        assert!(!lineage_cell.contains('…'));
     }
 
     #[test]
