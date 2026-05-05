@@ -18,7 +18,7 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, OnceCell};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::{AbortOnDropHandle, TaskTracker};
@@ -46,6 +46,7 @@ use crate::tools::{self, DelegationChannel, DelegationRequest};
 /// map is allowed to stay permanently empty in production.
 const COMPLETED_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 const DEFAULT_PLAN_PENDING_GRACE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+const BRAIN_SESSION_BIND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Prefix used to mark a comment as a startup-sweep quarantine audit.
 ///
 /// **DO NOT RENAME WITHOUT MIGRATION.** This string is durable state: the
@@ -76,6 +77,27 @@ fn mcp_session_keepalive() -> Option<std::time::Duration> {
             Err(_) => Some(MCP_SESSION_KEEPALIVE_DEFAULT),
         },
         Err(_) => Some(MCP_SESSION_KEEPALIVE_DEFAULT),
+    }
+}
+
+struct ReconcilerTaskHandle {
+    cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    handle: AbortOnDropHandle<()>,
+}
+
+impl ReconcilerTaskHandle {
+    fn abort(mut self) {
+        if let Some(tx) = self.cancel_tx.take() {
+            let _ = tx.send(());
+        }
+        self.handle.abort();
+    }
+
+    async fn shutdown(mut self) {
+        if let Some(tx) = self.cancel_tx.take() {
+            let _ = tx.send(());
+        }
+        let _ = self.handle.await;
     }
 }
 #[cfg(test)]
@@ -398,7 +420,8 @@ pub struct McpCallbackServer {
     /// Available worker agents (set once at creation).
     workers: Vec<WorkerInfo>,
     /// Brain session this server belongs to. INV-2: typed as BrainSessionId.
-    brain_session_id: std::sync::OnceLock<spur_acp::BrainSessionId>,
+    brain_session_id: Arc<OnceCell<spur_acp::BrainSessionId>>,
+    brain_session_id_notify: Arc<tokio::sync::Notify>,
     /// Delegation IDs whose background collector is still awaiting a result.
     active_delegations: Arc<tokio::sync::Mutex<HashSet<DelegationId>>>,
     /// Results that a background collector has received but the brain has
@@ -453,8 +476,11 @@ pub struct McpCallbackServer {
     cancel_token: CancellationToken,
     /// v3-c: handle to the root listener task so `force_abort` can stop it.
     root_handle: Mutex<Option<JoinHandle<()>>>,
-    /// v0a.3: if true, spawn the reconciler on server start. Default true
-    /// for beads backends, false for github. Wired via `set_reconciler_enabled`.
+    /// Handle to the optional beads reconciler task. It is enabled only after
+    /// the orchestrator binds this server to a derived brain_session_id.
+    reconciler_handle: Mutex<Option<ReconcilerTaskHandle>>,
+    /// v0a.3: if true, `enable_reconciler` may spawn the reconciler after
+    /// the brain_session_id is bound. Wired via `set_reconciler_enabled`.
     reconciler_enabled: bool,
     /// Fast-forward trigger for the reconciler. When the plan executor completes
     /// a task (transitions to AwaitingReview), it notifies the reconciler so it can
@@ -771,6 +797,7 @@ struct ActiveOwnedPlan {
 
 async fn find_plan_epic(
     pm: &PmService,
+    feature_gate: &spur_license::FeatureGate,
     plan_id: &str,
     operation: &str,
 ) -> Result<IssueSummary, String> {
@@ -793,7 +820,12 @@ async fn find_plan_epic(
         return Ok(epics.into_iter().next().expect("non-empty epics"));
     }
 
-    if let Some(advanced) = pm.advanced() {
+    if require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED, feature_gate).is_ok() {
+        let Some(advanced) = pm.advanced() else {
+            return Err(format!(
+                "{operation}: ambiguous plan lookup for {plan_id}; beads advanced backend is unavailable"
+            ));
+        };
         let candidate_ids = epics
             .iter()
             .map(|epic| epic.id.clone())
@@ -1755,12 +1787,13 @@ impl McpCallbackServer {
             delegation_tx: req_tx,
             workers: Vec::new(),
             brain_session_id: {
-                let cell = std::sync::OnceLock::new();
+                let cell = Arc::new(OnceCell::new());
                 if let Some(id) = session_id {
                     let _ = cell.set(id.clone());
                 }
                 cell
             },
+            brain_session_id_notify: Arc::new(tokio::sync::Notify::new()),
             active_delegations: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             completed_delegations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             task_tracker: TaskTracker::new(),
@@ -1781,6 +1814,7 @@ impl McpCallbackServer {
             retiring: AtomicBool::new(false),
             cancel_token: CancellationToken::new(),
             root_handle: Mutex::new(None),
+            reconciler_handle: Mutex::new(None),
             reconciler_enabled: false,
             reconciler_fast_forward: None,
             repo_root: None,
@@ -1803,6 +1837,20 @@ impl McpCallbackServer {
             .expect("brain_session_id must be set before MCP handlers dispatch")
     }
 
+    /// Wait until the orchestrator binds this callback server to its derived
+    /// brain_session_id. JSON-RPC entry points use this defensively because
+    /// some ACP agents connect MCP before replying to `new_session`.
+    pub async fn brain_session_id_ready(&self) -> &spur_acp::BrainSessionId {
+        loop {
+            let notified = self.brain_session_id_notify.notified();
+            tokio::pin!(notified);
+            if let Some(id) = self.brain_session_id.get() {
+                return id;
+            }
+            notified.await;
+        }
+    }
+
     /// Set the brain_session_id once. Idempotent on the same value; returns
     /// Err if already set to a different value.
     pub fn set_brain_session_id(
@@ -1811,12 +1859,20 @@ impl McpCallbackServer {
     ) -> Result<(), spur_acp::BrainSessionId> {
         if let Some(existing) = self.brain_session_id.get() {
             if existing == &id {
+                self.brain_session_id_notify.notify_waiters();
                 Ok(())
             } else {
                 Err(id)
             }
         } else {
-            self.brain_session_id.set(id)
+            match self.brain_session_id.set(id) {
+                Ok(()) => {
+                    self.brain_session_id_notify.notify_waiters();
+                    Ok(())
+                }
+                Err(tokio::sync::SetError::AlreadyInitializedError(id))
+                | Err(tokio::sync::SetError::InitializingError(id)) => Err(id),
+            }
         }
     }
 
@@ -1861,14 +1917,17 @@ impl McpCallbackServer {
 
     pub fn force_abort(&self) {
         self.task_tracker.close();
+        if let Some(handle) = self.reconciler_handle.lock().unwrap().take() {
+            handle.abort();
+        }
         if let Some(handle) = self.root_handle.lock().unwrap().take() {
             handle.abort();
         }
     }
 
-    /// v0a.3: Enable the reconciler on server start. Must be called BEFORE
-    /// `start()`. The reconciler is only spawned if the PM service has a beads
-    /// backend (determined via `PmService::advanced()` at start time).
+    /// v0a.3: Configure whether the reconciler should be spawned once the
+    /// orchestrator binds `brain_session_id` and calls `enable_reconciler`.
+    /// Must be called before `enable_reconciler`.
     ///
     /// - `enable` — when true, attempt to spawn the reconciler.
     /// - `fast_forward` — optional Notify channel. When provided, the reconciler ticks
@@ -2074,6 +2133,10 @@ impl McpCallbackServer {
     /// for all in-flight result collectors to finish.
     pub async fn shutdown(&self) {
         self.task_tracker.close();
+        let reconciler_handle = self.reconciler_handle.lock().unwrap().take();
+        if let Some(handle) = reconciler_handle {
+            handle.shutdown().await;
+        }
         self.task_tracker.wait().await;
     }
 
@@ -2251,6 +2314,12 @@ impl McpCallbackServer {
         self.active_plans.lock().await.len()
     }
 
+    /// Test-only: report whether the reconciler task has been spawned.
+    #[doc(hidden)]
+    pub fn __test_reconciler_running(&self) -> bool {
+        self.reconciler_handle.lock().unwrap().is_some()
+    }
+
     /// Remove completed delegation results older than `COMPLETED_TTL`.
     /// Called lazily from polling handlers to bound memory growth.
     async fn evict_stale_completions(&self) {
@@ -2258,6 +2327,117 @@ impl McpCallbackServer {
             .lock()
             .await
             .retain(|_, (_, ts)| ts.elapsed() < COMPLETED_TTL);
+    }
+
+    /// Spawn the beads reconciler after the orchestrator has bound the derived
+    /// brain_session_id. Safe no-op when the reconciler is disabled, the PM
+    /// backend is absent/non-beads, or the advanced beads feature is gated off.
+    pub async fn enable_reconciler(self: Arc<Self>) -> Result<()> {
+        if !self.reconciler_enabled {
+            tracing::debug!("reconciler disabled: reconciler_enabled = false");
+            return Ok(());
+        }
+        if self.reconciler_handle.lock().unwrap().is_some() {
+            return Ok(());
+        }
+
+        let Some(pm) = self.pm_service.as_ref() else {
+            tracing::debug!("reconciler disabled: no PM service");
+            return Ok(());
+        };
+        if self
+            .require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED)
+            .is_err()
+            || pm.advanced().is_none()
+        {
+            tracing::debug!("reconciler disabled: PM has no beads advanced() backend");
+            return Ok(());
+        }
+
+        let repo_root = self
+            .repo_root
+            .clone()
+            .context("repo_root not set on McpCallbackServer")?;
+        let brain_session_id = self
+            .brain_session_id
+            .get()
+            .cloned()
+            .context("brain_session_id must be set before enabling reconciler")?;
+        let fast_forward = self
+            .reconciler_fast_forward
+            .as_ref()
+            .cloned()
+            .expect("reconciler_enabled must retain a fast-forward notify");
+
+        let dispatch = ReconcilerDispatchCtx {
+            delegation_tx: self.delegation_tx.clone(),
+            task_tracker: self.task_tracker.clone(),
+            brain_session_id,
+            event_sink: self.event_sink.clone(),
+            materializer: Arc::new(self.materializer.clone()),
+            continuation_ctx: Arc::clone(&self.continuation_ctx),
+        };
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        info!("spawning plan reconciler (beads backend detected)");
+        let auto_merge = self.auto_merge_approved_plans;
+        let reconciler_config = ReconcilerConfig {
+            dispatch_lease_duration: self.dispatch_lease_duration,
+            repo_root: repo_root.clone(),
+            ..Default::default()
+        };
+        let automation: Option<Arc<dyn crate::plan::reconciler::ReconcilerAutomation>> =
+            Some(Arc::clone(&self) as Arc<dyn crate::plan::reconciler::ReconcilerAutomation>);
+        let feature_gate = Arc::clone(&self.feature_gate);
+        let reconciler_outcomes = Arc::clone(&self.reconciler_outcomes);
+        let journal_notify = Arc::new(tokio::sync::Notify::new());
+        let journal_handle = {
+            let path = crate::plan::reconciler::beads_journal_path(&repo_root);
+            AbortOnDropHandle::new(tokio::spawn(
+                crate::plan::reconciler::monitor_journal_appends(path, Arc::clone(&journal_notify)),
+            ))
+        };
+        let pm = Arc::clone(pm);
+        let handle = AbortOnDropHandle::new(tokio::spawn(async move {
+            let mut reconciler = Reconciler::new(
+                reconciler_config,
+                pm,
+                fast_forward,
+                Some(dispatch),
+                None,
+                feature_gate,
+            );
+            reconciler.set_outcomes(reconciler_outcomes);
+            reconciler.set_auto_merge_approved_plans(auto_merge);
+            reconciler.set_journal_wake(journal_notify);
+            if let Some(a) = automation {
+                reconciler.set_automation(a);
+            }
+            reconciler.run(cancel_rx).await;
+            drop(journal_handle);
+        }));
+
+        let mut task_handle = Some(ReconcilerTaskHandle {
+            cancel_tx: Some(cancel_tx),
+            handle,
+        });
+        {
+            let mut guard = self.reconciler_handle.lock().unwrap();
+            if guard.is_some() {
+                if let Some(handle) = task_handle.take() {
+                    handle.abort();
+                }
+                return Ok(());
+            }
+            *guard = task_handle.take();
+        }
+
+        let has_active_plans = !self.active_plans.lock().await.is_empty();
+        tokio::task::yield_now().await;
+        if has_active_plans {
+            self.fast_forward_reconciler();
+        }
+
+        Ok(())
     }
 
     /// Start listening on a random localhost port.
@@ -2305,8 +2485,6 @@ impl McpCallbackServer {
                 }
             }
         }
-        let has_reclaimed_plans = !self.active_plans.lock().await.is_empty();
-
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .context("Failed to bind TCP listener")?;
@@ -2323,97 +2501,6 @@ impl McpCallbackServer {
             StreamableHttpService::new(move || Ok(Arc::clone(&server)), session_manager, config)
         };
         let router = Router::new().nest_service("/mcp", service);
-
-        let mut reconciler_cancel_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
-        let reconciler_task = if self.reconciler_enabled {
-            let fast_forward = self
-                .reconciler_fast_forward
-                .as_ref()
-                .cloned()
-                .expect("reconciler_enabled must retain a fast-forward notify");
-            if let Some(pm) = self.pm_service.as_ref() {
-                // Only spawn if PmService has an advanced() (beads) backend.
-                if self
-                    .require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED)
-                    .is_ok()
-                    && pm.advanced().is_some()
-                {
-                    let pm = Arc::clone(pm);
-                    let dispatch = ReconcilerDispatchCtx {
-                        delegation_tx: self.delegation_tx.clone(),
-                        task_tracker: self.task_tracker.clone(),
-                        brain_session_id: self.brain_session_id().clone(),
-                        event_sink: self.event_sink.clone(),
-                        materializer: Arc::new(self.materializer.clone()),
-                        continuation_ctx: Arc::clone(&self.continuation_ctx),
-                    };
-                    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
-                    reconciler_cancel_tx = Some(cancel_tx);
-                    info!("spawning plan reconciler (beads backend detected)");
-                    let auto_merge = self.auto_merge_approved_plans;
-                    let repo_root = repo_root
-                        .clone()
-                        .expect("repo_root must be set when spawning beads reconciler");
-                    let reconciler_config = ReconcilerConfig {
-                        dispatch_lease_duration: self.dispatch_lease_duration,
-                        repo_root: repo_root.clone(),
-                        ..Default::default()
-                    };
-                    let automation: Option<Arc<dyn crate::plan::reconciler::ReconcilerAutomation>> =
-                        Some(Arc::clone(&self)
-                            as Arc<dyn crate::plan::reconciler::ReconcilerAutomation>);
-                    let feature_gate = Arc::clone(&self.feature_gate);
-                    let reconciler_outcomes = Arc::clone(&self.reconciler_outcomes);
-                    let journal_notify = Arc::new(tokio::sync::Notify::new());
-                    let journal_handle = {
-                        let path = crate::plan::reconciler::beads_journal_path(&repo_root);
-                        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
-                            crate::plan::reconciler::monitor_journal_appends(
-                                path,
-                                Arc::clone(&journal_notify),
-                            ),
-                        ))
-                    };
-                    let handle = AbortOnDropHandle::new(tokio::spawn(async move {
-                        let mut reconciler = Reconciler::new(
-                            reconciler_config,
-                            pm,
-                            fast_forward,
-                            Some(dispatch),
-                            None, // plan_id: observe all plans when None
-                            feature_gate,
-                        );
-                        reconciler.set_outcomes(reconciler_outcomes);
-                        reconciler.set_auto_merge_approved_plans(auto_merge);
-                        reconciler.set_journal_wake(journal_notify);
-                        if let Some(a) = automation {
-                            reconciler.set_automation(a);
-                        }
-                        reconciler.run(cancel_rx).await;
-                        // journal_handle is AbortOnDropHandle: dropping aborts the
-                        // polling task, preventing graceful-shutdown hangs and
-                        // abort/drop leaks.
-                        drop(journal_handle);
-                    }));
-                    Some(handle)
-                } else {
-                    tracing::debug!("reconciler disabled: PM has no beads advanced() backend");
-                    None
-                }
-            } else {
-                tracing::debug!("reconciler disabled: no PM service");
-                None
-            }
-        } else {
-            tracing::debug!("reconciler disabled: reconciler_enabled = false");
-            None
-        };
-        if reconciler_task.is_some() {
-            tokio::task::yield_now().await;
-            if has_reclaimed_plans {
-                self.fast_forward_reconciler();
-            }
-        }
 
         let mut signal_watcher_cancel_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
         let signal_watcher_task = if let Some(pm) = self.pm_service.as_ref() {
@@ -2453,15 +2540,8 @@ impl McpCallbackServer {
             if let Err(error) = axum::serve(listener, router).await {
                 debug!(%error, "RMCP callback server exited");
             }
-            if let Some(tx) = reconciler_cancel_tx {
-                let _ = tx.send(());
-            }
             if let Some(tx) = signal_watcher_cancel_tx {
                 let _ = tx.send(());
-            }
-            // Wait for reconciler to finish on shutdown.
-            if let Some(rh) = reconciler_task {
-                let _ = rh.await;
             }
             if let Some(sh) = signal_watcher_task {
                 let _ = sh.await;
@@ -2477,6 +2557,9 @@ impl McpCallbackServer {
 
         impl Drop for AbortRootOnDrop {
             fn drop(&mut self) {
+                if let Some(handle) = self.server.reconciler_handle.lock().unwrap().take() {
+                    handle.abort();
+                }
                 if let Some(handle) = self.server.root_handle.lock().unwrap().take() {
                     handle.abort();
                 }
@@ -2538,6 +2621,13 @@ impl McpCallbackServer {
             .unwrap_or_else(|| json!({}));
 
         debug!(tool = %tool_name, "Handling tool call");
+
+        if tokio::time::timeout(BRAIN_SESSION_BIND_TIMEOUT, self.brain_session_id_ready())
+            .await
+            .is_err()
+        {
+            return JsonRpcResponse::internal_error(id, "server not yet bound to brain session");
+        }
 
         match tool_name.as_str() {
             "delegate_to_worker" => self.handle_delegate_to_worker(id, arguments).await,
@@ -3825,7 +3915,8 @@ impl McpCallbackServer {
             .as_deref()
             .ok_or_else(|| "claim_plan requires PM service".to_string())?;
 
-        let epic_summary = find_plan_epic(pm, plan_id, "claim_plan").await?;
+        let epic_summary =
+            find_plan_epic(pm, self.feature_gate.as_ref(), plan_id, "claim_plan").await?;
         let epic_id = epic_summary.id.clone();
         let epic = pm
             .get_issue(&epic_id)
@@ -3953,18 +4044,19 @@ impl McpCallbackServer {
             None => return JsonRpcResponse::internal_error(id, "resume_plan requires PM service"),
         };
 
-        let epic_summary = match find_plan_epic(pm, plan_id, "resume_plan").await {
-            Ok(epic) => epic,
-            Err(error) => {
-                return if error.contains("plan not found") {
-                    JsonRpcResponse::error(id, -32004, error)
-                } else if error.contains("ambiguous plan lookup") {
-                    JsonRpcResponse::error(id, -32009, error)
-                } else {
-                    JsonRpcResponse::internal_error(id, error)
+        let epic_summary =
+            match find_plan_epic(pm, self.feature_gate.as_ref(), plan_id, "resume_plan").await {
+                Ok(epic) => epic,
+                Err(error) => {
+                    return if error.contains("plan not found") {
+                        JsonRpcResponse::error(id, -32004, error)
+                    } else if error.contains("ambiguous plan lookup") {
+                        JsonRpcResponse::error(id, -32009, error)
+                    } else {
+                        JsonRpcResponse::internal_error(id, error)
+                    }
                 }
-            }
-        };
+            };
         let epic_id = epic_summary.id.clone();
         let epic = match pm.get_issue(&epic_id).await {
             Ok(epic) => epic,

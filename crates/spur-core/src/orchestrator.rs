@@ -62,6 +62,8 @@ type NewBrainSessionBootstrap = (
     spur_acp::config::AgentConfig,
     Option<tokio::sync::broadcast::Receiver<spur_acp::SessionNotification>>,
     agent_client_protocol::schema::NewSessionResponse,
+    spur_acp::BrainSessionId,
+    SessionId,
 );
 type LoadedBrainSessionBootstrap = (
     spur_acp::config::AgentConfig,
@@ -70,6 +72,8 @@ type LoadedBrainSessionBootstrap = (
     Option<std::pin::Pin<Box<dyn futures::Stream<Item = spur_acp::SessionNotification> + Send>>>,
     bool,
     spur_acp::LoadOutcome,
+    spur_acp::BrainSessionId,
+    SessionId,
 );
 
 // ─── Agent name normalization ─────────────────────────────────────────
@@ -2940,6 +2944,10 @@ impl Orchestrator {
                 .set(brain_session_id.as_session_id().clone())
                 .expect("set once");
             let session_id = brain_session_id.as_session_id().clone();
+            Arc::clone(&mcp_server)
+                .enable_reconciler()
+                .await
+                .context("Failed to enable MCP reconciler")?;
 
             info!(brain = %brain_name, session = %session_id, "Starting ad-hoc run");
             self.emit(SpurEvent::now(SpurEventBody::BrainSpawned {
@@ -4757,9 +4765,10 @@ impl Orchestrator {
             .await
             .context("Failed to start MCP callback server")?;
 
-        let ((brain_cfg, presub_notif_rx, session_response), mcp_handle): McpGuarded<
-            NewBrainSessionBootstrap,
-        > = cleanup_mcp_on_err(mcp_handle, async {
+        let (
+            (brain_cfg, presub_notif_rx, session_response, brain_session_id, session_id),
+            mcp_handle,
+        ): McpGuarded<NewBrainSessionBootstrap> = cleanup_mcp_on_err(mcp_handle, async {
             let mcp_servers = vec![McpServer::Http(McpServerHttp::new("spur-mcp", &mcp_url))];
 
             let brain_cfg = self.registry.get(&brain_name).cloned().ok_or_else(|| {
@@ -4786,19 +4795,29 @@ impl Orchestrator {
             .await
             .context("Failed to create brain session")?;
 
-            Ok((brain_cfg, presub_notif_rx, session_response))
+            let acp_session_id = spur_acp::SessionId(session_response.session_id.to_string());
+            let brain_session_id = spur_mcp::plan::labels::derive_brain_session_id(&acp_session_id);
+            mcp_server
+                .set_brain_session_id(brain_session_id.clone())
+                .expect("set once");
+            brain_session_id_cell
+                .set(brain_session_id.as_session_id().clone())
+                .expect("set once");
+            let session_id = brain_session_id.as_session_id().clone();
+            Arc::clone(&mcp_server)
+                .enable_reconciler()
+                .await
+                .context("Failed to enable MCP reconciler")?;
+
+            Ok((
+                brain_cfg,
+                presub_notif_rx,
+                session_response,
+                brain_session_id,
+                session_id,
+            ))
         })
         .await?;
-
-        let acp_session_id = spur_acp::SessionId(session_response.session_id.to_string());
-        let brain_session_id = spur_mcp::plan::labels::derive_brain_session_id(&acp_session_id);
-        mcp_server
-            .set_brain_session_id(brain_session_id.clone())
-            .expect("set once");
-        brain_session_id_cell
-            .set(brain_session_id.as_session_id().clone())
-            .expect("set once");
-        let session_id = brain_session_id.as_session_id().clone();
 
         info!(brain = %brain_name, session = %session_id, "Creating brain session");
         self.emit(SpurEvent::now(SpurEventBody::BrainSpawned {
@@ -5033,6 +5052,8 @@ impl Orchestrator {
                 history_stream,
                 resumed,
                 load_outcome,
+                brain_session_id,
+                session_id,
             ),
             mcp_handle,
         ): McpGuarded<LoadedBrainSessionBootstrap> = cleanup_mcp_on_err(mcp_handle, async {
@@ -5116,6 +5137,21 @@ impl Orchestrator {
                     }
                 };
 
+            let final_acp_session = spur_acp::SessionId(final_acp_session_id.clone());
+            let brain_session_id =
+                spur_mcp::plan::labels::derive_brain_session_id(&final_acp_session);
+            mcp_server
+                .set_brain_session_id(brain_session_id.clone())
+                .expect("set once");
+            brain_session_id_cell
+                .set(brain_session_id.as_session_id().clone())
+                .expect("set once");
+            let session_id = brain_session_id.as_session_id().clone();
+            Arc::clone(&mcp_server)
+                .enable_reconciler()
+                .await
+                .context("Failed to enable MCP reconciler")?;
+
             Ok((
                 brain_cfg,
                 presub_notif_rx,
@@ -5123,19 +5159,11 @@ impl Orchestrator {
                 history_stream,
                 resumed,
                 load_outcome,
+                brain_session_id,
+                session_id,
             ))
         })
         .await?;
-
-        let final_acp_session = spur_acp::SessionId(final_acp_session_id.clone());
-        let brain_session_id = spur_mcp::plan::labels::derive_brain_session_id(&final_acp_session);
-        mcp_server
-            .set_brain_session_id(brain_session_id.clone())
-            .expect("set once");
-        brain_session_id_cell
-            .set(brain_session_id.as_session_id().clone())
-            .expect("set once");
-        let session_id = brain_session_id.as_session_id().clone();
 
         if final_acp_session_id != requested_acp_session_id {
             drop(attach_guard.take());
