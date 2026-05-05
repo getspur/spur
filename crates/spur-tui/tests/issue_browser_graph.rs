@@ -13,11 +13,15 @@ fn key(c: char) -> KeyEvent {
 }
 
 fn sample_summary(id: &str, title: &str) -> IssueSummaryEvent {
+    sample_summary_with_status(id, title, "open")
+}
+
+fn sample_summary_with_status(id: &str, title: &str, status: &str) -> IssueSummaryEvent {
     IssueSummaryEvent {
         id: id.into(),
         source: "beads".into(),
         title: title.into(),
-        status: "open".into(),
+        status: status.into(),
         labels: Vec::new(),
         priority: Some(1),
         issue_type: Some("task".into()),
@@ -64,10 +68,14 @@ fn sample_detail(id: &str, title: &str) -> IssueDetailEvent {
 }
 
 fn graph_node(id: &str, title: &str) -> GraphNodeEvent {
+    graph_node_with_status(id, title, "open")
+}
+
+fn graph_node_with_status(id: &str, title: &str, status: &str) -> GraphNodeEvent {
     GraphNodeEvent {
         id: id.into(),
         title: Some(title.into()),
-        status: Some("open".into()),
+        status: Some(status.into()),
         priority: Some(1),
         labels: vec![],
         pagerank: Some(0.42),
@@ -252,6 +260,51 @@ fn issue_list_renders_lineage_context_from_selected_graph_cache() {
     assert!(
         rendered.contains("blocked by open upstream"),
         "rendered:\n{rendered}"
+    );
+}
+
+#[test]
+fn issue_list_lineage_uses_compact_checkmark_for_closed_status() {
+    let (mut app, mut rx) = spur_tui::test_support::app_with_user_input_tx();
+    spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
+    match rx.try_recv() {
+        Ok(UserInput::RefreshIssues) => {}
+        Ok(_) => panic!("expected RefreshIssues, got different user input"),
+        Err(err) => panic!("expected RefreshIssues, got {err}"),
+    }
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssuesLoaded {
+            issues: vec![
+                sample_summary("issue-A", "Selected issue"),
+                sample_summary_with_status("issue-C", "Downstream work", "closed"),
+            ],
+        }),
+    );
+    expect_get_graph(&mut rx, "issue-A");
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
+            requested_id: "issue-A".into(),
+            nodes: vec![
+                graph_node("issue-A", "Selected issue"),
+                graph_node_with_status("issue-C", "Downstream work", "closed"),
+            ],
+            edges: vec![graph_edge("issue-A", "issue-C")],
+        }),
+    );
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+
+    let rendered = render_text(&mut app, &mut terminal);
+
+    assert!(
+        rendered.contains("└─ ✓ issue-C"),
+        "closed lineage labels should use the compact checkmark:\n{rendered}"
+    );
+    const OLD_EMOJI_CHECKMARK: &str = "\u{2705}";
+    assert!(
+        !rendered.contains(OLD_EMOJI_CHECKMARK),
+        "closed lineage labels should not use the old emoji checkmark:\n{rendered}"
     );
 }
 
