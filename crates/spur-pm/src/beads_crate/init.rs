@@ -143,7 +143,6 @@ fn is_jsonl_temp_file(name: &str) -> bool {
 
 /// Sweep stale jsonl temp files older than `min_age`. Returns count removed.
 /// Caller MUST hold .write.lock when calling this; we do not acquire it here.
-#[allow(dead_code)] // wired into Section C/D adapter open path
 pub(crate) fn sweep_stale_jsonl_temps(beads_dir: &Path, min_age: Duration) -> std::io::Result<u64> {
     let now = SystemTime::now();
     let mut removed = 0;
@@ -244,56 +243,20 @@ mod sweep_tests {
     }
 }
 
-/// Open the writer connection with cross-process serialization. Holds
-/// `.beads/.write.lock` for the duration of schema/migration work.
-///
-/// Returns the opened `SqliteStorage` ready for writes. The flock is released
-/// once the storage is fully initialized (the caller's later writes will
-/// re-acquire it per-write).
-#[allow(dead_code)] // wired into Section C/D adapter open path
-pub(crate) fn open_writer_under_migration_lock(
-    beads_dir: &Path,
-    lock_timeout_ms: u64,
-) -> anyhow::Result<SqliteStorage> {
-    // Acquire .write.lock — guards schema migration against other instances
-    // racing the same first-open. `_guard: File` must stay in scope until we
-    // return; dropping it releases the flock.
-    let _guard = sync::blocking_write_lock_with_timeout(beads_dir, Some(lock_timeout_ms))?;
-    // Opening the storage runs schema init / migrations as needed.
-    let db_path = beads_dir.join("beads.db");
-    let storage = SqliteStorage::open_with_timeout(&db_path, Some(lock_timeout_ms))?;
-    // _guard drops here, releasing flock.
-    Ok(storage)
-}
-
-/// Detect whether the SQLite db has writes that haven't been flushed to JSONL,
-/// and force a flush if so. Returns the `AutoFlushResult` for inspection.
-///
-/// # Lock contract
-///
-/// Caller MUST hold `.write.lock` for the duration of the call. `auto_flush`
-/// reads dirty rows from SQLite and rewrites the JSONL file; without a lock,
-/// a concurrent writer could interleave and corrupt the JSONL atomic-write.
-///
-/// Note that `open_writer_under_migration_lock` releases its flock on return.
-/// The intended Section C/D wiring is:
-///   1. Acquire `sync::blocking_write_lock_with_timeout(beads_dir, …)`.
-///   2. Call `detect_and_force_flush_stale_jsonl` while holding it.
-///   3. Drop the lock.
-///
-/// Tracked in bd-5z7w (T8/T9 lock-contract design follow-up).
-#[allow(dead_code)] // wired into Section C/D adapter open path
-pub(crate) fn detect_and_force_flush_stale_jsonl(
-    storage: &mut SqliteStorage,
+/// Initialize the writer-side storage state and flush stale SQLite changes to
+/// JSONL while holding `.write.lock` for the full boot-time sequence.
+pub(crate) fn init_writer_with_flush(
     beads_dir: &Path,
     jsonl_path: &Path,
-) -> anyhow::Result<beads_rust::sync::AutoFlushResult> {
-    // beads_rust auto_flush is idempotent: it computes whether the JSONL is
-    // out of sync with the SQLite db, and is a no-op if not. We call it
-    // unconditionally at boot. `allow_external_jsonl: false` because spur-pm
-    // is the single writer to the JSONL file in our model.
-    let result = sync::auto_flush(storage, beads_dir, jsonl_path, false)?;
-    Ok(result)
+    lock_timeout_ms: u64,
+    stale_tmp_min_age: Duration,
+) -> anyhow::Result<()> {
+    let _guard = sync::blocking_write_lock_with_timeout(beads_dir, Some(lock_timeout_ms))?;
+    let db_path = beads_dir.join("beads.db");
+    let mut storage = SqliteStorage::open_with_timeout(&db_path, Some(lock_timeout_ms))?;
+    let _ = sweep_stale_jsonl_temps(beads_dir, stale_tmp_min_age);
+    sync::auto_flush(&mut storage, beads_dir, jsonl_path, false)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -302,23 +265,11 @@ mod migration_tests {
     use tempfile::TempDir;
 
     #[test]
-    fn opens_writer_in_fresh_dir() {
+    fn init_writer_with_flush_runs_clean_on_fresh_dir() {
         let dir = TempDir::new().unwrap();
-        let _writer =
-            open_writer_under_migration_lock(dir.path(), 5_000).expect("first open should succeed");
-        // Subsequent open in the same process should also succeed
-        let _writer2 = open_writer_under_migration_lock(dir.path(), 5_000)
-            .expect("second open should succeed");
-    }
-
-    #[test]
-    fn force_flush_on_fresh_db_is_no_op() {
-        let dir = TempDir::new().unwrap();
-        let mut storage = open_writer_under_migration_lock(dir.path(), 5_000).unwrap();
         let jsonl = dir.path().join("issues.jsonl");
-        let result = detect_and_force_flush_stale_jsonl(&mut storage, dir.path(), &jsonl).unwrap();
-        // Fresh db has no dirty rows; auto_flush must report no work done.
-        assert!(!result.flushed, "fresh db should not trigger a flush");
-        assert_eq!(result.exported_count, 0, "no rows to export on fresh db");
+
+        init_writer_with_flush(dir.path(), &jsonl, 5_000, Duration::ZERO)
+            .expect("fresh dir init should succeed");
     }
 }
