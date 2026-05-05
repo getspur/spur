@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::TestBackend, Terminal};
@@ -149,6 +151,16 @@ fn expect_get_graph(rx: &mut mpsc::Receiver<UserInput>, expected_id: &str) {
     }
 }
 
+fn expect_get_graph_after_debounce(
+    app: &mut App,
+    rx: &mut mpsc::Receiver<UserInput>,
+    expected_id: &str,
+) {
+    app.age_issue_browser_prefetch_for_test(Duration::from_millis(200));
+    app.tick();
+    expect_get_graph(rx, expected_id);
+}
+
 #[test]
 fn issue_browser_filters_plan_artifacts_from_work_item_list() {
     let (mut app, mut rx) = spur_tui::test_support::app_with_user_input_tx();
@@ -205,11 +217,11 @@ fn issue_list_prefetches_dependency_graph_when_browsing_selection() {
         }),
     );
 
-    expect_get_graph(&mut rx, "issue-1");
+    expect_get_graph_after_debounce(&mut app, &mut rx, "issue-1");
 
     app.handle_crossterm_event_for_test(key('j'));
 
-    expect_get_graph(&mut rx, "issue-2");
+    expect_get_graph_after_debounce(&mut app, &mut rx, "issue-2");
 }
 
 #[test]
@@ -281,7 +293,7 @@ fn issue_list_lineage_uses_compact_checkmark_for_closed_status() {
             ],
         }),
     );
-    expect_get_graph(&mut rx, "issue-A");
+    expect_get_graph_after_debounce(&mut app, &mut rx, "issue-A");
     spur_tui::test_support::push_event(
         &mut app,
         SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
@@ -407,7 +419,7 @@ fn issue_list_keeps_panel_height_when_navigating_from_parent_to_child() {
     let parent_height = issue_panel_height(&parent_render);
 
     app.handle_crossterm_event_for_test(key('j'));
-    expect_get_graph(&mut rx, "bd-parent.1");
+    expect_get_graph_after_debounce(&mut app, &mut rx, "bd-parent.1");
     let child_render = render_text(&mut app, &mut terminal);
     let child_height = issue_panel_height(&child_render);
 
@@ -485,7 +497,7 @@ fn issue_list_keeps_lineage_panel_while_selected_graph_is_loading() {
             ],
         }),
     );
-    expect_get_graph(&mut rx, "issue-A");
+    expect_get_graph_after_debounce(&mut app, &mut rx, "issue-A");
     spur_tui::test_support::push_event(
         &mut app,
         SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
@@ -506,7 +518,7 @@ fn issue_list_keeps_lineage_panel_while_selected_graph_is_loading() {
 
     app.handle_crossterm_event_for_test(key('j'));
 
-    expect_get_graph(&mut rx, "issue-C");
+    expect_get_graph_after_debounce(&mut app, &mut rx, "issue-C");
     let after_nav = render_text(&mut app, &mut terminal);
     assert!(
         after_nav.contains("Work Item Lineage"),
@@ -536,7 +548,7 @@ fn issue_list_keeps_lineage_panel_after_selected_graph_loads_without_edges() {
         &mut app,
         SpurEvent::now(SpurEventBody::IssuesLoaded { issues }),
     );
-    expect_get_graph(&mut rx, "bd-2pb");
+    expect_get_graph_after_debounce(&mut app, &mut rx, "bd-2pb");
     spur_tui::test_support::push_event(
         &mut app,
         SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
@@ -554,7 +566,7 @@ fn issue_list_keeps_lineage_panel_after_selected_graph_loads_without_edges() {
 
     app.handle_crossterm_event_for_test(key('j'));
 
-    expect_get_graph(&mut rx, "bd-2pb.1");
+    expect_get_graph_after_debounce(&mut app, &mut rx, "bd-2pb.1");
     let loading = render_text(&mut app, &mut terminal);
     assert!(
         !loading.contains("loading work tree"),
@@ -615,7 +627,7 @@ fn issue_list_keeps_plan_epic_as_root_when_child_is_selected() {
             ],
         }),
     );
-    expect_get_graph(&mut rx, "bd-2pb");
+    expect_get_graph_after_debounce(&mut app, &mut rx, "bd-2pb");
     spur_tui::test_support::push_event(
         &mut app,
         SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
@@ -635,7 +647,7 @@ fn issue_list_keeps_plan_epic_as_root_when_child_is_selected() {
 
     app.handle_crossterm_event_for_test(key('j'));
 
-    expect_get_graph(&mut rx, "bd-2pb.1");
+    expect_get_graph_after_debounce(&mut app, &mut rx, "bd-2pb.1");
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
     let loading = render_text(&mut app, &mut terminal);
     assert!(
@@ -709,7 +721,7 @@ fn issue_list_keeps_non_prefix_child_label_while_graph_loads() {
             ],
         }),
     );
-    expect_get_graph(&mut rx, "bd-2pb");
+    expect_get_graph_after_debounce(&mut app, &mut rx, "bd-2pb");
     spur_tui::test_support::push_event(
         &mut app,
         SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
@@ -724,7 +736,7 @@ fn issue_list_keeps_non_prefix_child_label_while_graph_loads() {
 
     app.handle_crossterm_event_for_test(key('j'));
 
-    expect_get_graph(&mut rx, "bd-work");
+    expect_get_graph_after_debounce(&mut app, &mut rx, "bd-work");
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
     let loading = render_text(&mut app, &mut terminal);
     assert!(
@@ -763,7 +775,7 @@ fn issue_list_does_not_infer_unrelated_dot_prefix_parent() {
             ],
         }),
     );
-    expect_get_graph(&mut rx, "bd-2");
+    expect_get_graph_after_debounce(&mut app, &mut rx, "bd-2");
     spur_tui::test_support::push_event(
         &mut app,
         SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
@@ -778,7 +790,7 @@ fn issue_list_does_not_infer_unrelated_dot_prefix_parent() {
 
     app.handle_crossterm_event_for_test(key('j'));
 
-    expect_get_graph(&mut rx, "bd-2.1");
+    expect_get_graph_after_debounce(&mut app, &mut rx, "bd-2.1");
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
     let loading = render_text(&mut app, &mut terminal);
     assert!(
@@ -813,7 +825,7 @@ fn issue_list_does_not_treat_sibling_related_edge_as_parent() {
             ],
         }),
     );
-    expect_get_graph(&mut rx, "bd-2pb.1");
+    expect_get_graph_after_debounce(&mut app, &mut rx, "bd-2pb.1");
     spur_tui::test_support::push_event(
         &mut app,
         SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
@@ -862,7 +874,7 @@ fn issue_list_keeps_ultimate_plan_epic_as_root_for_grandchild() {
             ],
         }),
     );
-    expect_get_graph(&mut rx, "bd-2pb");
+    expect_get_graph_after_debounce(&mut app, &mut rx, "bd-2pb");
     spur_tui::test_support::push_event(
         &mut app,
         SpurEvent::now(SpurEventBody::IssueSubgraphLoaded {
@@ -880,9 +892,9 @@ fn issue_list_keeps_ultimate_plan_epic_as_root_for_grandchild() {
     );
 
     app.handle_crossterm_event_for_test(key('j'));
-    expect_get_graph(&mut rx, "bd-2pb.1");
+    expect_get_graph_after_debounce(&mut app, &mut rx, "bd-2pb.1");
     app.handle_crossterm_event_for_test(key('j'));
-    expect_get_graph(&mut rx, "bd-2pb.1.1");
+    expect_get_graph_after_debounce(&mut app, &mut rx, "bd-2pb.1.1");
 
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
     let loading = render_text(&mut app, &mut terminal);
