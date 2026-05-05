@@ -270,7 +270,7 @@ impl IssuesPanel {
             (
                 Style::default().fg(Color::Cyan),
                 format!(
-                    " Issues {}/{} — [j/k] select · [Enter] detail · [W]ork ",
+                    " Issues {}/{} — [j/k] select · [Enter] detail · [v] graph · [W]ork · [e] exec · [?] help ",
                     selected_idx + 1,
                     total
                 ),
@@ -309,7 +309,7 @@ impl IssuesPanel {
             (
                 Style::default().fg(Color::Cyan),
                 format!(
-                    " Work Item Lineage {}/{} · {} — [j/k] select · [Enter] detail · [e] execute ",
+                    " Work Item Lineage {}/{} · {} — [j/k] select · [Enter] detail · [v] graph · [e] exec · [?] help ",
                     selected_idx + 1,
                     total,
                     readiness
@@ -677,7 +677,7 @@ fn is_closed(node: Option<&GraphNodeEvent>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::{backend::TestBackend, style::Color, Terminal};
+    use ratatui::{backend::TestBackend, buffer::Buffer, style::Color, Terminal};
     use spur_pm::PmSource;
 
     fn issue(id: &str) -> IssueSummary {
@@ -741,6 +741,17 @@ mod tests {
         }
     }
 
+    fn render_buffer_text(buf: &Buffer) -> String {
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
     #[test]
     fn issue_label_preserves_root_status_icon_with_blocker_alarm() {
         let mut root = issue("bd-root");
@@ -770,6 +781,55 @@ mod tests {
         });
 
         assert_eq!(unblocked_meta.issue_label(&root), "> ✓ bd-root");
+    }
+
+    #[test]
+    fn focused_titles_advertise_graph_toggle_and_help() {
+        let issues = vec![issue("issue-A"), issue("issue-B")];
+        let mut flat_panel = IssuesPanel::new();
+        flat_panel.set_focused(true);
+        let mut flat_terminal = Terminal::new(TestBackend::new(160, 8)).unwrap();
+
+        flat_terminal
+            .draw(|frame| flat_panel.render(&issues, frame, frame.area()))
+            .unwrap();
+        let flat = render_buffer_text(flat_terminal.backend().buffer());
+
+        assert!(
+            flat.contains("[v]"),
+            "flat title should advertise graph toggle:\n{flat}"
+        );
+        assert!(
+            flat.contains("[?]"),
+            "flat title should advertise help:\n{flat}"
+        );
+
+        let nodes = vec![graph_node("issue-A", "open"), graph_node("issue-B", "open")];
+        let edges = vec![graph_edge("issue-B", "issue-A")];
+        let lineage = IssueLineageView::Loaded(IssueLineageContext {
+            root_id: "issue-A",
+            nodes: &nodes,
+            edges: &edges,
+        });
+        let mut lineage_panel = IssuesPanel::new();
+        lineage_panel.set_focused(true);
+        let mut lineage_terminal = Terminal::new(TestBackend::new(160, 8)).unwrap();
+
+        lineage_terminal
+            .draw(|frame| {
+                lineage_panel.render_with_lineage(&issues, Some(lineage), frame, frame.area())
+            })
+            .unwrap();
+        let lineage = render_buffer_text(lineage_terminal.backend().buffer());
+
+        assert!(
+            lineage.contains("[v]"),
+            "lineage title should advertise graph toggle:\n{lineage}"
+        );
+        assert!(
+            lineage.contains("[?]"),
+            "lineage title should advertise help:\n{lineage}"
+        );
     }
 
     #[test]
