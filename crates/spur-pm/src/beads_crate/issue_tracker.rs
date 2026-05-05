@@ -226,6 +226,16 @@ impl BeadsCrateAdapter {
         })
         .await
     }
+
+    pub async fn add_dependency(&self, issue_id: &str, depends_on_id: &str) -> anyhow::Result<()> {
+        let issue_id = issue_id.to_string();
+        let depends_on_id = depends_on_id.to_string();
+        self.write(move |s| {
+            s.add_dependency(&issue_id, &depends_on_id, "blocks", "spur")?;
+            Ok(())
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -372,6 +382,45 @@ mod tests {
         let mut labels = after.labels;
         labels.sort();
         assert_eq!(labels, vec!["keep".to_string(), "new".to_string()]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_dependency_links_two_issues() {
+        use crate::types::IssueCreate;
+
+        let dir = TempDir::new().unwrap();
+        let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
+            .await
+            .unwrap();
+
+        let parent = adapter
+            .create_issue(IssueCreate {
+                title: "P".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let child = adapter
+            .create_issue(IssueCreate {
+                title: "C".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        adapter.add_dependency(&child, &parent).await.unwrap();
+
+        // Verify the edge through the storage's own dependency reader.
+        let parent_for_check = parent.clone();
+        let child_for_check = child.clone();
+        let deps = adapter
+            .read(move |s| Ok(s.get_dependencies(&child_for_check)?))
+            .await
+            .unwrap();
+        assert!(
+            deps.contains(&parent_for_check),
+            "expected {parent_for_check} in deps, got {deps:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

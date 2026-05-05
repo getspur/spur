@@ -2025,6 +2025,11 @@ git add crates/spur-pm/src/beads_crate/
 git commit -m "spur-pm: IssueTracker::add_dependency via crate adapter"
 ```
 
+> **Plan revision (2026-05-05):** Section D drift fixes applied to T19:
+> - `s.add_dependency(issue_id, depends_on_id, dep_type, actor)` takes 4 args (not 3) and returns `Result<bool>`. Default `dep_type` is `"blocks"` for the trait's plain `add_dependency` method.
+> - The plan's verification idea ("via get_issue.blocked_by") doesn't fire today because `br_to_pm_issue` returns `blocked_by: vec![]` — populating it requires calling `s.get_dependencies_full(&id)` in the read closure. The T19 test instead verifies via `s.get_dependencies(&child)?` directly inside an `adapter.read(...)` call.
+> - Future work: extend `br_to_pm_issue` to load deps via `get_dependencies_full` and filter by blocking dependency types (matches `BLOCKING_TYPES` in `crates/spur-pm/src/beads.rs:166`).
+
 ---
 
 ### Task 20: Implement `IssueTracker::poll`
