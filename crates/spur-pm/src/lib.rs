@@ -6,13 +6,15 @@ pub mod bv;
 pub mod github;
 pub mod graph;
 pub mod pidfile;
+pub mod poll_cursor;
 pub mod service;
 pub mod types;
 
 pub use adapter::{IssueTracker, PrService};
 pub use advanced::{BeadsAdvanced, Comment, CommentId, DependencyCycle, ReadyFilter};
-pub use beads::{BeadsAdapter, PollCursor};
+pub use beads::BeadsAdapter;
 pub use bv::BvAdapter;
 pub use github::GitHubAdapter;
+pub use poll_cursor::PollCursor;
 pub use service::PmService;
 pub use types::*;

@@ -2122,6 +2122,13 @@ git add crates/spur-pm/src/poll_cursor.rs crates/spur-pm/src/lib.rs crates/spur-
 git commit -m "spur-pm: IssueTracker::poll via crate adapter (shared PollCursor)"
 ```
 
+> **Plan revision (2026-05-05):** Section D drift fixes applied to T20:
+> - `PollCursor` extracted from `crates/spur-pm/src/beads.rs:25-42` to a new `crates/spur-pm/src/poll_cursor.rs`. Both `BeadsAdapter` and `BeadsCrateAdapter` now share it. `lib.rs` re-exports `PollCursor` from the new module (preserves the existing `spur_pm::PollCursor` public path for downstream tests).
+> - `BeadsCrateAdapter` gains `cursor: tokio::sync::Mutex<Option<PollCursor>>` (initialized to `None` in `open`).
+> - Poll mirrors `BeadsAdapter::poll_with_limit` shape: pull bounded open set via `list_issues(status="open", limit=POLL_FETCH_LIMIT)`, hydrate each summary via `get_issue` to obtain `updated_at`, apply the boundary-safe predicate client-side, and advance the cursor (with the saturation guard preserving the prior cursor on a fully-saturated batch).
+> - `POLL_FETCH_LIMIT` continues to live in `beads.rs` (re-used here via `crate::beads::POLL_FETCH_LIMIT`); both adapters share the same constant.
+> - The inherent `impl BeadsCrateAdapter { ... }` block in `issue_tracker.rs` was refactored into `#[async_trait] impl IssueTracker for BeadsCrateAdapter`. T15-T19 had each landed methods as inherents on a stub `impl BeadsCrateAdapter`; T20 finalizes the trait impl block and adds the trait `use` to the test module so `adapter.create_issue(...)` etc. resolves.
+
 ---
 
 ## Section E — Test fixture migration (Tasks 21-25)

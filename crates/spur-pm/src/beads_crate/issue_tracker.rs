@@ -1,11 +1,16 @@
-//! Issue read adapter for `BeadsCrateAdapter`.
+//! `IssueTracker` trait impl for `BeadsCrateAdapter`.
 
+use std::collections::HashSet;
 use std::str::FromStr;
 
+use async_trait::async_trait;
 use chrono::Utc;
 
+use crate::adapter::IssueTracker;
+use crate::beads::POLL_FETCH_LIMIT;
 use crate::beads_crate::adapter::BeadsCrateAdapter;
-use crate::types::{Issue, IssueCreate, IssueFilter, IssueSummary, IssueUpdate, PmSource};
+use crate::poll_cursor::PollCursor;
+use crate::types::{Issue, IssueCreate, IssueFilter, IssueSummary, IssueUpdate, PmEvent, PmSource};
 
 pub(crate) fn br_to_pm_issue(br: beads_rust::model::Issue) -> Issue {
     let url = format!("beads://{}", br.id);
@@ -42,8 +47,9 @@ pub(crate) fn br_to_pm_summary(br: beads_rust::model::Issue) -> IssueSummary {
     }
 }
 
-impl BeadsCrateAdapter {
-    pub async fn get_issue(&self, id: &str) -> anyhow::Result<Issue> {
+#[async_trait]
+impl IssueTracker for BeadsCrateAdapter {
+    async fn get_issue(&self, id: &str) -> anyhow::Result<Issue> {
         let id = id.to_string();
         self.read(move |s| {
             let mut br = s
@@ -58,7 +64,7 @@ impl BeadsCrateAdapter {
         .await
     }
 
-    pub async fn list_issues(&self, filter: IssueFilter) -> anyhow::Result<Vec<IssueSummary>> {
+    async fn list_issues(&self, filter: IssueFilter) -> anyhow::Result<Vec<IssueSummary>> {
         self.read(move |s| {
             let mut br_filters = beads_rust::storage::sqlite::ListFilters::default();
 
@@ -100,7 +106,7 @@ impl BeadsCrateAdapter {
         .await
     }
 
-    pub async fn create_issue(&self, params: IssueCreate) -> anyhow::Result<String> {
+    async fn create_issue(&self, params: IssueCreate) -> anyhow::Result<String> {
         self.write(move |s| {
             let now = Utc::now();
             let id = beads_rust::util::generate_id(
@@ -185,7 +191,7 @@ impl BeadsCrateAdapter {
         .await
     }
 
-    pub async fn update_issue(&self, id: &str, update: IssueUpdate) -> anyhow::Result<()> {
+    async fn update_issue(&self, id: &str, update: IssueUpdate) -> anyhow::Result<()> {
         let id = id.to_string();
         self.write(move |s| {
             let has_field_update =
@@ -227,7 +233,7 @@ impl BeadsCrateAdapter {
         .await
     }
 
-    pub async fn add_dependency(&self, issue_id: &str, depends_on_id: &str) -> anyhow::Result<()> {
+    async fn add_dependency(&self, issue_id: &str, depends_on_id: &str) -> anyhow::Result<()> {
         let issue_id = issue_id.to_string();
         let depends_on_id = depends_on_id.to_string();
         self.write(move |s| {
@@ -235,6 +241,90 @@ impl BeadsCrateAdapter {
             Ok(())
         })
         .await
+    }
+
+    async fn poll(&self) -> anyhow::Result<Vec<PmEvent>> {
+        let mut guard = self.cursor.lock().await;
+        let prior_cursor = guard.clone();
+        let had_prior = prior_cursor.is_some();
+
+        // Mirror BeadsAdapter::poll_with_limit: pull bounded open set,
+        // apply the boundary-safe predicate client-side, advance cursor.
+        let summaries = self
+            .list_issues(IssueFilter {
+                status: Some("open".to_string()),
+                limit: Some(POLL_FETCH_LIMIT),
+                ..Default::default()
+            })
+            .await?;
+
+        let saturated = summaries.len() == POLL_FETCH_LIMIT;
+
+        let mut kept: Vec<Issue> = Vec::with_capacity(summaries.len());
+        for sum in summaries {
+            let issue = self.get_issue(&sum.id).await?;
+            let pass = match prior_cursor.as_ref() {
+                None => true,
+                Some(c) => c.allows(&issue.id, issue.updated_at),
+            };
+            if pass {
+                kept.push(issue);
+            }
+        }
+
+        let new_cursor: Option<PollCursor> = if !kept.is_empty() {
+            if saturated {
+                tracing::warn!(
+                    limit = POLL_FETCH_LIMIT,
+                    kept_count = kept.len(),
+                    "BeadsCrateAdapter::poll fetch saturated; preserving cursor"
+                );
+                prior_cursor.clone()
+            } else {
+                let max_ts = kept.iter().map(|i| i.updated_at).max().unwrap();
+                let ids_at_max: HashSet<String> = kept
+                    .iter()
+                    .filter(|i| i.updated_at == max_ts)
+                    .map(|i| i.id.clone())
+                    .collect();
+                Some(PollCursor {
+                    ts: max_ts,
+                    ids_at_boundary: ids_at_max,
+                })
+            }
+        } else if let Some(existing) = prior_cursor.clone() {
+            Some(existing)
+        } else {
+            Some(PollCursor {
+                ts: Utc::now(),
+                ids_at_boundary: HashSet::new(),
+            })
+        };
+
+        let events: Vec<PmEvent> = kept
+            .into_iter()
+            .map(|issue| {
+                let summary = IssueSummary {
+                    id: issue.id.clone(),
+                    source: PmSource::Beads,
+                    title: issue.title,
+                    status: issue.status,
+                    labels: issue.labels,
+                    url: issue.url,
+                    priority: issue.priority,
+                    issue_type: issue.issue_type,
+                    assignee: issue.assignee,
+                };
+                if had_prior {
+                    PmEvent::IssueUpdated(summary)
+                } else {
+                    PmEvent::IssueCreated(summary)
+                }
+            })
+            .collect();
+
+        *guard = new_cursor;
+        Ok(events)
     }
 }
 
@@ -244,6 +334,7 @@ mod tests {
     use chrono::Utc;
     use tempfile::TempDir;
 
+    use crate::adapter::IssueTracker;
     use crate::beads_crate::adapter::{AdapterConfig, BeadsCrateAdapter};
 
     fn minimal_issue(id: &str, title: &str) -> BrIssue {
@@ -420,6 +511,36 @@ mod tests {
         assert!(
             deps.contains(&parent_for_check),
             "expected {parent_for_check} in deps, got {deps:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn poll_emits_created_then_quiesces() {
+        use crate::types::IssueCreate;
+        use crate::types::PmEvent;
+
+        let dir = TempDir::new().unwrap();
+        let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
+            .await
+            .unwrap();
+
+        adapter
+            .create_issue(IssueCreate {
+                title: "X".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let first = adapter.poll().await.unwrap();
+        assert_eq!(first.len(), 1);
+        assert!(matches!(first[0], PmEvent::IssueCreated(_)));
+
+        let second = adapter.poll().await.unwrap();
+        assert!(
+            second.is_empty(),
+            "second poll should be empty, got {:?}",
+            second
         );
     }
 

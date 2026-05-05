@@ -4,42 +4,12 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio::process::Command;
 
 use crate::adapter::IssueTracker;
+use crate::poll_cursor::PollCursor;
 use crate::types::{Issue, IssueCreate, IssueFilter, IssueSummary, IssueUpdate, PmEvent, PmSource};
-
-// ─── Poll cursor ──────────────────────────────────────────────────────
-
-/// Boundary-safe poll cursor.
-///
-/// A single `DateTime<Utc>` boundary causes "boundary replay": any row whose
-/// `updated_at` equals the cursor ts re-emits on every subsequent poll.
-///
-/// The fix: track the set of IDs seen at the boundary timestamp. On the next
-/// poll a row passes only if:
-///   - `item.updated_at > cursor.ts`   (strictly newer), OR
-///   - `item.updated_at == cursor.ts && !ids_at_boundary.contains(&item.id)`
-///     (same ts but a genuinely new item we haven't returned yet).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PollCursor {
-    pub ts: DateTime<Utc>,
-    pub ids_at_boundary: HashSet<String>,
-}
-
-impl PollCursor {
-    /// Returns `true` if `item` should be included in the current poll's output.
-    pub fn allows(&self, item_id: &str, item_updated_at: DateTime<Utc>) -> bool {
-        if item_updated_at > self.ts {
-            true
-        } else if item_updated_at == self.ts {
-            !self.ids_at_boundary.contains(item_id)
-        } else {
-            false
-        }
-    }
-}
 
 /// Maximum rows fetched per `poll()` call via `br list --limit N`.
 ///
