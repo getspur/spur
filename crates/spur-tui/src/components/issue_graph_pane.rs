@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{hash_map::DefaultHasher, HashMap, HashSet},
+    hash::{Hash, Hasher},
+};
 
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
@@ -18,7 +21,26 @@ pub struct IssueGraphPane {
     last_total_lines: u16,
     last_visible_height: u16,
     cached_lines: Vec<Line<'static>>,
-    cache_key: Option<(String, usize, usize)>,
+    cache_key: Option<GraphRenderCacheKey>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct GraphRenderCacheKey {
+    requested_id: String,
+    node_count: usize,
+    edge_count: usize,
+    content_fingerprint: u64,
+}
+
+impl GraphRenderCacheKey {
+    fn new(requested_id: &str, nodes: &[GraphNodeEvent], edges: &[GraphEdgeEvent]) -> Self {
+        Self {
+            requested_id: requested_id.to_string(),
+            node_count: nodes.len(),
+            edge_count: edges.len(),
+            content_fingerprint: graph_content_fingerprint(nodes, edges),
+        }
+    }
 }
 
 impl IssueGraphPane {
@@ -46,7 +68,7 @@ impl IssueGraphPane {
         frame: &mut Frame,
         area: Rect,
     ) {
-        let cache_key = (requested_id.to_string(), nodes.len(), edges.len());
+        let cache_key = GraphRenderCacheKey::new(requested_id, nodes, edges);
         if self.cache_key.as_ref() != Some(&cache_key) {
             self.cached_lines = build_graph_lines(nodes, edges, requested_id);
             self.cache_key = Some(cache_key);
@@ -158,6 +180,26 @@ fn render_centered_state(
             .style(Style::default().fg(color)),
         chunks[1],
     );
+}
+
+fn graph_content_fingerprint(nodes: &[GraphNodeEvent], edges: &[GraphEdgeEvent]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+
+    for node in nodes {
+        0_u8.hash(&mut hasher);
+        node.id.hash(&mut hasher);
+        node.status.hash(&mut hasher);
+        node.title.hash(&mut hasher);
+    }
+
+    for edge in edges {
+        1_u8.hash(&mut hasher);
+        edge.from.hash(&mut hasher);
+        edge.to.hash(&mut hasher);
+        edge.edge_type.hash(&mut hasher);
+    }
+
+    hasher.finish()
 }
 
 fn build_graph_lines(
