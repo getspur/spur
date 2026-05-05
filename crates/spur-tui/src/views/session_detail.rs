@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 
@@ -127,6 +127,12 @@ pub struct SessionDetailView {
     /// prevents re-entrant cancel dispatches (the next `Esc` falls through
     /// to existing handlers, e.g. NavigateBack).
     pub(crate) cancelling_in_flight: bool,
+    /// True while the "Cancel turn? [y]es / [n]o" confirmation modal is
+    /// open. Set when `Esc` fires during an in-flight stream; cleared on
+    /// `y/Y` (which also dispatches `Action::CancelStream`), `n/N`, or a
+    /// second `Esc` (vim-safe dismissal). `Enter` and other keys leave the
+    /// modal open so the user must make an explicit choice.
+    pub(crate) cancel_confirm_open: bool,
     cancel_hint_until: Option<Instant>,
 
     /// How `AgentConnection::cancel` behaves for this session's transport.
@@ -239,6 +245,7 @@ impl SessionDetailView {
             resume_banner: None,
             stream_in_flight: false,
             cancelling_in_flight: false,
+            cancel_confirm_open: false,
             cancel_hint_until: None,
             cancel_mode: None,
             fs_unsafe: false,
@@ -322,6 +329,7 @@ impl SessionDetailView {
             resume_banner: None,
             stream_in_flight: false,
             cancelling_in_flight: false,
+            cancel_confirm_open: false,
             cancel_hint_until: None,
             cancel_mode: None,
             fs_unsafe: false,
@@ -382,6 +390,7 @@ impl SessionDetailView {
             resume_banner: None,
             stream_in_flight: false,
             cancelling_in_flight: false,
+            cancel_confirm_open: false,
             cancel_hint_until: None,
             cancel_mode: None,
             fs_unsafe: false,
@@ -509,6 +518,7 @@ impl SessionDetailView {
         // Stream flags.
         self.stream_in_flight = false;
         self.cancelling_in_flight = false;
+        self.cancel_confirm_open = false;
         self.cancel_hint_until = None;
 
         // Draft debounce locals (spec §3.5). Gate is ALSO at the source in
@@ -1198,8 +1208,42 @@ impl SessionDetailView {
             self.auth_error = None;
         }
 
-        // Priority 0: Esc-to-cancel takes precedence when a stream is in flight
-        // and we're not already cancelling. Second Esc falls through to the
+        // Priority 0a: confirmation modal — when open, captures all keys
+        // until the user makes an explicit yes/no choice or dismisses.
+        //
+        // Vim-safe dismissal: a reflexive double-tap of `Esc` (Insert→Normal
+        // habit) opens then closes the modal with no destructive action.
+        // `Enter` is intentionally NOT a confirmation key — vim users press
+        // Enter to commit Normal-mode commands, and we do not want that
+        // muscle-memory to cancel an in-flight turn.
+        if self.cancel_confirm_open {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.cancel_confirm_open = false;
+                    self.cancelling_in_flight = true;
+                    self.cancel_hint_until = Some(Instant::now() + Duration::from_secs(2));
+                    self.push_cancel_note();
+                    self.input_bar.set_status(
+                        Some(format!("[{}: cancelling{{spinner}}]", self.agent_name)),
+                        ActivityKind::Cancelling,
+                    );
+                    return Some(Action::CancelStream {
+                        session: self.session_id.clone(),
+                    });
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.cancel_confirm_open = false;
+                    return None;
+                }
+                _ => return None,
+            }
+        }
+
+        // Priority 0b: Esc-to-cancel takes precedence when a stream is in flight
+        // and we're not already cancelling. Opens the confirmation modal
+        // instead of dispatching `CancelStream` directly — vim users would
+        // otherwise lose work to a single reflexive `Esc`. Second Esc (after
+        // dispatch, when `cancelling_in_flight == true`) falls through to the
         // existing Esc handlers (popup dismiss / NavigateBack).
         // Exception: in Vim Insert/Visual mode, Esc first exits to Normal mode.
         if matches!(key.code, KeyCode::Esc)
@@ -1207,16 +1251,8 @@ impl SessionDetailView {
             && !self.cancelling_in_flight
             && !self.input_bar.wants_esc()
         {
-            self.cancelling_in_flight = true;
-            self.cancel_hint_until = Some(Instant::now() + Duration::from_secs(2));
-            self.push_cancel_note();
-            self.input_bar.set_status(
-                Some(format!("[{}: cancelling{{spinner}}]", self.agent_name)),
-                ActivityKind::Cancelling,
-            );
-            return Some(Action::CancelStream {
-                session: self.session_id.clone(),
-            });
+            self.cancel_confirm_open = true;
+            return None;
         }
 
         // Alt-m → cycle session mode between "default" and "plan".
@@ -2094,6 +2130,40 @@ fn build_session_error_widget<'a>(message: &'a str) -> Paragraph<'a> {
         )
 }
 
+/// Render the centered "Cancel turn? [y]es / [n]o" confirmation modal as
+/// an overlay over the trace pane. Drawn last in `render_inner` so it sits
+/// on top of everything else.
+fn render_cancel_confirm_modal(frame: &mut Frame, area: Rect) {
+    let modal_width: u16 = 50;
+    let modal_height: u16 = 5;
+    if area.width < modal_width || area.height < modal_height {
+        return;
+    }
+    let x = area.x + (area.width.saturating_sub(modal_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(modal_height)) / 2;
+    let rect = Rect {
+        x,
+        y,
+        width: modal_width,
+        height: modal_height,
+    };
+    let widget = Paragraph::new("Cancel turn?\n\n[y]es / [n]o")
+        .alignment(Alignment::Center)
+        .style(
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Confirm cancel "),
+        );
+    frame.render_widget(Clear, rect);
+    frame.render_widget(widget, rect);
+}
+
 impl SessionDetailView {
     fn render_inner(&mut self, frame: &mut Frame, area: Rect, ctx: &super::ViewContext) {
         let lineage = Some(ctx.lineage);
@@ -2380,6 +2450,11 @@ impl SessionDetailView {
             let styled = Paragraph::new(ready_text.as_str())
                 .style(Style::default().add_modifier(Modifier::DIM | Modifier::ITALIC));
             frame.render_widget(styled, rect);
+        }
+
+        // ── Cancel-confirm modal (drawn last so it sits on top) ─────────
+        if self.cancel_confirm_open {
+            render_cancel_confirm_modal(frame, area);
         }
     }
 
@@ -3247,16 +3322,26 @@ mod cancel_state_tests {
         v.handle_spur_event(&tool_call_event(&sid, "t1"), &test_ctx());
         assert!(v.stream_in_flight);
 
-        let action = <SessionDetailView as crate::views::View>::handle_key(
+        // Esc opens the cancel-confirm modal; `y` dispatches.
+        let opened = <SessionDetailView as crate::views::View>::handle_key(
             &mut v,
             press(KeyCode::Esc),
             &test_ctx(),
         );
+        assert!(opened.is_none(), "first Esc must only open the modal");
+        assert!(v.cancel_confirm_open);
+
+        let action = <SessionDetailView as crate::views::View>::handle_key(
+            &mut v,
+            press(KeyCode::Char('y')),
+            &test_ctx(),
+        );
         assert!(
             matches!(action, Some(Action::CancelStream { .. })),
-            "Esc after tool-first update should emit CancelStream, got {action:?}"
+            "y after Esc-modal should emit CancelStream, got {action:?}"
         );
         assert!(v.cancelling_in_flight);
+        assert!(!v.cancel_confirm_open);
     }
 
     #[test]
@@ -3297,7 +3382,7 @@ mod cancel_state_tests {
     }
 
     #[test]
-    fn esc_with_stream_in_flight_emits_cancel_stream() {
+    fn esc_with_stream_in_flight_opens_confirm_modal_does_not_dispatch() {
         let mut v = make_view();
         v.stream_in_flight = true;
         v.cancel_mode = Some(spur_acp::CancelMode::AcpSoft);
@@ -3306,8 +3391,145 @@ mod cancel_state_tests {
             press(KeyCode::Esc),
             &test_ctx(),
         );
+        assert!(
+            action.is_none(),
+            "Esc must not dispatch CancelStream directly"
+        );
+        assert!(v.cancel_confirm_open, "Esc must open the confirm modal");
+        assert!(
+            !v.cancelling_in_flight,
+            "cancelling_in_flight must NOT flip until confirmation"
+        );
+    }
+
+    #[test]
+    fn modal_y_dispatches_cancel_stream() {
+        let mut v = make_view();
+        v.stream_in_flight = true;
+        v.cancel_mode = Some(spur_acp::CancelMode::AcpSoft);
+        v.cancel_confirm_open = true;
+        let action = <SessionDetailView as crate::views::View>::handle_key(
+            &mut v,
+            press(KeyCode::Char('y')),
+            &test_ctx(),
+        );
         assert!(matches!(action, Some(Action::CancelStream { .. })));
+        assert!(!v.cancel_confirm_open);
         assert!(v.cancelling_in_flight);
+    }
+
+    #[test]
+    fn modal_uppercase_y_dispatches_cancel_stream() {
+        let mut v = make_view();
+        v.stream_in_flight = true;
+        v.cancel_mode = Some(spur_acp::CancelMode::AcpSoft);
+        v.cancel_confirm_open = true;
+        let action = <SessionDetailView as crate::views::View>::handle_key(
+            &mut v,
+            press(KeyCode::Char('Y')),
+            &test_ctx(),
+        );
+        assert!(matches!(action, Some(Action::CancelStream { .. })));
+        assert!(!v.cancel_confirm_open);
+    }
+
+    #[test]
+    fn modal_n_dismisses_no_action() {
+        let mut v = make_view();
+        v.stream_in_flight = true;
+        v.cancel_confirm_open = true;
+        let action = <SessionDetailView as crate::views::View>::handle_key(
+            &mut v,
+            press(KeyCode::Char('n')),
+            &test_ctx(),
+        );
+        assert!(action.is_none());
+        assert!(!v.cancel_confirm_open, "n must close the modal");
+        assert!(
+            !v.cancelling_in_flight,
+            "n must not flip cancelling_in_flight"
+        );
+    }
+
+    #[test]
+    fn modal_uppercase_n_dismisses_no_action() {
+        let mut v = make_view();
+        v.stream_in_flight = true;
+        v.cancel_confirm_open = true;
+        let action = <SessionDetailView as crate::views::View>::handle_key(
+            &mut v,
+            press(KeyCode::Char('N')),
+            &test_ctx(),
+        );
+        assert!(action.is_none());
+        assert!(!v.cancel_confirm_open);
+    }
+
+    #[test]
+    fn modal_esc_dismisses_vim_safe_no_action() {
+        // Vim users reflexively double-tap Esc; the second tap must dismiss
+        // the modal harmlessly rather than confirm cancellation.
+        let mut v = make_view();
+        v.stream_in_flight = true;
+        v.cancel_confirm_open = true;
+        let action = <SessionDetailView as crate::views::View>::handle_key(
+            &mut v,
+            press(KeyCode::Esc),
+            &test_ctx(),
+        );
+        assert!(action.is_none());
+        assert!(!v.cancel_confirm_open);
+        assert!(!v.cancelling_in_flight);
+    }
+
+    #[test]
+    fn modal_enter_keeps_modal_open_no_dispatch() {
+        // Enter is intentionally NOT a confirmation key — vim users press
+        // Enter to commit Normal-mode commands.
+        let mut v = make_view();
+        v.stream_in_flight = true;
+        v.cancel_confirm_open = true;
+        let action = <SessionDetailView as crate::views::View>::handle_key(
+            &mut v,
+            press(KeyCode::Enter),
+            &test_ctx(),
+        );
+        assert!(action.is_none());
+        assert!(v.cancel_confirm_open, "Enter must NOT close the modal");
+        assert!(!v.cancelling_in_flight);
+    }
+
+    #[test]
+    fn modal_arbitrary_key_keeps_modal_open() {
+        let mut v = make_view();
+        v.stream_in_flight = true;
+        v.cancel_confirm_open = true;
+        let action = <SessionDetailView as crate::views::View>::handle_key(
+            &mut v,
+            press(KeyCode::Char('x')),
+            &test_ctx(),
+        );
+        assert!(action.is_none());
+        assert!(v.cancel_confirm_open);
+    }
+
+    #[test]
+    fn modal_does_not_open_when_already_cancelling() {
+        // Once a cancel is in flight, ESC falls through to NavigateBack
+        // (existing behavior preserved).
+        let mut v = make_view();
+        v.stream_in_flight = true;
+        v.cancelling_in_flight = true;
+        let action = <SessionDetailView as crate::views::View>::handle_key(
+            &mut v,
+            press(KeyCode::Esc),
+            &test_ctx(),
+        );
+        assert!(matches!(action, Some(Action::NavigateBack)));
+        assert!(
+            !v.cancel_confirm_open,
+            "modal must not open when cancelling already in flight"
+        );
     }
 
     #[test]
@@ -3344,6 +3566,11 @@ mod cancel_state_tests {
             press(KeyCode::Esc),
             &test_ctx(),
         );
+        let _ = <SessionDetailView as crate::views::View>::handle_key(
+            &mut v,
+            press(KeyCode::Char('y')),
+            &test_ctx(),
+        );
         let trace = v.react_trace();
         let last_text = trace.last_text().unwrap_or_default();
         assert!(
@@ -3362,6 +3589,11 @@ mod cancel_state_tests {
             press(KeyCode::Esc),
             &test_ctx(),
         );
+        let _ = <SessionDetailView as crate::views::View>::handle_key(
+            &mut v,
+            press(KeyCode::Char('y')),
+            &test_ctx(),
+        );
         let trace = v.react_trace();
         let last_text = trace.last_text().unwrap_or_default();
         assert!(
@@ -3378,6 +3610,11 @@ mod cancel_state_tests {
         let _ = <SessionDetailView as crate::views::View>::handle_key(
             &mut v,
             press(KeyCode::Esc),
+            &test_ctx(),
+        );
+        let _ = <SessionDetailView as crate::views::View>::handle_key(
+            &mut v,
+            press(KeyCode::Char('y')),
             &test_ctx(),
         );
         let trace = v.react_trace();
