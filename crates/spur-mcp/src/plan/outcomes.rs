@@ -54,6 +54,7 @@ pub enum SkipReason {
     EpicNotOpen,
     MissingIssueId,
     DuplicateIssueId,
+    ProjectorFailed { error: String },
     PersistError { msg: String },
     DispatchSendFailed { msg: String },
     MissingDispatchLeaseExpiry,
@@ -174,6 +175,7 @@ enum SkipReasonKey {
     EpicNotOpen,
     MissingIssueId,
     DuplicateIssueId,
+    ProjectorFailed,
     PersistError,
     DispatchSendFailed,
     MissingDispatchLeaseExpiry,
@@ -194,6 +196,7 @@ impl From<&SkipReason> for SkipReasonKey {
             SkipReason::EpicNotOpen => Self::EpicNotOpen,
             SkipReason::MissingIssueId => Self::MissingIssueId,
             SkipReason::DuplicateIssueId => Self::DuplicateIssueId,
+            SkipReason::ProjectorFailed { .. } => Self::ProjectorFailed,
             SkipReason::PersistError { .. } => Self::PersistError,
             SkipReason::DispatchSendFailed { .. } => Self::DispatchSendFailed,
             SkipReason::MissingDispatchLeaseExpiry => Self::MissingDispatchLeaseExpiry,
@@ -479,6 +482,12 @@ mod tests {
     skip_reason_records_in_latest!(
         skip_reason_duplicate_issue_id_records,
         SkipReason::DuplicateIssueId
+    );
+    skip_reason_records_in_latest!(
+        skip_reason_projector_failed_records_without_error_in_key,
+        SkipReason::ProjectorFailed {
+            error: "projection failed".into()
+        }
     );
     skip_reason_records_in_latest!(
         skip_reason_persist_error_records_without_message_in_key,

@@ -1049,8 +1049,8 @@ async fn observe_ready_summaries_preserve_plan_labels() {
         .observe_ready_summaries()
         .await
         .expect("ready summaries");
-    assert!(summaries.iter().any(|summary| {
-        summary.id == task_id && summary.labels.contains(&labels::plan_id("P1"))
+    assert!(summaries.iter().any(|ready| {
+        ready.summary.id == task_id && ready.summary.labels.contains(&labels::plan_id("P1"))
     }));
 }
 
@@ -1204,7 +1204,7 @@ async fn plan_enumeration_finds_tasks_buried_under_backlog() {
         .expect("observe_ready_summaries");
     let ready_ids = summaries
         .iter()
-        .map(|summary| summary.id.as_str())
+        .map(|ready| ready.summary.id.as_str())
         .collect::<std::collections::HashSet<_>>();
 
     assert_eq!(
