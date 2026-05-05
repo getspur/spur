@@ -56,6 +56,7 @@ type BrainRunBootstrap = (
     JoinHandle<()>,
     bool,
     Option<String>,
+    SessionId,
 );
 type NewBrainSessionBootstrap = (
     spur_acp::config::AgentConfig,
@@ -973,9 +974,13 @@ mod session_attach_guard_transfer_tests {
 
         let spur_session_id = SessionId("apply-settings-test".to_string());
         let brain_session_id: spur_acp::BrainSessionId = spur_session_id.clone().into();
-        let cont_ctx = orchestrator.build_continuation_ctx(spur_session_id);
+        let brain_session_id_cell = Arc::new(std::sync::OnceLock::new());
+        brain_session_id_cell
+            .set(spur_session_id)
+            .expect("test brain session id set once");
+        let cont_ctx = orchestrator.build_continuation_ctx(brain_session_id_cell);
         let (mut server, _channel) = McpCallbackServer::new(
-            &brain_session_id,
+            Some(&brain_session_id),
             orchestrator.pm_service.clone(),
             None,
             cont_ctx,
@@ -2691,19 +2696,22 @@ impl Orchestrator {
     /// correct for the one-shot batch path.
     fn build_continuation_ctx(
         &self,
-        brain_session_id: spur_acp::types::SessionId,
+        brain_session_id: Arc<std::sync::OnceLock<spur_acp::types::SessionId>>,
     ) -> spur_mcp::server::DetachedContinuationCtx {
         match (
             self.continuation_tx.clone(),
             self.continuation_overflow.clone(),
         ) {
             (Some(tx), Some(overflow)) => {
-                let session = brain_session_id.clone();
+                let session_cell = Arc::clone(&brain_session_id);
                 spur_mcp::server::DetachedContinuationCtx {
                     on_complete: std::sync::Arc::new(move |cont, worker_session_str| {
                         let tx = tx.clone();
                         let overflow = overflow.clone();
-                        let session = session.clone();
+                        let session = session_cell
+                            .get()
+                            .expect("brain_session_id must be set before detached completion")
+                            .clone();
                         let worker_session = spur_acp::types::SessionId(worker_session_str);
                         Box::pin(async move {
                             crate::continuation_bridge::report_detached_completion(
@@ -2809,7 +2817,6 @@ impl Orchestrator {
     /// Run an ad-hoc task through the brain agent.
     pub async fn run_adhoc(&mut self, task: &str, opts: RunOpts) -> Result<RunResult> {
         let start = Instant::now();
-        let session_id = SessionId::new();
 
         // 1. Resolve brain agent.
         let brain_name = opts
@@ -2823,12 +2830,6 @@ impl Orchestrator {
             .get(&brain_name)
             .ok_or_else(|| anyhow!("Brain agent '{}' not found in registry", brain_name))?
             .clone();
-
-        info!(brain = %brain_name, session = %session_id, "Starting ad-hoc run");
-        self.emit(SpurEvent::now(SpurEventBody::BrainSpawned {
-            agent: brain_name.clone(),
-            session: session_id.clone(),
-        }));
 
         // 1b. Parallel-fetch issues + graph intelligence for TUI + brain prompt.
         let graph_summary = if let Some(pm) = &self.pm_service {
@@ -2861,20 +2862,14 @@ impl Orchestrator {
             Some(summary) => format!("{summary}\n\n{task}"),
             None => task.to_string(),
         };
-        let prompt_text = self.build_brain_prompt(
-            &enriched_task,
-            issue_context.as_ref(),
-            &session_id,
-            &brain_name,
-        );
 
         // 4. Start MCP callback server.
         let sink: Option<std::sync::Arc<dyn spur_mcp::McpEventSink>> =
             Some(std::sync::Arc::new(self.funnel.clone()));
-        let brain_session_id: spur_acp::BrainSessionId = session_id.clone().into();
-        let adhoc_ctx = self.build_continuation_ctx(session_id.clone());
+        let brain_session_id_cell = Arc::new(std::sync::OnceLock::new());
+        let adhoc_ctx = self.build_continuation_ctx(Arc::clone(&brain_session_id_cell));
         let (mcp_server, delegation_channel) = McpCallbackServer::new(
-            &brain_session_id,
+            None,
             self.pm_service.clone(),
             sink,
             adhoc_ctx,
@@ -2906,20 +2901,7 @@ impl Orchestrator {
             .await
             .context("Failed to start MCP callback server")?;
 
-        // 5. Log session start.
-        if let Some(ref ct) = self.cost_tracker {
-            let _ = ct.start_session(
-                &session_id,
-                &brain_name,
-                "brain",
-                None,
-                task,
-                self.config.project.as_ref().map(|p| p.name.as_str()),
-                opts.issue.as_deref(),
-            );
-        }
-
-        let ((mut connection, delegation_handle, success, pr_url), mcp_handle): McpGuarded<
+        let ((mut connection, delegation_handle, success, pr_url, session_id), mcp_handle): McpGuarded<
             BrainRunBootstrap,
         > = cleanup_mcp_on_err(mcp_handle, async {
             // 6. Spawn brain agent via AgentConnection.
@@ -2947,6 +2929,43 @@ impl Orchestrator {
             )
             .await
             .context("Failed to create brain session")?;
+
+            let acp_session_id = spur_acp::SessionId(session_response.session_id.to_string());
+            let brain_session_id =
+                spur_mcp::plan::labels::derive_brain_session_id(&acp_session_id);
+            mcp_server
+                .set_brain_session_id(brain_session_id.clone())
+                .expect("set once");
+            brain_session_id_cell
+                .set(brain_session_id.as_session_id().clone())
+                .expect("set once");
+            let session_id = brain_session_id.as_session_id().clone();
+
+            info!(brain = %brain_name, session = %session_id, "Starting ad-hoc run");
+            self.emit(SpurEvent::now(SpurEventBody::BrainSpawned {
+                agent: brain_name.clone(),
+                session: session_id.clone(),
+            }));
+
+            // 5. Log session start.
+            if let Some(ref ct) = self.cost_tracker {
+                let _ = ct.start_session(
+                    &session_id,
+                    &brain_name,
+                    "brain",
+                    None,
+                    task,
+                    self.config.project.as_ref().map(|p| p.name.as_str()),
+                    opts.issue.as_deref(),
+                );
+            }
+
+            let prompt_text = self.build_brain_prompt(
+                &enriched_task,
+                issue_context.as_ref(),
+                &session_id,
+                &brain_name,
+            );
 
             // 7. Send prompt and stream events.
             let prompt_request = PromptRequest::new(
@@ -3030,7 +3049,7 @@ impl Orchestrator {
             .await
             .context("Failed to send prompt to brain")?;
 
-            Ok((connection, delegation_handle, success, pr_url))
+            Ok((connection, delegation_handle, success, pr_url, session_id))
         })
         .await?;
 
@@ -3358,10 +3377,15 @@ impl Orchestrator {
                         };
 
                         let original_session_id = session_id.clone();
+                        let loading_session_id = spur_mcp::plan::labels::derive_brain_session_id(
+                            &spur_acp::SessionId(session_id.clone()),
+                        )
+                        .as_session_id()
+                        .clone();
                         // Emit SessionLoading before the RPC so the UI can show a
                         // "loading session" state while the brain retrieves history.
                         self.emit(SpurEvent::now(SpurEventBody::SessionLoading {
-                            session: SessionId(session_id.clone()),
+                            session: loading_session_id,
                         }));
                         match self
                             .load_brain_session(
@@ -3369,7 +3393,7 @@ impl Orchestrator {
                                 brain_name,
                                 permission_tx.clone(),
                                 session_id,
-                                None,
+                                false,
                                 false,
                                 attach_guard,
                                 fs_unsafe,
@@ -4696,21 +4720,13 @@ impl Orchestrator {
         existing_fs_unsafe: bool,
         init_response: agent_client_protocol::schema::InitializeResponse,
     ) -> Result<BrainSession> {
-        let session_id = SessionId::new();
-
-        info!(brain = %brain_name, session = %session_id, "Creating brain session");
-        self.emit(SpurEvent::now(SpurEventBody::BrainSpawned {
-            agent: brain_name.clone(),
-            session: session_id.clone(),
-        }));
-
         // Start MCP callback server.
         let sink: Option<std::sync::Arc<dyn spur_mcp::McpEventSink>> =
             Some(std::sync::Arc::new(self.funnel.clone()));
-        let brain_session_id: spur_acp::BrainSessionId = session_id.clone().into();
-        let cont_ctx = self.build_continuation_ctx(session_id.clone());
+        let brain_session_id_cell = Arc::new(std::sync::OnceLock::new());
+        let cont_ctx = self.build_continuation_ctx(Arc::clone(&brain_session_id_cell));
         let (mcp_server, delegation_channel) = McpCallbackServer::new(
-            &brain_session_id,
+            None,
             self.pm_service.clone(),
             sink,
             cont_ctx,
@@ -4740,19 +4756,6 @@ impl Orchestrator {
             .start()
             .await
             .context("Failed to start MCP callback server")?;
-
-        // Log session start.
-        if let Some(ref ct) = self.cost_tracker {
-            let _ = ct.start_session(
-                &session_id,
-                &brain_name,
-                "brain",
-                None,
-                "(interactive)",
-                self.config.project.as_ref().map(|p| p.name.as_str()),
-                None,
-            );
-        }
 
         let ((brain_cfg, presub_notif_rx, session_response), mcp_handle): McpGuarded<
             NewBrainSessionBootstrap,
@@ -4786,6 +4789,35 @@ impl Orchestrator {
             Ok((brain_cfg, presub_notif_rx, session_response))
         })
         .await?;
+
+        let acp_session_id = spur_acp::SessionId(session_response.session_id.to_string());
+        let brain_session_id = spur_mcp::plan::labels::derive_brain_session_id(&acp_session_id);
+        mcp_server
+            .set_brain_session_id(brain_session_id.clone())
+            .expect("set once");
+        brain_session_id_cell
+            .set(brain_session_id.as_session_id().clone())
+            .expect("set once");
+        let session_id = brain_session_id.as_session_id().clone();
+
+        info!(brain = %brain_name, session = %session_id, "Creating brain session");
+        self.emit(SpurEvent::now(SpurEventBody::BrainSpawned {
+            agent: brain_name.clone(),
+            session: session_id.clone(),
+        }));
+
+        // Log session start.
+        if let Some(ref ct) = self.cost_tracker {
+            let _ = ct.start_session(
+                &session_id,
+                &brain_name,
+                "brain",
+                None,
+                "(interactive)",
+                self.config.project.as_ref().map(|p| p.name.as_str()),
+                None,
+            );
+        }
 
         let (attach_guard, fs_unsafe) = self.acquire_attach_guard_for_existing_or_new(
             &session_response.session_id.to_string(),
@@ -4927,7 +4959,7 @@ impl Orchestrator {
             tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>,
         >,
         acp_session_id: String,
-        preserve_spur_session_id: Option<SessionId>,
+        is_reconnect: bool,
         force_new_session: bool,
         existing_attach_guard: Option<SessionAttachGuard>,
         existing_fs_unsafe: bool,
@@ -4940,10 +4972,6 @@ impl Orchestrator {
         ),
         LoadBrainSessionError,
     > {
-        let (session_id, is_reconnect) = match preserve_spur_session_id {
-            Some(sid) => (sid, true),
-            None => (SessionId::new(), false),
-        };
         let requested_acp_session_id = acp_session_id.clone();
 
         let (mut attach_guard, mut fs_unsafe) = if force_new_session {
@@ -4957,21 +4985,15 @@ impl Orchestrator {
             )?
         };
 
-        info!(brain = %brain_name, session = %session_id, acp_session = %acp_session_id, "Loading brain session");
-        if !is_reconnect {
-            self.emit(SpurEvent::now(SpurEventBody::BrainSpawned {
-                agent: brain_name.clone(),
-                session: session_id.clone(),
-            }));
-        }
+        info!(brain = %brain_name, acp_session = %acp_session_id, "Loading brain session");
 
         // Start MCP callback server.
         let sink: Option<std::sync::Arc<dyn spur_mcp::McpEventSink>> =
             Some(std::sync::Arc::new(self.funnel.clone()));
-        let brain_session_id: spur_acp::BrainSessionId = session_id.clone().into();
-        let cont_ctx = self.build_continuation_ctx(session_id.clone());
+        let brain_session_id_cell = Arc::new(std::sync::OnceLock::new());
+        let cont_ctx = self.build_continuation_ctx(Arc::clone(&brain_session_id_cell));
         let (mcp_server, delegation_channel) = McpCallbackServer::new(
-            &brain_session_id,
+            None,
             self.pm_service.clone(),
             sink,
             cont_ctx,
@@ -5002,21 +5024,6 @@ impl Orchestrator {
             .start()
             .await
             .context("Failed to start MCP callback server")?;
-
-        // Log session start.
-        if !is_reconnect {
-            if let Some(ref ct) = self.cost_tracker {
-                let _ = ct.start_session(
-                    &session_id,
-                    &brain_name,
-                    "brain",
-                    None,
-                    "(resumed)",
-                    self.config.project.as_ref().map(|p| p.name.as_str()),
-                    None,
-                );
-            }
-        }
 
         let (
             (
@@ -5120,9 +5127,42 @@ impl Orchestrator {
         })
         .await?;
 
+        let final_acp_session = spur_acp::SessionId(final_acp_session_id.clone());
+        let brain_session_id = spur_mcp::plan::labels::derive_brain_session_id(&final_acp_session);
+        mcp_server
+            .set_brain_session_id(brain_session_id.clone())
+            .expect("set once");
+        brain_session_id_cell
+            .set(brain_session_id.as_session_id().clone())
+            .expect("set once");
+        let session_id = brain_session_id.as_session_id().clone();
+
         if final_acp_session_id != requested_acp_session_id {
             drop(attach_guard.take());
             (attach_guard, fs_unsafe) = self.acquire_attach_guard_for_new(&final_acp_session_id)?;
+        }
+
+        info!(brain = %brain_name, session = %session_id, acp_session = %final_acp_session_id, "Loaded brain session");
+        if !is_reconnect {
+            self.emit(SpurEvent::now(SpurEventBody::BrainSpawned {
+                agent: brain_name.clone(),
+                session: session_id.clone(),
+            }));
+        }
+
+        // Log session start.
+        if !is_reconnect {
+            if let Some(ref ct) = self.cost_tracker {
+                let _ = ct.start_session(
+                    &session_id,
+                    &brain_name,
+                    "brain",
+                    None,
+                    "(resumed)",
+                    self.config.project.as_ref().map(|p| p.name.as_str()),
+                    None,
+                );
+            }
         }
 
         // Spawn delegation handler.
@@ -5267,7 +5307,6 @@ impl Orchestrator {
         force_new_session: bool,
     ) -> std::result::Result<(BrainSession, spur_acp::LoadOutcome), ReconnectError> {
         let acp_session_id = dead_brain.acp_session_id.clone();
-        let preserve_spur_id = dead_brain.spur_session_id.clone();
         let brain_name_hint = dead_brain.brain_name.clone();
         let existing_attach_guard = dead_brain.attach_guard.take();
         let existing_fs_unsafe = dead_brain.fs_unsafe;
@@ -5305,7 +5344,7 @@ impl Orchestrator {
                 brain_name,
                 permission_tx,
                 acp_session_id,
-                Some(preserve_spur_id),
+                true,
                 force_new_session,
                 existing_attach_guard,
                 existing_fs_unsafe,

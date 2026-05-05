@@ -398,7 +398,7 @@ pub struct McpCallbackServer {
     /// Available worker agents (set once at creation).
     workers: Vec<WorkerInfo>,
     /// Brain session this server belongs to. INV-2: typed as BrainSessionId.
-    brain_session_id: spur_acp::BrainSessionId,
+    brain_session_id: std::sync::OnceLock<spur_acp::BrainSessionId>,
     /// Delegation IDs whose background collector is still awaiting a result.
     active_delegations: Arc<tokio::sync::Mutex<HashSet<DelegationId>>>,
     /// Results that a background collector has received but the brain has
@@ -1736,12 +1736,12 @@ mod topo_tests {
 }
 
 impl McpCallbackServer {
-    /// Create a new MCP callback server for the given session.
+    /// Create a new MCP callback server.
     ///
     /// Returns the server instance and a `DelegationChannel` that the
     /// orchestrator uses to receive requests and send responses.
     pub fn new(
-        session_id: &spur_acp::BrainSessionId,
+        session_id: Option<&spur_acp::BrainSessionId>,
         pm_service: Option<Arc<PmService>>,
         event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
         continuation_ctx: DetachedContinuationCtx,
@@ -1754,7 +1754,13 @@ impl McpCallbackServer {
         let server = Self {
             delegation_tx: req_tx,
             workers: Vec::new(),
-            brain_session_id: session_id.clone(),
+            brain_session_id: {
+                let cell = std::sync::OnceLock::new();
+                if let Some(id) = session_id {
+                    let _ = cell.set(id.clone());
+                }
+                cell
+            },
             active_delegations: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             completed_delegations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             task_tracker: TaskTracker::new(),
@@ -1785,6 +1791,33 @@ impl McpCallbackServer {
 
         let channel = DelegationChannel { request_rx: req_rx };
         (server, channel)
+    }
+
+    /// Returns the brain_session_id. Panics if not yet set - callers from
+    /// handler paths can rely on this because handlers fire only after
+    /// `set_brain_session_id` has been called by the orchestrator (after
+    /// `agent.new_session` returns the ACP session_id).
+    pub fn brain_session_id(&self) -> &spur_acp::BrainSessionId {
+        self.brain_session_id
+            .get()
+            .expect("brain_session_id must be set before MCP handlers dispatch")
+    }
+
+    /// Set the brain_session_id once. Idempotent on the same value; returns
+    /// Err if already set to a different value.
+    pub fn set_brain_session_id(
+        &self,
+        id: spur_acp::BrainSessionId,
+    ) -> Result<(), spur_acp::BrainSessionId> {
+        if let Some(existing) = self.brain_session_id.get() {
+            if existing == &id {
+                Ok(())
+            } else {
+                Err(id)
+            }
+        } else {
+            self.brain_session_id.set(id)
+        }
     }
 
     /// Return the feature gate snapshot shared with the license runtime.
@@ -2309,7 +2342,7 @@ impl McpCallbackServer {
                     let dispatch = ReconcilerDispatchCtx {
                         delegation_tx: self.delegation_tx.clone(),
                         task_tracker: self.task_tracker.clone(),
-                        brain_session_id: self.brain_session_id.clone(),
+                        brain_session_id: self.brain_session_id().clone(),
                         event_sink: self.event_sink.clone(),
                         materializer: Arc::new(self.materializer.clone()),
                         continuation_ctx: Arc::clone(&self.continuation_ctx),
@@ -2531,7 +2564,7 @@ impl McpCallbackServer {
 
                 let ctx = crate::handlers::WorkerCallContext {
                     delegation_id: String::new(),
-                    brain_session_id: self.brain_session_id.as_session_id().0.clone(),
+                    brain_session_id: self.brain_session_id().as_session_id().0.clone(),
                 };
                 match crate::handlers::report_signal(
                     pm.as_ref(),
@@ -2628,7 +2661,7 @@ impl McpCallbackServer {
             task: parsed.task,
             context_files: parsed.context_files.unwrap_or_default(),
             respond_to: tx,
-            brain_session_id: self.brain_session_id.clone(),
+            brain_session_id: self.brain_session_id().clone(),
             delegation_plan: parsed.delegation_plan,
             issue_id: parsed.issue_id,
             base: parsed.base,
@@ -2743,7 +2776,7 @@ impl McpCallbackServer {
                         ctx: Arc::clone(&self.continuation_ctx),
                         source_kind: DetachedSourceKind::BlockTimeout,
                         attempt_tracker,
-                        brain_session: self.brain_session_id.as_session_id().clone(),
+                        brain_session: self.brain_session_id().as_session_id().clone(),
                         event_sink: self.event_sink.clone(),
                         materializer: self.materializer.clone(),
                     }),
@@ -2790,7 +2823,7 @@ impl McpCallbackServer {
             return JsonRpcResponse::invalid_params(id, e);
         }
 
-        let skeletons = match parse_parallel_tasks(&args, &self.brain_session_id) {
+        let skeletons = match parse_parallel_tasks(&args, self.brain_session_id()) {
             Ok(s) => s,
             Err(e) => return JsonRpcResponse::invalid_params(id, e),
         };
@@ -2839,7 +2872,7 @@ impl McpCallbackServer {
             let task_tracker = self.task_tracker.clone();
             let cancel_token = self.cancel_token.child_token();
             let event_sink = self.event_sink.clone();
-            let brain_session = self.brain_session_id.as_session_id().clone();
+            let brain_session = self.brain_session_id().as_session_id().clone();
             let materializer = self.materializer.clone();
             waits.spawn(async move {
                 let mut rx = rx;
@@ -2998,7 +3031,7 @@ impl McpCallbackServer {
     async fn handle_fetch_outcome_artifact(&self, id: Value, args: Value) -> JsonRpcResponse {
         let ctx = crate::handlers::WorkerCallContext {
             delegation_id: String::new(),
-            brain_session_id: self.brain_session_id.as_session_id().0.clone(),
+            brain_session_id: self.brain_session_id().as_session_id().0.clone(),
         };
         match crate::handlers::fetch_outcome_artifact(
             &self.materializer,
@@ -3128,7 +3161,7 @@ impl McpCallbackServer {
         };
         let ctx = crate::handlers::WorkerCallContext {
             delegation_id: String::new(),
-            brain_session_id: self.brain_session_id.as_session_id().0.clone(),
+            brain_session_id: self.brain_session_id().as_session_id().0.clone(),
         };
 
         match crate::handlers::get_issue(pm, &ctx, args).await {
@@ -3226,7 +3259,7 @@ impl McpCallbackServer {
         };
         let ctx = crate::handlers::WorkerCallContext {
             delegation_id: String::new(),
-            brain_session_id: self.brain_session_id.as_session_id().0.clone(),
+            brain_session_id: self.brain_session_id().as_session_id().0.clone(),
         };
 
         match crate::handlers::update_issue(pm, &ctx, args).await {
@@ -3596,7 +3629,7 @@ impl McpCallbackServer {
 
         match crate::plan::ownership::classify_owner(
             &epic.labels,
-            self.brain_session_id.as_session_id(),
+            self.brain_session_id().as_session_id(),
         ) {
             crate::plan::ownership::PlanOwnerMatch::OwnedByCurrent => Ok(()),
             crate::plan::ownership::PlanOwnerMatch::OwnedByOther { owner } => Err((
@@ -3646,7 +3679,8 @@ impl McpCallbackServer {
         exempt_plan_id: Option<&str>,
         exempt_epic_id: Option<&str>,
     ) -> Result<Option<ActiveOwnedPlan>, String> {
-        let owner_label = crate::plan::labels::plan_owner(&self.brain_session_id.as_session_id().0);
+        let owner_label =
+            crate::plan::labels::plan_owner(&self.brain_session_id().as_session_id().0);
         let epics = pm
             .list_issues(IssueFilter {
                 labels: vec![owner_label],
@@ -3800,7 +3834,7 @@ impl McpCallbackServer {
 
         match crate::plan::ownership::classify_owner(
             &epic.labels,
-            self.brain_session_id.as_session_id(),
+            self.brain_session_id().as_session_id(),
         ) {
             crate::plan::ownership::PlanOwnerMatch::OwnedByCurrent => {
                 if let Some(active) = self
@@ -3831,7 +3865,7 @@ impl McpCallbackServer {
                 }
 
                 let owner_label =
-                    crate::plan::labels::plan_owner(&self.brain_session_id.as_session_id().0);
+                    crate::plan::labels::plan_owner(&self.brain_session_id().as_session_id().0);
                 apply_issue_update(
                     pm,
                     &epic_id,
@@ -3851,7 +3885,7 @@ impl McpCallbackServer {
                 })?;
                 match crate::plan::ownership::classify_owner(
                     &epic.labels,
-                    self.brain_session_id.as_session_id(),
+                    self.brain_session_id().as_session_id(),
                 ) {
                     crate::plan::ownership::PlanOwnerMatch::OwnedByCurrent => Ok(()),
                     crate::plan::ownership::PlanOwnerMatch::OwnedByOther { owner } => {
@@ -3944,7 +3978,7 @@ impl McpCallbackServer {
 
         match crate::plan::ownership::classify_owner(
             &epic.labels,
-            self.brain_session_id.as_session_id(),
+            self.brain_session_id().as_session_id(),
         ) {
             crate::plan::ownership::PlanOwnerMatch::OwnedByCurrent => {
                 match self.is_projected_plan_nonterminal(plan_id).await {
@@ -4061,7 +4095,7 @@ impl McpCallbackServer {
                     }
                 }
                 let owner_label =
-                    crate::plan::labels::plan_owner(&self.brain_session_id.as_session_id().0);
+                    crate::plan::labels::plan_owner(&self.brain_session_id().as_session_id().0);
                 if let Err(error) = apply_issue_update(
                     pm,
                     &epic_id,
@@ -4092,7 +4126,7 @@ impl McpCallbackServer {
                 };
                 match crate::plan::ownership::classify_owner(
                     &epic.labels,
-                    self.brain_session_id.as_session_id(),
+                    self.brain_session_id().as_session_id(),
                 ) {
                     crate::plan::ownership::PlanOwnerMatch::OwnedByCurrent => {
                         let result = json!({
@@ -4283,7 +4317,7 @@ impl McpCallbackServer {
         };
 
         let new_owner_label =
-            crate::plan::labels::plan_owner(&self.brain_session_id.as_session_id().0);
+            crate::plan::labels::plan_owner(&self.brain_session_id().as_session_id().0);
         let mut remove_labels: Vec<String> = epic
             .labels
             .iter()
@@ -4313,7 +4347,7 @@ impl McpCallbackServer {
         }
         self.fast_forward_reconciler();
 
-        let new_owner = self.brain_session_id.to_string();
+        let new_owner = self.brain_session_id().to_string();
         let token = uuid::Uuid::new_v4().to_string();
 
         if let Err(error) = self.require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED) {
@@ -4540,7 +4574,7 @@ impl McpCallbackServer {
                 .expect("gate ensures pm is beads");
             let title = epic_title.as_deref().expect("gate ensures non-empty title");
             let owner_label =
-                crate::plan::labels::plan_owner(&self.brain_session_id.as_session_id().0);
+                crate::plan::labels::plan_owner(&self.brain_session_id().as_session_id().0);
             match build_epic_subgraph_with_activation_labels(
                 pm,
                 self.feature_gate.as_ref(),
@@ -4560,7 +4594,7 @@ impl McpCallbackServer {
                         let audit =
                             crate::plan::audit_sentinel::AuditSentinelKind::PlanOwnershipAcquired {
                                 plan_id: plan_id.clone(),
-                                owner: self.brain_session_id.to_string(),
+                                owner: self.brain_session_id().to_string(),
                                 token: uuid::Uuid::new_v4().to_string(),
                                 reason: "submit_plan".to_string(),
                             };
@@ -4608,7 +4642,7 @@ impl McpCallbackServer {
         let state = crate::plan::PlanState {
             plan_id: plan_id.clone(),
             tasks: entries,
-            brain_session_id: self.brain_session_id.clone(),
+            brain_session_id: self.brain_session_id().clone(),
             base_snapshot_branch: base_snapshot.branch,
             base_snapshot_oid: base_snapshot.oid,
             merge_state: crate::plan::PlanMergeState::NotStarted,
@@ -4635,7 +4669,7 @@ impl McpCallbackServer {
                     base_snapshot_branch.as_deref(),
                     base_snapshot_oid.as_deref(),
                     Some("submit_plan"),
-                    Some(self.brain_session_id.as_session_id()),
+                    Some(self.brain_session_id().as_session_id()),
                 )
                 .await;
             }
@@ -4751,7 +4785,7 @@ impl McpCallbackServer {
         }
         match crate::plan::ownership::classify_owner(
             &epic_issue.labels,
-            self.brain_session_id.as_session_id(),
+            self.brain_session_id().as_session_id(),
         ) {
             crate::plan::ownership::PlanOwnerMatch::Unowned
             | crate::plan::ownership::PlanOwnerMatch::OwnedByCurrent => {}
@@ -4958,7 +4992,7 @@ impl McpCallbackServer {
         let state = crate::plan::PlanState {
             plan_id: plan_id.clone(),
             tasks: entries,
-            brain_session_id: self.brain_session_id.clone(),
+            brain_session_id: self.brain_session_id().clone(),
             base_snapshot_branch: base_snapshot.branch,
             base_snapshot_oid: base_snapshot.oid,
             merge_state: crate::plan::PlanMergeState::NotStarted,
@@ -4996,11 +5030,11 @@ impl McpCallbackServer {
         if let Ok(epic_issue) = pm.get_issue(&epic_id).await {
             prior_owner_match = Some(crate::plan::ownership::classify_owner(
                 &epic_issue.labels,
-                self.brain_session_id.as_session_id(),
+                self.brain_session_id().as_session_id(),
             ));
             let mut remove_labels = Vec::new();
             let owner_label =
-                crate::plan::labels::plan_owner(&self.brain_session_id.as_session_id().0);
+                crate::plan::labels::plan_owner(&self.brain_session_id().as_session_id().0);
             for label in &epic_issue.labels {
                 if crate::plan::labels::parse_plan_id(label).is_some()
                     || crate::plan::labels::parse_agent(label).is_some()
@@ -5083,7 +5117,7 @@ impl McpCallbackServer {
                 base_snapshot_branch.as_deref(),
                 base_snapshot_oid.as_deref(),
                 Some("execute_epic"),
-                Some(self.brain_session_id.as_session_id()),
+                Some(self.brain_session_id().as_session_id()),
             )
             .await;
 
@@ -5093,7 +5127,7 @@ impl McpCallbackServer {
                     | crate::plan::ownership::PlanOwnerMatch::OwnedByCurrent => Some(
                         crate::plan::audit_sentinel::AuditSentinelKind::PlanOwnershipAcquired {
                             plan_id: plan_id.clone(),
-                            owner: self.brain_session_id.to_string(),
+                            owner: self.brain_session_id().to_string(),
                             token: uuid::Uuid::new_v4().to_string(),
                             reason: "execute_epic".to_string(),
                         },
@@ -5102,7 +5136,7 @@ impl McpCallbackServer {
                         crate::plan::audit_sentinel::AuditSentinelKind::PlanOwnershipTransferred {
                             plan_id: plan_id.clone(),
                             from: owner.clone(),
-                            to: self.brain_session_id.to_string(),
+                            to: self.brain_session_id().to_string(),
                             mode: "execute_epic".to_string(),
                             previous_token: String::new(),
                             new_token: uuid::Uuid::new_v4().to_string(),
@@ -5208,7 +5242,7 @@ impl McpCallbackServer {
     async fn handle_get_plan_status(&self, id: Value, args: Value) -> JsonRpcResponse {
         let ctx = crate::handlers::WorkerCallContext {
             delegation_id: String::new(),
-            brain_session_id: self.brain_session_id.as_session_id().0.clone(),
+            brain_session_id: self.brain_session_id().as_session_id().0.clone(),
         };
         match crate::handlers::get_plan_status(self, &self.reconciler_outcomes, &ctx, args).await {
             Ok(status) => {
@@ -5255,7 +5289,7 @@ impl McpCallbackServer {
     async fn handle_get_task_diff(&self, id: Value, args: Value) -> JsonRpcResponse {
         let ctx = crate::handlers::WorkerCallContext {
             delegation_id: String::new(),
-            brain_session_id: self.brain_session_id.as_session_id().0.clone(),
+            brain_session_id: self.brain_session_id().as_session_id().0.clone(),
         };
         match crate::handlers::get_task_diff(
             self.pm_service.as_deref(),
@@ -5312,7 +5346,7 @@ impl McpCallbackServer {
         };
         let ctx = crate::handlers::WorkerCallContext {
             delegation_id: String::new(),
-            brain_session_id: self.brain_session_id.as_session_id().0.clone(),
+            brain_session_id: self.brain_session_id().as_session_id().0.clone(),
         };
         match crate::handlers::report_progress(sink, &ctx, args).await {
             Ok(value) => {
@@ -6286,7 +6320,7 @@ mod retirement_state_tests {
     async fn test_server_mark_retiring_rejects_new_delegations() {
         let session_id = BrainSessionId::new(SessionId("brain".into()));
         let (server, _channel) = super::McpCallbackServer::new(
-            &session_id,
+            Some(&session_id),
             None,
             None,
             no_op_ctx(),
@@ -6311,7 +6345,7 @@ mod retirement_state_tests {
     async fn test_server_cancel_in_flight_signals_token() {
         let session_id = BrainSessionId::new(SessionId("brain".into()));
         let (server, _channel) = super::McpCallbackServer::new(
-            &session_id,
+            Some(&session_id),
             None,
             None,
             no_op_ctx(),
@@ -6336,7 +6370,7 @@ mod retirement_state_tests {
     async fn test_server_force_abort_idempotent() {
         let session_id = BrainSessionId::new(SessionId("brain".into()));
         let (server, _channel) = super::McpCallbackServer::new(
-            &session_id,
+            Some(&session_id),
             None,
             None,
             no_op_ctx(),
@@ -6381,7 +6415,7 @@ mod retirement_state_tests {
     async fn test_server_force_abort_after_shutdown_partial_progress() {
         let session_id = BrainSessionId::new(SessionId("brain".into()));
         let (server, _channel) = super::McpCallbackServer::new(
-            &session_id,
+            Some(&session_id),
             None,
             None,
             no_op_ctx(),
@@ -6760,7 +6794,7 @@ mod fetch_outcome_artifact_tests {
         outcome_store: Arc<dyn spur_blob_store::OutcomeStore>,
     ) -> McpCallbackServer {
         let (mut server, _channel) = McpCallbackServer::new(
-            &brain_session,
+            Some(&brain_session),
             None,
             None,
             no_op_continuation_ctx(),
@@ -7381,7 +7415,7 @@ mod clobber_review_tests {
 
         let session_id = BrainSessionId::new(SessionId("brain".into()));
         let (mut server, _channel) = super::McpCallbackServer::new(
-            &session_id,
+            Some(&session_id),
             None,
             None,
             no_op_ctx(),
@@ -7635,7 +7669,7 @@ mod merge_plan_tests {
             on_complete: Arc::new(|_, _| Box::pin(async {})),
         };
         let (mut server, _channel) = super::McpCallbackServer::new(
-            &session_id,
+            Some(&session_id),
             Some(Arc::clone(&pm)),
             None,
             continuation_ctx,
@@ -7855,7 +7889,7 @@ mod merge_plan_tests {
             on_complete: Arc::new(|_, _| Box::pin(async {})),
         };
         let (mut server, _channel) = super::McpCallbackServer::new(
-            &session_id,
+            Some(&session_id),
             Some(Arc::clone(&pm)),
             None,
             continuation_ctx,
@@ -8083,7 +8117,7 @@ mod merge_plan_tests {
             on_complete: Arc::new(|_, _| Box::pin(async {})),
         };
         let (mut server, _channel) = super::McpCallbackServer::new(
-            &session_id,
+            Some(&session_id),
             Some(Arc::clone(&pm)),
             None,
             continuation_ctx,
@@ -8592,7 +8626,7 @@ mod merge_plan_tests {
         let outcome_store: Arc<dyn spur_blob_store::OutcomeStore> =
             Arc::new(spur_blob_store::MemoryOutcomeStore::new());
         let (server, _channel) = super::McpCallbackServer::new(
-            &session_id,
+            Some(&session_id),
             None,
             None,
             continuation_ctx,
@@ -8663,7 +8697,7 @@ mod reconciler_fast_forward_tests {
             on_complete: Arc::new(|_, _| Box::pin(async {})),
         };
         let (mut server, _channel) = super::McpCallbackServer::new(
-            &session_id,
+            Some(&session_id),
             None,
             None,
             continuation_ctx,
@@ -8693,7 +8727,7 @@ mod reconciler_fast_forward_tests {
             on_complete: Arc::new(|_, _| Box::pin(async {})),
         };
         let (mut server, _channel) = super::McpCallbackServer::new(
-            &session_id,
+            Some(&session_id),
             None,
             None,
             continuation_ctx,
@@ -8727,7 +8761,7 @@ mod reconciler_fast_forward_tests {
             on_complete: Arc::new(|_, _| Box::pin(async {})),
         };
         let (server, _channel) = super::McpCallbackServer::new(
-            &session_id,
+            Some(&session_id),
             None,
             None,
             continuation_ctx,
@@ -8973,7 +9007,7 @@ mod reconciler_fast_forward_tests {
             on_complete: Arc::new(|_, _| Box::pin(async {})),
         };
         let (server, _channel) = super::McpCallbackServer::new(
-            &session_id,
+            Some(&session_id),
             None,
             None,
             continuation_ctx,
@@ -9074,7 +9108,7 @@ mod reconciler_fast_forward_tests {
             on_complete: Arc::new(|_, _| Box::pin(async {})),
         };
         let (server, _channel) = super::McpCallbackServer::new(
-            &session_id,
+            Some(&session_id),
             Some(Arc::clone(&pm)),
             None,
             continuation_ctx,
@@ -9097,7 +9131,7 @@ mod reconciler_fast_forward_tests {
             on_complete: Arc::new(|_, _| Box::pin(async {})),
         };
         let (server, _channel) = super::McpCallbackServer::new(
-            &session_id,
+            Some(&session_id),
             None,
             None,
             continuation_ctx,
