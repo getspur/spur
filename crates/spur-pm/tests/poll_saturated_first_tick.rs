@@ -41,6 +41,11 @@ struct BrIssueRow {
     id: String,
 }
 
+#[derive(serde::Deserialize)]
+struct BrListOutput {
+    issues: Vec<BrIssueRow>,
+}
+
 #[tokio::test]
 async fn saturated_first_poll_keeps_cursor_unset_until_backlog_drains() {
     if !br_available() {
@@ -58,11 +63,12 @@ async fn saturated_first_poll_keeps_cursor_unset_until_backlog_drains() {
         );
     }
 
-    let all_rows: Vec<BrIssueRow> = serde_json::from_str(&run_br(
+    let all_rows: BrListOutput = serde_json::from_str(&run_br(
         dir.path(),
         &["list", "-s", "open", "--limit", "600"],
     ))
     .expect("br list output must be valid JSON");
+    let all_rows = all_rows.issues;
     assert_eq!(all_rows.len(), POLL_FETCH_LIMIT + 5);
 
     let adapter = BeadsAdapter::connect_with_actor(dir.path(), None, Some(cursor_file.clone()))
