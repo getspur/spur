@@ -79,6 +79,7 @@ directories = "5"
 regex = "1"
 sha2 = "0.10"
 proptest = "1"
+petgraph = { version = "0.6", default-features = false, features = ["stable_graph"] }
 
 # ACP SDK
 agent-client-protocol = { version = "0.11", features = ["unstable_session_usage", "unstable_session_model"] }
