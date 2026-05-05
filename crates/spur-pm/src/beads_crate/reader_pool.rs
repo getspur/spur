@@ -1,18 +1,39 @@
 //! Small fixed pool of `beads_rust::SqliteStorage` reader connections.
 //!
 //! WAL mode permits concurrent readers via *multiple* connections. One
-//! connection cannot be called concurrently (rusqlite Connection is !Sync).
-//! The pool gives us bounded concurrency without unbounded handle growth.
+//! connection cannot be called concurrently. The pool gives us bounded
+//! concurrency without unbounded handle growth.
+//!
+//! Capacity is enforced by an async semaphore: at most `capacity` permits
+//! are outstanding at any time, so at most `capacity` connections exist.
+//! Connections are opened lazily on first miss and reused thereafter.
+//!
+//! ## Threading note
+//!
+//! `beads_rust 0.2.1`'s underlying SQLite engine (fsqlite) is `!Send` — it
+//! holds `Rc<RefCell<…>>` internally. Consequences:
+//!   - A `ReaderGuard` (and the `SqliteStorage` it wraps) cannot move across
+//!     thread boundaries.
+//!   - `ReaderPool` itself is `!Send`, so it cannot be cloned into a
+//!     `tokio::spawn`'d task on a multi-threaded runtime.
+//!   - All pool usage must stay on a single thread (e.g., `current_thread`
+//!     runtime, `LocalSet` / `spawn_local`, or a dedicated worker thread that
+//!     owns the pool).
+//!
+//! The semaphore still serializes capacity correctly under cooperative
+//! single-threaded concurrency: while one task is awaiting the permit, others
+//! can hold guards and progress.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
 
 use beads_rust::storage::sqlite::SqliteStorage;
+use tokio::sync::{Semaphore, SemaphorePermit};
 
 pub struct ReaderPool {
     beads_dir: PathBuf,
     free: Mutex<Vec<SqliteStorage>>,
-    capacity: usize,
+    capacity: Semaphore,
 }
 
 impl ReaderPool {
@@ -21,42 +42,39 @@ impl ReaderPool {
         Self {
             beads_dir,
             free: Mutex::new(Vec::with_capacity(capacity)),
-            capacity,
+            capacity: Semaphore::new(capacity),
         }
     }
 
-    /// Check out a reader connection. Lazily opens new connections up to
-    /// `capacity`. If at capacity and none free, blocks briefly and retries
-    /// (rare under expected workloads).
-    pub fn checkout(&self) -> anyhow::Result<ReaderGuard<'_>> {
-        loop {
-            {
-                let mut free = self.free.lock().unwrap();
-                if let Some(conn) = free.pop() {
-                    return Ok(ReaderGuard {
-                        pool: self,
-                        conn: Some(conn),
-                    });
-                }
-                // No free; can we open a new one?
-                if free.capacity() < self.capacity {
-                    // We track open count via capacity-of-vec; fine for single-process pool
-                    free.reserve(1);
-                }
-            }
-            // Open without holding the mutex
-            let conn = SqliteStorage::open(&self.beads_dir.join("beads.db"))?;
-            return Ok(ReaderGuard {
-                pool: self,
-                conn: Some(conn),
-            });
-        }
+    /// Check out a reader connection. Awaits a capacity permit, then either
+    /// reuses a free connection or opens a new one. The returned guard holds
+    /// the permit; dropping it returns the connection and releases capacity.
+    pub async fn checkout(&self) -> anyhow::Result<ReaderGuard<'_>> {
+        let permit = self
+            .capacity
+            .acquire()
+            .await
+            .expect("ReaderPool semaphore never closed");
+        let cached = {
+            let mut free = self.free.lock().unwrap();
+            free.pop()
+        };
+        let conn = match cached {
+            Some(c) => c,
+            None => SqliteStorage::open(&self.beads_dir.join("beads.db"))?,
+        };
+        Ok(ReaderGuard {
+            pool: self,
+            conn: Some(conn),
+            _permit: permit,
+        })
     }
 }
 
 pub struct ReaderGuard<'a> {
     pool: &'a ReaderPool,
     conn: Option<SqliteStorage>,
+    _permit: SemaphorePermit<'a>,
 }
 
 impl<'a> ReaderGuard<'a> {
@@ -71,43 +89,103 @@ impl<'a> Drop for ReaderGuard<'a> {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
             let mut free = self.pool.free.lock().unwrap();
-            if free.len() < self.pool.capacity {
-                free.push(conn);
-            }
-            // else: drop the connection (over-capacity, lazy shrink)
+            free.push(conn);
         }
+        // _permit drop releases the semaphore slot.
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     fn init_beads(dir: &std::path::Path) {
-        // Use beads_rust directly to initialize the workspace
         let _ = SqliteStorage::open(&dir.join("beads.db")).expect("open initializes schema");
     }
 
-    #[test]
-    fn checkout_returns_a_reader() {
+    #[tokio::test]
+    async fn checkout_returns_a_reader() {
         let dir = TempDir::new().unwrap();
         init_beads(dir.path());
         let pool = ReaderPool::new(dir.path().to_path_buf(), 2);
-        let r = pool.checkout().expect("checkout");
-        // sanity: storage is callable
+        let r = pool.checkout().await.expect("checkout");
         let _ = r.storage();
     }
 
-    #[test]
-    fn drop_returns_to_pool() {
+    #[tokio::test]
+    async fn drop_returns_to_pool() {
         let dir = TempDir::new().unwrap();
         init_beads(dir.path());
         let pool = ReaderPool::new(dir.path().to_path_buf(), 1);
         {
-            let _ = pool.checkout().unwrap();
+            let _ = pool.checkout().await.unwrap();
         }
-        // Free vec should now have 1 conn
         assert_eq!(pool.free.lock().unwrap().len(), 1);
+    }
+
+    /// With capacity=1 and one outstanding guard, a second checkout must NOT
+    /// resolve until the first guard is dropped. SqliteStorage is `!Send`, so
+    /// we cannot use `tokio::spawn` — we drive the second future cooperatively
+    /// via `pin!` + `timeout`.
+    #[tokio::test]
+    async fn checkout_blocks_when_at_capacity() {
+        let dir = TempDir::new().unwrap();
+        init_beads(dir.path());
+        let pool = ReaderPool::new(dir.path().to_path_buf(), 1);
+
+        let g1 = pool.checkout().await.expect("first checkout");
+
+        let second = pool.checkout();
+        tokio::pin!(second);
+
+        // While g1 is held, polling the second future to completion must time out.
+        let blocked = tokio::time::timeout(Duration::from_millis(50), &mut second).await;
+        assert!(
+            blocked.is_err(),
+            "second checkout completed while permit was held"
+        );
+
+        drop(g1);
+
+        // After g1 is dropped, the second future must resolve promptly.
+        let g2 = tokio::time::timeout(Duration::from_millis(500), &mut second)
+            .await
+            .expect("second checkout did not unblock after first was dropped")
+            .expect("checkout returned an error");
+        let _ = g2.storage();
+    }
+
+    /// Hold all N permits, then verify the (N+1)th checkout blocks.
+    #[tokio::test]
+    async fn capacity_caps_open_connections() {
+        let dir = TempDir::new().unwrap();
+        init_beads(dir.path());
+        let capacity = 3usize;
+        let pool = ReaderPool::new(dir.path().to_path_buf(), capacity);
+
+        let mut guards = Vec::new();
+        for _ in 0..capacity {
+            guards.push(pool.checkout().await.expect("checkout"));
+        }
+
+        let waiter = pool.checkout();
+        tokio::pin!(waiter);
+
+        let blocked = tokio::time::timeout(Duration::from_millis(50), &mut waiter).await;
+        assert!(blocked.is_err(), "(N+1)th checkout did not block");
+
+        drop(guards.pop());
+
+        let g = tokio::time::timeout(Duration::from_millis(500), &mut waiter)
+            .await
+            .expect("(N+1)th checkout did not unblock")
+            .expect("checkout returned an error");
+        let _ = g.storage();
+
+        drop(guards);
+        drop(g);
+        assert!(pool.free.lock().unwrap().len() <= capacity);
     }
 }
