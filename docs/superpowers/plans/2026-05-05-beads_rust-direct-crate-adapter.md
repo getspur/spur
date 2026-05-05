@@ -731,11 +731,26 @@ Append to `crates/spur-pm/src/beads_crate/init.rs`:
 use std::time::{Duration, SystemTime};
 
 /// Pattern matching the temp files beads_rust creates during atomic JSONL writes.
-/// Specifically: `.beads/issues.jsonl.tmp.<pid>.<random>` (per beads_rust 0.2.1
-/// `sync::export_temp_path`). We are deliberately strict about the prefix so we
-/// never touch SQLite sidecars (`-wal`, `-shm`).
+/// Per beads_rust 0.2.1 `sync::export_temp_path`:
+///
+/// ```ignore
+/// pub(crate) fn export_temp_path(output_path: &Path) -> PathBuf {
+///     output_path.with_extension(format!("jsonl.{}.tmp", std::process::id()))
+/// }
+/// ```
+///
+/// For input `issues.jsonl`, `Path::with_extension` strips `.jsonl` and appends
+/// the new extension, producing `issues.jsonl.<pid>.tmp`. The PID is decimal
+/// digits; there is NO random suffix. We deliberately match strictly so we
+/// never touch SQLite sidecars (`-wal`, `-shm`) or the live `issues.jsonl`.
 fn is_jsonl_temp_file(name: &str) -> bool {
-    name.starts_with("issues.jsonl.tmp.")
+    let Some(rest) = name.strip_prefix("issues.jsonl.") else {
+        return false;
+    };
+    let Some(pid_str) = rest.strip_suffix(".tmp") else {
+        return false;
+    };
+    !pid_str.is_empty() && pid_str.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Sweep stale jsonl temp files older than `min_age`. Returns count removed.
@@ -773,13 +788,15 @@ mod sweep_tests {
     use tempfile::TempDir;
 
     #[test]
-    fn ignores_wal_and_shm_sidecars() {
+    fn ignores_wal_and_shm_sidecars_and_live_jsonl() {
         let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("issues.jsonl"), b"x").unwrap();
         std::fs::write(dir.path().join("issues.jsonl-wal"), b"x").unwrap();
         std::fs::write(dir.path().join("issues.jsonl-shm"), b"x").unwrap();
         std::fs::write(dir.path().join("beads.db-wal"), b"x").unwrap();
         let removed = sweep_stale_jsonl_temps(dir.path(), Duration::ZERO).unwrap();
         assert_eq!(removed, 0);
+        assert!(dir.path().join("issues.jsonl").exists());
         assert!(dir.path().join("issues.jsonl-wal").exists());
         assert!(dir.path().join("beads.db-wal").exists());
     }
@@ -787,9 +804,9 @@ mod sweep_tests {
     #[test]
     fn removes_old_jsonl_tmp_files() {
         let dir = TempDir::new().unwrap();
-        let p = dir.path().join("issues.jsonl.tmp.123.abc");
+        // beads_rust temp scheme: `issues.jsonl.<pid>.tmp` (decimal digits only)
+        let p = dir.path().join("issues.jsonl.12345.tmp");
         std::fs::write(&p, b"orphan").unwrap();
-        // age = 0 means "remove if anything", so this should match
         let removed = sweep_stale_jsonl_temps(dir.path(), Duration::ZERO).unwrap();
         assert_eq!(removed, 1);
         assert!(!p.exists());
@@ -798,12 +815,26 @@ mod sweep_tests {
     #[test]
     fn keeps_recent_tmp_files() {
         let dir = TempDir::new().unwrap();
-        let p = dir.path().join("issues.jsonl.tmp.456.def");
+        let p = dir.path().join("issues.jsonl.99999.tmp");
         std::fs::write(&p, b"in-flight").unwrap();
-        // require min_age = 1h; recent file should not be swept
         let removed = sweep_stale_jsonl_temps(dir.path(), Duration::from_secs(3600)).unwrap();
         assert_eq!(removed, 0);
         assert!(p.exists());
+    }
+
+    #[test]
+    fn ignores_non_pid_lookalikes() {
+        let dir = TempDir::new().unwrap();
+        // Right shape but non-digit middle — must not be matched.
+        let p1 = dir.path().join("issues.jsonl.abc.tmp");
+        // Right prefix/suffix but empty middle.
+        let p2 = dir.path().join("issues.jsonl..tmp");
+        std::fs::write(&p1, b"x").unwrap();
+        std::fs::write(&p2, b"x").unwrap();
+        let removed = sweep_stale_jsonl_temps(dir.path(), Duration::ZERO).unwrap();
+        assert_eq!(removed, 0);
+        assert!(p1.exists());
+        assert!(p2.exists());
     }
 
     #[test]
@@ -818,7 +849,7 @@ mod sweep_tests {
 - [ ] **Step 2: Run tests + commit**
 
 Run: `cargo test -p spur-pm beads_crate::init --lib`
-Expected: 5 pass.
+Expected: 6 pass (FS detection + 5 sweep tests including the lookalike guard).
 
 ```bash
 git add crates/spur-pm/src/beads_crate/init.rs
@@ -831,6 +862,10 @@ git commit -m "spur-pm: add sweep_stale_jsonl_temps init guard"
 
 **Files:**
 - Modify: `crates/spur-pm/src/beads_crate/init.rs`
+
+> **API note (verified 2026-05-05 against beads_rust 0.2.1):**
+> - `SqliteStorage::open_with_timeout(path: &Path, lock_timeout_ms: Option<u64>) -> Result<Self>` — `path` is the **`.db` file path**, not the `.beads` directory. Pass `&beads_dir.join("beads.db")`.
+> - `sync::blocking_write_lock_with_timeout(beads_dir: &Path, lock_timeout_ms: Option<u64>) -> Result<File>` — takes the **`.beads` directory** and joins `.write.lock` internally. Returns the lock `File` which MUST be kept in scope for the lifetime of the lock; dropping it releases the flock silently.
 
 - [ ] **Step 1: Add the migration helper**
 
@@ -851,10 +886,12 @@ pub fn open_writer_under_migration_lock(
     lock_timeout_ms: u64,
 ) -> anyhow::Result<SqliteStorage> {
     // Acquire .write.lock — guards schema migration against other instances
-    // racing the same first-open.
+    // racing the same first-open. `_guard: File` must stay in scope until we
+    // return; dropping it releases the flock.
     let _guard = sync::blocking_write_lock_with_timeout(beads_dir, Some(lock_timeout_ms))?;
     // Opening the storage runs schema init / migrations as needed.
-    let storage = SqliteStorage::open_with_timeout(beads_dir, Some(lock_timeout_ms))?;
+    let db_path = beads_dir.join("beads.db");
+    let storage = SqliteStorage::open_with_timeout(&db_path, Some(lock_timeout_ms))?;
     // _guard drops here, releasing flock.
     Ok(storage)
 }
@@ -879,7 +916,7 @@ mod migration_tests {
 - [ ] **Step 2: Run tests + commit**
 
 Run: `cargo test -p spur-pm beads_crate::init --lib`
-Expected: 6 pass.
+Expected: 7 pass (FS + 5 sweep + 1 migration).
 
 ```bash
 git add crates/spur-pm/src/beads_crate/init.rs
@@ -893,54 +930,62 @@ git commit -m "spur-pm: add open_writer_under_migration_lock"
 **Files:**
 - Modify: `crates/spur-pm/src/beads_crate/init.rs`
 
+> **API correction (verified 2026-05-05 against beads_rust 0.2.1):**
+> The actual `sync::auto_flush` signature is:
+>
+> ```rust
+> pub fn auto_flush(
+>     storage: &mut SqliteStorage,
+>     beads_dir: &Path,
+>     jsonl_path: &Path,
+>     allow_external_jsonl: bool,
+> ) -> Result<AutoFlushResult>
+> ```
+>
+> There is **no `ExportConfig` / `AutoFlushConfig`** parameter. Pass `false` for `allow_external_jsonl` (matches our single-writer assumption — we do not allow other tools to mutate the JSONL). The internal `ExportConfig` is constructed by `auto_flush` itself.
+
 - [ ] **Step 1: Add stale-JSONL detection**
 
 Append:
 
 ```rust
 /// Detect whether the SQLite db has writes that haven't been flushed to JSONL,
-/// and force a flush if so. Returns true if a flush occurred. Caller MUST hold
-/// `.write.lock` (via `open_writer_under_migration_lock` for first-open path,
-/// or via per-write flock acquisition).
+/// and force a flush if so. Returns the `AutoFlushResult` for inspection.
+/// Caller MUST hold `.write.lock` (via `open_writer_under_migration_lock` for
+/// first-open path, or via per-write flock acquisition).
 pub fn detect_and_force_flush_stale_jsonl(
     storage: &mut SqliteStorage,
+    beads_dir: &Path,
     jsonl_path: &Path,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<beads_rust::sync::AutoFlushResult> {
     // beads_rust auto_flush is idempotent: it computes whether the JSONL is
     // out of sync with the SQLite db, and is a no-op if not. We call it
-    // unconditionally at boot.
-    let outcome = sync::auto_flush(storage, jsonl_path, &Default::default(), &Default::default())?;
-    // The outcome type carries information about whether work was done; here we
-    // just signal "we tried". Callers can inspect the outcome separately.
-    let _ = outcome;
-    Ok(true)
+    // unconditionally at boot. `allow_external_jsonl: false` because spur-pm
+    // is the single writer to the JSONL file in our model.
+    let result = sync::auto_flush(storage, beads_dir, jsonl_path, false)?;
+    Ok(result)
 }
 ```
 
-- [ ] **Step 2: Verify the auto_flush signature**
-
-Run: `cargo doc -p beads_rust --no-deps --open` (or grep the source)
-Expected: confirm exact signature of `sync::auto_flush`. If the signature differs from above, adjust the call site to match. Common variants: `auto_flush(storage, jsonl_path, &ExportConfig, &AutoFlushConfig)`.
-
-- [ ] **Step 3: Add minimal test**
+- [ ] **Step 2: Add minimal test**
 
 In the existing `mod migration_tests`, append:
 
 ```rust
 #[test]
-fn force_flush_on_fresh_db_is_noop() {
+fn force_flush_on_fresh_db_is_safe() {
     let dir = TempDir::new().unwrap();
     let mut storage = open_writer_under_migration_lock(dir.path(), 5_000).unwrap();
     let jsonl = dir.path().join("issues.jsonl");
-    let attempted = detect_and_force_flush_stale_jsonl(&mut storage, &jsonl).unwrap();
-    assert!(attempted);
+    let _result = detect_and_force_flush_stale_jsonl(&mut storage, dir.path(), &jsonl).unwrap();
+    // Fresh db has no writes; flush is a no-op but must not error.
 }
 ```
 
-- [ ] **Step 4: Run tests + commit**
+- [ ] **Step 3: Run tests + commit**
 
 Run: `cargo test -p spur-pm beads_crate::init --lib`
-Expected: 7 pass.
+Expected: 8 pass (FS + 5 sweep + 2 migration).
 
 ```bash
 git add crates/spur-pm/src/beads_crate/init.rs
