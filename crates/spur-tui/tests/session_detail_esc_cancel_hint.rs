@@ -131,3 +131,58 @@ fn reset_to_root_clears_cancel_hint() {
 
     assert!(detail.cancel_hint_until_for_test().is_none());
 }
+
+/// Render the view at `(width, height)` and return the rendered string.
+fn render_at(detail: &mut SessionDetailView, width: u16, height: u16) -> String {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let ctx = test_ctx();
+    terminal
+        .draw(|frame| detail.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut output = String::new();
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            output.push_str(buffer[(x, y)].symbol());
+        }
+        output.push('\n');
+    }
+    output
+}
+
+#[test]
+fn confirm_modal_renders_full_layout_on_normal_terminal() {
+    let mut detail = mk_view();
+    detail.set_stream_in_flight_for_test(true);
+    // Esc opens modal — `y` would dispatch, so we stop after the open.
+    assert!(press_esc(&mut detail).is_none());
+
+    let rendered = render_at(&mut detail, 80, 24);
+    assert!(
+        rendered.contains("Cancel turn?"),
+        "modal title row missing on 80x24:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("[y]es") && rendered.contains("[n]o"),
+        "modal options missing on 80x24:\n{rendered}"
+    );
+}
+
+#[test]
+fn confirm_modal_renders_compact_fallback_on_tiny_terminal() {
+    // Regression: previously the modal returned early (rendering nothing)
+    // when the terminal was smaller than 50×5, leaving the user in an
+    // invisible focus trap because the key handler still swallowed all
+    // input. The fallback must always render *something* the user can see.
+    let mut detail = mk_view();
+    detail.set_stream_in_flight_for_test(true);
+    assert!(press_esc(&mut detail).is_none());
+
+    // 30×3: too small for the full bordered modal, must trigger compact fallback.
+    let rendered = render_at(&mut detail, 30, 3);
+    assert!(
+        rendered.contains("Cancel turn?"),
+        "compact fallback must still surface 'Cancel turn?' on 30x3:\n{rendered}"
+    );
+}
