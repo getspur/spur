@@ -487,7 +487,9 @@ impl<'a> LineageMeta<'a> {
     fn issue_label(&self, issue: &IssueSummary) -> String {
         let icon = status_icon(issue.status.as_str());
         if issue.id == self.root_id {
-            let icon = if self.open_blockers > 0 { "!" } else { icon };
+            if self.open_blockers > 0 {
+                return format!("> {icon}! {}", issue.id);
+            }
             return format!("> {icon} {}", issue.id);
         }
 
@@ -718,6 +720,56 @@ mod tests {
             }
         }
         None
+    }
+
+    fn graph_node(id: &str, status: &str) -> GraphNodeEvent {
+        GraphNodeEvent {
+            id: id.into(),
+            title: Some(id.into()),
+            status: Some(status.into()),
+            priority: None,
+            labels: Vec::new(),
+            pagerank: None,
+        }
+    }
+
+    fn graph_edge(from: &str, to: &str) -> GraphEdgeEvent {
+        GraphEdgeEvent {
+            from: from.into(),
+            to: to.into(),
+            edge_type: Some("blocks".into()),
+        }
+    }
+
+    #[test]
+    fn issue_label_preserves_root_status_icon_with_blocker_alarm() {
+        let mut root = issue("bd-root");
+        root.status = "closed".into();
+
+        let nodes = vec![
+            graph_node("bd-root", "closed"),
+            graph_node("bd-blocker-a", "open"),
+            graph_node("bd-blocker-b", "open"),
+        ];
+        let edges = vec![
+            graph_edge("bd-blocker-a", "bd-root"),
+            graph_edge("bd-blocker-b", "bd-root"),
+        ];
+        let blocked_meta = LineageMeta::new(IssueLineageContext {
+            root_id: "bd-root",
+            nodes: &nodes,
+            edges: &edges,
+        });
+
+        assert_eq!(blocked_meta.issue_label(&root), "> ✓! bd-root");
+
+        let unblocked_meta = LineageMeta::new(IssueLineageContext {
+            root_id: "bd-root",
+            nodes: &nodes,
+            edges: &[],
+        });
+
+        assert_eq!(unblocked_meta.issue_label(&root), "> ✓ bd-root");
     }
 
     #[test]

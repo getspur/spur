@@ -273,6 +273,10 @@ fn issue_list_renders_lineage_context_from_selected_graph_cache() {
         rendered.contains("blocked by open upstream"),
         "rendered:\n{rendered}"
     );
+    assert!(
+        rendered.contains("> ○! issue-A"),
+        "blocked root should preserve status and alarm markers:\n{rendered}"
+    );
 }
 
 #[test]
