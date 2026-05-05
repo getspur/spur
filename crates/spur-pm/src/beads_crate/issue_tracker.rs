@@ -2,8 +2,10 @@
 
 use std::str::FromStr;
 
+use chrono::Utc;
+
 use crate::beads_crate::adapter::BeadsCrateAdapter;
-use crate::types::{Issue, IssueFilter, IssueSummary, PmSource};
+use crate::types::{Issue, IssueCreate, IssueFilter, IssueSummary, PmSource};
 
 pub(crate) fn br_to_pm_issue(br: beads_rust::model::Issue) -> Issue {
     let url = format!("beads://{}", br.id);
@@ -44,9 +46,13 @@ impl BeadsCrateAdapter {
     pub async fn get_issue(&self, id: &str) -> anyhow::Result<Issue> {
         let id = id.to_string();
         self.read(move |s| {
-            let br = s
+            let mut br = s
                 .get_issue(&id)?
                 .ok_or_else(|| anyhow::anyhow!("issue {id} not found"))?;
+            // `get_issue` only reads the `issues` table; labels are stored
+            // out-of-line and must be loaded separately.
+            let mut by_id = s.get_labels_for_issues(std::slice::from_ref(&id))?;
+            br.labels = by_id.remove(&id).unwrap_or_default();
             Ok(br_to_pm_issue(br))
         })
         .await
@@ -90,6 +96,91 @@ impl BeadsCrateAdapter {
 
             let issues = s.list_issues(&br_filters)?;
             Ok(issues.into_iter().map(br_to_pm_summary).collect())
+        })
+        .await
+    }
+
+    pub async fn create_issue(&self, params: IssueCreate) -> anyhow::Result<String> {
+        self.write(move |s| {
+            let now = Utc::now();
+            let id = beads_rust::util::generate_id(
+                &params.title,
+                params.description.as_deref(),
+                Some("spur"),
+                now,
+            );
+
+            let issue_type = params
+                .issue_type
+                .as_deref()
+                .map(|t| {
+                    beads_rust::model::IssueType::from_str(t)
+                        .unwrap_or(beads_rust::model::IssueType::Task)
+                })
+                .unwrap_or_default();
+
+            let priority = params
+                .priority
+                .map(beads_rust::model::Priority)
+                .unwrap_or_default();
+
+            let issue = beads_rust::model::Issue {
+                id: id.clone(),
+                title: params.title,
+                description: params.description,
+                status: beads_rust::model::Status::Open,
+                priority,
+                issue_type,
+                created_at: now,
+                updated_at: now,
+                assignee: params.assignee,
+                owner: None,
+                estimated_minutes: params.estimate_minutes.and_then(|m| i32::try_from(m).ok()),
+                due_at: None,
+                defer_until: None,
+                external_ref: None,
+                ephemeral: false,
+                content_hash: None,
+                design: None,
+                acceptance_criteria: None,
+                notes: None,
+                created_by: Some("spur".to_string()),
+                closed_at: None,
+                close_reason: None,
+                closed_by_session: None,
+                source_system: None,
+                source_repo: None,
+                deleted_at: None,
+                deleted_by: None,
+                delete_reason: None,
+                original_type: None,
+                compaction_level: None,
+                compacted_at: None,
+                compacted_at_commit: None,
+                original_size: None,
+                sender: None,
+                pinned: false,
+                is_template: false,
+                labels: Vec::new(),
+                dependencies: Vec::new(),
+                comments: Vec::new(),
+            };
+            let labels = params.labels;
+
+            s.create_issue(&issue, "spur")?;
+
+            if !labels.is_empty() {
+                s.set_labels(&id, &labels, "spur")?;
+            }
+
+            if let Some(parent) = params.parent.as_deref() {
+                s.add_dependency(&id, parent, "parent-child", "spur")?;
+            }
+            for dep in &params.depends_on {
+                s.add_dependency(&id, dep, "blocks", "spur")?;
+            }
+
+            Ok(id)
         })
         .await
     }
@@ -167,6 +258,38 @@ mod tests {
 
         assert_eq!(issue.id, expected_id);
         assert_eq!(issue.title, expected_title);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_issue_round_trips_via_get_issue() {
+        use crate::types::IssueCreate;
+
+        let dir = TempDir::new().unwrap();
+        let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
+            .await
+            .unwrap();
+
+        let id = adapter
+            .create_issue(IssueCreate {
+                title: "Hello".into(),
+                description: Some("Body".into()),
+                priority: Some(1),
+                labels: vec!["lbl-a".into(), "lbl-b".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(!id.is_empty());
+
+        let fetched = adapter.get_issue(&id).await.unwrap();
+        assert_eq!(fetched.title, "Hello");
+        assert_eq!(fetched.body, "Body");
+        assert_eq!(fetched.priority, Some(1));
+        assert_eq!(
+            fetched.labels,
+            vec!["lbl-a".to_string(), "lbl-b".to_string()]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

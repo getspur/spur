@@ -1900,6 +1900,16 @@ git add crates/spur-pm/src/beads_crate/
 git commit -m "spur-pm: IssueTracker::create_issue via crate adapter"
 ```
 
+> **Plan revision (2026-05-05):** Section D drift fixes applied to T17:
+> - `Issue::new(title)` does not exist in beads_rust 0.2.1; build via struct literal (mirror `minimal_issue` test helper from T15).
+> - `Issue::id` must be set explicitly — there is no auto-generation in `s.create_issue()`. Use `beads_rust::util::generate_id(title, description, creator, created_at)`.
+> - `priority` is `Priority(pub i32)` newtype — wrap with `Priority(p)`, not `p as u8`.
+> - `issue_type` is the `IssueType` enum — parse via `IssueType::from_str` (Custom variant for unknown).
+> - Labels are stored out-of-line in beads_rust; the `Issue.labels` field on the struct passed to `s.create_issue()` is **ignored**. Call `s.set_labels(&id, &labels, "spur")` separately after `create_issue` to persist them.
+> - `s.add_dependency(issue_id, depends_on_id, dep_type, actor)` — 4 args (not 3). Use `"parent-child"` for parent links and `"blocks"` for `depends_on`.
+> - `IssueCreate.estimate_minutes: Option<u32>` → `i32`: use `i32::try_from(m).ok()` to avoid lossy `as` cast.
+> - `get_issue` was extended in this commit to fetch labels via `s.get_labels_for_issues(...)` and merge them into the returned Issue (otherwise downstream callers see empty labels).
+
 ---
 
 ### Task 18: Implement `IssueTracker::update_issue`
