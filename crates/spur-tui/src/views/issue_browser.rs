@@ -182,7 +182,7 @@ pub struct IssueBrowserView {
     graph_cache: HashMap<String, (Vec<GraphNodeEvent>, Vec<GraphEdgeEvent>)>,
     graph_cache_order: VecDeque<String>,
     graph_loading: Option<String>,
-    graph_error: Option<String>,
+    graph_error: Option<(String, String)>,
     execute_modal: Option<ExecuteModal>,
     /// Inc 3 (bd-d587.3): id to select in the left list once it appears in
     /// `tracked_issues`. Set by `open_external_detail` when the id isn't yet
@@ -497,6 +497,14 @@ impl IssueBrowserView {
         self.issues_panel
             .selected_id(&self.tracked_issues)
             .map(String::from)
+    }
+
+    /// Graph errors are request-id scoped; render callers must not treat them
+    /// as global detail-pane state.
+    fn graph_error_for(&self, issue_id: &str) -> Option<&str> {
+        self.graph_error
+            .as_ref()
+            .and_then(|(id, message)| (id == issue_id).then_some(message.as_str()))
     }
 
     fn selected_issue(&self) -> Option<&spur_pm::IssueSummary> {
@@ -938,7 +946,7 @@ impl IssueBrowserView {
                     self.issue_detail_pane.render(issue, frame, chunks[1]);
                 }
                 DetailMode::Graph => {
-                    if let Some(error) = self.graph_error.as_deref() {
+                    if let Some(error) = self.graph_error_for(id) {
                         IssueGraphPane::render_error(id, error, frame, chunks[1]);
                     } else if let Some((nodes, edges)) = self.graph_cache.get(id) {
                         self.graph_pane.render(id, nodes, edges, frame, chunks[1]);
@@ -1206,7 +1214,9 @@ impl View for IssueBrowserView {
                     self.last_refresh_error = Some(error.clone());
                 } else if matches!(operation.as_str(), "GetIssueGraph" | "get_graph") {
                     if id.as_deref() == self.graph_loading.as_deref() {
-                        self.graph_error = Some(error.clone());
+                        if let Some(id) = id {
+                            self.graph_error = Some((id.clone(), error.clone()));
+                        }
                         self.graph_loading = None;
                         // bd-d587.3 follow-up: a graph-fetch error must not leave
                         // post_load_mode armed for a future unrelated detail fetch.
@@ -1420,6 +1430,36 @@ mod tests {
 
         assert_eq!(view.graph_loading.as_deref(), Some("current"));
         assert!(view.graph_error.is_none());
+    }
+
+    #[test]
+    fn graph_error_for_other_id_does_not_poison_currently_loaded_graph() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.graph_loading = Some("A".into());
+        view.handle_spur_event(&subgraph_loaded_event("A", vec![graph_node("A")]), &ctx);
+        view.issue_focus = IssueFocus::Loaded {
+            id: "A".into(),
+            issue: Box::new(issue_detail("A", "A body")),
+        };
+        view.detail_mode = DetailMode::Graph;
+        view.graph_loading = Some("B".into());
+
+        view.handle_spur_event(&graph_error_event(Some("B")), &ctx);
+
+        assert!(view.graph_error_for("A").is_none());
+        assert_eq!(view.graph_error_for("B"), Some("graph failed"));
+
+        let rendered = rendered_text(&mut view);
+        assert!(
+            rendered.contains("Issue Graph: A (1 nodes)"),
+            "cached graph for A should render despite B's failed prefetch:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("Graph error: graph failed"),
+            "B's graph error should not render in A's detail pane:\n{rendered}"
+        );
     }
 
     fn graph_node(id: &str) -> GraphNodeEvent {
