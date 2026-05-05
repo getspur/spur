@@ -15,10 +15,8 @@ use crate::action::{Action, IssueAction, ViewId};
 use crate::components::execute_modal::{ExecuteModal, ExecuteModalVariant};
 use crate::components::issue_detail_pane::IssueDetailPane;
 use crate::components::issue_graph_pane::IssueGraphPane;
-use crate::components::issue_utils::{
-    descendant_depth, find_plan_id_label, has_label, has_plan_task_label, insert_parent_id,
-};
-use crate::components::issues_panel::{IssueLineageContext, IssueLineageView, IssuesPanel};
+use crate::components::issue_utils::{find_plan_id_label, has_label, has_plan_task_label};
+use crate::components::issues_panel::IssuesPanel;
 use crate::components::status_bar::{HintOverride, StatusBar, StatusBarProps};
 use crate::components::tombstone::Tombstone;
 
@@ -164,12 +162,6 @@ fn is_issue_ancestor(parent: &str, child: &str) -> bool {
     child
         .strip_prefix(parent)
         .is_some_and(|suffix| suffix.starts_with('.'))
-}
-
-#[derive(Debug, Clone)]
-struct CachedLineageFallback {
-    root_id: String,
-    cache_key: Option<String>,
 }
 
 // ── View ────────────────────────────────────────────────────────────────
@@ -345,149 +337,6 @@ impl IssueBrowserView {
         self.graph_error = None;
         self.graph_loading = Some(id.clone());
         self.pending_action = Some(Action::GetIssueGraph { id });
-    }
-
-    fn lineage_loading_root_id(&self, selected_id: &str) -> String {
-        let cached_root_id = self.cached_lineage_root_id(selected_id);
-        let prefix_root_id = cached_root_id
-            .as_deref()
-            .and_then(|id| self.prefix_lineage_root_id(id))
-            .or_else(|| self.prefix_lineage_root_id(selected_id));
-
-        prefix_root_id
-            .map(str::to_string)
-            .or(cached_root_id)
-            .unwrap_or_else(|| selected_id.to_string())
-    }
-
-    fn cached_lineage_root_id(&self, selected_id: &str) -> Option<String> {
-        let parent_by_child_id = self.cached_parent_by_child_id();
-        let mut current_id = selected_id;
-        let mut found_parent = false;
-        let mut seen = HashSet::new();
-        while let Some(parent_id) = parent_by_child_id.get(current_id).copied() {
-            if !seen.insert(current_id) || seen.contains(parent_id) {
-                break;
-            }
-            found_parent = true;
-            current_id = parent_id;
-        }
-
-        found_parent.then(|| current_id.to_string())
-    }
-
-    fn cached_parent_by_child_id(&self) -> HashMap<&str, &str> {
-        let mut parent_by_child_id = HashMap::new();
-        for (nodes, edges) in self.graph_cache.values() {
-            let node_by_id: HashMap<&str, &GraphNodeEvent> =
-                nodes.iter().map(|node| (node.id.as_str(), node)).collect();
-            for edge in edges
-                .iter()
-                .filter(|edge| Self::is_lineage_parent_edge(edge, &node_by_id))
-            {
-                insert_parent_id(
-                    &mut parent_by_child_id,
-                    edge.from.as_str(),
-                    edge.to.as_str(),
-                );
-            }
-        }
-        parent_by_child_id
-    }
-
-    fn cached_lineage_fallback_for_selection(
-        &self,
-        selected_id: &str,
-        lineage_mode_active: bool,
-    ) -> Option<CachedLineageFallback> {
-        if !lineage_mode_active {
-            return None;
-        }
-
-        let selected_cache = self.graph_cache.get(selected_id);
-        let selected_cache_sparse = selected_cache.is_some_and(|(nodes, _)| nodes.len() <= 1);
-        let selected_cache_loading =
-            selected_cache.is_none() && self.graph_loading.as_deref() == Some(selected_id);
-        let selected_cache_pending_prefetch = selected_cache.is_none()
-            && self
-                .pending_prefetch
-                .as_ref()
-                .is_some_and(|(id, _)| id.as_str() == selected_id);
-
-        if !selected_cache_sparse && !selected_cache_loading && !selected_cache_pending_prefetch {
-            return None;
-        }
-
-        let root_id = self.lineage_loading_root_id(selected_id);
-        let cache_key = self.cached_lineage_context_key(selected_id, root_id.as_str());
-
-        Some(CachedLineageFallback { root_id, cache_key })
-    }
-
-    fn cached_lineage_context_key(&self, selected_id: &str, root_id: &str) -> Option<String> {
-        if self.graph_cache.contains_key(root_id) {
-            return Some(root_id.to_string());
-        }
-
-        self.graph_cache
-            .iter()
-            .find(|(_, (nodes, edges))| {
-                nodes.iter().any(|node| node.id == selected_id)
-                    || edges
-                        .iter()
-                        .any(|edge| edge.from == selected_id || edge.to == selected_id)
-            })
-            .map(|(key, _)| key.clone())
-    }
-
-    fn prefix_lineage_root_id<'a>(&'a self, selected_id: &str) -> Option<&'a str> {
-        self.tracked_issues
-            .iter()
-            .filter(|issue| {
-                selected_id
-                    .strip_prefix(issue.id.as_str())
-                    .is_some_and(|suffix| suffix.starts_with('.'))
-                    && is_lineage_root_candidate(issue)
-            })
-            .min_by_key(|issue| issue.id.len())
-            .map(|issue| issue.id.as_str())
-    }
-
-    fn is_lineage_parent_edge(
-        edge: &GraphEdgeEvent,
-        node_by_id: &HashMap<&str, &GraphNodeEvent>,
-    ) -> bool {
-        match edge.edge_type.as_deref() {
-            Some("parent-child") => true,
-            Some("related") => Self::is_structural_related_edge(edge, node_by_id),
-            _ => false,
-        }
-    }
-
-    fn is_structural_related_edge(
-        edge: &GraphEdgeEvent,
-        node_by_id: &HashMap<&str, &GraphNodeEvent>,
-    ) -> bool {
-        descendant_depth(edge.to.as_str(), edge.from.as_str()).is_some()
-            || Self::is_plan_membership_edge(edge, node_by_id)
-    }
-
-    fn is_plan_membership_edge(
-        edge: &GraphEdgeEvent,
-        node_by_id: &HashMap<&str, &GraphNodeEvent>,
-    ) -> bool {
-        let Some(child) = node_by_id.get(edge.from.as_str()) else {
-            return false;
-        };
-        let Some(parent) = node_by_id.get(edge.to.as_str()) else {
-            return false;
-        };
-        let Some(child_plan_id) = find_plan_id_label(&child.labels) else {
-            return false;
-        };
-        find_plan_id_label(&parent.labels) == Some(child_plan_id)
-            && has_plan_task_label(&child.labels)
-            && is_graph_plan_root(parent)
     }
 
     pub fn scroll_issue_detail_up_by(&mut self, lines: u16) {
@@ -949,11 +798,6 @@ impl IssueBrowserView {
         view_hint_override: Option<HintOverride<'_>>,
     ) {
         let issue_count = self.tracked_issues.len();
-        let selected_id = self.selected_issue_id();
-        let lineage_mode_active = self.graph_cache.values().any(|(nodes, _)| nodes.len() > 1);
-        let cached_lineage_fallback = selected_id
-            .as_deref()
-            .and_then(|id| self.cached_lineage_fallback_for_selection(id, lineage_mode_active));
 
         let issues_height = if issue_count == 0 {
             3u16 // placeholder height
@@ -998,61 +842,8 @@ impl IssueBrowserView {
             let msg = Paragraph::new(body).style(Style::default().fg(fg));
             frame.render_widget(msg, inner);
         } else {
-            let lineage = if let Some(id) = selected_id.as_deref() {
-                if let Some((nodes, edges)) = self.graph_cache.get(id) {
-                    if nodes.len() > 1 || !lineage_mode_active {
-                        Some(IssueLineageView::Loaded(IssueLineageContext {
-                            root_id: id,
-                            nodes,
-                            edges,
-                        }))
-                    } else if let Some(fallback) = cached_lineage_fallback.as_ref() {
-                        let (nodes, edges) = fallback
-                            .cache_key
-                            .as_deref()
-                            .and_then(|key| self.graph_cache.get(key))
-                            .map(|(nodes, edges)| (nodes.as_slice(), edges.as_slice()))
-                            .unwrap_or((nodes.as_slice(), edges.as_slice()));
-                        Some(IssueLineageView::Cached {
-                            root_id: fallback.root_id.clone(),
-                            nodes,
-                            edges,
-                        })
-                    } else {
-                        Some(IssueLineageView::Cached {
-                            root_id: id.to_string(),
-                            nodes,
-                            edges,
-                        })
-                    }
-                } else if let Some(fallback) = cached_lineage_fallback.as_ref() {
-                    let (nodes, edges) = fallback
-                        .cache_key
-                        .as_deref()
-                        .and_then(|key| self.graph_cache.get(key))
-                        .map(|(nodes, edges)| (nodes.as_slice(), edges.as_slice()))
-                        .unwrap_or((&[], &[]));
-                    if nodes.len() > 1 {
-                        Some(IssueLineageView::Cached {
-                            root_id: fallback.root_id.clone(),
-                            nodes,
-                            edges,
-                        })
-                    } else {
-                        Some(IssueLineageView::Loading {
-                            root_id: fallback.root_id.clone(),
-                            nodes,
-                            edges,
-                        })
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
             self.issues_panel
-                .render_with_lineage(&self.tracked_issues, lineage, frame, chunks[0]);
+                .render(&self.tracked_issues, frame, chunks[0]);
         }
 
         // ── Detail or placeholder ────────────────────────────────────────
@@ -1369,17 +1160,6 @@ impl View for IssueBrowserView {
     fn tick(&mut self) {
         self.flush_due_prefetch();
     }
-}
-
-fn is_lineage_root_candidate(issue: &spur_pm::IssueSummary) -> bool {
-    issue.issue_type.as_deref() == Some("epic")
-        || has_label(&issue.labels, "spur:plan-complete")
-        || (find_plan_id_label(&issue.labels).is_some() && !has_plan_task_label(&issue.labels))
-}
-
-fn is_graph_plan_root(node: &GraphNodeEvent) -> bool {
-    has_label(&node.labels, "spur:plan-complete")
-        || (find_plan_id_label(&node.labels).is_some() && !has_plan_task_label(&node.labels))
 }
 
 fn is_plan_artifact_summary(issue: &spur_acp::IssueSummaryEvent) -> bool {
@@ -1796,102 +1576,6 @@ mod tests {
         assert!(
             view.take_pending_action().is_none(),
             "only the final stable selection should dispatch"
-        );
-    }
-
-    /// During the prefetch debounce window, navigating from a cached parent
-    /// to a child whose own graph has not been fetched must keep the lineage
-    /// layout on screen rather than briefly flickering to flat. The fallback
-    /// resolves the child's id to the parent's cached subgraph (cache_key =
-    /// "bd-root") and the panel renders `IssueLineageView::Cached` with the
-    /// real multi-node tree.
-    #[test]
-    fn pending_prefetch_holds_lineage_layout_during_debounce_window() {
-        let lineage_exec = ExecutorLineage::new();
-        let ctx = ViewContext::test_ctx(&lineage_exec);
-        let mut view = IssueBrowserView::new();
-        view.set_issues_for_test(vec![
-            issue("bd-root", "epic", Vec::new()),
-            issue("bd-root.1", "task", Vec::new()),
-        ]);
-
-        view.graph_loading = Some("bd-root".into());
-        view.handle_spur_event(
-            &subgraph_loaded_event(
-                "bd-root",
-                vec![graph_node("bd-root"), graph_node("bd-root.1")],
-            ),
-            &ctx,
-        );
-
-        assert!(view
-            .issues_panel
-            .select_by_id("bd-root.1", &view.tracked_issues));
-        view.prefetch_selected_graph();
-
-        assert!(
-            view.pending_prefetch
-                .as_ref()
-                .is_some_and(|(id, _)| id == "bd-root.1"),
-            "j/k navigation should arm pending_prefetch for the new selection"
-        );
-        assert!(
-            view.graph_loading.is_none(),
-            "graph_loading must be empty before flush_due_prefetch fires"
-        );
-
-        let rendered = rendered_text(&mut view);
-
-        assert!(
-            rendered.contains("Work Item Lineage"),
-            "panel should hold the lineage title during the debounce window:\n{rendered}"
-        );
-        assert!(
-            !rendered.contains(" Issues "),
-            "panel must not flicker back to the flat 'Issues' title:\n{rendered}"
-        );
-    }
-
-    /// Sibling regression guard for the "Rank 0 Teleportation" loop that
-    /// commit 84c505a7 introduced for *unrelated* selections. When the user
-    /// j/k's onto an issue with no cached ancestor, the panel must fall
-    /// through to the flat layout rather than rendering a synthetic
-    /// `IssueLineageView::Loading` with an empty subgraph (which puts the
-    /// new selection at `display_order[0]` and traps navigation in a
-    /// 2-element bounce).
-    #[test]
-    fn pending_prefetch_for_unrelated_selection_falls_through_to_flat() {
-        let lineage_exec = ExecutorLineage::new();
-        let ctx = ViewContext::test_ctx(&lineage_exec);
-        let mut view = IssueBrowserView::new();
-        view.set_issues_for_test(vec![
-            issue("bd-root", "epic", Vec::new()),
-            issue("bd-other", "bug", Vec::new()),
-        ]);
-
-        view.graph_loading = Some("bd-root".into());
-        view.handle_spur_event(
-            &subgraph_loaded_event(
-                "bd-root",
-                vec![graph_node("bd-root"), graph_node("bd-child")],
-            ),
-            &ctx,
-        );
-
-        assert!(view
-            .issues_panel
-            .select_by_id("bd-other", &view.tracked_issues));
-        view.prefetch_selected_graph();
-
-        let rendered = rendered_text(&mut view);
-
-        assert!(
-            rendered.contains(" Issues "),
-            "panel must show the flat layout when the selection has no cached ancestor:\n{rendered}"
-        );
-        assert!(
-            !rendered.contains("Work Item Lineage"),
-            "panel must not synthesize a Loading lineage over an empty subgraph:\n{rendered}"
         );
     }
 
