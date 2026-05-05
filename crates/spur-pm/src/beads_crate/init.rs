@@ -231,6 +231,23 @@ pub(crate) fn open_writer_under_migration_lock(
     Ok(storage)
 }
 
+/// Detect whether the SQLite db has writes that haven't been flushed to JSONL,
+/// and force a flush if so. Returns the `AutoFlushResult` for inspection.
+/// Caller MUST hold `.write.lock` (via `open_writer_under_migration_lock` for
+/// first-open path, or via per-write flock acquisition).
+pub fn detect_and_force_flush_stale_jsonl(
+    storage: &mut SqliteStorage,
+    beads_dir: &Path,
+    jsonl_path: &Path,
+) -> anyhow::Result<beads_rust::sync::AutoFlushResult> {
+    // beads_rust auto_flush is idempotent: it computes whether the JSONL is
+    // out of sync with the SQLite db, and is a no-op if not. We call it
+    // unconditionally at boot. `allow_external_jsonl: false` because spur-pm
+    // is the single writer to the JSONL file in our model.
+    let result = sync::auto_flush(storage, beads_dir, jsonl_path, false)?;
+    Ok(result)
+}
+
 #[cfg(test)]
 mod migration_tests {
     use super::*;
@@ -244,5 +261,14 @@ mod migration_tests {
         // Subsequent open in the same process should also succeed
         let _writer2 = open_writer_under_migration_lock(dir.path(), 5_000)
             .expect("second open should succeed");
+    }
+
+    #[test]
+    fn force_flush_on_fresh_db_is_safe() {
+        let dir = TempDir::new().unwrap();
+        let mut storage = open_writer_under_migration_lock(dir.path(), 5_000).unwrap();
+        let jsonl = dir.path().join("issues.jsonl");
+        let _result = detect_and_force_flush_stale_jsonl(&mut storage, dir.path(), &jsonl).unwrap();
+        // Fresh db has no writes; flush is a no-op but must not error.
     }
 }
