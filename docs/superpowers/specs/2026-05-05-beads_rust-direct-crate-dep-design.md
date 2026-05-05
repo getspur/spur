@@ -44,6 +44,107 @@ We'd still own the shellout layer and the 20 bypass call sites. Direct crate lin
 
 ---
 
+## How it works mechanically
+
+### What "direct crate dependency" means
+
+SPUR communicates with `beads_rust` via **direct in-process Rust function calls**. There is no subprocess, no IPC, no JSON marshaling, no network. `beads_rust` is linked into the SPUR binary at compile time and lives in the same address space at runtime.
+
+**Cargo dependency** (in `crates/spur-pm/Cargo.toml`):
+
+```toml
+[dependencies]
+beads_rust = { git = "https://github.com/Dicklesworthstone/beads_rust", tag = "v0.2.1" }
+```
+
+**Usage** — the public API is consumed like any other Rust library:
+
+```rust
+use beads_rust::storage::sqlite::SqliteStorage;
+use beads_rust::model::{Issue, IssueUpdate};
+use beads_rust::sync;
+use beads_rust::error::BeadsError;
+
+let storage = SqliteStorage::open_with_timeout(&beads_dir, Some(5_000))?;
+
+// Read — sync function call returning a typed Rust struct
+let issue: Issue = storage.get_issue("bd-1h3w")?;
+
+// Write — sync function call returning a typed Result
+let update = IssueUpdate { status: Some("closed".into()), ..Default::default() };
+storage.update_issue("bd-1h3w", &update)?;
+
+// JSONL export — atomic tmp+fsync+rename happens inside this call
+sync::export_to_jsonl_with_policy(&storage, &jsonl_path, /* config */, /* policy */)?;
+```
+
+That is the entire surface. SPUR holds a `SqliteStorage` value on its own heap. `SqliteStorage` internally owns a `rusqlite::Connection`, which owns OS file handles into `.beads/beads.db` and the SQLite WAL sidecars.
+
+### Execution path of one write
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ SPUR async code (Tokio task)                                    │
+│   adapter.write(|s| s.update_issue("bd-1h3w", &update))         │
+└────────────┬────────────────────────────────────────────────────┘
+             │ tokio::task::spawn_blocking { … }
+             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ SPUR sync closure (on Tokio blocking-pool thread)               │
+│   1. Acquire .beads/.write.lock via flock (cross-process)       │
+│   2. Lock the writer Mutex (in-process Connection guard)        │
+│   3. Begin DB transaction                                       │
+│   4. Call beads_rust::SqliteStorage::update_issue()             │
+│   5. Commit on Ok / rollback on Err                             │
+│   6. Drop guards — releases Mutex then flock (RAII)             │
+└────────────┬────────────────────────────────────────────────────┘
+             │ direct Rust function call (zero overhead)
+             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ beads_rust crate (linked into SPUR binary)                      │
+│   - rusqlite Connection (owns SQLite OS file handles)           │
+│   - sync module (atomic tmp+fsync+rename for JSONL)             │
+│   - flock primitives via blocking_write_lock_with_timeout       │
+└────────────┬────────────────────────────────────────────────────┘
+             │ syscalls (write, fsync, rename, flock, …)
+             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Operating system / filesystem                                   │
+│   .beads/beads.db, .beads/beads.db-wal, .beads/beads.db-shm     │
+│   .beads/issues.jsonl, .beads/.write.lock                       │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Comparison: subprocess vs direct crate
+
+| Aspect | Current (`Command::new("br")`) | New (direct crate) |
+|---|---|---|
+| Boundary | OS process | Rust function call |
+| Cost per call | fork + exec + JSON parse (~ms) | function call (~ns) |
+| Type safety | stringly-typed JSON over stderr | typed `Result<T, BeadsError>` |
+| Shared state | none (fresh process each call) | persistent `SqliteStorage` in SPUR's heap |
+| Concurrency model | OS process scheduling | Tokio + `spawn_blocking` |
+| Cross-process safety | per-call (`br` re-acquires flock each time) | per-call (we acquire flock each write) — same primitive, different caller |
+| Failure surface | parse stderr, child process exit codes | typed `BeadsError` enum, no parsing |
+
+### Two layers of communication (don't confuse them)
+
+**Layer 1 — SPUR ↔ `beads_rust`:** direct function calls. Same process. Single SPUR instance has no concurrency story to negotiate at this layer beyond the `Mutex<SqliteStorage>` guarding the Connection handle.
+
+**Layer 2 — SPUR-instance-A ↔ SPUR-instance-B:** *not direct*. Two SPUR processes never communicate with each other in code. They communicate **only via shared files** in `.beads/`:
+
+- Both call `flock(.beads/.write.lock, LOCK_EX)`. The OS serializes them.
+- A writes to `.beads/beads.db-wal`, then atomically renames `.beads/issues.jsonl.tmp.X` → `.beads/issues.jsonl`. B sees the new state on its next read.
+- SQLite's WAL file format coordinates A and B's concurrent readers via the standard reader-writer protocol.
+
+So:
+- "How does SPUR talk to `beads_rust`?" → **direct function calls** (Layer 1)
+- "How do two SPURs coordinate?" → **filesystem primitives** (Layer 2)
+
+The rest of this spec — the five primitives, the writer Mutex, the flock backoff policy, the snapshot re-validation pattern — exists to make Layer 1 use the Layer 2 primitives correctly and observably.
+
+---
+
 ## Goals
 
 1. **Eliminate `Command::new("br")` from SPUR runtime code** — production paths call `beads_rust` directly.
