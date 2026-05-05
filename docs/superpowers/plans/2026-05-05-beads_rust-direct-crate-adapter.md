@@ -610,8 +610,12 @@ git commit -m "spur-pm: add Snapshot CAS types (Snapshot, Conflict)"
 
 > **Plan revision (2026-05-05):** bd-f2mp fixed two corner cases in the
 > Task 6 snippet: paths that cannot be C-stringified now best-effort allow
-> instead of panicking, and Linux filesystem magic comparisons use `u64` so
-> CIFS detection preserves the unsigned bit pattern on 32-bit targets.
+> instead of panicking, and Linux filesystem magic comparisons cast `f_type`
+> through `u32` first (`as u32 as u64`) so CIFS detection works on 32-bit
+> Linux where `f_type` is `i32` and a direct `as u64` would sign-extend the
+> high bit. Test cfg tightened to the OSes whose code paths the test
+> exercises, and a `cifs_magic_does_not_sign_extend_through_i32` regression
+> test locks the cast contract regardless of build target.
 
 **Files:**
 - Create: `crates/spur-pm/src/beads_crate/init.rs`
@@ -641,18 +645,20 @@ pub fn detect_local_fs(beads_dir: &Path) -> Result<(), InitError> {
     {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
-        let path = match CString::new(beads_dir.as_os_str().as_bytes()) {
-            Ok(p) => p,
-            Err(_) => return Ok(()), // path can't be C-stringified — best-effort allow
+        let Ok(path) = CString::new(beads_dir.as_os_str().as_bytes()) else {
+            return Ok(()); // path can't be C-stringified — best-effort allow
         };
         let mut buf: libc::statfs = unsafe { std::mem::zeroed() };
         let rc = unsafe { libc::statfs(path.as_ptr(), &mut buf) };
         if rc != 0 { return Ok(()); } // can't determine; allow
-        // Magic numbers from <linux/magic.h>
+        // Magic numbers from <linux/magic.h>; kernel stores them as __u32.
+        // On 32-bit Linux, libc::statfs.f_type is i32; per the Rust reference,
+        // `i32 as u64` SIGN-extends. Cast through u32 first to zero-extend so
+        // CIFS (high bit set) compares correctly.
         const NFS_SUPER_MAGIC: u64 = 0x6969;
         const SMB_SUPER_MAGIC: u64 = 0x517B;
         const CIFS_MAGIC_NUMBER: u64 = 0xFF534D42;
-        let ty = buf.f_type as u64;
+        let ty = buf.f_type as u32 as u64;
         if ty == NFS_SUPER_MAGIC || ty == SMB_SUPER_MAGIC || ty == CIFS_MAGIC_NUMBER {
             return Err(InitError::NonLocalFilesystem {
                 path: beads_dir.display().to_string(),
@@ -664,9 +670,8 @@ pub fn detect_local_fs(beads_dir: &Path) -> Result<(), InitError> {
     {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
-        let path = match CString::new(beads_dir.as_os_str().as_bytes()) {
-            Ok(p) => p,
-            Err(_) => return Ok(()), // path can't be C-stringified — best-effort allow
+        let Ok(path) = CString::new(beads_dir.as_os_str().as_bytes()) else {
+            return Ok(()); // path can't be C-stringified — best-effort allow
         };
         let mut buf: libc::statfs = unsafe { std::mem::zeroed() };
         let rc = unsafe { libc::statfs(path.as_ptr(), &mut buf) };
@@ -698,7 +703,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn nul_byte_in_path_does_not_panic() {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
@@ -707,6 +712,20 @@ mod tests {
         let bad = PathBuf::from(OsString::from_vec(vec![b'a', 0, b'b']));
         // Best-effort: must not panic. Result is `Ok(())` because we can't determine FS.
         assert!(detect_local_fs(&bad).is_ok());
+    }
+
+    /// Locks the cast contract used in the Linux branch: i32 sign-extends
+    /// through `as u64`, but `as u32 as u64` zero-extends. CIFS magic has the
+    /// high bit set, so the choice matters on 32-bit Linux.
+    #[test]
+    fn cifs_magic_does_not_sign_extend_through_i32() {
+        let signed: i32 = 0xFF534D42_u32 as i32;
+        assert!(signed.is_negative());
+        let direct: u64 = signed as u64;
+        let via_u32: u64 = signed as u32 as u64;
+        assert_eq!(direct, 0xFFFFFFFF_FF534D42_u64);
+        assert_eq!(via_u32, 0xFF534D42_u64);
+        assert_ne!(direct, via_u32);
     }
 }
 ```
@@ -730,7 +749,8 @@ pub mod init;
 - [ ] **Step 4: Run tests**
 
 Run: `cargo test -p spur-pm beads_crate::init --lib`
-Expected: 2 pass.
+Expected: 3 pass for Task 6 (`local_tempdir_is_local`,
+`nul_byte_in_path_does_not_panic`, `cifs_magic_does_not_sign_extend_through_i32`).
 
 - [ ] **Step 5: Commit**
 
