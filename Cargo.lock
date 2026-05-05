@@ -6876,6 +6876,7 @@ dependencies = [
  "beads_rust",
  "chrono",
  "fs2",
+ "libc",
  "semver",
  "serde",
  "serde_json",
