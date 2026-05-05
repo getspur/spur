@@ -87,6 +87,20 @@ pub fn delegation_id(delegation_id: &str) -> String {
     format!("{DELEGATION_ID_PREFIX}{delegation_id}")
 }
 
+/// Mint a fresh 16-char hex delegation_id derived from a v4 UUID. The 16-char
+/// length keeps `spur:delegation-id:<id>` (35 chars) under the `br create`
+/// 50-char cap. 64 bits of entropy is collision-immune for any single
+/// project's dispatch lifetime.
+///
+/// Output is `[0-9a-f]{16}` — `br`-legal under the `[A-Za-z0-9_:-]+` grammar.
+pub fn mint_delegation_id() -> String {
+    let uuid = uuid::Uuid::new_v4();
+    // Take the high 64 bits of the UUID (git-hash-short style: a prefix of the
+    // long form, deterministically derived).
+    let high = uuid.as_u128() >> 64;
+    format!("{high:016x}")
+}
+
 pub fn lease_expires_at(ts: i64) -> String {
     format!("{LEASE_EXPIRES_AT_PREFIX}{ts}")
 }
@@ -499,6 +513,34 @@ mod tests {
             Some(issue_id),
             "round-trip failed for hierarchical id"
         );
+    }
+
+    #[test]
+    fn mint_delegation_id_returns_16_hex_chars() {
+        for _ in 0..100 {
+            let id = mint_delegation_id();
+            assert_eq!(id.len(), 16, "expected 16 chars, got {}: {id:?}", id.len());
+            assert!(
+                id.chars().all(
+                    |c| c.is_ascii_hexdigit() && (c.is_ascii_digit() || c.is_ascii_lowercase())
+                ),
+                "expected lowercase hex, got: {id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn delegation_id_label_under_50_chars_for_minted_id() {
+        for _ in 0..100 {
+            let minted = mint_delegation_id();
+            let label = delegation_id(&minted);
+            assert!(
+                label.len() <= 50,
+                "label exceeds 50-char br create cap: {} chars: {label}",
+                label.len()
+            );
+            assert!(is_br_legal(&label), "label not br-legal: {label}");
+        }
     }
 
     #[test]

@@ -815,7 +815,7 @@ impl Reconciler {
                 continue;
             }
 
-            let delegation_id = uuid::Uuid::new_v4().to_string();
+            let delegation_id = crate::plan::labels::mint_delegation_id();
             let task_attempt = task.attempt;
             let agent_fallback = !summary
                 .labels
