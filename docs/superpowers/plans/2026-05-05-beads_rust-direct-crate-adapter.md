@@ -1277,14 +1277,15 @@ git commit -m "spur-pm: BeadsCrateAdapter::read primitive"
 
 ### Task 12: `write` primitive (with backoff)
 
-> **Plan revision (2026-05-05):** `Issue` has no `new` constructor and does
-> not derive `Default` in beads_rust 0.2.1; constructing one directly takes
-> ~30 fields. The smoke-test for `write` is replaced with a closure that
-> doesn't need to mutate — it just verifies the closure runs under flock
-> and metrics increment. Real `Issue` construction is deferred to
-> Section D (IssueTracker), where the IssueTracker layer is the
-> appropriate place to own the construction helpers. Note also:
-> `ContentionMetrics::write_total` is `AtomicU64`, not `AtomicUsize`.
+> **Plan revision (2026-05-05):** Three changes:
+> (1) Open-fresh-per-call (consistent with T10): the writer is opened
+> inside `spawn_blocking` AFTER `.write.lock` is acquired, used for the
+> closure, and dropped before the lock is released. No persistent
+> `Arc<Mutex<SqliteStorage>>`.
+> (2) `Issue` has no `new` constructor and doesn't derive `Default`; the
+> smoke-test uses an `_s` closure that returns a constant. Real Issue
+> construction lives in Section D (IssueTracker).
+> (3) `ContentionMetrics::write_total` is `AtomicU64`, not `AtomicUsize`.
 
 **Files:**
 - Modify: `crates/spur-pm/src/beads_crate/adapter.rs`
@@ -1347,27 +1348,40 @@ fn fastrand_unit() -> f64 {
 In `impl BeadsCrateAdapter`, add:
 
 ```rust
-/// Single write under cross-process flock + in-process writer guard.
-/// Each `beads_rust` mutation method (update_issue, etc.) is internally
-/// atomic via the crate's pub(crate) with_write_transaction.
+/// Single write under cross-process flock. Opens a fresh
+/// `SqliteStorage` AFTER acquiring `.write.lock`, runs the closure,
+/// drops both. Each `beads_rust` mutation method (update_issue, etc.)
+/// is internally atomic via the crate's `with_write_transaction`.
 pub async fn write<T, F>(&self, f: F) -> anyhow::Result<T>
 where
-    F: FnOnce(&mut SqliteStorage) -> anyhow::Result<T> + Send + 'static,
+    F: FnOnce(&mut beads_rust::storage::sqlite::SqliteStorage) -> anyhow::Result<T>
+        + Send
+        + 'static,
     T: Send + 'static,
 {
-    let writer = Arc::clone(&self.writer);
     let metrics = Arc::clone(&self.metrics);
     let beads_dir = self.beads_dir.clone();
     let backoff = self.config.backoff.clone();
     let lock_timeout_ms = self.config.lock_timeout_ms;
     tokio::task::spawn_blocking(move || -> anyhow::Result<T> {
-        let _flock = acquire_write_lock_with_backoff(&beads_dir, &backoff, lock_timeout_ms, &metrics)?;
-        let mut writer_guard = writer.blocking_lock();
+        let _flock = acquire_write_lock_with_backoff(
+            &beads_dir,
+            &backoff,
+            lock_timeout_ms,
+            &metrics,
+        )?;
+        let mut storage = beads_rust::storage::sqlite::SqliteStorage::open_with_timeout(
+            &beads_dir.join("beads.db"),
+            Some(lock_timeout_ms),
+        )?;
         metrics.incr_write();
-        let result = f(&mut writer_guard);
-        if result.is_err() { metrics.incr_write_error(); }
+        let result = f(&mut storage);
+        if result.is_err() {
+            metrics.incr_write_error();
+        }
         result
-    }).await?
+    })
+    .await?
 }
 ```
 
