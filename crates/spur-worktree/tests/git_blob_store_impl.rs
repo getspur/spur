@@ -146,7 +146,37 @@ async fn git_blob_store_rejects_non_uuid() {
         attempt: 1,
     };
     let err = store.put(&bad, b"x", &metadata(b"x")).await.unwrap_err();
-    assert!(matches!(err, StoreError::Backend(ref s) if s.contains("non-uuid")));
+    // brain_session_id now validates via `validate_id` (16 OR 36 char) post-bd-ttyo;
+    // "../etc/passwd" is wrong-length and rejected with "non-id ... wrong length".
+    assert!(
+        matches!(err, StoreError::Backend(ref s) if s.contains("non-id")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn git_blob_store_accepts_short_hex_brain_session_id() {
+    // bd-ttyo also produces 16-char `[0-9a-f]+` brain_session_ids via
+    // `derive_brain_session_id` (sha256-truncated). Both fields must accept
+    // the new shape.
+    let td = TempDir::new().unwrap();
+    init_repo(td.path());
+    let store = GitBlobOutcomeStore::new(td.path().to_path_buf());
+    let k = key(
+        "d04edac4e67c4649",
+        "deadbeef-1111-2222-3333-444455556666",
+        1,
+    );
+    let r = store.put(&k, b"hello", &metadata(b"hello")).await.unwrap();
+    assert_eq!(r.sha256, sha256_hex(b"hello"));
+    let got = store.get(&k, None).await.unwrap();
+    assert_eq!(got.bytes, b"hello");
+
+    let report = store
+        .delete_namespace(&BrainSessionId::new(SessionId("d04edac4e67c4649".into())))
+        .await
+        .unwrap();
+    assert_eq!(report.count, 1);
 }
 
 #[tokio::test]
