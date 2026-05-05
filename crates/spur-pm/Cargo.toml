@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 fs2 = "0.4"
+libc = "0.2"
 async-trait = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
