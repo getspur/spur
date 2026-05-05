@@ -150,6 +150,21 @@ impl BeadsCrateAdapter {
         .await?
     }
 
+    /// Multiple mutations under one flock acquisition. NOT a single DB
+    /// transaction — each individual call inside `f` is atomic, but the
+    /// batch as a whole is not. See spec "Multi-statement atomicity"
+    /// non-goal.
+    pub async fn batch<T, F>(&self, f: F) -> anyhow::Result<T>
+    where
+        F: FnOnce(&mut beads_rust::storage::sqlite::SqliteStorage) -> anyhow::Result<T>
+            + Send
+            + 'static,
+        T: Send + 'static,
+    {
+        // Same shape as `write`; the API distinction signals intent.
+        self.write(f).await
+    }
+
     /// Single write under cross-process flock. Opens a fresh
     /// `SqliteStorage` AFTER acquiring `.write.lock`, runs the closure,
     /// drops both. Each `beads_rust` mutation method is internally
@@ -225,6 +240,33 @@ mod tests {
             .unwrap();
         let result: i32 = adapter.write(|_s| Ok(42)).await.unwrap();
         assert_eq!(result, 42);
+        assert_eq!(
+            adapter
+                .metrics()
+                .write_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn batch_runs_multiple_steps_under_one_lock() {
+        let dir = TempDir::new().unwrap();
+        let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
+            .await
+            .unwrap();
+        let count = adapter
+            .batch(|_s| {
+                let mut acc = 0_usize;
+                for _ in 0..5 {
+                    acc += 1;
+                }
+                Ok(acc)
+            })
+            .await
+            .unwrap();
+        assert_eq!(count, 5);
+        // Single batch = single write op recorded
         assert_eq!(
             adapter
                 .metrics()
