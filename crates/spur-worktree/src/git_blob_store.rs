@@ -226,7 +226,7 @@ impl OutcomeStore for GitBlobOutcomeStore {
         content: &[u8],
         metadata: &OutcomeMetadata,
     ) -> Result<OutcomeRef, StoreError> {
-        Self::validate_uuid(
+        Self::validate_id(
             Self::brain_session_str(&key.brain_session_id),
             "brain_session_id",
         )?;
@@ -321,7 +321,7 @@ impl OutcomeStore for GitBlobOutcomeStore {
         key: &OutcomeKey,
         _section: Option<Section>,
     ) -> Result<OutcomeContent, StoreError> {
-        Self::validate_uuid(
+        Self::validate_id(
             Self::brain_session_str(&key.brain_session_id),
             "brain_session_id",
         )?;
@@ -344,7 +344,7 @@ impl OutcomeStore for GitBlobOutcomeStore {
         &self,
         brain_session_id: &BrainSessionId,
     ) -> Result<DeleteNamespaceReport, StoreError> {
-        Self::validate_uuid(
+        Self::validate_id(
             Self::brain_session_str(brain_session_id),
             "brain_session_id",
         )?;

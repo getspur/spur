@@ -4,12 +4,16 @@
 //!   <root>/<brain_session_id>/<delegation_id>/<attempt>.bin   # content bytes
 //!   <root>/<brain_session_id>/<delegation_id>/<attempt>.meta  # OutcomeMetadata JSON
 //!
-//! `brain_session_id` MUST parse as UUID shape (Round 9 P2-S2). `delegation_id`
-//! is allowed to be EITHER a 36-char UUID (legacy) OR a 16-char `[0-9a-f]+`
-//! short hex (post-`bd-ttyo`; see `spur-mcp/src/plan/labels.rs::mint_delegation_id`,
-//! which derives 60 random bits from the high 64 bits of a v4 UUID to fit the
-//! `br create --label` 50-char cap). Both forms are safe against directory-
-//! traversal and shell-meta injection.
+//! Both `brain_session_id` and `delegation_id` accept EITHER a 36-char UUID
+//! (legacy) OR a 16-char `[0-9a-f]+` short hex form (post-`bd-ttyo`):
+//!   * `delegation_id` shortened by `mint_delegation_id` to fit the
+//!     `br create --label` 50-char cap (60 random bits from the high 64 of a
+//!     v4 UUID).
+//!   * `brain_session_id` shortened by `derive_brain_session_id`
+//!     (sha256-truncated from the ACP session_id) for the same cap and to
+//!     make plan ownership labels deterministic across spur restarts.
+//!
+//! Both forms are safe against directory-traversal and shell-meta injection.
 //!
 //! Idempotent `put`: reads `<attempt>.meta` first, compares sha256.
 //! Equal → return existing `OutcomeRef`. Different → `ContentMismatch`.
@@ -128,7 +132,7 @@ impl OutcomeStore for FsOutcomeStore {
         content: &[u8],
         metadata: &OutcomeMetadata,
     ) -> Result<OutcomeRef, StoreError> {
-        Self::validate_uuid(
+        Self::validate_id(
             key.brain_session_id.as_session_id().0.as_str(),
             "brain_session_id",
         )?;
@@ -222,7 +226,7 @@ impl OutcomeStore for FsOutcomeStore {
         &self,
         brain_session_id: &BrainSessionId,
     ) -> Result<DeleteNamespaceReport, StoreError> {
-        Self::validate_uuid(
+        Self::validate_id(
             brain_session_id.as_session_id().0.as_str(),
             "brain_session_id",
         )?;
@@ -442,7 +446,12 @@ mod tests {
         };
         let body = b"x".to_vec();
         let err = store.put(&bad, &body, &metadata(&body)).await.unwrap_err();
-        assert!(matches!(err, StoreError::Backend(ref s) if s.contains("non-uuid")));
+        // brain_session_id now validates via `validate_id` (16 OR 36 char) post-bd-ttyo;
+        // "../etc/passwd" is wrong-length and rejected with "non-id ... wrong length".
+        assert!(
+            matches!(err, StoreError::Backend(ref s) if s.contains("non-id")),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -463,6 +472,34 @@ mod tests {
         let r = store.put(&k, &body, &metadata(&body)).await.unwrap();
         assert_eq!(r.sha256, sha256_hex(&body));
         assert!(store.get(&k, None).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn fs_store_accepts_short_hex_brain_session_id() {
+        // Regression: bd-ttyo Phase 2 (fd6c8947) made `brain_session_id`
+        // sha256-truncated 16 hex chars (derive_brain_session_id). bd-ljsr
+        // (34eb50b9) only switched the `delegation_id` validator to the
+        // dual-format helper; this site still hard-required a 36-char UUID
+        // for brain_session_id, surfacing as
+        // "non-uuid brain_session_id: wrong length (16)" → put/delete fail →
+        // worker outcome dropped. Covers both put() and delete_namespace().
+        let td = TempDir::new().unwrap();
+        let store = FsOutcomeStore::new(td.path().to_path_buf());
+        let k = key(
+            "d04edac4e67c4649",
+            "deadbeef-1111-2222-3333-444455556666",
+            1,
+        );
+        let body = b"x".to_vec();
+        let r = store.put(&k, &body, &metadata(&body)).await.unwrap();
+        assert_eq!(r.sha256, sha256_hex(&body));
+        assert!(store.get(&k, None).await.is_ok());
+
+        let report = store
+            .delete_namespace(&BrainSessionId::new(SessionId("d04edac4e67c4649".into())))
+            .await
+            .unwrap();
+        assert_eq!(report.count, 1);
     }
 
     #[tokio::test]
