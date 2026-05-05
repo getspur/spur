@@ -12,7 +12,7 @@
 
 ## TL;DR
 
-Replace SPUR's current `Command::new("br")` shellouts with direct linkage of the `beads_rust` 0.2.1 crate. The new in-process adapter exposes five disciplined primitives (`read`, `write`, `batch`, `with_txn`, `rpw_optimistic`), backed by a small reader connection pool and a single guarded writer connection. Cross-process safety comes from `beads_rust`'s built-in `.beads/.write.lock` advisory flock; intra-process Connection-handle safety comes from the writer Mutex; DB-level atomicity comes from explicit transactions. Migration is staged across five phases with shadow validation before cutover.
+Replace SPUR's current `Command::new("br")` shellouts with direct linkage of the `beads_rust` 0.2.1 crate. The new in-process adapter exposes four disciplined primitives (`read`, `write`, `batch`, plus a snapshot CAS pair `read_snapshot` / `validate_and_commit`), backed by a small reader connection pool and a single guarded writer connection. Cross-process safety comes from `beads_rust`'s built-in `.beads/.write.lock` advisory flock; intra-process Connection-handle safety comes from the writer Mutex; per-mutation DB-level atomicity comes from `beads_rust`'s internal `with_write_transaction` (multi-statement atomicity is an explicit non-goal — see "Multi-statement atomicity" below). Migration is staged across five phases gated by a compile-time Cargo feature, with shadow validation before cutover and an explicit quiescence protocol around any backend swap.
 
 ---
 
@@ -185,7 +185,7 @@ struct BeadsCrateAdapter {
 - **`flock_path` separate from the writer.** The cross-process flock is acquired *outside* the writer Mutex closure scope to make the ordering explicit and to allow lock-free operations (init detection, sweeps) that don't need the writer connection.
 - **`ContentionMetrics` first-class.** Cross-process contention manifests as silent hangs without instrumentation; metrics are part of the adapter contract, not an afterthought.
 
-### The five primitives
+### The four primitives
 
 ```rust
 impl BeadsCrateAdapter {
@@ -195,49 +195,77 @@ impl BeadsCrateAdapter {
     where F: FnOnce(&SqliteStorage) -> Result<T> + Send + 'static,
           T: Send + 'static;
 
-    /// Single write under cross-process flock + in-process writer guard +
-    /// implicit DB transaction.
+    /// Single write under cross-process flock + in-process writer guard.
+    /// Each public mutation in beads_rust (update_issue, create_issue,
+    /// delete_issue) is internally atomic via the crate's pub(crate)
+    /// with_write_transaction. The closure should perform exactly one such
+    /// mutation, or rely on `batch` for sequential mutations.
     pub async fn write<T, F>(&self, f: F) -> Result<T>
     where F: FnOnce(&mut SqliteStorage) -> Result<T> + Send + 'static,
           T: Send + 'static;
 
-    /// Batch of mutations under one flock acquisition + one DB transaction.
-    /// Avoids 50-acquire thrash for bulk operations.
+    /// Batch of mutations under one flock acquisition. Each individual
+    /// mutation is atomic at the DB level; the batch as a whole is NOT a
+    /// single DB transaction (see "Multi-statement atomicity" note below).
+    /// Avoids flock acquire/release thrash for bulk operations.
     pub async fn batch<T, F>(&self, f: F) -> Result<T>
     where F: FnOnce(&mut SqliteStorage) -> Result<T> + Send + 'static,
           T: Send + 'static;
 
-    /// Explicit transaction scope — alias for `write` that documents intent
-    /// when callers need DB-level atomicity for a multi-statement invariant.
-    pub async fn with_txn<T, F>(&self, f: F) -> Result<T>
-    where F: FnOnce(&mut Transaction) -> Result<T> + Send + 'static,
-          T: Send + 'static;
+    /// Read a snapshot for use as a CAS token. Returns the snapshot value
+    /// and the SqliteStorage's data_version pragma at read time. Caller
+    /// performs compute on the regular async runtime (not blocking pool),
+    /// then calls `validate_and_commit` to apply the result.
+    pub async fn read_snapshot<S, F>(&self, f: F) -> Result<Snapshot<S>>
+    where F: FnOnce(&SqliteStorage) -> Result<S> + Send + 'static,
+          S: Send + 'static;
 
-    /// Read-process-write with optimistic snapshot re-validation at the
-    /// commit boundary. Avoids holding the file lock during the (potentially
-    /// slow) compute phase. Returns Conflict if state moved between read and
-    /// write — caller decides retry policy.
-    pub async fn rpw_optimistic<S, T, FR, FC, FV, FW>(
+    /// Apply a write conditioned on the snapshot still matching. Acquires
+    /// flock, re-reads under lock, compares to snapshot, writes if matched,
+    /// returns Err(Conflict) if state moved.
+    pub async fn validate_and_commit<S, T, FV, FW>(
         &self,
-        read_phase:     FR,   // unlocked initial snapshot
-        compute_phase:  FC,   // pure compute, no DB calls
-        validate_phase: FV,   // re-read inside lock for matching
-        write_phase:    FW,   // commit
+        snapshot:     Snapshot<S>,
+        validate:     FV,   // re-read function (re-runs the read closure)
+        write:        FW,   // commit function, given (current, snapshot)
     ) -> Result<T>
-    where /* … bounds … */;
+    where FV: FnOnce(&SqliteStorage) -> Result<S> + Send + 'static,
+          FW: FnOnce(&mut SqliteStorage, S, S) -> Result<T> + Send + 'static,
+          S: Send + Eq + 'static, T: Send + 'static;
 }
 ```
 
-#### `rpw_optimistic` — the heart of multi-instance correctness
+#### Multi-statement atomicity — explicit non-goal
+
+`beads_rust` 0.2.1's `with_write_transaction` is `pub(crate)` (`storage/sqlite.rs:869`). The adapter cannot wrap arbitrary multi-statement closures in a single DB transaction without forking the crate. This is an accepted constraint:
+
+- Each individual public mutation (`update_issue`, `create_issue`, `delete_issue`) is atomic — internally the crate calls its own `with_write_transaction`.
+- `batch` performs multiple such mutations sequentially under one flock acquisition. If the closure errors mid-batch, prior mutations remain committed (DB-level), but no other process can interleave because we hold flock.
+- For invariants that *require* multi-statement atomicity beyond the file lock, callers must either upstream a public `with_write_transaction` to `beads_rust` (preferred) or design the operation as idempotent / restartable.
+
+If a future `beads_rust` release exposes `with_write_transaction` publicly, a `with_txn` primitive can be added without breaking this design.
+
+#### Snapshot CAS pattern — replaces the rejected `rpw_optimistic` monolith
+
+The earlier `rpw_optimistic` design ran the compute phase inside `spawn_blocking`, which would park a blocking-pool thread if compute called an LLM, network API, or other slow async work. The two-phase split fixes this:
 
 ```
-Read  (unlocked, fast)  →  Compute  (unlocked, may be slow)  →
-   Lock  →  Re-read  →  Verify snapshot still matches  →  Write  →  Unlock
+read_snapshot              (lock-free; uses reader pool; brief spawn_blocking)
+   │
+   ▼
+─── caller's async compute on the Tokio runtime ───
+     (LLM calls, network I/O, anything that wants to .await freely)
+   │
+   ▼
+validate_and_commit        (acquire flock; re-read; compare; write or Conflict)
 ```
 
-If the verify step fails, the closure returns `Err(Conflict)` and the caller decides whether to retry, escalate, or surface to the brain. This pattern:
+The compute phase happens entirely on the regular async runtime. The blocking pool is only used briefly twice (once for the snapshot read, once for the validate-then-write). The `Snapshot<S>` token captures both the value `S` and the `PRAGMA data_version` at read time; `validate_and_commit` rejects the write if either has changed.
 
-- Avoids holding `.write.lock` during slow processing (which would starve other SPUR instances)
+If the verify step fails, the call returns `Err(Conflict { expected, actual })` and the caller decides whether to retry, escalate, or surface to the brain. This pattern:
+
+- Keeps slow compute on the async runtime; never starves the blocking pool
+- Avoids holding `.write.lock` during compute (which would starve other SPUR instances)
 - Avoids the lost-update problem (write is gated on snapshot still matching)
 - Avoids forking `beads_rust` to add native CAS to the mutation API
 - Surfaces conflicts as typed errors rather than silent overwrites
@@ -336,7 +364,18 @@ On retryable lock errors (`Busy`, `Timeout`), the adapter retries until either s
 
 **Mechanism:** idempotent under-lock no-op. Every process may call `auto_flush()` periodically. Inside the file lock, it computes the dirty-set hash; if nothing changed since the last flush metadata, it returns immediately. No leader election, no designated process, no split-brain risk.
 
-**Cadence:** every 30s in MCP server processes; every 5s during active plan execution (configurable). Other processes (TUI) skip auto-flush entirely — they're read-mostly.
+**Lock-hold cost (important):** the export work happens *while holding* `.beads/.write.lock`. The crate has two paths:
+
+1. **Incremental fast path** (`try_existing_jsonl_replacements_atomically`, `sync/mod.rs:2711`) — when the dirty set is small and only updates existing JSONL lines in place, work is bounded by the dirty-set size, not total issue count. This is the common case during active execution.
+2. **Full re-export fallback** (`write_jsonl_lines_atomically`, `sync/mod.rs:2801`) — when the incremental check fails (added/removed issues, sort order changed, first-call-after-restart with stale metadata), the full set is rewritten. Cost is O(N issues).
+
+The fallback path *can* hold the lock long enough to starve other SPUR instances at large dataset sizes. Mitigations:
+
+- **Cadence:** every 60s in MCP server processes; **only on idle** (no in-flight writes for ≥5s) during active plan execution. Aggressive flushing during high-throughput execution would amplify the starvation risk.
+- **Skip during contention:** before calling `auto_flush`, check if `.write.lock` was contended in the recent past (via metrics); if so, skip this tick.
+- **Observability:** the `beads.lock.hold_ms` histogram bucketed by op (`write` vs `flush`) makes the starvation path visible. If the p99 of `flush` lock-hold exceeds a threshold (e.g., 500ms), this is a signal to investigate dataset growth or to upstream a streaming-export API to `beads_rust`.
+
+Other processes (TUI) skip auto-flush entirely — they're read-mostly.
 
 ### Stale tmp sweep
 
@@ -401,7 +440,7 @@ All metrics emitted via SPUR's existing tracing/metrics layer.
 | Metric | Type | Purpose |
 |---|---|---|
 | `beads.lock.wait_ms` | histogram | Time spent waiting to acquire `.write.lock` |
-| `beads.lock.hold_ms` | histogram | Time spent holding `.write.lock` (from acquire to release) |
+| `beads.lock.hold_ms{op}` | histogram | Time spent holding `.write.lock`, bucketed by op (`write`, `batch`, `flush`, `migrate`, `validate_and_commit`) |
 | `beads.lock.busy_total` | counter | Times we hit retryable `Busy` |
 | `beads.lock.ceiling_total` | counter | Times we exhausted backoff ceiling |
 | `beads.write.duration_ms` | histogram | Time inside writer Mutex |
@@ -474,15 +513,17 @@ Five phases, each independently verifiable and rollback-able.
 
 **Risk:** low.
 
-### Phase 2 — Direct adapter behind feature flag
+### Phase 2 — Direct adapter behind compile-time feature
 
-**Action:** implement `BeadsCrateAdapter` (the design above) alongside the existing `BeadsAdapter` (CLI shellout). Both implement `IssueTracker`. Selection via env var `SPUR_BEADS_BACKEND={cli,crate}` (default `cli`).
+**Action:** implement `BeadsCrateAdapter` (the design above) alongside the existing `BeadsAdapter` (CLI shellout). Both implement `IssueTracker`. Selection via **compile-time Cargo feature** `beads_crate_backend` on the `spur-pm` crate. Default-off in Phase 2; default-on in Phase 4.
 
-**Verification:** all existing tests pass with both backends. New unit tests for each primitive. New multi-process integration tests for the matrix above.
+**Why compile-time, not env-var:** runtime selection via env var would let different SPUR processes on the same host (TUI, MCP server, background worker) read different env values and run mixed backends against the same `.beads/` dir. Even though both backends honor `.write.lock`, mixing in-process state (long-lived crate connections) with subprocess invocations creates an asymmetry that's hard to reason about. Compile-time feature guarantees a single binary's processes are homogeneous.
 
-**Rollback:** flip env var back; ship continues on CLI path.
+**Verification:** all existing tests pass with both feature settings. CI runs the suite under both `--no-default-features` and `--features beads_crate_backend`. New unit tests for each primitive. New multi-process integration tests for the matrix above.
 
-**Risk:** medium. New code path, but isolated behind the flag.
+**Rollback:** rebuild with the feature off; ship.
+
+**Risk:** medium. New code path, but isolated behind the feature.
 
 ### Phase 3 — Shadow validation in CI
 
@@ -508,11 +549,22 @@ Five phases, each independently verifiable and rollback-able.
 
 ### Phase 4 — Cutover
 
-**Action:** flip default to `SPUR_BEADS_BACKEND=crate`. Ship. Keep CLI path as escape hatch for one release cycle.
+**Action:** flip the default Cargo feature so `beads_crate_backend` is on by default. Ship. The CLI path remains compiled in (behind `--no-default-features`) for one release cycle as escape hatch.
 
-**Verification:** observability dashboards green for one week. No regressions in plan execution metrics.
+**Quiescence protocol (mandatory before any backend swap, including initial rollout and rollback):**
 
-**Rollback:** flip env var back to `cli`.
+1. **Drain in-flight writes** — stop accepting new `write` / `batch` / `validate_and_commit` calls; wait for all in-flight `spawn_blocking` write closures to complete (with a hard timeout, e.g. 30s).
+2. **Force WAL checkpoint** — call `PRAGMA wal_checkpoint(TRUNCATE)` to flush all WAL pages to the main db file. Verifies the SQLite db is in a clean state.
+3. **Force JSONL flush** — call `auto_flush()` unconditionally so the JSONL is in sync with the SQLite db.
+4. **Close all connections** — drop reader pool, drop writer Mutex, finalize all prepared statements.
+5. **Verify clean shutdown** — confirm no `.beads/.tmp_*` files remain, `.beads/.write.lock` is unheld.
+6. **Restart with new backend.**
+
+This protocol applies to both the cutover (CLI → crate) and the rollback (crate → CLI). Without it, the legacy CLI adapter on rollback would trip over WAL frames or unfinalized statements left behind by the crate adapter.
+
+**Verification:** observability dashboards green for one week. No regressions in plan execution metrics. Quiescence protocol exercised in CI before each release.
+
+**Rollback:** rebuild without the feature, run quiescence protocol, redeploy.
 
 **Risk:** medium. Production traffic on new path.
 
@@ -525,6 +577,107 @@ Five phases, each independently verifiable and rollback-able.
 **Rollback:** revert Phase 5 in git.
 
 **Risk:** low. Only runs after Phase 4 has stabilized.
+
+---
+
+## Runbooks & incident response
+
+Concrete operator playbook for the failure modes the metrics surface. Each entry covers: what triggers it, how to confirm, what to do, and what NOT to do.
+
+### R1 — WAL grows unbounded (`beads.wal.size_bytes` keeps climbing)
+
+**Trigger:** `beads.wal.size_bytes` > 50MB and rising for >10 minutes; `beads.checkpoint.outcome{kind=busy}` fires repeatedly.
+
+**Likely cause:** a long-lived reader connection holds an open transaction or unfinalized prepared statement, pinning a WAL snapshot and preventing checkpoint truncation.
+
+**Confirm:** `lsof | grep beads.db-wal` shows multiple SPUR processes holding the WAL file. Check `beads.read.duration_ms` p99 — if there's a multi-minute outlier, suspect a stuck reader.
+
+**Action:**
+1. Identify which SPUR process owns the longest-lived reader connection (PID via lsof).
+2. SIGTERM that process gracefully (it should drop connections cleanly).
+3. Trigger a manual checkpoint from any remaining SPUR: call the adapter's `force_checkpoint()` admin function (to be added in Phase 2).
+4. If the checkpoint still fails, last resort: stop ALL SPUR processes, run `sqlite3 .beads/beads.db "PRAGMA wal_checkpoint(TRUNCATE);"` directly, restart.
+
+**Do NOT:** delete `.beads/beads.db-wal` or `.beads/beads.db-shm` while any process has the db open. This will corrupt the database. Always stop processes first.
+
+### R2 — Conflict counter spikes (`beads.conflict.total` rate >> baseline)
+
+**Trigger:** `beads.conflict.total` rate exceeds 5/sec for >2 minutes during normal plan execution.
+
+**Likely cause:** two or more SPUR instances writing to the same issues without plan-scoped lease (the `spur:plan-owner:*` label discipline) being respected, OR a snapshot read predicate is too narrow (missing labels/deps/comments in the snapshot).
+
+**Confirm:** check `beads.conflict.exhausted_total` — if it's also rising, callers are giving up; investigate which `validate_and_commit` call sites correspond to the conflicted issue IDs.
+
+**Action:**
+1. Use plan ownership inspection (`spur-mcp` tools or `br show <id>`) to identify which plans are touching the conflicted issues.
+2. If two plans legitimately race for the same issue, that's a brain-level dispatch bug — escalate to plan ownership review.
+3. If one plan is generating the conflicts, the snapshot definition is too narrow; widen to include the changing field.
+
+**Do NOT:** raise the conflict retry budget as a workaround. Conflicts are signal, not noise.
+
+### R3 — Blocking pool saturated (`beads.blocking_pool.saturation` > 80%)
+
+**Trigger:** `beads.blocking_pool.saturation` exceeds 80% sustained, OR Tokio task latency degrades broadly.
+
+**Likely cause:** beads work is monopolizing the Tokio blocking pool (default 512 threads). Either too many concurrent writes, or compute work leaked into a `spawn_blocking` closure (violating the discipline rule).
+
+**Confirm:** check `beads.write.duration_ms` p99 — if >100ms, individual writes are too slow. Check `beads.lock.hold_ms` — if writer Mutex hold time correlates, the writer connection is the bottleneck.
+
+**Action:**
+1. Short term: configure Tokio to allocate a larger blocking pool (`tokio::runtime::Builder::worker_threads`).
+2. Audit recent `write` / `batch` call sites for non-trivial compute inside the closure.
+3. If a specific call site is at fault, refactor to use the snapshot CAS pattern (`read_snapshot` + `validate_and_commit`).
+
+**Do NOT:** raise the writer Mutex to allow concurrent writers. The flock would still serialize them, just with worse contention.
+
+### R4 — Stuck `.write.lock`
+
+**Trigger:** `beads.lock.busy_total` and `beads.lock.ceiling_total` both rising; new writes timeout with `Busy { holder_pid }`.
+
+**Likely cause:** a SPUR process crashed mid-write and somehow leaked the flock (rare — OS should release on process exit), OR an external `br` invocation is holding it.
+
+**Confirm:** `ls -la .beads/.write.lock` — check ownership. `lsof .beads/.write.lock` — see what process holds it. If no process appears to hold it, the flock is genuinely orphaned.
+
+**Action:**
+1. If a real process holds it: investigate why it's not releasing; SIGTERM if appropriate.
+2. If the lock file is genuinely orphaned (no `lsof` match), it's safe to delete the lock file — `flock` advisory locks live in the kernel, not the file content. The file is just a presence sentinel.
+   ```bash
+   rm .beads/.write.lock
+   ```
+3. After deletion, the next process to acquire will create a fresh lock file.
+
+**Do NOT:** `kill -9` a process holding the lock — this can leave a half-rename in flight. Prefer SIGTERM and wait.
+
+### R5 — Legacy `br` detected at startup, SPUR refuses to boot
+
+**Trigger:** SPUR exits at startup with `LegacyBinaryDetected { found: 0.1.x, min_required: 0.2.1 }`.
+
+**Likely cause:** an old `br` binary is on PATH, often from a prior install or a CI image.
+
+**Action:**
+1. Identify the old binary: `which -a br` shows all `br` on PATH.
+2. Upgrade: `cargo install --git https://github.com/Dicklesworthstone/beads_rust --tag v0.2.1` (or higher).
+3. Verify: `br --version` reports ≥ 0.2.1.
+
+**Emergency bypass (USE WITH EXTREME CAUTION):** set `SPUR_BYPASS_LEGACY_BR_CHECK=1` to skip the assertion. **This re-opens the bd-1h3w corruption surface** if the old `br` is actually run against the same `.beads/`. Use only when you can guarantee the old binary will not be invoked (e.g., headless CI where you've audited every script).
+
+### R6 — Stale JSONL detected at boot
+
+**Trigger:** SPUR logs `StaleJsonlDetected { db_seq: X, jsonl_seq: Y }` at startup; auto-recovers via forced flush.
+
+**Likely cause:** previous SPUR process crashed between SQLite commit and JSONL flush. Recovery is automatic.
+
+**Action:** none required — startup forces an `auto_flush` to bring JSONL up to date. Check audit logs to confirm what was lost (nothing should be — the SQLite db is the source of truth, JSONL is a derived view).
+
+### R7 — Non-local filesystem detected
+
+**Trigger:** SPUR logs `NonLocalFilesystem { path, fs_type }` at startup with a loud warning (or refuses to start, depending on config).
+
+**Likely cause:** `.beads/` lives on NFS, SMB, or another network mount where `flock` semantics aren't reliable.
+
+**Action:**
+1. Move `.beads/` to local storage if at all possible.
+2. If you must run on a network mount, set the config to `allow_non_local_fs: true` AND ensure only ONE SPUR process accesses the directory at a time. Multi-instance correctness is NOT guaranteed.
 
 ---
 
