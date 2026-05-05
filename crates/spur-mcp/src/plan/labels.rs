@@ -30,16 +30,27 @@ pub fn plan_id(plan_id: &str) -> String {
 }
 
 /// Token used to encode the `.` character (which the br label validator
-/// rejects) inside `spur:plan-task-id:<id>` values. Beads issue IDs are
-/// hierarchical (`bd-2dww.7`) once an issue gets a child, so plan-task-id
-/// labels MUST round-trip through this encoding to remain br-legal while
-/// preserving the original task_id for downstream consumers (projector,
-/// reconciler).
-const PLAN_TASK_ID_DOT_ENCODED: &str = "_dot_";
+/// rejects) inside label values that carry external identifiers. Beads issue
+/// IDs are hierarchical (`bd-2dww.7`) once an issue gets a child, so any
+/// label embedding such an id MUST round-trip through this encoding to remain
+/// br-legal while preserving the original id for downstream consumers
+/// (projector, reconciler).
+const LABEL_ID_DOT_ENCODED: &str = "_dot_";
+
+/// Encode external ids (beads or otherwise) for safe embedding in br labels.
+/// `bd-42` → `bd-42` (no change). `bd-2dww.7` → `bd-2dww_dot_7`.
+fn encode_label_id(id: &str) -> String {
+    id.replace('.', LABEL_ID_DOT_ENCODED)
+}
+
+/// Reverse of `encode_label_id`. Allocates only when the encoded sentinel
+/// is actually present.
+fn decode_label_id(encoded: &str) -> String {
+    encoded.replace(LABEL_ID_DOT_ENCODED, ".")
+}
 
 pub fn plan_task_id(task_id: &str) -> String {
-    let encoded = task_id.replace('.', PLAN_TASK_ID_DOT_ENCODED);
-    format!("spur:plan-task-id:{encoded}")
+    format!("spur:plan-task-id:{}", encode_label_id(task_id))
 }
 
 pub fn agent(agent_name: &str) -> String {
@@ -47,7 +58,7 @@ pub fn agent(agent_name: &str) -> String {
 }
 
 pub fn source_issue(issue_id: &str) -> String {
-    format!("spur:source-issue:{issue_id}")
+    format!("spur:source-issue:{}", encode_label_id(issue_id))
 }
 
 pub const DELEGATION_ID_PREFIX: &str = "spur:delegation-id:";
@@ -153,9 +164,7 @@ pub fn parse_plan_owner_lease_expires_at(label: &str) -> Option<i64> {
 /// Reverses the dot-encoding applied by `plan_task_id` so hierarchical beads
 /// IDs (`bd-2dww.7`) round-trip through the br label validator.
 pub fn parse_plan_task_id(label: &str) -> Option<String> {
-    label
-        .strip_prefix(PLAN_TASK_ID_PREFIX)
-        .map(|s| s.replace(PLAN_TASK_ID_DOT_ENCODED, "."))
+    label.strip_prefix(PLAN_TASK_ID_PREFIX).map(decode_label_id)
 }
 
 /// Returns `Some(plan_id)` if the given label is a `spur:plan-id:<id>` label.
@@ -169,8 +178,10 @@ pub fn parse_agent(label: &str) -> Option<&str> {
 }
 
 /// Returns `Some(issue_id)` if the given label is a `spur:source-issue:<id>` label.
-pub fn parse_source_issue(label: &str) -> Option<&str> {
-    label.strip_prefix(SOURCE_ISSUE_PREFIX)
+/// Reverses the dot-encoding applied by `source_issue` so hierarchical beads
+/// IDs (`bd-2dww.7`) round-trip through the br label validator (bd-18vs).
+pub fn parse_source_issue(label: &str) -> Option<String> {
+    label.strip_prefix(SOURCE_ISSUE_PREFIX).map(decode_label_id)
 }
 
 /// Returns `Some(kind)` if the given label is a `signal:<kind>` label
@@ -272,7 +283,10 @@ mod tests {
         assert_eq!(parse_plan_task_id("unrelated"), None);
         assert_eq!(parse_plan_id(&plan_id("P1")), Some("P1"));
         assert_eq!(parse_agent(&agent("codex")), Some("codex"));
-        assert_eq!(parse_source_issue(&source_issue("bd-42")), Some("bd-42"));
+        assert_eq!(
+            parse_source_issue(&source_issue("bd-42")).as_deref(),
+            Some("bd-42")
+        );
         assert_eq!(parse_delegation_id(&delegation_id("del-A")), Some("del-A"));
         assert_eq!(
             parse_lease_expires_at(&lease_expires_at(1_777_777_777)),
@@ -462,6 +476,27 @@ mod tests {
         assert_eq!(
             parse_plan_task_id(&label).as_deref(),
             Some(task_id),
+            "round-trip failed for hierarchical id"
+        );
+    }
+
+    /// Regression for bd-18vs: `source_issue` had the same dot-rejection bug as
+    /// `plan_task_id`. When `submit_plan` payloads set `task.issue_id` to a
+    /// hierarchical beads ID, `plan_epic_issue_creates` (server.rs:1308) emits
+    /// `spur:source-issue:bd-2dww.7` — rejected by the `br 0.1.14` label
+    /// validator. `source_issue` must emit a br-legal label AND
+    /// `parse_source_issue` must return the original hierarchical id.
+    #[test]
+    fn source_issue_label_round_trips_hierarchical_beads_ids() {
+        let issue_id = "bd-2dww.7";
+        let label = source_issue(issue_id);
+        assert!(
+            is_br_legal(&label),
+            "source_issue emitted br-illegal label for hierarchical id: {label}"
+        );
+        assert_eq!(
+            parse_source_issue(&label).as_deref(),
+            Some(issue_id),
             "round-trip failed for hierarchical id"
         );
     }
