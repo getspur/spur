@@ -108,9 +108,9 @@ impl IssuesPanel {
         self.table_state.select(Some(prev));
     }
 
-    pub fn select_first(&mut self) {
+    pub fn select_first(&mut self, issue_count: usize) {
         let first = self
-            .valid_display_order(self.display_order.len())
+            .valid_display_order(issue_count)
             .and_then(|display_order| display_order.first().copied())
             .unwrap_or(0);
         self.table_state.select(Some(first));
@@ -683,9 +683,20 @@ mod tests {
         let mut panel = IssuesPanel::new();
         panel.display_order = vec![2, 0, 1];
 
-        panel.select_first();
+        panel.select_first(issues.len());
 
         assert_eq!(panel.selected_id(&issues), Some("issue-C"));
+    }
+
+    #[test]
+    fn select_first_with_stale_display_order_falls_back_to_zero() {
+        let issues = vec![issue("issue-A"), issue("issue-B")];
+        let mut panel = IssuesPanel::new();
+        panel.display_order = vec![2, 0, 1];
+
+        panel.select_first(issues.len());
+
+        assert_eq!(panel.selected_id(&issues), Some("issue-A"));
     }
 
     #[test]
