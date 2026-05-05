@@ -48,6 +48,8 @@ pub struct IssuesPanel {
 }
 
 impl IssuesPanel {
+    const WRAPAROUND_LIMIT: usize = 20;
+
     pub fn new() -> Self {
         Self {
             table_state: TableState::default(),
@@ -74,15 +76,23 @@ impl IssuesPanel {
             .selected()
             .unwrap_or(0)
             .min(issue_count.saturating_sub(1));
-        let next = if let Some(display_order) = self.valid_display_order(issue_count) {
-            let visual_idx = display_order
-                .iter()
-                .position(|idx| *idx == current)
-                .unwrap_or(0);
-            display_order[(visual_idx + count) % issue_count]
+        let display_order = self.valid_display_order(issue_count);
+        let current_position = display_order
+            .map(|display_order| {
+                display_order
+                    .iter()
+                    .position(|idx| *idx == current)
+                    .unwrap_or(0)
+            })
+            .unwrap_or(current);
+        let next_position = if issue_count <= Self::WRAPAROUND_LIMIT {
+            (current_position + (count % issue_count)) % issue_count
         } else {
-            (current + count) % issue_count
+            current_position.saturating_add(count).min(issue_count - 1)
         };
+        let next = display_order
+            .map(|display_order| display_order[next_position])
+            .unwrap_or(next_position);
         self.table_state.select(Some(next));
     }
 
@@ -95,16 +105,23 @@ impl IssuesPanel {
             .selected()
             .unwrap_or(0)
             .min(issue_count.saturating_sub(1));
-        let prev = if let Some(display_order) = self.valid_display_order(issue_count) {
-            let visual_idx = display_order
-                .iter()
-                .position(|idx| *idx == current)
-                .unwrap_or(0);
-            let step = count % issue_count;
-            display_order[(visual_idx + issue_count - step) % issue_count]
+        let display_order = self.valid_display_order(issue_count);
+        let current_position = display_order
+            .map(|display_order| {
+                display_order
+                    .iter()
+                    .position(|idx| *idx == current)
+                    .unwrap_or(0)
+            })
+            .unwrap_or(current);
+        let prev_position = if issue_count <= Self::WRAPAROUND_LIMIT {
+            (current_position + issue_count - (count % issue_count)) % issue_count
         } else {
-            (current + issue_count - (count % issue_count)) % issue_count
+            current_position.saturating_sub(count)
         };
+        let prev = display_order
+            .map(|display_order| display_order[prev_position])
+            .unwrap_or(prev_position);
         self.table_state.select(Some(prev));
     }
 
@@ -776,5 +793,28 @@ mod tests {
         for x in status_cells {
             assert_eq!(buf[(x, y)].fg, Color::White, "rendered row: {row}");
         }
+    }
+
+    #[test]
+    fn issue_selection_clamps_large_lists_and_wraps_small_lists() {
+        let large_issues: Vec<_> = (0..21).map(|idx| issue(&format!("large-{idx}"))).collect();
+        let small_issues: Vec<_> = (0..5).map(|idx| issue(&format!("small-{idx}"))).collect();
+        let mut panel = IssuesPanel::new();
+
+        panel.table_state.select(Some(20));
+        panel.select_next(1, large_issues.len());
+        assert_eq!(panel.selected_id(&large_issues), Some("large-20"));
+
+        panel.table_state.select(Some(0));
+        panel.select_prev(1, large_issues.len());
+        assert_eq!(panel.selected_id(&large_issues), Some("large-0"));
+
+        panel.table_state.select(Some(4));
+        panel.select_next(1, small_issues.len());
+        assert_eq!(panel.selected_id(&small_issues), Some("small-0"));
+
+        panel.table_state.select(Some(0));
+        panel.select_prev(1, small_issues.len());
+        assert_eq!(panel.selected_id(&small_issues), Some("small-4"));
     }
 }
