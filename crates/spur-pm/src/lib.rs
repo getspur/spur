@@ -5,6 +5,7 @@ pub mod beads_crate;
 pub mod bv;
 pub mod github;
 pub mod graph;
+pub mod graph_engine;
 pub mod pidfile;
 pub mod poll_cursor;
 pub mod service;
