@@ -1820,6 +1820,16 @@ git add crates/spur-pm/src/beads_crate/issue_tracker.rs crates/spur-pm/src/beads
 git commit -m "spur-pm: IssueTracker::list_issues via crate adapter"
 ```
 
+> **Plan revision (2026-05-05):** Section D drift fixes applied to T16:
+> - `ListFilters` field is `statuses: Option<Vec<Status>>` (not `status: Option<String>`); parse via `Status::from_str` and wrap in single-element `Vec`.
+> - `ListFilters.labels` is `Option<Vec<String>>` (not `Vec<String>`); set to `Some(filter.labels.clone())` only when non-empty.
+> - `ListFilters` has no `priority_min`/`priority_max`; expand to `priorities: Option<Vec<Priority>>` over the inclusive range.
+> - `IssueFilter.since` maps to `ListFilters.updated_after`.
+> - Map `IssueFilter.issue_type` (string) → `ListFilters.types: Option<Vec<IssueType>>` via `IssueType::from_str`.
+> - Map `IssueFilter.text_search` → `ListFilters.title_contains`.
+> - Implementation lives as inherent method on `BeadsCrateAdapter` (matching T15 shape); trait impl block materializes in T20.
+> - Test uses `minimal_issue` struct-literal helper from T15 (no `BrIssue::new` constructor exists in beads_rust 0.2.1).
+
 ---
 
 ### Task 17: Implement `IssueTracker::create_issue`
