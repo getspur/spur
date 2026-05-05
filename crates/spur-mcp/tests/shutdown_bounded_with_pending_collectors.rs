@@ -73,7 +73,7 @@ async fn test_shutdown_bounded_with_pending_collectors() -> Result<(), Box<dyn s
     let failed_count = Arc::new(AtomicUsize::new(0));
     let brain_sid = BrainSessionId::new(SessionId::new());
     let (server, channel) = McpCallbackServer::new(
-        &brain_sid,
+        Some(&brain_sid),
         None,
         None,
         observing_continuation_ctx(Arc::clone(&failed_count)),

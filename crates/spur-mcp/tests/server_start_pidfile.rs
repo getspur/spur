@@ -70,7 +70,7 @@ async fn beads_backed_start_requires_repo_root_before_listener_boot() {
     let brain_sid = BrainSessionId::new(SessionId::new());
 
     let (server, _channel) = McpCallbackServer::new(
-        &brain_sid,
+        Some(&brain_sid),
         Some(pm),
         None,
         test_continuation_ctx(),
@@ -105,7 +105,7 @@ async fn beads_backed_start_allows_concurrent_brain_servers() {
     let second_brain_sid = BrainSessionId::new(SessionId::new());
 
     let (mut first_server, _first_channel) = McpCallbackServer::new(
-        &first_brain_sid,
+        Some(&first_brain_sid),
         Some(pm.clone()),
         None,
         test_continuation_ctx(),
@@ -121,7 +121,7 @@ async fn beads_backed_start_allows_concurrent_brain_servers() {
         .expect("first start should succeed");
 
     let (mut second_server, _second_channel) = McpCallbackServer::new(
-        &second_brain_sid,
+        Some(&second_brain_sid),
         Some(pm.clone()),
         None,
         test_continuation_ctx(),
@@ -156,7 +156,7 @@ async fn dropping_server_handle_releases_pidfile_for_next_start() {
     let brain_sid = BrainSessionId::new(SessionId::new());
 
     let (mut server, _channel) = McpCallbackServer::new(
-        &brain_sid,
+        Some(&brain_sid),
         Some(pm.clone()),
         None,
         test_continuation_ctx(),
@@ -178,7 +178,7 @@ async fn dropping_server_handle_releases_pidfile_for_next_start() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
     loop {
         let (mut next_server, _channel) = McpCallbackServer::new(
-            &brain_sid,
+            Some(&brain_sid),
             Some(pm.clone()),
             None,
             test_continuation_ctx(),

@@ -90,7 +90,7 @@ async fn run_plan_pushes_continuation_when_plan_completes() {
     let sink_ref: Arc<dyn McpEventSink> = Arc::clone(&sink) as Arc<dyn McpEventSink>;
     let session = BrainSessionId::new(SessionId("brain-plan-completed".into()));
     let (server, mut channel) = McpCallbackServer::new(
-        &session,
+        Some(&session),
         None,
         Some(sink_ref),
         continuation_ctx(continuation_tx),

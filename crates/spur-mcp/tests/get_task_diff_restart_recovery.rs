@@ -208,7 +208,7 @@ async fn t_v0d_4_get_task_diff_works_after_restart_for_latest_attempt() {
 
     let session_id = BrainSessionId::new(SessionId("brain".into()));
     let (mut server1, _channel1) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),
@@ -230,7 +230,7 @@ async fn t_v0d_4_get_task_diff_works_after_restart_for_latest_attempt() {
     drop(server1);
 
     let (mut server2, _channel2) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),

@@ -419,7 +419,7 @@ async fn t_v0e_1_no_persisted_direct_dispatch() {
     let pm = beads_pm(dir.path()).await;
     let session_id = BrainSessionId::new(SessionId("brain".into()));
     let (mut server, mut channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(pm),
         None,
         continuation_ctx(),

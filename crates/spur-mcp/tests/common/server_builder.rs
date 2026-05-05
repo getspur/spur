@@ -73,7 +73,7 @@ impl MockServerBuilder {
 
     pub fn build(self) -> (McpCallbackServer, DelegationChannel) {
         McpCallbackServer::new(
-            &self.session_id,
+            Some(&self.session_id),
             self.pm_service,
             None,
             continuation_ctx(),

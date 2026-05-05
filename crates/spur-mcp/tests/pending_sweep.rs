@@ -160,7 +160,7 @@ async fn start_server_for_sweep(
 ) {
     let brain_sid = BrainSessionId::new(SessionId::new());
     let (mut server, _channel) = McpCallbackServer::new(
-        &brain_sid,
+        Some(&brain_sid),
         Some(pm),
         sink,
         test_continuation_ctx(),

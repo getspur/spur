@@ -25,7 +25,7 @@ fn json_object(value: Value) -> JsonObject {
 fn mock_server() -> (McpCallbackServer, spur_mcp::DelegationChannel) {
     let brain_sid = BrainSessionId::new(SessionId::new());
     McpCallbackServer::new(
-        &brain_sid,
+        Some(&brain_sid),
         None,
         None,
         DetachedContinuationCtx {

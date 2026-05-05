@@ -162,7 +162,7 @@ async fn run_plan_pushes_continuation_and_event_for_failed_task() {
     let sink_ref: Arc<dyn McpEventSink> = Arc::clone(&sink) as Arc<dyn McpEventSink>;
     let session = BrainSessionId::new(SessionId("brain-plan-failed".into()));
     let (server, mut channel) = McpCallbackServer::new(
-        &session,
+        Some(&session),
         Some(pm),
         Some(sink_ref),
         continuation_ctx,
@@ -279,7 +279,7 @@ async fn event_emission_does_not_race_with_state_update_for_failed_task() {
 
     let session = BrainSessionId::new(SessionId("brain-event-race-failed".into()));
     let (server, mut channel) = McpCallbackServer::new(
-        &session,
+        Some(&session),
         Some(pm),
         Some(sink_ref),
         continuation_ctx,

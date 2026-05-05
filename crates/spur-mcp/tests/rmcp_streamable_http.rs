@@ -22,7 +22,7 @@ async fn rmcp_client_can_initialize_list_tools_and_call_tool(
     );
     let brain_sid = BrainSessionId::new(SessionId::new());
     let (mut server, _channel) = McpCallbackServer::new(
-        &brain_sid,
+        Some(&brain_sid),
         None,
         None,
         test_continuation_ctx(),

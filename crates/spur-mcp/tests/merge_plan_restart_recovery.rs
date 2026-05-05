@@ -230,7 +230,7 @@ async fn t_v0d_3_merge_plan_works_after_restart_on_persisted_plan() {
 
     let session_id = BrainSessionId::new(SessionId("brain".into()));
     let (mut server1, _channel1) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),
@@ -252,7 +252,7 @@ async fn t_v0d_3_merge_plan_works_after_restart_on_persisted_plan() {
     drop(server1);
 
     let (mut server2, _channel2) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),

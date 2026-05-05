@@ -28,7 +28,7 @@ fn pro_gate() -> Arc<FeatureGate> {
 fn server_with_gate(feature_gate: Arc<FeatureGate>) -> McpCallbackServer {
     let brain_sid = BrainSessionId::new(SessionId::new());
     let (server, _channel) = McpCallbackServer::new(
-        &brain_sid,
+        Some(&brain_sid),
         None,
         None,
         continuation_ctx(),
