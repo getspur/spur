@@ -262,6 +262,7 @@ impl IssueBrowserView {
     }
 
     pub fn seed_issues(&mut self, mut issues: Vec<spur_pm::IssueSummary>) {
+        self.last_refresh_error = None;
         self.invalidate_graph_cache();
         sort_issues_parent_first(&mut issues);
         self.tracked_issues = issues;
@@ -1067,10 +1068,10 @@ impl View for IssueBrowserView {
             }
 
             spur_acp::SpurEventBody::IssueUpdated {
+                source: _,
                 id,
                 status,
                 assignee,
-                ..
             } => {
                 if let Some(issue) = self.tracked_issues.iter_mut().find(|i| i.id == *id) {
                     if let Some(s) = status {
@@ -1136,23 +1137,34 @@ impl View for IssueBrowserView {
             }
 
             spur_acp::SpurEventBody::IssueCommandError {
-                error, operation, ..
+                error,
+                operation,
+                id,
             } => {
-                if matches!(operation.as_str(), "GetIssueGraph" | "get_graph")
-                    && self.graph_loading.is_some()
-                {
-                    self.graph_error = Some(error.clone());
-                    self.graph_loading = None;
-                    // bd-d587.3 follow-up: a graph-fetch error must not leave
-                    // post_load_mode armed for a future unrelated detail fetch.
-                    self.post_load_mode = None;
-                    self.pending_action = None;
-                } else if matches!(self.issue_focus, IssueFocus::Loading { .. }) {
-                    self.issue_focus = IssueFocus::None;
-                    // bd-d587.3 follow-up: same rationale on detail-fetch error.
-                    self.reset_armed_state();
-                } else if operation == "list_issues" || operation == "RefreshIssues" {
+                if operation == "list_issues" || operation == "RefreshIssues" {
                     self.last_refresh_error = Some(error.clone());
+                } else if matches!(operation.as_str(), "GetIssueGraph" | "get_graph") {
+                    if id.as_deref() == self.graph_loading.as_deref() {
+                        self.graph_error = Some(error.clone());
+                        self.graph_loading = None;
+                        // bd-d587.3 follow-up: a graph-fetch error must not leave
+                        // post_load_mode armed for a future unrelated detail fetch.
+                        self.post_load_mode = None;
+                        self.pending_action = None;
+                    }
+                } else if operation == "GetIssueDetail" {
+                    let matches_loading = match &self.issue_focus {
+                        IssueFocus::Loading { id: loading_id } => {
+                            id.as_deref() == Some(loading_id.as_str())
+                        }
+                        _ => false,
+                    };
+                    if matches_loading {
+                        self.issue_focus = IssueFocus::None;
+                        self.issue_detail_pane.reset();
+                        // bd-d587.3 follow-up: same rationale on detail-fetch error.
+                        self.reset_armed_state();
+                    }
                 }
             }
 
@@ -1189,6 +1201,7 @@ fn is_plan_artifact_summary(issue: &spur_acp::IssueSummaryEvent) -> bool {
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::{backend::TestBackend, Terminal};
     use spur_core::ExecutorLineage;
 
     use crate::views::{View, ViewContext};
@@ -1211,6 +1224,141 @@ mod tests {
             issue_type: Some(issue_type.into()),
             assignee: None,
         }
+    }
+
+    fn issue_detail(id: &str, body: &str) -> spur_pm::Issue {
+        let now = chrono::Utc::now();
+        spur_pm::Issue {
+            id: id.into(),
+            source: spur_pm::PmSource::Beads,
+            title: "Current detail".into(),
+            body: body.into(),
+            status: "open".into(),
+            labels: Vec::new(),
+            assignee: None,
+            url: String::new(),
+            priority: Some(1),
+            issue_type: Some("task".into()),
+            blocked_by: Vec::new(),
+            due_at: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn issue_command_error(operation: &str, id: Option<&str>) -> spur_acp::SpurEvent {
+        spur_acp::SpurEvent::now(spur_acp::SpurEventBody::IssueCommandError {
+            operation: operation.into(),
+            error: "failed".into(),
+            id: id.map(String::from),
+        })
+    }
+
+    fn rendered_text(view: &mut IssueBrowserView) -> String {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut terminal = Terminal::new(TestBackend::new(100, 18)).unwrap();
+        terminal
+            .draw(|frame| view.render(frame, frame.area(), &ctx))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let mut rendered = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                rendered.push_str(buf[(x, y)].symbol());
+            }
+            rendered.push('\n');
+        }
+        rendered
+    }
+
+    #[test]
+    fn seed_issues_clears_last_refresh_error() {
+        let mut view = IssueBrowserView::new();
+        view.last_refresh_error = Some("old refresh error".into());
+
+        view.seed_issues(vec![issue("bd-1", "task", Vec::new())]);
+
+        assert!(view.last_refresh_error.is_none());
+    }
+
+    #[test]
+    fn stale_detail_error_does_not_clear_current_loading_focus() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.issue_focus = IssueFocus::Loading {
+            id: "current".into(),
+        };
+
+        view.handle_spur_event(&issue_command_error("GetIssueDetail", Some("stale")), &ctx);
+
+        assert!(matches!(
+            view.issue_focus,
+            IssueFocus::Loading { ref id } if id == "current"
+        ));
+    }
+
+    #[test]
+    fn list_error_while_detail_loading_preserves_focus_and_records_refresh_error() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.issue_focus = IssueFocus::Loading {
+            id: "current".into(),
+        };
+
+        view.handle_spur_event(&issue_command_error("list_issues", None), &ctx);
+
+        assert!(matches!(
+            view.issue_focus,
+            IssueFocus::Loading { ref id } if id == "current"
+        ));
+        assert_eq!(view.last_refresh_error.as_deref(), Some("failed"));
+    }
+
+    #[test]
+    fn matching_detail_error_clears_focus_and_resets_detail_pane() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.issue_detail_pane.scroll_down_by(3);
+        view.issue_focus = IssueFocus::Loading {
+            id: "current".into(),
+        };
+
+        view.handle_spur_event(
+            &issue_command_error("GetIssueDetail", Some("current")),
+            &ctx,
+        );
+
+        assert!(matches!(view.issue_focus, IssueFocus::None));
+
+        view.issue_focus = IssueFocus::Loaded {
+            id: "current".into(),
+            issue: Box::new(issue_detail(
+                "current",
+                "body line 1\nbody line 2\nbody line 3\nbody line 4",
+            )),
+        };
+        let rendered = rendered_text(&mut view);
+        assert!(
+            rendered.contains("body line 1"),
+            "detail pane scroll offset should reset after load error:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn stale_graph_error_does_not_clear_current_graph_loading() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.graph_loading = Some("current".into());
+
+        view.handle_spur_event(&issue_command_error("GetIssueGraph", Some("stale")), &ctx);
+
+        assert_eq!(view.graph_loading.as_deref(), Some("current"));
+        assert!(view.graph_error.is_none());
     }
 
     #[test]
