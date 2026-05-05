@@ -584,11 +584,12 @@ impl IssueBrowserView {
         let keys_to_remove = self
             .graph_cache
             .iter()
-            .filter_map(|(key, (nodes, _))| {
-                nodes
-                    .iter()
-                    .any(|node| node.id == issue_id)
-                    .then(|| key.clone())
+            .filter_map(|(key, (nodes, edges))| {
+                (nodes.iter().any(|node| node.id == issue_id)
+                    || edges
+                        .iter()
+                        .any(|edge| edge.from == issue_id || edge.to == issue_id))
+                .then(|| key.clone())
             })
             .collect::<HashSet<_>>();
 
@@ -1473,11 +1474,27 @@ mod tests {
         }
     }
 
+    fn graph_edge(from: &str, to: &str) -> GraphEdgeEvent {
+        GraphEdgeEvent {
+            from: from.into(),
+            to: to.into(),
+            edge_type: Some("blocks".into()),
+        }
+    }
+
     fn subgraph_loaded_event(requested_id: &str, nodes: Vec<GraphNodeEvent>) -> SpurEvent {
+        subgraph_loaded_event_with_edges(requested_id, nodes, Vec::new())
+    }
+
+    fn subgraph_loaded_event_with_edges(
+        requested_id: &str,
+        nodes: Vec<GraphNodeEvent>,
+        edges: Vec<GraphEdgeEvent>,
+    ) -> SpurEvent {
         SpurEvent::now(spur_acp::SpurEventBody::IssueSubgraphLoaded {
             requested_id: requested_id.into(),
             nodes,
-            edges: Vec::new(),
+            edges,
         })
     }
 
@@ -1539,6 +1556,35 @@ mod tests {
 
         assert!(!view.graph_cache.contains_key("bd-root"));
         assert!(view.graph_cache.contains_key("bd-other"));
+    }
+
+    #[test]
+    fn issue_updated_invalidates_cache_when_issue_is_only_edge_endpoint() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+
+        view.graph_loading = Some("bd-root".into());
+        view.handle_spur_event(
+            &subgraph_loaded_event_with_edges(
+                "bd-root",
+                vec![graph_node("bd-root")],
+                vec![graph_edge("bd-other", "bd-root")],
+            ),
+            &ctx,
+        );
+
+        view.handle_spur_event(
+            &SpurEvent::now(spur_acp::SpurEventBody::IssueUpdated {
+                source: "beads".into(),
+                id: "bd-other".into(),
+                status: Some("closed".into()),
+                assignee: None,
+            }),
+            &ctx,
+        );
+
+        assert!(!view.graph_cache.contains_key("bd-root"));
     }
 
     #[test]
