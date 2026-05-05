@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -51,6 +52,7 @@ const LIST_STATUS_HINT_PLAN_EPIC: &str =
     "[List] j/k: Nav  Enter/o: Open Detail  v: Graph  p: Open Plan  W: Work  r: Refresh  q: Quit";
 const LIST_STATUS_HINT_PLAN_EPIC_COMPACT: &str = "[List] j/k: Nav  o: Open  p: Plan  W: Work";
 const GRAPH_CACHE_CAPACITY: usize = 32;
+const PREFETCH_DEBOUNCE_MS: u64 = 200;
 
 // ── Issue focus state machine ───────────────────────────────────────────
 
@@ -198,6 +200,8 @@ pub struct IssueBrowserView {
     /// can't dispatch actions, only stash them for the app to pick up via
     /// `take_pending_action`.
     pending_action: Option<Action>,
+    /// Debounced preview graph prefetch armed by list navigation.
+    pending_prefetch: Option<(String, Instant)>,
     /// Error from the most recent `list_issues` failure surfaced via
     /// `IssueCommandError` (e.g. corrupt `.beads/issues.jsonl`). Rendered in
     /// the empty-list pane so the user sees the cause instead of a misleading
@@ -228,6 +232,7 @@ impl IssueBrowserView {
             pending_select: None,
             post_load_mode: None,
             pending_action: None,
+            pending_prefetch: None,
             last_refresh_error: None,
         }
     }
@@ -237,6 +242,9 @@ impl IssueBrowserView {
     /// after dispatching events to the view so it can route the action
     /// through `process_action` (the only way to actually execute it).
     pub fn take_pending_action(&mut self) -> Option<Action> {
+        if self.pending_action.is_none() {
+            self.flush_due_prefetch();
+        }
         self.pending_action.take()
     }
 
@@ -252,11 +260,13 @@ impl IssueBrowserView {
     /// Inc 3 (bd-d587.3) follow-up: drain all armed `open_external_detail`
     /// state so that a subsequent fresh detail open or error tear-down does
     /// not inherit stale `post_load_mode` / `pending_select` / `pending_action`
-    /// / `graph_loading` from a previous (possibly errored) external open.
+    /// / `pending_prefetch` / `graph_loading` from a previous (possibly
+    /// errored) external open.
     fn reset_armed_state(&mut self) {
         self.pending_select = None;
         self.post_load_mode = None;
         self.pending_action = None;
+        self.pending_prefetch = None;
         self.graph_loading = None;
     }
 
@@ -279,17 +289,52 @@ impl IssueBrowserView {
         self.seed_issues(issues);
     }
 
+    #[cfg(any(test, debug_assertions))]
+    pub fn age_pending_prefetch_for_test(&mut self, age: Duration) {
+        if let Some((_, scheduled_at)) = self.pending_prefetch.as_mut() {
+            *scheduled_at -= age;
+        }
+    }
+
     pub fn issue_detail_visible(&self) -> bool {
         matches!(self.issue_focus, IssueFocus::Loaded { .. })
     }
 
     fn prefetch_selected_graph(&mut self) {
         if self.tracked_issues.len() < 2 {
+            self.pending_prefetch = None;
             return;
         }
         let Some(id) = self.selected_issue_id() else {
+            self.pending_prefetch = None;
             return;
         };
+        if self.graph_cache.contains_key(&id) || self.graph_loading.as_deref() == Some(id.as_str())
+        {
+            return;
+        }
+
+        self.graph_error = None;
+        self.pending_prefetch = Some((id, Instant::now()));
+    }
+
+    fn flush_due_prefetch(&mut self) {
+        if self.pending_action.is_some() {
+            return;
+        }
+        let Some((id, scheduled_at)) = self.pending_prefetch.clone() else {
+            return;
+        };
+        if Instant::now().saturating_duration_since(scheduled_at)
+            < Duration::from_millis(PREFETCH_DEBOUNCE_MS)
+        {
+            return;
+        }
+
+        self.pending_prefetch = None;
+        if self.selected_issue_id().as_deref() != Some(id.as_str()) {
+            return;
+        }
         if self.graph_cache.contains_key(&id) || self.graph_loading.as_deref() == Some(id.as_str())
         {
             return;
@@ -548,12 +593,14 @@ impl IssueBrowserView {
         self.graph_cache.clear();
         self.graph_cache_order.clear();
         self.graph_loading = None;
+        self.pending_prefetch = None;
         self.graph_error = None;
     }
 
     fn invalidate_graph_cache_preserving_inflight(&mut self) {
         self.graph_cache.clear();
         self.graph_cache_order.clear();
+        self.pending_prefetch = None;
         if self.graph_loading.is_none() {
             self.graph_error = None;
         }
@@ -654,6 +701,7 @@ impl IssueBrowserView {
                     self.detail_mode = DetailMode::Graph;
                     self.graph_pane.reset();
                     self.graph_error = None;
+                    self.pending_prefetch = None;
                     if self.graph_cache.contains_key(id) {
                         self.graph_loading = None;
                         None
@@ -755,13 +803,13 @@ impl IssueBrowserView {
             KeyCode::Char('g') if key.modifiers.is_empty() => {
                 self.issues_panel.select_first(self.tracked_issues.len());
                 self.prefetch_selected_graph();
-                self.pending_action.take()
+                None
             }
             KeyCode::Char('G') if key.modifiers.is_empty() => {
                 let count = self.tracked_issues.len();
                 self.issues_panel.select_last(count);
                 self.prefetch_selected_graph();
-                self.pending_action.take()
+                None
             }
 
             // Enter — fetch detail for the selected row, or close if already
@@ -1243,7 +1291,7 @@ impl View for IssueBrowserView {
     }
 
     fn tick(&mut self) {
-        // No animation state yet
+        self.flush_due_prefetch();
     }
 }
 
@@ -1619,7 +1667,49 @@ mod tests {
     }
 
     #[test]
-    fn g_and_shift_g_return_prefetch_pending_action() {
+    fn rapid_navigation_prefetch_debounces_to_last_selected_issue() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.set_issues_for_test(vec![
+            issue("bd-1", "bug", Vec::new()),
+            issue("bd-2", "bug", Vec::new()),
+            issue("bd-3", "bug", Vec::new()),
+            issue("bd-4", "bug", Vec::new()),
+        ]);
+
+        view.handle_key(key(KeyCode::Char('j')), &ctx);
+        view.handle_key(key(KeyCode::Char('j')), &ctx);
+        view.handle_key(key(KeyCode::Char('j')), &ctx);
+
+        assert!(
+            view.take_pending_action().is_none(),
+            "navigation prefetch should not dispatch synchronously"
+        );
+
+        let (id, scheduled_at) = view
+            .pending_prefetch
+            .take()
+            .expect("rapid navigation should arm a pending prefetch");
+        view.pending_prefetch = Some((
+            id,
+            scheduled_at - std::time::Duration::from_millis(PREFETCH_DEBOUNCE_MS),
+        ));
+
+        view.flush_due_prefetch();
+
+        assert!(matches!(
+            view.take_pending_action(),
+            Some(Action::GetIssueGraph { ref id }) if id == "bd-4"
+        ));
+        assert!(
+            view.take_pending_action().is_none(),
+            "only the final stable selection should dispatch"
+        );
+    }
+
+    #[test]
+    fn g_and_shift_g_schedule_debounced_prefetch() {
         let lineage = ExecutorLineage::new();
         let ctx = ViewContext::test_ctx(&lineage);
         let mut view = IssueBrowserView::new();
@@ -1630,11 +1720,12 @@ mod tests {
 
         let first_action = view.handle_key(key(KeyCode::Char('g')), &ctx);
 
-        assert!(matches!(
-            first_action,
-            Some(Action::GetIssueGraph { ref id }) if id == "bd-1"
-        ));
+        assert!(first_action.is_none());
         assert!(view.pending_action.is_none());
+        assert!(matches!(
+            view.pending_prefetch,
+            Some((ref id, _)) if id == "bd-1"
+        ));
 
         let mut view = IssueBrowserView::new();
         view.set_issues_for_test(vec![
@@ -1644,11 +1735,12 @@ mod tests {
 
         let last_action = view.handle_key(key(KeyCode::Char('G')), &ctx);
 
-        assert!(matches!(
-            last_action,
-            Some(Action::GetIssueGraph { ref id }) if id == "bd-2"
-        ));
+        assert!(last_action.is_none());
         assert!(view.pending_action.is_none());
+        assert!(matches!(
+            view.pending_prefetch,
+            Some((ref id, _)) if id == "bd-2"
+        ));
     }
 
     #[test]

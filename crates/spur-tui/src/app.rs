@@ -4014,6 +4014,13 @@ impl App {
         &self.current_view
     }
 
+    #[cfg(any(test, debug_assertions))]
+    pub fn age_issue_browser_prefetch_for_test(&mut self, age: Duration) {
+        if let Some(view) = self.issue_browser.as_mut() {
+            view.age_pending_prefetch_for_test(age);
+        }
+    }
+
     /// Tick the active view (for animations, batched text flush, etc.).
     pub fn tick(&mut self) {
         let now = Instant::now();
@@ -4108,8 +4115,14 @@ impl App {
                 }
             }
             ViewId::IssueBrowser => {
-                if let Some(view) = self.issue_browser.as_mut() {
+                let pending = if let Some(view) = self.issue_browser.as_mut() {
                     view.tick();
+                    view.take_pending_action()
+                } else {
+                    None
+                };
+                if let Some(action) = pending {
+                    self.process_action(action);
                 }
             }
             ViewId::Insights => {}
