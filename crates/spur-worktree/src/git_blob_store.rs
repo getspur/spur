@@ -69,6 +69,30 @@ impl GitBlobOutcomeStore {
         Ok(())
     }
 
+    /// Accept either a 36-char UUID (legacy) or a 16-char `[0-9a-f]+` short
+    /// id (post-`bd-ttyo`). See `spur-mcp/src/plan/labels.rs::mint_delegation_id`
+    /// — the short form is derived from the high 64 bits of a v4 UUID to fit
+    /// the `br create --label` 50-char cap. Both forms are safe against
+    /// directory-traversal and shell-meta injection.
+    fn validate_id(value: &str, field: &str) -> Result<(), StoreError> {
+        match value.len() {
+            16 => {
+                for (i, c) in value.chars().enumerate() {
+                    if !c.is_ascii_hexdigit() {
+                        return Err(StoreError::Backend(format!(
+                            "non-id {field}: bad char at position {i}"
+                        )));
+                    }
+                }
+                Ok(())
+            }
+            36 => Self::validate_uuid(value, field),
+            n => Err(StoreError::Backend(format!(
+                "non-id {field}: wrong length ({n}); expected 16 (short hex) or 36 (UUID)"
+            ))),
+        }
+    }
+
     fn brain_session_str(session: &BrainSessionId) -> &str {
         session.as_session_id().0.as_str()
     }
@@ -206,7 +230,7 @@ impl OutcomeStore for GitBlobOutcomeStore {
             Self::brain_session_str(&key.brain_session_id),
             "brain_session_id",
         )?;
-        Self::validate_uuid(key.delegation_id.as_str(), "delegation_id")?;
+        Self::validate_id(key.delegation_id.as_str(), "delegation_id")?;
 
         let new_sha = sha256_hex(content);
         if new_sha != metadata.sha256 {
@@ -301,7 +325,7 @@ impl OutcomeStore for GitBlobOutcomeStore {
             Self::brain_session_str(&key.brain_session_id),
             "brain_session_id",
         )?;
-        Self::validate_uuid(key.delegation_id.as_str(), "delegation_id")?;
+        Self::validate_id(key.delegation_id.as_str(), "delegation_id")?;
         let meta = match self.read_meta(key).await? {
             Some(m) => m,
             None => return Err(StoreError::NotFound(key.clone())),
