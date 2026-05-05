@@ -1,6 +1,7 @@
 pub mod adapter;
 pub mod advanced;
 pub mod beads;
+pub mod beads_crate;
 pub mod bv;
 pub mod github;
 pub mod graph;
