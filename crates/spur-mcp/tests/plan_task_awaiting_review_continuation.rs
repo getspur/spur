@@ -135,7 +135,7 @@ async fn run_plan_pushes_continuation_and_event_for_awaiting_review_task() {
     let sink_ref: Arc<dyn McpEventSink> = Arc::clone(&sink) as Arc<dyn McpEventSink>;
     let session = BrainSessionId::new(SessionId("brain-plan-review".into()));
     let (server, mut channel) = McpCallbackServer::new(
-        &session,
+        Some(&session),
         Some(pm),
         Some(sink_ref),
         continuation_ctx,

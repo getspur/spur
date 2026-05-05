@@ -2512,7 +2512,7 @@ async fn execute_epic_persists_execution_scope_labels_on_epic_and_tasks() {
     let pm = Arc::new(pm);
     let brain_sid = BrainSessionId::new(SessionId::new());
     let (mut server, _channel) = McpCallbackServer::new(
-        &brain_sid,
+        Some(&brain_sid),
         Some(Arc::clone(&pm)),
         None,
         test_continuation_ctx(),
@@ -2630,7 +2630,7 @@ async fn execute_epic_reprojects_persisted_non_terminal_state_before_starting_fr
     let pm = Arc::new(pm);
     let brain_sid = BrainSessionId::new(SessionId::new());
     let (mut server, _channel) = McpCallbackServer::new(
-        &brain_sid,
+        Some(&brain_sid),
         Some(Arc::clone(&pm)),
         None,
         test_continuation_ctx(),
@@ -2747,7 +2747,7 @@ async fn execute_epic_preserves_pre_existing_agent_label_on_child_task() {
     let pm = Arc::new(pm);
     let brain_sid = BrainSessionId::new(SessionId::new());
     let (mut server, _channel) = McpCallbackServer::new(
-        &brain_sid,
+        Some(&brain_sid),
         Some(Arc::clone(&pm)),
         None,
         test_continuation_ctx(),
@@ -2820,7 +2820,7 @@ async fn execute_epic_rolls_back_epic_scope_when_task_scope_persist_fails() {
     let pm = Arc::new(pm);
     let brain_sid = BrainSessionId::new(SessionId::new());
     let (mut server, _channel) = McpCallbackServer::new(
-        &brain_sid,
+        Some(&brain_sid),
         Some(Arc::clone(&pm)),
         None,
         test_continuation_ctx(),
@@ -2883,7 +2883,7 @@ async fn submit_plan_default_notify_path_dispatches_ready_task() {
     let pm = Arc::new(pm);
     let brain_sid = BrainSessionId::new(SessionId("brain".into()));
     let (mut server, mut channel) = McpCallbackServer::new(
-        &brain_sid,
+        Some(&brain_sid),
         Some(Arc::clone(&pm)),
         None,
         test_continuation_ctx(),
@@ -2988,7 +2988,7 @@ async fn execute_epic_default_notify_path_dispatches_ready_task() {
     let pm = Arc::new(pm);
     let brain_sid = BrainSessionId::new(SessionId("brain".into()));
     let (mut server, mut channel) = McpCallbackServer::new(
-        &brain_sid,
+        Some(&brain_sid),
         Some(Arc::clone(&pm)),
         None,
         test_continuation_ctx(),
@@ -3073,7 +3073,7 @@ async fn execute_epic_shutdown_abort_does_not_emit_plan_snapshot() {
     let sink_ref: Arc<dyn McpEventSink> = Arc::clone(&sink) as Arc<dyn McpEventSink>;
     let brain_sid = BrainSessionId::new(SessionId("brain".into()));
     let (mut server, _channel) = McpCallbackServer::new(
-        &brain_sid,
+        Some(&brain_sid),
         Some(Arc::clone(&pm)),
         Some(sink_ref),
         test_continuation_ctx(),

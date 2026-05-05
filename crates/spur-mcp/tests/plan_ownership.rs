@@ -118,7 +118,7 @@ async fn resume_plan_claims_unowned_plan() {
 
     let session_id = BrainSessionId::new(SessionId("brain-current".into()));
     let (server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),
@@ -180,7 +180,7 @@ async fn resume_plan_refuses_plan_owned_by_other_brain() {
 
     let session_id = BrainSessionId::new(SessionId("brain-current".into()));
     let (server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),
@@ -232,7 +232,7 @@ async fn resume_plan_rejects_duplicate_plan_epics() {
 
     let session_id = BrainSessionId::new(SessionId("brain-current".into()));
     let (server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),
@@ -289,7 +289,7 @@ async fn resume_plan_refuses_mixed_current_and_other_owner_labels() {
     .expect("add mixed owner labels");
 
     let (server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),
@@ -340,7 +340,7 @@ async fn merge_plan_refuses_plan_owned_by_other_brain() {
 
     let session_id = BrainSessionId::new(SessionId("brain-current".into()));
     let (server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),
@@ -383,7 +383,7 @@ async fn merge_plan_refuses_unowned_plan() {
 
     let session_id = BrainSessionId::new(SessionId("brain-current".into()));
     let (server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),
@@ -435,7 +435,7 @@ async fn review_task_refuses_plan_owned_by_other_brain() {
 
     let session_id = BrainSessionId::new(SessionId("brain-current".into()));
     let (server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),
@@ -485,7 +485,7 @@ async fn review_task_refuses_unowned_plan() {
 
     let session_id = BrainSessionId::new(SessionId("brain-current".into()));
     let (server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),
@@ -551,7 +551,7 @@ async fn execute_epic_emits_plan_ownership_acquired_when_claiming_unowned_epic()
 
     let session_id = BrainSessionId::new(SessionId("brain-current".into()));
     let (mut server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),
@@ -637,7 +637,7 @@ async fn execute_epic_emits_plan_ownership_acquired_when_re_issued_by_current_br
     .expect("seed current-brain owner label");
 
     let (mut server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),
@@ -731,7 +731,7 @@ async fn execute_epic_refuses_plan_owned_by_other_brain() {
 
     let session_id = BrainSessionId::new(SessionId("brain-current".into()));
     let (mut server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),
@@ -801,7 +801,7 @@ async fn execute_epic_refuses_plan_with_ambiguous_owners() {
 
     let session_id = BrainSessionId::new(SessionId("brain-current".into()));
     let (mut server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),
@@ -859,7 +859,7 @@ async fn execute_epic_allows_unowned_plan() {
 
     let session_id = BrainSessionId::new(SessionId("brain-current".into()));
     let (mut server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),
@@ -916,7 +916,7 @@ async fn execute_epic_allows_re_issue_by_current_brain() {
     .expect("seed current-brain owner label");
 
     let (mut server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),
@@ -977,7 +977,7 @@ async fn force_reclaim_plan_refuses_without_confirm() {
 
     let session_id = BrainSessionId::new(SessionId("brain-current".into()));
     let (server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),
@@ -1073,7 +1073,7 @@ async fn force_reclaim_plan_takes_over_from_other_brain() {
 
     let session_id = BrainSessionId::new(SessionId("brain-current".into()));
     let (server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),
@@ -1191,7 +1191,7 @@ async fn force_reclaim_plan_handles_unowned_plan() {
 
     let session_id = BrainSessionId::new(SessionId("brain-current".into()));
     let (server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),
@@ -1402,7 +1402,7 @@ async fn resume_plan_rejects_unowned_plan_when_current_brain_already_owns_active
     .expect("build target epic subgraph");
 
     let (server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),
@@ -1442,7 +1442,7 @@ async fn execute_epic_rejects_new_epic_when_current_brain_already_owns_active_pl
     let target_epic_id = create_executable_epic(dir.path(), "Execute Different Epic");
 
     let (mut server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),
@@ -1497,7 +1497,7 @@ async fn terminal_owned_plan_does_not_block_resume_plan_claim() {
     .expect("build target epic subgraph");
 
     let (server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),
@@ -1540,7 +1540,7 @@ async fn terminal_owned_plan_does_not_block_execute_epic() {
     let target_epic_id = create_executable_epic(dir.path(), "Execute After Terminal");
 
     let (mut server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),
@@ -1597,7 +1597,7 @@ async fn concurrent_resume_plan_claims_only_one_active_plan_for_current_brain() 
 
     let session_id = BrainSessionId::new(SessionId("brain-current".into()));
     let (server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),
@@ -1656,7 +1656,7 @@ async fn concurrent_execute_epic_starts_only_one_active_plan_for_current_brain()
 
     let session_id = BrainSessionId::new(SessionId("brain-current".into()));
     let (mut server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),
