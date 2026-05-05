@@ -2659,22 +2659,24 @@ mod tests {
             .output()
             .expect("label epic integration-pending");
 
-        // Make the beads database read-only so that add_comment (and therefore
-        // emit_epic_completion_audit) fails, while list_issues/list_comments
-        // continue to work because SQLite opens read-only for queries.
-        let db_path = repo.join(".beads").join("beads.db");
-        let mut perms = std::fs::metadata(&db_path)
-            .expect("db metadata")
-            .permissions();
-        perms.set_readonly(true);
-        std::fs::set_permissions(&db_path, perms).expect("set readonly");
-
         let pm = Arc::new(
             spur_pm::PmService::try_new(None, true, false, repo, None)
                 .await
                 .expect("PmService::try_new failed")
                 .expect("expected beads pm"),
         );
+
+        // Make the beads database read-only so that add_comment (and therefore
+        // emit_epic_completion_audit) fails. Some br versions refuse even read
+        // commands against this fixture; that is still acceptable for this
+        // regression because automation must not run when the durable audit
+        // cannot be established.
+        let db_path = repo.join(".beads").join("beads.db");
+        let mut perms = std::fs::metadata(&db_path)
+            .expect("db metadata")
+            .permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&db_path, perms).expect("set readonly");
 
         let actions = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let automation = Arc::new(MockAutomation {
@@ -2692,7 +2694,14 @@ mod tests {
         reconciler.set_auto_merge_approved_plans(true);
         reconciler.set_automation(automation);
 
-        reconciler.tick_once().await.unwrap();
+        match reconciler.tick_once().await {
+            Ok(_) => {}
+            Err(error)
+                if error.to_string().contains("Permission denied")
+                    || error.to_string().contains("readonly")
+                    || error.to_string().contains("read-only") => {}
+            Err(error) => panic!("unexpected tick_once error: {error:#}"),
+        }
 
         let recorded = actions.lock().await;
         assert!(

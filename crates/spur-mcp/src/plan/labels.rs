@@ -121,7 +121,7 @@ pub fn mint_delegation_id() -> String {
 /// for any single project's brain-session lifetime.
 pub fn derive_brain_session_id(acp_session_id: &spur_acp::SessionId) -> spur_acp::BrainSessionId {
     let mut hasher = Sha256::new();
-    hasher.update(acp_session_id.0.as_bytes());
+    hasher.update(acp_session_id.0.to_ascii_lowercase().as_bytes());
     let digest = hasher.finalize();
     // Take first 8 bytes (64 bits) -> 16 lowercase hex chars.
     let derived = digest
@@ -610,6 +610,17 @@ mod tests {
         let b = derive_brain_session_id(&acp);
         assert_eq!(a.as_session_id().0, b.as_session_id().0);
         assert_eq!(a.as_session_id().0.len(), 16);
+
+        let upper = spur_acp::SessionId("550E8400-E29B-41D4-A716-446655440000".to_string());
+        let mixed = spur_acp::SessionId("550e8400-E29B-41d4-A716-446655440000".to_string());
+        assert_eq!(
+            a.as_session_id().0,
+            derive_brain_session_id(&upper).as_session_id().0
+        );
+        assert_eq!(
+            a.as_session_id().0,
+            derive_brain_session_id(&mixed).as_session_id().0
+        );
     }
 
     #[test]

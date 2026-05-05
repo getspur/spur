@@ -182,7 +182,7 @@ async fn test_no_double_delivery_on_block_timeout() {
 
     let brain_sid = BrainSessionId::new(SessionId::new());
     let (mut server, mut channel) = McpCallbackServer::new(
-        &brain_sid,
+        Some(&brain_sid),
         None,
         None,
         ctx,
@@ -313,7 +313,7 @@ async fn test_no_double_delivery_on_fast_path() {
 
     let brain_sid = BrainSessionId::new(SessionId::new());
     let (mut server, mut channel) = McpCallbackServer::new(
-        &brain_sid,
+        Some(&brain_sid),
         None,
         None,
         ctx,

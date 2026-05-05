@@ -221,7 +221,7 @@ async fn test_cancel_during_inline_window_fast_arm_wins() {
 
     let brain_sid = BrainSessionId::new(SessionId::new());
     let (mut server, mut channel) = McpCallbackServer::new(
-        &brain_sid,
+        Some(&brain_sid),
         None,
         None,
         ctx,
@@ -372,7 +372,7 @@ async fn test_cancel_during_detached_path_continuation_delivers_cancelled() {
 
     let brain_sid = BrainSessionId::new(SessionId::new());
     let (mut server, mut channel) = McpCallbackServer::new(
-        &brain_sid,
+        Some(&brain_sid),
         None,
         None,
         ctx,
