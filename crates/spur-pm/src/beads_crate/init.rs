@@ -24,20 +24,23 @@ pub fn detect_local_fs(beads_dir: &Path) -> Result<(), InitError> {
     {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
-        let path = match CString::new(beads_dir.as_os_str().as_bytes()) {
-            Ok(p) => p,
-            Err(_) => return Ok(()), // path can't be C-stringified — best-effort allow
+        let Ok(path) = CString::new(beads_dir.as_os_str().as_bytes()) else {
+            return Ok(()); // path can't be C-stringified — best-effort allow
         };
         let mut buf: libc::statfs = unsafe { std::mem::zeroed() };
         let rc = unsafe { libc::statfs(path.as_ptr(), &mut buf) };
         if rc != 0 {
             return Ok(());
         } // can't determine; allow
-          // Magic numbers from <linux/magic.h>
+          // Magic numbers from <linux/magic.h>; kernel stores them as __u32.
+          // On 32-bit Linux, libc::statfs.f_type is i32, and `i32 as u64` SIGN-extends
+          // (Rust language reference, Numeric Cast). The CIFS magic 0xFF534D42 has
+          // the high bit set, so a direct `as u64` would yield 0xFFFFFFFF_FF534D42
+          // and never match the constant. Cast through u32 first to zero-extend.
         const NFS_SUPER_MAGIC: u64 = 0x6969;
         const SMB_SUPER_MAGIC: u64 = 0x517B;
         const CIFS_MAGIC_NUMBER: u64 = 0xFF534D42;
-        let ty = buf.f_type as u64;
+        let ty = buf.f_type as u32 as u64;
         if ty == NFS_SUPER_MAGIC || ty == SMB_SUPER_MAGIC || ty == CIFS_MAGIC_NUMBER {
             return Err(InitError::NonLocalFilesystem {
                 path: beads_dir.display().to_string(),
@@ -49,9 +52,8 @@ pub fn detect_local_fs(beads_dir: &Path) -> Result<(), InitError> {
     {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
-        let path = match CString::new(beads_dir.as_os_str().as_bytes()) {
-            Ok(p) => p,
-            Err(_) => return Ok(()), // path can't be C-stringified — best-effort allow
+        let Ok(path) = CString::new(beads_dir.as_os_str().as_bytes()) else {
+            return Ok(()); // path can't be C-stringified — best-effort allow
         };
         let mut buf: libc::statfs = unsafe { std::mem::zeroed() };
         let rc = unsafe { libc::statfs(path.as_ptr(), &mut buf) };
@@ -85,7 +87,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn nul_byte_in_path_does_not_panic() {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
@@ -94,6 +96,23 @@ mod tests {
         let bad = PathBuf::from(OsString::from_vec(vec![b'a', 0, b'b']));
         // Best-effort: must not panic. Result is `Ok(())` because we can't determine FS.
         assert!(detect_local_fs(&bad).is_ok());
+    }
+
+    /// On 32-bit Linux, `libc::statfs.f_type` is `i32`. The CIFS magic
+    /// `0xFF534D42` has the high bit set, so its `i32` representation is
+    /// negative. Per the Rust reference, `i32 as u64` SIGN-extends — a direct
+    /// cast yields `0xFFFFFFFF_FF534D42` and never matches the magic constant.
+    /// Casting through `u32` first zero-extends. This test locks the cast
+    /// contract regardless of build target.
+    #[test]
+    fn cifs_magic_does_not_sign_extend_through_i32() {
+        let signed: i32 = 0xFF534D42_u32 as i32;
+        assert!(signed.is_negative());
+        let direct: u64 = signed as u64;
+        let via_u32: u64 = signed as u32 as u64;
+        assert_eq!(direct, 0xFFFFFFFF_FF534D42_u64);
+        assert_eq!(via_u32, 0xFF534D42_u64);
+        assert_ne!(direct, via_u32);
     }
 }
 
@@ -150,10 +169,8 @@ pub(crate) fn sweep_stale_jsonl_temps(beads_dir: &Path, min_age: Duration) -> st
         };
         if let Ok(modified) = meta.modified() {
             if let Ok(age) = now.duration_since(modified) {
-                if age >= min_age {
-                    if std::fs::remove_file(entry.path()).is_ok() {
-                        removed += 1;
-                    }
+                if age >= min_age && std::fs::remove_file(entry.path()).is_ok() {
+                    removed += 1;
                 }
             }
         }
