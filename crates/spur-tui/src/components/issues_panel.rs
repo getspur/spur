@@ -1,5 +1,3 @@
-use std::collections::{HashMap, HashSet};
-
 use ratatui::{
     layout::{Constraint, Rect},
     style::{Color, Modifier, Style, Stylize},
@@ -7,42 +5,14 @@ use ratatui::{
     Frame,
 };
 
-use spur_acp::{GraphEdgeEvent, GraphNodeEvent};
 use spur_pm::IssueSummary;
-
-use crate::components::issue_utils::{
-    descendant_depth, find_plan_id_label, has_label, has_plan_task_label, insert_parent_id,
-    status_icon,
-};
-
-pub struct IssueLineageContext<'a> {
-    pub root_id: &'a str,
-    pub nodes: &'a [GraphNodeEvent],
-    pub edges: &'a [GraphEdgeEvent],
-}
-
-pub enum IssueLineageView<'a> {
-    Loaded(IssueLineageContext<'a>),
-    Cached {
-        root_id: String,
-        nodes: &'a [GraphNodeEvent],
-        edges: &'a [GraphEdgeEvent],
-    },
-    Loading {
-        root_id: String,
-        nodes: &'a [GraphNodeEvent],
-        edges: &'a [GraphEdgeEvent],
-    },
-}
 
 pub struct IssuesPanel {
     // Selection state invariant:
-    // - table_state stores the source index into the `issues` slice.
-    // - lineage_table_state stores the visual index for lineage rendering only.
-    // - selected_id always reads table_state; never treat lineage_table_state as
-    //   a source index.
+    // - `table_state` stores the source index into the `issues` slice.
+    // - `selected_id` always reads `table_state`; never treat any other field
+    //   as a source index.
     table_state: TableState,
-    lineage_table_state: TableState,
     focused: bool,
     display_order: Vec<usize>,
 }
@@ -53,7 +23,6 @@ impl IssuesPanel {
     pub fn new() -> Self {
         Self {
             table_state: TableState::default(),
-            lineage_table_state: TableState::default(),
             focused: false,
             display_order: Vec::new(),
         }
@@ -167,63 +136,8 @@ impl IssuesPanel {
     }
 
     pub fn render(&mut self, issues: &[IssueSummary], frame: &mut Frame, area: Rect) {
-        self.render_with_lineage(issues, None, frame, area);
-    }
-
-    pub fn render_with_lineage(
-        &mut self,
-        issues: &[IssueSummary],
-        lineage: Option<IssueLineageView<'_>>,
-        frame: &mut Frame,
-        area: Rect,
-    ) {
         if issues.is_empty() {
             return;
-        }
-
-        // A lineage view needs a real subgraph (root + at least one related
-        // node) to be meaningful. With <=1 node, `LineageMeta` would assign
-        // rank `(0, 0)` to a synthetic root and rank `(5, 0)` to every other
-        // tracked issue, teleporting the selection to `display_order[0]` on
-        // every render — `j` then bounces between two ids forever. Fall
-        // through to the flat layout when the subgraph isn't substantial.
-        if let Some(lineage) = lineage {
-            match lineage {
-                IssueLineageView::Loaded(lineage) if lineage.nodes.len() > 1 => {
-                    let meta = LineageMeta::new(lineage);
-                    let readiness = meta.readiness();
-                    self.render_lineage(issues, meta, readiness, frame, area);
-                    return;
-                }
-                IssueLineageView::Cached {
-                    root_id,
-                    nodes,
-                    edges,
-                } if nodes.len() > 1 => {
-                    let meta = LineageMeta::new(IssueLineageContext {
-                        root_id: root_id.as_str(),
-                        nodes,
-                        edges,
-                    });
-                    let readiness = meta.readiness();
-                    self.render_lineage(issues, meta, readiness, frame, area);
-                    return;
-                }
-                IssueLineageView::Loading {
-                    root_id,
-                    nodes,
-                    edges,
-                } if nodes.len() > 1 => {
-                    let meta = LineageMeta::new(IssueLineageContext {
-                        root_id: root_id.as_str(),
-                        nodes,
-                        edges,
-                    });
-                    self.render_lineage(issues, meta, "loading work tree".into(), frame, area);
-                    return;
-                }
-                _ => {}
-            }
         }
 
         let header = Row::new(["ID", "P", "Type", "Status", "Assignee", "Title"])
@@ -301,100 +215,6 @@ impl IssuesPanel {
         frame.render_stateful_widget(table, area, &mut self.table_state);
     }
 
-    fn render_lineage(
-        &mut self,
-        issues: &[IssueSummary],
-        meta: LineageMeta<'_>,
-        readiness: String,
-        frame: &mut Frame,
-        area: Rect,
-    ) {
-        let selected_idx = self.table_state.selected().unwrap_or(0);
-        let total = issues.len();
-        let (border_style, title) = if self.focused {
-            (
-                Style::default().fg(Color::Cyan),
-                format!(
-                    " Work Item Lineage {}/{} · {} — [j/k] select · [Enter] detail · [v] graph · [e] exec · [?] help ",
-                    selected_idx + 1,
-                    total,
-                    readiness
-                ),
-            )
-        } else {
-            (
-                Style::default(),
-                format!(
-                    " Work Item Lineage {}/{} · {} ",
-                    selected_idx + 1,
-                    total,
-                    readiness
-                ),
-            )
-        };
-
-        let header = Row::new(["Lineage", "P", "Type", "Status", "Assignee", "Title"])
-            .style(Style::default().bold());
-        let ordered_issues = meta.ordered_issues(issues);
-        self.display_order = ordered_issues.iter().map(|(idx, _)| *idx).collect();
-        let display_selected_idx = ordered_issues
-            .iter()
-            .position(|(issue_idx, _)| *issue_idx == selected_idx)
-            .unwrap_or_else(|| selected_idx.min(ordered_issues.len().saturating_sub(1)));
-
-        let rows: Vec<Row> = ordered_issues
-            .iter()
-            .map(|(_, issue)| {
-                let priority_cell = match issue.priority {
-                    Some(0) => Cell::from("P0").fg(Color::Red),
-                    Some(1) => Cell::from("P1").fg(Color::Yellow),
-                    Some(2) => Cell::from("P2").fg(Color::White),
-                    Some(3) => Cell::from("P3").fg(Color::DarkGray),
-                    Some(4) => Cell::from("P4").fg(Color::DarkGray),
-                    _ => Cell::from("--").fg(Color::DarkGray),
-                };
-
-                let status_cell = match issue.status.as_str() {
-                    "open" => Cell::from("open").fg(Color::Green),
-                    "in_progress" => Cell::from("wip").fg(Color::Cyan),
-                    "blocked" => Cell::from("blk").fg(Color::Red),
-                    "closed" => Cell::from("done").fg(Color::DarkGray),
-                    other => Cell::from(other.to_string()).fg(Color::White),
-                };
-
-                Row::new([
-                    Cell::from(meta.issue_label(issue)),
-                    priority_cell,
-                    Cell::from(issue.issue_type.as_deref().unwrap_or("--")),
-                    status_cell,
-                    Cell::from(issue.assignee.as_deref().unwrap_or("--")),
-                    Cell::from(issue.title.as_str()),
-                ])
-            })
-            .collect();
-
-        let widths = [
-            Constraint::Length(20),
-            Constraint::Length(2),
-            Constraint::Length(7),
-            Constraint::Length(4),
-            Constraint::Length(8),
-            Constraint::Min(20),
-        ];
-        let table = Table::new(rows, widths)
-            .header(header)
-            .block(Block::bordered().title(title).border_style(border_style))
-            .row_highlight_style(
-                Style::default()
-                    .fg(Color::White)
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD),
-            );
-
-        self.lineage_table_state.select(Some(display_selected_idx));
-        frame.render_stateful_widget(table, area, &mut self.lineage_table_state);
-    }
-
     pub fn computed_height(issue_count: usize, available_height: u16) -> u16 {
         let max_panel = (available_height / 4).max(3);
         issue_count.saturating_add(3).min(usize::from(max_panel)) as u16
@@ -407,279 +227,10 @@ impl Default for IssuesPanel {
     }
 }
 
-struct LineageMeta<'a> {
-    root_id: &'a str,
-    blockers_by_id: HashMap<&'a str, Vec<&'a str>>,
-    blocks_by_id: HashMap<&'a str, Vec<&'a str>>,
-    children_by_parent_id: HashMap<&'a str, Vec<&'a str>>,
-    node_by_id: HashMap<&'a str, &'a GraphNodeEvent>,
-    open_blockers: usize,
-}
-
-impl<'a> LineageMeta<'a> {
-    fn new(lineage: IssueLineageContext<'a>) -> Self {
-        let node_by_id: HashMap<&str, &GraphNodeEvent> = lineage
-            .nodes
-            .iter()
-            .map(|node| (node.id.as_str(), node))
-            .collect();
-        let mut blockers_by_id: HashMap<&str, Vec<&str>> = HashMap::new();
-        let mut blocks_by_id: HashMap<&str, Vec<&str>> = HashMap::new();
-        let mut parent_by_child_id: HashMap<&str, &str> = HashMap::new();
-        let mut children_by_parent_id: HashMap<&str, Vec<&str>> = HashMap::new();
-        for edge in lineage.edges {
-            match edge.edge_type.as_deref() {
-                Some("blocks") | None => {
-                    blocks_by_id
-                        .entry(edge.from.as_str())
-                        .or_default()
-                        .push(edge.to.as_str());
-                    blockers_by_id
-                        .entry(edge.to.as_str())
-                        .or_default()
-                        .push(edge.from.as_str());
-                }
-                Some("parent-child") => {
-                    insert_parent_id(
-                        &mut parent_by_child_id,
-                        edge.from.as_str(),
-                        edge.to.as_str(),
-                    );
-                    children_by_parent_id
-                        .entry(edge.to.as_str())
-                        .or_default()
-                        .push(edge.from.as_str());
-                }
-                Some("related") if is_structural_related_edge(edge, &node_by_id) => {
-                    insert_parent_id(
-                        &mut parent_by_child_id,
-                        edge.from.as_str(),
-                        edge.to.as_str(),
-                    );
-                    children_by_parent_id
-                        .entry(edge.to.as_str())
-                        .or_default()
-                        .push(edge.from.as_str());
-                }
-                Some(_) => {}
-            }
-        }
-        let root_id = resolve_lineage_root(lineage.root_id, &parent_by_child_id, &node_by_id);
-        let open_blockers = blockers_by_id
-            .get(root_id)
-            .into_iter()
-            .flatten()
-            .filter(|id| !is_closed(node_by_id.get(**id).copied()))
-            .count();
-
-        Self {
-            root_id,
-            blockers_by_id,
-            blocks_by_id,
-            children_by_parent_id,
-            node_by_id,
-            open_blockers,
-        }
-    }
-
-    fn readiness(&self) -> String {
-        if self.open_blockers > 0 {
-            format!("blocked by open upstream ({})", self.open_blockers)
-        } else {
-            "ready".into()
-        }
-    }
-
-    fn issue_label(&self, issue: &IssueSummary) -> String {
-        let icon = status_icon(issue.status.as_str());
-        if issue.id == self.root_id {
-            if self.open_blockers > 0 {
-                return format!("> {icon}! {}", issue.id);
-            }
-            return format!("> {icon} {}", issue.id);
-        }
-
-        if let Some(depth) = descendant_depth(self.root_id, issue.id.as_str()) {
-            return format!("{} {icon} {}", lineage_prefix(depth), issue.id);
-        }
-
-        if self
-            .children_by_parent_id
-            .get(self.root_id)
-            .is_some_and(|ids| ids.iter().any(|id| *id == issue.id))
-        {
-            return format!("├─ {icon} {}", issue.id);
-        }
-
-        if self
-            .blockers_by_id
-            .get(self.root_id)
-            .is_some_and(|ids| ids.iter().any(|id| *id == issue.id))
-        {
-            return format!("├─ {icon} {}", issue.id);
-        }
-
-        if self
-            .blocks_by_id
-            .get(self.root_id)
-            .is_some_and(|ids| ids.iter().any(|id| *id == issue.id))
-        {
-            return format!("└─ {icon} {}", issue.id);
-        }
-
-        format!("  {icon} {}", issue.id)
-    }
-
-    fn ordered_issues<'b>(&self, issues: &'b [IssueSummary]) -> Vec<(usize, &'b IssueSummary)> {
-        let mut ordered: Vec<(usize, &IssueSummary)> = issues.iter().enumerate().collect();
-        ordered.sort_by(|(left_idx, left), (right_idx, right)| {
-            self.issue_display_rank(left)
-                .cmp(&self.issue_display_rank(right))
-                .then_with(|| left_idx.cmp(right_idx))
-        });
-        ordered
-    }
-
-    fn issue_display_rank(&self, issue: &IssueSummary) -> (usize, usize) {
-        if issue.id == self.root_id {
-            return (0, 0);
-        }
-
-        if let Some(depth) = self.family_depth(issue.id.as_str()) {
-            return (1, depth);
-        }
-
-        if self
-            .children_by_parent_id
-            .get(self.root_id)
-            .is_some_and(|ids| ids.iter().any(|id| *id == issue.id))
-        {
-            return (1, 1);
-        }
-
-        if self
-            .blockers_by_id
-            .get(self.root_id)
-            .is_some_and(|ids| ids.iter().any(|id| *id == issue.id))
-        {
-            return (2, 0);
-        }
-
-        if self
-            .blocks_by_id
-            .get(self.root_id)
-            .is_some_and(|ids| ids.iter().any(|id| *id == issue.id))
-        {
-            return (3, 0);
-        }
-
-        if self.node_by_id.contains_key(issue.id.as_str()) {
-            return (4, 0);
-        }
-
-        (5, 0)
-    }
-
-    fn family_depth(&self, issue_id: &str) -> Option<usize> {
-        if let Some(depth) = descendant_depth(self.root_id, issue_id) {
-            return Some(depth);
-        }
-
-        let family_root = issue_family_root(self.root_id);
-        if family_root == self.root_id {
-            return None;
-        }
-        descendant_depth(family_root, issue_id)
-    }
-}
-
-fn resolve_lineage_root<'a>(
-    requested_root_id: &'a str,
-    parent_by_child_id: &HashMap<&'a str, &'a str>,
-    node_by_id: &HashMap<&'a str, &'a GraphNodeEvent>,
-) -> &'a str {
-    shortest_prefix_ancestor(requested_root_id, node_by_id.values().copied())
-        .unwrap_or_else(|| walk_parent_chain(requested_root_id, parent_by_child_id))
-}
-
-fn walk_parent_chain<'a>(
-    start_id: &'a str,
-    parent_by_child_id: &HashMap<&'a str, &'a str>,
-) -> &'a str {
-    let mut current_id = start_id;
-    let mut seen = HashSet::new();
-    while let Some(parent_id) = parent_by_child_id.get(current_id).copied() {
-        if !seen.insert(current_id) || seen.contains(parent_id) {
-            break;
-        }
-        current_id = parent_id;
-    }
-    current_id
-}
-
-fn shortest_prefix_ancestor<'a>(
-    id: &str,
-    candidates: impl IntoIterator<Item = &'a GraphNodeEvent>,
-) -> Option<&'a str> {
-    candidates
-        .into_iter()
-        .filter(|candidate| {
-            is_plan_root_node(candidate) && descendant_depth(candidate.id.as_str(), id).is_some()
-        })
-        .min_by_key(|candidate| candidate.id.len())
-        .map(|candidate| candidate.id.as_str())
-}
-
-fn is_structural_related_edge(
-    edge: &GraphEdgeEvent,
-    node_by_id: &HashMap<&str, &GraphNodeEvent>,
-) -> bool {
-    descendant_depth(edge.to.as_str(), edge.from.as_str()).is_some()
-        || is_plan_membership_edge(edge, node_by_id)
-}
-
-fn is_plan_membership_edge(
-    edge: &GraphEdgeEvent,
-    node_by_id: &HashMap<&str, &GraphNodeEvent>,
-) -> bool {
-    let Some(child) = node_by_id.get(edge.from.as_str()) else {
-        return false;
-    };
-    let Some(parent) = node_by_id.get(edge.to.as_str()) else {
-        return false;
-    };
-    let Some(child_plan_id) = find_plan_id_label(&child.labels) else {
-        return false;
-    };
-    find_plan_id_label(&parent.labels) == Some(child_plan_id)
-        && has_plan_task_label(&child.labels)
-        && is_plan_root_node(parent)
-}
-
-fn is_plan_root_node(node: &GraphNodeEvent) -> bool {
-    has_label(&node.labels, "spur:plan-complete")
-        || (find_plan_id_label(&node.labels).is_some() && !has_plan_task_label(&node.labels))
-}
-
-fn issue_family_root(id: &str) -> &str {
-    id.rsplit_once('.').map(|(root, _)| root).unwrap_or(id)
-}
-
-fn lineage_prefix(depth: usize) -> String {
-    if depth <= 1 {
-        return "├─".into();
-    }
-    format!("{}├─", "│ ".repeat(depth.saturating_sub(1)))
-}
-
-fn is_closed(node: Option<&GraphNodeEvent>) -> bool {
-    node.and_then(|node| node.status.as_deref()) == Some("closed")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::{backend::TestBackend, buffer::Buffer, style::Color, Terminal};
+    use ratatui::{backend::TestBackend, style::Color, Terminal};
     use spur_pm::PmSource;
 
     fn issue(id: &str) -> IssueSummary {
@@ -724,184 +275,33 @@ mod tests {
         None
     }
 
-    fn graph_node(id: &str, status: &str) -> GraphNodeEvent {
-        GraphNodeEvent {
-            id: id.into(),
-            title: Some(id.into()),
-            status: Some(status.into()),
-            priority: None,
-            labels: Vec::new(),
-            pagerank: None,
-        }
-    }
-
-    fn graph_edge(from: &str, to: &str) -> GraphEdgeEvent {
-        GraphEdgeEvent {
-            from: from.into(),
-            to: to.into(),
-            edge_type: Some("blocks".into()),
-        }
-    }
-
-    fn render_buffer_text(buf: &Buffer) -> String {
-        let mut out = String::new();
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                out.push_str(buf[(x, y)].symbol());
-            }
-            out.push('\n');
-        }
-        out
-    }
-
-    fn row_text(buf: &Buffer, y: u16) -> String {
-        (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
-    }
-
-    fn cell_text(buf: &Buffer, y: u16, x: u16, width: u16) -> String {
-        (x..x + width).map(|x| buf[(x, y)].symbol()).collect()
-    }
-
     #[test]
-    fn issue_label_preserves_root_status_icon_with_blocker_alarm() {
-        let mut root = issue("bd-root");
-        root.status = "closed".into();
-
-        let nodes = vec![
-            graph_node("bd-root", "closed"),
-            graph_node("bd-blocker-a", "open"),
-            graph_node("bd-blocker-b", "open"),
-        ];
-        let edges = vec![
-            graph_edge("bd-blocker-a", "bd-root"),
-            graph_edge("bd-blocker-b", "bd-root"),
-        ];
-        let blocked_meta = LineageMeta::new(IssueLineageContext {
-            root_id: "bd-root",
-            nodes: &nodes,
-            edges: &edges,
-        });
-
-        assert_eq!(blocked_meta.issue_label(&root), "> ✓! bd-root");
-
-        let unblocked_meta = LineageMeta::new(IssueLineageContext {
-            root_id: "bd-root",
-            nodes: &nodes,
-            edges: &[],
-        });
-
-        assert_eq!(unblocked_meta.issue_label(&root), "> ✓ bd-root");
-    }
-
-    #[test]
-    fn focused_titles_advertise_graph_toggle_and_help() {
+    fn focused_title_advertises_graph_toggle_and_help() {
         let issues = vec![issue("issue-A"), issue("issue-B")];
-        let mut flat_panel = IssuesPanel::new();
-        flat_panel.set_focused(true);
-        let mut flat_terminal = Terminal::new(TestBackend::new(160, 8)).unwrap();
-
-        flat_terminal
-            .draw(|frame| flat_panel.render(&issues, frame, frame.area()))
-            .unwrap();
-        let flat = render_buffer_text(flat_terminal.backend().buffer());
-
-        assert!(
-            flat.contains("[v]"),
-            "flat title should advertise graph toggle:\n{flat}"
-        );
-        assert!(
-            flat.contains("[?]"),
-            "flat title should advertise help:\n{flat}"
-        );
-
-        let nodes = vec![graph_node("issue-A", "open"), graph_node("issue-B", "open")];
-        let edges = vec![graph_edge("issue-B", "issue-A")];
-        let lineage = IssueLineageView::Loaded(IssueLineageContext {
-            root_id: "issue-A",
-            nodes: &nodes,
-            edges: &edges,
-        });
-        let mut lineage_panel = IssuesPanel::new();
-        lineage_panel.set_focused(true);
-        let mut lineage_terminal = Terminal::new(TestBackend::new(160, 8)).unwrap();
-
-        lineage_terminal
-            .draw(|frame| {
-                lineage_panel.render_with_lineage(&issues, Some(lineage), frame, frame.area())
-            })
-            .unwrap();
-        let lineage = render_buffer_text(lineage_terminal.backend().buffer());
-
-        assert!(
-            lineage.contains("[v]"),
-            "lineage title should advertise graph toggle:\n{lineage}"
-        );
-        assert!(
-            lineage.contains("[?]"),
-            "lineage title should advertise help:\n{lineage}"
-        );
-    }
-
-    #[test]
-    fn lineage_column_preserves_depth_three_dotted_id_without_ellipsis() {
-        const ROOT_ID: &str = "bd-ro";
-        const DEEP_ID: &str = "bd-ro.1.2.3";
-        const DEEP_TITLE: &str = "Deep child row";
-
-        let mut deep_issue = issue(DEEP_ID);
-        deep_issue.title = DEEP_TITLE.into();
-        let issues = vec![
-            issue(ROOT_ID),
-            issue("bd-ro.1"),
-            issue("bd-ro.1.2"),
-            deep_issue,
-        ];
-        let nodes = vec![
-            graph_node(ROOT_ID, "open"),
-            graph_node("bd-ro.1", "open"),
-            graph_node("bd-ro.1.2", "open"),
-            graph_node(DEEP_ID, "open"),
-        ];
-        let edges = Vec::new();
         let mut panel = IssuesPanel::new();
-        let mut terminal = Terminal::new(TestBackend::new(80, 8)).unwrap();
+        panel.set_focused(true);
+        let mut terminal = Terminal::new(TestBackend::new(160, 8)).unwrap();
 
         terminal
-            .draw(|frame| {
-                panel.render_with_lineage(
-                    &issues,
-                    Some(IssueLineageView::Loaded(IssueLineageContext {
-                        root_id: ROOT_ID,
-                        nodes: &nodes,
-                        edges: &edges,
-                    })),
-                    frame,
-                    frame.area(),
-                );
-            })
+            .draw(|frame| panel.render(&issues, frame, frame.area()))
             .unwrap();
 
         let buf = terminal.backend().buffer();
-        let row_y = (0..buf.area.height)
-            .find(|y| row_text(buf, *y).contains(DEEP_TITLE))
-            .expect("deep lineage row should render");
-        let lineage_cell = cell_text(buf, row_y, 1, 20);
+        let mut rendered = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                rendered.push_str(buf[(x, y)].symbol());
+            }
+        }
 
-        assert_eq!(lineage_cell, "│ │ ├─ ○ bd-ro.1.2.3");
-        assert!(!lineage_cell.contains('…'));
-    }
-
-    #[test]
-    fn issue_label_uses_default_indent_for_disconnected_graph_node() {
-        let floating = issue("bd-misc");
-        let nodes = vec![graph_node("bd-root", "open"), graph_node("bd-misc", "open")];
-        let meta = LineageMeta::new(IssueLineageContext {
-            root_id: "bd-root",
-            nodes: &nodes,
-            edges: &[],
-        });
-
-        assert_eq!(meta.issue_label(&floating), "  ○ bd-misc");
+        assert!(
+            rendered.contains("[v]"),
+            "title should advertise graph toggle:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("[?]"),
+            "title should advertise help:\n{rendered}"
+        );
     }
 
     #[test]
@@ -1000,184 +400,5 @@ mod tests {
         panel.table_state.select(Some(0));
         panel.select_prev(1, small_issues.len());
         assert_eq!(panel.selected_id(&small_issues), Some("small-4"));
-    }
-
-    /// Grounding test for the user-reported "j/k loops within graph subset" symptom.
-    /// Renders a real lineage view over 150 issues where only 6 are part of the
-    /// graph subgraph, then walks j 200 times. The arithmetic in `select_next`
-    /// must clamp at index 149, not loop within the 6-node subgraph.
-    #[test]
-    fn lineage_render_then_navigate_visits_all_150_source_indices() {
-        let mut issues: Vec<IssueSummary> = Vec::with_capacity(150);
-        issues.push(issue("bd-root"));
-        for i in 1..=5 {
-            issues.push(issue(&format!("bd-root.{i}")));
-        }
-        for i in 0..144 {
-            issues.push(issue(&format!("bd-other-{i:03}")));
-        }
-        assert_eq!(issues.len(), 150);
-
-        let mut graph_nodes: Vec<GraphNodeEvent> = vec![graph_node("bd-root", "open")];
-        for i in 1..=5 {
-            graph_nodes.push(graph_node(&format!("bd-root.{i}"), "open"));
-        }
-        let edges: Vec<GraphEdgeEvent> = (1..=5)
-            .map(|i| graph_edge(&format!("bd-root.{i}"), "bd-root"))
-            .collect();
-
-        let mut panel = IssuesPanel::new();
-        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
-        terminal
-            .draw(|frame| {
-                panel.render_with_lineage(
-                    &issues,
-                    Some(IssueLineageView::Loaded(IssueLineageContext {
-                        root_id: "bd-root",
-                        nodes: &graph_nodes,
-                        edges: &edges,
-                    })),
-                    frame,
-                    frame.area(),
-                );
-            })
-            .unwrap();
-
-        assert_eq!(
-            panel.display_order.len(),
-            150,
-            "lineage render must populate display_order with every tracked issue"
-        );
-
-        panel.select_first(issues.len());
-        let mut visited = std::collections::HashSet::new();
-        for _ in 0..200 {
-            if let Some(id) = panel.selected_id(&issues) {
-                visited.insert(id.to_string());
-            }
-            panel.select_next(1, issues.len());
-        }
-
-        assert_eq!(
-            visited.len(),
-            150,
-            "j held down should walk through all 150 issues, but only visited {}",
-            visited.len()
-        );
-    }
-
-    /// Grounding test for the viewport hypothesis: after navigating to a far-down
-    /// source index, the table widget must auto-scroll so the selection is on
-    /// screen. If the rendered buffer keeps showing only the lineage subset at
-    /// the top while selection has moved to a `bd-other-*` row, viewport scroll
-    /// is broken and *that* would explain the user-reported "loops within graph
-    /// subset" symptom even though `select_next` is arithmetically correct.
-    #[test]
-    fn lineage_navigation_scrolls_viewport_to_selection() {
-        let mut issues: Vec<IssueSummary> = Vec::with_capacity(150);
-        issues.push(issue("bd-root"));
-        for i in 1..=5 {
-            issues.push(issue(&format!("bd-root.{i}")));
-        }
-        for i in 0..144 {
-            issues.push(issue(&format!("bd-other-{i:03}")));
-        }
-
-        let mut graph_nodes: Vec<GraphNodeEvent> = vec![graph_node("bd-root", "open")];
-        for i in 1..=5 {
-            graph_nodes.push(graph_node(&format!("bd-root.{i}"), "open"));
-        }
-        let edges: Vec<GraphEdgeEvent> = (1..=5)
-            .map(|i| graph_edge(&format!("bd-root.{i}"), "bd-root"))
-            .collect();
-
-        let mut panel = IssuesPanel::new();
-        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
-
-        let render = |panel: &mut IssuesPanel, terminal: &mut Terminal<TestBackend>| {
-            terminal
-                .draw(|frame| {
-                    panel.render_with_lineage(
-                        &issues,
-                        Some(IssueLineageView::Loaded(IssueLineageContext {
-                            root_id: "bd-root",
-                            nodes: &graph_nodes,
-                            edges: &edges,
-                        })),
-                        frame,
-                        frame.area(),
-                    );
-                })
-                .unwrap();
-        };
-
-        render(&mut panel, &mut terminal);
-        panel.select_first(issues.len());
-        for _ in 0..100 {
-            panel.select_next(1, issues.len());
-        }
-        render(&mut panel, &mut terminal);
-
-        let selected_id = panel
-            .selected_id(&issues)
-            .expect("selection should be set after 100 j presses")
-            .to_string();
-        assert!(
-            selected_id.starts_with("bd-other-"),
-            "after 100 j from position 0, selection must be in the unrelated tail; got {selected_id}"
-        );
-
-        let buffer_text = render_buffer_text(terminal.backend().buffer());
-        assert!(
-            buffer_text.contains(selected_id.as_str()),
-            "rendered buffer must show the selected id {selected_id} after viewport auto-scroll; rendered:\n{buffer_text}"
-        );
-    }
-
-    /// Failing repro for the "Rank 0 Teleportation" loop introduced by commit
-    /// 84c505a7. When the issues panel renders `IssueLineageView::Loading`
-    /// with an empty subgraph (which happens when `pending_prefetch` arms a
-    /// fallback whose `cache_key` resolves to `None`), `LineageMeta` assigns
-    /// rank `(0, 0)` to the synthetic root, placing the currently-selected id
-    /// at `display_order[0]`. The next `j` advances to `display_order[1]`;
-    /// the next render makes THAT id the new rank-0 root; `j` bounces back.
-    /// Real UX re-renders between every keypress, so this loop is the real
-    /// "j/k seems to loop within graph pane subset" symptom the user reported.
-    #[test]
-    fn loading_lineage_with_empty_subgraph_does_not_trap_navigation() {
-        let issues: Vec<IssueSummary> = (0..150).map(|i| issue(&format!("bd-{i:03}"))).collect();
-        let mut panel = IssuesPanel::new();
-        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
-        panel.table_state.select(Some(100));
-
-        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
-        visited.insert(panel.selected_id(&issues).unwrap().to_string());
-
-        for _ in 0..20 {
-            let root = panel.selected_id(&issues).unwrap().to_string();
-            terminal
-                .draw(|frame| {
-                    panel.render_with_lineage(
-                        &issues,
-                        Some(IssueLineageView::Loading {
-                            root_id: root,
-                            nodes: &[],
-                            edges: &[],
-                        }),
-                        frame,
-                        frame.area(),
-                    );
-                })
-                .unwrap();
-            panel.select_next(1, issues.len());
-            visited.insert(panel.selected_id(&issues).unwrap().to_string());
-        }
-
-        assert!(
-            visited.len() > 5,
-            "j held over a Loading lineage should walk through many issues, but trapped within {} distinct ids: {:?}",
-            visited.len(),
-            visited
-        );
     }
 }
