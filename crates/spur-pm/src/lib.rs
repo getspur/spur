@@ -8,6 +8,7 @@ pub mod graph;
 pub mod pidfile;
 pub mod poll_cursor;
 pub mod service;
+pub mod test_workspace;
 pub mod types;
 
 pub use adapter::{IssueTracker, PrService};
