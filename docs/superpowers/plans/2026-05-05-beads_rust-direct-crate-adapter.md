@@ -887,7 +887,8 @@ use beads_rust::sync;
 /// Returns the opened `SqliteStorage` ready for writes. The flock is released
 /// once the storage is fully initialized (the caller's later writes will
 /// re-acquire it per-write).
-pub fn open_writer_under_migration_lock(
+#[allow(dead_code)] // wired into Section C/D adapter open path
+pub(crate) fn open_writer_under_migration_lock(
     beads_dir: &Path,
     lock_timeout_ms: u64,
 ) -> anyhow::Result<SqliteStorage> {
