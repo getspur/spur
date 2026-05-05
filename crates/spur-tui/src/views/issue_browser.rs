@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
@@ -207,6 +207,7 @@ pub struct IssueBrowserView {
     /// the empty-list pane so the user sees the cause instead of a misleading
     /// "No issues loaded" placeholder. Cleared on the next `IssuesLoaded`.
     last_refresh_error: Option<String>,
+    last_issues_panel_height: u16,
 }
 
 impl Default for IssueBrowserView {
@@ -234,6 +235,7 @@ impl IssueBrowserView {
             pending_action: None,
             pending_prefetch: None,
             last_refresh_error: None,
+            last_issues_panel_height: 0,
         }
     }
 
@@ -544,6 +546,36 @@ impl IssueBrowserView {
             .map(String::from)
     }
 
+    fn half_page_issue_rows(&self) -> usize {
+        if self.last_issues_panel_height == 0 {
+            10
+        } else {
+            usize::from((self.last_issues_panel_height / 2).max(1))
+        }
+    }
+
+    fn page_issue_rows(&self) -> usize {
+        if self.last_issues_panel_height == 0 {
+            20
+        } else {
+            usize::from(self.last_issues_panel_height)
+        }
+    }
+
+    fn select_next_issue_rows(&mut self, rows: usize) -> Option<Action> {
+        self.issues_panel
+            .select_next(rows, self.tracked_issues.len());
+        self.prefetch_selected_graph();
+        Some(Action::SelectNextBy(rows))
+    }
+
+    fn select_prev_issue_rows(&mut self, rows: usize) -> Option<Action> {
+        self.issues_panel
+            .select_prev(rows, self.tracked_issues.len());
+        self.prefetch_selected_graph();
+        Some(Action::SelectPrevBy(rows))
+    }
+
     /// Graph errors are request-id scoped; render callers must not treat them
     /// as global detail-pane state.
     fn graph_error_for(&self, issue_id: &str) -> Option<&str> {
@@ -800,6 +832,18 @@ impl IssueBrowserView {
                 self.prefetch_selected_graph();
                 Some(Action::SelectPrevBy(1))
             }
+            KeyCode::Char('J') if key.modifiers == KeyModifiers::SHIFT => {
+                self.select_next_issue_rows(5)
+            }
+            KeyCode::Char('K') if key.modifiers == KeyModifiers::SHIFT => {
+                self.select_prev_issue_rows(5)
+            }
+            KeyCode::Char('d') if key.modifiers == KeyModifiers::CONTROL => {
+                self.select_next_issue_rows(self.half_page_issue_rows())
+            }
+            KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => {
+                self.select_prev_issue_rows(self.half_page_issue_rows())
+            }
             KeyCode::Char('g') if key.modifiers.is_empty() => {
                 self.issues_panel.select_first(self.tracked_issues.len());
                 self.prefetch_selected_graph();
@@ -845,6 +889,22 @@ impl IssueBrowserView {
                 self.scroll_issue_detail_down_by(10);
                 Some(Action::ScrollDown)
             }
+            KeyCode::PageUp
+                if matches!(
+                    self.issue_focus,
+                    IssueFocus::None | IssueFocus::Loading { .. }
+                ) =>
+            {
+                self.select_prev_issue_rows(self.page_issue_rows())
+            }
+            KeyCode::PageDown
+                if matches!(
+                    self.issue_focus,
+                    IssueFocus::None | IssueFocus::Loading { .. }
+                ) =>
+            {
+                self.select_next_issue_rows(self.page_issue_rows())
+            }
 
             _ => None,
         }
@@ -887,6 +947,7 @@ impl IssueBrowserView {
                 .max(4)
                 .min(area.height * 40 / 100)
         };
+        self.last_issues_panel_height = issues_height;
 
         let has_detail = matches!(self.issue_focus, IssueFocus::Loaded { .. });
         let detail_min = if has_detail { 8 } else { 3 };
@@ -1326,6 +1387,17 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    fn modified_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    fn seed_fast_scroll_issues(view: &mut IssueBrowserView, count: usize) {
+        view.tracked_issues = (0..count)
+            .map(|idx| issue(&format!("bd-{idx:02}"), "task", Vec::new()))
+            .collect();
+        view.issues_panel.select_first(view.tracked_issues.len());
+    }
+
     fn issue(id: &str, issue_type: &str, labels: Vec<String>) -> spur_pm::IssueSummary {
         spur_pm::IssueSummary {
             id: id.into(),
@@ -1368,10 +1440,10 @@ mod tests {
         })
     }
 
-    fn rendered_text(view: &mut IssueBrowserView) -> String {
+    fn rendered_text_at(view: &mut IssueBrowserView, width: u16, height: u16) -> String {
         let lineage = ExecutorLineage::new();
         let ctx = ViewContext::test_ctx(&lineage);
-        let mut terminal = Terminal::new(TestBackend::new(100, 18)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| view.render(frame, frame.area(), &ctx))
             .unwrap();
@@ -1384,6 +1456,10 @@ mod tests {
             rendered.push('\n');
         }
         rendered
+    }
+
+    fn rendered_text(view: &mut IssueBrowserView) -> String {
+        rendered_text_at(view, 100, 18)
     }
 
     #[test]
@@ -1741,6 +1817,108 @@ mod tests {
             view.pending_prefetch,
             Some((ref id, _)) if id == "bd-2"
         ));
+    }
+
+    #[test]
+    fn fast_scroll_modified_keys_move_issue_selection() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+
+        let mut view = IssueBrowserView::new();
+        seed_fast_scroll_issues(&mut view, 30);
+
+        let action = view.handle_key(modified_key(KeyCode::Char('J'), KeyModifiers::SHIFT), &ctx);
+        assert!(
+            matches!(action, Some(Action::SelectNextBy(5))),
+            "expected Shift-J to move down 5 rows, got {action:?}"
+        );
+        assert_eq!(view.selected_issue_id().as_deref(), Some("bd-05"));
+
+        let action = view.handle_key(modified_key(KeyCode::Char('K'), KeyModifiers::SHIFT), &ctx);
+        assert!(
+            matches!(action, Some(Action::SelectPrevBy(5))),
+            "expected Shift-K to move up 5 rows, got {action:?}"
+        );
+        assert_eq!(view.selected_issue_id().as_deref(), Some("bd-00"));
+
+        rendered_text_at(&mut view, 100, 80);
+        let action = view.handle_key(
+            modified_key(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            &ctx,
+        );
+        assert!(
+            matches!(action, Some(Action::SelectNextBy(10))),
+            "expected Ctrl-D to move down half of a 20-row panel, got {action:?}"
+        );
+        assert_eq!(view.selected_issue_id().as_deref(), Some("bd-10"));
+
+        let action = view.handle_key(
+            modified_key(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            &ctx,
+        );
+        assert!(
+            matches!(action, Some(Action::SelectPrevBy(10))),
+            "expected Ctrl-U to move up half of a 20-row panel, got {action:?}"
+        );
+        assert_eq!(view.selected_issue_id().as_deref(), Some("bd-00"));
+    }
+
+    #[test]
+    fn page_keys_target_list_unless_detail_is_loaded() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+
+        let mut list_view = IssueBrowserView::new();
+        seed_fast_scroll_issues(&mut list_view, 30);
+        rendered_text_at(&mut list_view, 100, 80);
+        let before = list_view.selected_issue_id();
+
+        let action = list_view.handle_key(key(KeyCode::PageDown), &ctx);
+
+        assert!(
+            matches!(action, Some(Action::SelectNextBy(_))),
+            "expected PageDown without detail to move the list, got {action:?}"
+        );
+        assert_ne!(list_view.selected_issue_id(), before);
+
+        let mut loading_view = IssueBrowserView::new();
+        seed_fast_scroll_issues(&mut loading_view, 30);
+        loading_view.issue_focus = IssueFocus::Loading { id: "bd-00".into() };
+        rendered_text_at(&mut loading_view, 100, 80);
+        let action = loading_view.handle_key(key(KeyCode::PageUp), &ctx);
+        assert!(
+            matches!(action, Some(Action::SelectPrevBy(_))),
+            "expected PageUp while detail is loading to move the list, got {action:?}"
+        );
+
+        let mut detail_view = IssueBrowserView::new();
+        seed_fast_scroll_issues(&mut detail_view, 30);
+        let body = (1..=30)
+            .map(|line| format!("body line {line:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        detail_view.issue_focus = IssueFocus::Loaded {
+            id: "bd-00".into(),
+            issue: Box::new(issue_detail("bd-00", &body)),
+        };
+
+        let before = rendered_text(&mut detail_view);
+        assert!(
+            before.contains("body line 01"),
+            "detail should start at the top before PageDown:\n{before}"
+        );
+
+        let action = detail_view.handle_key(key(KeyCode::PageDown), &ctx);
+
+        assert!(
+            matches!(action, Some(Action::ScrollDown)),
+            "expected PageDown with loaded detail to scroll detail, got {action:?}"
+        );
+        let after = rendered_text(&mut detail_view);
+        assert!(
+            after.contains("body line 11"),
+            "detail should scroll by the existing 10-line PageDown behavior:\n{after}"
+        );
     }
 
     #[test]
