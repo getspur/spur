@@ -56,7 +56,7 @@ fn test_server(repo_root: &std::path::Path) -> McpCallbackServer {
         on_complete: Arc::new(|_, _| Box::pin(async {})),
     };
     let (mut server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         None,
         None,
         continuation_ctx,

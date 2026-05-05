@@ -112,7 +112,7 @@ impl PersistedFixture {
         let sink_ref: Arc<dyn McpEventSink> = Arc::clone(&sink) as Arc<dyn McpEventSink>;
         let session_id = BrainSessionId::new(SessionId("brain".into()));
         let (mut server, _channel) = McpCallbackServer::new(
-            &session_id,
+            Some(&session_id),
             Some(Arc::clone(&pm)),
             Some(sink_ref),
             continuation_ctx(),
@@ -291,7 +291,7 @@ async fn recover_persisted_plans_emits_plan_snapshot_updated() {
     let sink_ref: Arc<dyn McpEventSink> = Arc::clone(&sink) as Arc<dyn McpEventSink>;
     let session_id = BrainSessionId::new(SessionId("brain-2".into()));
     let (mut server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&fixture.pm)),
         Some(sink_ref),
         continuation_ctx(),
@@ -362,7 +362,7 @@ async fn recover_persisted_plans_uses_legacy_session_fallback_when_missing() {
     let sink_ref: Arc<dyn McpEventSink> = Arc::clone(&sink) as Arc<dyn McpEventSink>;
     let session_id = BrainSessionId::new(SessionId("brain-2".into()));
     let (mut server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         Some(sink_ref),
         continuation_ctx(),

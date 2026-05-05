@@ -659,7 +659,7 @@ async fn persisted_submit_fixture() -> PersistedSubmitFixture {
     let pm = beads_pm(dir.path()).await;
     let session_id = BrainSessionId::new(SessionId("brain".into()));
     let (mut server, channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(pm),
         None,
         continuation_ctx(),

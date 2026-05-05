@@ -50,7 +50,7 @@ async fn test_parallel_response_length_invariant_INV_ASYNC_6() {
 
     let brain_sid = BrainSessionId::new(SessionId::new());
     let (mut server, mut channel) = McpCallbackServer::new(
-        &brain_sid,
+        Some(&brain_sid),
         None,
         None,
         empty_continuation_ctx(),
@@ -187,7 +187,7 @@ async fn test_parallel_preserves_input_order() {
 
     let brain_sid = BrainSessionId::new(SessionId::new());
     let (mut server, mut channel) = McpCallbackServer::new(
-        &brain_sid,
+        Some(&brain_sid),
         None,
         None,
         empty_continuation_ctx(),
@@ -285,7 +285,7 @@ async fn test_parallel_no_serial_dispatch_regression() {
 
     let brain_sid = BrainSessionId::new(SessionId::new());
     let (mut server, mut channel) = McpCallbackServer::new(
-        &brain_sid,
+        Some(&brain_sid),
         None,
         None,
         empty_continuation_ctx(),

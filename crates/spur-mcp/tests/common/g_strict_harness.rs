@@ -236,7 +236,7 @@ impl TestHarness {
         let session_id = BrainSessionId::new(SessionId("brain".into()));
         let feature_gate = super::server_builder::pro_feature_gate();
         let (mut server, _unused_channel) = McpCallbackServer::new(
-            &session_id,
+            Some(&session_id),
             Some(Arc::clone(&pm)),
             None,
             super::server_builder::continuation_ctx(),

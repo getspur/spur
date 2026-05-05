@@ -110,7 +110,7 @@ async fn get_plan_status_reprojects_persisted_plan_instead_of_trusting_corrupted
     let pm = beads_pm(dir.path()).await;
     let session_id = BrainSessionId::new(SessionId("brain".into()));
     let (server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(pm),
         None,
         continuation_ctx(),
@@ -173,7 +173,7 @@ async fn get_plan_status_preserves_in_progress_persisted_children() {
     let pm = beads_pm(dir.path()).await;
     let session_id = BrainSessionId::new(SessionId("brain".into()));
     let (server, _channel) = McpCallbackServer::new(
-        &session_id,
+        Some(&session_id),
         Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),
