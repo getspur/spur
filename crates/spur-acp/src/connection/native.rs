@@ -280,6 +280,75 @@ fn cache_session_modes(
     }
 }
 
+fn busy_in_flight_error(agent_name: &str, in_flight: &str) -> anyhow::Error {
+    anyhow::anyhow!("NativeAcpConnection '{agent_name}': busy ({in_flight} in flight)")
+}
+
+/// Reply to every non-Cancel/non-Shutdown command variant with a busy error.
+/// Used inside the in-flight `Prompt` and `LoadSession` select! loops to
+/// reject commands the orchestrator should not be issuing while a request is
+/// pending. The match is exhaustive over `AcpCommand` so a future variant
+/// cannot silently sneak past the busy guard.
+fn reject_busy_command(cmd: AcpCommand, agent_name: &str, in_flight: &str) {
+    let err = || busy_in_flight_error(agent_name, in_flight);
+    match cmd {
+        AcpCommand::Initialize { reply, .. } => {
+            let _ = reply.send(Err(err()));
+        }
+        AcpCommand::NewSession { reply, .. } => {
+            let _ = reply.send(Err(err()));
+        }
+        AcpCommand::Prompt { reply, .. } => {
+            let _ = reply.send(Err(err()));
+        }
+        AcpCommand::Cancel { reply, .. } => {
+            let _ = reply.send(Err(err()));
+        }
+        AcpCommand::Shutdown { reply } => {
+            let _ = reply.send(Err(err()));
+        }
+        AcpCommand::LoadSession { reply, .. } => {
+            let _ = reply.send(Err(err()));
+        }
+        AcpCommand::ListSessions { reply, .. } => {
+            let _ = reply.send(Err(err()));
+        }
+        AcpCommand::SetSessionMode { reply, .. } => {
+            let _ = reply.send(Err(err()));
+        }
+        AcpCommand::SetSessionModel { reply, .. } => {
+            let _ = reply.send(Err(err()));
+        }
+        AcpCommand::SetSessionConfigOption { reply, .. } => {
+            let _ = reply.send(Err(err()));
+        }
+        AcpCommand::Authenticate { reply, .. } => {
+            let _ = reply.send(Err(err()));
+        }
+        AcpCommand::ExtMethod { reply, .. } => {
+            let _ = reply.send(Err(err()));
+        }
+    }
+}
+
+/// Send `session/cancel` as a JSON-RPC notification (one-way) and reply to
+/// the originating `AcpCommand::Cancel`. `cx.send_notification` is synchronous
+/// and does not wait for an agent response, so this is safe to call while a
+/// `Prompt` or `LoadSession` request future is in flight on the same `cx`.
+fn dispatch_cancel(
+    cx: &ConnectionTo<Agent>,
+    session_id: String,
+    reply: oneshot::Sender<anyhow::Result<()>>,
+    agent_name: &str,
+) {
+    let cancel = CancelNotification::new(session_id);
+    let result = cx.send_notification(cancel);
+    let _ = reply
+        .send(result.map_err(|e| {
+            anyhow::anyhow!("NativeAcpConnection '{agent_name}': cancel failed: {e}")
+        }));
+}
+
 impl NativeAcpConnection {
     /// Create a new native ACP connection.
     ///
@@ -1580,31 +1649,61 @@ fn acp_thread_main(
                                     mpsc::unbounded_channel::<SessionNotification>();
                                 let _ = reply.send(Ok(rx_empty));
                                 let session_id_for_probe = request.session_id.clone();
-                                let prompt_result =
-                                    cx.send_request(request).block_task().await;
-                                match &prompt_result {
-                                    Ok(_) => tracing::debug!(
-                                        agent = %agent_name_loop,
-                                        session = %session_id_for_probe,
-                                        "NativeAcpConnection: prompt completed"
-                                    ),
-                                    Err(e) => tracing::warn!(
-                                        agent = %agent_name_loop,
-                                        session = %session_id_for_probe,
-                                        "NativeAcpConnection: prompt failed: {e}"
-                                    ),
+                                // Multiplex command intake against the in-flight prompt
+                                // future so `Cancel` and `Shutdown` can be serviced while
+                                // the agent is still streaming. `biased;` polls cmd_rx
+                                // first so a queued cancel cannot starve behind heavy
+                                // notification flow.
+                                let prompt_fut =
+                                    cx.send_request(request).block_task();
+                                tokio::pin!(prompt_fut);
+                                let mut cmd_rx_closed = false;
+                                loop {
+                                    tokio::select! {
+                                        biased;
+                                        maybe_cmd = cmd_rx.recv(), if !cmd_rx_closed => {
+                                            match maybe_cmd {
+                                                Some(AcpCommand::Cancel { session_id, reply }) => {
+                                                    dispatch_cancel(&cx, session_id, reply, &agent_name_loop);
+                                                }
+                                                Some(AcpCommand::Shutdown { reply }) => {
+                                                    tracing::debug!(
+                                                        agent = %agent_name_loop,
+                                                        "NativeAcpConnection: ACP thread received shutdown during in-flight prompt"
+                                                    );
+                                                    *shutdown_reply_slot_loop.borrow_mut() = Some(reply);
+                                                    drop(tx_empty);
+                                                    return Ok(());
+                                                }
+                                                Some(other) => {
+                                                    reject_busy_command(other, &agent_name_loop, "prompt");
+                                                }
+                                                None => {
+                                                    cmd_rx_closed = true;
+                                                }
+                                            }
+                                        }
+                                        prompt_result = &mut prompt_fut => {
+                                            match &prompt_result {
+                                                Ok(_) => tracing::debug!(
+                                                    agent = %agent_name_loop,
+                                                    session = %session_id_for_probe,
+                                                    "NativeAcpConnection: prompt completed"
+                                                ),
+                                                Err(e) => tracing::warn!(
+                                                    agent = %agent_name_loop,
+                                                    session = %session_id_for_probe,
+                                                    "NativeAcpConnection: prompt failed: {e}"
+                                                ),
+                                            }
+                                            drop(tx_empty);
+                                            break;
+                                        }
+                                    }
                                 }
-                                drop(tx_empty);
                             }
                             AcpCommand::Cancel { session_id, reply } => {
-                                let cancel = CancelNotification::new(session_id);
-                                let result = cx.send_notification(cancel);
-                                let _ = reply.send(result.map_err(|e| {
-                                    anyhow::anyhow!(
-                                        "NativeAcpConnection '{}': cancel failed: {e}",
-                                        agent_name_loop
-                                    )
-                                }));
+                                dispatch_cancel(&cx, session_id, reply, &agent_name_loop);
                             }
                             AcpCommand::Shutdown { reply } => {
                                 tracing::debug!(
@@ -1624,33 +1723,77 @@ fn acp_thread_main(
                                 let (tx_empty, rx_empty) =
                                     mpsc::unbounded_channel::<SessionNotification>();
                                 let session_id_for_probe = request.session_id.clone();
-                                match cx.send_request(request).block_task().await {
-                                    Ok(response) => {
-                                        cache_session_modes(
-                                            &advertised_modes,
-                                            &session_id_for_probe,
-                                            response.modes.as_ref(),
-                                        );
-                                        tracing::debug!(
-                                            agent = %agent_name_loop,
-                                            session = %session_id_for_probe,
-                                            "NativeAcpConnection: load_session completed"
-                                        );
-                                        let _ = reply.send(Ok(rx_empty));
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            agent = %agent_name_loop,
-                                            session = %session_id_for_probe,
-                                            "NativeAcpConnection: load_session failed: {e}"
-                                        );
-                                        let _ = reply.send(Err(anyhow::anyhow!(
-                                            "NativeAcpConnection '{}': load_session failed: {e}",
-                                            agent_name_loop
-                                        )));
+                                // Multiplex command intake against the in-flight
+                                // `session/load` future so cancel/shutdown can be
+                                // serviced while history replay is in progress.
+                                // Reply is sent AFTER the future resolves (load_session's
+                                // contract is reply-with-result, unlike Prompt which
+                                // hands the empty stream out up front).
+                                let load_session_fut =
+                                    cx.send_request(request).block_task();
+                                tokio::pin!(load_session_fut);
+                                let mut reply_holder = Some(reply);
+                                let mut cmd_rx_closed = false;
+                                loop {
+                                    tokio::select! {
+                                        biased;
+                                        maybe_cmd = cmd_rx.recv(), if !cmd_rx_closed => {
+                                            match maybe_cmd {
+                                                Some(AcpCommand::Cancel { session_id, reply }) => {
+                                                    dispatch_cancel(&cx, session_id, reply, &agent_name_loop);
+                                                }
+                                                Some(AcpCommand::Shutdown { reply }) => {
+                                                    tracing::debug!(
+                                                        agent = %agent_name_loop,
+                                                        "NativeAcpConnection: ACP thread received shutdown during in-flight load_session"
+                                                    );
+                                                    *shutdown_reply_slot_loop.borrow_mut() = Some(reply);
+                                                    drop(tx_empty);
+                                                    return Ok(());
+                                                }
+                                                Some(other) => {
+                                                    reject_busy_command(other, &agent_name_loop, "load_session");
+                                                }
+                                                None => {
+                                                    cmd_rx_closed = true;
+                                                }
+                                            }
+                                        }
+                                        load_result = &mut load_session_fut => {
+                                            let reply = reply_holder
+                                                .take()
+                                                .expect("LoadSession reply consumed only once");
+                                            match load_result {
+                                                Ok(response) => {
+                                                    cache_session_modes(
+                                                        &advertised_modes,
+                                                        &session_id_for_probe,
+                                                        response.modes.as_ref(),
+                                                    );
+                                                    tracing::debug!(
+                                                        agent = %agent_name_loop,
+                                                        session = %session_id_for_probe,
+                                                        "NativeAcpConnection: load_session completed"
+                                                    );
+                                                    let _ = reply.send(Ok(rx_empty));
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        agent = %agent_name_loop,
+                                                        session = %session_id_for_probe,
+                                                        "NativeAcpConnection: load_session failed: {e}"
+                                                    );
+                                                    let _ = reply.send(Err(anyhow::anyhow!(
+                                                        "NativeAcpConnection '{}': load_session failed: {e}",
+                                                        agent_name_loop
+                                                    )));
+                                                }
+                                            }
+                                            drop(tx_empty);
+                                            break;
+                                        }
                                     }
                                 }
-                                drop(tx_empty);
                             }
                             AcpCommand::ListSessions { request, reply } => {
                                 let result = cx.send_request(request).block_task().await;
