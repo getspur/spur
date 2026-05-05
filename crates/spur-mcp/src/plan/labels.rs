@@ -89,14 +89,19 @@ pub fn delegation_id(delegation_id: &str) -> String {
 
 /// Mint a fresh 16-char hex delegation_id derived from a v4 UUID. The 16-char
 /// length keeps `spur:delegation-id:<id>` (35 chars) under the `br create`
-/// 50-char cap. 64 bits of entropy is collision-immune for any single
+/// 50-char cap.
+///
+/// 60 bits of effective entropy: the high 64 bits of a v4 UUID include the
+/// 4-bit version nibble (RFC 4122 §4.4 byte 6 upper nibble = `0100`), which
+/// lands at hex position 12 of the output (always `'4'`). The remaining 60
+/// random bits → ~1.15e18 values → birthday-collision-immune for any single
 /// project's dispatch lifetime.
 ///
 /// Output is `[0-9a-f]{16}` — `br`-legal under the `[A-Za-z0-9_:-]+` grammar.
 pub fn mint_delegation_id() -> String {
     let uuid = uuid::Uuid::new_v4();
     // Take the high 64 bits of the UUID (git-hash-short style: a prefix of the
-    // long form, deterministically derived).
+    // 128-bit form).
     let high = uuid.as_u128() >> 64;
     format!("{high:016x}")
 }
@@ -541,6 +546,32 @@ mod tests {
             );
             assert!(is_br_legal(&label), "label not br-legal: {label}");
         }
+    }
+
+    /// Locks the `:016x` format contract by injecting deterministic UUIDs via
+    /// `Builder::from_random_bytes` and asserting exact output strings. The
+    /// 100-iteration property test above almost never hits a leading-zero
+    /// high half (P ≈ 1/4e9); without this, a future refactor that drops the
+    /// zero-pad width (e.g. `{x:x}`) would slip past CI.
+    #[test]
+    fn mint_delegation_id_format_pads_zeros_and_pins_version_nibble() {
+        let zeros = uuid::Builder::from_random_bytes([0u8; 16]).into_uuid();
+        let high = zeros.as_u128() >> 64;
+        // V4 sets byte 6 upper nibble to 0100; all-zero input → byte 6 = 0x40.
+        assert_eq!(
+            format!("{high:016x}"),
+            "0000000000004000",
+            "leading-zero high half must be left-padded to 16 chars"
+        );
+
+        let ones = uuid::Builder::from_random_bytes([0xffu8; 16]).into_uuid();
+        let high = ones.as_u128() >> 64;
+        // V4 still forces byte 6 upper nibble to 0100 → byte 6 = 0x4f.
+        assert_eq!(
+            format!("{high:016x}"),
+            "ffffffffffff4fff",
+            "version nibble lives at hex char index 12; remaining bits stay random"
+        );
     }
 
     #[test]
