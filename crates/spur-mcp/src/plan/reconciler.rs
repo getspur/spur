@@ -19,6 +19,7 @@
 //! the same loop that owns completion writeback.
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -141,6 +142,20 @@ fn unresolved_blocker_issue_ids(
     blockers.sort();
     blockers.dedup();
     blockers
+}
+
+async fn projected_plan_for_ready<Fut>(
+    hydrated_plan_state: Option<Arc<crate::plan::PlanState>>,
+    project: Fut,
+) -> anyhow::Result<Arc<crate::plan::PlanState>>
+where
+    Fut: Future<Output = anyhow::Result<crate::plan::PlanState>>,
+{
+    if let Some(plan_state) = hydrated_plan_state {
+        return Ok(plan_state);
+    }
+
+    Ok(Arc::new(project.await?))
 }
 
 fn is_hex_oid(spec: &str) -> bool {
@@ -397,6 +412,12 @@ pub struct ReconcilerDispatchCtx {
     pub event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
     pub materializer: Arc<crate::outcome_materializer::OutcomeMaterializer>,
     pub continuation_ctx: Arc<crate::server::DetachedContinuationCtx>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HydratedReady {
+    pub summary: spur_pm::IssueSummary,
+    pub plan_state: Option<Arc<crate::plan::PlanState>>,
 }
 
 pub struct ReconcilerConfig {
@@ -734,7 +755,8 @@ impl Reconciler {
 
         let ready = self.observe_ready_summaries().await?;
 
-        for summary in ready {
+        for hydrated in ready {
+            let summary = hydrated.summary;
             let Some(plan_id) = summary
                 .labels
                 .iter()
@@ -745,7 +767,12 @@ impl Reconciler {
                 continue;
             };
 
-            let projected = match self.project_plan_from_beads(plan_id).await {
+            let projected = match projected_plan_for_ready(
+                hydrated.plan_state,
+                self.project_plan_from_beads(plan_id),
+            )
+            .await
+            {
                 Ok(projected) => projected,
                 Err(error) => {
                     tracing::warn!(
@@ -753,6 +780,14 @@ impl Reconciler {
                         %plan_id,
                         "reconciler skipping ready summary after plan projection failed: {error}"
                     );
+                    self.record_skipped(
+                        Some(plan_id),
+                        &summary.id,
+                        SkipReason::ProjectorFailed {
+                            error: error.to_string(),
+                        },
+                    )
+                    .await;
                     continue;
                 }
             };
@@ -1569,7 +1604,7 @@ impl Reconciler {
         Ok(did_work)
     }
 
-    pub async fn observe_ready_summaries(&self) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
+    pub async fn observe_ready_summaries(&self) -> anyhow::Result<Vec<HydratedReady>> {
         crate::server::require_feature(
             spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
             self.feature_gate.as_ref(),
@@ -1659,7 +1694,10 @@ impl Reconciler {
                         }
                     }
                     if seen_issue_ids.insert(issue.id.clone()) {
-                        hydrated.push(issue_to_summary(issue));
+                        hydrated.push(HydratedReady {
+                            summary: issue_to_summary(issue),
+                            plan_state: None,
+                        });
                     }
                 }
                 Some("epic") => {
@@ -1680,7 +1718,7 @@ impl Reconciler {
                         self.record_skipped(Some(&plan_id), &issue.id, reason).await;
                         continue;
                     }
-                    let projected = self.project_plan_from_beads(&plan_id).await?;
+                    let projected = Arc::new(self.project_plan_from_beads(&plan_id).await?);
                     for task in &projected.tasks {
                         if !matches!(task.status, crate::plan::PlanTaskStatus::Ready) {
                             let blocked_by = unresolved_blocker_issue_ids(&projected, task);
@@ -1711,7 +1749,10 @@ impl Reconciler {
                             continue;
                         }
                         let task_issue = self.pm.get_issue(issue_id).await?;
-                        hydrated.push(issue_to_summary(task_issue));
+                        hydrated.push(HydratedReady {
+                            summary: issue_to_summary(task_issue),
+                            plan_state: Some(Arc::clone(&projected)),
+                        });
                     }
                 }
                 _ => {
@@ -1943,7 +1984,7 @@ impl Reconciler {
             .observe_ready_summaries()
             .await?
             .into_iter()
-            .map(|summary| summary.id)
+            .map(|ready| ready.summary.id)
             .collect())
     }
 
@@ -1961,7 +2002,7 @@ impl Reconciler {
             .observe_ready_summaries()
             .await?
             .into_iter()
-            .map(|summary| summary.id)
+            .map(|ready| ready.summary.id)
             .collect())
     }
 }
@@ -1983,6 +2024,49 @@ mod tests {
             features,
         ));
         gate
+    }
+
+    fn projected_test_state(plan_id: &str) -> crate::plan::PlanState {
+        crate::plan::PlanState {
+            plan_id: plan_id.to_string(),
+            tasks: Vec::new(),
+            brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId(
+                "test-brain".into(),
+            )),
+            base_snapshot_branch: None,
+            base_snapshot_oid: None,
+            merge_state: crate::plan::PlanMergeState::NotStarted,
+            epic_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn projected_plan_for_ready_reuses_hydrated_state_without_projecting() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let hydrated = Arc::new(projected_test_state("hydrated-plan"));
+        let fallback_polled = Arc::new(AtomicBool::new(false));
+        let fallback_polled_for_future = Arc::clone(&fallback_polled);
+
+        let projected = projected_plan_for_ready(Some(Arc::clone(&hydrated)), async move {
+            fallback_polled_for_future.store(true, Ordering::SeqCst);
+            Ok(projected_test_state("fallback-plan"))
+        })
+        .await
+        .expect("hydrated plan state should be returned");
+
+        assert!(Arc::ptr_eq(&projected, &hydrated));
+        assert!(!fallback_polled.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn projected_plan_for_ready_projects_when_unhydrated() {
+        let projected =
+            projected_plan_for_ready(None, async { Ok(projected_test_state("fallback-plan")) })
+                .await
+                .expect("fallback projection should be used");
+
+        assert_eq!(projected.plan_id, "fallback-plan");
     }
 
     #[test]
