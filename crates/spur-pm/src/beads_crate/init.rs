@@ -7,9 +7,11 @@ use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
 pub enum InitError {
-    #[error("non-local filesystem detected at {path}: fs_type = {fs_type}. \
+    #[error(
+        "non-local filesystem detected at {path}: fs_type = {fs_type}. \
              flock semantics are not portable here. \
-             Set allow_non_local_fs=true in config to bypass.")]
+             Set allow_non_local_fs=true in config to bypass."
+    )]
     NonLocalFilesystem { path: String, fs_type: String },
 }
 
@@ -23,8 +25,10 @@ pub fn detect_local_fs(beads_dir: &Path) -> Result<(), InitError> {
         let path = CString::new(beads_dir.as_os_str().as_bytes()).unwrap();
         let mut buf: libc::statfs = unsafe { std::mem::zeroed() };
         let rc = unsafe { libc::statfs(path.as_ptr(), &mut buf) };
-        if rc != 0 { return Ok(()); } // can't determine; allow
-        // Magic numbers from <linux/magic.h>
+        if rc != 0 {
+            return Ok(());
+        } // can't determine; allow
+          // Magic numbers from <linux/magic.h>
         const NFS_SUPER_MAGIC: i64 = 0x6969;
         const SMB_SUPER_MAGIC: i64 = 0x517B;
         const CIFS_MAGIC_NUMBER: i64 = 0xFF534D42_u64 as i64;
@@ -43,7 +47,9 @@ pub fn detect_local_fs(beads_dir: &Path) -> Result<(), InitError> {
         let path = CString::new(beads_dir.as_os_str().as_bytes()).unwrap();
         let mut buf: libc::statfs = unsafe { std::mem::zeroed() };
         let rc = unsafe { libc::statfs(path.as_ptr(), &mut buf) };
-        if rc != 0 { return Ok(()); }
+        if rc != 0 {
+            return Ok(());
+        }
         let fs_name = unsafe {
             let raw = buf.f_fstypename.as_ptr();
             std::ffi::CStr::from_ptr(raw).to_string_lossy().into_owned()
@@ -98,7 +104,8 @@ fn is_jsonl_temp_file(name: &str) -> bool {
 
 /// Sweep stale jsonl temp files older than `min_age`. Returns count removed.
 /// Caller MUST hold .write.lock when calling this; we do not acquire it here.
-pub fn sweep_stale_jsonl_temps(beads_dir: &Path, min_age: Duration) -> std::io::Result<u64> {
+#[allow(dead_code)] // wired into Section C/D adapter open path
+pub(crate) fn sweep_stale_jsonl_temps(beads_dir: &Path, min_age: Duration) -> std::io::Result<u64> {
     let now = SystemTime::now();
     let mut removed = 0;
     let entries = match std::fs::read_dir(beads_dir) {
@@ -109,9 +116,18 @@ pub fn sweep_stale_jsonl_temps(beads_dir: &Path, min_age: Duration) -> std::io::
     for entry in entries {
         let entry = entry?;
         let name = entry.file_name();
-        let Some(name_str) = name.to_str() else { continue };
-        if !is_jsonl_temp_file(name_str) { continue; }
-        let meta = entry.metadata()?;
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        if !is_jsonl_temp_file(name_str) {
+            continue;
+        }
+        // TOCTOU: the file may have been renamed/unlinked between read_dir and
+        // metadata (e.g., a concurrent atomic write completing). Skip the entry
+        // instead of failing the whole sweep.
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
         if let Ok(modified) = meta.modified() {
             if let Ok(age) = now.duration_since(modified) {
                 if age >= min_age {
@@ -184,6 +200,9 @@ mod sweep_tests {
     fn tolerates_missing_dir() {
         let dir = TempDir::new().unwrap();
         let nonexistent = dir.path().join("does-not-exist");
-        assert_eq!(sweep_stale_jsonl_temps(&nonexistent, Duration::ZERO).unwrap(), 0);
+        assert_eq!(
+            sweep_stale_jsonl_temps(&nonexistent, Duration::ZERO).unwrap(),
+            0
+        );
     }
 }
