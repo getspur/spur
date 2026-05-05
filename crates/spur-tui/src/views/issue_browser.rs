@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -50,6 +50,7 @@ const LIST_STATUS_HINT_EPIC_COMPACT: &str = "[List] j/k: Nav  o: Open  e: Execut
 const LIST_STATUS_HINT_PLAN_EPIC: &str =
     "[List] j/k: Nav  Enter/o: Open Detail  v: Graph  p: Open Plan  W: Work  r: Refresh  q: Quit";
 const LIST_STATUS_HINT_PLAN_EPIC_COMPACT: &str = "[List] j/k: Nav  o: Open  p: Plan  W: Work";
+const GRAPH_CACHE_CAPACITY: usize = 32;
 
 // ── Issue focus state machine ───────────────────────────────────────────
 
@@ -179,6 +180,7 @@ pub struct IssueBrowserView {
     detail_mode: DetailMode,
     graph_pane: IssueGraphPane,
     graph_cache: HashMap<String, (Vec<GraphNodeEvent>, Vec<GraphEdgeEvent>)>,
+    graph_cache_order: VecDeque<String>,
     graph_loading: Option<String>,
     graph_error: Option<String>,
     execute_modal: Option<ExecuteModal>,
@@ -219,6 +221,7 @@ impl IssueBrowserView {
             detail_mode: DetailMode::Text,
             graph_pane: IssueGraphPane::new(),
             graph_cache: HashMap::new(),
+            graph_cache_order: VecDeque::new(),
             graph_loading: None,
             graph_error: None,
             execute_modal: None,
@@ -535,21 +538,74 @@ impl IssueBrowserView {
 
     pub(crate) fn invalidate_graph_cache(&mut self) {
         self.graph_cache.clear();
+        self.graph_cache_order.clear();
         self.graph_loading = None;
         self.graph_error = None;
     }
 
     fn invalidate_graph_cache_preserving_inflight(&mut self) {
         self.graph_cache.clear();
+        self.graph_cache_order.clear();
         if self.graph_loading.is_none() {
             self.graph_error = None;
         }
     }
 
+    fn insert_graph_cache(
+        &mut self,
+        key: String,
+        nodes: Vec<GraphNodeEvent>,
+        edges: Vec<GraphEdgeEvent>,
+    ) {
+        if self.graph_cache.contains_key(&key) {
+            self.graph_cache_order.retain(|existing| existing != &key);
+        }
+
+        self.graph_cache.insert(key.clone(), (nodes, edges));
+        self.graph_cache_order.push_back(key);
+
+        while self.graph_cache.len() > GRAPH_CACHE_CAPACITY {
+            let Some(evicted) = self.graph_cache_order.pop_front() else {
+                break;
+            };
+            self.graph_cache.remove(&evicted);
+        }
+    }
+
+    fn invalidate_graph_cache_entries_containing_issue(&mut self, issue_id: &str) {
+        let keys_to_remove = self
+            .graph_cache
+            .iter()
+            .filter_map(|(key, (nodes, _))| {
+                nodes
+                    .iter()
+                    .any(|node| node.id == issue_id)
+                    .then(|| key.clone())
+            })
+            .collect::<HashSet<_>>();
+
+        if keys_to_remove.is_empty() {
+            return;
+        }
+
+        self.graph_cache
+            .retain(|key, _| !keys_to_remove.contains(key));
+        self.graph_cache_order
+            .retain(|key| !keys_to_remove.contains(key));
+    }
+
     fn request_selected_detail(&mut self) -> Option<Action> {
+        self.request_selected_detail_with_post_load_mode(None)
+    }
+
+    fn request_selected_detail_with_post_load_mode(
+        &mut self,
+        post_load_mode: Option<DetailMode>,
+    ) -> Option<Action> {
         // bd-d587.3 follow-up: a fresh user-driven detail open must not
         // inherit `post_load_mode` from a prior external open.
         self.reset_armed_state();
+        self.post_load_mode = post_load_mode;
         let selected = self.selected_issue_id();
         match (&self.issue_focus, selected) {
             (
@@ -575,7 +631,10 @@ impl IssueBrowserView {
                 self.detail_mode = DetailMode::Text;
                 None
             }
-            (_, None) => None,
+            (_, None) => {
+                self.post_load_mode = None;
+                None
+            }
         }
     }
 
@@ -602,7 +661,9 @@ impl IssueBrowserView {
                     None
                 }
             },
-            IssueFocus::None => self.request_selected_detail(),
+            IssueFocus::None => {
+                self.request_selected_detail_with_post_load_mode(Some(DetailMode::Graph))
+            }
             IssueFocus::Loading { .. } => None,
         }
     }
@@ -685,13 +746,13 @@ impl IssueBrowserView {
             KeyCode::Char('g') if key.modifiers.is_empty() => {
                 self.issues_panel.select_first();
                 self.prefetch_selected_graph();
-                None
+                self.pending_action.take()
             }
             KeyCode::Char('G') if key.modifiers.is_empty() => {
                 let count = self.tracked_issues.len();
                 self.issues_panel.select_last(count);
                 self.prefetch_selected_graph();
-                None
+                self.pending_action.take()
             }
 
             // Enter — fetch detail for the selected row, or close if already
@@ -1095,6 +1156,7 @@ impl View for IssueBrowserView {
                         }
                     }
                 }
+                self.invalidate_graph_cache_entries_containing_issue(id);
             }
 
             spur_acp::SpurEventBody::IssueDetailFetched {
@@ -1130,8 +1192,7 @@ impl View for IssueBrowserView {
                     return;
                 }
 
-                self.graph_cache
-                    .insert(requested_id.clone(), (nodes.clone(), edges.clone()));
+                self.insert_graph_cache(requested_id.clone(), nodes.clone(), edges.clone());
                 self.graph_loading = None;
                 self.graph_error = None;
             }
@@ -1358,6 +1419,154 @@ mod tests {
         view.handle_spur_event(&issue_command_error("GetIssueGraph", Some("stale")), &ctx);
 
         assert_eq!(view.graph_loading.as_deref(), Some("current"));
+        assert!(view.graph_error.is_none());
+    }
+
+    fn graph_node(id: &str) -> GraphNodeEvent {
+        GraphNodeEvent {
+            id: id.into(),
+            title: Some(id.into()),
+            status: Some("open".into()),
+            priority: Some(1),
+            labels: Vec::new(),
+            pagerank: None,
+        }
+    }
+
+    fn subgraph_loaded_event(requested_id: &str, nodes: Vec<GraphNodeEvent>) -> SpurEvent {
+        SpurEvent::now(spur_acp::SpurEventBody::IssueSubgraphLoaded {
+            requested_id: requested_id.into(),
+            nodes,
+            edges: Vec::new(),
+        })
+    }
+
+    fn graph_error_event(id: Option<&str>) -> SpurEvent {
+        SpurEvent::now(spur_acp::SpurEventBody::IssueCommandError {
+            operation: "GetIssueGraph".into(),
+            error: "graph failed".into(),
+            id: id.map(str::to_string),
+        })
+    }
+
+    #[test]
+    fn graph_cache_evicts_oldest_entries_after_32_insertions() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+
+        for idx in 0..33 {
+            let id = format!("bd-{idx}");
+            view.graph_loading = Some(id.clone());
+            view.handle_spur_event(&subgraph_loaded_event(&id, vec![graph_node(&id)]), &ctx);
+        }
+
+        assert_eq!(view.graph_cache.len(), 32);
+        assert!(!view.graph_cache.contains_key("bd-0"));
+        assert!(view.graph_cache.contains_key("bd-1"));
+        assert!(view.graph_cache.contains_key("bd-32"));
+    }
+
+    #[test]
+    fn issue_updated_invalidates_graph_cache_entries_containing_updated_issue() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+
+        view.graph_loading = Some("bd-root".into());
+        view.handle_spur_event(
+            &subgraph_loaded_event(
+                "bd-root",
+                vec![graph_node("bd-root"), graph_node("bd-child")],
+            ),
+            &ctx,
+        );
+        view.graph_loading = Some("bd-other".into());
+        view.handle_spur_event(
+            &subgraph_loaded_event("bd-other", vec![graph_node("bd-other")]),
+            &ctx,
+        );
+
+        view.handle_spur_event(
+            &SpurEvent::now(spur_acp::SpurEventBody::IssueUpdated {
+                source: "beads".into(),
+                id: "bd-child".into(),
+                status: Some("closed".into()),
+                assignee: None,
+            }),
+            &ctx,
+        );
+
+        assert!(!view.graph_cache.contains_key("bd-root"));
+        assert!(view.graph_cache.contains_key("bd-other"));
+    }
+
+    #[test]
+    fn v_from_list_mode_arms_graph_mode_for_detail_load() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.set_issues_for_test(vec![issue("bd-1", "bug", Vec::new())]);
+
+        let action = view.handle_key(key(KeyCode::Char('v')), &ctx);
+
+        assert!(matches!(
+            action,
+            Some(Action::Issue(IssueAction::ViewDetail { ref id })) if id == "bd-1"
+        ));
+        assert_eq!(view.post_load_mode, Some(DetailMode::Graph));
+    }
+
+    #[test]
+    fn g_and_shift_g_return_prefetch_pending_action() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.set_issues_for_test(vec![
+            issue("bd-1", "bug", Vec::new()),
+            issue("bd-2", "bug", Vec::new()),
+        ]);
+
+        let first_action = view.handle_key(key(KeyCode::Char('g')), &ctx);
+
+        assert!(matches!(
+            first_action,
+            Some(Action::GetIssueGraph { ref id }) if id == "bd-1"
+        ));
+        assert!(view.pending_action.is_none());
+
+        let mut view = IssueBrowserView::new();
+        view.set_issues_for_test(vec![
+            issue("bd-1", "bug", Vec::new()),
+            issue("bd-2", "bug", Vec::new()),
+        ]);
+
+        let last_action = view.handle_key(key(KeyCode::Char('G')), &ctx);
+
+        assert!(matches!(
+            last_action,
+            Some(Action::GetIssueGraph { ref id }) if id == "bd-2"
+        ));
+        assert!(view.pending_action.is_none());
+    }
+
+    #[test]
+    fn graph_error_without_id_does_not_clear_armed_graph_state() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.graph_loading = Some("bd-1".into());
+        view.post_load_mode = Some(DetailMode::Graph);
+        view.pending_action = Some(Action::GetIssueGraph { id: "bd-1".into() });
+
+        view.handle_spur_event(&graph_error_event(None), &ctx);
+
+        assert_eq!(view.graph_loading.as_deref(), Some("bd-1"));
+        assert_eq!(view.post_load_mode, Some(DetailMode::Graph));
+        assert!(matches!(
+            view.pending_action,
+            Some(Action::GetIssueGraph { ref id }) if id == "bd-1"
+        ));
         assert!(view.graph_error.is_none());
     }
 
