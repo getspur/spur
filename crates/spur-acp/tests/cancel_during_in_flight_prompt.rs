@@ -70,11 +70,15 @@ async fn cancel_during_in_flight_prompt_returns_within_250ms() {
     let release_path = temp.path().join("release_prompt");
     let cancel_seen_path = temp.path().join("cancel_seen");
 
-    // The bash fixture reads these via env vars.
-    std::env::set_var("SPUR_TEST_RELEASE_FILE", &release_path);
-    std::env::set_var("SPUR_TEST_CANCEL_SEEN", &cancel_seen_path);
-
-    let mut conn = NativeAcpConnection::new("mock-held", "bash", vec![script_path], None);
+    // Pass paths as positional args, NOT env vars — `std::env::set_var`
+    // mutates process-global state and would race across parallel
+    // `cargo test` workers.
+    let extra_args = vec![
+        script_path,
+        release_path.to_string_lossy().into_owned(),
+        cancel_seen_path.to_string_lossy().into_owned(),
+    ];
+    let mut conn = NativeAcpConnection::new("mock-held", "bash", extra_args, None);
 
     conn.initialize(InitializeRequest::new(ProtocolVersion::LATEST))
         .await
