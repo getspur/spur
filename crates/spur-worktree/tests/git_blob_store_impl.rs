@@ -150,6 +150,28 @@ async fn git_blob_store_rejects_non_uuid() {
 }
 
 #[tokio::test]
+async fn git_blob_store_accepts_short_hex_delegation_id() {
+    // Regression: bd-ttyo's `mint_delegation_id` produces 16-char `[0-9a-f]+`
+    // ids to fit the `br create --label` 50-char cap. Before this fix the
+    // git blob store rejected them with "non-uuid delegation_id: wrong length
+    // (16)", forcing fallback to the legacy artifact ref and breaking the
+    // worker-output invariant downstream (no worker branch existed for
+    // `git rev-list base..branch` to inspect).
+    let td = TempDir::new().unwrap();
+    init_repo(td.path());
+    let store = GitBlobOutcomeStore::new(td.path().to_path_buf());
+    let k = key(
+        "550e8400-e29b-41d4-a716-446655440000",
+        "d04edac4e67c4649",
+        1,
+    );
+    let r = store.put(&k, b"hello", &metadata(b"hello")).await.unwrap();
+    assert_eq!(r.sha256, sha256_hex(b"hello"));
+    let got = store.get(&k, None).await.unwrap();
+    assert_eq!(got.bytes, b"hello");
+}
+
+#[tokio::test]
 async fn git_blob_store_per_attempt_granularity() {
     // Verifies Round 11 MF1 fix: distinct attempts under same delegation
     // get distinct refs (legacy bug overwrote the shared session ref).

@@ -4,9 +4,12 @@
 //!   <root>/<brain_session_id>/<delegation_id>/<attempt>.bin   # content bytes
 //!   <root>/<brain_session_id>/<delegation_id>/<attempt>.meta  # OutcomeMetadata JSON
 //!
-//! Both `brain_session_id` and `delegation_id` MUST parse as UUID
-//! shape (Round 9 P2-S2) — defense against directory traversal and
-//! shell-meta injection.
+//! `brain_session_id` MUST parse as UUID shape (Round 9 P2-S2). `delegation_id`
+//! is allowed to be EITHER a 36-char UUID (legacy) OR a 16-char `[0-9a-f]+`
+//! short hex (post-`bd-ttyo`; see `spur-mcp/src/plan/labels.rs::mint_delegation_id`,
+//! which derives 60 random bits from the high 64 bits of a v4 UUID to fit the
+//! `br create --label` 50-char cap). Both forms are safe against directory-
+//! traversal and shell-meta injection.
 //!
 //! Idempotent `put`: reads `<attempt>.meta` first, compares sha256.
 //! Equal → return existing `OutcomeRef`. Different → `ContentMismatch`.
@@ -75,6 +78,25 @@ impl FsOutcomeStore {
         Ok(())
     }
 
+    fn validate_id(value: &str, field: &str) -> Result<(), StoreError> {
+        match value.len() {
+            16 => {
+                for (i, c) in value.chars().enumerate() {
+                    if !c.is_ascii_hexdigit() {
+                        return Err(StoreError::Backend(format!(
+                            "non-id {field}: bad char at position {i}"
+                        )));
+                    }
+                }
+                Ok(())
+            }
+            36 => Self::validate_uuid(value, field),
+            n => Err(StoreError::Backend(format!(
+                "non-id {field}: wrong length ({n}); expected 16 (short hex) or 36 (UUID)"
+            ))),
+        }
+    }
+
     fn paths_for(&self, key: &OutcomeKey) -> (PathBuf, PathBuf, PathBuf) {
         let session_dir = self
             .root
@@ -110,7 +132,7 @@ impl OutcomeStore for FsOutcomeStore {
             key.brain_session_id.as_session_id().0.as_str(),
             "brain_session_id",
         )?;
-        Self::validate_uuid(key.delegation_id.as_str(), "delegation_id")?;
+        Self::validate_id(key.delegation_id.as_str(), "delegation_id")?;
 
         let new_sha = sha256_hex(content);
         if new_sha != metadata.sha256 {
@@ -421,6 +443,60 @@ mod tests {
         let body = b"x".to_vec();
         let err = store.put(&bad, &body, &metadata(&body)).await.unwrap_err();
         assert!(matches!(err, StoreError::Backend(ref s) if s.contains("non-uuid")));
+    }
+
+    #[tokio::test]
+    async fn fs_store_accepts_short_hex_delegation_id() {
+        // Regression: bd-ttyo's `mint_delegation_id` produces 16-char `[0-9a-f]+`
+        // ids to fit the `br create --label` 50-char cap. Before this fix the
+        // outcome store rejected them as "non-uuid delegation_id: wrong length
+        // (16)", forcing fallback to legacy artifact storage and breaking the
+        // worker-output invariant downstream.
+        let td = TempDir::new().unwrap();
+        let store = FsOutcomeStore::new(td.path().to_path_buf());
+        let k = key(
+            "550e8400-e29b-41d4-a716-446655440000",
+            "d04edac4e67c4649",
+            1,
+        );
+        let body = b"x".to_vec();
+        let r = store.put(&k, &body, &metadata(&body)).await.unwrap();
+        assert_eq!(r.sha256, sha256_hex(&body));
+        assert!(store.get(&k, None).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn fs_store_rejects_bad_short_id() {
+        let td = TempDir::new().unwrap();
+        let store = FsOutcomeStore::new(td.path().to_path_buf());
+        // 15 chars (between the two valid lengths)
+        let bad = OutcomeKey {
+            brain_session_id: BrainSessionId::new(SessionId(
+                "550e8400-e29b-41d4-a716-446655440000".into(),
+            )),
+            delegation_id: "d04edac4e67c46".into(),
+            attempt: 1,
+        };
+        let body = b"x".to_vec();
+        let err = store.put(&bad, &body, &metadata(&body)).await.unwrap_err();
+        assert!(matches!(err, StoreError::Backend(ref s) if s.contains("non-id")));
+    }
+
+    #[tokio::test]
+    async fn fs_store_rejects_short_id_with_non_hex() {
+        let td = TempDir::new().unwrap();
+        let store = FsOutcomeStore::new(td.path().to_path_buf());
+        let bad = OutcomeKey {
+            brain_session_id: BrainSessionId::new(SessionId(
+                "550e8400-e29b-41d4-a716-446655440000".into(),
+            )),
+            // 16 chars but contains non-hex `g`
+            delegation_id: "d04edac4e67c464g".into(),
+            attempt: 1,
+        };
+        let body = b"x".to_vec();
+        let err = store.put(&bad, &body, &metadata(&body)).await.unwrap_err();
+        assert!(matches!(err, StoreError::Backend(ref s) if s.contains("non-id")));
     }
 
     #[tokio::test]
