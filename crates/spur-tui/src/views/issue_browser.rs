@@ -780,13 +780,10 @@ impl IssueBrowserView {
             KeyCode::Char('x') if key.modifiers.is_empty() => self.update_status("closed", false),
             KeyCode::Char('d') if key.modifiers.is_empty() => self.update_status("closed", true),
             KeyCode::Char('W') if key.modifiers.is_empty() => {
-                let id = match &self.issue_focus {
-                    IssueFocus::Loaded { id, .. } => Some(id.clone()),
-                    _ => self
-                        .issues_panel
-                        .selected_id(&self.tracked_issues)
-                        .map(String::from),
-                };
+                let id = self
+                    .issues_panel
+                    .selected_id(&self.tracked_issues)
+                    .map(String::from);
                 id.map(|id| Action::Issue(IssueAction::WorkOn { id }))
             }
             KeyCode::Char('e') if key.modifiers.is_empty() => self.open_execute_modal(),
@@ -806,13 +803,10 @@ impl IssueBrowserView {
     }
 
     fn update_status(&self, status: &str, via_legacy_key: bool) -> Option<Action> {
-        let id = match &self.issue_focus {
-            IssueFocus::Loaded { id, .. } => Some(id.clone()),
-            _ => self
-                .issues_panel
-                .selected_id(&self.tracked_issues)
-                .map(String::from),
-        };
+        let id = self
+            .issues_panel
+            .selected_id(&self.tracked_issues)
+            .map(String::from);
         id.map(|id| {
             Action::Issue(IssueAction::UpdateStatus {
                 id,
@@ -1504,6 +1498,27 @@ mod tests {
             error: "graph failed".into(),
             id: id.map(str::to_string),
         })
+    }
+
+    #[test]
+    fn update_status_targets_highlighted_row_when_detail_is_loaded_for_another_issue() {
+        let mut view = IssueBrowserView::new();
+        view.set_issues_for_test(vec![
+            issue("bd-A", "task", Vec::new()),
+            issue("bd-B", "task", Vec::new()),
+        ]);
+        view.issue_focus = IssueFocus::Loaded {
+            id: "bd-A".into(),
+            issue: Box::new(issue_detail("bd-A", "A body")),
+        };
+        view.issues_panel.select_next(1, view.tracked_issues.len());
+
+        let action = view.update_status("in_progress", false);
+
+        assert!(matches!(
+            action,
+            Some(Action::Issue(IssueAction::UpdateStatus { ref id, .. })) if id == "bd-B"
+        ));
     }
 
     #[test]
