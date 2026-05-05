@@ -270,6 +270,7 @@ impl IssuesPanel {
             .block(Block::bordered().title(title).border_style(border_style))
             .row_highlight_style(
                 Style::default()
+                    .fg(Color::White)
                     .bg(Color::DarkGray)
                     .add_modifier(Modifier::BOLD),
             );
@@ -362,6 +363,7 @@ impl IssuesPanel {
             .block(Block::bordered().title(title).border_style(border_style))
             .row_highlight_style(
                 Style::default()
+                    .fg(Color::White)
                     .bg(Color::DarkGray)
                     .add_modifier(Modifier::BOLD),
             );
@@ -656,6 +658,7 @@ fn is_closed(node: Option<&GraphNodeEvent>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::{backend::TestBackend, style::Color, Terminal};
     use spur_pm::PmSource;
 
     fn issue(id: &str) -> IssueSummary {
@@ -670,6 +673,34 @@ mod tests {
             issue_type: None,
             assignee: None,
         }
+    }
+
+    fn rendered_row_with_cell_positions(
+        terminal: &Terminal<TestBackend>,
+        needle: &str,
+    ) -> Option<(String, Vec<u16>, u16)> {
+        let buf = terminal.backend().buffer();
+        for y in 0..buf.area.height {
+            let mut row = String::new();
+            let mut cell_x_by_byte = Vec::new();
+            for x in 0..buf.area.width {
+                cell_x_by_byte.push((row.len(), x));
+                row.push_str(buf[(x, y)].symbol());
+            }
+            if row.contains(needle) {
+                let cell_positions = needle
+                    .char_indices()
+                    .filter_map(|(offset, _)| {
+                        let byte_idx = row.find(needle)? + offset;
+                        cell_x_by_byte
+                            .iter()
+                            .find_map(|(candidate, x)| (*candidate == byte_idx).then_some(*x))
+                    })
+                    .collect();
+                return Some((row, cell_positions, y));
+            }
+        }
+        None
     }
 
     #[test]
@@ -720,5 +751,30 @@ mod tests {
         panel.select_next(1, issues.len());
 
         assert_eq!(panel.selected_id(&issues), Some("issue-B"));
+    }
+
+    #[test]
+    fn selected_closed_issue_status_uses_contrasting_foreground() {
+        let mut closed = issue("issue-A");
+        closed.status = "closed".into();
+        closed.priority = Some(3);
+        let issues = vec![closed];
+        let mut panel = IssuesPanel::new();
+        panel.select_first(issues.len());
+        let backend = TestBackend::new(80, 6);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+
+        terminal
+            .draw(|frame| panel.render(&issues, frame, frame.area()))
+            .expect("render issues panel");
+
+        let (row, status_cells, y) =
+            rendered_row_with_cell_positions(&terminal, "done").expect("done status row");
+        assert!(row.contains("done"), "rendered row: {row}");
+        assert_eq!(status_cells.len(), "done".len(), "rendered row: {row}");
+        let buf = terminal.backend().buffer();
+        for x in status_cells {
+            assert_eq!(buf[(x, y)].fg, Color::White, "rendered row: {row}");
+        }
     }
 }
