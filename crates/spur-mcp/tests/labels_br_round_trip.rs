@@ -87,7 +87,7 @@ fn every_label_constructor_is_accepted_by_br() {
     // Round-trip assertion: every constructed label appears in `br list --json`.
     let list_out = run_br(dir.path(), &["list"]).unwrap();
     let items: serde_json::Value = serde_json::from_str(&list_out).unwrap();
-    let labels_in_db: Vec<String> = items[0]["labels"]
+    let labels_in_db: Vec<String> = items["issues"][0]["labels"]
         .as_array()
         .expect("list response missing labels")
         .iter()
@@ -124,7 +124,7 @@ fn parsers_round_trip_through_real_br_labels() {
 
     let list_out = run_br(dir.path(), &["list"]).unwrap();
     let items: serde_json::Value = serde_json::from_str(&list_out).unwrap();
-    let returned: Vec<String> = items[0]["labels"]
+    let returned: Vec<String> = items["issues"][0]["labels"]
         .as_array()
         .unwrap()
         .iter()
