@@ -225,6 +225,75 @@ fn issue_list_prefetches_dependency_graph_when_browsing_selection() {
 }
 
 #[test]
+fn single_issue_graph_open_requests_graph_after_detail_loads() {
+    let (mut app, mut rx) = spur_tui::test_support::app_with_user_input_tx();
+    spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
+    match rx.try_recv() {
+        Ok(UserInput::RefreshIssues) => {}
+        Ok(_) => panic!("expected RefreshIssues, got different user input"),
+        Err(err) => panic!("expected RefreshIssues, got {err}"),
+    }
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssuesLoaded {
+            issues: vec![sample_summary("bd-only", "Only issue")],
+        }),
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "single visible work item must not prefetch before Graph mode is requested"
+    );
+
+    app.handle_crossterm_event_for_test(key('v'));
+    expect_get_detail(&mut rx, "bd-only");
+
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssueDetailFetched {
+            requested_id: "bd-only".into(),
+            issue: sample_detail("bd-only", "Only issue"),
+        }),
+    );
+
+    expect_get_graph(&mut rx, "bd-only");
+}
+
+#[test]
+fn single_issue_loaded_detail_toggle_requests_graph() {
+    let (mut app, mut rx) = spur_tui::test_support::app_with_user_input_tx();
+    spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
+    match rx.try_recv() {
+        Ok(UserInput::RefreshIssues) => {}
+        Ok(_) => panic!("expected RefreshIssues, got different user input"),
+        Err(err) => panic!("expected RefreshIssues, got {err}"),
+    }
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssuesLoaded {
+            issues: vec![sample_summary("bd-only", "Only issue")],
+        }),
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "single visible work item must not prefetch before Graph mode is requested"
+    );
+
+    app.handle_crossterm_event_for_test(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    expect_get_detail(&mut rx, "bd-only");
+    spur_tui::test_support::push_event(
+        &mut app,
+        SpurEvent::now(SpurEventBody::IssueDetailFetched {
+            requested_id: "bd-only".into(),
+            issue: sample_detail("bd-only", "Only issue"),
+        }),
+    );
+
+    app.handle_crossterm_event_for_test(key('v'));
+
+    expect_get_graph(&mut rx, "bd-only");
+}
+
+#[test]
 fn issue_list_renders_lineage_context_from_selected_graph_cache() {
     let (mut app, mut rx) = spur_tui::test_support::app_with_user_input_tx();
     spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
