@@ -4,7 +4,7 @@
 //! for the full design.
 
 pub mod backoff;
+pub mod init;
 pub mod metrics;
 pub mod reader_pool;
-// pub mod init;          // Task 5/6/7/8
 pub mod snapshot; // Task 11
