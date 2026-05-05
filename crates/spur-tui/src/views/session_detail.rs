@@ -1853,6 +1853,11 @@ impl View for SessionDetailView {
                 if session.0 == self.session_id.0 {
                     self.stream_in_flight = false;
                     self.cancelling_in_flight = false;
+                    // If the modal is still open when the turn ends naturally,
+                    // close it. Otherwise the modal-open key handler would
+                    // hijack the user's next keystroke for a question the
+                    // agent has already answered (cancel is moot).
+                    self.cancel_confirm_open = false;
                     self.tool_depth.clear();
                     #[cfg(feature = "markdown")]
                     {
@@ -2133,12 +2138,24 @@ fn build_session_error_widget<'a>(message: &'a str) -> Paragraph<'a> {
 /// Render the centered "Cancel turn? [y]es / [n]o" confirmation modal as
 /// an overlay over the trace pane. Drawn last in `render_inner` so it sits
 /// on top of everything else.
+///
+/// Always renders SOMETHING visible while `cancel_confirm_open == true` —
+/// silent no-render would create an invisible focus trap (the modal-open
+/// key handler swallows all keys; if the user can't see why, they can't
+/// recover). On terminals smaller than the preferred 50×5 the modal
+/// degrades to a compact single-line prompt clamped to the available
+/// width.
 fn render_cancel_confirm_modal(frame: &mut Frame, area: Rect) {
-    let modal_width: u16 = 50;
-    let modal_height: u16 = 5;
-    if area.width < modal_width || area.height < modal_height {
+    if area.width == 0 || area.height == 0 {
         return;
     }
+
+    const PREFERRED_WIDTH: u16 = 50;
+    const PREFERRED_HEIGHT: u16 = 5;
+    const MINIMAL_PROMPT: &str = "Cancel turn? [y]es / [n]o";
+
+    let modal_width = PREFERRED_WIDTH.min(area.width);
+    let modal_height = PREFERRED_HEIGHT.min(area.height);
     let x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let y = area.y + (area.height.saturating_sub(modal_height)) / 2;
     let rect = Rect {
@@ -2147,19 +2164,31 @@ fn render_cancel_confirm_modal(frame: &mut Frame, area: Rect) {
         width: modal_width,
         height: modal_height,
     };
-    let widget = Paragraph::new("Cancel turn?\n\n[y]es / [n]o")
-        .alignment(Alignment::Center)
-        .style(
-            Style::default()
-                .fg(Color::White)
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        )
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Confirm cancel "),
-        );
+
+    let style = Style::default()
+        .fg(Color::White)
+        .bg(Color::DarkGray)
+        .add_modifier(Modifier::BOLD);
+
+    // Bordered block needs ≥3 cols × ≥3 rows for top/bottom borders +
+    // content. Below that, fall back to a borderless single-line prompt
+    // clamped to the available width so the user is never left in an
+    // invisible-modal focus trap.
+    let widget = if modal_width >= 3 && modal_height >= 3 {
+        Paragraph::new("Cancel turn?\n\n[y]es / [n]o")
+            .alignment(Alignment::Center)
+            .style(style)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Confirm cancel "),
+            )
+    } else {
+        let truncated: String = MINIMAL_PROMPT.chars().take(modal_width as usize).collect();
+        Paragraph::new(truncated)
+            .alignment(Alignment::Left)
+            .style(style)
+    };
     frame.render_widget(Clear, rect);
     frame.render_widget(widget, rect);
 }
@@ -3353,6 +3382,23 @@ mod cancel_state_tests {
         v.handle_spur_event(&turn_complete_event(&sid), &test_ctx());
         assert!(!v.stream_in_flight);
         assert!(!v.cancelling_in_flight);
+    }
+
+    #[test]
+    fn turn_complete_closes_open_cancel_confirm_modal() {
+        // If the agent finishes streaming while the modal is open, the modal
+        // would otherwise hijack the user's next keystroke for a question
+        // that's already moot.
+        let mut v = make_view();
+        let sid = v.session_id().clone();
+        v.stream_in_flight = true;
+        v.cancel_confirm_open = true;
+        v.handle_spur_event(&turn_complete_event(&sid), &test_ctx());
+        assert!(!v.stream_in_flight);
+        assert!(
+            !v.cancel_confirm_open,
+            "TurnComplete must close any open cancel-confirm modal"
+        );
     }
 
     #[test]
