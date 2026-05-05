@@ -24,17 +24,20 @@ pub fn detect_local_fs(beads_dir: &Path) -> Result<(), InitError> {
     {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
-        let path = CString::new(beads_dir.as_os_str().as_bytes()).unwrap();
+        let path = match CString::new(beads_dir.as_os_str().as_bytes()) {
+            Ok(p) => p,
+            Err(_) => return Ok(()), // path can't be C-stringified — best-effort allow
+        };
         let mut buf: libc::statfs = unsafe { std::mem::zeroed() };
         let rc = unsafe { libc::statfs(path.as_ptr(), &mut buf) };
         if rc != 0 {
             return Ok(());
         } // can't determine; allow
           // Magic numbers from <linux/magic.h>
-        const NFS_SUPER_MAGIC: i64 = 0x6969;
-        const SMB_SUPER_MAGIC: i64 = 0x517B;
-        const CIFS_MAGIC_NUMBER: i64 = 0xFF534D42_u64 as i64;
-        let ty = buf.f_type as i64;
+        const NFS_SUPER_MAGIC: u64 = 0x6969;
+        const SMB_SUPER_MAGIC: u64 = 0x517B;
+        const CIFS_MAGIC_NUMBER: u64 = 0xFF534D42;
+        let ty = buf.f_type as u64;
         if ty == NFS_SUPER_MAGIC || ty == SMB_SUPER_MAGIC || ty == CIFS_MAGIC_NUMBER {
             return Err(InitError::NonLocalFilesystem {
                 path: beads_dir.display().to_string(),
@@ -46,7 +49,10 @@ pub fn detect_local_fs(beads_dir: &Path) -> Result<(), InitError> {
     {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
-        let path = CString::new(beads_dir.as_os_str().as_bytes()).unwrap();
+        let path = match CString::new(beads_dir.as_os_str().as_bytes()) {
+            Ok(p) => p,
+            Err(_) => return Ok(()), // path can't be C-stringified — best-effort allow
+        };
         let mut buf: libc::statfs = unsafe { std::mem::zeroed() };
         let rc = unsafe { libc::statfs(path.as_ptr(), &mut buf) };
         if rc != 0 {
@@ -76,6 +82,18 @@ mod tests {
         let dir = TempDir::new().unwrap();
         // tmpfs / APFS local — should pass
         assert!(detect_local_fs(dir.path()).is_ok());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn nul_byte_in_path_does_not_panic() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        use std::path::PathBuf;
+        // Construct a path with an interior NUL byte. CString::new will reject this.
+        let bad = PathBuf::from(OsString::from_vec(vec![b'a', 0, b'b']));
+        // Best-effort: must not panic. Result is `Ok(())` because we can't determine FS.
+        assert!(detect_local_fs(&bad).is_ok());
     }
 }
 
