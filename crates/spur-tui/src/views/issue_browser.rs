@@ -613,6 +613,18 @@ impl IssueBrowserView {
             }))
     }
 
+    fn request_graph_if_needed(&mut self, id: String) -> Option<Action> {
+        if self.graph_cache.contains_key(&id) {
+            self.graph_loading = None;
+            None
+        } else if self.graph_loading.as_deref() == Some(id.as_str()) {
+            None
+        } else {
+            self.graph_loading = Some(id.clone());
+            Some(Action::GetIssueGraph { id })
+        }
+    }
+
     fn hint_override(full: &'static str, compact: &'static str) -> HintOverride<'static> {
         HintOverride {
             full,
@@ -734,16 +746,7 @@ impl IssueBrowserView {
                     self.graph_pane.reset();
                     self.graph_error = None;
                     self.pending_prefetch = None;
-                    if self.graph_cache.contains_key(id) {
-                        self.graph_loading = None;
-                        None
-                    } else if self.graph_loading.as_deref() == Some(id.as_str()) {
-                        None
-                    } else {
-                        let id = id.clone();
-                        self.graph_loading = Some(id.clone());
-                        Some(Action::GetIssueGraph { id })
-                    }
+                    self.request_graph_if_needed(id.clone())
                 }
                 DetailMode::Graph => {
                     self.detail_mode = DetailMode::Text;
@@ -751,7 +754,14 @@ impl IssueBrowserView {
                 }
             },
             IssueFocus::None => {
-                self.request_selected_detail_with_post_load_mode(Some(DetailMode::Graph))
+                let action =
+                    self.request_selected_detail_with_post_load_mode(Some(DetailMode::Graph));
+                if action.is_some() {
+                    if let Some(id) = self.selected_issue_id() {
+                        self.pending_action = self.request_graph_if_needed(id);
+                    }
+                }
+                action
             }
             IssueFocus::Loading { .. } => None,
         }
