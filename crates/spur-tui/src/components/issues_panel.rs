@@ -36,6 +36,11 @@ pub enum IssueLineageView<'a> {
 }
 
 pub struct IssuesPanel {
+    // Selection state invariant:
+    // - table_state stores the source index into the `issues` slice.
+    // - lineage_table_state stores the visual index for lineage rendering only.
+    // - selected_id always reads table_state; never treat lineage_table_state as
+    //   a source index.
     table_state: TableState,
     lineage_table_state: TableState,
     focused: bool,
@@ -104,12 +109,20 @@ impl IssuesPanel {
     }
 
     pub fn select_first(&mut self) {
-        self.table_state.select(Some(0));
+        let first = self
+            .valid_display_order(self.display_order.len())
+            .and_then(|display_order| display_order.first().copied())
+            .unwrap_or(0);
+        self.table_state.select(Some(first));
     }
 
     pub fn select_last(&mut self, issue_count: usize) {
         if issue_count > 0 {
-            self.table_state.select(Some(issue_count - 1));
+            let last = self
+                .valid_display_order(issue_count)
+                .and_then(|display_order| display_order.last().copied())
+                .unwrap_or(issue_count - 1);
+            self.table_state.select(Some(last));
         }
     }
 
@@ -359,7 +372,7 @@ impl IssuesPanel {
 
     pub fn computed_height(issue_count: usize, available_height: u16) -> u16 {
         let max_panel = (available_height / 4).max(3);
-        (issue_count as u16 + 3).min(max_panel)
+        issue_count.saturating_add(3).min(usize::from(max_panel)) as u16
     }
 }
 
@@ -638,4 +651,63 @@ fn lineage_prefix(depth: usize) -> String {
 
 fn is_closed(node: Option<&GraphNodeEvent>) -> bool {
     node.and_then(|node| node.status.as_deref()) == Some("closed")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use spur_pm::PmSource;
+
+    fn issue(id: &str) -> IssueSummary {
+        IssueSummary {
+            id: id.into(),
+            source: PmSource::Beads,
+            title: id.into(),
+            status: "open".into(),
+            labels: Vec::new(),
+            url: format!("beads://{id}"),
+            priority: None,
+            issue_type: None,
+            assignee: None,
+        }
+    }
+
+    #[test]
+    fn computed_height_saturates_issue_count_before_panel_cap() {
+        assert_eq!(IssuesPanel::computed_height(65_533, u16::MAX), u16::MAX / 4);
+    }
+
+    #[test]
+    fn select_first_uses_first_visual_row_when_display_order_is_valid() {
+        let issues = vec![issue("issue-A"), issue("issue-B"), issue("issue-C")];
+        let mut panel = IssuesPanel::new();
+        panel.display_order = vec![2, 0, 1];
+
+        panel.select_first();
+
+        assert_eq!(panel.selected_id(&issues), Some("issue-C"));
+    }
+
+    #[test]
+    fn select_last_uses_last_visual_row_when_display_order_is_valid() {
+        let issues = vec![issue("issue-A"), issue("issue-B"), issue("issue-C")];
+        let mut panel = IssuesPanel::new();
+        panel.display_order = vec![2, 0, 1];
+
+        panel.select_last(issues.len());
+
+        assert_eq!(panel.selected_id(&issues), Some("issue-B"));
+    }
+
+    #[test]
+    fn stale_display_order_with_out_of_bounds_index_is_ignored() {
+        let issues = vec![issue("issue-A"), issue("issue-B"), issue("issue-C")];
+        let mut panel = IssuesPanel::new();
+        panel.display_order = vec![0, 3, 1];
+        panel.table_state.select(Some(0));
+
+        panel.select_next(1, issues.len());
+
+        assert_eq!(panel.selected_id(&issues), Some("issue-B"));
+    }
 }
