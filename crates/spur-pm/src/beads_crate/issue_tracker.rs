@@ -13,12 +13,6 @@ use crate::types::{Issue, IssueCreate, IssueFilter, IssueSummary, IssueUpdate, P
 
 pub(crate) fn br_to_pm_issue(br: beads_rust::model::Issue) -> Issue {
     let url = format!("beads://{}", br.id);
-    let blocked_by = br
-        .dependencies
-        .iter()
-        .filter(|dependency| dependency.dep_type.is_blocking())
-        .map(|dependency| dependency.depends_on_id.clone())
-        .collect();
     Issue {
         id: br.id,
         source: PmSource::Beads,
@@ -30,7 +24,7 @@ pub(crate) fn br_to_pm_issue(br: beads_rust::model::Issue) -> Issue {
         url,
         priority: Some(br.priority.0),
         issue_type: Some(br.issue_type.to_string()),
-        blocked_by,
+        blocked_by: vec![],
         due_at: br.due_at,
         created_at: br.created_at,
         updated_at: br.updated_at,
@@ -61,11 +55,9 @@ impl IssueTracker for BeadsCrateAdapter {
                 .get_issue(&id)?
                 .ok_or_else(|| anyhow::anyhow!("issue {id} not found"))?;
             // `get_issue` only reads the `issues` table; labels are stored
-            // out-of-line and must be loaded separately. Dependencies are also
-            // stored out-of-line and back the PM `blocked_by` field.
+            // out-of-line and must be loaded separately.
             let mut by_id = s.get_labels_for_issues(std::slice::from_ref(&id))?;
             br.labels = by_id.remove(&id).unwrap_or_default();
-            br.dependencies = s.get_dependencies_full(&id)?;
             Ok(br_to_pm_issue(br))
         })
         .await
@@ -100,26 +92,20 @@ impl IssueTracker for BeadsCrateAdapter {
                 br_filters.priorities = Some(priorities);
             }
             br_filters.title_contains = filter.text_search.clone();
-            br_filters.include_closed = filter.include_closed || filter.status.is_some();
+            br_filters.include_closed = filter.include_closed;
             br_filters.limit = filter.limit;
             br_filters.offset = filter.offset;
             if let Some(since) = filter.since {
                 br_filters.updated_after = Some(since);
             }
 
-            let mut issues = s.list_issues(&br_filters)?;
-            let ids: Vec<String> = issues.iter().map(|issue| issue.id.clone()).collect();
-            let mut labels_by_id = s.get_labels_for_issues(&ids)?;
-            for issue in &mut issues {
-                issue.labels = labels_by_id.remove(&issue.id).unwrap_or_default();
-            }
+            let issues = s.list_issues(&br_filters)?;
             Ok(issues.into_iter().map(br_to_pm_summary).collect())
         })
         .await
     }
 
     async fn create_issue(&self, params: IssueCreate) -> anyhow::Result<String> {
-        let actor = self.config.actor.clone();
         self.write(move |s| {
             let now = Utc::now();
             let id = beads_rust::util::generate_id(
@@ -163,7 +149,7 @@ impl IssueTracker for BeadsCrateAdapter {
                 design: None,
                 acceptance_criteria: None,
                 notes: None,
-                created_by: Some(actor.clone()),
+                created_by: Some("spur".to_string()),
                 closed_at: None,
                 close_reason: None,
                 closed_by_session: None,
@@ -186,17 +172,17 @@ impl IssueTracker for BeadsCrateAdapter {
             };
             let labels = params.labels;
 
-            s.create_issue(&issue, &actor)?;
+            s.create_issue(&issue, "spur")?;
 
             if !labels.is_empty() {
-                s.set_labels(&id, &labels, &actor)?;
+                s.set_labels(&id, &labels, "spur")?;
             }
 
             if let Some(parent) = params.parent.as_deref() {
-                s.add_dependency(&id, parent, "parent-child", &actor)?;
+                s.add_dependency(&id, parent, "parent-child", "spur")?;
             }
             for dep in &params.depends_on {
-                s.add_dependency(&id, dep, "blocks", &actor)?;
+                s.add_dependency(&id, dep, "blocks", "spur")?;
             }
 
             Ok(id)
@@ -206,7 +192,6 @@ impl IssueTracker for BeadsCrateAdapter {
 
     async fn update_issue(&self, id: &str, update: IssueUpdate) -> anyhow::Result<()> {
         let id = id.to_string();
-        let actor = self.config.actor.clone();
         self.write(move |s| {
             let has_field_update =
                 update.status.is_some() || update.priority.is_some() || update.assignee.is_some();
@@ -228,18 +213,18 @@ impl IssueTracker for BeadsCrateAdapter {
                         Some(Some(a.clone()))
                     };
                 }
-                s.update_issue(&id, &br_update, &actor)?;
+                s.update_issue(&id, &br_update, "spur")?;
             }
 
             for label in &update.add_labels {
-                s.add_label(&id, label, &actor)?;
+                s.add_label(&id, label, "spur")?;
             }
             for label in &update.remove_labels {
-                s.remove_label(&id, label, &actor)?;
+                s.remove_label(&id, label, "spur")?;
             }
 
             if let Some(comment) = update.comment.as_deref() {
-                s.add_comment(&id, &actor, comment)?;
+                s.add_comment(&id, "spur", comment)?;
             }
 
             Ok(())
@@ -250,9 +235,8 @@ impl IssueTracker for BeadsCrateAdapter {
     async fn add_dependency(&self, issue_id: &str, depends_on_id: &str) -> anyhow::Result<()> {
         let issue_id = issue_id.to_string();
         let depends_on_id = depends_on_id.to_string();
-        let actor = self.config.actor.clone();
         self.write(move |s| {
-            s.add_dependency(&issue_id, &depends_on_id, "blocks", &actor)?;
+            s.add_dependency(&issue_id, &depends_on_id, "blocks", "spur")?;
             Ok(())
         })
         .await
