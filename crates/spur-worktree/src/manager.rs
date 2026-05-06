@@ -77,9 +77,9 @@ pub enum WorktreeError {
         source_task_id: String,
         files: Vec<String>,
     },
-    /// Cherry-pick failed for a non-conflict reason (empty range, invalid OID,
-    /// hook rejection, GPG failure, etc.). The underlying git error is preserved
-    /// for forensics. Distinct from OverlayConflict so callers can route
+    /// Cherry-pick failed for a non-conflict reason (invalid OID, hook
+    /// rejection, GPG failure, etc.). The underlying git error is preserved for
+    /// forensics. Distinct from OverlayConflict so callers can route
     /// non-conflict failures to a different remediation path.
     CherryPickFailed {
         source_task_id: String,
@@ -278,6 +278,40 @@ impl WorktreeManager {
     ) -> Result<(), WorktreeError> {
         for (source_task_id, base_oid, tip_oid) in overlays {
             let range = format!("{base_oid}..{tip_oid}");
+            let commit_count = match self
+                .run_git(&["rev-list", "--count", &range], Some(worktree_path))
+                .await
+            {
+                Ok(output) => output,
+                Err(e) => {
+                    return Err(WorktreeError::CherryPickFailed {
+                        source_task_id: source_task_id.clone(),
+                        range,
+                        error: format!("{e}"),
+                    });
+                }
+            };
+            let commit_count =
+                commit_count
+                    .parse::<u64>()
+                    .map_err(|e| WorktreeError::CherryPickFailed {
+                        source_task_id: source_task_id.clone(),
+                        range: range.clone(),
+                        error: format!(
+                            "git rev-list --count returned non-numeric output {commit_count:?}: {e}"
+                        ),
+                    })?;
+
+            if commit_count == 0 {
+                tracing::debug!(
+                    source_task_id = %source_task_id,
+                    base = %base_oid,
+                    tip = %tip_oid,
+                    "apply_overlays: skipping empty range"
+                );
+                continue;
+            }
+
             let pick_result = self
                 .run_git(&["cherry-pick", &range], Some(worktree_path))
                 .await;
@@ -945,7 +979,7 @@ mod overlay_tests {
     }
 
     #[tokio::test]
-    async fn apply_overlays_returns_cherry_pick_failed_on_empty_range() {
+    async fn apply_overlays_skips_empty_range_silently() {
         let dir = init_repo();
         let main_oid = run_git(dir.path(), &["rev-parse", "HEAD"]);
 
@@ -963,6 +997,8 @@ mod overlay_tests {
             ],
         );
 
+        let head_before = run_git(&worker_path, &["rev-parse", "HEAD"]);
+
         let mgr = WorktreeManager::new(dir.path().to_path_buf());
         let result = mgr
             .apply_overlays(
@@ -970,15 +1006,80 @@ mod overlay_tests {
                 &[("task1".into(), main_oid.clone(), main_oid)],
             )
             .await;
-        match result {
-            Err(WorktreeError::CherryPickFailed { source_task_id, .. }) => {
-                assert_eq!(source_task_id, "task1");
-            }
-            Err(WorktreeError::OverlayConflict { .. }) => {
-                panic!("empty range must NOT be classified as OverlayConflict");
-            }
-            other => panic!("expected CherryPickFailed, got {other:?}"),
-        }
+        result.expect("empty overlay range should be skipped");
+
+        let head_after = run_git(&worker_path, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            head_after, head_before,
+            "empty overlay range must leave HEAD unchanged"
+        );
+        let cherry_pick_head = run_git(
+            &worker_path,
+            &["rev-parse", "--git-path", "CHERRY_PICK_HEAD"],
+        );
+        let cherry_pick_head = std::path::PathBuf::from(cherry_pick_head);
+        let cherry_pick_head = if cherry_pick_head.is_absolute() {
+            cherry_pick_head
+        } else {
+            worker_path.join(cherry_pick_head)
+        };
+        assert!(
+            !cherry_pick_head.exists(),
+            "empty overlay range must not leave cherry-pick state"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_overlays_skips_empty_range_in_chain() {
+        let dir = init_repo();
+        let main_oid = run_git(dir.path(), &["rev-parse", "HEAD"]);
+
+        run_git(dir.path(), &["checkout", "-q", "-B", "task1", "main"]);
+        std::fs::write(dir.path().join("foo.rs"), "// foo\n").unwrap();
+        run_git(dir.path(), &["add", "foo.rs"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "task1"]);
+        let task1_tip = run_git(dir.path(), &["rev-parse", "HEAD"]);
+
+        run_git(dir.path(), &["checkout", "-q", "-B", "task3", "main"]);
+        std::fs::write(dir.path().join("bar.rs"), "// bar\n").unwrap();
+        run_git(dir.path(), &["add", "bar.rs"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "task3"]);
+        let task3_tip = run_git(dir.path(), &["rev-parse", "HEAD"]);
+
+        run_git(dir.path(), &["checkout", "-q", "main"]);
+        let worker_path = dir.path().join("worker_wt");
+        run_git(
+            dir.path(),
+            &[
+                "worktree",
+                "add",
+                worker_path.to_str().unwrap(),
+                "-b",
+                "worker1",
+                "main",
+            ],
+        );
+
+        let mgr = WorktreeManager::new(dir.path().to_path_buf());
+        mgr.apply_overlays(
+            &worker_path,
+            &[
+                ("task1".into(), main_oid.clone(), task1_tip),
+                ("task2".into(), main_oid.clone(), main_oid.clone()),
+                ("task3".into(), main_oid, task3_tip),
+            ],
+        )
+        .await
+        .expect("empty middle overlay range should be skipped");
+
+        assert!(
+            worker_path.join("foo.rs").exists(),
+            "first overlay should have been applied"
+        );
+        assert!(
+            worker_path.join("bar.rs").exists(),
+            "third overlay should have been applied after empty range"
+        );
     }
 }
 
