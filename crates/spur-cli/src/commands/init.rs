@@ -131,11 +131,35 @@ pub async fn run(repo_root: PathBuf, force: bool, skills: bool) -> Result<()> {
     std::fs::create_dir_all(config_path.parent().unwrap())?;
     std::fs::write(&config_path, toml::to_string_pretty(&config)?)?;
 
-    // ── Phase 13: Skills install (only when explicitly requested) ──────
+    // ── Phase 12.5: First-time beads bootstrap ─────────────────────────
+    // Run `pm init` automatically when `.beads/` is absent. This makes the
+    // golden-path "git clone → spur init" produce a working tracker without
+    // a second command. Idempotent: subsequent `spur init` runs see the
+    // directory present and skip this phase.
+    if !repo_root.join(".beads").exists() {
+        println!();
+        println!("[spur] no .beads/ found — bootstrapping tracker...");
+        if let Err(e) = run_pm_init(repo_root.clone()).await {
+            eprintln!("[spur] warning: pm init failed: {e}");
+            // Do not return Err — `spur init`'s primary contract (write
+            // .spur/config.toml) is already met. The user can re-run
+            // `spur pm init` directly.
+        }
+    }
+
+    // ── Phase 13: Skills install ────────────────────────────────────────
+    // Default-on, but filtered: only fan out to adapters whose agent was
+    // discovered on `$PATH` (plus `SpurHermetic` for brain prompt injection).
+    // `--with-skills` forces the legacy full fanout (all 8 adapters) for
+    // users who explicitly want every adapter dir materialized.
     if skills {
         if let Err(e) = run_skills_init(&repo_root) {
             eprintln!("[spur] warning: skills install failed: {e}");
-            // Do not return Err — config is already written and usable.
+        }
+    } else if !config.agents.entries.is_empty() {
+        let allowed = adapters_for_discovered_agents(&discovered_names);
+        if let Err(e) = run_skills_init_filtered(&repo_root, &allowed) {
+            eprintln!("[spur] warning: skills install failed: {e}");
         }
     }
 
@@ -434,6 +458,161 @@ fn print_summary(config: &SpurConfig) {
     }
 }
 
+/// `spur pm init` — bootstrap the beads tracker in a fresh repo.
+///
+/// Idempotent: safe to run multiple times. On a fresh repo, this:
+///   1. creates `.beads/` and initializes `beads.db` + `issues.jsonl` via
+///      `BeadsCrateAdapter::open` (which runs `init_writer_with_flush`);
+///   2. appends beads-derived-file entries to `.gitignore` if missing
+///      (so `issues.jsonl` stays committed and `beads.db` / locks / temps
+///      do not);
+///   3. ensures `[pm.beads] enabled = true` in `.spur/config.toml` if the
+///      file already exists. If the config doesn't exist, prints a hint
+///      pointing at `spur init` instead of fabricating one.
+pub async fn run_pm_init(repo_root: PathBuf) -> Result<()> {
+    use spur_pm::beads_crate::adapter::{AdapterConfig, BeadsCrateAdapter};
+
+    let beads_dir = repo_root.join(".beads");
+    let already_existed = beads_dir.exists();
+
+    std::fs::create_dir_all(&beads_dir)
+        .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", beads_dir.display()))?;
+
+    // Bootstrap SQLite + JSONL by opening once and dropping. The adapter's
+    // `open` runs `init_writer_with_flush` under `.write.lock`, which creates
+    // `beads.db` (schema) and leaves an empty `issues.jsonl`.
+    let _adapter = BeadsCrateAdapter::open(&beads_dir, AdapterConfig::default())
+        .await
+        .map_err(|e| anyhow::anyhow!("beads adapter init failed: {e}"))?;
+    drop(_adapter);
+
+    // `init_writer_with_flush` only emits `issues.jsonl` when the DB is dirty;
+    // a fresh DB skips the write. Materialize an empty file ourselves so the
+    // source-of-truth artifact exists at well-known path from the first run
+    // and `git add .beads/issues.jsonl` works without a follow-up command.
+    let jsonl = beads_dir.join("issues.jsonl");
+    if !jsonl.exists() {
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&jsonl)
+            .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", jsonl.display()))?;
+    }
+
+    // Patch .gitignore — selective entries so `issues.jsonl` stays committed.
+    let gitignore_added =
+        ensure_gitignore_lines(&repo_root.join(".gitignore"), BEADS_GITIGNORE_LINES)?;
+
+    // Patch .spur/config.toml only if it exists.
+    let config_path = repo_root.join(".spur").join("config.toml");
+    let config_touched = if config_path.exists() {
+        ensure_pm_beads_enabled(&config_path)?
+    } else {
+        false
+    };
+
+    println!();
+    if already_existed {
+        println!("[pm init] .beads/ already present — verified schema is up to date.");
+    } else {
+        println!("[pm init] initialized .beads/ (beads.db + issues.jsonl).");
+    }
+    if gitignore_added > 0 {
+        println!(
+            "[pm init] added {gitignore_added} entr{} to .gitignore.",
+            if gitignore_added == 1 { "y" } else { "ies" }
+        );
+    } else {
+        println!("[pm init] .gitignore already up to date.");
+    }
+    if config_touched {
+        println!("[pm init] set [pm.beads] enabled = true in .spur/config.toml.");
+    } else if !config_path.exists() {
+        println!("[pm init] tip: run `spur init` to create .spur/config.toml.");
+    }
+    println!();
+    println!("Next: commit `.beads/issues.jsonl` and `.gitignore`, then create issues.");
+    Ok(())
+}
+
+/// Lines added to `.gitignore` by `spur pm init`. Selective on purpose:
+/// `issues.jsonl` is the source of truth and MUST stay committed.
+const BEADS_GITIGNORE_LINES: &[&str] = &[
+    ".beads/beads.db",
+    ".beads/beads.db-*",
+    ".beads/.write.lock",
+    ".beads/issues.jsonl.*.tmp",
+];
+
+/// Append any of `lines` not already present in `path`. Returns count added.
+/// Creates the file (with a leading section comment) if it doesn't exist.
+fn ensure_gitignore_lines(path: &std::path::Path, lines: &[&str]) -> Result<usize> {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let present: std::collections::HashSet<&str> = existing
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    let mut to_add: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|l| !present.contains(*l))
+        .collect();
+    if to_add.is_empty() {
+        return Ok(0);
+    }
+
+    let mut out = String::with_capacity(existing.len() + 256);
+    out.push_str(&existing);
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    if !existing.contains("# spur pm (beads)") {
+        out.push_str("\n# spur pm (beads) — derived files; commit issues.jsonl\n");
+    }
+    for line in &to_add {
+        out.push_str(line);
+        out.push('\n');
+    }
+
+    std::fs::write(path, out)
+        .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))?;
+    Ok(to_add.drain(..).count())
+}
+
+/// Load `.spur/config.toml`, ensure `[pm.beads] enabled = true` (preserving
+/// `auto_sync`), persist atomically. Returns `true` if the file was changed.
+fn ensure_pm_beads_enabled(config_path: &std::path::Path) -> Result<bool> {
+    use spur_acp::config::BeadsPmConfig;
+
+    let content = std::fs::read_to_string(config_path)
+        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", config_path.display()))?;
+    let mut config: SpurConfig = toml::from_str(&content)
+        .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", config_path.display()))?;
+
+    let was_enabled = config.pm.beads.as_ref().map(|b| b.enabled).unwrap_or(false);
+    let was_explicit = config.pm.beads.is_some();
+
+    if was_enabled && was_explicit {
+        return Ok(false);
+    }
+
+    let auto_sync = config
+        .pm
+        .beads
+        .as_ref()
+        .map(|b| b.auto_sync)
+        .unwrap_or(false);
+    config.pm.beads = Some(BeadsPmConfig {
+        enabled: true,
+        auto_sync,
+    });
+    std::fs::write(config_path, toml::to_string_pretty(&config)?)
+        .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", config_path.display()))?;
+    Ok(true)
+}
+
 /// Run the SpurPower skills installer independently of config init.
 pub fn run_skills_init(repo_root: &std::path::Path) -> Result<()> {
     match spur_core::skills::installer::run(repo_root) {
@@ -445,6 +624,62 @@ pub fn run_skills_init(repo_root: &std::path::Path) -> Result<()> {
         }
         Err(e) => Err(anyhow::anyhow!("skills install failed: {e}")),
     }
+}
+
+/// Filtered skills install — used by `spur init`'s default-on path so we
+/// don't materialize dotfile dirs for agents the user doesn't have.
+pub fn run_skills_init_filtered(
+    repo_root: &std::path::Path,
+    adapters: &[spur_core::skills::adapters::Adapter],
+) -> Result<()> {
+    match spur_core::skills::installer::run_filtered(repo_root, adapters) {
+        Ok(summary) => {
+            println!();
+            print!("{summary}");
+            print_gitattributes_advisory_if_needed(repo_root);
+            Ok(())
+        }
+        Err(e) => Err(anyhow::anyhow!("skills install failed: {e}")),
+    }
+}
+
+/// Map discovered agent names to skill adapters. `SpurHermetic` is always
+/// included for brain prompt injection. Unknown agent names are ignored.
+fn adapters_for_discovered_agents(
+    discovered: &std::collections::HashSet<String>,
+) -> Vec<spur_core::skills::adapters::Adapter> {
+    use spur_core::skills::adapters::Adapter;
+    let mut set: std::collections::HashSet<Adapter> = std::collections::HashSet::new();
+    set.insert(Adapter::SpurHermetic);
+    for name in discovered {
+        match name.as_str() {
+            "claude-code" => {
+                set.insert(Adapter::ClaudeCode);
+            }
+            "codex" | "codex-bin" => {
+                set.insert(Adapter::Codex);
+            }
+            "gemini" => {
+                set.insert(Adapter::Gemini);
+            }
+            "kiro" => {
+                set.insert(Adapter::Kiro);
+            }
+            "opencode" => {
+                set.insert(Adapter::OpenCode);
+            }
+            "kimi" => {
+                set.insert(Adapter::Kimi);
+            }
+            _ => {}
+        }
+    }
+    // Preserve `Adapter::all()` order so output is deterministic.
+    Adapter::all()
+        .iter()
+        .copied()
+        .filter(|a| set.contains(a))
+        .collect()
 }
 
 fn prompt_permission_bypass(config: &mut SpurConfig) -> Result<()> {

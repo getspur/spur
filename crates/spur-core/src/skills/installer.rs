@@ -261,15 +261,25 @@ pub(crate) fn decide(rf: &RenderedFile) -> Result<Decision, InstallError> {
 ///   brain prompt injection. They are NOT sent to worker agent adapters.
 /// - `Worker` and `Both` skills render to all adapters.
 pub fn run(repo_root: &Path) -> Result<Summary, InstallError> {
+    run_filtered(repo_root, Adapter::all())
+}
+
+/// Same as [`run`] but only renders into `adapters`. The caller is
+/// responsible for including `Adapter::SpurHermetic` if brain-prompt
+/// injection is desired (this function does not implicitly add it).
+///
+/// Used by `spur init`'s default-on flow to skip dotfile dirs for agents
+/// that aren't on `$PATH`. The Kiro steering pointer is still emitted only
+/// when `Adapter::Kiro` is in the filter — otherwise the pointer would
+/// dangle to a directory that holds no rendered skills.
+pub fn run_filtered(repo_root: &Path, adapters: &[Adapter]) -> Result<Summary, InstallError> {
     use super::SkillRole;
 
     let skills = list_active_skills(repo_root)?;
     let mut summary = Summary::default();
 
-    // Per-skill × per-adapter fanout.
     for skill in &skills {
-        for adapter in Adapter::all() {
-            // Role gating: brain-only skills skip worker adapters.
+        for adapter in adapters {
             if skill.role == SkillRole::Brain && *adapter != Adapter::SpurHermetic {
                 let rf = adapter.render(skill, repo_root);
                 remove_stale_managed_file(&rf, &mut summary)?;
@@ -280,8 +290,9 @@ pub fn run(repo_root: &Path) -> Result<Summary, InstallError> {
         }
     }
 
-    // Once-per-run files (currently only Kiro steering pointer).
-    apply(&render_kiro_steering_pointer(repo_root), &mut summary)?;
+    if adapters.contains(&Adapter::Kiro) {
+        apply(&render_kiro_steering_pointer(repo_root), &mut summary)?;
+    }
 
     Ok(summary)
 }
