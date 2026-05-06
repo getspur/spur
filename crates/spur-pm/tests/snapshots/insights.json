@@ -5,68 +5,83 @@
     {
       "ID": "<id-1>",
       "Value": 1.0
-    }
-  ],
-  "Keystones": [
-    {
-      "ID": "<id-1>",
-      "Value": 1.0
-    }
-  ],
-  "Influencers": [
-    {
-      "ID": "<id-2>",
-      "Value": 0.474412171508
     },
     {
-      "ID": "<id-1>",
-      "Value": 0.341171046565
+      "ID": "<id-2>",
+      "Value": 1.0
     },
     {
       "ID": "<id-3>",
-      "Value": 0.184416781927
+      "Value": 1.0
+    }
+  ],
+  "Keystones": [],
+  "Influencers": [
+    {
+      "ID": "<id-1>",
+      "Value": 0.333333333333
+    },
+    {
+      "ID": "<id-2>",
+      "Value": 0.333333333333
+    },
+    {
+      "ID": "<id-3>",
+      "Value": 0.333333333333
     }
   ],
   "Hubs": [
     {
       "ID": "<id-1>",
-      "Value": 0.707106781187
+      "Value": 0.57735026919
+    },
+    {
+      "ID": "<id-2>",
+      "Value": 0.57735026919
     },
     {
       "ID": "<id-3>",
-      "Value": 0.707106781187
+      "Value": 0.57735026919
     }
   ],
   "Authorities": [
     {
       "ID": "<id-1>",
-      "Value": 0.707106781187
+      "Value": 0.57735026919
     },
     {
       "ID": "<id-2>",
-      "Value": 0.707106781187
+      "Value": 0.57735026919
+    },
+    {
+      "ID": "<id-3>",
+      "Value": 0.57735026919
     }
   ],
   "Cores": [
     {
       "ID": "<id-1>",
-      "Value": 1.0
+      "Value": 2.0
     },
     {
       "ID": "<id-2>",
-      "Value": 1.0
+      "Value": 2.0
     },
     {
       "ID": "<id-3>",
-      "Value": 1.0
+      "Value": 2.0
     }
   ],
-  "Articulation": [
-    "<id-1>"
-  ],
+  "Articulation": [],
   "Orphans": [],
-  "Cycles": [],
-  "ClusterDensity": 0.666666666667,
+  "Cycles": [
+    [
+      "<id-1>",
+      "<id-2>",
+      "<id-3>"
+    ]
+  ],
+  "ClusterDensity": 1.0,
   "top_what_ifs": [
     {
       "issue_id": "<id-1>",

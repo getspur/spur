@@ -2,7 +2,7 @@
   "format": "json",
   "graph": null,
   "nodes": 3,
-  "edges": 2,
+  "edges": 3,
   "data_hash": "<normalized>",
   "adjacency": {
     "nodes": [
@@ -36,6 +36,11 @@
         "from": "<id-1>",
         "to": "<id-2>",
         "type": "blocks"
+      },
+      {
+        "from": "<id-2>",
+        "to": "<id-3>",
+        "type": "related-to"
       },
       {
         "from": "<id-3>",

@@ -161,10 +161,10 @@
       },
       "graph": {
         "node_count": 3,
-        "edge_count": 2,
-        "density": 0.333333333333,
-        "has_cycles": false,
-        "cycle_count": 0
+        "edge_count": 3,
+        "density": 0.5,
+        "has_cycles": true,
+        "cycle_count": 1
       },
       "velocity": null,
       "staleness": null
