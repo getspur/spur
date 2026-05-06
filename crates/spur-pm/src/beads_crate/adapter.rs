@@ -149,6 +149,10 @@ impl BeadsCrateAdapter {
     /// Idempotent under-lock auto-flush. Inside `.beads/.write.lock`, calls
     /// `beads_rust::sync::auto_flush` which is a no-op if nothing is dirty.
     /// Safe to call concurrently across processes — they serialize on the flock.
+    ///
+    /// Must NOT be called from inside a `write()` or `batch()` closure: the
+    /// underlying file flock is not reentrant within the same process and
+    /// the second acquisition would deadlock.
     pub async fn auto_flush(&self) -> anyhow::Result<()> {
         let beads_dir = self.beads_dir.clone();
         let backoff = self.config.backoff.clone();
@@ -157,30 +161,21 @@ impl BeadsCrateAdapter {
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             let _flock =
                 acquire_write_lock_with_backoff(&beads_dir, &backoff, lock_timeout_ms, &metrics)?;
-            let mut storage =
-                beads_rust::storage::sqlite::SqliteStorage::open(&beads_dir.join("beads.db"))?;
+            let mut storage = beads_rust::storage::sqlite::SqliteStorage::open_with_timeout(
+                &beads_dir.join("beads.db"),
+                Some(lock_timeout_ms),
+            )?;
             let jsonl = beads_dir.join("issues.jsonl");
-            let _outcome = beads_rust::sync::auto_flush(&mut storage, &beads_dir, &jsonl, false)?;
-            metrics.incr_auto_flush_success();
+            let outcome = beads_rust::sync::auto_flush(&mut storage, &beads_dir, &jsonl, false)?;
+            if outcome.flushed {
+                metrics.incr_auto_flush_dirty();
+                metrics.incr_auto_flush_success();
+            } else {
+                metrics.incr_auto_flush_skipped();
+            }
             Ok(())
         })
         .await?
-    }
-
-    pub fn spawn_periodic_auto_flush(
-        self: Arc<Self>,
-        interval: std::time::Duration,
-    ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(interval);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tick.tick().await;
-                if let Err(e) = self.auto_flush().await {
-                    tracing::warn!(error = %e, "periodic auto_flush failed");
-                }
-            }
-        })
     }
 
     /// Lock-free snapshot read. Opens a fresh `SqliteStorage` connection
@@ -372,20 +367,41 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn auto_flush_idempotent_when_clean() {
+        use std::sync::atomic::Ordering;
+
         let dir = TempDir::new().unwrap();
         let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
             .await
             .unwrap();
 
         adapter.auto_flush().await.unwrap();
-        adapter.auto_flush().await.unwrap();
+        let success_after_first = adapter
+            .metrics()
+            .auto_flush_success_total
+            .load(Ordering::Relaxed);
+        let skipped_after_first = adapter
+            .metrics()
+            .auto_flush_skipped_total
+            .load(Ordering::Relaxed);
 
-        assert!(
-            adapter
-                .metrics()
-                .auto_flush_success_total
-                .load(std::sync::atomic::Ordering::Relaxed)
-                >= 2
+        adapter.auto_flush().await.unwrap();
+        let success_after_second = adapter
+            .metrics()
+            .auto_flush_success_total
+            .load(Ordering::Relaxed);
+        let skipped_after_second = adapter
+            .metrics()
+            .auto_flush_skipped_total
+            .load(Ordering::Relaxed);
+
+        assert_eq!(
+            success_after_second, success_after_first,
+            "clean re-flush must NOT bump success counter (would inflate telemetry)"
+        );
+        assert_eq!(
+            skipped_after_second - skipped_after_first,
+            1,
+            "clean re-flush must bump skipped counter exactly once"
         );
     }
 
