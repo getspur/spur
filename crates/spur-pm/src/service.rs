@@ -1,10 +1,12 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::adapter::{IssueTracker, PrService};
 use crate::beads_crate::{AdapterConfig, BeadsCrateAdapter};
 use crate::bv::BvAdapter;
 use crate::github::GitHubAdapter;
 use crate::graph::DependencyGraph;
+use crate::graph_engine::GraphEngineConfig;
 use crate::types::*;
 
 /// Resolve the beads "closed" status string. Default is `"closed"` — the
@@ -81,10 +83,13 @@ impl PmService {
                 ..AdapterConfig::default()
             };
             let beads = BeadsCrateAdapter::open(&beads_dir, config).await?;
-            let bv = match BvAdapter::connect(repo_root).await {
-                Ok(bv) => Some(bv),
+            let bv = match BeadsCrateAdapter::open(&beads_dir, AdapterConfig::default()).await {
+                Ok(beads_crate) => Some(BvAdapter::from_beads(
+                    Arc::new(beads_crate),
+                    GraphEngineConfig::default(),
+                )),
                 Err(e) => {
-                    tracing::info!("bv unavailable (graph analysis disabled): {e}");
+                    tracing::info!("graph engine unavailable (graph analysis disabled): {e}");
                     None
                 }
             };
@@ -211,7 +216,7 @@ impl PmService {
         let bv = self
             .bv
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("bv unavailable for issue graph"))?;
+            .ok_or_else(|| anyhow::anyhow!("graph engine unavailable for issue graph"))?;
 
         if let PmBackendInner::Beads { beads, .. } = &self.inner {
             if let Some(plan_label) = beads.plan_id_label_for_epic(id).await? {

@@ -39,6 +39,44 @@ Two independent cross-checks (codex + gemini) confirmed:
 | The Rust SDK collapses generic errors into JSON-RPC `InternalError` (-32603) with the message string in `data`. No transient-vs-fatal classification. | Confirmed | spur-acp owns its own classifier (substring match on a small allow-list). |
 | `CLAUDE_STREAM_IDLE_TIMEOUT_MS` and `CLAUDE_ENABLE_STREAM_WATCHDOG=0` env vars are respected by the underlying Claude Agent SDK and pass through the bridge unchanged. | Refined (gemini) | We may bump or disable the upstream watchdog if our own watchdog supersedes it. Out of scope for v1; noted for tuning. |
 
+## Existing in-tree watchdog: `delegation_watchdog`
+
+There is already a watchdog in `crates/spur-core/src/delegation_watchdog.rs` that observes worker delegations. It is **not** an implementation of this spec — different module, different signal — but it watches the same physical ACP transport, so the two watchdogs overlap and the design below must account for it.
+
+### What it does
+
+- Module: `crates/spur-core/src/delegation_watchdog.rs`. Declared at `crates/spur-core/src/lib.rs:6`.
+- Lifetime: spawned in `orchestrator.rs:6117` after the delegation semaphore permit is acquired; stopped via the `Option<HeartbeatWatchdogStop> = oneshot::Sender<()>` returned to the caller (dropped on delegation completion).
+- Liveness signal: `SpurEventBody::WorkerHeartbeat` on the internal `broadcast<SpurEvent>` bus. The events originate from `_spur/heartbeat` ACP ExtNotifications interpreted at `spur_ext_interp.rs:51-62`. So the heartbeats *do* travel over the same ACP wire this spec's watchdog watches — just one specific frame kind.
+- Behaviour: single timeout (`worker_heartbeat_timeout_secs`, default 90s) plus an initial grace (`worker_heartbeat_initial_grace_secs`, default 60s clamped to `max(self, timeout*2)`). On expiry it calls `DelegationAbortHandle::request_abort(DelegationAbortReason::WorkerHeartbeatTimeout)`. The orchestrator's existing cancel paths translate that into `DelegationStatus::Timeout` via the `status_from_abort_reason` helper.
+- No state machine, no multipliers, no retry tier, no user banner. Cooperative-protocol backstop only.
+- Config keys are on `WorktreeConfig`, not on a per-agent recovery policy: `worker_heartbeat_watchdog_enabled`, `worker_heartbeat_timeout_secs`, `worker_heartbeat_initial_grace_secs`.
+
+### How it overlaps with this spec's ACP stream watchdog
+
+Both watchdogs observe the same `AgentConnection` for a worker turn, but they ask different questions:
+
+- **ACP stream watchdog (this spec):** "Is *anything* coming over the wire?" — superset signal, state-aware multipliers, two-tier recovery.
+- **`delegation_watchdog`:** "Is the worker *explicitly cooperating* by emitting `_spur/heartbeat`?" — narrow signal, single-tier abort.
+
+| Scenario | ACP stream watchdog | `delegation_watchdog` |
+|---|---|---|
+| Worker streaming `session/update` chunks but skipping `_spur/heartbeat` | quiet (frames flowing) | **fires** after `worker_heartbeat_timeout_secs` |
+| Worker emits `_spur/heartbeat` but its upstream LLM stream is dead | **fires** (no other frames; multiplier-adjusted) | quiet (heartbeats arriving) |
+| Worker process hung — nothing on wire | fires after `base × multiplier` | fires after timeout |
+| Worker process EOF | fires (transport error / classifier path) | fires (no more heartbeats) |
+| Long tool call | suppressed by `MULT_TOOL_RUNNING = 10×` | not state-aware; only `_spur/heartbeat` keepalives prevent fire |
+
+### Implications for this design
+
+1. **Both watchdogs may fire on the same delegation.** Once this spec ships, a hung worker can trip both. The first one to fire cancels the delegation. This is acceptable as long as the resulting `DelegationStatus` is consistent (`Timeout` either way), but the design must not assume single-watchdog ownership of cancel semantics. The recovery flow in this spec lives at the connection layer and does not interact with `DelegationAbortHandle`; the orchestrator's own cancel path is what produces `DelegationStatus`. Tier-1 silent retry must therefore complete *before* `delegation_watchdog` would fire, or the orchestrator-side cancel will pre-empt the retry.
+
+2. **`_spur/heartbeat` becomes lower-value once this spec lands.** With "any inbound frame counts as liveness", periodic `session/update` chunks already prove worker liveness during streaming work. `_spur/heartbeat` is only load-bearing for long pure-tool spans — which the new `MULT_TOOL_RUNNING = 10×` grace already covers in a less invasive way. The follow-up question (whether to keep `delegation_watchdog` post-spec, narrow it to a longer outer-bound only, or retire it) is **out of scope for v1** and called out in Open Questions below.
+
+3. **Recovery semantics differ — worker delegations should NOT silent-retry by default.** `delegation_watchdog`'s only move is "abort the delegation". This spec's Tier-1 silent retry would `session/cancel` + re-`session/prompt` on the same worker connection. Re-running a worker's coding turn against a partially-mutated worktree is a different risk profile from re-running a brain's planning turn. **For v1, default `auto_silent_retry = false` for worker connections** (override the global default at the call site) and keep silent retry on for brain connections only. The `AgentRecoveryPolicy` stays a per-agent config, and the orchestrator passes the appropriate policy when constructing the worker `AgentConnection`.
+
+4. **Config namespacing must not collide.** This spec adds `[agents.entries.recovery]` with `heartbeat_base_secs` / `auto_silent_retry`. `delegation_watchdog` reads `worker_heartbeat_*` on `WorktreeConfig`. Keep both — they govern different watchdogs. Do not unify keys in v1.
+
 ## Design
 
 ### Failure mode taxonomy
@@ -288,6 +326,8 @@ Existing tests that may need updating:
 2. **Telegram bot integration.** The Telegram brain interface (`bot.telegram` in config) presumably can't show a non-modal banner. For v1, the bot consumer can either auto-pick `RetryTurn` on stall (Tier-1 behavior extended to Tier-2 for non-interactive surfaces) or simply emit the stalled error to the user as a chat message. Decision deferred — the `RecoveryEvent` channel exposes everything needed for either policy.
 
 3. **Should `BrainStalled` count as an `AcpError`?** Currently the design is: `prompt()` does NOT return Err on stall — it stays open while the watchdog and resolver dance. Only if `Reset` happens does the original `prompt()` future get cancelled. This may complicate caller code. Alternative: `prompt()` returns `Err(AcpError::Stalled { resolver })` immediately, the resolver is held by the caller. Pick during writing-plans phase based on actual call-site shape.
+
+4. **Long-term fate of `delegation_watchdog`.** Once this spec lands, the existing `crates/spur-core/src/delegation_watchdog.rs` becomes a narrower cooperative-protocol backstop on top of a more capable transport-level watchdog. Three plausible end states: (a) keep both as-is, (b) widen `worker_heartbeat_timeout_secs` to a long outer-bound (e.g. 10–15 min) so it only catches "worker process is alive but completely silent on the protocol layer", (c) retire it entirely once the ACP watchdog has soaked. Decision deferred until after the ACP watchdog has produced real-world data on stall causes for worker connections specifically.
 
 ## Future work (out of scope)
 

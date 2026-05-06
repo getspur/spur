@@ -4485,7 +4485,7 @@ impl McpCallbackServer {
         pm.analyzer().ok_or_else(|| {
             JsonRpcResponse::internal_error(
                 id.clone(),
-                "Graph analysis not available. Install bv: brew install dicklesworthstone/tap/bv",
+                "Graph analysis not available (beads database unavailable)",
             )
         })
     }

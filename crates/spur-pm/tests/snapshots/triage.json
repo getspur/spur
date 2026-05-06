@@ -1,0 +1,179 @@
+{
+  "generated_at": "<normalized>",
+  "data_hash": "<normalized>",
+  "triage": {
+    "meta": {
+      "engine": "spur-graph-engine",
+      "version": "1"
+    },
+    "quick_ref": {
+      "open_count": 2,
+      "actionable_count": 1,
+      "blocked_count": 1,
+      "in_progress_count": 0,
+      "top_picks": [
+        {
+          "id": "<id-1>",
+          "title": "Top task",
+          "score": 1.0,
+          "reasons": [
+            "unblocks 1 downstream",
+            "actionable now",
+            "recently updated"
+          ],
+          "unblocks": 1
+        },
+        {
+          "id": "<id-3>",
+          "title": "Closed parent",
+          "score": 0.717941563651,
+          "reasons": [
+            "unblocks 2 downstream",
+            "recently updated"
+          ],
+          "unblocks": 2
+        },
+        {
+          "id": "<id-2>",
+          "title": "Blocked task",
+          "score": 0.502243231149,
+          "reasons": [
+            "recently updated"
+          ],
+          "unblocks": 0
+        }
+      ]
+    },
+    "recommendations": [
+      {
+        "id": "<id-1>",
+        "title": "Top task",
+        "type": "task",
+        "status": "open",
+        "priority": 2,
+        "labels": [],
+        "score": 1.0,
+        "breakdown": {
+          "priority": 0.6,
+          "unblocks": 0.301029995664,
+          "actionable": 1.0,
+          "freshness": 0.73105857863,
+          "age_penalty": 0.119202922022,
+          "raw": 0.552995993508
+        },
+        "action": "start",
+        "reasons": [
+          "unblocks 1 downstream",
+          "actionable now",
+          "recently updated"
+        ],
+        "unblocks_ids": [
+          "<id-2>"
+        ],
+        "blocked_by": [
+          "<id-3>"
+        ]
+      },
+      {
+        "id": "<id-3>",
+        "title": "Closed parent",
+        "type": "task",
+        "status": "closed",
+        "priority": 2,
+        "labels": [],
+        "score": 0.717941563651,
+        "breakdown": {
+          "priority": 0.6,
+          "unblocks": 0.47712125472,
+          "actionable": 0.0,
+          "freshness": 0.73105857863,
+          "age_penalty": 0.119202922022,
+          "raw": 0.397018808272
+        },
+        "action": "wait",
+        "reasons": [
+          "unblocks 2 downstream",
+          "recently updated"
+        ],
+        "unblocks_ids": [
+          "<id-1>"
+        ],
+        "blocked_by": []
+      },
+      {
+        "id": "<id-2>",
+        "title": "Blocked task",
+        "type": "task",
+        "status": "open",
+        "priority": 2,
+        "labels": [],
+        "score": 0.502243231149,
+        "breakdown": {
+          "priority": 0.6,
+          "unblocks": 0.0,
+          "actionable": 0.0,
+          "freshness": 0.73105857863,
+          "age_penalty": 0.119202922022,
+          "raw": 0.277738494592
+        },
+        "action": "wait",
+        "reasons": [
+          "recently updated"
+        ],
+        "unblocks_ids": [],
+        "blocked_by": [
+          "<id-1>"
+        ]
+      }
+    ],
+    "quick_wins": [
+      {
+        "id": "<id-1>",
+        "title": "Top task",
+        "score": 1.0,
+        "reason": "unblocks 1 downstream; actionable now; recently updated",
+        "unblocks_ids": [
+          "<id-2>"
+        ]
+      }
+    ],
+    "blockers_to_clear": [
+      {
+        "id": "<id-1>",
+        "title": "Top task",
+        "unblocks_count": 1,
+        "unblocks_ids": [
+          "<id-2>"
+        ],
+        "actionable": true,
+        "blocked_by": [
+          "<id-3>"
+        ]
+      }
+    ],
+    "project_health": {
+      "counts": {
+        "total": 3,
+        "open": 2,
+        "closed": 1,
+        "blocked": 1,
+        "actionable": 1
+      },
+      "graph": {
+        "node_count": 3,
+        "edge_count": 3,
+        "density": 0.5,
+        "has_cycles": true,
+        "cycle_count": 1
+      },
+      "velocity": null,
+      "staleness": null
+    },
+    "alerts": [],
+    "commands": null
+  },
+  "usage_hints": [
+    "jq '.triage.quick_ref.top_picks'",
+    "jq '.triage.recommendations[0:3]'"
+  ]
+}
