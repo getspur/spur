@@ -4,9 +4,6 @@ use std::path::Path;
 use tempfile::TempDir;
 
 mod common;
-fn br_available() -> bool {
-    common::beads::br_available()
-}
 
 fn run_br(repo: &Path, args: &[&str]) {
     common::beads::run_br(repo, args)
@@ -15,9 +12,6 @@ fn run_br(repo: &Path, args: &[&str]) {
 
 #[tokio::test]
 async fn second_brain_acquisition_refuses() {
-    if !br_available() {
-        return;
-    }
     let dir = TempDir::new().unwrap();
     run_br(dir.path(), &["init"]);
     let pid_path = dir.path().join(".beads").join(".spur-brain.pid");
@@ -28,9 +22,6 @@ async fn second_brain_acquisition_refuses() {
 
 #[tokio::test]
 async fn stale_pidfile_is_reacquirable_after_restart() {
-    if !br_available() {
-        return;
-    }
     let dir = TempDir::new().unwrap();
     run_br(dir.path(), &["init"]);
     let pid_path = dir.path().join(".beads").join(".spur-brain.pid");

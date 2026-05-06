@@ -13,10 +13,6 @@ use tempfile::TempDir;
 
 mod common;
 
-fn br_available() -> bool {
-    common::beads::br_available()
-}
-
 fn run_br(repo: &Path, args: &[&str]) -> Result<(), String> {
     common::beads::run_br(repo, args).map(|_| ())
 }
@@ -87,14 +83,8 @@ fn decode_tool_response(response: &Value) -> Value {
     serde_json::from_str(text).expect("tool response must be json")
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0d_3_merge_plan_works_after_restart_on_persisted_plan() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = init_repo().await;
     run_br(dir.path(), &["init"]).expect("br init");
     commit_file(dir.path(), "base.txt", "base\n", "seed").await;

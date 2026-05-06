@@ -20,9 +20,6 @@ use tempfile::TempDir;
 use tokio::sync::Mutex;
 
 mod common;
-fn br_available() -> bool {
-    common::beads::br_available()
-}
 
 fn run_br(repo: &Path, args: &[&str]) {
     common::beads::run_br(repo, args)
@@ -136,14 +133,8 @@ fn make_plan_needing_recovery(plan_id: &str) -> PlanState {
     }
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn get_task_diff_returns_cached_diff_shape() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let pm = test_pm_service(dir.path()).await;
@@ -188,7 +179,7 @@ async fn get_task_diff_cached_result_succeeds_without_pm_or_repo_root() {
     let resolver = FixedPlanResolver {
         plan: Arc::new(Mutex::new(make_plan_with_cached_result("plan-cached"))),
     };
-    // Note: no `br_available` skip — this test deliberately constructs no PM
+    // Note: this test deliberately constructs no PM
     // and no repo_root. The cached-result branch must not need either.
     let gate = community_gate();
 
@@ -216,14 +207,8 @@ async fn get_task_diff_cached_result_succeeds_without_pm_or_repo_root() {
     );
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn get_task_diff_unauthorized_when_recovery_needs_pro_feature() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let pm = test_pm_service(dir.path()).await;
@@ -253,14 +238,8 @@ async fn get_task_diff_unauthorized_when_recovery_needs_pro_feature() {
     );
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn get_task_diff_missing_plan_id_invalid_params() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let pm = test_pm_service(dir.path()).await;

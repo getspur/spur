@@ -30,10 +30,6 @@ fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterialize
     ))
 }
 
-fn br_available() -> bool {
-    common::beads::br_available()
-}
-
 fn run_br(repo: &Path, args: &[&str]) -> Result<(), String> {
     common::beads::run_br(repo, args).map(|_| ())
 }
@@ -92,6 +88,27 @@ fn continuation_ctx() -> DetachedContinuationCtx {
     }
 }
 
+async fn recv_reconciler_request(
+    server: &Arc<McpCallbackServer>,
+    request_rx: &mut tokio::sync::mpsc::Receiver<spur_mcp::DelegationRequest>,
+    timeout_message: &str,
+) -> spur_mcp::DelegationRequest {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            server.fast_forward_reconciler();
+            match tokio::time::timeout(Duration::from_millis(50), request_rx.recv()).await {
+                Ok(Some(request)) => break request,
+                Ok(None) => {
+                    panic!("delegation channel closed while waiting for reconciler request")
+                }
+                Err(_) => {}
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{timeout_message}"))
+}
+
 fn persisted_task(agent: &str) -> Vec<PlanTask> {
     vec![PlanTask {
         task_id: "t1".into(),
@@ -117,14 +134,8 @@ fn persisted_task_with_context(agent: &str, context_files: &[&str]) -> Vec<PlanT
     }]
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0c_1_persisted_submit_path_does_not_direct_dispatch() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -157,14 +168,8 @@ async fn t_v0c_1_persisted_submit_path_does_not_direct_dispatch() {
     );
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0c_2_reconciler_dispatch_writes_label_and_dispatch_audit() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -217,14 +222,8 @@ async fn t_v0c_2_reconciler_dispatch_writes_label_and_dispatch_audit() {
         .any(|audit| matches!(audit, AuditSentinelKind::Dispatch { .. })));
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0c_3_completion_success_writes_ready_for_review_and_completion() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -270,14 +269,8 @@ async fn t_v0c_3_completion_success_writes_ready_for_review_and_completion() {
     )));
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0c_4_reject_closes_task_and_blocks_watcher() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -342,14 +335,8 @@ async fn t_v0c_4_reject_closes_task_and_blocks_watcher() {
     assert!(!issue.labels.contains(&labels::READY_FOR_REVIEW.to_string()));
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0c_5_request_changes_stays_open_and_reconciler_redispatches() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -443,14 +430,8 @@ async fn t_v0c_5_request_changes_stays_open_and_reconciler_redispatches() {
     assert_eq!(request.issue_id.as_deref(), Some(task_id.as_str()));
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0c_6_watcher_uses_projected_plan_state_not_stub_state() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -529,14 +510,8 @@ async fn t_v0c_6_watcher_uses_projected_plan_state_not_stub_state() {
     );
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0c_7_cache_miss_rehydrates_persisted_plan_from_beads() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -566,14 +541,8 @@ async fn t_v0c_7_cache_miss_rehydrates_persisted_plan_from_beads() {
     );
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0c_8_orphaned_dispatch_requeues_and_late_completion_is_superseded() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -627,14 +596,8 @@ async fn t_v0c_8_orphaned_dispatch_requeues_and_late_completion_is_superseded() 
     )));
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0c_9_orphaned_mutation_plan_is_compensated_before_new_signals() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -672,13 +635,8 @@ async fn t_v0c_9_orphaned_mutation_plan_is_compensated_before_new_signals() {
     )));
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0c_10_startup_reclaims_mid_plan_and_continues_dispatch() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
     skip_if_no_loopback!("t_v0c_10_startup_reclaims_mid_plan_and_continues_dispatch");
 
     let dir = TempDir::new().expect("tempdir");
@@ -718,24 +676,24 @@ async fn t_v0c_10_startup_reclaims_mid_plan_and_continues_dispatch() {
         .start()
         .await
         .expect("start server (loopback bind already probed at fn entry)");
-    server.fast_forward_reconciler();
-    let request = tokio::time::timeout(Duration::from_secs(5), channel.request_rx.recv())
+    Arc::clone(&server)
+        .enable_reconciler()
         .await
-        .expect("reconciler dispatch timeout")
-        .expect("dispatch request");
+        .expect("enable reconciler");
+    let request = recv_reconciler_request(
+        &server,
+        &mut channel.request_rx,
+        "reconciler dispatch timeout",
+    )
+    .await;
     handle.abort();
 
     assert!(server.__test_active_plan_count().await > 0);
     assert_eq!(request.issue_id.as_deref(), Some(task_id.as_str()));
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0c_11_startup_reclaim_clears_stale_dispatch_before_redispatch() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
     skip_if_no_loopback!("t_v0c_11_startup_reclaim_clears_stale_dispatch_before_redispatch");
 
     let dir = TempDir::new().expect("tempdir");
@@ -783,6 +741,10 @@ async fn t_v0c_11_startup_reclaim_clears_stale_dispatch_before_redispatch() {
         .start()
         .await
         .expect("start server (loopback bind already probed at fn entry)");
+    Arc::clone(&server)
+        .enable_reconciler()
+        .await
+        .expect("enable reconciler");
 
     let issue_after_start = pm
         .get_issue(&task_id)
@@ -795,10 +757,8 @@ async fn t_v0c_11_startup_reclaim_clears_stale_dispatch_before_redispatch() {
         "startup reclaim should clear stale dispatch intent before redispatch"
     );
 
-    let request = tokio::time::timeout(Duration::from_secs(5), channel.request_rx.recv())
-        .await
-        .expect("redispatch timeout")
-        .expect("dispatch request");
+    let request =
+        recv_reconciler_request(&server, &mut channel.request_rx, "redispatch timeout").await;
 
     let issue_after_redispatch = pm
         .get_issue(&task_id)

@@ -14,14 +14,12 @@ use tokio::sync::Notify;
 
 mod common;
 
+const COMPLETION_TASK_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterializer> {
     Arc::new(spur_mcp::outcome_materializer::OutcomeMaterializer::new(
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
     ))
-}
-
-fn br_available() -> bool {
-    common::beads::br_available()
 }
 
 fn run_br(repo: &Path, args: &[&str]) {
@@ -150,14 +148,8 @@ async fn seed_epic_fixture(
     (beads_pm(repo).await, epic_id, task_a_id, task_b_id)
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn reconciler_pushes_plan_completed_continuation_after_worker_completion_closes_epic() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let plan_id = "P-reconciler-continuation";
@@ -234,7 +226,7 @@ async fn reconciler_pushes_plan_completed_continuation_after_worker_completion_c
         })
         .expect("send worker result");
     task_tracker.close();
-    tokio::time::timeout(Duration::from_secs(2), task_tracker.wait())
+    tokio::time::timeout(COMPLETION_TASK_TIMEOUT, task_tracker.wait())
         .await
         .expect("completion task should finish");
 
@@ -259,14 +251,8 @@ async fn reconciler_pushes_plan_completed_continuation_after_worker_completion_c
     assert_eq!(epic.status, pm.closed_status());
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0d_1_epic_closes_when_children_terminal() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let (pm, epic_id, task_a_id, task_b_id) = seed_epic_fixture(dir.path(), "P1").await;
@@ -317,14 +303,8 @@ async fn t_v0d_1_epic_closes_when_children_terminal() {
     )));
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0d_2_all_approved_epic_still_yields_plan_ready_to_merge() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let (pm, epic_id, task_a_id, task_b_id) = seed_epic_fixture(dir.path(), "P1").await;
@@ -407,14 +387,8 @@ async fn t_v0d_2_all_approved_epic_still_yields_plan_ready_to_merge() {
     assert_eq!(ready_events, 1, "expected one PlanReadyToMerge event");
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn three_task_plan_drops_plan_outcomes_on_epic_close_but_retains_global_ring() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -529,7 +503,7 @@ async fn three_task_plan_drops_plan_outcomes_on_epic_close_but_retains_global_ri
             .expect("send worker result");
     }
     task_tracker.close();
-    tokio::time::timeout(Duration::from_secs(2), task_tracker.wait())
+    tokio::time::timeout(COMPLETION_TASK_TIMEOUT, task_tracker.wait())
         .await
         .expect("completion tasks should finish");
 
@@ -562,14 +536,8 @@ async fn three_task_plan_drops_plan_outcomes_on_epic_close_but_retains_global_ri
     ));
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn epic_completion_backfills_missing_audit_for_closed_terminal_epic() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let (pm, epic_id, task_a_id, task_b_id) = seed_epic_fixture(dir.path(), "P1").await;
@@ -626,14 +594,8 @@ async fn epic_completion_backfills_missing_audit_for_closed_terminal_epic() {
     )));
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn closed_epic_backfill_emits_plan_completed_event() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let (pm, epic_id, task_a_id, task_b_id) = seed_epic_fixture(dir.path(), "P2").await;
@@ -717,14 +679,8 @@ async fn closed_epic_backfill_emits_plan_completed_event() {
     );
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn closed_epic_backfill_clears_stale_integration_pending_on_failure() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let (pm, epic_id, task_a_id, task_b_id) = seed_epic_fixture(dir.path(), "P3").await;
@@ -782,14 +738,8 @@ async fn closed_epic_backfill_clears_stale_integration_pending_on_failure() {
     );
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn epic_closure_ignores_non_task_plan_scoped_issues() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let (pm, epic_id, task_a_id, task_b_id) = seed_epic_fixture(dir.path(), "P4").await;

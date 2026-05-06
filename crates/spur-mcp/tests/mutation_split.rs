@@ -13,10 +13,6 @@ use uuid::Uuid;
 
 mod common;
 
-fn br_available() -> bool {
-    common::beads::br_available()
-}
-
 fn run_br(repo: &Path, args: &[&str]) -> Result<String, String> {
     common::beads::run_br(repo, args)
 }
@@ -58,14 +54,8 @@ fn mutation_batch(
     .expect("MutationBatch JSON must deserialize")
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn split_task_happy_path_rewires_downstream_and_commits() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
 

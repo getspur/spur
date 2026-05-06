@@ -9,10 +9,6 @@ use tempfile::TempDir;
 
 mod common;
 
-fn br_available() -> bool {
-    common::beads::br_available()
-}
-
 fn run_git(repo: &Path, args: &[&str]) {
     let out = Command::new("git")
         .args(args)
@@ -61,12 +57,6 @@ fn extract_submit_plan_task_issue_id(response: &serde_json::Value, task_id: &str
 
 #[tokio::test]
 async fn reconciler_starts_only_after_brain_session_id_is_bound() {
-    if !br_available() {
-        eprintln!(
-            "skipping reconciler_starts_only_after_brain_session_id_is_bound: `br` not on PATH"
-        );
-        return;
-    }
     skip_if_no_loopback!("reconciler_starts_only_after_brain_session_id_is_bound");
 
     let dir = TempDir::new().expect("tempdir");

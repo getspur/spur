@@ -214,9 +214,13 @@ impl BeadsCrateAdapter {
     {
         let metrics = Arc::clone(&self.metrics);
         let db_path = self.beads_dir.join("beads.db");
+        let lock_timeout_ms = self.config.lock_timeout_ms;
         tokio::task::spawn_blocking(move || -> anyhow::Result<T> {
             metrics.incr_read();
-            let storage = beads_rust::storage::sqlite::SqliteStorage::open(&db_path)?;
+            let storage = beads_rust::storage::sqlite::SqliteStorage::open_with_timeout(
+                &db_path,
+                Some(lock_timeout_ms),
+            )?;
             f(&storage)
         })
         .await?
@@ -235,9 +239,13 @@ impl BeadsCrateAdapter {
     {
         let metrics = Arc::clone(&self.metrics);
         let db_path = self.beads_dir.join("beads.db");
+        let lock_timeout_ms = self.config.lock_timeout_ms;
         tokio::task::spawn_blocking(move || -> anyhow::Result<Snapshot<S>> {
             metrics.incr_read();
-            let storage = beads_rust::storage::sqlite::SqliteStorage::open(&db_path)?;
+            let storage = beads_rust::storage::sqlite::SqliteStorage::open_with_timeout(
+                &db_path,
+                Some(lock_timeout_ms),
+            )?;
             let value = f(&storage)?;
             let data_version = read_data_version(&storage)?;
             Ok(Snapshot {
