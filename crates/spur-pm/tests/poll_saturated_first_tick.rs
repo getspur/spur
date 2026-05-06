@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
 
-use spur_pm::{beads::POLL_FETCH_LIMIT, BeadsAdapter, IssueTracker, PmEvent};
+use spur_pm::{BeadsAdapter, IssueTracker, PmEvent, POLL_FETCH_LIMIT};
 use tempfile::TempDir;
 
 fn br_available() -> bool {

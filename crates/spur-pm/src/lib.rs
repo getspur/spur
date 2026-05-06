@@ -17,6 +17,6 @@ pub use advanced::{BeadsAdvanced, Comment, CommentId, DependencyCycle, ReadyFilt
 pub use beads::BeadsAdapter;
 pub use bv::BvAdapter;
 pub use github::GitHubAdapter;
-pub use poll_cursor::PollCursor;
+pub use poll_cursor::{PollCursor, POLL_FETCH_LIMIT};
 pub use service::PmService;
 pub use types::*;

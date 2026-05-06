@@ -7,9 +7,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 
 use crate::adapter::IssueTracker;
-use crate::beads::POLL_FETCH_LIMIT;
 use crate::beads_crate::adapter::BeadsCrateAdapter;
-use crate::poll_cursor::PollCursor;
+use crate::poll_cursor::{PollCursor, POLL_FETCH_LIMIT};
 use crate::types::{Issue, IssueCreate, IssueFilter, IssueSummary, IssueUpdate, PmEvent, PmSource};
 
 pub(crate) fn br_to_pm_issue(br: beads_rust::model::Issue) -> Issue {
