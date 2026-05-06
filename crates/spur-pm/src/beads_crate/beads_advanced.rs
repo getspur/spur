@@ -99,15 +99,17 @@ impl BeadsAdvanced for BeadsCrateAdapter {
     async fn add_comment(&self, issue_id: &str, body: &str) -> anyhow::Result<CommentId> {
         let issue_id = issue_id.to_string();
         let body = body.to_string();
-        self.write(move |s| Ok(s.add_comment(&issue_id, "spur", &body)?.id.to_string()))
+        let actor = self.actor();
+        self.write(move |s| Ok(s.add_comment(&issue_id, &actor, &body)?.id.to_string()))
             .await
     }
 
     async fn remove_dependency(&self, issue_id: &str, depends_on_id: &str) -> anyhow::Result<()> {
         let issue_id = issue_id.to_string();
         let depends_on_id = depends_on_id.to_string();
+        let actor = self.actor();
         self.write(move |s| {
-            s.remove_dependency(&issue_id, &depends_on_id, "spur")?;
+            s.remove_dependency(&issue_id, &depends_on_id, &actor)?;
             Ok(())
         })
         .await
@@ -235,6 +237,37 @@ mod tests {
                 && comment.actor == "spur"),
             "expected advanced comment id {comment_id} via list_comments, got {comments:?}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn actor_threads_through_write_methods() {
+        let dir = TempDir::new().unwrap();
+        let config = AdapterConfig {
+            actor: "test-actor".to_string(),
+            ..AdapterConfig::default()
+        };
+        let adapter = BeadsCrateAdapter::open(dir.path(), config).await.unwrap();
+        let id = adapter
+            .create_issue(IssueCreate {
+                title: "actor threading test".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let issue_for_check = id.clone();
+        let created_by = adapter
+            .read(move |s| {
+                Ok(s.get_issue(&issue_for_check)?
+                    .and_then(|issue| issue.created_by))
+            })
+            .await
+            .unwrap();
+        assert_eq!(created_by.as_deref(), Some("test-actor"));
+
+        let _comment_id = adapter.add_comment(&id, "test body").await.unwrap();
+        let comments = adapter.list_comments(&id).await.unwrap();
+        assert!(comments.iter().any(|c| c.actor == "test-actor"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
