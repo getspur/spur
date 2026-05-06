@@ -7573,11 +7573,39 @@ mod clobber_review_tests {
 }
 
 #[cfg(test)]
+fn attach_beads_workspace(repo: &std::path::Path, w: &spur_pm::test_workspace::TestBeadsWorkspace) {
+    let beads_dir = repo.join(".beads");
+    std::fs::create_dir(&beads_dir).expect("create test .beads directory");
+    std::fs::copy(w.path().join("beads.db"), beads_dir.join("beads.db"))
+        .expect("copy test beads database");
+}
+
+#[cfg(test)]
+async fn init_beads_pm(
+    repo: &std::path::Path,
+) -> (
+    spur_pm::test_workspace::TestBeadsWorkspace,
+    std::sync::Arc<spur_pm::PmService>,
+) {
+    let w = spur_pm::test_workspace::TestBeadsWorkspace::init();
+    attach_beads_workspace(repo, &w);
+
+    let pm = std::sync::Arc::new(
+        spur_pm::PmService::try_new(None, true, false, repo, None)
+            .await
+            .expect("PmService::try_new failed")
+            .expect("expected Some(PmService)"),
+    );
+    (w, pm)
+}
+
+#[cfg(test)]
 mod merge_plan_tests {
     use super::{integrate_plan_branches, run_git_capture, snapshot_plan_base, JsonRpcResponse};
     use crate::plan::audit_sentinel::{encode_comment, AuditSentinelKind, CompletionState};
     use crate::plan::{PlanMergeState, PlanTask};
     use serde_json::{json, Value};
+    use spur_pm::test_workspace::TestBeadsWorkspace;
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
 
@@ -7605,24 +7633,9 @@ mod merge_plan_tests {
             .expect("git commit");
     }
 
-    async fn init_beads_pm(repo: &std::path::Path) -> Arc<spur_pm::PmService> {
-        let output = std::process::Command::new("br")
-            .args(["init"])
-            .current_dir(repo)
-            .output()
-            .expect("br init");
-        assert!(output.status.success(), "br init failed: {:?}", output);
-
-        Arc::new(
-            spur_pm::PmService::try_new(None, true, false, repo, None)
-                .await
-                .expect("PmService::try_new failed")
-                .expect("expected Some(PmService)"),
-        )
-    }
-
     struct PersistedMergeFixture {
         _dir: TempDir,
+        _beads: TestBeadsWorkspace,
         pm: Arc<spur_pm::PmService>,
         server: super::McpCallbackServer,
         plan_id: String,
@@ -7635,7 +7648,7 @@ mod merge_plan_tests {
     ) -> PersistedMergeFixture {
         let dir = init_repo().await;
         commit_file(dir.path(), "base.txt", "base\n", "seed").await;
-        let pm = init_beads_pm(dir.path()).await;
+        let (beads, pm) = super::init_beads_pm(dir.path()).await;
 
         run_git_capture(
             dir.path(),
@@ -7788,6 +7801,7 @@ mod merge_plan_tests {
 
         PersistedMergeFixture {
             _dir: dir,
+            _beads: beads,
             pm,
             server,
             plan_id: plan_id.to_string(),
@@ -7801,7 +7815,7 @@ mod merge_plan_tests {
     ) -> PersistedMergeFixture {
         let dir = init_repo().await;
         commit_file(dir.path(), "base.txt", "base\n", "seed").await;
-        let pm = init_beads_pm(dir.path()).await;
+        let (beads, pm) = super::init_beads_pm(dir.path()).await;
 
         run_git_capture(
             dir.path(),
@@ -8008,6 +8022,7 @@ mod merge_plan_tests {
 
         PersistedMergeFixture {
             _dir: dir,
+            _beads: beads,
             pm,
             server,
             plan_id: plan_id.to_string(),
@@ -8021,7 +8036,7 @@ mod merge_plan_tests {
     ) -> PersistedMergeFixture {
         let dir = init_repo().await;
         commit_file(dir.path(), "base.txt", "base\n", "seed").await;
-        let pm = init_beads_pm(dir.path()).await;
+        let (beads, pm) = super::init_beads_pm(dir.path()).await;
 
         run_git_capture(
             dir.path(),
@@ -8228,6 +8243,7 @@ mod merge_plan_tests {
 
         PersistedMergeFixture {
             _dir: dir,
+            _beads: beads,
             pm,
             server,
             plan_id: plan_id.to_string(),
@@ -8709,7 +8725,7 @@ mod merge_plan_tests {
         use spur_acp::{BrainSessionId, SessionId};
 
         let dir = TempDir::new().expect("tempdir");
-        let pm = init_beads_pm(dir.path()).await;
+        let (_beads, pm) = super::init_beads_pm(dir.path()).await;
 
         let session_id = BrainSessionId::new(SessionId("comment-lookup-non-pro".into()));
         let continuation_ctx = super::DetachedContinuationCtx {
@@ -9162,19 +9178,7 @@ mod reconciler_fast_forward_tests {
     #[tokio::test]
     async fn reclaim_persisted_plans_hydrates_empty_cache() {
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let output = std::process::Command::new("br")
-            .args(["init"])
-            .current_dir(dir.path())
-            .output()
-            .expect("br init");
-        assert!(output.status.success(), "br init failed: {:?}", output);
-
-        let pm = Arc::new(
-            spur_pm::PmService::try_new(None, true, false, dir.path(), None)
-                .await
-                .expect("PmService::try_new failed")
-                .expect("expected Some(PmService)"),
-        );
+        let (_beads, pm) = super::init_beads_pm(dir.path()).await;
         let tasks = vec![crate::plan::PlanTask {
             task_id: "t1".into(),
             agent: "codex".into(),
@@ -9328,19 +9332,7 @@ mod reconciler_fast_forward_tests {
     #[tokio::test]
     async fn detector_skips_reclaim_when_all_epics_have_rev1_metadata() {
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let output = std::process::Command::new("br")
-            .args(["init"])
-            .current_dir(dir.path())
-            .output()
-            .expect("br init");
-        assert!(output.status.success(), "br init failed: {:?}", output);
-
-        let pm = Arc::new(
-            spur_pm::PmService::try_new(None, true, false, dir.path(), None)
-                .await
-                .expect("PmService::try_new failed")
-                .expect("expected Some(PmService)"),
-        );
+        let (_beads, pm) = super::init_beads_pm(dir.path()).await;
         let tasks = vec![crate::plan::PlanTask {
             task_id: "t1".into(),
             agent: "codex".into(),
@@ -9393,19 +9385,7 @@ mod reconciler_fast_forward_tests {
     #[tokio::test]
     async fn detector_reclaims_when_plan_submit_lacks_bootstrap_metadata() {
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let output = std::process::Command::new("br")
-            .args(["init"])
-            .current_dir(dir.path())
-            .output()
-            .expect("br init");
-        assert!(output.status.success(), "br init failed: {:?}", output);
-
-        let pm = Arc::new(
-            spur_pm::PmService::try_new(None, true, false, dir.path(), None)
-                .await
-                .expect("PmService::try_new failed")
-                .expect("expected Some(PmService)"),
-        );
+        let (_beads, pm) = super::init_beads_pm(dir.path()).await;
         let tasks = vec![crate::plan::PlanTask {
             task_id: "t1".into(),
             agent: "codex".into(),
