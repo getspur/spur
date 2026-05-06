@@ -1,133 +1,56 @@
-//! `BvAdapter` — wraps the `bv` (beads_viewer) CLI robot protocol for
-//! graph analysis of the `.beads/` issue store.
+//! `BvAdapter` — wraps the native `GraphEngine` and provides the historical
+//! API surface that MCP, orchestrator, TUI, and tests already call.
 //!
 //! All methods return typed structs with a `raw: serde_json::Value` field
-//! carrying the full bv output for MCP passthrough.
+//! containing the report's JSON for MCP passthrough.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::Arc;
 
-use serde::de::DeserializeOwned;
-use tokio::process::Command;
-
-use crate::graph::*;
-
-/// Timeout for all bv subprocess calls.
-const BV_TIMEOUT: Duration = Duration::from_secs(10);
+use crate::beads_crate::{AdapterConfig, BeadsCrateAdapter};
+use crate::graph::{AlertReport, DependencyGraph, ExecutionPlan, GraphInsights, TriageReport};
+use crate::graph_engine::{GraphEngine, GraphEngineConfig};
 
 pub struct BvAdapter {
-    cwd: PathBuf,
+    engine: GraphEngine,
 }
 
 impl BvAdapter {
-    /// Probe for `bv` binary. Returns `Err` if not installed.
+    /// Construct a BvAdapter from a connected BeadsCrateAdapter and graph config.
+    pub fn from_beads(beads: Arc<BeadsCrateAdapter>, cfg: GraphEngineConfig) -> Self {
+        Self {
+            engine: GraphEngine::new(beads, cfg),
+        }
+    }
+
+    /// Compatibility constructor matching the historical signature.
     pub async fn connect(repo_root: &Path) -> anyhow::Result<Self> {
-        let adapter = Self {
-            cwd: repo_root.to_path_buf(),
-        };
-
-        let output = adapter.run_bv_raw(&["--version"]).await?;
-        tracing::info!(version = %output.trim(), "connected to beads_viewer (bv)");
-
-        Ok(adapter)
-    }
-
-    /// Run `bv` and return raw stdout.
-    async fn run_bv_raw(&self, args: &[&str]) -> anyhow::Result<String> {
-        tracing::debug!(?args, "running bv CLI");
-
-        let child = Command::new("bv")
-            .args(args)
-            .current_dir(&self.cwd)
-            .env("NO_COLOR", "1")
-            .env("BV_OUTPUT_FORMAT", "json")
-            .kill_on_drop(true)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    anyhow::anyhow!(
-                        "bv binary not found. Install: brew install dicklesworthstone/tap/bv"
-                    )
-                } else {
-                    anyhow::anyhow!("Failed to execute bv: {e}")
-                }
-            })?;
-
-        let output = tokio::time::timeout(BV_TIMEOUT, child.wait_with_output())
-            .await
-            .map_err(|_| anyhow::anyhow!("bv timed out after {}s", BV_TIMEOUT.as_secs()))?
-            .map_err(|e| anyhow::anyhow!("Failed to read bv output: {e}"))?;
-
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stderr.trim().is_empty() {
-            tracing::debug!(stderr = %stderr.trim(), "bv stderr");
-        }
-
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).to_string())
-        } else {
-            let msg = if !stderr.trim().is_empty() {
-                stderr.trim().to_string()
-            } else {
-                String::from_utf8_lossy(&output.stdout).trim().to_string()
-            };
-            anyhow::bail!("bv failed: {msg}")
-        }
-    }
-
-    /// Run a bv robot command, parse JSON output into a typed struct,
-    /// and populate the `raw` field with the full JSON Value.
-    async fn run_robot<T: DeserializeOwned + HasRaw>(
-        &self,
-        args: &[&str],
-        cmd_name: &str,
-    ) -> anyhow::Result<T> {
-        let output = self.run_bv_raw(args).await?;
-        let raw: serde_json::Value = serde_json::from_str(&output)
-            .map_err(|e| anyhow::anyhow!("bv {cmd_name}: JSON parse error: {e}"))?;
-        let mut result: T = serde_json::from_value(raw.clone())
-            .map_err(|e| anyhow::anyhow!("bv {cmd_name}: deserialize error: {e}"))?;
-        result.set_raw(raw);
-        Ok(result)
+        let beads = Arc::new(
+            BeadsCrateAdapter::open(&beads_dir_for(repo_root), AdapterConfig::default()).await?,
+        );
+        Ok(Self::from_beads(beads, GraphEngineConfig::default()))
     }
 
     // ─── Public graph analysis methods ────────────────────────────────
 
-    /// Full project triage — recommendations, quick wins, blockers, health.
+    /// Full project triage - recommendations, quick wins, blockers, health.
     pub async fn triage(&self, label: Option<&str>) -> anyhow::Result<TriageReport> {
-        let mut args = vec!["--robot-triage"];
-        if let Some(l) = label {
-            args.push("--label");
-            args.push(l);
-        }
-        self.run_robot(&args, "triage").await
+        self.engine.triage(label).await
     }
 
     /// Parallel execution plan with dependency-aware tracks.
     pub async fn plan(&self, label: Option<&str>) -> anyhow::Result<ExecutionPlan> {
-        let mut args = vec!["--robot-plan"];
-        if let Some(l) = label {
-            args.push("--label");
-            args.push(l);
-        }
-        self.run_robot(&args, "plan").await
+        self.engine.plan(label).await
     }
 
     /// Graph metrics: PageRank, betweenness, HITS, critical path, cycles.
     pub async fn insights(&self, label: Option<&str>) -> anyhow::Result<GraphInsights> {
-        let mut args = vec!["--robot-insights"];
-        if let Some(l) = label {
-            args.push("--label");
-            args.push(l);
-        }
-        self.run_robot(&args, "insights").await
+        self.engine.insights(label).await
     }
 
     /// Active alerts: stale issues, blocking cascades, cycles, priority mismatches.
     pub async fn alerts(&self) -> anyhow::Result<AlertReport> {
-        self.run_robot(&["--robot-alerts"], "alerts").await
+        self.engine.alerts().await
     }
 
     /// Dependency subgraph for a specific issue.
@@ -137,22 +60,7 @@ impl BvAdapter {
         depth: Option<u32>,
         format: Option<&str>,
     ) -> anyhow::Result<DependencyGraph> {
-        let root_arg = format!("--graph-root={root_id}");
-        let mut args = vec!["--robot-graph", &root_arg];
-
-        let depth_str;
-        if let Some(d) = depth {
-            depth_str = format!("--graph-depth={d}");
-            args.push(&depth_str);
-        }
-
-        let fmt_str;
-        if let Some(f) = format {
-            fmt_str = format!("--graph-format={f}");
-            args.push(&fmt_str);
-        }
-
-        self.run_robot(&args, "graph").await
+        self.engine.subgraph(root_id, depth, format).await
     }
 
     /// Dependency graph for all issues matching a label.
@@ -165,51 +73,84 @@ impl BvAdapter {
         label: &str,
         format: Option<&str>,
     ) -> anyhow::Result<DependencyGraph> {
-        let mut args = vec!["--robot-graph", "--label", label];
-
-        let fmt_str;
-        if let Some(f) = format {
-            fmt_str = format!("--graph-format={f}");
-            args.push(&fmt_str);
-        }
-
-        self.run_robot(&args, "graph").await
+        self.engine.graph_by_label(label, format).await
     }
 }
 
-// ─── HasRaw trait for populating the raw field ───────────────────────
-
-/// Internal trait for setting the `raw` field on deserialized structs.
-pub(crate) trait HasRaw {
-    fn set_raw(&mut self, raw: serde_json::Value);
-}
-
-impl HasRaw for TriageReport {
-    fn set_raw(&mut self, raw: serde_json::Value) {
-        self.raw = raw;
+fn beads_dir_for(repo_root: &Path) -> PathBuf {
+    if repo_root.join("beads.db").is_file() {
+        repo_root.to_path_buf()
+    } else {
+        repo_root.join(".beads")
     }
 }
 
-impl HasRaw for ExecutionPlan {
-    fn set_raw(&mut self, raw: serde_json::Value) {
-        self.raw = raw;
-    }
-}
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
 
-impl HasRaw for GraphInsights {
-    fn set_raw(&mut self, raw: serde_json::Value) {
-        self.raw = raw;
-    }
-}
+    use crate::beads_crate::{AdapterConfig, BeadsCrateAdapter};
+    use crate::graph_engine::{GraphEngine, GraphEngineConfig};
+    use crate::test_workspace::TestBeadsWorkspace;
 
-impl HasRaw for AlertReport {
-    fn set_raw(&mut self, raw: serde_json::Value) {
-        self.raw = raw;
-    }
-}
+    use super::*;
 
-impl HasRaw for DependencyGraph {
-    fn set_raw(&mut self, raw: serde_json::Value) {
-        self.raw = raw;
+    async fn open_beads(w: &TestBeadsWorkspace) -> Arc<BeadsCrateAdapter> {
+        Arc::new(
+            BeadsCrateAdapter::open(w.path(), AdapterConfig::default())
+                .await
+                .expect("open beads crate adapter"),
+        )
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn from_beads_delegates_triage_to_graph_engine() {
+        let mut w = TestBeadsWorkspace::init();
+        let label = "spur:plan-id:T16";
+        let issue = w.create_issue("Adapter task");
+        w.add_label(&issue, label);
+
+        let beads = open_beads(&w).await;
+        let cfg = GraphEngineConfig::default();
+        let expected = GraphEngine::new(Arc::clone(&beads), cfg.clone())
+            .triage(Some(label))
+            .await
+            .expect("graph engine triage");
+        let adapter = BvAdapter::from_beads(beads, cfg);
+
+        let actual = adapter.triage(Some(label)).await.expect("adapter triage");
+        assert_eq!(actual.triage.quick_ref.open_count, 1);
+        assert_eq!(actual.triage.recommendations[0].id, issue);
+        assert_eq!(actual.data_hash, expected.data_hash);
+        assert_eq!(actual.raw["triage"], expected.raw["triage"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn connect_keeps_repo_root_signature_and_uses_local_beads() {
+        let repo = tempfile::TempDir::new().expect("create repo tempdir");
+        let beads_dir = repo.path().join(".beads");
+        std::fs::create_dir_all(&beads_dir).expect("create .beads dir");
+
+        let mut w = TestBeadsWorkspace::init();
+        let issue = w.create_issue("Repo root adapter task");
+        w.copy_db_to(&beads_dir);
+
+        let adapter = BvAdapter::connect(repo.path())
+            .await
+            .expect("connect from repo root");
+        let report = adapter.triage(None).await.expect("triage from repo root");
+
+        assert_eq!(report.triage.quick_ref.open_count, 1);
+        assert_eq!(report.triage.recommendations[0].id, issue);
+    }
+
+    #[test]
+    fn source_no_longer_contains_bv_subprocess_path() {
+        let source = include_str!("bv.rs");
+        let command_new_bv = ["Command", "::new", "(\"", "bv", "\")"].concat();
+        let tokio_command = ["tokio", "::process", "::Command"].concat();
+
+        assert!(!source.contains(&command_new_bv));
+        assert!(!source.contains(&tokio_command));
     }
 }
