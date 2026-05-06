@@ -8,16 +8,8 @@ use serde::Deserialize;
 use tokio::process::Command;
 
 use crate::adapter::IssueTracker;
-use crate::poll_cursor::PollCursor;
+use crate::poll_cursor::{PollCursor, POLL_FETCH_LIMIT};
 use crate::types::{Issue, IssueCreate, IssueFilter, IssueSummary, IssueUpdate, PmEvent, PmSource};
-
-/// Maximum rows fetched per `poll()` call via `br list --limit N`.
-///
-/// Chosen to comfortably exceed realistic concurrent-update volume between
-/// two poll ticks. If a single poll returns exactly this many rows, the
-/// backend may hold additional qualifying rows that were truncated — see
-/// [`BeadsAdapter::poll_with_limit`] for the saturation data-loss guard.
-pub const POLL_FETCH_LIMIT: usize = 500;
 
 // ─── Private error type ───────────────────────────────────────────────
 

@@ -14,6 +14,13 @@ use std::collections::HashSet;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Maximum rows fetched per `poll()` call.
+///
+/// Chosen to comfortably exceed realistic concurrent-update volume between
+/// two poll ticks. If a single poll returns exactly this many rows, the
+/// backend may hold additional qualifying rows that were truncated.
+pub const POLL_FETCH_LIMIT: usize = 500;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PollCursor {
     pub ts: DateTime<Utc>,
