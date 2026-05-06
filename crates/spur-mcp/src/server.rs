@@ -7576,8 +7576,9 @@ mod clobber_review_tests {
 fn attach_beads_workspace(repo: &std::path::Path, w: &spur_pm::test_workspace::TestBeadsWorkspace) {
     let beads_dir = repo.join(".beads");
     std::fs::create_dir(&beads_dir).expect("create test .beads directory");
-    std::fs::copy(w.path().join("beads.db"), beads_dir.join("beads.db"))
-        .expect("copy test beads database");
+    // Copy db + WAL + SHM (beads_rust uses WAL mode and skips checkpoint on
+    // Drop; bare `fs::copy(beads.db)` loses every uncheckpointed write).
+    w.copy_db_to(&beads_dir);
 }
 
 #[cfg(test)]
