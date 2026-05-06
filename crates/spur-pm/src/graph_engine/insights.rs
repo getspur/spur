@@ -28,17 +28,28 @@ impl Default for InsightConfig {
 pub fn compute_insights(snap: &GraphSnapshot, cfg: &InsightConfig) -> GraphInsights {
     let mut cycles: Vec<Vec<String>> = tarjan_scc(&snap.graph)
         .into_iter()
-        .filter(|component| component.len() > 1)
-        .map(|component| {
+        .filter_map(|component| {
+            let ix = component[0];
+            let has_self_loop =
+                component.len() == 1 && snap.graph.edges(ix).any(|edge| edge.target() == ix);
+            if component.len() <= 1 && !has_self_loop {
+                return None;
+            }
+
             let mut ids: Vec<String> = component
                 .into_iter()
                 .map(|ix| snap.graph[ix].id.clone())
                 .collect();
             ids.sort();
-            ids
+            Some(ids)
         })
         .collect();
-    cycles.sort();
+    cycles.sort_by(|a, b| {
+        a.first()
+            .cmp(&b.first())
+            .then_with(|| a.len().cmp(&b.len()))
+            .then_with(|| a.cmp(b))
+    });
 
     let articulation = articulation_points(snap);
     let articulation_ids: HashSet<String> = articulation
@@ -312,6 +323,7 @@ fn compute_top_what_ifs(snap: &GraphSnapshot, cfg: &InsightConfig) -> Vec<WhatIf
 }
 
 fn highest_impact_node(snap: &GraphSnapshot) -> Option<(NodeIndex, usize)> {
+    // TODO: memoize transitive_unblocks across nodes if N grows; currently O(N·(N+E)).
     snap.graph
         .node_indices()
         .filter(|&ix| snap.graph[ix].status != "closed")
@@ -477,6 +489,25 @@ mod tests {
 
         assert_eq!(i.cycles.len(), 1);
         assert_eq!(i.cycles[0], vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn compute_insights_lists_self_loops_as_cycles() {
+        let s = snap(
+            vec![n("a"), n("b"), n("c")],
+            vec![
+                ("a", "a", DependencyKind::Blocks),
+                ("b", "c", DependencyKind::Blocks),
+                ("c", "b", DependencyKind::Blocks),
+            ],
+        );
+        let cfg = InsightConfig::default();
+
+        let i = compute_insights(&s, &cfg);
+
+        assert_eq!(i.cycles.len(), 2);
+        assert!(i.cycles.contains(&vec!["a".to_string()]));
+        assert!(i.cycles.contains(&vec!["b".to_string(), "c".to_string()]));
     }
 
     #[test]
