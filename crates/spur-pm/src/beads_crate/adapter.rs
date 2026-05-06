@@ -84,6 +84,10 @@ pub struct AdapterConfig {
     pub stale_tmp_min_age: Duration,
     pub allow_non_local_fs: bool,
     pub backoff: BackoffPolicy,
+    /// Optional poll cursor file. When set, `open()` loads the cursor from
+    /// this path if it exists, and every successful `poll()` writes the latest
+    /// cursor back to the same path.
+    pub cursor_path: Option<PathBuf>,
 }
 
 impl Default for AdapterConfig {
@@ -93,6 +97,7 @@ impl Default for AdapterConfig {
             stale_tmp_min_age: Duration::from_secs(3600),
             allow_non_local_fs: false,
             backoff: BackoffPolicy::default(),
+            cursor_path: None,
         }
     }
 }
@@ -132,13 +137,26 @@ impl BeadsCrateAdapter {
         .await??;
 
         let metrics = Arc::new(ContentionMetrics::default());
+        let initial_cursor = match config.cursor_path.as_ref() {
+            Some(path) => match PollCursor::load_from(path) {
+                Ok(cursor) => cursor,
+                Err(e) => {
+                    tracing::warn!(
+                        ?path,
+                        "failed to load cursor file ({e}); starting without cursor"
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
 
         Ok(Self {
             beads_dir,
             jsonl_path,
             config,
             metrics,
-            cursor: tokio::sync::Mutex::new(None),
+            cursor: tokio::sync::Mutex::new(initial_cursor),
         })
     }
 
@@ -319,6 +337,9 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    use crate::adapter::IssueTracker;
+    use crate::types::IssueCreate;
+
     #[tokio::test(flavor = "multi_thread")]
     async fn open_succeeds_in_fresh_dir() {
         let dir = TempDir::new().unwrap();
@@ -326,6 +347,49 @@ mod tests {
             .await
             .expect("adapter opens");
         assert!(adapter.beads_dir.exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cursor_persists_across_open() {
+        let dir = TempDir::new().unwrap();
+        let cursor_path = dir.path().join(".spur-test-cursor");
+        let config = AdapterConfig {
+            cursor_path: Some(cursor_path.clone()),
+            ..AdapterConfig::default()
+        };
+
+        let first_cursor = {
+            let adapter = BeadsCrateAdapter::open(dir.path(), config.clone())
+                .await
+                .unwrap();
+            adapter
+                .create_issue(IssueCreate {
+                    title: "persisted cursor issue".into(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            let events = adapter.poll().await.unwrap();
+            assert_eq!(events.len(), 1);
+            assert!(cursor_path.exists(), "poll should write cursor file");
+
+            let cursor = {
+                let guard = adapter.cursor.lock().await;
+                guard.clone()
+            };
+            cursor.expect("poll should set cursor")
+        };
+
+        let reopened = BeadsCrateAdapter::open(dir.path(), config).await.unwrap();
+        let loaded_cursor = reopened
+            .cursor
+            .lock()
+            .await
+            .clone()
+            .expect("open should load cursor from disk");
+
+        assert_eq!(loaded_cursor.ts, first_cursor.ts);
+        assert_eq!(loaded_cursor.ids_at_boundary, first_cursor.ids_at_boundary);
     }
 
     #[tokio::test(flavor = "multi_thread")]
