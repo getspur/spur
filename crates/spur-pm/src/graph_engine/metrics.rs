@@ -1,7 +1,7 @@
 use crate::graph_engine::snapshot::GraphSnapshot;
 use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 /// HITS algorithm - returns (hubs, authorities) maps keyed by NodeIndex.
 /// Iterative, normalized at each step. 50 iterations is sufficient for our scale.
@@ -37,6 +37,67 @@ pub fn hits(snap: &GraphSnapshot) -> (HashMap<NodeIndex, f64>, HashMap<NodeIndex
     }
 
     (hubs, authorities)
+}
+
+/// Brandes' algorithm for betweenness centrality on a directed graph.
+/// Time complexity: O(V * (V + E)).
+pub fn betweenness_centrality_brandes(snap: &GraphSnapshot) -> HashMap<NodeIndex, f64> {
+    let mut centrality: HashMap<NodeIndex, f64> =
+        snap.graph.node_indices().map(|ix| (ix, 0.0)).collect();
+
+    for source in snap.graph.node_indices() {
+        let mut stack = Vec::new();
+        let mut predecessors: HashMap<NodeIndex, Vec<NodeIndex>> = snap
+            .graph
+            .node_indices()
+            .map(|ix| (ix, Vec::new()))
+            .collect();
+        let mut shortest_path_counts: HashMap<NodeIndex, f64> =
+            snap.graph.node_indices().map(|ix| (ix, 0.0)).collect();
+        let mut distances: HashMap<NodeIndex, i64> =
+            snap.graph.node_indices().map(|ix| (ix, -1)).collect();
+
+        shortest_path_counts.insert(source, 1.0);
+        distances.insert(source, 0);
+
+        let mut queue = VecDeque::new();
+        queue.push_back(source);
+
+        while let Some(node) = queue.pop_front() {
+            stack.push(node);
+            for edge in snap.graph.edges(node) {
+                let target = edge.target();
+                if distances[&target] < 0 {
+                    queue.push_back(target);
+                    distances.insert(target, distances[&node] + 1);
+                }
+                if distances[&target] == distances[&node] + 1 {
+                    let path_count = shortest_path_counts[&target] + shortest_path_counts[&node];
+                    shortest_path_counts.insert(target, path_count);
+                    predecessors
+                        .get_mut(&target)
+                        .expect("node was initialized")
+                        .push(node);
+                }
+            }
+        }
+
+        let mut dependencies: HashMap<NodeIndex, f64> =
+            snap.graph.node_indices().map(|ix| (ix, 0.0)).collect();
+        while let Some(node) = stack.pop() {
+            for predecessor in &predecessors[&node] {
+                let contribution = (shortest_path_counts[predecessor]
+                    / shortest_path_counts[&node])
+                    * (1.0 + dependencies[&node]);
+                dependencies.insert(*predecessor, dependencies[predecessor] + contribution);
+            }
+            if node != source {
+                centrality.insert(node, centrality[&node] + dependencies[&node]);
+            }
+        }
+    }
+
+    centrality
 }
 
 fn normalize(scores: &mut HashMap<NodeIndex, f64>) {
@@ -119,5 +180,49 @@ mod tests {
 
         assert!(d_authority > authorities[&s.by_id["a"]]);
         assert!(d_authority > authorities[&s.by_id["e"]]);
+    }
+
+    #[test]
+    fn chain_middle_nodes_have_highest_betweenness() {
+        let s = snap(
+            vec![n("a"), n("b"), n("c"), n("d")],
+            vec![
+                ("a", "b", DependencyKind::Blocks),
+                ("b", "c", DependencyKind::Blocks),
+                ("c", "d", DependencyKind::Blocks),
+            ],
+        );
+
+        let centrality = betweenness_centrality_brandes(&s);
+
+        assert_eq!(centrality[&s.by_id["a"]], 0.0);
+        assert_eq!(centrality[&s.by_id["b"]], 2.0);
+        assert_eq!(centrality[&s.by_id["c"]], 2.0);
+        assert_eq!(centrality[&s.by_id["d"]], 0.0);
+    }
+
+    #[test]
+    fn bidirectional_star_center_has_highest_betweenness() {
+        let s = snap(
+            vec![n("center"), n("a"), n("b"), n("c"), n("d")],
+            vec![
+                ("center", "a", DependencyKind::Blocks),
+                ("a", "center", DependencyKind::Blocks),
+                ("center", "b", DependencyKind::Blocks),
+                ("b", "center", DependencyKind::Blocks),
+                ("center", "c", DependencyKind::Blocks),
+                ("c", "center", DependencyKind::Blocks),
+                ("center", "d", DependencyKind::Blocks),
+                ("d", "center", DependencyKind::Blocks),
+            ],
+        );
+
+        let centrality = betweenness_centrality_brandes(&s);
+
+        assert_eq!(centrality[&s.by_id["center"]], 12.0);
+        assert_eq!(centrality[&s.by_id["a"]], 0.0);
+        assert_eq!(centrality[&s.by_id["b"]], 0.0);
+        assert_eq!(centrality[&s.by_id["c"]], 0.0);
+        assert_eq!(centrality[&s.by_id["d"]], 0.0);
     }
 }
