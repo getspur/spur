@@ -2,10 +2,11 @@ use std::str::FromStr;
 
 use async_trait::async_trait;
 
-use crate::advanced::{BeadsAdvanced, Comment, CommentId, DependencyCycle, ReadyFilter};
-use crate::beads_crate::adapter::BeadsCrateAdapter;
-use crate::beads_crate::issue_tracker::br_to_pm_summary;
-use crate::types::IssueSummary;
+use crate::{
+    advanced::{BeadsAdvanced, Comment, CommentId, DependencyCycle, ReadyFilter},
+    beads_crate::{adapter::BeadsCrateAdapter, issue_tracker::br_to_pm_summary},
+    types::IssueSummary,
+};
 
 impl BeadsCrateAdapter {
     /// Look up the `spur:plan-id:<plan-id>` label on an epic, if any.
@@ -132,10 +133,12 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use crate::adapter::IssueTracker;
-    use crate::advanced::{BeadsAdvanced, ReadyFilter};
-    use crate::beads_crate::adapter::{AdapterConfig, BeadsCrateAdapter};
-    use crate::types::IssueCreate;
+    use crate::{
+        adapter::IssueTracker,
+        advanced::{BeadsAdvanced, ReadyFilter},
+        beads_crate::adapter::{AdapterConfig, BeadsCrateAdapter},
+        types::IssueCreate,
+    };
 
     async fn setup_adapter() -> (TempDir, BeadsCrateAdapter) {
         let dir = TempDir::new().unwrap();
