@@ -51,51 +51,19 @@ fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterialize
 }
 
 fn br_available() -> bool {
-    Command::new("br")
-        .arg("--help")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    common::beads::br_available()
 }
 
 /// Run `br <args> --json` in the given directory; panics on failure.
 fn run_br_json(repo: &Path, args: &[&str]) -> String {
-    let mut full_args: Vec<&str> = args.to_vec();
-    full_args.push("--json");
-    let out = Command::new("br")
-        .args(&full_args)
-        .current_dir(repo)
-        .env("RUST_LOG", "error")
-        .output()
-        .expect("br invocation failed");
-    if out.status.success() {
-        String::from_utf8_lossy(&out.stdout).to_string()
-    } else {
-        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-        panic!(
-            "br {args:?} failed (exit {}): stderr={stderr} stdout={stdout}",
-            out.status
-        );
-    }
+    common::beads::run_br(repo, args)
+        .unwrap_or_else(|err| panic!("test beads command {args:?} failed: {err}"))
 }
 
 /// Run `br <args>` in the given directory (no --json); panics on failure.
 fn run_br(repo: &Path, args: &[&str]) {
-    let out = Command::new("br")
-        .args(args)
-        .current_dir(repo)
-        .env("RUST_LOG", "error")
-        .output()
-        .expect("br invocation failed");
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-        panic!(
-            "br {args:?} failed (exit {}): stderr={stderr} stdout={stdout}",
-            out.status
-        );
-    }
+    common::beads::run_br(repo, args)
+        .unwrap_or_else(|err| panic!("test beads command {args:?} failed: {err}"));
 }
 
 /// Run `git <args>` in the given directory; panics on failure.

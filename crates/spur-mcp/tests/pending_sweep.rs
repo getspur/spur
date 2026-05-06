@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -63,28 +62,12 @@ fn test_continuation_ctx() -> DetachedContinuationCtx {
 }
 
 fn br_available() -> bool {
-    Command::new("br")
-        .arg("--help")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    common::beads::br_available()
 }
 
 fn run_br(repo: &Path, args: &[&str]) {
-    let out = Command::new("br")
-        .args(args)
-        .current_dir(repo)
-        .env("RUST_LOG", "error")
-        .output()
-        .expect("br invocation failed");
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-        panic!(
-            "br {args:?} failed (exit {}): stderr={stderr} stdout={stdout}",
-            out.status
-        );
-    }
+    common::beads::run_br(repo, args)
+        .unwrap_or_else(|err| panic!("test beads command {args:?} failed: {err}"));
 }
 
 async fn beads_pm(repo: &Path) -> Arc<PmService> {

@@ -10,11 +10,7 @@ use tempfile::TempDir;
 mod common;
 
 fn br_available() -> bool {
-    Command::new("br")
-        .arg("--help")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    common::beads::br_available()
 }
 
 fn run_git(repo: &Path, args: &[&str]) {
@@ -32,18 +28,8 @@ fn run_git(repo: &Path, args: &[&str]) {
 }
 
 fn run_br(repo: &Path, args: &[&str]) {
-    let out = Command::new("br")
-        .args(args)
-        .current_dir(repo)
-        .env("RUST_LOG", "error")
-        .output()
-        .expect("br invocation failed");
-    assert!(
-        out.status.success(),
-        "br {args:?} failed: stderr={} stdout={}",
-        String::from_utf8_lossy(&out.stderr),
-        String::from_utf8_lossy(&out.stdout)
-    );
+    common::beads::run_br(repo, args)
+        .unwrap_or_else(|err| panic!("test beads command {args:?} failed: {err}"));
 }
 
 fn test_continuation_ctx() -> DetachedContinuationCtx {

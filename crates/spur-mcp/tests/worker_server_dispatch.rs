@@ -6,7 +6,6 @@
 //! rejected with `-32600` (per-element token attribution is unsupported).
 
 use std::path::Path;
-use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,25 +23,14 @@ use spur_pm::{IssueCreate, PmService};
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 
+mod common;
 fn br_available() -> bool {
-    Command::new("br")
-        .arg("--help")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    common::beads::br_available()
 }
 
 fn run_br(repo: &Path, args: &[&str]) {
-    let out = Command::new("br")
-        .args(args)
-        .current_dir(repo)
-        .env("RUST_LOG", "error")
-        .output()
-        .expect("br invocation failed");
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-        panic!("br {args:?} failed (exit {}): {stderr}", out.status);
-    }
+    common::beads::run_br(repo, args)
+        .unwrap_or_else(|err| panic!("test beads command {args:?} failed: {err}"));
 }
 
 async fn pm_service_fixture(repo: &Path) -> Arc<PmService> {
@@ -321,39 +309,41 @@ async fn dispatcher_drop_emits_summary_event_with_correct_counts() {
     // Complete the delegation
     server.complete_delegation("d-summary", "success");
 
-    let events = sink.events.lock().unwrap();
-    let summaries: Vec<_> = events
-        .iter()
-        .filter(|e| matches!(e, SpurEventBody::WorkerMcpDelegationSummary { .. }))
-        .collect();
-    assert_eq!(
-        summaries.len(),
-        1,
-        "expected exactly one summary event, got: {events:?}"
-    );
-
-    if let SpurEventBody::WorkerMcpDelegationSummary {
-        delegation_id,
-        brain_session_id,
-        tool_calls,
-        audits_emitted,
-        outcome,
-        ..
-    } = &summaries[0]
     {
-        assert_eq!(delegation_id, "d-summary");
-        assert_eq!(brain_session_id, "session-summary");
+        let events = sink.events.lock().unwrap();
+        let summaries: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, SpurEventBody::WorkerMcpDelegationSummary { .. }))
+            .collect();
         assert_eq!(
-            *tool_calls, 2,
-            "expected 2 tool calls (get_issue + update_issue)"
+            summaries.len(),
+            1,
+            "expected exactly one summary event, got: {events:?}"
         );
-        assert_eq!(*audits_emitted, 1, "expected 1 audit (update_issue)");
-        assert_eq!(outcome, "success");
-    } else {
-        panic!(
-            "expected WorkerMcpDelegationSummary, got: {:?}",
-            summaries[0]
-        );
+
+        if let SpurEventBody::WorkerMcpDelegationSummary {
+            delegation_id,
+            brain_session_id,
+            tool_calls,
+            audits_emitted,
+            outcome,
+            ..
+        } = &summaries[0]
+        {
+            assert_eq!(delegation_id, "d-summary");
+            assert_eq!(brain_session_id, "session-summary");
+            assert_eq!(
+                *tool_calls, 2,
+                "expected 2 tool calls (get_issue + update_issue)"
+            );
+            assert_eq!(*audits_emitted, 1, "expected 1 audit (update_issue)");
+            assert_eq!(outcome, "success");
+        } else {
+            panic!(
+                "expected WorkerMcpDelegationSummary, got: {:?}",
+                summaries[0]
+            );
+        }
     }
 
     server.shutdown(Duration::from_secs(5)).await;

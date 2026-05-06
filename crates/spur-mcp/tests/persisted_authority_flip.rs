@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,50 +31,15 @@ fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterialize
 }
 
 fn br_available() -> bool {
-    Command::new("br")
-        .arg("--help")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    common::beads::br_available()
 }
 
 fn run_br(repo: &Path, args: &[&str]) -> Result<(), String> {
-    let output = Command::new("br")
-        .args(args)
-        .current_dir(repo)
-        .env("RUST_LOG", "error")
-        .output()
-        .expect("br invocation failed");
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        Err(format!(
-            "br {args:?} failed (exit {}): stderr={stderr} stdout={stdout}",
-            output.status
-        ))
-    }
+    common::beads::run_br(repo, args).map(|_| ())
 }
 
 fn run_br_json(repo: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("br")
-        .args(args)
-        .arg("--json")
-        .current_dir(repo)
-        .env("RUST_LOG", "error")
-        .output()
-        .expect("br invocation failed");
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        Err(format!(
-            "br {args:?} failed (exit {}): stderr={stderr} stdout={stdout}",
-            output.status
-        ))
-    }
+    common::beads::run_br(repo, args)
 }
 
 fn extract_id(json: &str) -> String {

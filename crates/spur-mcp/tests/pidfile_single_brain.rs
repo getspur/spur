@@ -1,24 +1,16 @@
 //! T-I4: At most one brain session holds the pidfile.
 
 use std::path::Path;
-use std::process::Command;
 use tempfile::TempDir;
 
+mod common;
 fn br_available() -> bool {
-    Command::new("br")
-        .arg("--help")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    common::beads::br_available()
 }
 
 fn run_br(repo: &Path, args: &[&str]) {
-    let out = Command::new("br")
-        .args(args)
-        .current_dir(repo)
-        .output()
-        .expect("br failed");
-    assert!(out.status.success(), "br {:?} failed: {:?}", args, out);
+    common::beads::run_br(repo, args)
+        .unwrap_or_else(|err| panic!("test beads command {args:?} failed: {err}"));
 }
 
 #[tokio::test]

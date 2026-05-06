@@ -1,48 +1,38 @@
-//! Integration tests for `PmService` on the beads backend.
-//! Tests auto-skip if `br` is not installed.
-
 use std::path::Path;
-use std::process::Command;
 
+use beads_rust::storage::sqlite::SqliteStorage;
+use spur_pm::test_workspace::TestBeadsWorkspace;
 use spur_pm::{IssueCreate, IssueUpdate, PmService};
 use tempfile::TempDir;
 
-fn br_available() -> bool {
-    Command::new("br")
-        .arg("--help")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+fn attach_beads_workspace(repo: &Path, w: &TestBeadsWorkspace) {
+    let beads_dir = repo.join(".beads");
+    std::fs::create_dir_all(&beads_dir).expect("create test .beads directory");
+    for suffix in ["", "-wal", "-shm"] {
+        let file_name = format!("beads.db{suffix}");
+        let src = w.path().join(&file_name);
+        if src.exists() {
+            std::fs::copy(&src, beads_dir.join(file_name)).expect("copy test beads database");
+        }
+    }
 }
 
-fn run_br(repo: &Path, args: &[&str]) -> String {
-    let out = Command::new("br")
-        .args(args)
-        .arg("--json")
-        .current_dir(repo)
-        .output()
-        .expect("br invocation failed");
-    assert!(out.status.success(), "br {:?} failed: {:?}", args, out);
-    String::from_utf8(out.stdout).unwrap()
+fn init_beads_repo(repo: &Path) -> TestBeadsWorkspace {
+    let w = TestBeadsWorkspace::init();
+    attach_beads_workspace(repo, &w);
+    w
 }
 
-#[derive(serde::Deserialize)]
-struct BrShowIssue {
-    #[serde(default)]
-    created_by: Option<String>,
-    #[serde(default)]
-    labels: Vec<String>,
+fn repo_storage(repo: &Path) -> SqliteStorage {
+    SqliteStorage::open(&repo.join(".beads/beads.db")).expect("open test beads db")
 }
 
 #[tokio::test]
 async fn pm_service_poll_persists_cursor_across_restarts() {
-    if !br_available() {
-        return;
-    }
-
     let dir = TempDir::new().unwrap();
-    run_br(dir.path(), &["init"]);
-    run_br(dir.path(), &["create", "Issue1", "--silent", "-t", "task"]);
+    let mut w = TestBeadsWorkspace::init();
+    w.create_issue("Issue1");
+    attach_beads_workspace(dir.path(), &w);
 
     let first = PmService::try_new(None, true, false, dir.path(), None)
         .await
@@ -68,12 +58,8 @@ async fn pm_service_poll_persists_cursor_across_restarts() {
 
 #[tokio::test]
 async fn pm_service_create_issue_uses_reconciler_actor_by_default() {
-    if !br_available() {
-        return;
-    }
-
     let dir = TempDir::new().unwrap();
-    run_br(dir.path(), &["init"]);
+    let _w = init_beads_repo(dir.path());
 
     let service = PmService::try_new(None, true, false, dir.path(), None)
         .await
@@ -89,23 +75,22 @@ async fn pm_service_create_issue_uses_reconciler_actor_by_default() {
         .await
         .unwrap();
 
-    let shown: Vec<BrShowIssue> =
-        serde_json::from_str(&run_br(dir.path(), &["show", &issue_id])).unwrap();
-    let created_by = shown
-        .first()
-        .and_then(|issue| issue.created_by.as_deref())
+    let storage = repo_storage(dir.path());
+    let issue = storage
+        .get_issue(&issue_id)
+        .expect("load issue")
+        .expect("issue should exist");
+    let created_by = issue
+        .created_by
+        .as_deref()
         .expect("br show must expose created_by");
     assert_eq!(created_by, "reconciler");
 }
 
 #[tokio::test]
 async fn pm_service_update_issue_handles_multiple_label_changes() {
-    if !br_available() {
-        return;
-    }
-
     let dir = TempDir::new().unwrap();
-    run_br(dir.path(), &["init"]);
+    let _w = init_beads_repo(dir.path());
 
     let service = PmService::try_new(None, true, false, dir.path(), None)
         .await
@@ -132,9 +117,11 @@ async fn pm_service_update_issue_handles_multiple_label_changes() {
         .await
         .expect("multi-label add should succeed");
 
-    let shown: Vec<BrShowIssue> =
-        serde_json::from_str(&run_br(dir.path(), &["show", &issue_id])).unwrap();
-    let labels_after_add = &shown.first().expect("issue row after add").labels;
+    let issue = service
+        .get_issue(&issue_id)
+        .await
+        .expect("load issue after add");
+    let labels_after_add = &issue.labels;
     assert!(
         labels_after_add.iter().any(|label| label == "alpha"),
         "alpha missing after add: {labels_after_add:?}"
@@ -155,9 +142,11 @@ async fn pm_service_update_issue_handles_multiple_label_changes() {
         .await
         .expect("multi-label remove should succeed");
 
-    let shown: Vec<BrShowIssue> =
-        serde_json::from_str(&run_br(dir.path(), &["show", &issue_id])).unwrap();
-    let labels_after_remove = &shown.first().expect("issue row after remove").labels;
+    let issue = service
+        .get_issue(&issue_id)
+        .await
+        .expect("load issue after remove");
+    let labels_after_remove = &issue.labels;
     assert!(
         !labels_after_remove.iter().any(|label| label == "alpha"),
         "alpha still present after remove: {labels_after_remove:?}"

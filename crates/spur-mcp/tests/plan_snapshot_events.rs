@@ -24,30 +24,11 @@ fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterialize
 }
 
 fn br_available() -> bool {
-    Command::new("br")
-        .arg("--help")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    common::beads::br_available()
 }
 
 fn run_br(repo: &Path, args: &[&str]) -> Result<(), String> {
-    let output = Command::new("br")
-        .args(args)
-        .current_dir(repo)
-        .env("RUST_LOG", "error")
-        .output()
-        .expect("br invocation failed");
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "br {args:?} failed (exit {}): stderr={} stdout={}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr),
-            String::from_utf8_lossy(&output.stdout)
-        ))
-    }
+    common::beads::run_br(repo, args).map(|_| ())
 }
 
 fn run_git(repo: &Path, args: &[&str]) {

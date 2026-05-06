@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::Duration;
@@ -17,24 +16,14 @@ use tempfile::TempDir;
 use tokio::sync::Mutex;
 use tracing::field::{Field, Visit};
 
+mod common;
 fn br_available() -> bool {
-    Command::new("br")
-        .arg("--help")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    common::beads::br_available()
 }
 
 fn run_br(repo: &Path, args: &[&str]) {
-    let out = Command::new("br")
-        .args(args)
-        .current_dir(repo)
-        .env("RUST_LOG", "error")
-        .output()
-        .expect("br invocation failed");
-    if !out.status.success() {
-        panic!("br {args:?} failed (exit {})", out.status);
-    }
+    common::beads::run_br(repo, args)
+        .unwrap_or_else(|err| panic!("test beads command {args:?} failed: {err}"));
 }
 
 async fn test_pm_service_empty(repo: &Path) -> Arc<PmService> {

@@ -2,7 +2,6 @@
 //! reprojection and reach the worker in the re-dispatched enriched task.
 
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 
 use spur_acp::{BrainSessionId, SessionId};
@@ -15,30 +14,11 @@ use tokio::sync::{Mutex, Notify};
 mod common;
 
 fn br_available() -> bool {
-    Command::new("br")
-        .arg("--help")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    common::beads::br_available()
 }
 
 fn run_br(repo: &Path, args: &[&str]) -> Result<(), String> {
-    let output = Command::new("br")
-        .args(args)
-        .current_dir(repo)
-        .env("RUST_LOG", "error")
-        .output()
-        .expect("br invocation failed");
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        Err(format!(
-            "br {args:?} failed (exit {}): stderr={stderr} stdout={stdout}",
-            output.status
-        ))
-    }
+    common::beads::run_br(repo, args).map(|_| ())
 }
 
 async fn beads_pm(repo: &Path) -> Arc<PmService> {
