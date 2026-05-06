@@ -1,10 +1,13 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::adapter::{IssueTracker, PrService};
 use crate::beads::BeadsAdapter;
+use crate::beads_crate::{AdapterConfig, BeadsCrateAdapter};
 use crate::bv::BvAdapter;
 use crate::github::GitHubAdapter;
 use crate::graph::DependencyGraph;
+use crate::graph_engine::GraphEngineConfig;
 use crate::types::*;
 
 /// Resolve the beads "closed" status string. Default is `"closed"` — the
@@ -76,8 +79,11 @@ impl PmService {
             let cursor_path = beads_dir.join(".spur-poll-cursor");
             let beads =
                 BeadsAdapter::connect_with_actor(repo_root, actor, Some(cursor_path)).await?;
-            let bv = match BvAdapter::connect(repo_root).await {
-                Ok(bv) => Some(bv),
+            let bv = match BeadsCrateAdapter::open(&beads_dir, AdapterConfig::default()).await {
+                Ok(beads_crate) => Some(BvAdapter::from_beads(
+                    Arc::new(beads_crate),
+                    GraphEngineConfig::default(),
+                )),
                 Err(e) => {
                     tracing::info!("bv unavailable (graph analysis disabled): {e}");
                     None
