@@ -1,0 +1,15 @@
+{
+  "generated_at": "<normalized>",
+  "data_hash": "<normalized>",
+  "alerts": [],
+  "summary": {
+    "total": 0,
+    "critical": 0,
+    "warning": 0,
+    "info": 0
+  },
+  "usage_hints": [
+    "Filter by severity: jq '.alerts[] | select(.severity==\"critical\")'",
+    "Group by type: jq '.alerts | group_by(.type)'"
+  ]
+}
