@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::adapter::{IssueTracker, PrService};
-use crate::beads::BeadsAdapter;
+use crate::beads_crate::{AdapterConfig, BeadsCrateAdapter};
 use crate::bv::BvAdapter;
 use crate::github::GitHubAdapter;
 use crate::graph::DependencyGraph;
@@ -19,9 +19,10 @@ fn default_beads_actor() -> Option<String> {
     Some("reconciler".to_string())
 }
 
+#[allow(clippy::large_enum_variant)]
 enum PmBackendInner {
     Beads {
-        beads: BeadsAdapter,
+        beads: BeadsCrateAdapter,
         github: Option<GitHubAdapter>,
     },
     GitHub {
@@ -56,11 +57,11 @@ impl PmService {
         .await
     }
 
-    /// Actor-aware constructor for beads-backed services.
+    /// Constructor for beads-backed services.
     ///
     /// Existing callers should continue using [`PmService::try_new`], which
-    /// defaults to the server-level `"reconciler"` actor. Pass `None` here to
-    /// disable actor attribution for beads CLI calls.
+    /// passes the server-level `"reconciler"` actor for compatibility with
+    /// pre-`BeadsCrateAdapter` callers.
     pub async fn try_new_with_actor(
         github_repo: Option<String>,
         beads_enabled: bool,
@@ -74,8 +75,12 @@ impl PmService {
 
         if beads_dir.is_dir() && beads_enabled {
             let cursor_path = beads_dir.join(".spur-poll-cursor");
-            let beads =
-                BeadsAdapter::connect_with_actor(repo_root, actor, Some(cursor_path)).await?;
+            let config = AdapterConfig {
+                actor: actor.unwrap_or_else(|| "spur".to_string()),
+                cursor_path: Some(cursor_path),
+                ..AdapterConfig::default()
+            };
+            let beads = BeadsCrateAdapter::open(&beads_dir, config).await?;
             let bv = match BvAdapter::connect(repo_root).await {
                 Ok(bv) => Some(bv),
                 Err(e) => {
