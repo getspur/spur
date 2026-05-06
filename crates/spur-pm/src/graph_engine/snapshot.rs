@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use petgraph::graph::{Graph, NodeIndex};
-use petgraph::Directed;
+use petgraph::visit::EdgeRef;
+use petgraph::{Directed, Direction};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +98,48 @@ impl GraphSnapshot {
     pub fn edge_count(&self) -> usize {
         self.graph.edge_count()
     }
+
+    pub fn compute_data_hash(&self) -> String {
+        let mut rows: Vec<String> = self
+            .graph
+            .node_indices()
+            .map(|ix| {
+                let node = &self.graph[ix];
+
+                let mut labels = node.labels.clone();
+                labels.sort_unstable();
+
+                let mut blocking_deps: Vec<&str> = self
+                    .graph
+                    .edges_directed(ix, Direction::Incoming)
+                    .filter(|edge| edge.weight().kind.is_blocking())
+                    .map(|edge| self.graph[edge.source()].id.as_str())
+                    .collect();
+                blocking_deps.sort_unstable();
+
+                format!(
+                    "{}|{}|{}|{}",
+                    node.id,
+                    node.content_hash,
+                    labels.join(","),
+                    blocking_deps.join(",")
+                )
+            })
+            .collect();
+        rows.sort_unstable();
+
+        sha256_hex(rows.join("\n").as_bytes())
+    }
+}
+
+fn sha256_hex(input: &[u8]) -> String {
+    let digest = Sha256::digest(input);
+    let mut output = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write;
+        write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    output
 }
 
 /// Load the full graph snapshot from a SqliteStorage handle.
@@ -224,6 +268,38 @@ mod tests {
         assert!(!DependencyKind::parse("related-to").is_blocking());
         assert!(!DependencyKind::parse("discovered").is_blocking());
         assert!(!DependencyKind::parse("garbage").is_blocking());
+    }
+
+    #[test]
+    fn data_hash_is_deterministic_and_content_sensitive() {
+        let mut first = GraphSnapshot::new(None);
+        let mut first_a = node("a");
+        first_a.labels = vec!["beta".into(), "alpha".into()];
+        first.add_node(first_a);
+        first.add_node(node("b"));
+        assert!(first.add_edge("a", "b", DependencyKind::Blocks));
+
+        let first_hash = first.compute_data_hash();
+        assert!(!first_hash.is_empty());
+
+        let mut reordered = GraphSnapshot::new(None);
+        reordered.add_node(node("b"));
+        let mut reordered_a = node("a");
+        reordered_a.labels = vec!["alpha".into(), "beta".into()];
+        reordered.add_node(reordered_a);
+        assert!(reordered.add_edge("a", "b", DependencyKind::Blocks));
+
+        assert_eq!(first_hash, reordered.compute_data_hash());
+
+        let mut changed = GraphSnapshot::new(None);
+        let mut changed_a = node("a");
+        changed_a.labels = vec!["alpha".into(), "beta".into()];
+        changed_a.content_hash = "changed".into();
+        changed.add_node(changed_a);
+        changed.add_node(node("b"));
+        assert!(changed.add_edge("a", "b", DependencyKind::Blocks));
+
+        assert_ne!(first_hash, changed.compute_data_hash());
     }
 }
 
