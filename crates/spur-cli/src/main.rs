@@ -168,7 +168,10 @@ enum Commands {
         /// Overwrite existing .spur/config.toml.
         #[arg(long)]
         force: bool,
-        /// Also install SpurPower skills after config init.
+        /// Force full skills fanout to all 8 adapter dirs. Default behavior
+        /// is filtered: skills install only into the dirs of agents found on
+        /// $PATH (plus `.spur/skills/`). Use this flag to materialize every
+        /// adapter dir regardless of which agents are installed.
         #[arg(long)]
         with_skills: bool,
     },
@@ -305,11 +308,22 @@ enum Commands {
         #[command(subcommand)]
         command: Option<commands::profile::ProfileCommands>,
     },
+    /// Project-management backend commands (beads)
+    Pm {
+        #[command(subcommand)]
+        command: PmCommands,
+    },
 }
 
 #[derive(Subcommand)]
 enum SkillsCommands {
     /// Render bundled+override skills into per-adapter agent dirs
+    Init,
+}
+
+#[derive(Subcommand)]
+enum PmCommands {
+    /// Initialize the beads tracker in this repo (.beads/, .gitignore, [pm.beads]).
     Init,
 }
 
@@ -735,6 +749,12 @@ async fn run() -> Result<()> {
             .await
         }
         Commands::Profile { command } => commands::profile::run(command).await,
+        Commands::Pm { command } => match command {
+            PmCommands::Init => {
+                require_cli_gate(spur_license::FeatureKey::CLI_CORE_INIT)?;
+                commands::init::run_pm_init(repo_root).await
+            }
+        },
         Commands::Tui {
             brain,
             sessions,
