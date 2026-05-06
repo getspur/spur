@@ -78,9 +78,10 @@ pub enum WorktreeError {
         files: Vec<String>,
     },
     /// Cherry-pick failed for a non-conflict reason (invalid OID, hook
-    /// rejection, GPG failure, etc.). The underlying git error is preserved for
-    /// forensics. Distinct from OverlayConflict so callers can route
-    /// non-conflict failures to a different remediation path.
+    /// rejection, GPG failure, preflight rev-list failure, etc.). The
+    /// underlying git error is preserved for forensics. Distinct from
+    /// OverlayConflict so callers can route non-conflict failures to a different
+    /// remediation path.
     CherryPickFailed {
         source_task_id: String,
         range: String,
@@ -303,12 +304,23 @@ impl WorktreeManager {
                     })?;
 
             if commit_count == 0 {
-                tracing::debug!(
-                    source_task_id = %source_task_id,
-                    base = %base_oid,
-                    tip = %tip_oid,
-                    "apply_overlays: skipping empty range"
-                );
+                if base_oid == tip_oid {
+                    tracing::debug!(
+                        source_task_id = %source_task_id,
+                        base = %base_oid,
+                        tip = %tip_oid,
+                        commit_count = 0,
+                        "apply_overlays: skipping empty range"
+                    );
+                } else {
+                    tracing::warn!(
+                        source_task_id = %source_task_id,
+                        base = %base_oid,
+                        tip = %tip_oid,
+                        commit_count = 0,
+                        "apply_overlays: skipping empty range with non-equal OIDs (tip is ancestor of base, or unrelated history; likely overlay-generation bug)"
+                    );
+                }
                 continue;
             }
 
@@ -1079,6 +1091,170 @@ mod overlay_tests {
         assert!(
             worker_path.join("bar.rs").exists(),
             "third overlay should have been applied after empty range"
+        );
+        assert_eq!(
+            run_git(&worker_path, &["rev-list", "--count", "main..HEAD"]),
+            "2",
+            "worker HEAD should advance by exactly the two non-empty overlays"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_overlays_skips_empty_first_in_chain() {
+        let dir = init_repo();
+        let main_oid = run_git(dir.path(), &["rev-parse", "HEAD"]);
+
+        run_git(dir.path(), &["checkout", "-q", "-B", "task2", "main"]);
+        std::fs::write(dir.path().join("foo.rs"), "// foo\n").unwrap();
+        run_git(dir.path(), &["add", "foo.rs"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "task2"]);
+        let task2_tip = run_git(dir.path(), &["rev-parse", "HEAD"]);
+
+        run_git(dir.path(), &["checkout", "-q", "-B", "task3", &task2_tip]);
+        std::fs::write(dir.path().join("bar.rs"), "// bar\n").unwrap();
+        run_git(dir.path(), &["add", "bar.rs"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "task3"]);
+        let task3_tip = run_git(dir.path(), &["rev-parse", "HEAD"]);
+
+        run_git(dir.path(), &["checkout", "-q", "main"]);
+        let worker_path = dir.path().join("worker_wt");
+        run_git(
+            dir.path(),
+            &[
+                "worktree",
+                "add",
+                worker_path.to_str().unwrap(),
+                "-b",
+                "worker1",
+                "main",
+            ],
+        );
+
+        let mgr = WorktreeManager::new(dir.path().to_path_buf());
+        mgr.apply_overlays(
+            &worker_path,
+            &[
+                ("task1".into(), main_oid.clone(), main_oid.clone()),
+                ("task2".into(), main_oid, task2_tip.clone()),
+                ("task3".into(), task2_tip, task3_tip),
+            ],
+        )
+        .await
+        .expect("empty first overlay range should be skipped");
+
+        assert!(
+            worker_path.join("foo.rs").exists(),
+            "second overlay should have been applied after empty first range"
+        );
+        assert!(
+            worker_path.join("bar.rs").exists(),
+            "third overlay should have been applied after empty first range"
+        );
+        assert_eq!(
+            run_git(&worker_path, &["rev-list", "--count", "main..HEAD"]),
+            "2",
+            "worker HEAD should advance by exactly the two non-empty overlays"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_overlays_skips_empty_last_in_chain() {
+        let dir = init_repo();
+        let main_oid = run_git(dir.path(), &["rev-parse", "HEAD"]);
+
+        run_git(dir.path(), &["checkout", "-q", "-B", "task1", "main"]);
+        std::fs::write(dir.path().join("foo.rs"), "// foo\n").unwrap();
+        run_git(dir.path(), &["add", "foo.rs"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "task1"]);
+        let task1_tip = run_git(dir.path(), &["rev-parse", "HEAD"]);
+
+        run_git(dir.path(), &["checkout", "-q", "-B", "task2", &task1_tip]);
+        std::fs::write(dir.path().join("bar.rs"), "// bar\n").unwrap();
+        run_git(dir.path(), &["add", "bar.rs"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "task2"]);
+        let task2_tip = run_git(dir.path(), &["rev-parse", "HEAD"]);
+
+        run_git(dir.path(), &["checkout", "-q", "main"]);
+        let worker_path = dir.path().join("worker_wt");
+        run_git(
+            dir.path(),
+            &[
+                "worktree",
+                "add",
+                worker_path.to_str().unwrap(),
+                "-b",
+                "worker1",
+                "main",
+            ],
+        );
+
+        let mgr = WorktreeManager::new(dir.path().to_path_buf());
+        mgr.apply_overlays(
+            &worker_path,
+            &[
+                ("task1".into(), main_oid.clone(), task1_tip.clone()),
+                ("task2".into(), task1_tip, task2_tip.clone()),
+                ("task3".into(), task2_tip.clone(), task2_tip),
+            ],
+        )
+        .await
+        .expect("empty last overlay range should be skipped");
+
+        assert!(
+            worker_path.join("foo.rs").exists(),
+            "first overlay should have been applied before empty last range"
+        );
+        assert!(
+            worker_path.join("bar.rs").exists(),
+            "second overlay should have been applied before empty last range"
+        );
+        assert_eq!(
+            run_git(&worker_path, &["rev-list", "--count", "main..HEAD"]),
+            "2",
+            "worker HEAD should advance by exactly the two non-empty overlays"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_overlays_skips_backwards_range_with_warn() {
+        let dir = init_repo();
+
+        run_git(dir.path(), &["checkout", "-q", "main"]);
+        std::fs::write(dir.path().join("a.rs"), "// a\n").unwrap();
+        run_git(dir.path(), &["add", "a.rs"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "A"]);
+        let a_oid = run_git(dir.path(), &["rev-parse", "HEAD"]);
+
+        std::fs::write(dir.path().join("b.rs"), "// b\n").unwrap();
+        run_git(dir.path(), &["add", "b.rs"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "B"]);
+        let b_oid = run_git(dir.path(), &["rev-parse", "HEAD"]);
+
+        let worker_path = dir.path().join("worker_wt");
+        run_git(
+            dir.path(),
+            &[
+                "worktree",
+                "add",
+                worker_path.to_str().unwrap(),
+                "-b",
+                "worker1",
+                "main",
+            ],
+        );
+        let head_before = run_git(&worker_path, &["rev-parse", "HEAD"]);
+
+        let mgr = WorktreeManager::new(dir.path().to_path_buf());
+        // The implementation emits a warn-level telemetry signal for this malformed
+        // non-equal empty range, but still treats it as a skip rather than an error.
+        mgr.apply_overlays(&worker_path, &[("task1".into(), b_oid, a_oid)])
+            .await
+            .expect("backwards overlay range should be skipped");
+
+        let head_after = run_git(&worker_path, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            head_after, head_before,
+            "backwards overlay range must leave HEAD unchanged"
         );
     }
 }
