@@ -99,17 +99,15 @@ impl BeadsAdvanced for BeadsCrateAdapter {
     async fn add_comment(&self, issue_id: &str, body: &str) -> anyhow::Result<CommentId> {
         let issue_id = issue_id.to_string();
         let body = body.to_string();
-        let actor = self.config.actor.clone();
-        self.write(move |s| Ok(s.add_comment(&issue_id, &actor, &body)?.id.to_string()))
+        self.write(move |s| Ok(s.add_comment(&issue_id, "spur", &body)?.id.to_string()))
             .await
     }
 
     async fn remove_dependency(&self, issue_id: &str, depends_on_id: &str) -> anyhow::Result<()> {
         let issue_id = issue_id.to_string();
         let depends_on_id = depends_on_id.to_string();
-        let actor = self.config.actor.clone();
         self.write(move |s| {
-            s.remove_dependency(&issue_id, &depends_on_id, &actor)?;
+            s.remove_dependency(&issue_id, &depends_on_id, "spur")?;
             Ok(())
         })
         .await

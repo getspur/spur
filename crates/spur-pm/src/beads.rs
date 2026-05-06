@@ -267,7 +267,6 @@ impl BeadsAdapter {
             .ok_or_else(|| anyhow::anyhow!("`br show {id}` returned empty result"))
     }
 
-    #[allow(dead_code)] // PmService now uses BeadsCrateAdapter; BeadsAdapter is deleted in T27c.
     pub(crate) async fn plan_id_label_for_epic(&self, id: &str) -> anyhow::Result<Option<String>> {
         let issue = self.issue_details(id).await?;
         if !issue.issue_type.eq_ignore_ascii_case("epic") {
