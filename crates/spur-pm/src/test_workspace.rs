@@ -59,6 +59,34 @@ impl TestBeadsWorkspace {
         &self.path
     }
 
+    /// Copy `beads.db` plus its WAL/SHM sidecars to `<dst_dir>/beads.db…`.
+    ///
+    /// beads_rust's `SqliteStorage` opens the database in WAL mode and
+    /// explicitly skips checkpoint on `Drop` (see `beads_rust::storage::sqlite`
+    /// `impl Drop` — comment cites the read-only-CLI lock-contention bug).
+    /// Periodic auto-checkpoint only fires every 50 mutations, so a typical
+    /// test (a handful of issues + labels) leaves all of its data in
+    /// `beads.db-wal` with `beads.db` effectively empty.
+    ///
+    /// Copying just `beads.db` therefore loses every uncheckpointed write.
+    /// The reader opens an empty database and trivial assertions like
+    /// `actions.is_empty()` pass for the wrong reason. beads_rust does NOT
+    /// expose a public checkpoint API to downstream crates (`execute_raw` is
+    /// `pub(crate)`, `execute_test_sql` is `#[cfg(test)]`), so we mirror the
+    /// production read path: copy all three SQLite files. `SqliteStorage`
+    /// at the destination then reads main + WAL exactly as it does at the
+    /// source.
+    pub fn copy_db_to(&self, dst_dir: &Path) {
+        for sidecar in ["beads.db", "beads.db-wal", "beads.db-shm"] {
+            let src = self.path.join(sidecar);
+            if !src.exists() {
+                continue;
+            }
+            std::fs::copy(&src, dst_dir.join(sidecar))
+                .unwrap_or_else(|e| panic!("copy {sidecar}: {e}"));
+        }
+    }
+
     fn create_with_type(&mut self, title: &str, issue_type: IssueType) -> String {
         let id = beads_rust::util::generate_id(title, None, Some("test"), Utc::now());
         let issue = build_issue(id.clone(), title.to_string(), issue_type);
@@ -133,5 +161,32 @@ mod tests {
         let epic_id = w.create_epic("Epic");
         let child = w.create_issue("Child");
         w.add_dep(&child, &epic_id);
+    }
+
+    #[test]
+    fn copy_db_to_preserves_uncheckpointed_wal_data() {
+        let mut w = TestBeadsWorkspace::init();
+        let epic = w.create_epic("Epic");
+        for i in 0..3 {
+            let task = w.create_issue(&format!("Task {i}"));
+            w.add_label(&task, "spur:plan-id:CP-TEST");
+            w.close_issue(&task);
+        }
+        w.add_label(&epic, "spur:plan-complete");
+        w.close_issue(&epic);
+
+        let original_count = w.storage.count_issues().unwrap();
+        assert_eq!(original_count, 4, "setup precondition");
+
+        let dst = TempDir::new().unwrap();
+        w.copy_db_to(dst.path());
+
+        let copy_storage =
+            beads_rust::storage::sqlite::SqliteStorage::open(&dst.path().join("beads.db")).unwrap();
+        let copy_count = copy_storage.count_issues().unwrap();
+        assert_eq!(
+            copy_count, original_count,
+            "copy_db_to must preserve all data — bare `fs::copy(beads.db)` would lose WAL data"
+        );
     }
 }
