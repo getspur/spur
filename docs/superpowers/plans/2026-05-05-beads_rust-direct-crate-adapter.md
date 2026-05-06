@@ -2346,6 +2346,10 @@ git commit -m "spur-mcp: server.rs test fixtures use beads_rust directly"
 **Files:**
 - Modify: `crates/spur-mcp/src/plan/reconciler.rs` (lines 2206-2411, 16 sites)
 
+> **Plan revision (2026-05-06):** Current `main` drifted from the original
+> snapshot: the reconciler fixture shellout count is 20 sites, not 16, and the
+> affected line range shifted from 2206-2411 to 2451-2656.
+
 - [ ] **Step 1: Replace each fixture pattern**
 
 Use `TestBeadsWorkspace::init()` for the `br init` calls, and `workspace.create_issue` / `workspace.create_epic` / `workspace.add_label` / `workspace.close_issue` for the `br create` / `br label add` / `br update --status closed` calls.
