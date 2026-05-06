@@ -18,6 +18,9 @@ async fn canonical_engine() -> (GraphEngine, TestBeadsWorkspace, String, IdMap) 
     ws.close_issue(&parent);
     ws.add_dep(&top, &parent);
     ws.add_dep(&blocked, &top);
+    ws.storage
+        .add_dependency(&parent, &blocked, "related", "test")
+        .expect("add cycle-closing related dependency");
 
     let id_map = vec![
         (top.clone(), "<id-1>".to_string()),
@@ -100,12 +103,16 @@ fn should_sort_array(parent_key: Option<&str>) -> bool {
         Some(
             "nodes"
                 | "edges"
+                | "Bottlenecks"
+                | "Keystones"
+                | "Influencers"
                 | "Cores"
                 | "Hubs"
                 | "Authorities"
                 | "Articulation"
                 | "Orphans"
                 | "Cycles"
+                | "alerts"
                 | "issue_ids"
                 | "unblocks_ids"
                 | "blocked_by"
