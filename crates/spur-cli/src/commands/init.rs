@@ -98,13 +98,10 @@ pub async fn run(repo_root: PathBuf, force: bool, skills: bool) -> Result<()> {
     println!("[spur] Checking PM tools...");
     println!();
 
-    const PM_TOOLS: &[(&str, &str)] = &[
-        (
-            "br",
-            "cargo install --git https://github.com/Dicklesworthstone/beads_rust.git",
-        ),
-        ("bv", "brew install dicklesworthstone/tap/bv"),
-    ];
+    const PM_TOOLS: &[(&str, &str)] = &[(
+        "br",
+        "cargo install --git https://github.com/Dicklesworthstone/beads_rust.git",
+    )];
     let beads_dir_exists = repo_root.join(".beads").is_dir();
     let mut br_found = false;
 

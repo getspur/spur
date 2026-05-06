@@ -3142,9 +3142,7 @@ impl Orchestrator {
             if pm.analyzer().is_none() {
                 self.funnel.emit(SpurEventBody::IssueCommandError {
                     operation: "startup".into(),
-                    error: "bv (beads_viewer) not installed — graph analysis disabled. \
-                            Install: brew install dicklesworthstone/tap/bv"
-                        .into(),
+                    error: "graph analysis disabled (beads database unavailable)".into(),
                     id: None,
                 });
             }
