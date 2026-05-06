@@ -322,7 +322,18 @@ impl IssueTracker for BeadsCrateAdapter {
             })
             .collect();
 
+        let cursor_to_persist = new_cursor.clone();
         *guard = new_cursor;
+        drop(guard);
+
+        if let (Some(path), Some(cursor)) =
+            (self.config.cursor_path.as_ref(), cursor_to_persist.as_ref())
+        {
+            if let Err(e) = cursor.write_to(path) {
+                tracing::warn!(?path, "failed to write cursor file: {e}");
+            }
+        }
+
         Ok(events)
     }
 }
