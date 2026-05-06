@@ -84,7 +84,6 @@ pub struct AdapterConfig {
     pub stale_tmp_min_age: Duration,
     pub allow_non_local_fs: bool,
     pub backoff: BackoffPolicy,
-    pub actor: String,
     /// Optional poll cursor file. When set, `open()` loads the cursor from
     /// this path if it exists, and every successful `poll()` writes the latest
     /// cursor back to the same path.
@@ -98,7 +97,6 @@ impl Default for AdapterConfig {
             stale_tmp_min_age: Duration::from_secs(3600),
             allow_non_local_fs: false,
             backoff: BackoffPolicy::default(),
-            actor: "spur".to_string(),
             cursor_path: None,
         }
     }
