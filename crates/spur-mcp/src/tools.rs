@@ -645,12 +645,12 @@ fn cancel_delegation_def() -> ToolDefinition {
     }
 }
 
-// ─── Graph analysis tool definitions (bv robot protocol) ────────────
+// ─── Graph analysis tool definitions (in-process graph engine) ──────
 
 fn graph_triage_def() -> ToolDefinition {
     ToolDefinition {
         name: "graph_triage".into(),
-        description: "Get PageRank-weighted project triage: top recommendations, quick wins, blockers to clear, and project health metrics. Complements list_issues (CRUD) with graph-based dependency analysis. Call this FIRST for orientation before starting work. Note: triage includes alert data — only call graph_alerts separately when you need standalone alert monitoring without the full triage context. Optionally scope to a label. Requires bv (beads_viewer) to be installed.".into(),
+        description: "Get PageRank-weighted project triage: top recommendations, quick wins, blockers to clear, and project health metrics. Complements list_issues (CRUD) with graph-based dependency analysis. Call this FIRST for orientation before starting work. Note: triage includes alert data — only call graph_alerts separately when you need standalone alert monitoring without the full triage context. Optionally scope to a label.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
