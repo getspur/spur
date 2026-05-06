@@ -2,35 +2,17 @@
 //! real `br comments add` + `br comments list --json`.
 
 use std::path::Path;
-use std::process::Command;
 
 use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind, CompletionState};
 use tempfile::TempDir;
 
+mod common;
 fn br_available() -> bool {
-    Command::new("br")
-        .arg("--help")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    common::beads::br_available()
 }
 
 fn run_br(repo: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("br")
-        .args(args)
-        .arg("--json")
-        .current_dir(repo)
-        .env("RUST_LOG", "error")
-        .output()
-        .expect("br invocation");
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).to_string())
-    } else {
-        Err(format!(
-            "br {args:?} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ))
-    }
+    common::beads::run_br(repo, args)
 }
 
 fn extract_id(json: &str) -> String {

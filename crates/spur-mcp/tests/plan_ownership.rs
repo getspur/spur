@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 
 use serde_json::json;
@@ -33,30 +32,11 @@ fn resume_plan_appears_in_tools_list() {
 }
 
 fn br_available() -> bool {
-    Command::new("br")
-        .arg("--help")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    common::beads::br_available()
 }
 
 fn run_br(repo: &Path, args: &[&str]) -> Result<(), String> {
-    let output = Command::new("br")
-        .args(args)
-        .current_dir(repo)
-        .env("RUST_LOG", "error")
-        .output()
-        .expect("br invocation failed");
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        Err(format!(
-            "br {args:?} failed (exit {}): stderr={stderr} stdout={stdout}",
-            output.status
-        ))
-    }
+    common::beads::run_br(repo, args).map(|_| ())
 }
 
 async fn beads_pm(repo: &Path) -> Arc<spur_pm::PmService> {
@@ -1266,24 +1246,8 @@ async fn force_reclaim_plan_handles_unowned_plan() {
     assert!(reason.is_none(), "reason must be None when not supplied");
 }
 fn run_br_json(repo: &Path, args: &[&str]) -> String {
-    let mut full_args = args.to_vec();
-    full_args.push("--json");
-    let output = Command::new("br")
-        .args(&full_args)
-        .current_dir(repo)
-        .env("RUST_LOG", "error")
-        .output()
-        .expect("br invocation failed");
-    if output.status.success() {
-        String::from_utf8_lossy(&output.stdout).into_owned()
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        panic!(
-            "br {args:?} failed (exit {}): stderr={stderr} stdout={stdout}",
-            output.status
-        );
-    }
+    common::beads::run_br(repo, args)
+        .unwrap_or_else(|err| panic!("test beads command {args:?} failed: {err}"))
 }
 
 fn parse_id_from_create(json: &str) -> String {

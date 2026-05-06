@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -8,26 +7,12 @@ use tempfile::TempDir;
 mod common;
 
 fn br_available() -> bool {
-    Command::new("br")
-        .arg("--help")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    common::beads::br_available()
 }
 
 fn run_br(repo: &Path, args: &[&str]) {
-    let output = Command::new("br")
-        .args(args)
-        .current_dir(repo)
-        .env("RUST_LOG", "error")
-        .output()
-        .expect("br invocation failed");
-    assert!(
-        output.status.success(),
-        "br {args:?} failed: stderr={} stdout={}",
-        String::from_utf8_lossy(&output.stderr),
-        String::from_utf8_lossy(&output.stdout)
-    );
+    common::beads::run_br(repo, args)
+        .unwrap_or_else(|err| panic!("test beads command {args:?} failed: {err}"));
 }
 
 async fn beads_pm(repo: &Path) -> Arc<spur_pm::PmService> {
