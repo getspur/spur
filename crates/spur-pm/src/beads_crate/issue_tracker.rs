@@ -11,6 +11,40 @@ use crate::beads_crate::adapter::BeadsCrateAdapter;
 use crate::poll_cursor::{PollCursor, POLL_FETCH_LIMIT};
 use crate::types::{Issue, IssueCreate, IssueFilter, IssueSummary, IssueUpdate, PmEvent, PmSource};
 
+fn validate_create_label(label: &str) -> anyhow::Result<()> {
+    beads_rust::validation::LabelValidator::validate(label)
+        .map_err(|error| anyhow::anyhow!("Validation failed: {error}"))
+}
+
+fn validate_create_labels<'a>(labels: impl IntoIterator<Item = &'a String>) -> anyhow::Result<()> {
+    for label in labels {
+        validate_create_label(label)?;
+    }
+    Ok(())
+}
+
+fn validate_added_label(label: &str) -> anyhow::Result<()> {
+    if label.is_empty() {
+        anyhow::bail!("Validation failed: label: cannot be empty");
+    }
+    if !label
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ':')
+    {
+        anyhow::bail!(
+            "Validation failed: label: invalid characters (only alphanumeric, hyphen, underscore, colon allowed)"
+        );
+    }
+    Ok(())
+}
+
+fn validate_added_labels<'a>(labels: impl IntoIterator<Item = &'a String>) -> anyhow::Result<()> {
+    for label in labels {
+        validate_added_label(label)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn br_to_pm_issue(br: beads_rust::model::Issue) -> Issue {
     let url = format!("beads://{}", br.id);
     let blocked_by = br
@@ -218,6 +252,7 @@ impl IssueTracker for BeadsCrateAdapter {
     async fn create_issue(&self, params: IssueCreate) -> anyhow::Result<String> {
         let actor = self.actor();
         self.write(move |s| {
+            validate_create_labels(&params.labels)?;
             let now = Utc::now();
             let id = beads_rust::util::generate_id(
                 &params.title,
@@ -305,6 +340,7 @@ impl IssueTracker for BeadsCrateAdapter {
         let id = id.to_string();
         let actor = self.actor();
         self.write(move |s| {
+            validate_added_labels(&update.add_labels)?;
             let has_field_update =
                 update.status.is_some() || update.priority.is_some() || update.assignee.is_some();
 

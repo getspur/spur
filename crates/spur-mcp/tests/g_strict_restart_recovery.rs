@@ -7,16 +7,10 @@ use serde_json::json;
 
 mod common;
 
-use common::g_strict_harness::{br_available, TestHarness};
+use common::g_strict_harness::TestHarness;
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn g_strict_restart_then_dispatch_walks_rehydrated_overlay() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let mut harness = TestHarness::new().await;
     let plan_id = harness
         .submit_plan_with_tasks(

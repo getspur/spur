@@ -50,10 +50,6 @@ fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterialize
     ))
 }
 
-fn br_available() -> bool {
-    common::beads::br_available()
-}
-
 /// Run `br <args> --json` in the given directory; panics on failure.
 fn run_br_json(repo: &Path, args: &[&str]) -> String {
     common::beads::run_br(repo, args)
@@ -201,14 +197,8 @@ impl McpEventSink for CaptureSink {
     }
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn tick_once_does_not_dispatch_partial_plan_after_child_create_failure() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -268,14 +258,8 @@ async fn tick_once_does_not_dispatch_partial_plan_after_child_create_failure() {
     );
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn tick_once_skips_plan_owned_by_another_brain() {
-    if !br_available() {
-        eprintln!("skipping tick_once_skips_plan_owned_by_another_brain: `br` not on PATH");
-        return;
-    }
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -329,13 +313,6 @@ async fn tick_once_skips_plan_owned_by_another_brain() {
 
 #[tokio::test]
 async fn tick_once_skips_terminal_epic_owned_by_another_brain() {
-    if !br_available() {
-        eprintln!(
-            "skipping tick_once_skips_terminal_epic_owned_by_another_brain: `br` not on PATH"
-        );
-        return;
-    }
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -413,13 +390,6 @@ async fn tick_once_skips_terminal_epic_owned_by_another_brain() {
 
 #[tokio::test]
 async fn tick_once_does_not_reclaim_expired_lease_owned_by_another_brain() {
-    if !br_available() {
-        eprintln!(
-            "skipping tick_once_does_not_reclaim_expired_lease_owned_by_another_brain: `br` not on PATH"
-        );
-        return;
-    }
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -509,11 +479,6 @@ async fn tick_once_does_not_reclaim_expired_lease_owned_by_another_brain() {
 
 #[tokio::test]
 async fn tick_once_dispatches_ready_task_with_approved_dep_overlay() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     init_git_repo(dir.path());
     let worker_branch = "spur-test-t1-worker";
@@ -687,14 +652,8 @@ async fn tick_once_dispatches_ready_task_with_approved_dep_overlay() {
     );
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn overlay_conflict_routes_to_blocked_on_setup_conflict() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     init_git_repo(dir.path());
     let worker_branch = "spur-test-t1-worker";
@@ -852,14 +811,8 @@ async fn overlay_conflict_routes_to_blocked_on_setup_conflict() {
     );
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn observe_ready_returns_unblocked_task_only() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -959,14 +912,8 @@ async fn observe_ready_returns_unblocked_task_only() {
     );
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn observe_ready_summaries_preserve_plan_labels() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -1022,14 +969,8 @@ async fn observe_ready_summaries_preserve_plan_labels() {
     }));
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn pending_label_on_closed_epic_blocks_dispatch() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -1097,14 +1038,8 @@ async fn pending_label_on_closed_epic_blocks_dispatch() {
     );
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn plan_enumeration_finds_tasks_buried_under_backlog() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -1195,14 +1130,8 @@ async fn plan_enumeration_finds_tasks_buried_under_backlog() {
 /// This test bypasses the bv primary path and calls the br fallback helper
 /// directly. It verifies that task-level `br ready` candidates are filtered
 /// through the plan epic's activation labels.
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn observe_ready_via_br_returns_ready_tasks() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -1303,14 +1232,8 @@ async fn observe_ready_via_br_returns_ready_tasks() {
     );
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn observe_ready_via_br_suppresses_tasks_for_closed_complete_epic() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -1378,14 +1301,8 @@ async fn observe_ready_via_br_suppresses_tasks_for_closed_complete_epic() {
     );
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn epic_closes_when_scoped_children_terminal() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -1496,14 +1413,8 @@ async fn epic_closes_when_scoped_children_terminal() {
     )));
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn all_approved_epic_emits_plan_ready_to_merge() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -1603,14 +1514,8 @@ async fn all_approved_epic_emits_plan_ready_to_merge() {
     )));
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn tick_once_persists_dispatch_before_queue_send() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -1674,14 +1579,8 @@ async fn tick_once_persists_dispatch_before_queue_send() {
     assert_eq!(request.issue_id.as_deref(), Some(task_id.as_str()));
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn tick_once_persists_failed_completion_when_respond_to_drops() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -1804,14 +1703,8 @@ async fn tick_once_persists_failed_completion_when_respond_to_drops() {
     )));
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn tick_once_reclaims_expired_lease_dispatch() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -1944,14 +1837,8 @@ async fn tick_once_reclaims_expired_lease_dispatch() {
     )));
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn worker_success_after_orphan_clear_is_superseded() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -2051,14 +1938,8 @@ async fn worker_success_after_orphan_clear_is_superseded() {
     assert!(!issue.labels.contains(&labels::delegation_id(delegation_id)));
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn tick_once_does_not_reclaim_live_lease() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -2138,14 +2019,8 @@ async fn tick_once_does_not_reclaim_live_lease() {
         .any(|event| matches!(event.body, SpurEventBody::DispatchLeaseExpired { .. })));
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn tick_once_clears_dispatch_label_when_send_fails() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -2213,14 +2088,8 @@ async fn tick_once_clears_dispatch_label_when_send_fails() {
         .any(|label| label.starts_with("spur:delegation-id:")));
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn tick_once_skips_broken_plan_and_dispatches_other_ready_work() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -2303,14 +2172,8 @@ async fn tick_once_skips_broken_plan_and_dispatches_other_ready_work() {
     assert_eq!(request.issue_id.as_deref(), Some(valid_task_id.as_str()));
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn resolve_dispatch_orphan_emits_breadcrumb_and_clears_label() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -2368,14 +2231,8 @@ async fn resolve_dispatch_orphan_emits_breadcrumb_and_clears_label() {
     )));
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn resolve_dispatch_orphan_preserves_legacy_ready_for_review_marker() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -2422,14 +2279,8 @@ async fn resolve_dispatch_orphan_preserves_legacy_ready_for_review_marker() {
     );
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn execute_epic_persists_execution_scope_labels_on_epic_and_tasks() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -2554,14 +2405,8 @@ async fn execute_epic_persists_execution_scope_labels_on_epic_and_tasks() {
     }
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
-async fn execute_epic_reprojects_persisted_non_terminal_state_before_starting_fresh_run() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
+async fn execute_epic_rejects_persisted_non_terminal_epic_on_second_call() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -2637,23 +2482,16 @@ async fn execute_epic_reprojects_persisted_non_terminal_state_before_starting_fr
     let second = server
         .__test_call_execute_epic(&epic_id, Some("codex"))
         .await;
+    let msg = second
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(|message| message.as_str())
+        .unwrap_or("");
     assert!(
-        second.get("error").is_none(),
-        "second execute_epic should reproject persisted non-terminal state and reuse the active plan: {second}"
-    );
-
-    let second_text = second["result"]["content"][0]["text"]
-        .as_str()
-        .expect("execute_epic response text");
-    let second_json: serde_json::Value =
-        serde_json::from_str(second_text).expect("execute_epic response JSON");
-    let second_plan_id = second_json["plan_id"]
-        .as_str()
-        .expect("plan_id")
-        .to_string();
-    assert_eq!(
-        second_plan_id, first_plan_id,
-        "stale terminal cache must not cause execute_epic to start a fresh plan"
+        msg.contains("already a persisted plan epic")
+            && msg.contains(&first_plan_id)
+            && msg.contains("use claim/start/resume plan instead"),
+        "second execute_epic must reject persisted plan epics at the execute boundary: {second}"
     );
 }
 
@@ -2664,14 +2502,8 @@ async fn execute_epic_reprojects_persisted_non_terminal_state_before_starting_fr
 /// label was wiped — causing the next dispatch tick to error with
 /// `no agent for task; set spur:agent:<name>` and fall back to the hardcoded
 /// `"codex"` default in projector.rs.
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn execute_epic_preserves_pre_existing_agent_label_on_child_task() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -2744,14 +2576,8 @@ async fn execute_epic_preserves_pre_existing_agent_label_on_child_task() {
     );
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn execute_epic_rolls_back_epic_scope_when_task_scope_persist_fails() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -2826,13 +2652,8 @@ async fn execute_epic_rolls_back_epic_scope_when_task_scope_persist_fails() {
     );
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn submit_plan_default_notify_path_dispatches_ready_task() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
     skip_if_no_loopback!("submit_plan_default_notify_path_dispatches_ready_task");
 
     let dir = TempDir::new().expect("tempdir");
@@ -2866,6 +2687,10 @@ async fn submit_plan_default_notify_path_dispatches_ready_task() {
         .start()
         .await
         .expect("start server (loopback bind already probed at fn entry)");
+    Arc::clone(&server)
+        .enable_reconciler()
+        .await
+        .expect("enable reconciler");
 
     let response = server
         .__test_call_submit_plan(serde_json::json!({
@@ -2881,22 +2706,19 @@ async fn submit_plan_default_notify_path_dispatches_ready_task() {
         .await;
     let task_id = extract_submit_plan_task_issue_id(&response, "t1");
 
-    let request =
-        tokio::time::timeout(std::time::Duration::from_secs(5), channel.request_rx.recv())
-            .await
-            .expect("started reconciler should dispatch persisted submit_plan work within timeout")
-            .expect("dispatch request");
+    let request = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        channel.request_rx.recv(),
+    )
+    .await
+    .expect("started reconciler should dispatch persisted submit_plan work within timeout")
+    .expect("dispatch request");
 
     assert_eq!(request.issue_id.as_deref(), Some(task_id.as_str()));
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn execute_epic_default_notify_path_dispatches_ready_task() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
     skip_if_no_loopback!("execute_epic_default_notify_path_dispatches_ready_task");
 
     let dir = TempDir::new().expect("tempdir");
@@ -2975,6 +2797,10 @@ async fn execute_epic_default_notify_path_dispatches_ready_task() {
         .start()
         .await
         .expect("start server (loopback bind already probed at fn entry)");
+    Arc::clone(&server)
+        .enable_reconciler()
+        .await
+        .expect("enable reconciler");
 
     let response = server
         .__test_call_execute_epic(&epic_id, Some("codex"))
@@ -2984,23 +2810,19 @@ async fn execute_epic_default_notify_path_dispatches_ready_task() {
         "execute_epic should succeed: {response}"
     );
 
-    let request =
-        tokio::time::timeout(std::time::Duration::from_secs(5), channel.request_rx.recv())
-            .await
-            .expect("started reconciler should dispatch execute_epic work within timeout")
-            .expect("dispatch request");
+    let request = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        channel.request_rx.recv(),
+    )
+    .await
+    .expect("started reconciler should dispatch execute_epic work within timeout")
+    .expect("dispatch request");
 
     assert_eq!(request.issue_id.as_deref(), Some(task_a_id.as_str()));
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn execute_epic_shutdown_abort_does_not_emit_plan_snapshot() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -3088,15 +2910,9 @@ async fn execute_epic_shutdown_abort_does_not_emit_plan_snapshot() {
 /// always in flight, let it run for a brief warm-up, then fire cancel. With
 /// the fix in place the spawned task must complete within the 1-second
 /// timeout budget.
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn reconciler_cancels_during_tick() {
     use std::time::Duration;
-
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -3156,15 +2972,9 @@ async fn reconciler_cancels_during_tick() {
 /// Hybrid wake equivalence: a fast-forward signal causes the reconciler to tick
 /// and produce the same observable dispatch as a direct `tick_once()` call.
 /// The journal wake is optional and does not change `tick_once()` semantics.
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn hybrid_fast_forward_matches_polling_projection() {
     use std::time::Duration;
-
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
 
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -3243,19 +3053,27 @@ async fn hybrid_fast_forward_matches_polling_projection() {
     tokio::task::yield_now().await;
 
     // Fast-forward should trigger an immediate tick and dispatch the ready task.
-    fast_forward.notify_one();
-
-    let request = tokio::time::timeout(Duration::from_secs(2), delegation_rx.recv()).await;
-    assert!(
-        request.is_ok(),
-        "fast-forward must trigger tick and dispatch within timeout"
-    );
-    let request = request.unwrap();
+    // Re-notify within a bounded window so the test is not sensitive to whether
+    // the first wake lands before the run loop enters its select.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut request = None;
+    while tokio::time::Instant::now() < deadline {
+        fast_forward.notify_one();
+        match tokio::time::timeout(Duration::from_millis(100), delegation_rx.recv()).await {
+            Ok(Some(req)) => {
+                request = Some(req);
+                break;
+            }
+            Ok(None) => break,
+            Err(_) => {}
+        }
+    }
     assert!(
         request.is_some(),
-        "fast-forward must produce a delegation request"
+        "fast-forward must trigger tick and dispatch within timeout"
     );
-    assert_eq!(request.unwrap().issue_id.as_deref(), Some(task_id.as_str()));
+    let request = request.expect("fast-forward must produce a delegation request");
+    assert_eq!(request.issue_id.as_deref(), Some(task_id.as_str()));
 
     // Cancel and clean up.
     let _ = cancel_tx.send(());

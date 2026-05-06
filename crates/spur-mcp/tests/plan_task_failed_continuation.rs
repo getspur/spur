@@ -71,10 +71,6 @@ fn decode_tool_response(response: &Value) -> Value {
     serde_json::from_str(text).expect("tool response must be json")
 }
 
-fn br_available() -> bool {
-    common::beads::br_available()
-}
-
 fn run_br(repo: &Path, args: &[&str]) -> String {
     common::beads::run_br(repo, args)
         .unwrap_or_else(|err| panic!("test beads command {args:?} failed: {err}"))
@@ -125,14 +121,8 @@ fn continuation_ctx(
     (ctx, release)
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn run_plan_pushes_continuation_and_event_for_failed_task() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let pm = beads_pm(dir.path()).await;
@@ -233,14 +223,8 @@ async fn run_plan_pushes_continuation_and_event_for_failed_task() {
 /// the task is already `failed` at that moment. v2 fails this assertion (sees
 /// `dispatched`); v3 — after moving the event emit into the deferred-push
 /// `deliver()` step — passes.
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn event_emission_does_not_race_with_state_update_for_failed_task() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let pm = beads_pm(dir.path()).await;

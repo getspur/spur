@@ -1,23 +1,10 @@
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use spur_pm::test_workspace::TestBeadsWorkspace;
-
-// PmService still constructs BeadsAdapter (shellout to `br`) until Section F
-// T26 swaps it for BeadsCrateAdapter. Tests that build PmService must skip
-// when `br` is absent — returning unconditional `true` here would let those
-// `#[ignore]` tests panic inside PmService::try_new instead of skipping.
-pub fn br_available() -> bool {
-    Command::new("br")
-        .arg("--help")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
 
 pub fn attach_beads_workspace(repo: &Path, w: &TestBeadsWorkspace) {
     let beads_dir = repo.join(".beads");
@@ -56,6 +43,7 @@ pub fn run_br(repo: &Path, args: &[&str]) -> Result<String, String> {
         Some("comments") => comments(repo, args),
         Some("show") => show_issue(repo, args),
         Some("list") => list_issues(repo),
+        Some("sync") => sync_import_only(repo, args),
         other => Err(format!(
             "unsupported test beads command: {other:?} {args:?}"
         )),
@@ -111,9 +99,7 @@ fn create_issue(repo: &Path, args: &[&str]) -> Result<String, String> {
                     .get(i)
                     .ok_or_else(|| "missing label".to_string())?
                     .to_string();
-                if label.len() > 50 {
-                    return Err("Validation failed: label: exceeds 50 characters".to_string());
-                }
+                validate_create_label(&label)?;
                 labels.push(label);
             }
             value if !value.starts_with('-') && title.is_none() => {
@@ -177,13 +163,27 @@ fn add_dependency(repo: &Path, args: &[&str]) -> Result<String, String> {
         return Err(format!("unsupported dep command: {args:?}"));
     }
     let conn = open(repo)?;
+    let depends_on_type: Option<String> = conn
+        .query_row(
+            "SELECT issue_type FROM issues WHERE id = ?1",
+            params![args[3]],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|err| err.to_string())?;
+    let dep_type = if depends_on_type.as_deref() == Some("epic") {
+        "parent-child"
+    } else {
+        "blocks"
+    };
     conn.execute(
         "INSERT OR IGNORE INTO dependencies(
              issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id
-         ) VALUES (?1, ?2, 'blocks', ?3, 'test', '{}', '')",
-        params![args[2], args[3], now()],
+         ) VALUES (?1, ?2, ?3, ?4, 'test', '{}', '')",
+        params![args[2], args[3], dep_type, now()],
     )
     .map_err(|err| err.to_string())?;
+    rebuild_blocked_cache(&conn)?;
     Ok(String::new())
 }
 
@@ -219,6 +219,7 @@ fn close_issue(repo: &Path, issue_id: &str) -> Result<(), String> {
     if changed == 0 {
         return Err(format!("issue not found: {issue_id}"));
     }
+    rebuild_blocked_cache(&conn)?;
     Ok(())
 }
 
@@ -317,6 +318,135 @@ fn list_issues(repo: &Path) -> Result<String, String> {
         }
     }
     Ok(json!({ "issues": issues }).to_string())
+}
+
+fn sync_import_only(repo: &Path, args: &[&str]) -> Result<String, String> {
+    if args != ["sync", "--import-only"] {
+        return Err(format!("unsupported sync command: {args:?}"));
+    }
+
+    let jsonl_path = repo.join(".beads/issues.jsonl");
+    let contents = std::fs::read_to_string(&jsonl_path).map_err(|err| err.to_string())?;
+    let conn = open(repo)?;
+    for (idx, line) in contents.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let issue: Value = serde_json::from_str(line)
+            .map_err(|err| format!("invalid issues.jsonl line {}: {err}", idx + 1))?;
+        let id = issue
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("issues.jsonl line {} missing id", idx + 1))?;
+        let title = issue.get("title").and_then(Value::as_str).unwrap_or("");
+        let description = issue
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let status = issue
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("open");
+        let priority = issue.get("priority").and_then(Value::as_i64).unwrap_or(2);
+        let issue_type = issue
+            .get("issue_type")
+            .and_then(Value::as_str)
+            .unwrap_or("task");
+        let created_at = issue
+            .get("created_at")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| line);
+        let updated_at = issue
+            .get("updated_at")
+            .and_then(Value::as_str)
+            .unwrap_or(created_at);
+        let created_by = issue
+            .get("created_by")
+            .and_then(Value::as_str)
+            .unwrap_or("test");
+        let source_repo = issue
+            .get("source_repo")
+            .and_then(Value::as_str)
+            .unwrap_or(".");
+
+        conn.execute(
+            "INSERT OR REPLACE INTO issues (
+                 id, title, description, status, priority, issue_type, created_at,
+                 updated_at, created_by, source_repo
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                id,
+                title,
+                description,
+                status,
+                priority,
+                issue_type,
+                created_at,
+                updated_at,
+                created_by,
+                source_repo
+            ],
+        )
+        .map_err(|err| err.to_string())?;
+    }
+    Ok(String::new())
+}
+
+fn validate_create_label(label: &str) -> Result<(), String> {
+    if label.is_empty() {
+        return Err("Validation failed: label: cannot be empty".to_string());
+    }
+    if label.len() > 50 {
+        return Err("Validation failed: label: exceeds 50 characters".to_string());
+    }
+    if !label
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ':')
+    {
+        return Err(
+            "Validation failed: label: invalid characters (only alphanumeric, hyphen, underscore, colon allowed)"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn rebuild_blocked_cache(conn: &Connection) -> Result<(), String> {
+    conn.execute("DELETE FROM blocked_issues_cache", [])
+        .map_err(|err| err.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT d.issue_id, d.depends_on_id
+             FROM dependencies d
+             JOIN issues blocker ON blocker.id = d.depends_on_id
+             WHERE d.type IN ('blocks', 'conditional-blocks', 'waits-for')
+               AND blocker.status != 'closed'
+             ORDER BY d.issue_id, d.depends_on_id",
+        )
+        .map_err(|err| err.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|err| err.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| err.to_string())?;
+
+    let mut by_issue = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for (issue_id, blocked_by) in rows {
+        by_issue.entry(issue_id).or_default().push(blocked_by);
+    }
+
+    for (issue_id, blocked_by) in by_issue {
+        let blocked_by_json = serde_json::to_string(&blocked_by).map_err(|err| err.to_string())?;
+        conn.execute(
+            "INSERT INTO blocked_issues_cache(issue_id, blocked_by, blocked_at)
+             VALUES (?1, ?2, CURRENT_TIMESTAMP)",
+            params![issue_id, blocked_by_json],
+        )
+        .map_err(|err| err.to_string())?;
+    }
+    Ok(())
 }
 
 fn issue_json(conn: &Connection, issue_id: &str) -> Result<Option<Value>, String> {

@@ -16,9 +16,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 mod common;
-fn br_available() -> bool {
-    common::beads::br_available()
-}
 
 fn run_br(repo: &Path, args: &[&str]) {
     common::beads::run_br(repo, args)
@@ -81,13 +78,8 @@ async fn test_server() -> (TempDir, Arc<WorkerMcpServer>) {
     (dir, server)
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn valid_token_round_trip_header() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
     let (_dir, server) = test_server().await;
     let token = server.issue_token("d-1", Duration::from_secs(60));
     let client = reqwest::Client::new();
@@ -102,13 +94,8 @@ async fn valid_token_round_trip_header() {
     server.shutdown(Duration::from_secs(5)).await;
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn valid_token_round_trip_query() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
     let (_dir, server) = test_server().await;
     let token = server.issue_token("d-1", Duration::from_secs(60));
     let client = reqwest::Client::new();
@@ -127,13 +114,8 @@ async fn valid_token_round_trip_query() {
     server.shutdown(Duration::from_secs(5)).await;
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn missing_token_returns_401() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
     let (_dir, server) = test_server().await;
     let client = reqwest::Client::new();
     let resp = client
@@ -146,13 +128,8 @@ async fn missing_token_returns_401() {
     server.shutdown(Duration::from_secs(5)).await;
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn malformed_token_returns_401() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
     let (_dir, server) = test_server().await;
     let client = reqwest::Client::new();
     let resp = client
@@ -166,13 +143,8 @@ async fn malformed_token_returns_401() {
     server.shutdown(Duration::from_secs(5)).await;
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn tampered_hmac_rejected() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
     let (_dir, server) = test_server().await;
     let token = server.issue_token("d-1", Duration::from_secs(60));
     // Mutate the last character of the signature to corrupt the HMAC.
@@ -193,13 +165,8 @@ async fn tampered_hmac_rejected() {
     server.shutdown(Duration::from_secs(5)).await;
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn expired_token_rejected() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
     let (_dir, server) = test_server().await;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -218,13 +185,8 @@ async fn expired_token_rejected() {
     server.shutdown(Duration::from_secs(5)).await;
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn wrong_brain_session_id_rejected() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let pm = test_pm_service_empty(dir.path()).await;
@@ -259,13 +221,8 @@ async fn wrong_brain_session_id_rejected() {
 /// Send a header line longer than MAX_HEADER_LINE (8192 bytes) with no
 /// trailing newline. The server must detect the truncated read and close the
 /// connection with 401 well before the 15-second headers-phase timeout.
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn long_header_line_without_newline_rejected_quickly() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
     let (_dir, server) = test_server().await;
 
     let url = server.url();

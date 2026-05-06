@@ -44,10 +44,6 @@ fn decode_tool_response(response: &Value) -> Value {
     serde_json::from_str(text).expect("tool response must be json")
 }
 
-fn br_available() -> bool {
-    common::beads::br_available()
-}
-
 fn run_br(repo: &Path, args: &[&str]) -> String {
     common::beads::run_br(repo, args)
         .unwrap_or_else(|err| panic!("test beads command {args:?} failed: {err}"))
@@ -98,14 +94,8 @@ fn continuation_ctx(
     (ctx, release)
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn run_plan_pushes_continuation_and_event_for_awaiting_review_task() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let pm = beads_pm(dir.path()).await;

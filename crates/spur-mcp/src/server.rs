@@ -4849,6 +4849,8 @@ impl McpCallbackServer {
             return response;
         }
 
+        let _active_plan_claim_guard = self.active_plan_claim_lock.lock().await;
+
         // Owner-classification gate. Refuses takeover (OwnedByOther) and
         // ambiguous owner labels before reserving the registry slot. Unowned
         // (claim) and OwnedByCurrent (re-issue) proceed. The
@@ -5012,7 +5014,6 @@ impl McpCallbackServer {
             }
         }
 
-        let _active_plan_claim_guard = self.active_plan_claim_lock.lock().await;
         match self
             .current_brain_active_owned_plan(pm, None, Some(&epic_id))
             .await
@@ -8652,7 +8653,7 @@ mod merge_plan_tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn get_task_diff_warns_and_falls_back_for_legacy_task() {
         let fixture = setup_cached_overlay_diff_plan("plan-diff-legacy", false).await;
         let warnings = CapturedWarnings::default();

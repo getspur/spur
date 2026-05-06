@@ -15,10 +15,6 @@ use uuid::Uuid;
 
 mod common;
 
-fn br_available() -> bool {
-    common::beads::br_available()
-}
-
 fn run_br(repo: &Path, args: &[&str]) -> Result<String, String> {
     common::beads::run_br(repo, args)
 }
@@ -90,14 +86,8 @@ fn scope_drift_signal(signal_id: Uuid) -> WorkerSignal {
 /// SPUR-vocab strings exercised dead code (beads never emits those strings
 /// via `br show`). This single test uses the production flow (`br close`)
 /// and verifies the invariant holds end-to-end.
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn report_signal_on_closed_task_records_late_arrival() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
 

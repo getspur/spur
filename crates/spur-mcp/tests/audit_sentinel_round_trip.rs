@@ -7,9 +7,6 @@ use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind, CompletionState};
 use tempfile::TempDir;
 
 mod common;
-fn br_available() -> bool {
-    common::beads::br_available()
-}
 
 fn run_br(repo: &Path, args: &[&str]) -> Result<String, String> {
     common::beads::run_br(repo, args)
@@ -23,13 +20,8 @@ fn extract_id(json: &str) -> String {
         .to_string()
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[test]
 fn every_audit_sentinel_variant_round_trips_through_br_comments() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
     let dir = TempDir::new().unwrap();
     run_br(dir.path(), &["init"]).unwrap();
     let id = extract_id(&run_br(dir.path(), &["create", "t", "-t", "task"]).unwrap());

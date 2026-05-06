@@ -25,9 +25,6 @@ use tokio::sync::Mutex as TokioMutex;
 use tracing::field::{Field, Visit};
 
 mod common;
-fn br_available() -> bool {
-    common::beads::br_available()
-}
 
 fn run_br(repo: &Path, args: &[&str]) {
     common::beads::run_br(repo, args)
@@ -133,14 +130,8 @@ impl Visit for StringVisitor {
 
 // ─── T21: background flusher ────────────────────────────────────────────────
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn flusher_emits_sentinel_for_stale_entry() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let pm = pm_service_fixture(dir.path()).await;
@@ -212,14 +203,8 @@ async fn flusher_emits_sentinel_for_stale_entry() {
     server.shutdown(Duration::from_secs(5)).await;
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn flusher_exits_within_1s_of_cancellation() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let pm = pm_service_fixture(dir.path()).await;
@@ -244,14 +229,8 @@ async fn flusher_exits_within_1s_of_cancellation() {
     );
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn flusher_warns_when_all_entries_have_no_target_issue_id() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let warnings = CapturedWarnings::default();
     let _guard = tracing::subscriber::set_default(warnings.clone());
 
