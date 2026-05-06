@@ -114,7 +114,21 @@ impl WorktreeAuthority {
             let brain_session_id = match owned_branch_brain_session_id(trimmed) {
                 Some(id) => id,
                 None => {
-                    if trimmed.starts_with("spur/worker-")
+                    let path_lossy = path.to_string_lossy();
+                    if path_lossy.contains("/.spur/worktrees/") {
+                        // Audit log: vanishing-worktree triage. We expect to see
+                        // this for every non-v2 worktree under .spur/worktrees/
+                        // (e.g. fix/bd-* feature branches) on every sweep tick.
+                        // If a worktree disappears between two consecutive ticks,
+                        // its absence here is the evidence we want.
+                        tracing::info!(
+                            target: "spur.worktree.audit",
+                            op = "authority_sweep_skip_unknown_owner",
+                            path = %path.display(),
+                            branch = %trimmed,
+                            "skipped non-v2 worktree under .spur/worktrees/ — not removed by authority"
+                        );
+                    } else if trimmed.starts_with("spur/worker-")
                         && !trimmed.starts_with("spur/worker/v2/")
                     {
                         tracing::debug!(
@@ -251,6 +265,19 @@ impl WorktreeAuthority {
         let path_str = path
             .to_str()
             .ok_or_else(|| AuthorityError::Git("worktree path not UTF-8".into()))?;
+        // Audit log: any authority-driven worktree removal carries the call
+        // stack so we can confirm whether vanishing-worktree incidents trace
+        // here. force_capture so the backtrace is visible regardless of
+        // RUST_BACKTRACE.
+        let bt = std::backtrace::Backtrace::force_capture();
+        tracing::info!(
+            target: "spur.worktree.audit",
+            op = "authority_sweep_remove",
+            path = %path_str,
+            branch = %branch,
+            backtrace = %bt,
+            "WorktreeAuthority sweep removing worktree"
+        );
         let out = Command::new("git")
             .args(["worktree", "remove", "--force", "--force", path_str])
             .current_dir(&*self.repo_root)
