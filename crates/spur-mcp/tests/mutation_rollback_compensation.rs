@@ -162,8 +162,8 @@ async fn inject_partial_rollback_failure(
         }
         sleep(Duration::from_millis(2)).await;
     }
-    let child_ids = child_ids
-        .ok_or_else(|| "timed out waiting for mutation children before injecting cycle")?;
+    let child_ids =
+        child_ids.ok_or("timed out waiting for mutation children before injecting cycle")?;
 
     for _ in 0..5_000 {
         let edge_count = match downstream_child_edge_count(&repo, &downstream, &child_ids) {

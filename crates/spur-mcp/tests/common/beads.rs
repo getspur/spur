@@ -355,7 +355,7 @@ fn sync_import_only(repo: &Path, args: &[&str]) -> Result<String, String> {
         let created_at = issue
             .get("created_at")
             .and_then(Value::as_str)
-            .unwrap_or_else(|| line);
+            .unwrap_or(line);
         let updated_at = issue
             .get("updated_at")
             .and_then(Value::as_str)
