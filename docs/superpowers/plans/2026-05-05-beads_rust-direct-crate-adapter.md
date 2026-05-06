@@ -2287,6 +2287,13 @@ git commit -m "spur-pm: add TestBeadsWorkspace helper (no br CLI)"
 
 ### Task 22: Migrate `crates/spur-mcp/src/server.rs` test fixtures
 
+> **Plan revision (2026-05-06):** The original line references drifted:
+> 7483/9039/9205/9270 are now 7609/9165/9331/9396 before this task's edit.
+> The reusable helper in current `server.rs` is `init_beads_pm`; the migration
+> keeps `TestBeadsWorkspace` alive in `PersistedMergeFixture` and uses
+> `attach_beads_workspace` to seed the repo `.beads` directory from
+> `TestBeadsWorkspace::path()` for the existing PM-service construction path.
+
 **Files:**
 - Modify: `crates/spur-mcp/src/server.rs` (lines 7483, 9039, 9205, 9270)
 
