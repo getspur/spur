@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -6,20 +7,22 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use spur_pm::test_workspace::TestBeadsWorkspace;
 
+// PmService still constructs BeadsAdapter (shellout to `br`) until Section F
+// T26 swaps it for BeadsCrateAdapter. Tests that build PmService must skip
+// when `br` is absent — returning unconditional `true` here would let those
+// `#[ignore]` tests panic inside PmService::try_new instead of skipping.
 pub fn br_available() -> bool {
-    true
+    Command::new("br")
+        .arg("--help")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 pub fn attach_beads_workspace(repo: &Path, w: &TestBeadsWorkspace) {
     let beads_dir = repo.join(".beads");
     std::fs::create_dir_all(&beads_dir).expect("create test .beads directory");
-    for suffix in ["", "-wal", "-shm"] {
-        let file_name = format!("beads.db{suffix}");
-        let src = w.path().join(&file_name);
-        if src.exists() {
-            std::fs::copy(&src, beads_dir.join(file_name)).expect("copy test beads database");
-        }
-    }
+    w.copy_db_to(&beads_dir);
 }
 
 pub fn init_beads_repo(repo: &Path) -> TestBeadsWorkspace {

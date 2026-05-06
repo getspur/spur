@@ -8,13 +8,7 @@ use tempfile::TempDir;
 fn attach_beads_workspace(repo: &Path, w: &TestBeadsWorkspace) {
     let beads_dir = repo.join(".beads");
     std::fs::create_dir_all(&beads_dir).expect("create test .beads directory");
-    for suffix in ["", "-wal", "-shm"] {
-        let file_name = format!("beads.db{suffix}");
-        let src = w.path().join(&file_name);
-        if src.exists() {
-            std::fs::copy(&src, beads_dir.join(file_name)).expect("copy test beads database");
-        }
-    }
+    w.copy_db_to(&beads_dir);
 }
 
 fn init_beads_repo(repo: &Path) -> TestBeadsWorkspace {
