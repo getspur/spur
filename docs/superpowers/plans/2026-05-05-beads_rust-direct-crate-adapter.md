@@ -2467,13 +2467,21 @@ git commit -m "spur-mcp,spur-pm: migrate test fixtures from br CLI to TestBeadsW
 
 > **Plan revision (2026-05-06):** Final sweep found one additional
 > non-Section-F test caller: `crates/spur-core/tests/resume_plan_bridge.rs`.
-> Migrate it to `TestBeadsWorkspace`. After Task 25, the only remaining
-> `Command::new("br")` paths are the Section F production adapter
-> `crates/spur-pm/src/beads.rs` plus the intentionally retained BeadsAdapter
-> behavior tests from Task 24:
-> `crates/spur-pm/tests/poll_cursor.rs`,
-> `crates/spur-pm/tests/poll_saturated_first_tick.rs`, and
-> `crates/spur-pm/tests/beads_advanced.rs`.
+> Migrate it to `TestBeadsWorkspace`. After Task 25, the remaining
+> `Command::new("br")` paths are:
+> - `crates/spur-pm/src/beads.rs` — Section F production adapter, deleted in T27.
+> - `crates/spur-pm/tests/poll_cursor.rs`,
+>   `crates/spur-pm/tests/poll_saturated_first_tick.rs`,
+>   `crates/spur-pm/tests/beads_advanced.rs` — intentionally retained
+>   BeadsAdapter behavior tests (T24).
+> - `crates/spur-mcp/tests/common/beads.rs::br_available()` — `#[ignore]`
+>   skip-gate that probes for the `br` binary; not a fixture-init call.
+>   Restored in `8cea1a4e` after T24 mistakenly stubbed it to `true`.
+>   Removed when Section F deletes the last `PmService` shellout to `br`.
+>
+> Cleanup follow-up after the worker commit: `attach_beads_workspace` in
+> `crates/spur-core/tests/resume_plan_bridge.rs` was deduplicated to call
+> `TestBeadsWorkspace::copy_db_to(&beads_dir)` (matches T24 dedup `8cea1a4e`).
 
 - [ ] **Step 1: Final grep**
 
