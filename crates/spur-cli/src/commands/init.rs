@@ -93,34 +93,6 @@ pub async fn run(repo_root: PathBuf, force: bool, skills: bool) -> Result<()> {
         }
     }
 
-    // ── Phase 6: PM tools check ────────────────────────────────────────
-    //
-    // Issue tracking is provided in-process by `BeadsCrateAdapter` (direct
-    // `beads_rust` linkage; see docs/spur-pm-beads-crate-architecture.md), so
-    // no external `br` CLI is required. The remaining tool we still shell out
-    // to is `bv` (graph analysis: triage / plan / insights / alerts). Its
-    // absence only disables the graph features — issue tracking continues to
-    // work end-to-end.
-    println!();
-    println!("[spur] Checking PM tools...");
-    println!();
-
-    const PM_TOOLS: &[(&str, &str)] = &[("bv", "brew install dicklesworthstone/tap/bv")];
-
-    for &(cmd, hint) in PM_TOOLS {
-        let found = tokio::process::Command::new("which")
-            .arg(cmd)
-            .output()
-            .await
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if found {
-            println!("  ✓ {cmd}");
-        } else {
-            println!("  ✗ {cmd:<18}install: {hint}  (optional — graph analysis only)");
-        }
-    }
-
     // ── Phase 7: Brain selection (interactive only in TTY) ─────────────
     if std::io::stdin().is_terminal() {
         if let Err(e) = prompt_default_brain_selection(&mut config) {

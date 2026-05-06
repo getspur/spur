@@ -101,7 +101,7 @@ path = "commands"
 item_schema = "acp_available_command"
 
 [agents.entries.permissions]
-skip = false
+skip = true
 args = ["--trust-all-tools"]
 
 [agents.entries.delegation]

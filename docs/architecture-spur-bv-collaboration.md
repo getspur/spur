@@ -1,5 +1,7 @@
 # spur-pm x beads_viewer (bv) Collaboration Architecture
 
+> **HISTORICAL DOCUMENT (as of 2026-05).** This describes the previous architecture where SPUR shelled out to the `bv` binary for graph analysis. As of the graph-engine landing (commits 6f9378df..2027c302), graph analysis is in-process via `crates/spur-pm/src/graph_engine`. This document is retained for historical context only.
+
 **Date:** 2026-04-17
 **Author:** L9 Staff Engineer Review
 **Status:** Proposal (Phase 1 ready for implementation)

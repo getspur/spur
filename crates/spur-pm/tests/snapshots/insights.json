@@ -1,0 +1,99 @@
+{
+  "generated_at": "<normalized>",
+  "data_hash": "<normalized>",
+  "Bottlenecks": [
+    {
+      "ID": "<id-1>",
+      "Value": 1.0
+    },
+    {
+      "ID": "<id-2>",
+      "Value": 1.0
+    },
+    {
+      "ID": "<id-3>",
+      "Value": 1.0
+    }
+  ],
+  "Keystones": [],
+  "Influencers": [
+    {
+      "ID": "<id-1>",
+      "Value": 0.333333333333
+    },
+    {
+      "ID": "<id-2>",
+      "Value": 0.333333333333
+    },
+    {
+      "ID": "<id-3>",
+      "Value": 0.333333333333
+    }
+  ],
+  "Hubs": [
+    {
+      "ID": "<id-1>",
+      "Value": 0.57735026919
+    },
+    {
+      "ID": "<id-2>",
+      "Value": 0.57735026919
+    },
+    {
+      "ID": "<id-3>",
+      "Value": 0.57735026919
+    }
+  ],
+  "Authorities": [
+    {
+      "ID": "<id-1>",
+      "Value": 0.57735026919
+    },
+    {
+      "ID": "<id-2>",
+      "Value": 0.57735026919
+    },
+    {
+      "ID": "<id-3>",
+      "Value": 0.57735026919
+    }
+  ],
+  "Cores": [
+    {
+      "ID": "<id-1>",
+      "Value": 2.0
+    },
+    {
+      "ID": "<id-2>",
+      "Value": 2.0
+    },
+    {
+      "ID": "<id-3>",
+      "Value": 2.0
+    }
+  ],
+  "Articulation": [],
+  "Orphans": [],
+  "Cycles": [
+    [
+      "<id-1>",
+      "<id-2>",
+      "<id-3>"
+    ]
+  ],
+  "ClusterDensity": 1.0,
+  "top_what_ifs": [
+    {
+      "issue_id": "<id-1>",
+      "title": "Top task",
+      "delta": {
+        "direct_unblocks": 1,
+        "transitive_unblocks": 1,
+        "blocked_reduction": 1,
+        "depth_reduction": 1.0,
+        "estimated_days_saved": null,
+        "explanation": "Closing <id-1> would directly unblock 1 issue(s) and reduce blocked work by 1 issue(s)"
+      }
+    }
+  ]
+}
