@@ -1,13 +1,11 @@
 use std::path::Path;
 
-use crate::{
-    adapter::{IssueTracker, PrService},
-    beads_crate::{AdapterConfig, BeadsCrateAdapter},
-    bv::BvAdapter,
-    github::GitHubAdapter,
-    graph::DependencyGraph,
-    types::*,
-};
+use crate::adapter::{IssueTracker, PrService};
+use crate::beads_crate::{AdapterConfig, BeadsCrateAdapter};
+use crate::bv::BvAdapter;
+use crate::github::GitHubAdapter;
+use crate::graph::DependencyGraph;
+use crate::types::*;
 
 /// Resolve the beads "closed" status string. Default is `"closed"` — the
 /// value the default beads config accepts. Override via the argument for
