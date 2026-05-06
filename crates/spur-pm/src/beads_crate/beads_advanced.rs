@@ -181,6 +181,95 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn list_ready_priorities_is_set_membership() {
+        let (_dir, adapter) = setup_adapter().await;
+        let p0 = adapter
+            .create_issue(IssueCreate {
+                title: "P0".into(),
+                priority: Some(0),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let p2 = adapter
+            .create_issue(IssueCreate {
+                title: "P2".into(),
+                priority: Some(2),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let p4 = adapter
+            .create_issue(IssueCreate {
+                title: "P4".into(),
+                priority: Some(4),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let ready = adapter
+            .list_ready(ReadyFilter {
+                priorities: vec![0, 4],
+                limit: Some(50),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let ids: HashSet<String> = ready.into_iter().map(|issue| issue.id).collect();
+
+        assert!(ids.contains(&p0), "priority 0 issue missing: {ids:?}");
+        assert!(ids.contains(&p4), "priority 4 issue missing: {ids:?}");
+        assert!(
+            !ids.contains(&p2),
+            "priority 2 issue should be filtered out"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_ready_empty_priorities_returns_all_priority_levels() {
+        let (_dir, adapter) = setup_adapter().await;
+        let p0 = adapter
+            .create_issue(IssueCreate {
+                title: "P0".into(),
+                priority: Some(0),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let p2 = adapter
+            .create_issue(IssueCreate {
+                title: "P2".into(),
+                priority: Some(2),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let p4 = adapter
+            .create_issue(IssueCreate {
+                title: "P4".into(),
+                priority: Some(4),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let ready = adapter
+            .list_ready(ReadyFilter {
+                priorities: vec![],
+                limit: Some(50),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let ids: HashSet<String> = ready.into_iter().map(|issue| issue.id).collect();
+
+        assert!(ids.contains(&p0), "priority 0 issue missing: {ids:?}");
+        assert!(ids.contains(&p2), "priority 2 issue missing: {ids:?}");
+        assert!(ids.contains(&p4), "priority 4 issue missing: {ids:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn list_comments_returns_existing_comment() {
         let (_dir, adapter) = setup_adapter().await;
         let issue_id = adapter
