@@ -355,6 +355,8 @@ flowchart TD
 
 **Current:** `✗ br                install: cargo install --git ...`
 **Proposed:**
+> Note (2026-05): SPUR no longer requires the bv binary; graph analysis is now in-process via crates/spur-pm/src/graph_engine.
+
 ```
 [spur] Checking PM tools (optional — SPUR works without these)...
 

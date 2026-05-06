@@ -85,7 +85,7 @@ impl PmService {
                     GraphEngineConfig::default(),
                 )),
                 Err(e) => {
-                    tracing::info!("bv unavailable (graph analysis disabled): {e}");
+                    tracing::info!("graph engine unavailable (graph analysis disabled): {e}");
                     None
                 }
             };
@@ -209,7 +209,7 @@ impl PmService {
         let bv = self
             .bv
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("bv unavailable for issue graph"))?;
+            .ok_or_else(|| anyhow::anyhow!("graph engine unavailable for issue graph"))?;
 
         if let PmBackendInner::Beads { beads, .. } = &self.inner {
             if let Some(plan_label) = beads.plan_id_label_for_epic(id).await? {
