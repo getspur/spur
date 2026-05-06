@@ -1802,9 +1802,7 @@ fn lifecycle_from_plan(
         PlanLifecycleEvent::AwaitingReview
     } else if counts.total > 0 && counts.pending == counts.total {
         PlanLifecycleEvent::Pending
-    } else if counts.total > 0 {
-        PlanLifecycleEvent::Running
-    } else if epic.labels.iter().any(|label| label == PLAN_COMPLETE_LABEL) {
+    } else if counts.total > 0 || epic.labels.iter().any(|label| label == PLAN_COMPLETE_LABEL) {
         PlanLifecycleEvent::Running
     } else {
         PlanLifecycleEvent::Unknown

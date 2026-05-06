@@ -21,6 +21,7 @@
 //! seeded with an active `BrainSession` without a live ACP transport, so this
 //! test validates the bridge's downstream at its natural boundary.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,6 +31,7 @@ use spur_acp::types::SessionId;
 use spur_core::continuation_bridge::new_overflow_buf;
 use spur_core::orchestrator::InteractiveInput;
 use spur_core::Orchestrator;
+use spur_pm::test_workspace::TestBeadsWorkspace;
 use tokio::sync::mpsc;
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
@@ -81,6 +83,18 @@ fn build_orchestrator() -> (
     });
 
     (input_tx, events_rx)
+}
+
+fn attach_beads_workspace(repo: &Path, w: &TestBeadsWorkspace) {
+    let beads_dir = repo.join(".beads");
+    std::fs::create_dir_all(&beads_dir).expect("create test .beads directory");
+    for suffix in ["", "-wal", "-shm"] {
+        let file_name = format!("beads.db{suffix}");
+        let src = w.path().join(&file_name);
+        if src.exists() {
+            std::fs::copy(&src, beads_dir.join(file_name)).expect("copy test beads database");
+        }
+    }
 }
 
 /// When `ResumePlan` is sent without any active brain session, the orchestrator
@@ -139,23 +153,14 @@ async fn no_brain_session_emits_plan_command_error() {
 // bridge at this level is the closest possible integration without a live ACP
 // transport.
 //
-// Requires: `br` binary on $PATH (beads CLI).
+// The fixture initializes beads through TestBeadsWorkspace rather than the
+// `br` CLI. PmService still exercises the production beads backend.
 
 /// Set up a minimal git + beads repo, create an epic whose labels carry a
 /// `spur:owner:<other-session>` token, then confirm that `call_resume_plan`
 /// returns an Err containing the ownership-conflict message.
 #[tokio::test]
 async fn mcp_server_plan_owned_by_other_emits_plan_command_error() {
-    // ── 0. Check for `br` availability ──────────────────────────────────────
-    if std::process::Command::new("br")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
-        eprintln!("SKIP: `br` binary not found; skipping ownership-conflict test");
-        return;
-    }
-
     // ── 1. Git init ──────────────────────────────────────────────────────────
     let dir = tempfile::TempDir::new().expect("tempdir");
 
@@ -175,16 +180,8 @@ async fn mcp_server_plan_owned_by_other_emits_plan_command_error() {
     git(&["commit", "-q", "-m", "seed"]);
 
     // ── 2. Beads init ────────────────────────────────────────────────────────
-    let br_out = std::process::Command::new("br")
-        .arg("init")
-        .current_dir(dir.path())
-        .output()
-        .expect("br init");
-    assert!(
-        br_out.status.success(),
-        "br init failed: {:?}",
-        String::from_utf8_lossy(&br_out.stderr),
-    );
+    let beads = TestBeadsWorkspace::init();
+    attach_beads_workspace(dir.path(), &beads);
 
     // ── 3. Create PmService ──────────────────────────────────────────────────
     let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
