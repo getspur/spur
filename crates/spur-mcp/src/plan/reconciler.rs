@@ -2442,100 +2442,55 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn auto_merge_config_off_produces_zero_actions() {
-        use std::process::Command;
-        use tempfile::TempDir;
+    fn attach_beads_workspace(
+        repo: &std::path::Path,
+        w: &spur_pm::test_workspace::TestBeadsWorkspace,
+    ) {
+        let beads_dir = repo.join(".beads");
+        std::fs::create_dir(&beads_dir).expect("create test .beads directory");
+        std::fs::copy(w.path().join("beads.db"), beads_dir.join("beads.db"))
+            .expect("copy test beads database");
+    }
 
-        fn br_available() -> bool {
-            Command::new("br")
-                .arg("--help")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        }
-
-        if !br_available() {
-            eprintln!("skipping auto_merge_config_off_produces_zero_actions: `br` not on PATH");
-            return;
-        }
-
-        let dir = TempDir::new().expect("tempdir");
-        let repo = dir.path();
-
-        assert!(
-            Command::new("br")
-                .args(["init"])
-                .current_dir(repo)
-                .output()
-                .expect("br init")
-                .status
-                .success(),
-            "br init failed"
-        );
-
-        let epic_out = Command::new("br")
-            .args(["create", "--type", "epic", "--title", "Test Epic", "--json"])
-            .current_dir(repo)
-            .output()
-            .expect("br create epic");
-        let epic_json = String::from_utf8_lossy(&epic_out.stdout);
-        let epic_id: String = serde_json::from_str::<serde_json::Value>(&epic_json).unwrap()["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
+    fn workspace_with_complete_epic(
+        repo: &std::path::Path,
+        plan_id: &str,
+    ) -> spur_pm::test_workspace::TestBeadsWorkspace {
+        let mut w = spur_pm::test_workspace::TestBeadsWorkspace::init();
+        let plan_id_label = format!("spur:plan-id:{plan_id}");
+        let epic_id = w.create_epic("Test Epic");
 
         for title in ["Task A", "Task B"] {
-            let task_out = Command::new("br")
-                .args(["create", "--type", "task", "--title", title, "--json"])
-                .current_dir(repo)
-                .output()
-                .expect("br create task");
-            let task_json = String::from_utf8_lossy(&task_out.stdout);
-            let task_id: String = serde_json::from_str::<serde_json::Value>(&task_json).unwrap()
-                ["id"]
-                .as_str()
-                .unwrap()
-                .to_string();
-            Command::new("br")
-                .args(["label", "add", &task_id, "spur:plan-id:P1"])
-                .current_dir(repo)
-                .output()
-                .expect("label task");
-            Command::new("br")
-                .args(["update", &task_id, "--status", "closed"])
-                .current_dir(repo)
-                .output()
-                .expect("close task");
+            let task_id = w.create_issue(title);
+            w.add_label(&task_id, &plan_id_label);
+            w.close_issue(&task_id);
         }
 
-        Command::new("br")
-            .args(["label", "add", &epic_id, "spur:plan-id:P1"])
-            .current_dir(repo)
-            .output()
-            .expect("label epic");
-        Command::new("br")
-            .args(["label", "add", &epic_id, "spur:plan-complete"])
-            .current_dir(repo)
-            .output()
-            .expect("label epic plan-complete");
-        Command::new("br")
-            .args(["update", &epic_id, "--status", "closed"])
-            .current_dir(repo)
-            .output()
-            .expect("close epic");
-        Command::new("br")
-            .args(["label", "add", &epic_id, "spur:integration-pending"])
-            .current_dir(repo)
-            .output()
-            .expect("label epic integration-pending");
+        w.add_label(&epic_id, &plan_id_label);
+        w.add_label(&epic_id, "spur:plan-complete");
+        w.close_issue(&epic_id);
+        w.add_label(&epic_id, "spur:integration-pending");
+        attach_beads_workspace(repo, &w);
+        w
+    }
 
-        let pm = Arc::new(
+    async fn pm_for_beads_repo(repo: &std::path::Path) -> Arc<spur_pm::PmService> {
+        Arc::new(
             spur_pm::PmService::try_new(None, true, false, repo, None)
                 .await
                 .expect("PmService::try_new failed")
                 .expect("expected beads pm"),
-        );
+        )
+    }
+
+    #[tokio::test]
+    async fn auto_merge_config_off_produces_zero_actions() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().expect("tempdir");
+        let repo = dir.path();
+        let _beads = workspace_with_complete_epic(repo, "P1");
+        let pm = pm_for_beads_repo(repo).await;
 
         let actions = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let automation = Arc::new(MockAutomation {
@@ -2571,100 +2526,12 @@ mod tests {
     /// local audits vector.
     #[tokio::test]
     async fn failed_epic_completion_audit_suppresses_automation() {
-        use std::process::Command;
         use tempfile::TempDir;
-
-        fn br_available() -> bool {
-            Command::new("br")
-                .arg("--help")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        }
-
-        if !br_available() {
-            eprintln!(
-                "skipping failed_epic_completion_audit_suppresses_automation: `br` not on PATH"
-            );
-            return;
-        }
 
         let dir = TempDir::new().expect("tempdir");
         let repo = dir.path();
-
-        assert!(
-            Command::new("br")
-                .args(["init"])
-                .current_dir(repo)
-                .output()
-                .expect("br init")
-                .status
-                .success(),
-            "br init failed"
-        );
-
-        let epic_out = Command::new("br")
-            .args(["create", "--type", "epic", "--title", "Test Epic", "--json"])
-            .current_dir(repo)
-            .output()
-            .expect("br create epic");
-        let epic_json = String::from_utf8_lossy(&epic_out.stdout);
-        let epic_id: String = serde_json::from_str::<serde_json::Value>(&epic_json).unwrap()["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
-
-        for title in ["Task A", "Task B"] {
-            let task_out = Command::new("br")
-                .args(["create", "--type", "task", "--title", title, "--json"])
-                .current_dir(repo)
-                .output()
-                .expect("br create task");
-            let task_json = String::from_utf8_lossy(&task_out.stdout);
-            let task_id: String = serde_json::from_str::<serde_json::Value>(&task_json).unwrap()
-                ["id"]
-                .as_str()
-                .unwrap()
-                .to_string();
-            Command::new("br")
-                .args(["label", "add", &task_id, "spur:plan-id:P1"])
-                .current_dir(repo)
-                .output()
-                .expect("label task");
-            Command::new("br")
-                .args(["update", &task_id, "--status", "closed"])
-                .current_dir(repo)
-                .output()
-                .expect("close task");
-        }
-
-        Command::new("br")
-            .args(["label", "add", &epic_id, "spur:plan-id:P1"])
-            .current_dir(repo)
-            .output()
-            .expect("label epic");
-        Command::new("br")
-            .args(["label", "add", &epic_id, "spur:plan-complete"])
-            .current_dir(repo)
-            .output()
-            .expect("label epic plan-complete");
-        Command::new("br")
-            .args(["update", &epic_id, "--status", "closed"])
-            .current_dir(repo)
-            .output()
-            .expect("close epic");
-        Command::new("br")
-            .args(["label", "add", &epic_id, "spur:integration-pending"])
-            .current_dir(repo)
-            .output()
-            .expect("label epic integration-pending");
-
-        let pm = Arc::new(
-            spur_pm::PmService::try_new(None, true, false, repo, None)
-                .await
-                .expect("PmService::try_new failed")
-                .expect("expected beads pm"),
-        );
+        let _beads = workspace_with_complete_epic(repo, "P1");
+        let pm = pm_for_beads_repo(repo).await;
 
         // Make the beads database read-only so that add_comment (and therefore
         // emit_epic_completion_audit) fails. Some br versions refuse even read
