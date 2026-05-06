@@ -8,6 +8,26 @@ use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tracing::debug;
 
+/// Audit-log a worktree mutation (add or remove) with a captured backtrace
+/// so we can attribute "which call site touched .spur/worktrees/<id>" when
+/// triaging the vanishing-worktree class of incidents.
+///
+/// Uses `force_capture` (independent of `RUST_BACKTRACE`) because this hook
+/// only fires on rare, expensive git invocations — the perf cost is
+/// negligible relative to spawning a `git` subprocess. Remove or down-grade
+/// to `Backtrace::capture` once the originating remover is identified.
+fn log_worktree_op(op: &str, path: &str, branch: Option<&str>) {
+    let bt = std::backtrace::Backtrace::force_capture();
+    tracing::info!(
+        target: "spur.worktree.audit",
+        op,
+        path,
+        branch = branch.unwrap_or("<unknown>"),
+        backtrace = %bt,
+        "worktree mutation invoked"
+    );
+}
+
 /// Monotonic counter to guarantee unique snapshot branch names under concurrency.
 static SNAPSHOT_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -231,6 +251,7 @@ impl WorktreeManager {
         let path_str = path
             .to_str()
             .ok_or_else(|| anyhow!("worktree path is not valid UTF-8"))?;
+        log_worktree_op("create_worktree_at", path_str, Some(branch));
         self.run_git(&["worktree", "add", path_str, "-b", branch, base], None)
             .await
             .with_context(|| format!("failed to create worktree at {path_str}"))?;
@@ -243,6 +264,7 @@ impl WorktreeManager {
         let path_str = path
             .to_str()
             .ok_or_else(|| anyhow!("worktree path is not valid UTF-8"))?;
+        log_worktree_op("remove_worktree_at", path_str, None);
         self.run_git(
             &["worktree", "remove", path_str, "--force", "--force"],
             None,
@@ -432,6 +454,7 @@ impl WorktreeManager {
             .await
             .with_context(|| format!("failed to resolve base branch '{base_branch}'"))?;
 
+        log_worktree_op("create_worktree_v2", worktree_path_str, Some(&branch_name));
         self.run_git_with_retry(
             &[
                 "worktree",
@@ -614,6 +637,7 @@ impl WorktreeManager {
             .to_string();
         let branch = info.branch.clone();
 
+        log_worktree_op("remove_worktree", &path_str, Some(&branch));
         // Run git operations; if any fail, return without mutating self.active.
         self.run_git(
             &["worktree", "remove", &path_str, "--force", "--force"],
@@ -647,6 +671,7 @@ impl WorktreeManager {
             .to_string();
         let branch = info.branch.clone();
 
+        log_worktree_op("detach_worktree", &path_str, Some(&branch));
         // Run git operations; if any fail, return without mutating self.active.
         self.run_git(
             &["worktree", "remove", &path_str, "--force", "--force"],
@@ -741,6 +766,7 @@ impl WorktreeManager {
                             continue;
                         }
                         debug!(path = %path, branch = %branch, "removing orphaned spur worktree");
+                        log_worktree_op("cleanup_orphans", path, Some(branch));
                         let rm = Command::new("git")
                             .args(["worktree", "remove", "--force", path])
                             .current_dir(&self.repo_root)
