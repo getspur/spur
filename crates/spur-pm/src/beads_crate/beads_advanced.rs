@@ -8,6 +8,15 @@ use crate::beads_crate::issue_tracker::br_to_pm_summary;
 use crate::types::IssueSummary;
 
 impl BeadsCrateAdapter {
+    /// Look up the `spur:plan-id:<plan-id>` label on an epic, if any.
+    ///
+    /// Returns `Ok(None)` for non-epic issues (the label is only meaningful
+    /// on epics) and for epics that carry no `spur:plan-id:` label.
+    /// Returns `Err` if the issue does not exist.
+    ///
+    /// Mirrors `BeadsAdapter::plan_id_label_for_epic` in `crates/spur-pm/
+    /// src/beads.rs`; this is the inherent-method counterpart used by
+    /// `PmService` (see `crates/spur-pm/src/service.rs:209`).
     pub async fn plan_id_label_for_epic(&self, id: &str) -> anyhow::Result<Option<String>> {
         let id = id.to_string();
         self.read(move |s| {
@@ -44,10 +53,8 @@ impl BeadsAdvanced for BeadsCrateAdapter {
                     filter
                         .priorities
                         .iter()
-                        .map(|priority| {
-                            beads_rust::model::Priority::from_str(&priority.to_string())
-                        })
-                        .collect::<Result<Vec<_>, _>>()?,
+                        .map(|priority| beads_rust::model::Priority(*priority))
+                        .collect(),
                 )
             };
             let ready_filter = beads_rust::storage::ReadyFilters {
@@ -217,18 +224,16 @@ mod tests {
             .unwrap();
 
         assert!(!comment_id.is_empty());
-        let issue_for_check = issue_id.clone();
-        let comments = adapter
-            .read(move |s| Ok(s.get_comments(&issue_for_check)?))
-            .await
-            .unwrap();
+
+        // True trait round-trip: add via BeadsAdvanced::add_comment, read via
+        // BeadsAdvanced::list_comments — verifies the public surface end-to-end
+        // (the previous version went around list_comments via raw get_comments).
+        let comments = adapter.list_comments(&issue_id).await.unwrap();
         assert!(
-            comments
-                .iter()
-                .any(|comment| comment.id.to_string() == comment_id
-                    && comment.body == "advanced comment"
-                    && comment.author == "spur"),
-            "expected advanced comment id {comment_id}, got {comments:?}"
+            comments.iter().any(|comment| comment.id == comment_id
+                && comment.body == "advanced comment"
+                && comment.actor == "spur"),
+            "expected advanced comment id {comment_id} via list_comments, got {comments:?}"
         );
     }
 
