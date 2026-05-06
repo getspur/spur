@@ -5,6 +5,7 @@
 
 pub mod adapter;
 pub mod backoff;
+mod beads_advanced;
 pub mod init;
 pub mod issue_tracker;
 pub mod metrics;
