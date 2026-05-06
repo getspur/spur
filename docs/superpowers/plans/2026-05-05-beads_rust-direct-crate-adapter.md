@@ -2499,7 +2499,60 @@ git commit -m "tests: complete migration off br CLI in remaining test files"
 
 ## Section F — Wire-in + cleanup (Tasks 26-30)
 
+> **Plan revision (2026-05-06): Section F decomposition.** Drift audit
+> after Section E close-out found the as-written T26-T30 cannot execute.
+> Real surfaces:
+>
+> - `crates/spur-pm/src/service.rs:78` calls
+>   `BeadsAdapter::connect_with_actor(repo_root, actor, Some(cursor_path))`,
+>   not `try_new`.
+> - `PmBackendInner::Beads { beads: BeadsAdapter, ... }` (service.rs:22)
+>   stores a concrete struct, not `Arc<dyn IssueTracker>`.
+> - `service.rs:209` uses `beads.plan_id_label_for_epic(id)` from the
+>   `BeadsAdvanced` trait. `BeadsCrateAdapter` only implements
+>   `IssueTracker` — `BeadsAdvanced` (5 methods: `list_ready`,
+>   `list_comments`, `add_comment`, `remove_dependency`, `dep_cycles`)
+>   plus `plan_id_label_for_epic` (defined on `BeadsAdapter` directly,
+>   used at service.rs:209) is unimplemented on the crate adapter.
+> - `BeadsAdapter::connect_with_actor` accepts a `cursor_path` for
+>   persistence; `BeadsCrateAdapter::open(beads_dir, AdapterConfig)`
+>   has the cursor field in memory but no on-disk persistence hook.
+> - `crates/spur-pm/tests/poll_saturated_first_tick.rs:8` imports
+>   `spur_pm::beads::POLL_FETCH_LIMIT` directly. Deleting `beads.rs`
+>   breaks this import. The 3 retained shellout behavior tests
+>   (`poll_cursor.rs`, `poll_saturated_first_tick.rs`,
+>   `beads_advanced.rs`) all import `BeadsAdapter` from the to-be-
+>   deleted module.
+> - `beads_rust::sync::auto_flush(storage: &mut SqliteStorage, beads_dir:
+>   &Path, jsonl_path: &Path, allow_external_jsonl: bool) ->
+>   Result<AutoFlushResult>` — 4-arg signature differs from the plan's.
+>   `BeadsCrateAdapter` has no `self.writer` field; the adapter opens
+>   `SqliteStorage` per call inside `spawn_blocking`.
+>
+> **Revised DAG:**
+>
+> | Task | Depends on | Scope |
+> |------|-----------|-------|
+> | T26a | — | `impl BeadsAdvanced for BeadsCrateAdapter` (5 methods) + add `plan_id_label_for_epic` inherent method |
+> | T26b | — | Extend `AdapterConfig` with `cursor_path: Option<PathBuf>`; load on `open()`, persist after `poll()` |
+> | T26c | T26a, T26b | Swap `PmBackendInner::Beads { beads: BeadsAdapter }` → `BeadsCrateAdapter`; rewrite `service.rs:75-95` constructor |
+> | T27a | — | Relocate `POLL_FETCH_LIMIT` (move to `crates/spur-pm/src/poll_cursor.rs` + re-export from lib) so `beads.rs` deletion doesn't break the test import |
+> | T27b | T26c, T27a | Delete the 3 BeadsAdapter shellout behavior tests (`crates/spur-pm/tests/poll_cursor.rs`, `poll_saturated_first_tick.rs`, `beads_advanced.rs`) — their target struct is being removed; behavioral coverage migrates to `BeadsCrateAdapter` tests |
+> | T27c | T26c, T27a, T27b | Delete `crates/spur-pm/src/beads.rs`; remove `pub mod beads;` from `lib.rs:3` |
+> | T28 | T27c | Final grep verification |
+> | T29 | — | Multi-process integration tests (independent; do NOT pre-init via `SqliteStorage::open` — `BeadsCrateAdapter::open` initializes the DB itself) |
+> | T30 | — | `auto_flush()` method — open `SqliteStorage` fresh inside `spawn_blocking` (matching `write()` pattern), call 4-arg `beads_rust::sync::auto_flush(&mut storage, &beads_dir, &jsonl, false)` |
+>
+> Each original-numbered task below ALSO carries a per-task revision
+> callout reflecting its slice of the DAG.
+
 ### Task 26: Replace `BeadsAdapter` in `PmService`
+
+> **Plan revision (2026-05-06):** Decomposed into T26a (impl
+> `BeadsAdvanced` for `BeadsCrateAdapter`), T26b (cursor persistence
+> in `AdapterConfig`), T26c (swap concrete enum field). See Section F
+> preamble for the revised DAG. The "swap to `try_new`" wording
+> below is wrong — the actual call is `connect_with_actor`.
 
 **Files:**
 - Modify: `crates/spur-pm/src/service.rs`
@@ -2525,6 +2578,12 @@ git commit -m "spur-pm: PmService uses BeadsCrateAdapter (replaces shellout)"
 ---
 
 ### Task 27: Delete `crates/spur-pm/src/beads.rs`
+
+> **Plan revision (2026-05-06):** Decomposed into T27a (relocate
+> `POLL_FETCH_LIMIT` so the `poll_saturated_first_tick.rs` import
+> survives), T27b (delete the 3 retained shellout behavior tests
+> whose target is being removed), T27c (the actual file delete).
+> See Section F preamble for the revised DAG.
 
 **Files:**
 - Delete: `crates/spur-pm/src/beads.rs`
@@ -2575,6 +2634,15 @@ Document the result in a comment in the spec or in the PR description.
 ---
 
 ### Task 29: Multi-process integration tests
+
+> **Plan revision (2026-05-06):** Two corrections to the snippets below.
+> (a) `SqliteStorage::open(dir.path())` is wrong — `open()` takes the
+> `.db` file path, not the directory. Skip the explicit pre-init
+> entirely: `BeadsCrateAdapter::open` already creates and migrates the
+> SQLite DB on first call. (b) Verify the `Status` enum variant before
+> writing the test — current call sites use `Status::Open` and
+> `Status::from_str("closed")`; if `Status::Closed` does not compile,
+> use `from_str` instead.
 
 **Files:**
 - Create: `crates/spur-pm/tests/beads_crate_multiprocess.rs`
@@ -2685,6 +2753,18 @@ git commit -m "spur-pm: multi-process integration tests for BeadsCrateAdapter"
 ---
 
 ### Task 30: Idempotent under-lock auto-flush + periodic task
+
+> **Plan revision (2026-05-06):** The body sketch below uses the wrong
+> `auto_flush` signature and a non-existent `self.writer` field.
+> The real `beads_rust::sync::auto_flush` is
+> `(storage: &mut SqliteStorage, beads_dir: &Path, jsonl_path: &Path,
+> allow_external_jsonl: bool) -> Result<AutoFlushResult>`.
+> `BeadsCrateAdapter` does NOT hold a `Mutex<SqliteStorage>` writer
+> guard — it opens `SqliteStorage` per call inside `spawn_blocking`.
+> Pattern after the existing `write()` method: acquire flock, open a
+> fresh `SqliteStorage`, call the 4-arg `auto_flush(&mut storage,
+> &beads_dir, &jsonl, false)`. See `crates/spur-pm/src/beads_crate/
+> init.rs:258` for an existing call site to mirror.
 
 **Files:**
 - Modify: `crates/spur-pm/src/beads_crate/adapter.rs`
