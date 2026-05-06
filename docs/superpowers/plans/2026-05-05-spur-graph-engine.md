@@ -433,7 +433,10 @@ pub fn load_graph_snapshot(
         }
         for dep in issue.dependencies {
             let kind = DependencyKind::parse(&format!("{:?}", dep.dependency_type).to_lowercase());
-            snap.add_edge(&issue.id, &dep.depends_on_id, kind);
+            // Edge direction: blocker → blocked. In beads, `dep.depends_on_id`
+            // is the blocker (the issue THIS one depends on / waits for), so
+            // the source of the edge is `dep.depends_on_id`, not `issue.id`.
+            snap.add_edge(&dep.depends_on_id, &issue.id, kind);
         }
     }
 
