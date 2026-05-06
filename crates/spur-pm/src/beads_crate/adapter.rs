@@ -13,11 +13,15 @@ use std::time::{Duration, Instant};
 
 use beads_rust::sync;
 
-use crate::beads_crate::backoff::BackoffPolicy;
-use crate::beads_crate::init;
-use crate::beads_crate::metrics::ContentionMetrics;
-use crate::beads_crate::snapshot::{Conflict, Snapshot};
-use crate::poll_cursor::PollCursor;
+use crate::{
+    beads_crate::{
+        backoff::BackoffPolicy,
+        init,
+        metrics::ContentionMetrics,
+        snapshot::{Conflict, Snapshot},
+    },
+    poll_cursor::PollCursor,
+};
 
 /// Coarse data_version proxy. beads_rust 0.2.1 does not expose
 /// `PRAGMA data_version`; until it does, we use `count_issues()`. This

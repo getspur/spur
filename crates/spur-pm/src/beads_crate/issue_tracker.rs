@@ -6,10 +6,12 @@ use std::str::FromStr;
 use async_trait::async_trait;
 use chrono::Utc;
 
-use crate::adapter::IssueTracker;
-use crate::beads_crate::adapter::BeadsCrateAdapter;
-use crate::poll_cursor::{PollCursor, POLL_FETCH_LIMIT};
-use crate::types::{Issue, IssueCreate, IssueFilter, IssueSummary, IssueUpdate, PmEvent, PmSource};
+use crate::{
+    adapter::IssueTracker,
+    beads_crate::adapter::BeadsCrateAdapter,
+    poll_cursor::{PollCursor, POLL_FETCH_LIMIT},
+    types::{Issue, IssueCreate, IssueFilter, IssueSummary, IssueUpdate, PmEvent, PmSource},
+};
 
 pub(crate) fn br_to_pm_issue(br: beads_rust::model::Issue) -> Issue {
     let url = format!("beads://{}", br.id);
@@ -368,9 +370,11 @@ mod tests {
     use chrono::Utc;
     use tempfile::TempDir;
 
-    use crate::adapter::IssueTracker;
-    use crate::beads_crate::adapter::{AdapterConfig, BeadsCrateAdapter};
-    use crate::types::{IssueCreate, IssueUpdate, PmEvent};
+    use crate::{
+        adapter::IssueTracker,
+        beads_crate::adapter::{AdapterConfig, BeadsCrateAdapter},
+        types::{IssueCreate, IssueUpdate, PmEvent},
+    };
 
     fn minimal_issue(id: &str, title: &str) -> BrIssue {
         let now = Utc::now();
