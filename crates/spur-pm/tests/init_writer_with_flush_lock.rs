@@ -5,8 +5,7 @@
 
 use std::time::{Duration, Instant};
 
-use pm::beads_crate::{AdapterConfig, BeadsCrateAdapter};
-use spur_pm as pm;
+use spur_pm::beads_crate::{AdapterConfig, BeadsCrateAdapter};
 use tempfile::TempDir;
 
 #[tokio::test]
