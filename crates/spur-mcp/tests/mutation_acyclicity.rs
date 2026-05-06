@@ -1,10 +1,10 @@
 //! T-I2: post-mutation cycle triggers compensating rollback.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rusqlite::{params, Error as SqliteError, ErrorCode};
 use serde_json::json;
 use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
 use spur_mcp::plan::labels::mutation_id_label;
@@ -16,65 +16,8 @@ use uuid::Uuid;
 
 mod common;
 
-fn br_available() -> bool {
-    common::beads::br_available()
-}
-
-fn sqlite_available() -> bool {
-    Command::new("sqlite3")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 fn run_br(repo: &Path, args: &[&str]) -> Result<String, String> {
     common::beads::run_br(repo, args)
-}
-
-fn run_sql(repo: &Path, sql: &str) -> Result<(), String> {
-    let db = repo.join(".beads/beads.db");
-    let out = Command::new("sqlite3")
-        .arg("-cmd")
-        .arg(".timeout 2000")
-        .arg(db)
-        .arg(sql)
-        .current_dir(repo)
-        .output()
-        .expect("sqlite3 invocation failed");
-    if out.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        Err(format!(
-            "sqlite3 failed (exit {}): stderr={stderr} stdout={stdout}",
-            out.status
-        ))
-    }
-}
-
-fn run_sql_json(repo: &Path, sql: &str) -> Result<String, String> {
-    let db = repo.join(".beads/beads.db");
-    let out = Command::new("sqlite3")
-        .arg("-cmd")
-        .arg(".timeout 2000")
-        .arg("-json")
-        .arg(db)
-        .arg(sql)
-        .current_dir(repo)
-        .output()
-        .expect("sqlite3 invocation failed");
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-    } else {
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        Err(format!(
-            "sqlite3 -json failed (exit {}): stderr={stderr} stdout={stdout}",
-            out.status
-        ))
-    }
 }
 
 fn br_id(raw: &str) -> String {
@@ -114,62 +57,83 @@ fn mutation_batch(
     .expect("MutationBatch JSON must deserialize")
 }
 
-fn issue_ids_for_label(repo: &Path, label: &str) -> Result<Vec<String>, String> {
-    let rows = run_sql_json(
-        repo,
-        &format!(
-            "SELECT issue_id FROM labels WHERE label = '{}' ORDER BY issue_id;",
-            label
-        ),
-    )?;
-    if rows.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-    let ids = serde_json::from_str::<Vec<serde_json::Value>>(&rows)
-        .map_err(|err| format!("parse sqlite label rows: {err}; raw={rows}"))?
-        .into_iter()
-        .filter_map(|row| {
-            row.get("issue_id")
-                .and_then(|value| value.as_str())
-                .map(ToOwned::to_owned)
+async fn issue_ids_for_label_pm(
+    pm: &spur_pm::PmService,
+    label: &str,
+) -> Result<Vec<String>, String> {
+    let mut ids = pm
+        .list_issues(spur_pm::IssueFilter {
+            labels: vec![label.to_string()],
+            include_closed: true,
+            limit: Some(1_000),
+            ..Default::default()
         })
+        .await
+        .map_err(|err| err.to_string())?
+        .into_iter()
+        .map(|issue| issue.id)
         .collect::<Vec<_>>();
+    ids.sort();
     Ok(ids)
 }
 
-async fn inject_cycle_when_children_exist(repo: PathBuf, mutation_id: Uuid) -> Result<(), String> {
+fn is_sqlite_busy(err: &SqliteError) -> bool {
+    matches!(
+        err,
+        SqliteError::SqliteFailure(error, _)
+            if matches!(error.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+    )
+}
+
+fn is_busy_message(err: &str) -> bool {
+    err.contains("database is busy") || err.contains("database is locked")
+}
+
+fn insert_dependency_cycle(repo: &Path, ids: &[String]) -> Result<(), SqliteError> {
+    let conn = rusqlite::Connection::open(repo.join(".beads/beads.db"))?;
+    conn.busy_timeout(Duration::from_millis(100))?;
+    for (issue_id, depends_on_id) in [(&ids[0], &ids[1]), (&ids[1], &ids[0])] {
+        conn.execute(
+            "INSERT OR IGNORE INTO dependencies(issue_id, depends_on_id, type, created_by)
+             VALUES (?1, ?2, 'blocks', 'mutation-test')",
+            params![issue_id, depends_on_id],
+        )?;
+    }
+    Ok(())
+}
+
+async fn inject_cycle_when_children_exist(
+    repo: PathBuf,
+    pm: Arc<spur_pm::PmService>,
+    mutation_id: Uuid,
+) -> Result<(), String> {
     let label = mutation_id_label(&mutation_id);
     for _ in 0..2_000 {
-        let mut ids = issue_ids_for_label(&repo, &label)?;
+        let ids = match issue_ids_for_label_pm(pm.as_ref(), &label).await {
+            Ok(ids) => ids,
+            Err(err) if is_busy_message(&err) => {
+                sleep(Duration::from_millis(2)).await;
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
         if ids.len() >= 2 {
-            ids.sort();
-            let sql = format!(
-                "INSERT OR IGNORE INTO dependencies(issue_id, depends_on_id, type, created_by) \
-                 VALUES ('{}', '{}', 'blocks', 'mutation-test'); \
-                 INSERT OR IGNORE INTO dependencies(issue_id, depends_on_id, type, created_by) \
-                 VALUES ('{}', '{}', 'blocks', 'mutation-test');",
-                ids[0], ids[1], ids[1], ids[0]
-            );
-            run_sql(&repo, &sql)?;
-            return Ok(());
+            match insert_dependency_cycle(&repo, &ids) {
+                Ok(()) => return Ok(()),
+                Err(err) if is_sqlite_busy(&err) => {
+                    sleep(Duration::from_millis(2)).await;
+                    continue;
+                }
+                Err(err) => return Err(err.to_string()),
+            }
         }
         sleep(Duration::from_millis(2)).await;
     }
     Err("timed out waiting for mutation children before injecting cycle".into())
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn cycle_detection_emits_violation_and_rolls_back() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-    assert!(
-        sqlite_available(),
-        "this test requires `sqlite3` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
 
@@ -212,6 +176,7 @@ async fn cycle_detection_emits_violation_and_rolls_back() {
 
     let injector = tokio::spawn(inject_cycle_when_children_exist(
         dir.path().to_path_buf(),
+        pm.clone(),
         mutation_id,
     ));
 
@@ -328,7 +293,8 @@ async fn cycle_detection_emits_violation_and_rolls_back() {
         "MutationCommit must not be emitted on rolled-back mutation: err={err:#} sentinels={sentinels:?}"
     );
 
-    let child_ids = issue_ids_for_label(dir.path(), &mutation_id_label(&batch.mutation_id))
+    let child_ids = issue_ids_for_label_pm(pm.as_ref(), &mutation_id_label(&batch.mutation_id))
+        .await
         .expect("query rollback children by label");
     assert_eq!(
         child_ids.len(),

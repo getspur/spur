@@ -13,10 +13,6 @@ use tokio::sync::{Mutex, Notify};
 
 mod common;
 
-fn br_available() -> bool {
-    common::beads::br_available()
-}
-
 fn run_br(repo: &Path, args: &[&str]) -> Result<(), String> {
     common::beads::run_br(repo, args).map(|_| ())
 }
@@ -50,14 +46,8 @@ fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterialize
     ))
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn request_changes_feedback_survives_reprojection_and_reaches_worker() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -79,6 +69,12 @@ async fn request_changes_feedback_survives_reprojection_and_reaches_worker() {
     .await
     .expect("build epic subgraph");
     let task_issue_id = subgraph.task_map.get("t1").expect("task id").clone();
+    add_labels(
+        pm.as_ref(),
+        &subgraph.epic_id,
+        &[spur_mcp::plan::labels::plan_owner("brain")],
+    )
+    .await;
 
     add_labels(
         pm.as_ref(),
@@ -112,7 +108,7 @@ async fn request_changes_feedback_survives_reprojection_and_reaches_worker() {
         base_snapshot_branch: None,
         base_snapshot_oid: None,
         merge_state: PlanMergeState::NotStarted,
-        epic_id: Some("bd-epic".into()),
+        epic_id: Some(subgraph.epic_id.clone()),
     }));
 
     let pm_arc: Arc<dyn spur_mcp::plan::PmLike> = pm.clone();
@@ -149,7 +145,10 @@ async fn request_changes_feedback_survives_reprojection_and_reaches_worker() {
     );
 
     reconciler.tick_once().await.expect("tick_once");
-    let request = delegation_rx.recv().await.expect("redispatch request");
+    let request = tokio::time::timeout(std::time::Duration::from_secs(10), delegation_rx.recv())
+        .await
+        .expect("redispatch request within timeout")
+        .expect("redispatch request");
     assert_eq!(request.issue_id.as_deref(), Some(task_issue_id.as_str()));
     assert!(
         request.task.contains("fix the edge case with null inputs"),

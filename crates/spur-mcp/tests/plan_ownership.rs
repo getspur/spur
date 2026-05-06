@@ -31,10 +31,6 @@ fn resume_plan_appears_in_tools_list() {
     );
 }
 
-fn br_available() -> bool {
-    common::beads::br_available()
-}
-
 fn run_br(repo: &Path, args: &[&str]) -> Result<(), String> {
     common::beads::run_br(repo, args).map(|_| ())
 }
@@ -75,11 +71,6 @@ fn error_message(response: &serde_json::Value) -> &str {
 
 #[tokio::test]
 async fn resume_plan_claims_unowned_plan() {
-    if !br_available() {
-        eprintln!("skipping resume_plan_claims_unowned_plan: `br` not on PATH");
-        return;
-    }
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -128,11 +119,6 @@ async fn resume_plan_claims_unowned_plan() {
 
 #[tokio::test]
 async fn resume_plan_refuses_plan_owned_by_other_brain() {
-    if !br_available() {
-        eprintln!("skipping resume_plan_refuses_plan_owned_by_other_brain: `br` not on PATH");
-        return;
-    }
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -179,11 +165,6 @@ async fn resume_plan_refuses_plan_owned_by_other_brain() {
 
 #[tokio::test]
 async fn resume_plan_rejects_duplicate_plan_epics() {
-    if !br_available() {
-        eprintln!("skipping resume_plan_rejects_duplicate_plan_epics: `br` not on PATH");
-        return;
-    }
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -231,13 +212,6 @@ async fn resume_plan_rejects_duplicate_plan_epics() {
 
 #[tokio::test]
 async fn resume_plan_refuses_mixed_current_and_other_owner_labels() {
-    if !br_available() {
-        eprintln!(
-            "skipping resume_plan_refuses_mixed_current_and_other_owner_labels: `br` not on PATH"
-        );
-        return;
-    }
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -288,11 +262,6 @@ async fn resume_plan_refuses_mixed_current_and_other_owner_labels() {
 
 #[tokio::test]
 async fn merge_plan_refuses_plan_owned_by_other_brain() {
-    if !br_available() {
-        eprintln!("skipping merge_plan_refuses_plan_owned_by_other_brain: `br` not on PATH");
-        return;
-    }
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -340,11 +309,6 @@ async fn merge_plan_refuses_plan_owned_by_other_brain() {
 
 #[tokio::test]
 async fn merge_plan_refuses_unowned_plan() {
-    if !br_available() {
-        eprintln!("skipping merge_plan_refuses_unowned_plan: `br` not on PATH");
-        return;
-    }
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -383,11 +347,6 @@ async fn merge_plan_refuses_unowned_plan() {
 
 #[tokio::test]
 async fn review_task_refuses_plan_owned_by_other_brain() {
-    if !br_available() {
-        eprintln!("skipping review_task_refuses_plan_owned_by_other_brain: `br` not on PATH");
-        return;
-    }
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -442,11 +401,6 @@ async fn review_task_refuses_plan_owned_by_other_brain() {
 
 #[tokio::test]
 async fn review_task_refuses_unowned_plan() {
-    if !br_available() {
-        eprintln!("skipping review_task_refuses_unowned_plan: `br` not on PATH");
-        return;
-    }
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -505,29 +459,12 @@ async fn collect_epic_sentinels(pm: &spur_pm::PmService, epic_id: &str) -> Vec<A
         .collect()
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn execute_epic_emits_plan_ownership_acquired_when_claiming_unowned_epic() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
-    let feature_gate = common::server_builder::pro_feature_gate();
-    let plan_id = "plan-execute-claim-unowned";
-    let subgraph = spur_mcp::build_epic_subgraph(
-        pm.as_ref(),
-        feature_gate.as_ref(),
-        plan_id,
-        "Execute Claim Unowned",
-        None,
-        &one_task(),
-    )
-    .await
-    .expect("build epic subgraph");
+    let epic_id = create_executable_epic(dir.path(), "Execute Claim Unowned");
 
     let session_id = BrainSessionId::new(SessionId("brain-current".into()));
     let (mut server, _channel) = McpCallbackServer::new(
@@ -544,14 +481,14 @@ async fn execute_epic_emits_plan_ownership_acquired_when_claiming_unowned_epic()
     }]);
 
     let response = server
-        .__test_call_execute_epic(&subgraph.epic_id, Some("codex"))
+        .__test_call_execute_epic(&epic_id, Some("codex"))
         .await;
     assert!(
         response.get("error").is_none(),
         "execute_epic should claim unowned epic: {response}"
     );
 
-    let sentinels = collect_epic_sentinels(pm.as_ref(), &subgraph.epic_id).await;
+    let sentinels = collect_epic_sentinels(pm.as_ref(), &epic_id).await;
     let matches: Vec<&AuditSentinelKind> = sentinels
         .iter()
         .filter(|sentinel| {
@@ -581,33 +518,16 @@ async fn execute_epic_emits_plan_ownership_acquired_when_claiming_unowned_epic()
     assert_eq!(reason, "execute_epic");
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn execute_epic_emits_plan_ownership_acquired_when_re_issued_by_current_brain() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
-    let feature_gate = common::server_builder::pro_feature_gate();
-    let plan_id = "plan-execute-reissue";
-    let subgraph = spur_mcp::build_epic_subgraph(
-        pm.as_ref(),
-        feature_gate.as_ref(),
-        plan_id,
-        "Execute Re-issue",
-        None,
-        &one_task(),
-    )
-    .await
-    .expect("build epic subgraph");
+    let epic_id = create_executable_epic(dir.path(), "Execute Re-issue");
 
     let session_id = BrainSessionId::new(SessionId("brain-current".into()));
     pm.update_issue(
-        &subgraph.epic_id,
+        &epic_id,
         spur_pm::IssueUpdate {
             add_labels: vec![labels::plan_owner(&session_id.as_session_id().0)],
             ..Default::default()
@@ -630,14 +550,14 @@ async fn execute_epic_emits_plan_ownership_acquired_when_re_issued_by_current_br
     }]);
 
     let response = server
-        .__test_call_execute_epic(&subgraph.epic_id, Some("codex"))
+        .__test_call_execute_epic(&epic_id, Some("codex"))
         .await;
     assert!(
         response.get("error").is_none(),
         "execute_epic should re-issue ownership when already owned by current brain: {response}"
     );
 
-    let sentinels = collect_epic_sentinels(pm.as_ref(), &subgraph.epic_id).await;
+    let sentinels = collect_epic_sentinels(pm.as_ref(), &epic_id).await;
     let matches: Vec<&AuditSentinelKind> = sentinels
         .iter()
         .filter(|sentinel| {
@@ -676,31 +596,14 @@ async fn execute_epic_emits_plan_ownership_acquired_when_re_issued_by_current_br
     );
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn execute_epic_refuses_plan_owned_by_other_brain() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
-    let feature_gate = common::server_builder::pro_feature_gate();
-    let plan_id = "plan-execute-refuse-other";
-    let subgraph = spur_mcp::build_epic_subgraph(
-        pm.as_ref(),
-        feature_gate.as_ref(),
-        plan_id,
-        "Execute Refuse Other",
-        None,
-        &one_task(),
-    )
-    .await
-    .expect("build epic subgraph");
+    let epic_id = create_executable_epic(dir.path(), "Execute Refuse Other");
     pm.update_issue(
-        &subgraph.epic_id,
+        &epic_id,
         spur_pm::IssueUpdate {
             add_labels: vec![labels::plan_owner("other-brain")],
             ..Default::default()
@@ -724,7 +627,7 @@ async fn execute_epic_refuses_plan_owned_by_other_brain() {
     }]);
 
     let response = server
-        .__test_call_execute_epic(&subgraph.epic_id, Some("codex"))
+        .__test_call_execute_epic(&epic_id, Some("codex"))
         .await;
     let msg = error_message(&response);
     assert!(
@@ -732,7 +635,7 @@ async fn execute_epic_refuses_plan_owned_by_other_brain() {
         "execute_epic must refuse plans owned by another brain: {response}"
     );
 
-    let sentinels = collect_epic_sentinels(pm.as_ref(), &subgraph.epic_id).await;
+    let sentinels = collect_epic_sentinels(pm.as_ref(), &epic_id).await;
     let transfers = sentinels
         .iter()
         .filter(|s| matches!(s, AuditSentinelKind::PlanOwnershipTransferred { .. }))
@@ -743,31 +646,14 @@ async fn execute_epic_refuses_plan_owned_by_other_brain() {
     );
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn execute_epic_refuses_plan_with_ambiguous_owners() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
-    let feature_gate = common::server_builder::pro_feature_gate();
-    let plan_id = "plan-execute-refuse-ambiguous";
-    let subgraph = spur_mcp::build_epic_subgraph(
-        pm.as_ref(),
-        feature_gate.as_ref(),
-        plan_id,
-        "Execute Refuse Ambiguous",
-        None,
-        &one_task(),
-    )
-    .await
-    .expect("build epic subgraph");
+    let epic_id = create_executable_epic(dir.path(), "Execute Refuse Ambiguous");
     pm.update_issue(
-        &subgraph.epic_id,
+        &epic_id,
         spur_pm::IssueUpdate {
             add_labels: vec![
                 labels::plan_owner("brain-current"),
@@ -794,7 +680,7 @@ async fn execute_epic_refuses_plan_with_ambiguous_owners() {
     }]);
 
     let response = server
-        .__test_call_execute_epic(&subgraph.epic_id, Some("codex"))
+        .__test_call_execute_epic(&epic_id, Some("codex"))
         .await;
     let msg = error_message(&response);
     assert!(
@@ -802,7 +688,7 @@ async fn execute_epic_refuses_plan_with_ambiguous_owners() {
         "execute_epic must refuse plans with ambiguous owner labels: {response}"
     );
 
-    let sentinels = collect_epic_sentinels(pm.as_ref(), &subgraph.epic_id).await;
+    let sentinels = collect_epic_sentinels(pm.as_ref(), &epic_id).await;
     let transfers = sentinels
         .iter()
         .filter(|s| matches!(s, AuditSentinelKind::PlanOwnershipTransferred { .. }))
@@ -813,29 +699,12 @@ async fn execute_epic_refuses_plan_with_ambiguous_owners() {
     );
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn execute_epic_allows_unowned_plan() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
-    let feature_gate = common::server_builder::pro_feature_gate();
-    let plan_id = "plan-execute-gate-unowned";
-    let subgraph = spur_mcp::build_epic_subgraph(
-        pm.as_ref(),
-        feature_gate.as_ref(),
-        plan_id,
-        "Execute Gate Unowned",
-        None,
-        &one_task(),
-    )
-    .await
-    .expect("build epic subgraph");
+    let epic_id = create_executable_epic(dir.path(), "Execute Gate Unowned");
 
     let session_id = BrainSessionId::new(SessionId("brain-current".into()));
     let (mut server, _channel) = McpCallbackServer::new(
@@ -852,7 +721,7 @@ async fn execute_epic_allows_unowned_plan() {
     }]);
 
     let response = server
-        .__test_call_execute_epic(&subgraph.epic_id, Some("codex"))
+        .__test_call_execute_epic(&epic_id, Some("codex"))
         .await;
     assert!(
         response.get("error").is_none(),
@@ -860,33 +729,16 @@ async fn execute_epic_allows_unowned_plan() {
     );
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn execute_epic_allows_re_issue_by_current_brain() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
-    let feature_gate = common::server_builder::pro_feature_gate();
-    let plan_id = "plan-execute-gate-reissue";
-    let subgraph = spur_mcp::build_epic_subgraph(
-        pm.as_ref(),
-        feature_gate.as_ref(),
-        plan_id,
-        "Execute Gate Re-issue",
-        None,
-        &one_task(),
-    )
-    .await
-    .expect("build epic subgraph");
+    let epic_id = create_executable_epic(dir.path(), "Execute Gate Re-issue");
 
     let session_id = BrainSessionId::new(SessionId("brain-current".into()));
     pm.update_issue(
-        &subgraph.epic_id,
+        &epic_id,
         spur_pm::IssueUpdate {
             add_labels: vec![labels::plan_owner(&session_id.as_session_id().0)],
             ..Default::default()
@@ -909,7 +761,7 @@ async fn execute_epic_allows_re_issue_by_current_brain() {
     }]);
 
     let response = server
-        .__test_call_execute_epic(&subgraph.epic_id, Some("codex"))
+        .__test_call_execute_epic(&epic_id, Some("codex"))
         .await;
     assert!(
         response.get("error").is_none(),
@@ -917,14 +769,8 @@ async fn execute_epic_allows_re_issue_by_current_brain() {
     );
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn force_reclaim_plan_refuses_without_confirm() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -1018,14 +864,8 @@ fn parse_force_reclaim_response_body(response: &serde_json::Value) -> serde_json
     serde_json::from_str(text).expect("force_reclaim_plan body must be valid JSON")
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn force_reclaim_plan_takes_over_from_other_brain() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -1145,14 +985,8 @@ async fn force_reclaim_plan_takes_over_from_other_brain() {
     assert_eq!(reason.as_deref(), Some("takeover test"));
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn force_reclaim_plan_handles_unowned_plan() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -1335,13 +1169,6 @@ fn response_text(response: &serde_json::Value) -> &str {
 }
 #[tokio::test]
 async fn resume_plan_rejects_unowned_plan_when_current_brain_already_owns_active_plan() {
-    if !br_available() {
-        eprintln!(
-            "skipping resume_plan_rejects_unowned_plan_when_current_brain_already_owns_active_plan: `br` not on PATH"
-        );
-        return;
-    }
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -1385,13 +1212,6 @@ async fn resume_plan_rejects_unowned_plan_when_current_brain_already_owns_active
 
 #[tokio::test]
 async fn execute_epic_rejects_new_epic_when_current_brain_already_owns_active_plan() {
-    if !br_available() {
-        eprintln!(
-            "skipping execute_epic_rejects_new_epic_when_current_brain_already_owns_active_plan: `br` not on PATH"
-        );
-        return;
-    }
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -1429,13 +1249,6 @@ async fn execute_epic_rejects_new_epic_when_current_brain_already_owns_active_pl
 
 #[tokio::test]
 async fn terminal_owned_plan_does_not_block_resume_plan_claim() {
-    if !br_available() {
-        eprintln!(
-            "skipping terminal_owned_plan_does_not_block_resume_plan_claim: `br` not on PATH"
-        );
-        return;
-    }
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -1484,11 +1297,6 @@ async fn terminal_owned_plan_does_not_block_resume_plan_claim() {
 
 #[tokio::test]
 async fn terminal_owned_plan_does_not_block_execute_epic() {
-    if !br_available() {
-        eprintln!("skipping terminal_owned_plan_does_not_block_execute_epic: `br` not on PATH");
-        return;
-    }
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -1532,13 +1340,6 @@ async fn terminal_owned_plan_does_not_block_execute_epic() {
 
 #[tokio::test]
 async fn concurrent_resume_plan_claims_only_one_active_plan_for_current_brain() {
-    if !br_available() {
-        eprintln!(
-            "skipping concurrent_resume_plan_claims_only_one_active_plan_for_current_brain: `br` not on PATH"
-        );
-        return;
-    }
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;
@@ -1605,13 +1406,6 @@ async fn concurrent_resume_plan_claims_only_one_active_plan_for_current_brain() 
 
 #[tokio::test]
 async fn concurrent_execute_epic_starts_only_one_active_plan_for_current_brain() {
-    if !br_available() {
-        eprintln!(
-            "skipping concurrent_execute_epic_starts_only_one_active_plan_for_current_brain: `br` not on PATH"
-        );
-        return;
-    }
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
     let pm = beads_pm(dir.path()).await;

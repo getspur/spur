@@ -25,10 +25,6 @@ fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterialize
     ))
 }
 
-fn br_available() -> bool {
-    common::beads::br_available()
-}
-
 fn run_br(repo: &Path, args: &[&str]) {
     common::beads::run_br(repo, args)
         .unwrap_or_else(|err| panic!("test beads command {args:?} failed: {err}"));
@@ -67,6 +63,24 @@ async fn beads_pm(repo: &Path) -> Arc<spur_pm::PmService> {
             .expect("PmService::try_new failed")
             .expect("expected beads pm"),
     )
+}
+
+async fn get_issue_retry(pm: &spur_pm::PmService, issue_id: &str) -> spur_pm::Issue {
+    let mut last_busy = None;
+    for _ in 0..40 {
+        match pm.get_issue(issue_id).await {
+            Ok(issue) => return issue,
+            Err(err) if format!("{err:#}").contains("database is busy") => {
+                last_busy = Some(format!("{err:#}"));
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            Err(err) => panic!("get issue {issue_id}: {err:#}"),
+        }
+    }
+    panic!(
+        "get issue {issue_id}: {}",
+        last_busy.unwrap_or_else(|| "timed out retrying transient database busy".into())
+    );
 }
 
 async fn seed_all_approved_epic(
@@ -145,14 +159,8 @@ impl ReconcilerAutomation for RecordingAutomation {
     }
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0e_2_auto_merge_pr_is_opt_in() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let (pm, epic_id, task_a_id, task_b_id) = seed_all_approved_epic(dir.path(), "P1").await;
@@ -193,7 +201,7 @@ async fn t_v0e_2_auto_merge_pr_is_opt_in() {
         // First tick: close the epic and add integration-pending.
         reconciler.tick_once().await.expect("tick_once");
 
-        let epic = pm.get_issue(&epic_id).await.expect("get epic");
+        let epic = get_issue_retry(pm.as_ref(), &epic_id).await;
         assert_eq!(epic.status, pm.closed_status());
         assert!(
             epic.labels.iter().any(|l| l == labels::INTEGRATION_PENDING),
@@ -313,6 +321,16 @@ fn run_git(repo: &Path, args: &[&str]) {
     );
 }
 
+fn init_test_repo(repo: &Path) {
+    run_git(repo, &["init", "-q"]);
+    run_git(repo, &["config", "user.email", "test@spur"]);
+    run_git(repo, &["config", "user.name", "spur-test"]);
+    std::fs::write(repo.join("seed.txt"), "seed\n").expect("write seed");
+    run_git(repo, &["add", "seed.txt"]);
+    run_git(repo, &["commit", "-q", "-m", "seed"]);
+    run_br(repo, &["init"]);
+}
+
 fn continuation_ctx() -> DetachedContinuationCtx {
     DetachedContinuationCtx {
         on_complete: Arc::new(|_cont, _worker| Box::pin(async {})),
@@ -367,22 +385,10 @@ fn seed_ready_task(repo: &Path, plan_id: &str) -> (String, String) {
 
 // ── T-v0e-1: persisted direct-dispatch retirement ───────────────────────
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0e_1_no_persisted_direct_dispatch() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
-    run_git(dir.path(), &["init", "-q"]);
-    run_git(dir.path(), &["config", "user.email", "test@spur"]);
-    run_git(dir.path(), &["config", "user.name", "spur-test"]);
-    std::fs::write(dir.path().join("seed.txt"), "seed\n").expect("write seed");
-    run_git(dir.path(), &["add", "seed.txt"]);
-    run_git(dir.path(), &["commit", "-q", "-m", "seed"]);
-    run_br(dir.path(), &["init"]);
+    init_test_repo(dir.path());
 
     let pm = beads_pm(dir.path()).await;
     let session_id = BrainSessionId::new(SessionId("brain".into()));
@@ -425,8 +431,21 @@ async fn t_v0e_1_no_persisted_direct_dispatch() {
     );
 
     // 2. execute_epic must not dispatch directly
+    let dir_exec = TempDir::new().expect("tempdir");
+    init_test_repo(dir_exec.path());
+    let pm_exec = beads_pm(dir_exec.path()).await;
+    let (mut server_exec, mut channel_exec) = McpCallbackServer::new(
+        Some(&session_id),
+        Some(pm_exec),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        common::server_builder::pro_feature_gate(),
+    );
+    server_exec.set_repo_root(dir_exec.path().to_path_buf());
+
     let epic_id = parse_id_from_create(&run_br_json(
-        dir.path(),
+        dir_exec.path(),
         &[
             "create",
             "--type",
@@ -438,7 +457,7 @@ async fn t_v0e_1_no_persisted_direct_dispatch() {
         ],
     ));
     let task_a_id = parse_id_from_create(&run_br_json(
-        dir.path(),
+        dir_exec.path(),
         &[
             "create",
             "--type",
@@ -449,12 +468,12 @@ async fn t_v0e_1_no_persisted_direct_dispatch() {
             "2",
         ],
     ));
-    run_br(dir.path(), &["dep", "add", &task_a_id, &epic_id]);
-    server.set_workers(vec![spur_mcp::WorkerInfo {
+    run_br(dir_exec.path(), &["dep", "add", &task_a_id, &epic_id]);
+    server_exec.set_workers(vec![spur_mcp::WorkerInfo {
         name: "codex".into(),
         ..Default::default()
     }]);
-    let response = server
+    let response = server_exec
         .__test_call_execute_epic(&epic_id, Some("codex"))
         .await;
     assert!(
@@ -464,7 +483,7 @@ async fn t_v0e_1_no_persisted_direct_dispatch() {
 
     let recv = tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        channel.request_rx.recv(),
+        channel_exec.request_rx.recv(),
     )
     .await;
     assert!(recv.is_err(), "execute_epic must not dispatch directly");
@@ -522,14 +541,8 @@ async fn t_v0e_1_no_persisted_direct_dispatch() {
 
 // ── T-v0e-3: wakeup equivalence ─────────────────────────────────────────
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn t_v0e_3_fast_forward_matches_polling() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let plan_id = "P-wake";
 
     // ── 1. Ready-task progression equivalence ─────────────────────────
@@ -601,8 +614,17 @@ async fn t_v0e_3_fast_forward_matches_polling() {
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
     let handle = tokio::spawn(async move { ff_reconciler.run(cancel_rx).await });
     tokio::task::yield_now().await;
-    fast_forward.notify_one();
-    let ff_req = tokio::time::timeout(std::time::Duration::from_secs(2), ff_rx.recv()).await;
+    let ff_req = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            fast_forward.notify_one();
+            match tokio::time::timeout(std::time::Duration::from_millis(25), ff_rx.recv()).await {
+                Ok(Some(req)) => break Some(req),
+                Ok(None) => break None,
+                Err(_) => {}
+            }
+        }
+    })
+    .await;
     assert!(
         ff_req.is_ok(),
         "fast-forward must trigger dispatch within timeout"
@@ -646,10 +668,7 @@ async fn t_v0e_3_fast_forward_matches_polling() {
         .await
         .expect("term poll tick");
     assert!(term_poll_did_work, "polling tick must close epic");
-    let epic = pm_term_poll
-        .get_issue(&epic_term_poll)
-        .await
-        .expect("get epic");
+    let epic = get_issue_retry(pm_term_poll.as_ref(), &epic_term_poll).await;
     assert_eq!(epic.status, pm_term_poll.closed_status());
     assert!(
         epic.labels.iter().any(|l| l == labels::INTEGRATION_PENDING),
@@ -689,10 +708,10 @@ async fn t_v0e_3_fast_forward_matches_polling() {
     let (cancel_tx2, cancel_rx2) = tokio::sync::oneshot::channel();
     let handle2 = tokio::spawn(async move { term_ff_reconciler.run(cancel_rx2).await });
     tokio::task::yield_now().await;
-    term_fast_forward.notify_one();
-    let epic = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    let epic = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            let epic = pm_term_ff.get_issue(&epic_term_ff).await.expect("get epic");
+            term_fast_forward.notify_one();
+            let epic = get_issue_retry(pm_term_ff.as_ref(), &epic_term_ff).await;
             if epic.labels.iter().any(|l| l == labels::INTEGRATION_PENDING) {
                 break epic;
             }

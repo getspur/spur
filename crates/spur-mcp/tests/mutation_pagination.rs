@@ -22,10 +22,6 @@ mod common;
 
 const FILLER_COUNT: usize = 10_050;
 
-fn br_available() -> bool {
-    common::beads::br_available()
-}
-
 fn sqlite_available() -> bool {
     Command::new("sqlite3")
         .arg("--version")
@@ -126,8 +122,8 @@ fn set_issue_timestamp(repo: &Path, issue_id: &str, timestamp: &str) -> Result<(
 
 mod perf_regressions {
     use super::{
-        br_available, br_id, common, mutation_batch, run_br, seed_filler_issues,
-        set_issue_timestamp, sqlite_available, task_draft, FILLER_COUNT,
+        br_id, common, mutation_batch, run_br, seed_filler_issues, set_issue_timestamp,
+        sqlite_available, task_draft, FILLER_COUNT,
     };
     use spur_mcp::plan::mutation::{DepRewirePolicy, PlanMutationOp};
     use spur_mcp::plan::mutation_executor::apply_mutation;
@@ -139,10 +135,6 @@ mod perf_regressions {
     #[tokio::test]
     #[ignore = "heavy: bulk-inserts 10k+ issues to guard the old list_issues cap; run with `cargo test -- --ignored`"]
     async fn mutation_scans_paginate_past_10k_issues() {
-        assert!(
-            br_available(),
-            "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-        );
         assert!(
             sqlite_available(),
             "this test requires `sqlite3` on PATH; run with `cargo test -- --ignored`"

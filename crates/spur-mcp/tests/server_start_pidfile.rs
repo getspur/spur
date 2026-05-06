@@ -15,10 +15,6 @@ fn test_continuation_ctx() -> DetachedContinuationCtx {
     }
 }
 
-fn br_available() -> bool {
-    common::beads::br_available()
-}
-
 fn run_br(repo: &Path, args: &[&str]) {
     common::beads::run_br(repo, args)
         .unwrap_or_else(|err| panic!("test beads command {args:?} failed: {err}"));
@@ -38,14 +34,8 @@ async fn beads_pm(repo: &Path) -> Arc<PmService> {
     )
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn beads_backed_start_requires_repo_root_before_listener_boot() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
-
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -71,13 +61,8 @@ async fn beads_backed_start_requires_repo_root_before_listener_boot() {
     );
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn beads_backed_start_allows_concurrent_brain_servers() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
     skip_if_no_loopback!("beads_backed_start_allows_concurrent_brain_servers");
 
     let dir = TempDir::new().expect("tempdir");
@@ -123,13 +108,8 @@ async fn beads_backed_start_allows_concurrent_brain_servers() {
     drop(first_handle);
 }
 
-#[ignore = "requires br on PATH; run with --ignored"]
 #[tokio::test]
 async fn dropping_server_handle_releases_pidfile_for_next_start() {
-    assert!(
-        br_available(),
-        "this test requires `br` on PATH; run with `cargo test -- --ignored`"
-    );
     skip_if_no_loopback!("dropping_server_handle_releases_pidfile_for_next_start");
 
     let dir = TempDir::new().expect("tempdir");

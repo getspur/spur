@@ -19,10 +19,6 @@ use tokio_util::task::TaskTracker;
 static CWD_LOCK: LazyLock<Arc<tokio::sync::Mutex<()>>> =
     LazyLock::new(|| Arc::new(tokio::sync::Mutex::new(())));
 
-pub fn br_available() -> bool {
-    super::beads::br_available()
-}
-
 fn run_command(repo: &Path, program: &str, args: &[&str]) -> String {
     let output = Command::new(program)
         .args(args)
@@ -451,7 +447,7 @@ impl TestHarness {
             "fault injection task must panic: {panic:?}"
         );
 
-        panic
+        let panic_message = panic
             .try_into_panic()
             .ok()
             .and_then(|payload| {
@@ -461,7 +457,14 @@ impl TestHarness {
                         .map(|s| (*s).to_string())
                 })
             })
-            .unwrap_or_else(|| "unknown panic payload".to_string())
+            .unwrap_or_else(|| "unknown panic payload".to_string());
+
+        self.task_tracker.close();
+        tokio::time::timeout(Duration::from_secs(10), self.task_tracker.wait())
+            .await
+            .expect("dropped completion task should finish after worker panic");
+
+        panic_message
     }
 
     pub async fn wait_for_task_status(
