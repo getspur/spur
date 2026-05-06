@@ -6,6 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
+    text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
@@ -169,6 +170,7 @@ fn is_issue_ancestor(parent: &str, child: &str) -> bool {
 pub struct IssueBrowserView {
     tracked_issues: Vec<spur_pm::IssueSummary>,
     issues_panel: IssuesPanel,
+    filter_mode: bool,
     issue_detail_pane: IssueDetailPane,
     issue_focus: IssueFocus,
     detail_mode: DetailMode,
@@ -213,6 +215,7 @@ impl IssueBrowserView {
         Self {
             tracked_issues: Vec::new(),
             issues_panel: IssuesPanel::new(),
+            filter_mode: false,
             issue_detail_pane: IssueDetailPane::new(),
             issue_focus: IssueFocus::None,
             detail_mode: DetailMode::Text,
@@ -661,7 +664,40 @@ impl IssueBrowserView {
             };
         }
 
+        if self.filter_mode {
+            let accepts_text_input =
+                key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+            return match key.code {
+                KeyCode::Esc => {
+                    self.filter_mode = false;
+                    self.issues_panel.clear_filter(&self.tracked_issues);
+                    None
+                }
+                KeyCode::Enter => {
+                    self.filter_mode = false;
+                    None
+                }
+                KeyCode::Backspace => {
+                    let mut query = self.issues_panel.filter_query().to_string();
+                    query.pop();
+                    self.issues_panel.set_filter(&query, &self.tracked_issues);
+                    None
+                }
+                KeyCode::Char(c) if accepts_text_input => {
+                    let mut query = self.issues_panel.filter_query().to_string();
+                    query.push(c);
+                    self.issues_panel.set_filter(&query, &self.tracked_issues);
+                    None
+                }
+                _ => None,
+            };
+        }
+
         match key.code {
+            KeyCode::Char('/') if key.modifiers.is_empty() => {
+                self.filter_mode = true;
+                None
+            }
             KeyCode::Esc => {
                 if matches!(self.issue_focus, IssueFocus::Loaded { .. }) {
                     self.issue_focus = IssueFocus::None;
@@ -798,6 +834,7 @@ impl IssueBrowserView {
         view_hint_override: Option<HintOverride<'_>>,
     ) {
         let issue_count = self.tracked_issues.len();
+        let show_filter_bar = self.filter_mode || !self.issues_panel.filter_query().is_empty();
 
         let issues_height = if issue_count == 0 {
             3u16 // placeholder height
@@ -806,19 +843,42 @@ impl IssueBrowserView {
                 .max(4)
                 .min(area.height * 40 / 100)
         };
+        let filter_bar_height = if show_filter_bar { 1 } else { 0 };
+        let issues_section_height = issues_height.saturating_add(filter_bar_height);
         self.last_issues_panel_height = issues_height;
 
         let has_detail = matches!(self.issue_focus, IssueFocus::Loaded { .. });
         let detail_min = if has_detail { 8 } else { 3 };
 
         let constraints = vec![
-            Constraint::Length(issues_height),
+            Constraint::Length(issues_section_height),
             Constraint::Min(detail_min),
             Constraint::Length(1), // status bar
         ];
         let chunks = Layout::vertical(constraints).split(area);
 
         // ── Issues panel ──────────────────────────────────────────────────
+        let issues_area = if show_filter_bar {
+            let issue_chunks =
+                Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(chunks[0]);
+            let query = self.issues_panel.filter_query();
+            let line = Line::from(vec![
+                Span::styled(" /", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{}{}", query, if self.filter_mode { "_" } else { "" }),
+                    Style::default().fg(if self.filter_mode {
+                        Color::Cyan
+                    } else {
+                        Color::Gray
+                    }),
+                ),
+            ]);
+            frame.render_widget(Paragraph::new(line), issue_chunks[0]);
+            issue_chunks[1]
+        } else {
+            chunks[0]
+        };
+
         if issue_count == 0 {
             let (title, body, fg) = if let Some(err) = &self.last_refresh_error {
                 (
@@ -837,13 +897,13 @@ impl IssueBrowserView {
                 .title(title)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(fg));
-            let inner = block.inner(chunks[0]);
-            frame.render_widget(block, chunks[0]);
+            let inner = block.inner(issues_area);
+            frame.render_widget(block, issues_area);
             let msg = Paragraph::new(body).style(Style::default().fg(fg));
             frame.render_widget(msg, inner);
         } else {
             self.issues_panel
-                .render(&self.tracked_issues, frame, chunks[0]);
+                .render(&self.tracked_issues, frame, issues_area);
         }
 
         // ── Detail or placeholder ────────────────────────────────────────
@@ -1417,6 +1477,145 @@ mod tests {
             error: "graph failed".into(),
             id: id.map(str::to_string),
         })
+    }
+
+    #[test]
+    fn slash_enters_filter_mode_and_consumes_event() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.set_issues_for_test(vec![issue("bd-1", "task", Vec::new())]);
+
+        let action = view.handle_key(key(KeyCode::Char('/')), &ctx);
+
+        assert!(action.is_none());
+        assert!(view.filter_mode);
+    }
+
+    #[test]
+    fn char_in_filter_mode_appends_to_panel_filter_query() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.set_issues_for_test(vec![issue("bd-auth", "task", Vec::new())]);
+
+        view.handle_key(key(KeyCode::Char('/')), &ctx);
+        for c in ['a', 'u', 't', 'h'] {
+            view.handle_key(key(KeyCode::Char(c)), &ctx);
+        }
+
+        assert_eq!(view.issues_panel.filter_query(), "auth");
+    }
+
+    #[test]
+    fn backspace_in_filter_mode_pops_panel_filter_query() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.set_issues_for_test(vec![issue("bd-auth", "task", Vec::new())]);
+
+        view.handle_key(key(KeyCode::Char('/')), &ctx);
+        for c in ['a', 'u', 't', 'h'] {
+            view.handle_key(key(KeyCode::Char(c)), &ctx);
+        }
+        view.handle_key(key(KeyCode::Backspace), &ctx);
+
+        assert_eq!(view.issues_panel.filter_query(), "aut");
+    }
+
+    #[test]
+    fn esc_in_filter_mode_clears_filter_and_exits_mode() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.set_issues_for_test(vec![issue("bd-auth", "task", Vec::new())]);
+
+        view.handle_key(key(KeyCode::Char('/')), &ctx);
+        view.handle_key(key(KeyCode::Char('a')), &ctx);
+        view.handle_key(key(KeyCode::Esc), &ctx);
+
+        assert!(!view.filter_mode);
+        assert_eq!(view.issues_panel.filter_query(), "");
+    }
+
+    #[test]
+    fn enter_in_filter_mode_keeps_filter_and_exits_mode() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.set_issues_for_test(vec![issue("bd-auth", "task", Vec::new())]);
+
+        view.handle_key(key(KeyCode::Char('/')), &ctx);
+        view.handle_key(key(KeyCode::Char('a')), &ctx);
+        view.handle_key(key(KeyCode::Enter), &ctx);
+
+        assert!(!view.filter_mode);
+        assert_ne!(view.issues_panel.filter_query(), "");
+    }
+
+    #[test]
+    fn j_in_filter_mode_does_not_navigate_and_appends_j_to_query() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.set_issues_for_test(vec![
+            issue("bd-j-1", "task", Vec::new()),
+            issue("bd-2", "task", Vec::new()),
+        ]);
+        let selected_before = view.selected_issue_id();
+
+        view.handle_key(key(KeyCode::Char('/')), &ctx);
+        let action = view.handle_key(key(KeyCode::Char('j')), &ctx);
+
+        assert!(action.is_none());
+        assert_eq!(view.issues_panel.filter_query(), "j");
+        assert_eq!(view.selected_issue_id(), selected_before);
+    }
+
+    #[test]
+    fn j_outside_filter_mode_still_navigates() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.set_issues_for_test(vec![
+            issue("bd-1", "task", Vec::new()),
+            issue("bd-2", "task", Vec::new()),
+        ]);
+
+        let action = view.handle_key(key(KeyCode::Char('j')), &ctx);
+
+        assert!(matches!(action, Some(Action::SelectNextBy(1))));
+        assert_eq!(view.selected_issue_id().as_deref(), Some("bd-2"));
+    }
+
+    #[test]
+    fn slash_with_empty_issues_enters_filter_mode_without_panic() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.set_issues_for_test(Vec::new());
+
+        let action = view.handle_key(key(KeyCode::Char('/')), &ctx);
+
+        assert!(action.is_none());
+        assert!(view.filter_mode);
+    }
+
+    #[test]
+    fn execute_modal_blocks_filter_mode() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.execute_modal = Some(ExecuteModal {
+            epic_id: "bd-1".into(),
+            epic_title: "Epic".into(),
+            variant: ExecuteModalVariant::Confirm,
+        });
+
+        let action = view.handle_key(key(KeyCode::Char('/')), &ctx);
+
+        assert!(action.is_none());
+        assert!(!view.filter_mode);
     }
 
     #[test]
