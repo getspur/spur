@@ -518,8 +518,6 @@ flowchart LR
 │                   Press [s] to browse sessions                       │
 │                                                                      │
 ├─ Issues ────────────────────────────────────────────────────────────┤
-│  ⚠ bv (beads_viewer) not installed — graph analysis disabled.       │
-│    Install: brew install dicklesworthstone/tap/bv                   │
 ├──────────────────────────────────────────────────────────────────────┤
 │ > _                                                                  │
 ├──────────────────────────────────────────────────────────────────────┤

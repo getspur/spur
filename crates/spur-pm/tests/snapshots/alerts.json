@@ -1,0 +1,64 @@
+{
+  "generated_at": "<normalized>",
+  "data_hash": "<normalized>",
+  "alerts": [
+    {
+      "type": "cycle",
+      "severity": "critical",
+      "message": "Issue <id-1> is in a dependency cycle",
+      "issue_id": "<id-1>",
+      "issue_ids": [
+        "<id-1>",
+        "<id-2>",
+        "<id-3>"
+      ],
+      "label": null,
+      "details": [],
+      "baseline_value": null,
+      "current_value": null,
+      "delta": null
+    },
+    {
+      "type": "cycle",
+      "severity": "critical",
+      "message": "Issue <id-2> is in a dependency cycle",
+      "issue_id": "<id-2>",
+      "issue_ids": [
+        "<id-1>",
+        "<id-2>",
+        "<id-3>"
+      ],
+      "label": null,
+      "details": [],
+      "baseline_value": null,
+      "current_value": null,
+      "delta": null
+    },
+    {
+      "type": "cycle",
+      "severity": "critical",
+      "message": "Issue <id-3> is in a dependency cycle",
+      "issue_id": "<id-3>",
+      "issue_ids": [
+        "<id-1>",
+        "<id-2>",
+        "<id-3>"
+      ],
+      "label": null,
+      "details": [],
+      "baseline_value": null,
+      "current_value": null,
+      "delta": null
+    }
+  ],
+  "summary": {
+    "total": 3,
+    "critical": 3,
+    "warning": 0,
+    "info": 0
+  },
+  "usage_hints": [
+    "Filter by severity: jq '.alerts[] | select(.severity==\"critical\")'",
+    "Group by type: jq '.alerts | group_by(.type)'"
+  ]
+}
