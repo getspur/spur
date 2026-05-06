@@ -1,7 +1,7 @@
 use crate::graph_engine::snapshot::GraphSnapshot;
 use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 /// HITS algorithm - returns (hubs, authorities) maps keyed by NodeIndex.
 /// Iterative, normalized at each step. 50 iterations is sufficient for our scale.
@@ -98,6 +98,52 @@ pub fn betweenness_centrality_brandes(snap: &GraphSnapshot) -> HashMap<NodeIndex
     }
 
     centrality
+}
+
+/// k-core decomposition (treats the graph as undirected for core ranking).
+/// Returns each node's coreness (max k for which it remains in the k-core).
+pub fn k_core_decomposition(snap: &GraphSnapshot) -> HashMap<NodeIndex, usize> {
+    let mut degrees: HashMap<NodeIndex, usize> = snap
+        .graph
+        .node_indices()
+        .map(|ix| (ix, undirected_neighbors(snap, ix).len()))
+        .collect();
+    let mut remaining: BTreeSet<(usize, NodeIndex)> =
+        degrees.iter().map(|(&ix, &degree)| (degree, ix)).collect();
+    let mut core = HashMap::new();
+
+    while let Some(&(degree, ix)) = remaining.iter().next() {
+        remaining.remove(&(degree, ix));
+        core.insert(ix, degree);
+
+        for neighbor in undirected_neighbors(snap, ix) {
+            if core.contains_key(&neighbor) {
+                continue;
+            }
+            let old_degree = degrees[&neighbor];
+            if old_degree > degree {
+                remaining.remove(&(old_degree, neighbor));
+                let new_degree = old_degree - 1;
+                degrees.insert(neighbor, new_degree);
+                remaining.insert((new_degree, neighbor));
+            }
+        }
+    }
+
+    core
+}
+
+fn undirected_neighbors(snap: &GraphSnapshot, ix: NodeIndex) -> BTreeSet<NodeIndex> {
+    snap.graph
+        .edges(ix)
+        .map(|edge| edge.target())
+        .chain(
+            snap.graph
+                .edges_directed(ix, petgraph::Direction::Incoming)
+                .map(|edge| edge.source()),
+        )
+        .filter(|&neighbor| neighbor != ix)
+        .collect()
 }
 
 fn normalize(scores: &mut HashMap<NodeIndex, f64>) {
@@ -224,5 +270,86 @@ mod tests {
         assert_eq!(centrality[&s.by_id["b"]], 0.0);
         assert_eq!(centrality[&s.by_id["c"]], 0.0);
         assert_eq!(centrality[&s.by_id["d"]], 0.0);
+    }
+}
+
+#[cfg(test)]
+mod kcore_tests {
+    use super::*;
+    use crate::graph_engine::snapshot::{DependencyKind, NodeData};
+    use chrono::Utc;
+
+    fn n(id: &str) -> NodeData {
+        NodeData {
+            id: id.into(),
+            title: format!("T{id}"),
+            status: "open".into(),
+            priority: 2,
+            issue_type: "task".into(),
+            assignee: None,
+            labels: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            due_at: None,
+            content_hash: "h".into(),
+        }
+    }
+
+    fn snap(nodes: Vec<NodeData>, edges: Vec<(&str, &str, DependencyKind)>) -> GraphSnapshot {
+        let mut snap = GraphSnapshot::new(None);
+        for node in nodes {
+            snap.add_node(node);
+        }
+        for (from, to, kind) in edges {
+            assert!(snap.add_edge(from, to, kind));
+        }
+        snap
+    }
+
+    #[test]
+    fn isolated_node_has_core_zero() {
+        let s = snap(vec![n("a"), n("b")], vec![]);
+        let c = k_core_decomposition(&s);
+        assert_eq!(c[&s.by_id["a"]], 0);
+        assert_eq!(c[&s.by_id["b"]], 0);
+    }
+
+    #[test]
+    fn triangle_yields_core_two() {
+        let s = snap(
+            vec![n("a"), n("b"), n("c")],
+            vec![
+                ("a", "b", DependencyKind::Blocks),
+                ("b", "c", DependencyKind::Blocks),
+                ("c", "a", DependencyKind::Blocks),
+            ],
+        );
+        let c = k_core_decomposition(&s);
+        assert_eq!(c[&s.by_id["a"]], 2);
+        assert_eq!(c[&s.by_id["b"]], 2);
+        assert_eq!(c[&s.by_id["c"]], 2);
+    }
+
+    #[test]
+    fn pendant_on_triangle_yields_mixed_cores() {
+        // Triangle a-b-c with pendant d attached to a.
+        // Undirected degrees: a=3, b=2, c=2, d=1.
+        // d gets popped first (degree 1), then a, b, c remain a 2-core.
+        let s = snap(
+            vec![n("a"), n("b"), n("c"), n("d")],
+            vec![
+                ("a", "b", DependencyKind::Blocks),
+                ("b", "c", DependencyKind::Blocks),
+                ("c", "a", DependencyKind::Blocks),
+                ("a", "d", DependencyKind::Blocks),
+            ],
+        );
+
+        let core = k_core_decomposition(&s);
+
+        assert_eq!(core[&s.by_id["d"]], 1);
+        assert_eq!(core[&s.by_id["a"]], 2);
+        assert_eq!(core[&s.by_id["b"]], 2);
+        assert_eq!(core[&s.by_id["c"]], 2);
     }
 }
