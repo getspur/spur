@@ -10,7 +10,9 @@
 //!     (same ts but a genuinely new item we haven't returned yet).
 
 use std::collections::HashSet;
+use std::path::Path;
 
+use anyhow::Context;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -28,6 +30,50 @@ pub struct PollCursor {
 }
 
 impl PollCursor {
+    /// Load a cursor from disk.
+    ///
+    /// The current disk format is JSON-serialized `PollCursor`, matching
+    /// `BeadsAdapter`'s persisted cursor. For compatibility with older cursor
+    /// files, a bare RFC3339 timestamp is also accepted and upgraded with an
+    /// empty `ids_at_boundary` set.
+    pub fn load_from(path: &Path) -> anyhow::Result<Option<Self>> {
+        let contents = match std::fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(e).with_context(|| format!("read cursor file {}", path.display()))
+            }
+        };
+
+        Self::from_persisted_str(&contents)
+            .map(Some)
+            .with_context(|| format!("parse cursor file {}", path.display()))
+    }
+
+    /// Write the cursor using the same compact JSON serde format as
+    /// `BeadsAdapter`.
+    pub fn write_to(&self, path: &Path) -> anyhow::Result<()> {
+        let encoded = serde_json::to_string(self).context("serialize poll cursor")?;
+        std::fs::write(path, encoded)
+            .with_context(|| format!("write cursor file {}", path.display()))
+    }
+
+    fn from_persisted_str(contents: &str) -> anyhow::Result<Self> {
+        let trimmed = contents.trim();
+        if let Ok(cursor) = serde_json::from_str::<Self>(trimmed) {
+            return Ok(cursor);
+        }
+
+        if let Ok(ts) = trimmed.parse::<DateTime<Utc>>() {
+            return Ok(Self {
+                ts,
+                ids_at_boundary: HashSet::new(),
+            });
+        }
+
+        anyhow::bail!("cursor file is neither a JSON PollCursor nor an RFC3339 timestamp")
+    }
+
     /// Returns `true` if `item` should be included in the current poll's output.
     pub fn allows(&self, item_id: &str, item_updated_at: DateTime<Utc>) -> bool {
         if item_updated_at > self.ts {
