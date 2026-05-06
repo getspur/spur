@@ -393,6 +393,28 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn cursor_path_set_but_file_missing_starts_empty() {
+        let dir = TempDir::new().unwrap();
+        let cursor_path = dir.path().join(".spur-cursor-does-not-exist");
+        assert!(!cursor_path.exists(), "test precondition");
+
+        let adapter = BeadsCrateAdapter::open(
+            dir.path(),
+            AdapterConfig {
+                cursor_path: Some(cursor_path),
+                ..AdapterConfig::default()
+            },
+        )
+        .await
+        .expect("open should succeed when cursor_path is set but file is absent");
+
+        assert!(
+            adapter.cursor.lock().await.is_none(),
+            "missing cursor file must produce a None cursor, not panic or error"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn read_returns_count_for_empty_db() {
         let dir = TempDir::new().unwrap();
         let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
