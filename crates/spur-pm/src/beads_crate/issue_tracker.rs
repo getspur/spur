@@ -52,6 +52,103 @@ pub(crate) fn br_to_pm_summary(br: beads_rust::model::Issue) -> IssueSummary {
     }
 }
 
+impl BeadsCrateAdapter {
+    pub(crate) async fn poll_with_limit(&self, limit: usize) -> anyhow::Result<Vec<PmEvent>> {
+        let mut guard = self.cursor.lock().await;
+        let prior_cursor = guard.clone();
+        let had_prior = prior_cursor.is_some();
+
+        // Mirror BeadsAdapter::poll_with_limit: pull bounded open set,
+        // apply the boundary-safe predicate client-side, advance cursor.
+        let summaries = self
+            .list_issues(IssueFilter {
+                status: Some("open".to_string()),
+                limit: Some(limit),
+                ..Default::default()
+            })
+            .await?;
+
+        let saturated = summaries.len() == limit;
+
+        let mut kept: Vec<Issue> = Vec::with_capacity(summaries.len());
+        for sum in summaries {
+            let issue = self.get_issue(&sum.id).await?;
+            let pass = match prior_cursor.as_ref() {
+                None => true,
+                Some(c) => c.allows(&issue.id, issue.updated_at),
+            };
+            if pass {
+                kept.push(issue);
+            }
+        }
+
+        let new_cursor: Option<PollCursor> = if !kept.is_empty() {
+            if saturated {
+                tracing::warn!(
+                    limit,
+                    kept_count = kept.len(),
+                    "BeadsCrateAdapter::poll fetch saturated; preserving cursor"
+                );
+                prior_cursor.clone()
+            } else {
+                let max_ts = kept.iter().map(|i| i.updated_at).max().unwrap();
+                let ids_at_max: HashSet<String> = kept
+                    .iter()
+                    .filter(|i| i.updated_at == max_ts)
+                    .map(|i| i.id.clone())
+                    .collect();
+                Some(PollCursor {
+                    ts: max_ts,
+                    ids_at_boundary: ids_at_max,
+                })
+            }
+        } else if let Some(existing) = prior_cursor.clone() {
+            Some(existing)
+        } else {
+            Some(PollCursor {
+                ts: Utc::now(),
+                ids_at_boundary: HashSet::new(),
+            })
+        };
+
+        let events: Vec<PmEvent> = kept
+            .into_iter()
+            .map(|issue| {
+                let summary = IssueSummary {
+                    id: issue.id.clone(),
+                    source: PmSource::Beads,
+                    title: issue.title,
+                    status: issue.status,
+                    labels: issue.labels,
+                    url: issue.url,
+                    priority: issue.priority,
+                    issue_type: issue.issue_type,
+                    assignee: issue.assignee,
+                };
+                if had_prior {
+                    PmEvent::IssueUpdated(summary)
+                } else {
+                    PmEvent::IssueCreated(summary)
+                }
+            })
+            .collect();
+
+        let cursor_to_persist = new_cursor.clone();
+        *guard = new_cursor;
+        drop(guard);
+
+        if let (Some(path), Some(cursor)) =
+            (self.config.cursor_path.as_ref(), cursor_to_persist.as_ref())
+        {
+            if let Err(e) = cursor.write_to(path) {
+                tracing::warn!(?path, "failed to write cursor file: {e}");
+            }
+        }
+
+        Ok(events)
+    }
+}
+
 #[async_trait]
 impl IssueTracker for BeadsCrateAdapter {
     async fn get_issue(&self, id: &str) -> anyhow::Result<Issue> {
@@ -259,109 +356,21 @@ impl IssueTracker for BeadsCrateAdapter {
     }
 
     async fn poll(&self) -> anyhow::Result<Vec<PmEvent>> {
-        let mut guard = self.cursor.lock().await;
-        let prior_cursor = guard.clone();
-        let had_prior = prior_cursor.is_some();
-
-        // Mirror BeadsAdapter::poll_with_limit: pull bounded open set,
-        // apply the boundary-safe predicate client-side, advance cursor.
-        let summaries = self
-            .list_issues(IssueFilter {
-                status: Some("open".to_string()),
-                limit: Some(POLL_FETCH_LIMIT),
-                ..Default::default()
-            })
-            .await?;
-
-        let saturated = summaries.len() == POLL_FETCH_LIMIT;
-
-        let mut kept: Vec<Issue> = Vec::with_capacity(summaries.len());
-        for sum in summaries {
-            let issue = self.get_issue(&sum.id).await?;
-            let pass = match prior_cursor.as_ref() {
-                None => true,
-                Some(c) => c.allows(&issue.id, issue.updated_at),
-            };
-            if pass {
-                kept.push(issue);
-            }
-        }
-
-        let new_cursor: Option<PollCursor> = if !kept.is_empty() {
-            if saturated {
-                tracing::warn!(
-                    limit = POLL_FETCH_LIMIT,
-                    kept_count = kept.len(),
-                    "BeadsCrateAdapter::poll fetch saturated; preserving cursor"
-                );
-                prior_cursor.clone()
-            } else {
-                let max_ts = kept.iter().map(|i| i.updated_at).max().unwrap();
-                let ids_at_max: HashSet<String> = kept
-                    .iter()
-                    .filter(|i| i.updated_at == max_ts)
-                    .map(|i| i.id.clone())
-                    .collect();
-                Some(PollCursor {
-                    ts: max_ts,
-                    ids_at_boundary: ids_at_max,
-                })
-            }
-        } else if let Some(existing) = prior_cursor.clone() {
-            Some(existing)
-        } else {
-            Some(PollCursor {
-                ts: Utc::now(),
-                ids_at_boundary: HashSet::new(),
-            })
-        };
-
-        let events: Vec<PmEvent> = kept
-            .into_iter()
-            .map(|issue| {
-                let summary = IssueSummary {
-                    id: issue.id.clone(),
-                    source: PmSource::Beads,
-                    title: issue.title,
-                    status: issue.status,
-                    labels: issue.labels,
-                    url: issue.url,
-                    priority: issue.priority,
-                    issue_type: issue.issue_type,
-                    assignee: issue.assignee,
-                };
-                if had_prior {
-                    PmEvent::IssueUpdated(summary)
-                } else {
-                    PmEvent::IssueCreated(summary)
-                }
-            })
-            .collect();
-
-        let cursor_to_persist = new_cursor.clone();
-        *guard = new_cursor;
-        drop(guard);
-
-        if let (Some(path), Some(cursor)) =
-            (self.config.cursor_path.as_ref(), cursor_to_persist.as_ref())
-        {
-            if let Err(e) = cursor.write_to(path) {
-                tracing::warn!(?path, "failed to write cursor file: {e}");
-            }
-        }
-
-        Ok(events)
+        self.poll_with_limit(POLL_FETCH_LIMIT).await
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use beads_rust::model::{Issue as BrIssue, IssueType, Priority, Status};
     use chrono::Utc;
     use tempfile::TempDir;
 
     use crate::adapter::IssueTracker;
     use crate::beads_crate::adapter::{AdapterConfig, BeadsCrateAdapter};
+    use crate::types::{IssueCreate, IssueUpdate, PmEvent};
 
     fn minimal_issue(id: &str, title: &str) -> BrIssue {
         let now = Utc::now();
@@ -408,6 +417,25 @@ mod tests {
         }
     }
 
+    fn event_ids(events: &[PmEvent]) -> HashSet<String> {
+        events
+            .iter()
+            .map(|event| match event {
+                PmEvent::IssueCreated(summary) | PmEvent::IssueUpdated(summary) => {
+                    summary.id.clone()
+                }
+            })
+            .collect()
+    }
+
+    fn issue_event_is_updated(event: &PmEvent) -> bool {
+        matches!(event, PmEvent::IssueUpdated(_))
+    }
+
+    fn issue_event_is_created(event: &PmEvent) -> bool {
+        matches!(event, PmEvent::IssueCreated(_))
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn get_issue_returns_seeded_issue() {
         let dir = TempDir::new().unwrap();
@@ -431,8 +459,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn create_issue_round_trips_via_get_issue() {
-        use crate::types::IssueCreate;
-
         let dir = TempDir::new().unwrap();
         let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
             .await
@@ -463,8 +489,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn update_issue_changes_status_and_labels() {
-        use crate::types::{IssueCreate, IssueUpdate};
-
         let dir = TempDir::new().unwrap();
         let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
             .await
@@ -503,8 +527,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn add_dependency_links_two_issues() {
-        use crate::types::IssueCreate;
-
         let dir = TempDir::new().unwrap();
         let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
             .await
@@ -542,9 +564,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn poll_emits_created_then_quiesces() {
-        use crate::types::IssueCreate;
-        use crate::types::PmEvent;
-
         let dir = TempDir::new().unwrap();
         let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
             .await
@@ -568,6 +587,143 @@ mod tests {
             "second poll should be empty, got {:?}",
             second
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn poll_does_not_advance_cursor_on_limit_saturation() {
+        let dir = TempDir::new().unwrap();
+        let cursor_path = dir.path().join(".spur-test-cursor");
+        let config = AdapterConfig {
+            cursor_path: Some(cursor_path),
+            ..AdapterConfig::default()
+        };
+        let adapter = BeadsCrateAdapter::open(dir.path(), config).await.unwrap();
+
+        let initial = adapter
+            .create_issue(IssueCreate {
+                title: "Initial".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let prime = adapter.poll_with_limit(10).await.unwrap();
+        assert_eq!(prime.len(), 1);
+        adapter
+            .update_issue(
+                &initial,
+                IssueUpdate {
+                    status: Some("closed".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let cursor_before = adapter
+            .cursor
+            .lock()
+            .await
+            .clone()
+            .expect("prime poll should set cursor");
+
+        let mut new_ids = HashSet::new();
+        for i in 0..5 {
+            let id = adapter
+                .create_issue(IssueCreate {
+                    title: format!("Issue {i}"),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            new_ids.insert(id);
+        }
+
+        let saturated_events = adapter.poll_with_limit(3).await.unwrap();
+        assert_eq!(saturated_events.len(), 3);
+        assert!(saturated_events.iter().all(issue_event_is_updated));
+        let cursor_after = adapter
+            .cursor
+            .lock()
+            .await
+            .clone()
+            .expect("saturated poll with prior cursor should preserve it");
+        assert_eq!(cursor_after.ts, cursor_before.ts);
+        assert_eq!(cursor_after.ids_at_boundary, cursor_before.ids_at_boundary);
+
+        let saturated_ids = event_ids(&saturated_events);
+        for id in &saturated_ids {
+            adapter
+                .update_issue(
+                    id,
+                    IssueUpdate {
+                        status: Some("closed".into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let remaining_events = adapter.poll_with_limit(10).await.unwrap();
+        assert!(remaining_events.iter().all(issue_event_is_updated));
+        let remaining_ids = event_ids(&remaining_events);
+        let expected_remaining: HashSet<String> =
+            new_ids.difference(&saturated_ids).cloned().collect();
+        assert_eq!(remaining_ids, expected_remaining);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn saturated_first_poll_keeps_cursor_unset_until_backlog_drains() {
+        let dir = TempDir::new().unwrap();
+        let cursor_path = dir.path().join(".spur-test-cursor");
+        let config = AdapterConfig {
+            cursor_path: Some(cursor_path.clone()),
+            ..AdapterConfig::default()
+        };
+        let adapter = BeadsCrateAdapter::open(dir.path(), config).await.unwrap();
+
+        let mut all_ids = HashSet::new();
+        for i in 0..5 {
+            let id = adapter
+                .create_issue(IssueCreate {
+                    title: format!("Issue {i}"),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            all_ids.insert(id);
+        }
+
+        let first_events = adapter.poll_with_limit(3).await.unwrap();
+        assert_eq!(first_events.len(), 3);
+        assert!(first_events.iter().all(issue_event_is_created));
+        assert!(
+            adapter.cursor.lock().await.is_none(),
+            "first saturated poll should leave in-memory cursor unset"
+        );
+        assert!(
+            !cursor_path.exists(),
+            "first saturated poll should not write a cursor file"
+        );
+
+        let first_ids = event_ids(&first_events);
+        for id in &first_ids {
+            adapter
+                .update_issue(
+                    id,
+                    IssueUpdate {
+                        status: Some("closed".into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let second_events = adapter.poll_with_limit(10).await.unwrap();
+        assert!(second_events.iter().all(issue_event_is_created));
+        let second_ids = event_ids(&second_events);
+        let expected_second: HashSet<String> = all_ids.difference(&first_ids).cloned().collect();
+        assert_eq!(second_ids, expected_second);
     }
 
     #[tokio::test(flavor = "multi_thread")]
