@@ -52,10 +52,35 @@ impl PollCursor {
 
     /// Write the cursor using the same compact JSON serde format as
     /// `BeadsAdapter`.
+    ///
+    /// Atomic on POSIX: writes to a sibling `.tmp` file then renames over the
+    /// target path. A crash mid-write leaves either the previous cursor or
+    /// the new one — never a half-written file. The temp file is removed on
+    /// any failure path so retries don't accumulate stale `.tmp` debris.
     pub fn write_to(&self, path: &Path) -> anyhow::Result<()> {
         let encoded = serde_json::to_string(self).context("serialize poll cursor")?;
-        std::fs::write(path, encoded)
-            .with_context(|| format!("write cursor file {}", path.display()))
+        let tmp_path = match path.file_name() {
+            Some(name) => {
+                let mut tmp_name = name.to_os_string();
+                tmp_name.push(".tmp");
+                path.with_file_name(tmp_name)
+            }
+            None => anyhow::bail!("cursor path has no file name: {}", path.display()),
+        };
+        if let Err(e) = std::fs::write(&tmp_path, encoded) {
+            return Err(e).with_context(|| format!("write cursor tmp file {}", tmp_path.display()));
+        }
+        if let Err(e) = std::fs::rename(&tmp_path, path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e).with_context(|| {
+                format!(
+                    "rename cursor tmp {} -> {}",
+                    tmp_path.display(),
+                    path.display()
+                )
+            });
+        }
+        Ok(())
     }
 
     fn from_persisted_str(contents: &str) -> anyhow::Result<Self> {
