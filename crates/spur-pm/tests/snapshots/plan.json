@@ -1,0 +1,46 @@
+{
+  "generated_at": "<normalized>",
+  "data_hash": "<normalized>",
+  "plan": {
+    "tracks": [
+      {
+        "track_id": "track-A",
+        "items": [
+          {
+            "id": "<id-1>",
+            "title": "Top task",
+            "priority": 2,
+            "status": "open",
+            "unblocks": [
+              "<id-2>"
+            ]
+          }
+        ],
+        "reason": "Single actionable item"
+      },
+      {
+        "track_id": "track-B",
+        "items": [
+          {
+            "id": "<id-2>",
+            "title": "Blocked task",
+            "priority": 2,
+            "status": "open",
+            "unblocks": null
+          }
+        ],
+        "reason": "Generation 1 - depends on 1 completed track(s) above"
+      }
+    ],
+    "total_actionable": 1,
+    "total_blocked": 1,
+    "summary": {
+      "highest_impact": "<id-1>",
+      "impact_reason": "Unblocks 1 downstream issue(s)",
+      "unblocks_count": 1
+    }
+  },
+  "usage_hints": [
+    "jq '.plan.tracks[] | {id: .track_id, items: [.items[].id]}'"
+  ]
+}
