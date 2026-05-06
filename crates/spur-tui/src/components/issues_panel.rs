@@ -218,6 +218,10 @@ impl IssuesPanel {
         self.recompute_display_order(issues);
     }
 
+    pub fn filter_query(&self) -> &str {
+        &self.filter_query
+    }
+
     pub fn clear_filter(&mut self, issues: &[IssueSummary]) {
         self.filter_query.clear();
         self.recompute_display_order(issues);
@@ -493,6 +497,16 @@ mod tests {
             }
         }
         None
+    }
+
+    #[test]
+    fn filter_query_returns_current_query() {
+        let issues = vec![issue("bd-auth")];
+        let mut panel = IssuesPanel::new();
+
+        panel.set_filter("auth", &issues);
+
+        assert_eq!(panel.filter_query(), "auth");
     }
 
     #[test]
