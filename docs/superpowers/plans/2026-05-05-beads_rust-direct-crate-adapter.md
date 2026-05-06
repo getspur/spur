@@ -2465,6 +2465,16 @@ git commit -m "spur-mcp,spur-pm: migrate test fixtures from br CLI to TestBeadsW
 **Files:**
 - Modify: `crates/spur-core/tests/resume_plan_bridge.rs` and any other `br` callers found by grep
 
+> **Plan revision (2026-05-06):** Final sweep found one additional
+> non-Section-F test caller: `crates/spur-core/tests/resume_plan_bridge.rs`.
+> Migrate it to `TestBeadsWorkspace`. After Task 25, the only remaining
+> `Command::new("br")` paths are the Section F production adapter
+> `crates/spur-pm/src/beads.rs` plus the intentionally retained BeadsAdapter
+> behavior tests from Task 24:
+> `crates/spur-pm/tests/poll_cursor.rs`,
+> `crates/spur-pm/tests/poll_saturated_first_tick.rs`, and
+> `crates/spur-pm/tests/beads_advanced.rs`.
+
 - [ ] **Step 1: Final grep**
 
 Run grep tool: `Command::new\("br"\)` across `crates/`.
