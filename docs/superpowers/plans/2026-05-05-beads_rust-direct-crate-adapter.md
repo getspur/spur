@@ -2168,6 +2168,26 @@ git commit -m "spur-pm: IssueTracker::poll via crate adapter (shared PollCursor)
 > `add_dependency`, open `SqliteStorage` on `tempdir.path().join("beads.db")`, call
 > `set_labels` after creation for any helper that creates labeled issues, and set
 > close status with `Status::Closed` rather than a string.
+>
+> **Plan revision (2026-05-06) — WAL data-loss follow-up:** Dual-gate review of T23
+> (gemini + kimi) caught a critical bug: T22's and T23's `attach_beads_workspace`
+> helpers copied only `beads.db`, but `beads_rust::storage::sqlite::SqliteStorage`
+> opens in WAL mode and explicitly skips checkpoint on `Drop`. Periodic auto-checkpoint
+> only fires every 50 mutations, so a typical test (a handful of issues) leaves all
+> data in `beads.db-wal` while `beads.db` is effectively empty. The reader opens an
+> empty database; assertions like `actions.is_empty()` pass for the wrong reason.
+> Empirically verified: original storage `count_issues = 4`, copied storage `count_issues = 0`,
+> WAL file 1.7MB vs main db 278KB.
+>
+> Fix: added `TestBeadsWorkspace::copy_db_to(dst_dir)` that copies `beads.db` plus
+> `beads.db-wal` and `beads.db-shm` (skipping any that don't exist). beads_rust does
+> not expose a public checkpoint API to downstream crates (`execute_raw` is `pub(crate)`,
+> `execute_test_sql` is `#[cfg(test)]`), so we mirror the production read path: copy
+> all three SQLite files and the destination `SqliteStorage` reads main + WAL exactly
+> as the source did. Both T22 and T23 `attach_beads_workspace` helpers now call
+> `w.copy_db_to(&beads_dir)`. Regression test
+> `test_workspace::tests::copy_db_to_preserves_uncheckpointed_wal_data` proves the
+> bug stays fixed.
 
 **Files:**
 - Create: `crates/spur-pm/src/test_workspace.rs`
