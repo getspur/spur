@@ -17,11 +17,7 @@ use uuid::Uuid;
 mod common;
 
 fn br_available() -> bool {
-    Command::new("br")
-        .arg("--help")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    common::beads::br_available()
 }
 
 fn sqlite_available() -> bool {
@@ -33,23 +29,7 @@ fn sqlite_available() -> bool {
 }
 
 fn run_br(repo: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("br")
-        .args(args)
-        .arg("--json")
-        .current_dir(repo)
-        .env("RUST_LOG", "error")
-        .output()
-        .expect("br invocation failed");
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-    } else {
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        Err(format!(
-            "br {args:?} failed (exit {}): stderr={stderr} stdout={stdout}",
-            out.status
-        ))
-    }
+    common::beads::run_br(repo, args)
 }
 
 fn run_sql(repo: &Path, sql: &str) -> Result<(), String> {

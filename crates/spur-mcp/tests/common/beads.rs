@@ -1,0 +1,370 @@
+use std::path::Path;
+use std::sync::Arc;
+
+use chrono::Utc;
+use rusqlite::{params, Connection, OptionalExtension};
+use serde_json::{json, Value};
+use spur_pm::test_workspace::TestBeadsWorkspace;
+
+pub fn br_available() -> bool {
+    true
+}
+
+pub fn attach_beads_workspace(repo: &Path, w: &TestBeadsWorkspace) {
+    let beads_dir = repo.join(".beads");
+    std::fs::create_dir_all(&beads_dir).expect("create test .beads directory");
+    for suffix in ["", "-wal", "-shm"] {
+        let file_name = format!("beads.db{suffix}");
+        let src = w.path().join(&file_name);
+        if src.exists() {
+            std::fs::copy(&src, beads_dir.join(file_name)).expect("copy test beads database");
+        }
+    }
+}
+
+pub fn init_beads_repo(repo: &Path) -> TestBeadsWorkspace {
+    let w = TestBeadsWorkspace::init();
+    attach_beads_workspace(repo, &w);
+    w
+}
+
+pub async fn init_beads_pm(repo: &Path) -> (TestBeadsWorkspace, Arc<spur_pm::PmService>) {
+    let w = init_beads_repo(repo);
+    let pm = Arc::new(
+        spur_pm::PmService::try_new(None, true, false, repo, None)
+            .await
+            .expect("PmService::try_new failed")
+            .expect("expected beads pm"),
+    );
+    (w, pm)
+}
+
+pub fn run_br(repo: &Path, args: &[&str]) -> Result<String, String> {
+    match args.first().copied() {
+        Some("init") => {
+            init_beads_repo(repo);
+            Ok(String::new())
+        }
+        Some("create") => create_issue(repo, args),
+        Some("label") => add_label(repo, args),
+        Some("dep") => add_dependency(repo, args),
+        Some("update") => update_issue(repo, args),
+        Some("close") => close_issues(repo, args),
+        Some("comments") => comments(repo, args),
+        Some("show") => show_issue(repo, args),
+        Some("list") => list_issues(repo),
+        other => Err(format!(
+            "unsupported test beads command: {other:?} {args:?}"
+        )),
+    }
+}
+
+fn open(repo: &Path) -> Result<Connection, String> {
+    Connection::open(repo.join(".beads/beads.db")).map_err(|err| err.to_string())
+}
+
+fn now() -> String {
+    Utc::now().to_rfc3339()
+}
+
+fn create_issue(repo: &Path, args: &[&str]) -> Result<String, String> {
+    let mut title: Option<String> = None;
+    let mut issue_type = "task".to_string();
+    let mut priority = 2_i64;
+    let mut labels = Vec::new();
+    let mut silent = false;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i] {
+            "--json" => {}
+            "--silent" => silent = true,
+            "-t" | "--type" => {
+                i += 1;
+                issue_type = args
+                    .get(i)
+                    .ok_or_else(|| "missing issue type".to_string())?
+                    .to_string();
+            }
+            "--title" => {
+                i += 1;
+                title = Some(
+                    args.get(i)
+                        .ok_or_else(|| "missing issue title".to_string())?
+                        .to_string(),
+                );
+            }
+            "-p" | "--priority" => {
+                i += 1;
+                priority = args
+                    .get(i)
+                    .ok_or_else(|| "missing priority".to_string())?
+                    .parse::<i64>()
+                    .map_err(|err| format!("invalid priority: {err}"))?;
+            }
+            "-l" | "--label" => {
+                i += 1;
+                let label = args
+                    .get(i)
+                    .ok_or_else(|| "missing label".to_string())?
+                    .to_string();
+                if label.len() > 50 {
+                    return Err("Validation failed: label: exceeds 50 characters".to_string());
+                }
+                labels.push(label);
+            }
+            value if !value.starts_with('-') && title.is_none() => {
+                title = Some(value.to_string());
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let title = title.unwrap_or_else(|| "test issue".to_string());
+    let uuid = uuid::Uuid::new_v4().simple().to_string();
+    let id = format!("bd-{}", &uuid[..8]);
+    let now = now();
+    let conn = open(repo)?;
+    conn.execute(
+        "INSERT INTO issues (
+             id, title, description, status, priority, issue_type, created_at,
+             updated_at, created_by, source_repo
+         ) VALUES (?1, ?2, '', 'open', ?3, ?4, ?5, ?5, 'test', '.')",
+        params![id, title, priority, issue_type, now],
+    )
+    .map_err(|err| err.to_string())?;
+
+    for label in labels {
+        conn.execute(
+            "INSERT OR IGNORE INTO labels(issue_id, label) VALUES (?1, ?2)",
+            params![id, label],
+        )
+        .map_err(|err| err.to_string())?;
+    }
+
+    if silent {
+        Ok(format!("\"{id}\""))
+    } else {
+        Ok(json!({ "id": id }).to_string())
+    }
+}
+
+fn add_label(repo: &Path, args: &[&str]) -> Result<String, String> {
+    if args.len() < 4 || args.get(1) != Some(&"add") {
+        return Err(format!("unsupported label command: {args:?}"));
+    }
+    let issue_id = args[2];
+    let label = if args.get(3) == Some(&"-l") || args.get(3) == Some(&"--label") {
+        *args.get(4).ok_or_else(|| "missing label".to_string())?
+    } else {
+        args[3]
+    };
+    let conn = open(repo)?;
+    conn.execute(
+        "INSERT OR IGNORE INTO labels(issue_id, label) VALUES (?1, ?2)",
+        params![issue_id, label],
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(String::new())
+}
+
+fn add_dependency(repo: &Path, args: &[&str]) -> Result<String, String> {
+    if args.len() < 4 || args.get(1) != Some(&"add") {
+        return Err(format!("unsupported dep command: {args:?}"));
+    }
+    let conn = open(repo)?;
+    conn.execute(
+        "INSERT OR IGNORE INTO dependencies(
+             issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id
+         ) VALUES (?1, ?2, 'blocks', ?3, 'test', '{}', '')",
+        params![args[2], args[3], now()],
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(String::new())
+}
+
+fn update_issue(repo: &Path, args: &[&str]) -> Result<String, String> {
+    if args.len() >= 4 && args[2] == "--status" && args[3] == "closed" {
+        close_issue(repo, args[1])?;
+        Ok(String::new())
+    } else {
+        Err(format!("unsupported update command: {args:?}"))
+    }
+}
+
+fn close_issues(repo: &Path, args: &[&str]) -> Result<String, String> {
+    for issue_id in &args[1..] {
+        if issue_id.starts_with('-') {
+            continue;
+        }
+        close_issue(repo, issue_id)?;
+    }
+    Ok(String::new())
+}
+
+fn close_issue(repo: &Path, issue_id: &str) -> Result<(), String> {
+    let conn = open(repo)?;
+    let changed = conn
+        .execute(
+            "UPDATE issues
+             SET status = 'closed', closed_at = ?1, updated_at = ?1
+             WHERE id = ?2",
+            params![now(), issue_id],
+        )
+        .map_err(|err| err.to_string())?;
+    if changed == 0 {
+        return Err(format!("issue not found: {issue_id}"));
+    }
+    Ok(())
+}
+
+fn comments(repo: &Path, args: &[&str]) -> Result<String, String> {
+    match args.get(1).copied() {
+        Some("add") => {
+            let issue_id = args.get(2).ok_or_else(|| "missing issue id".to_string())?;
+            let body = args
+                .get(3)
+                .ok_or_else(|| "missing comment body".to_string())?;
+            let conn = open(repo)?;
+            conn.execute(
+                "INSERT INTO comments(issue_id, author, text, created_at)
+                 VALUES (?1, 'test', ?2, ?3)",
+                params![issue_id, body, now()],
+            )
+            .map_err(|err| err.to_string())?;
+            let id = conn.last_insert_rowid();
+            Ok(json!({ "id": id }).to_string())
+        }
+        Some("list") => {
+            let issue_id = args.get(2).ok_or_else(|| "missing issue id".to_string())?;
+            let conn = open(repo)?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, author, text, created_at
+                     FROM comments
+                     WHERE issue_id = ?1
+                     ORDER BY created_at ASC, id ASC",
+                )
+                .map_err(|err| err.to_string())?;
+            let rows = stmt
+                .query_map(params![issue_id], |row| {
+                    Ok(json!({
+                        "id": row.get::<_, i64>(0)?,
+                        "author": row.get::<_, String>(1)?,
+                        "text": row.get::<_, String>(2)?,
+                        "body": row.get::<_, String>(2)?,
+                        "created_at": row.get::<_, String>(3)?,
+                    }))
+                })
+                .map_err(|err| err.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|err| err.to_string())?;
+            Ok(Value::Array(rows).to_string())
+        }
+        _ => Err(format!("unsupported comments command: {args:?}")),
+    }
+}
+
+fn show_issue(repo: &Path, args: &[&str]) -> Result<String, String> {
+    let issue_id = args.get(1).ok_or_else(|| "missing issue id".to_string())?;
+    let conn = open(repo)?;
+    let mut issue =
+        issue_json(&conn, issue_id)?.ok_or_else(|| format!("issue not found: {issue_id}"))?;
+    issue["labels"] = Value::Array(
+        labels_for(&conn, issue_id)?
+            .into_iter()
+            .map(Value::String)
+            .collect(),
+    );
+    issue["dependencies"] = Value::Array(
+        dependencies_for(&conn, issue_id)?
+            .into_iter()
+            .map(|id| json!({ "id": id, "type": "blocks" }))
+            .collect(),
+    );
+    Ok(Value::Array(vec![issue]).to_string())
+}
+
+fn list_issues(repo: &Path) -> Result<String, String> {
+    let conn = open(repo)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id FROM issues
+             WHERE deleted_at IS NULL
+             ORDER BY created_at DESC, id ASC",
+        )
+        .map_err(|err| err.to_string())?;
+    let ids = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|err| err.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| err.to_string())?;
+
+    let mut issues = Vec::new();
+    for id in ids {
+        if let Some(mut issue) = issue_json(&conn, &id)? {
+            issue["labels"] = Value::Array(
+                labels_for(&conn, &id)?
+                    .into_iter()
+                    .map(Value::String)
+                    .collect(),
+            );
+            issues.push(issue);
+        }
+    }
+    Ok(json!({ "issues": issues }).to_string())
+}
+
+fn issue_json(conn: &Connection, issue_id: &str) -> Result<Option<Value>, String> {
+    conn.query_row(
+        "SELECT id, title, description, status, priority, issue_type, created_at,
+                updated_at, created_by
+         FROM issues
+         WHERE id = ?1",
+        params![issue_id],
+        |row| {
+            Ok(json!({
+                "id": row.get::<_, String>(0)?,
+                "title": row.get::<_, String>(1)?,
+                "description": row.get::<_, String>(2)?,
+                "status": row.get::<_, String>(3)?,
+                "priority": row.get::<_, i64>(4)?,
+                "issue_type": row.get::<_, String>(5)?,
+                "created_at": row.get::<_, String>(6)?,
+                "updated_at": row.get::<_, String>(7)?,
+                "created_by": row.get::<_, Option<String>>(8)?,
+            }))
+        },
+    )
+    .optional()
+    .map_err(|err| err.to_string())
+}
+
+fn labels_for(conn: &Connection, issue_id: &str) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare("SELECT label FROM labels WHERE issue_id = ?1 ORDER BY label")
+        .map_err(|err| err.to_string())?;
+    let labels = stmt
+        .query_map(params![issue_id], |row| row.get::<_, String>(0))
+        .map_err(|err| err.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| err.to_string())?;
+    Ok(labels)
+}
+
+fn dependencies_for(conn: &Connection, issue_id: &str) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT depends_on_id FROM dependencies
+             WHERE issue_id = ?1
+             ORDER BY depends_on_id",
+        )
+        .map_err(|err| err.to_string())?;
+    let dependencies = stmt
+        .query_map(params![issue_id], |row| row.get::<_, String>(0))
+        .map_err(|err| err.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| err.to_string())?;
+    Ok(dependencies)
+}

@@ -2414,6 +2414,13 @@ git commit -m "spur-mcp: reconciler test fixtures use beads_rust directly"
 **Files:**
 - Modify: ~50 test files (see grep output for `Command::new("br")` matches)
 
+> **Plan revision (2026-05-06):** Current `main` has 41 matching
+> `crates/spur-mcp/tests/` files and 5 matching `crates/spur-pm/tests/`
+> files. Migrate all `spur-mcp` test shellouts. In `spur-pm/tests`, migrate
+> files where `br` only seeds or inspects fixture state, but intentionally
+> leave BeadsAdapter CLI behavior coverage for Section F:
+> `poll_cursor.rs`, `poll_saturated_first_tick.rs`, and `beads_advanced.rs`.
+
 - [ ] **Step 1: Inventory the affected files**
 
 Run: `cargo grep -l 'Command::new("br")' crates/spur-mcp/tests crates/spur-pm/tests`

@@ -20,11 +20,7 @@ static CWD_LOCK: LazyLock<Arc<tokio::sync::Mutex<()>>> =
     LazyLock::new(|| Arc::new(tokio::sync::Mutex::new(())));
 
 pub fn br_available() -> bool {
-    Command::new("br")
-        .arg("--help")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    super::beads::br_available()
 }
 
 fn run_command(repo: &Path, program: &str, args: &[&str]) -> String {
@@ -51,7 +47,8 @@ fn run_git(repo: &Path, args: &[&str]) -> String {
 }
 
 fn run_br(repo: &Path, args: &[&str]) -> String {
-    run_command(repo, "br", args)
+    super::beads::run_br(repo, args)
+        .unwrap_or_else(|err| panic!("test beads command {args:?} failed: {err}"))
 }
 
 fn init_repo(repo: &Path) {

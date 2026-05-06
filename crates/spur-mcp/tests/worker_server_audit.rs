@@ -5,7 +5,6 @@
 //! target issue before returning success to the worker.
 
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,25 +23,14 @@ use spur_pm::{IssueCreate, PmService};
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 
+mod common;
 fn br_available() -> bool {
-    Command::new("br")
-        .arg("--help")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    common::beads::br_available()
 }
 
 fn run_br(repo: &Path, args: &[&str]) {
-    let out = Command::new("br")
-        .args(args)
-        .current_dir(repo)
-        .env("RUST_LOG", "error")
-        .output()
-        .expect("br invocation failed");
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-        panic!("br {args:?} failed (exit {}): {stderr}", out.status);
-    }
+    common::beads::run_br(repo, args)
+        .unwrap_or_else(|err| panic!("test beads command {args:?} failed: {err}"));
 }
 
 async fn pm_service_fixture(repo: &Path) -> Arc<PmService> {

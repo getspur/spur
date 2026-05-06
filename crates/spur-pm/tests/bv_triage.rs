@@ -8,16 +8,10 @@
 use std::path::Path;
 use std::process::Command;
 
+use beads_rust::sync::{export_to_jsonl, ExportConfig};
+use spur_pm::test_workspace::TestBeadsWorkspace;
 use spur_pm::BvAdapter;
 use tempfile::TempDir;
-
-fn br_available() -> bool {
-    Command::new("br")
-        .arg("--help")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
 
 fn bv_available() -> bool {
     Command::new("bv")
@@ -27,33 +21,40 @@ fn bv_available() -> bool {
         .unwrap_or(false)
 }
 
-fn run_br(repo: &Path, args: &[&str]) -> String {
-    let out = Command::new("br")
-        .args(args)
-        .arg("--json")
-        .current_dir(repo)
-        .env("RUST_LOG", "error")
-        .output()
-        .expect("br invocation");
-    assert!(out.status.success(), "br {args:?} failed: {out:?}");
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
-fn extract_id(json: &str) -> String {
-    let v: serde_json::Value = serde_json::from_str(json).unwrap();
-    v["id"].as_str().expect("id").to_string()
+fn attach_beads_workspace(repo: &Path, w: &TestBeadsWorkspace) {
+    let beads_dir = repo.join(".beads");
+    std::fs::create_dir_all(&beads_dir).expect("create test .beads directory");
+    for suffix in ["", "-wal", "-shm"] {
+        let file_name = format!("beads.db{suffix}");
+        let src = w.path().join(&file_name);
+        if src.exists() {
+            std::fs::copy(&src, beads_dir.join(file_name)).expect("copy test beads database");
+        }
+    }
+    export_to_jsonl(
+        &w.storage,
+        &beads_dir.join("issues.jsonl"),
+        &ExportConfig {
+            force: true,
+            is_default_path: true,
+            beads_dir: Some(beads_dir),
+            ..Default::default()
+        },
+    )
+    .expect("flush test beads JSONL");
 }
 
 /// Smoke test: bv --robot-triage returns a structurally valid TriageReport
 /// on an empty workspace. Proves the adapter + bv binary + JSON schema agree.
 #[tokio::test]
 async fn triage_on_empty_workspace_returns_report() {
-    if !br_available() || !bv_available() {
-        eprintln!("skipping: `br` or `bv` not on PATH");
+    if !bv_available() {
+        eprintln!("skipping: `bv` not on PATH");
         return;
     }
     let dir = TempDir::new().unwrap();
-    run_br(dir.path(), &["init"]);
+    let w = TestBeadsWorkspace::init();
+    attach_beads_workspace(dir.path(), &w);
     let bv = BvAdapter::connect(dir.path()).await.expect("bv connect");
 
     let report = bv.triage(None).await.expect("triage");
@@ -69,20 +70,18 @@ async fn triage_on_empty_workspace_returns_report() {
 /// labeled open issue, verify it appears in the label-scoped triage output.
 #[tokio::test]
 async fn triage_with_label_filter_surfaces_matching_issue() {
-    if !br_available() || !bv_available() {
-        eprintln!("skipping: `br` or `bv` not on PATH");
+    if !bv_available() {
+        eprintln!("skipping: `bv` not on PATH");
         return;
     }
     let dir = TempDir::new().unwrap();
-    run_br(dir.path(), &["init"]);
+    let mut w = TestBeadsWorkspace::init();
 
     // Create one issue under "spur:plan-id:P1" plus one unrelated issue.
-    let plan_task = extract_id(&run_br(dir.path(), &["create", "plan-task", "-t", "task"]));
-    run_br(
-        dir.path(),
-        &["label", "add", &plan_task, "-l", "spur:plan-id:P1"],
-    );
-    let _other = extract_id(&run_br(dir.path(), &["create", "other", "-t", "task"]));
+    let plan_task = w.create_issue("plan-task");
+    w.add_label(&plan_task, "spur:plan-id:P1");
+    let _other = w.create_issue("other");
+    attach_beads_workspace(dir.path(), &w);
 
     let bv = BvAdapter::connect(dir.path()).await.expect("bv connect");
     let report = bv.triage(Some("spur:plan-id:P1")).await.expect("triage");
