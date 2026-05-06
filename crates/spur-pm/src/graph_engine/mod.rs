@@ -1,9 +1,11 @@
+pub mod insights;
 pub mod metrics;
 pub mod plan;
 pub mod score;
 pub mod snapshot;
 pub mod triage;
 
+pub use insights::compute_insights;
 pub use metrics::hits;
 pub use plan::compute_plan;
 pub use score::{
