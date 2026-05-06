@@ -146,6 +146,43 @@ impl BeadsCrateAdapter {
         &self.metrics
     }
 
+    /// Idempotent under-lock auto-flush. Inside `.beads/.write.lock`, calls
+    /// `beads_rust::sync::auto_flush` which is a no-op if nothing is dirty.
+    /// Safe to call concurrently across processes — they serialize on the flock.
+    pub async fn auto_flush(&self) -> anyhow::Result<()> {
+        let beads_dir = self.beads_dir.clone();
+        let backoff = self.config.backoff.clone();
+        let lock_timeout_ms = self.config.lock_timeout_ms;
+        let metrics = Arc::clone(&self.metrics);
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let _flock =
+                acquire_write_lock_with_backoff(&beads_dir, &backoff, lock_timeout_ms, &metrics)?;
+            let mut storage =
+                beads_rust::storage::sqlite::SqliteStorage::open(&beads_dir.join("beads.db"))?;
+            let jsonl = beads_dir.join("issues.jsonl");
+            let _outcome = beads_rust::sync::auto_flush(&mut storage, &beads_dir, &jsonl, false)?;
+            metrics.incr_auto_flush_success();
+            Ok(())
+        })
+        .await?
+    }
+
+    pub fn spawn_periodic_auto_flush(
+        self: Arc<Self>,
+        interval: std::time::Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(interval);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                if let Err(e) = self.auto_flush().await {
+                    tracing::warn!(error = %e, "periodic auto_flush failed");
+                }
+            }
+        })
+    }
+
     /// Lock-free snapshot read. Opens a fresh `SqliteStorage` connection
     /// for the duration of `f` and drops it on return. WAL mode gives
     /// snapshot isolation across concurrent readers and writers.
@@ -330,6 +367,25 @@ mod tests {
                 .write_total
                 .load(std::sync::atomic::Ordering::Relaxed),
             1
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn auto_flush_idempotent_when_clean() {
+        let dir = TempDir::new().unwrap();
+        let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
+            .await
+            .unwrap();
+
+        adapter.auto_flush().await.unwrap();
+        adapter.auto_flush().await.unwrap();
+
+        assert!(
+            adapter
+                .metrics()
+                .auto_flush_success_total
+                .load(std::sync::atomic::Ordering::Relaxed)
+                >= 2
         );
     }
 
