@@ -190,6 +190,10 @@ async fn plan_dispatch_base_spec(
     task_id: &str,
     repo_root: &Path,
 ) -> anyhow::Result<crate::tools::BaseSpec> {
+    if let Some(name) = single_parent_approved_worker_branch(plan_state, task_id) {
+        return Ok(crate::tools::BaseSpec::Branch { name });
+    }
+
     let dep_closure = plan_state.approved_dep_closure(task_id);
     let mut overlays = Vec::with_capacity(dep_closure.len());
 
@@ -223,6 +227,32 @@ async fn plan_dispatch_base_spec(
         },
         overlays,
     })
+}
+
+fn single_parent_approved_worker_branch(
+    plan_state: &crate::plan::PlanState,
+    task_id: &str,
+) -> Option<String> {
+    let task = plan_state
+        .tasks
+        .iter()
+        .find(|entry| entry.spec.task_id == task_id)?;
+    let [dep_task_id] = task.spec.depends_on.as_slice() else {
+        return None;
+    };
+    let dep = plan_state
+        .tasks
+        .iter()
+        .find(|entry| entry.spec.task_id == *dep_task_id)?;
+
+    if !matches!(dep.status, crate::plan::PlanTaskStatus::Approved { .. }) {
+        return None;
+    }
+
+    dep.worker_branch
+        .as_deref()
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_owned)
 }
 
 fn setup_overlay_conflict(status: &spur_acp::DelegationStatus) -> Option<(&str, &[String])> {
