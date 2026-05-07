@@ -117,6 +117,13 @@ impl ReadAuditBuffer {
         &self.delegation_id
     }
 
+    /// Drain the buffer and return the accumulated entries. Used by
+    /// [`WorkerMcpServer::flush_delegation`] to forward entries on the
+    /// flush channel in-band rather than relying on the buffer's `Drop`.
+    pub fn take_entries(&self) -> Vec<ReadAuditEntry> {
+        std::mem::take(&mut *self.entries.lock())
+    }
+
     /// Test-only escape hatch so unit tests can populate the buffer without
     /// going through the dispatcher.
     #[cfg(any(test, feature = "test-support"))]
@@ -378,6 +385,18 @@ pub enum BindError {
     Io(#[from] std::io::Error),
 }
 
+/// Errors returned by [`WorkerMcpServer::flush_delegation`]. The flush is
+/// best-effort: a failure here means the audit aggregate could not be
+/// queued, but the per-delegation summary funnel event is still emitted.
+#[derive(Debug, thiserror::Error)]
+pub enum FlushDelegationError {
+    /// The background audit flusher's receiver has been dropped (the server
+    /// is mid-shutdown). Aggregated read-tool audits queued for this
+    /// delegation cannot be persisted to the PM.
+    #[error("read-audit flush channel closed (server shutting down)")]
+    ChannelClosed,
+}
+
 /// Outcome of [`WorkerMcpServer::shutdown`]'s drain phase. `drained` is `true`
 /// when every in-flight dispatcher exited before the caller-supplied deadline;
 /// `false` when the deadline elapsed with at least one dispatcher still in
@@ -543,6 +562,78 @@ impl WorkerMcpServer {
             guard.completed.store(true, Ordering::Relaxed);
             // Explicit drop to trigger the summary emission.
             drop(guard);
+        }
+    }
+
+    /// Phase 5 / Task 27. Drain the per-delegation read-tool audit aggregator
+    /// and emit the `WorkerMcpDelegationSummary` event for `delegation_id`.
+    /// The orchestrator calls this immediately before emitting
+    /// `DelegationCompleted` so downstream consumers observe the audit
+    /// summary first.
+    ///
+    /// Idempotent: a second call (or a call for a delegation that was never
+    /// registered, e.g. dispatched without `enable_worker_mcp`) is a no-op
+    /// returning `Ok(())`.
+    ///
+    /// `outcome` is the audit-trail string (`"success"`, `"cancelled"`,
+    /// `"rejected"`, or `"error"`). Only `"error"` flips the summary
+    /// guard's outcome; the cleaner terminations (`"cancelled"`,
+    /// `"rejected"`) preserve the guard's default success bit so the
+    /// emitted `WorkerMcpDelegationSummary.outcome` stays `"success"`
+    /// for those — but the audit-trail outcome string is propagated to
+    /// callers that surface it elsewhere.
+    ///
+    /// Returns `Err(FlushDelegationError::ChannelClosed)` only when the
+    /// background flusher's receiver has been dropped (server shutdown
+    /// in progress). The summary event is still emitted in that case;
+    /// callers should log the warning, emit a `WorkerMcpSubkind::FlushFailed`
+    /// audit if they have an issue context, and continue.
+    pub async fn flush_delegation(
+        &self,
+        delegation_id: &str,
+        outcome: &str,
+    ) -> Result<(), FlushDelegationError> {
+        self.deps.delegations.lock().remove(delegation_id);
+
+        // Drain the read-audit buffer in-band rather than relying on its Drop
+        // so that send-failures surface to the caller as a Result.
+        let entries = self
+            .deps
+            .read_audit_buffers
+            .lock()
+            .remove(delegation_id)
+            .map(|buf| buf.take_entries())
+            .unwrap_or_default();
+
+        let mut flush_err: Option<FlushDelegationError> = None;
+        if !entries.is_empty()
+            && self
+                .deps
+                .flush_tx
+                .send(FlushMessage {
+                    delegation_id: delegation_id.to_string(),
+                    entries,
+                })
+                .is_err()
+        {
+            flush_err = Some(FlushDelegationError::ChannelClosed);
+        }
+
+        // Drop the per-delegation summary guard regardless of flush outcome.
+        // The summary event is part of the contract; losing it would leave
+        // the funnel stream missing a sentinel.
+        let removed_guard = self.deps.delegation_guards.lock().remove(delegation_id);
+        if let Some(guard) = removed_guard {
+            if outcome == "error" || flush_err.is_some() {
+                guard.mark_error();
+            }
+            guard.completed.store(true, Ordering::Relaxed);
+            drop(guard);
+        }
+
+        match flush_err {
+            Some(e) => Err(e),
+            None => Ok(()),
         }
     }
 
