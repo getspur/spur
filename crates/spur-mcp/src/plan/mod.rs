@@ -2291,6 +2291,7 @@ pub async fn run_plan(
                 base: None,
                 dispatched_base_oid_tx: None,
                 attempt_tracker: Arc::new(std::sync::atomic::AtomicU32::new(task_attempt)),
+                enable_worker_mcp: None,
             };
 
             if let Err(e) = delegation_tx.send(request).await {

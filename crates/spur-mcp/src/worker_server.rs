@@ -11,7 +11,7 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -256,6 +256,13 @@ pub struct DelegationDispatchGuard {
     brain_session_id: String,
     funnel: Arc<dyn McpEventSink>,
     calls: Mutex<Vec<CallRecord>>,
+    /// Delegation-level error count, separate from per-call `is_error`.
+    /// Bumped by [`mark_error`] when the brain reports a terminal error
+    /// outcome or the flush channel closes; added to the per-call error
+    /// count in the emitted `WorkerMcpDelegationSummary`. This preserves
+    /// the delegation-level outcome bit even when no per-call errors
+    /// occurred (e.g. clean dispatch, then flush channel closure).
+    extra_errors: AtomicU64,
     /// Set to `true` by [`WorkerMcpServer::complete_delegation`] so the
     /// summary only fires on explicit delegation close, not on server
     /// shutdown or map eviction.
@@ -273,6 +280,7 @@ impl DelegationDispatchGuard {
             brain_session_id,
             funnel,
             calls: Mutex::new(Vec::new()),
+            extra_errors: AtomicU64::new(0),
             completed: AtomicBool::new(false),
         }
     }
@@ -285,6 +293,15 @@ impl DelegationDispatchGuard {
             latency_ms,
             is_error,
         });
+    }
+
+    /// Bump a delegation-level error counter. Used by
+    /// [`WorkerMcpServer::flush_delegation`] when the brain reports a
+    /// terminal error outcome or the audit-flush channel closes — so the
+    /// emitted `WorkerMcpDelegationSummary.errors` reflects the
+    /// delegation-level failure even when no per-call errors occurred.
+    pub fn mark_error(&self) {
+        self.extra_errors.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -326,6 +343,11 @@ impl Drop for DelegationDispatchGuard {
             }
         }
         let p99_latency_ms = compute_p99_latency_ms(&success_latencies);
+        // Add delegation-level errors (set via `mark_error` from
+        // `flush_delegation` on terminal-error outcome or flush channel
+        // closure) so the summary reflects failures even when no
+        // per-call errors occurred.
+        let errors = errors + self.extra_errors.load(Ordering::Relaxed);
         let body = spur_acp::SpurEventBody::WorkerMcpDelegationSummary {
             delegation_id: self.delegation_id.clone(),
             brain_session_id: self.brain_session_id.clone(),
@@ -676,6 +698,15 @@ impl WorkerMcpServer {
     /// observe pressure without reaching into `DispatcherDeps`.
     pub fn active_count(&self) -> u32 {
         self.active_delegations.load(Ordering::SeqCst)
+    }
+
+    /// `true` while the accept loop is still running — i.e. [`shutdown`]
+    /// has not been called and the cancellation token has not been
+    /// triggered. Read by orchestrator cache code so a stale cached
+    /// `Arc<WorkerMcpServer>` (e.g. one whose accept loop was aborted by
+    /// a session retire) is evicted and rebooted on next ensure.
+    pub fn is_running(&self) -> bool {
+        !self.shutdown.is_cancelled()
     }
 
     /// Cancel the accept loop, drain in-flight dispatchers up to `deadline`,
