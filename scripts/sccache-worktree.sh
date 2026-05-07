@@ -38,6 +38,10 @@ else
     export SCCACHE_BASEDIRS="${SPUR_ROOT}"
 fi
 
+if [[ -n "${CODEX_SANDBOX:-}" ]]; then
+    exec "$@"
+fi
+
 if command -v sccache >/dev/null 2>&1; then
     exec sccache "$@"
 fi
