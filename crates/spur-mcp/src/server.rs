@@ -131,6 +131,91 @@ struct StartupRecoveryState {
     pending: bool,
     handle: Option<StartupRecoveryTaskHandle>,
 }
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub struct StartupRecoveryProbe {
+    entered: AtomicBool,
+    dropped: AtomicBool,
+    entered_notify: tokio::sync::Notify,
+    dropped_notify: tokio::sync::Notify,
+    release_notify: tokio::sync::Notify,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl StartupRecoveryProbe {
+    pub fn new() -> Self {
+        Self {
+            entered: AtomicBool::new(false),
+            dropped: AtomicBool::new(false),
+            entered_notify: tokio::sync::Notify::new(),
+            dropped_notify: tokio::sync::Notify::new(),
+            release_notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    pub async fn wait_until_entered(&self) {
+        while !self.entered.load(Ordering::SeqCst) {
+            self.entered_notify.notified().await;
+        }
+    }
+
+    pub async fn wait_until_dropped(&self) {
+        while !self.dropped.load(Ordering::SeqCst) {
+            self.dropped_notify.notified().await;
+        }
+    }
+
+    async fn pause(self: Arc<Self>) {
+        struct DropGuard {
+            probe: Arc<StartupRecoveryProbe>,
+        }
+
+        impl Drop for DropGuard {
+            fn drop(&mut self) {
+                self.probe.dropped.store(true, Ordering::SeqCst);
+                self.probe.dropped_notify.notify_waiters();
+            }
+        }
+
+        let _guard = DropGuard {
+            probe: Arc::clone(&self),
+        };
+        self.entered.store(true, Ordering::SeqCst);
+        self.entered_notify.notify_waiters();
+        self.release_notify.notified().await;
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Default for StartupRecoveryProbe {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub struct StartupRecoveryProbeGuard;
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for StartupRecoveryProbeGuard {
+    fn drop(&mut self) {
+        *STARTUP_RECOVERY_PROBE.lock().unwrap() = None;
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+static STARTUP_RECOVERY_PROBE: Mutex<Option<Arc<StartupRecoveryProbe>>> = Mutex::new(None);
+
+#[cfg(any(test, feature = "test-support"))]
+async fn pause_startup_recovery_if_probed() {
+    let probe = STARTUP_RECOVERY_PROBE.lock().unwrap().clone();
+    if let Some(probe) = probe {
+        probe.pause().await;
+    }
+}
+
 #[cfg(test)]
 const PRODUCER_MAX_FIELD_BYTES: usize = 8192;
 const MCP_NOT_LICENSED_ERROR_CODE: i32 = -32041;
@@ -2390,6 +2475,28 @@ impl McpCallbackServer {
     pub async fn __test_call_submit_plan(&self, arguments: Value) -> Value {
         let resp = self.handle_submit_plan(Value::from(1), arguments).await;
         serde_json::to_value(&resp).expect("serialize JsonRpcResponse")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn __test_install_startup_recovery_probe(
+        probe: Arc<StartupRecoveryProbe>,
+    ) -> StartupRecoveryProbeGuard {
+        *STARTUP_RECOVERY_PROBE.lock().unwrap() = Some(probe);
+        StartupRecoveryProbeGuard
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn __test_request_startup_recovery(&self) {
+        self.request_startup_recovery();
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn __test_drop_startup_recovery_handle(&self) {
+        let handle = self.startup_recovery.lock().unwrap().handle.take();
+        drop(handle);
     }
 
     /// Test-only: trigger the persisted-plan recovery path directly.
@@ -6106,6 +6213,8 @@ impl McpCallbackServer {
 
     async fn recover_persisted_plans(&self, pm: Arc<spur_pm::PmService>) -> anyhow::Result<()> {
         let brain_session_id = self.brain_session_id_ready().await.clone();
+        #[cfg(any(test, feature = "test-support"))]
+        pause_startup_recovery_if_probed().await;
         let epics = pm
             .list_issues(spur_pm::IssueFilter {
                 status: Some("open".to_string()),
