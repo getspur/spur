@@ -1098,6 +1098,137 @@ pub fn validate_plan(tasks: &[PlanTask]) -> Result<(), String> {
     Ok(())
 }
 
+/// A single auto-injected dependency edge. Returned by `find_sibling_overlaps`
+/// and surfaced in the `submit_plan` response so the brain can audit which
+/// tasks were serialized.
+#[derive(Debug, Clone, Serialize)]
+pub struct SiblingOverlap {
+    /// Task that must complete first (lex-lower task_id of the pair).
+    pub from: String,
+    /// Task that gets the synthetic `depends_on: from` edge (lex-higher).
+    pub to: String,
+    /// The intersection of `context_files` that triggered the synthetic edge.
+    pub shared_files: Vec<String>,
+}
+
+/// Detect pairs of tasks where:
+///   1. Neither is a transitive ancestor of the other (i.e., they could
+///      currently dispatch in parallel), AND
+///   2. Their `context_files` sets intersect.
+///
+/// For each such pair, produce one `SiblingOverlap` with `from` = lex-lower
+/// task_id, `to` = lex-higher task_id. Determinism matters: callers will
+/// inject `depends_on` edges based on this output, and the synthetic graph
+/// must not depend on input ordering.
+pub fn find_sibling_overlaps(tasks: &[PlanTask]) -> Vec<SiblingOverlap> {
+    // Build adjacency (forward edges: dep → dependent) and reachability.
+    let id_to_idx: HashMap<&str, usize> = tasks
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.task_id.as_str(), i))
+        .collect();
+    let n = tasks.len();
+    // Transitive closure via DFS from each node.
+    let mut reachable: Vec<HashSet<usize>> = vec![HashSet::new(); n];
+    for (i, t) in tasks.iter().enumerate() {
+        let mut stack: Vec<usize> = t
+            .depends_on
+            .iter()
+            .filter_map(|d| id_to_idx.get(d.as_str()).copied())
+            .collect();
+        while let Some(node) = stack.pop() {
+            if reachable[i].insert(node) {
+                for dep in &tasks[node].depends_on {
+                    if let Some(&dep_idx) = id_to_idx.get(dep.as_str()) {
+                        if !reachable[i].contains(&dep_idx) {
+                            stack.push(dep_idx);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let related = |a: usize, b: usize| reachable[a].contains(&b) || reachable[b].contains(&a);
+
+    let mut overlaps = Vec::new();
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if related(i, j) {
+                continue;
+            }
+            let files_i: HashSet<&str> =
+                tasks[i].context_files.iter().map(String::as_str).collect();
+            let shared: Vec<String> = tasks[j]
+                .context_files
+                .iter()
+                .filter(|f| files_i.contains(f.as_str()))
+                .cloned()
+                .collect();
+            if shared.is_empty() {
+                continue;
+            }
+            // Determinism: order pair by lex task_id.
+            let (from, to) = if tasks[i].task_id <= tasks[j].task_id {
+                (&tasks[i].task_id, &tasks[j].task_id)
+            } else {
+                (&tasks[j].task_id, &tasks[i].task_id)
+            };
+            let mut shared_sorted = shared;
+            shared_sorted.sort();
+            overlaps.push(SiblingOverlap {
+                from: from.clone(),
+                to: to.clone(),
+                shared_files: shared_sorted,
+            });
+        }
+    }
+    // Sort by (from, to) for stable output.
+    overlaps.sort_by(|a, b| a.from.cmp(&b.from).then_with(|| a.to.cmp(&b.to)));
+    overlaps
+}
+
+/// Mutates `tasks` in place: for each `SiblingOverlap`, append `from` to the
+/// `depends_on` of the task with id `to` (unless already present).
+pub fn apply_sibling_overlaps(tasks: &mut [PlanTask], overlaps: &[SiblingOverlap]) {
+    if overlaps.is_empty() {
+        return;
+    }
+    let id_to_idx: HashMap<String, usize> = tasks
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.task_id.clone(), i))
+        .collect();
+    for o in overlaps {
+        let Some(&idx) = id_to_idx.get(&o.to) else {
+            continue;
+        };
+        if !tasks[idx].depends_on.iter().any(|d| d == &o.from) {
+            tasks[idx].depends_on.push(o.from.clone());
+        }
+    }
+}
+
+/// Submit-time normalization pipeline: validates the plan, computes sibling
+/// overlaps, applies synthetic edges, and re-validates (defense-in-depth
+/// against any future logic that could introduce cycles). Returns the list
+/// of injected overlaps so `submit_plan` can surface them in its response.
+#[allow(clippy::ptr_arg)]
+pub fn submit_plan_normalize_tasks(
+    tasks: &mut Vec<PlanTask>,
+) -> Result<Vec<SiblingOverlap>, String> {
+    validate_plan(tasks)?;
+    let overlaps = find_sibling_overlaps(tasks);
+    apply_sibling_overlaps(tasks, &overlaps);
+    // Re-validate after mutation. Synthetic edges should never introduce a
+    // cycle (lex-ordered pairs are acyclic by construction), but a future
+    // refactor could break this — fail loudly if it does.
+    validate_plan(tasks).map_err(|e| {
+        format!("auto-serialize-siblings produced an invalid plan (this is a bug): {e}")
+    })?;
+    Ok(overlaps)
+}
+
 /// Returns true if the dependency graph contains a cycle (Kahn's algorithm).
 fn has_cycle(tasks: &[PlanTask]) -> bool {
     let mut in_degree: HashMap<&str, usize> = HashMap::new();
@@ -4214,6 +4345,258 @@ mod tests {
         let tasks = vec![task("A", &["C"]), task("B", &["A"]), task("C", &["B"])];
         let err = validate_plan(&tasks).unwrap_err();
         assert!(err.contains("Cycle"));
+    }
+
+    fn task_with_files(id: &str, deps: &[&str], files: &[&str]) -> PlanTask {
+        PlanTask {
+            task_id: id.into(),
+            agent: "test-agent".into(),
+            task: "test task".into(),
+            depends_on: deps.iter().map(|s| s.to_string()).collect(),
+            issue_id: None,
+            context_files: files.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn find_sibling_overlaps_detects_unrelated_pair_sharing_file() {
+        // Two tasks at the same DAG level, neither depends on the other,
+        // both touch orchestrator.rs. Expect one overlap entry.
+        let tasks = vec![
+            task_with_files("A", &[], &["crates/spur-core/src/orchestrator.rs"]),
+            task_with_files("B", &[], &["crates/spur-core/src/orchestrator.rs"]),
+        ];
+        let overlaps = super::find_sibling_overlaps(&tasks);
+        assert_eq!(overlaps.len(), 1);
+        let entry = &overlaps[0];
+        // The injected edge is deterministic: lexicographically lower id
+        // becomes the dep of the higher id (so synthetic edges form an order
+        // independent of input task order).
+        assert_eq!(entry.from, "A");
+        assert_eq!(entry.to, "B");
+        assert_eq!(
+            entry.shared_files,
+            vec!["crates/spur-core/src/orchestrator.rs"]
+        );
+    }
+
+    #[test]
+    fn find_sibling_overlaps_skips_pairs_with_existing_transitive_dep() {
+        // A → B → C. A and C share a file but A is already a transitive dep of C.
+        let tasks = vec![
+            task_with_files("A", &[], &["shared.rs"]),
+            task_with_files("B", &["A"], &[]),
+            task_with_files("C", &["B"], &["shared.rs"]),
+        ];
+        let overlaps = super::find_sibling_overlaps(&tasks);
+        assert!(
+            overlaps.is_empty(),
+            "expected no overlaps, got {:?}",
+            overlaps
+        );
+    }
+
+    #[test]
+    fn find_sibling_overlaps_skips_disjoint_files() {
+        let tasks = vec![
+            task_with_files("A", &[], &["foo.rs"]),
+            task_with_files("B", &[], &["bar.rs"]),
+        ];
+        assert!(super::find_sibling_overlaps(&tasks).is_empty());
+    }
+
+    #[test]
+    fn find_sibling_overlaps_handles_empty_context_files() {
+        // A task with no context_files cannot overlap with anything.
+        let tasks = vec![
+            task_with_files("A", &[], &[]),
+            task_with_files("B", &[], &["foo.rs"]),
+        ];
+        assert!(super::find_sibling_overlaps(&tasks).is_empty());
+    }
+
+    #[test]
+    fn find_sibling_overlaps_diamond_dag_three_siblings() {
+        // The br-77i incident pattern: A depends on root, B/C/D are parallel
+        // siblings all touching orchestrator.rs.
+        let tasks = vec![
+            task_with_files("root", &[], &["root.rs"]),
+            task_with_files("B", &["root"], &["orch.rs"]),
+            task_with_files("C", &["root"], &["orch.rs"]),
+            task_with_files("D", &["root"], &["orch.rs"]),
+            task_with_files("sink", &["B", "C", "D"], &[]),
+        ];
+        let overlaps = super::find_sibling_overlaps(&tasks);
+        // Three unordered pairs (B,C), (B,D), (C,D) → three synthetic edges.
+        assert_eq!(overlaps.len(), 3);
+        let pairs: std::collections::HashSet<(&str, &str)> = overlaps
+            .iter()
+            .map(|o| (o.from.as_str(), o.to.as_str()))
+            .collect();
+        assert!(pairs.contains(&("B", "C")));
+        assert!(pairs.contains(&("B", "D")));
+        assert!(pairs.contains(&("C", "D")));
+    }
+
+    #[test]
+    fn apply_sibling_overlaps_injects_edges_and_preserves_originals() {
+        let mut tasks = vec![
+            task_with_files("A", &[], &["shared.rs"]),
+            task_with_files("B", &["A"], &["other.rs"]),
+            task_with_files("C", &[], &["shared.rs"]),
+        ];
+        let overlaps = super::find_sibling_overlaps(&tasks);
+        assert_eq!(overlaps.len(), 1);
+        super::apply_sibling_overlaps(&mut tasks, &overlaps);
+
+        let c = tasks.iter().find(|t| t.task_id == "C").unwrap();
+        assert!(
+            c.depends_on.iter().any(|d| d == "A"),
+            "expected synthetic edge A→C, got {:?}",
+            c.depends_on
+        );
+        let b = tasks.iter().find(|t| t.task_id == "B").unwrap();
+        assert_eq!(
+            b.depends_on,
+            vec!["A".to_string()],
+            "B's original deps must be preserved"
+        );
+    }
+
+    #[test]
+    fn apply_sibling_overlaps_idempotent_on_existing_edge() {
+        // If somehow the synthetic edge is already present, we must not duplicate.
+        let mut tasks = vec![
+            task_with_files("A", &[], &["shared.rs"]),
+            task_with_files("B", &["A"], &["shared.rs"]),
+        ];
+        // After find_sibling_overlaps: A and B are related (B depends on A), so
+        // no overlap is emitted. Direct invocation simulates a stale synthetic
+        // edge slipping through.
+        let synthetic = vec![super::SiblingOverlap {
+            from: "A".into(),
+            to: "B".into(),
+            shared_files: vec!["shared.rs".into()],
+        }];
+        super::apply_sibling_overlaps(&mut tasks, &synthetic);
+        let b = tasks.iter().find(|t| t.task_id == "B").unwrap();
+        assert_eq!(b.depends_on, vec!["A".to_string()]);
+    }
+
+    #[test]
+    fn apply_sibling_overlaps_keeps_validate_plan_passing() {
+        // After injecting synthetic edges, the resulting plan must still pass
+        // validate_plan (no cycles introduced — synthetic edges go lex-lower→higher,
+        // and original DAG was acyclic).
+        let mut tasks = vec![
+            task_with_files("A", &[], &["x.rs"]),
+            task_with_files("B", &[], &["x.rs"]),
+            task_with_files("C", &[], &["x.rs"]),
+        ];
+        let overlaps = super::find_sibling_overlaps(&tasks);
+        super::apply_sibling_overlaps(&mut tasks, &overlaps);
+        super::validate_plan(&tasks).expect("post-injection plan must validate");
+    }
+
+    #[test]
+    fn submit_plan_normalize_tasks_returns_injected_overlaps() {
+        // Diamond-DAG sibling-file-overlap (the br-77i incident pattern).
+        let mut tasks = vec![
+            task_with_files("root", &[], &["root.rs"]),
+            task_with_files("X", &["root"], &["orch.rs"]),
+            task_with_files("Y", &["root"], &["orch.rs"]),
+            task_with_files("sink", &["X", "Y"], &[]),
+        ];
+        let overlaps = super::submit_plan_normalize_tasks(&mut tasks)
+            .expect("normalize should succeed for valid input");
+        assert_eq!(overlaps.len(), 1);
+        assert_eq!(overlaps[0].from, "X");
+        assert_eq!(overlaps[0].to, "Y");
+        let y = tasks.iter().find(|t| t.task_id == "Y").unwrap();
+        assert!(
+            y.depends_on.iter().any(|d| d == "X"),
+            "Y must now depend on X"
+        );
+    }
+
+    #[test]
+    fn submit_plan_normalize_tasks_propagates_validate_errors() {
+        let mut tasks = vec![task_with_files("A", &["A"], &[])]; // self-cycle
+        let err = super::submit_plan_normalize_tasks(&mut tasks).unwrap_err();
+        assert!(err.contains("Cycle"));
+    }
+
+    #[test]
+    fn br_77i_diamond_dag_orchestrator_rs_serializes_three_siblings() {
+        // Reproduces the bd-14cq Wave-1+Wave-2 DAG that triggered br-77i:
+        //   orch-server-field (root) →
+        //     orch-shutdown-retire | orch-flush-on-exit | orch-inject-mcp-url →
+        //       e2e-integration-test (sink)
+        // All three Wave-2 tasks touched orchestrator.rs.
+        let mut tasks = vec![
+            task_with_files(
+                "orch-server-field",
+                &[],
+                &["crates/spur-core/src/orchestrator.rs"],
+            ),
+            task_with_files(
+                "orch-shutdown-retire",
+                &["orch-server-field"],
+                &["crates/spur-core/src/orchestrator.rs"],
+            ),
+            task_with_files(
+                "orch-flush-on-exit",
+                &["orch-server-field"],
+                &["crates/spur-core/src/orchestrator.rs"],
+            ),
+            task_with_files(
+                "orch-inject-mcp-url",
+                &["orch-server-field"],
+                &["crates/spur-core/src/orchestrator.rs"],
+            ),
+            task_with_files(
+                "e2e-integration-test",
+                &[
+                    "orch-shutdown-retire",
+                    "orch-flush-on-exit",
+                    "orch-inject-mcp-url",
+                ],
+                &[],
+            ),
+        ];
+        let overlaps = super::submit_plan_normalize_tasks(&mut tasks).unwrap();
+
+        // Three pairs among Wave-2 siblings: (flush, inject), (flush, shutdown),
+        // (inject, shutdown). orch-server-field overlaps with all three Wave-2
+        // tasks but is their declared parent → not flagged.
+        assert_eq!(overlaps.len(), 3, "got {:?}", overlaps);
+
+        // Verify Wave-2 tasks are now linearly ordered: lex-min depends on
+        // nothing extra; lex-mid depends on lex-min; lex-max depends on the
+        // other two.
+        let flush = tasks
+            .iter()
+            .find(|t| t.task_id == "orch-flush-on-exit")
+            .unwrap();
+        let inject = tasks
+            .iter()
+            .find(|t| t.task_id == "orch-inject-mcp-url")
+            .unwrap();
+        let shutdown = tasks
+            .iter()
+            .find(|t| t.task_id == "orch-shutdown-retire")
+            .unwrap();
+        // Lex order: orch-flush-on-exit < orch-inject-mcp-url < orch-shutdown-retire.
+        assert_eq!(flush.depends_on, vec!["orch-server-field"]);
+        assert!(inject
+            .depends_on
+            .contains(&"orch-flush-on-exit".to_string()));
+        assert!(shutdown
+            .depends_on
+            .contains(&"orch-flush-on-exit".to_string()));
+        assert!(shutdown
+            .depends_on
+            .contains(&"orch-inject-mcp-url".to_string()));
     }
 
     #[test]
