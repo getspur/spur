@@ -37,8 +37,13 @@ fn confirm_variant_renders_execute_epic_prompt() {
         rendered.contains("This sends a prompt asking the brain to analyze"),
         "{rendered}"
     );
-    assert!(rendered.contains("[Enter] confirm"), "{rendered}");
-    assert!(rendered.contains("[Esc] cancel"), "{rendered}");
+    assert!(
+        rendered.contains("Use e to review the prompt before sending."),
+        "{rendered}"
+    );
+    assert!(rendered.contains("[Enter] Confirm"), "{rendered}");
+    assert!(rendered.contains("[e] Edit in input bar"), "{rendered}");
+    assert!(rendered.contains("[Esc] Cancel"), "{rendered}");
 }
 
 #[test]

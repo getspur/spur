@@ -8,7 +8,7 @@ use ratatui::{
 };
 
 const MODAL_WIDTH: u16 = 60;
-const CONFIRM_HEIGHT: u16 = 8;
+const CONFIRM_HEIGHT: u16 = 9;
 const ALREADY_EXECUTING_HEIGHT: u16 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,11 +64,14 @@ impl ExecuteModal {
                 Line::from("  This sends a prompt asking the brain to analyze"),
                 Line::from("  this item and determine how to execute it."),
                 Line::from(""),
-                action_line(
+                Line::from("  Use e to review the prompt before sending."),
+                action_line3(
                     "[Enter]",
-                    "confirm",
+                    "Confirm",
+                    "[e]",
+                    "Edit in input bar",
                     "[Esc]",
-                    "cancel",
+                    "Cancel",
                     popup_width,
                     Color::Green,
                 ),
@@ -91,6 +94,50 @@ impl ExecuteModal {
             ],
         }
     }
+}
+
+fn action_line3(
+    left_key: &'static str,
+    left_label: &'static str,
+    middle_key: &'static str,
+    middle_label: &'static str,
+    right_key: &'static str,
+    right_label: &'static str,
+    popup_width: u16,
+    primary_color: Color,
+) -> Line<'static> {
+    let left_width = 1 + left_key.len() + 1 + left_label.len();
+    let middle_width = middle_key.len() + 1 + middle_label.len();
+    let right_width = right_key.len() + 1 + right_label.len();
+    let content_width = popup_width.saturating_sub(2) as usize;
+    let total_width = left_width + middle_width + right_width;
+    let gap = content_width.saturating_sub(total_width).max(2) / 2;
+
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled(
+            left_key,
+            Style::default()
+                .fg(primary_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(
+            " {left_label}{}",
+            " ".repeat(gap.saturating_sub(1))
+        )),
+        Span::styled(
+            middle_key,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(" {middle_label}{}", " ".repeat(gap))),
+        Span::styled(
+            right_key,
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(" {right_label}")),
+    ])
 }
 
 fn action_line(
