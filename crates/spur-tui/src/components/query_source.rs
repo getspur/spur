@@ -340,10 +340,11 @@ fn issue_preview_for_descriptor(
         ),
     ]));
 
-    if !descriptor.title.trim().is_empty() {
+    let title = crate::mentions::issue_source::sanitize_single_line(&descriptor.title);
+    if !title.trim().is_empty() {
         lines.push(Line::raw(""));
         lines.push(Line::from(Span::styled(
-            descriptor.title.clone(),
+            title,
             Style::default().add_modifier(Modifier::BOLD),
         )));
     }
@@ -375,7 +376,7 @@ fn issue_preview_for_descriptor(
             "Labels:",
             Style::default().add_modifier(Modifier::BOLD),
         )));
-        lines.push(Line::raw(descriptor.labels.join(", ")));
+        lines.push(labels_preview_line(&descriptor.labels));
     }
 
     lines.push(Line::raw(""));
@@ -404,6 +405,31 @@ fn optional_preview_value(value: Option<&str>) -> String {
 
 fn labeled_preview_line(label: &'static str, value: String) -> Line<'static> {
     Line::from(vec![Span::raw(label), Span::raw(" "), Span::raw(value)])
+}
+
+fn labels_preview_line(labels: &[String]) -> Line<'static> {
+    const LABEL_PREVIEW_LIMIT: usize = 6;
+
+    let mut spans = Vec::new();
+    for (idx, label) in labels.iter().take(LABEL_PREVIEW_LIMIT).enumerate() {
+        if idx > 0 {
+            spans.push(Span::raw(", "));
+        }
+        spans.push(Span::raw(label.clone()));
+    }
+    let remaining = labels.len().saturating_sub(LABEL_PREVIEW_LIMIT);
+    if remaining > 0 {
+        if !spans.is_empty() {
+            spans.push(Span::raw(", "));
+        }
+        spans.push(Span::styled(
+            format!("+{remaining} more"),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ));
+    }
+    Line::from(spans)
 }
 
 fn url_preview_line(url: &str) -> Line<'static> {
@@ -821,6 +847,27 @@ mod tests {
             .join("\n")
     }
 
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    fn issue_descriptor() -> crate::mentions::IssueMentionDescriptor {
+        crate::mentions::IssueMentionDescriptor {
+            id: "bd-1".to_string(),
+            title: "Mention picker issue rows".to_string(),
+            source: spur_pm::PmSource::Beads,
+            status: "open".to_string(),
+            assignee: Some("alice".to_string()),
+            priority: Some(2),
+            issue_type: Some("task".to_string()),
+            labels: vec!["mentions".to_string()],
+            url: "https://example.test/bd-1".to_string(),
+        }
+    }
+
     fn make_mention_registry_with_cwd(cwd: &std::path::Path) -> Rc<RefCell<MentionRegistry>> {
         let mut r = MentionRegistry::new();
         // Prime the cache by running one query; cwd must actually exist so
@@ -1014,6 +1061,41 @@ mod tests {
         assert!(text.contains("mentions"), "{text}");
         assert!(text.contains("preview"), "{text}");
         assert!(text.contains("URL: https://example.test/bd-42"), "{text}");
+    }
+
+    #[test]
+    fn issue_preview_caps_label_line_after_six_labels() {
+        let mut descriptor = issue_descriptor();
+        descriptor.labels = (1..=10).map(|n| format!("label-{n}")).collect();
+
+        let preview = issue_preview_for_descriptor(&descriptor);
+
+        let labels_line = preview
+            .lines
+            .iter()
+            .map(line_text)
+            .find(|text| text.starts_with("label-1"))
+            .expect("labels value line");
+        assert_eq!(
+            labels_line,
+            "label-1, label-2, label-3, label-4, label-5, label-6, +4 more"
+        );
+    }
+
+    #[test]
+    fn issue_preview_sanitizes_newlines_in_title() {
+        let mut descriptor = issue_descriptor();
+        descriptor.title = "first\nsecond".to_string();
+
+        let preview = issue_preview_for_descriptor(&descriptor);
+
+        let title_line = preview
+            .lines
+            .iter()
+            .map(line_text)
+            .find(|text| text == "first second")
+            .expect("sanitized title line");
+        assert_eq!(title_line, "first second");
     }
 
     #[test]
