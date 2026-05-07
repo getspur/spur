@@ -276,6 +276,34 @@ impl TestHarness {
         plan_id
     }
 
+    pub async fn server_test_submit_plan(&self, args: Value) -> Value {
+        self.server.__test_call_submit_plan(args).await
+    }
+
+    pub async fn tick_until_request_or_timeout(&mut self) {
+        for _ in 0..20 {
+            if !self.pending_requests.is_empty() {
+                return;
+            }
+
+            self.reconciler.tick_once().await.expect("reconciler tick");
+            match tokio::time::timeout(Duration::from_millis(100), self.request_rx.recv()).await {
+                Ok(Some(request)) => {
+                    self.pending_requests.push_back(request);
+                    return;
+                }
+                Ok(None) => panic!("delegation request channel closed"),
+                Err(_) => {}
+            }
+        }
+
+        panic!("timed out waiting for reconciler dispatch request");
+    }
+
+    pub fn take_next_dispatch(&mut self) -> Option<DelegationRequest> {
+        self.pending_requests.pop_front()
+    }
+
     pub async fn submit_plan(&mut self) -> String {
         self.submit_plan_with_tasks(
             "G-strict bd-2dww synthetic reproducer",
