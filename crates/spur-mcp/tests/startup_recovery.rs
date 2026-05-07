@@ -103,7 +103,6 @@ async fn start_does_not_recover_before_brain_session_is_bound() {
     server
         .set_brain_session_id(owner)
         .expect("brain_session_id set once");
-    Arc::clone(&server).spawn_startup_recovery_if_ready();
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
         server.__test_wait_startup_recovery(),
