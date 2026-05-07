@@ -134,6 +134,21 @@ fn extract_overlays(spec: &BaseSpec) -> Vec<(String, String, String)> {
     }
 }
 
+/// Whether the dispatch path needs to call `snapshot_brain_state`.
+/// Required only when the resolved base would fall back to the snapshot
+/// branch — i.e. `None` / `RepoMain` / `WithOverlay { base: RepoMain }`.
+/// Explicit `Branch` / `Commit` bases consume no snapshot, so taking one
+/// just to throw it away is wasted work and (per br-osl) actively breaks
+/// dispatch when the brain WT is dirty.
+fn snapshot_required_for_dispatch(spec: Option<&BaseSpec>) -> bool {
+    match spec {
+        None => true,
+        Some(BaseSpec::RepoMain) => true,
+        Some(BaseSpec::Branch { .. }) | Some(BaseSpec::Commit { .. }) => false,
+        Some(BaseSpec::WithOverlay { base, .. }) => matches!(base, BaseTarget::RepoMain),
+    }
+}
+
 fn emit_dispatch_overlay_applied(
     funnel: &crate::event_funnel::FunnelHandle,
     request_id: &str,
@@ -7985,11 +8000,17 @@ async fn run_one_worker_attempt(
 
     let start = Instant::now();
 
-    // 1. Snapshot brain state and create worktree.
-    let snapshot_branch = worktrees
-        .snapshot_brain_state()
-        .await
-        .map_err(|e| AttemptSetupError::SnapshotFailed(e.to_string()))?;
+    // 1. Snapshot brain state — only when the resolved base would consume it.
+    //    Explicit Branch/Commit bases bypass the WT entirely (br-osl).
+    let snapshot_needed = snapshot_required_for_dispatch(ctx.base.as_ref());
+    let snapshot_branch = if snapshot_needed {
+        worktrees
+            .snapshot_brain_state()
+            .await
+            .map_err(|e| AttemptSetupError::SnapshotFailed(e.to_string()))?
+    } else {
+        String::new()
+    };
 
     let base_branch = ctx
         .base
@@ -8009,12 +8030,15 @@ async fn run_one_worker_attempt(
 
     // The snapshot branch is only needed as a base ref for worktree creation.
     // Once the worktree exists, delete it immediately to prevent ref leaks.
-    if let Err(e) = worktrees.delete_snapshot_branch(&snapshot_branch).await {
-        tracing::debug!(
-            snapshot_branch = %snapshot_branch,
-            error = %e,
-            "failed to delete snapshot branch after worktree creation; will leak until cleanup_orphans runs"
-        );
+    // Skip when no snapshot was taken in the first place.
+    if snapshot_needed {
+        if let Err(e) = worktrees.delete_snapshot_branch(&snapshot_branch).await {
+            tracing::debug!(
+                snapshot_branch = %snapshot_branch,
+                error = %e,
+                "failed to delete snapshot branch after worktree creation; will leak until cleanup_orphans runs"
+            );
+        }
     }
 
     let overlays = ctx.base.as_ref().map(extract_overlays).unwrap_or_default();
@@ -10620,8 +10644,45 @@ mod build_diff_summary_tests {
 
 #[cfg(test)]
 mod base_spec_dispatch_tests {
-    use super::{emit_dispatch_overlay_applied, extract_overlays, resolve_base_branch};
+    use super::{
+        emit_dispatch_overlay_applied, extract_overlays, resolve_base_branch,
+        snapshot_required_for_dispatch,
+    };
     use spur_mcp::tools::{BaseSpec, BaseTarget, OverlayCommit};
+
+    #[test]
+    fn snapshot_needed_for_none_and_repo_main() {
+        assert!(snapshot_required_for_dispatch(None));
+        assert!(snapshot_required_for_dispatch(Some(&BaseSpec::RepoMain)));
+        assert!(snapshot_required_for_dispatch(Some(
+            &BaseSpec::WithOverlay {
+                base: BaseTarget::RepoMain,
+                overlays: vec![],
+            }
+        )));
+    }
+
+    #[test]
+    fn snapshot_not_needed_for_branch_or_commit() {
+        assert!(!snapshot_required_for_dispatch(Some(&BaseSpec::Branch {
+            name: "x".into()
+        })));
+        assert!(!snapshot_required_for_dispatch(Some(&BaseSpec::Commit {
+            oid: "abc".into()
+        })));
+        assert!(!snapshot_required_for_dispatch(Some(
+            &BaseSpec::WithOverlay {
+                base: BaseTarget::Branch { name: "x".into() },
+                overlays: vec![],
+            }
+        )));
+        assert!(!snapshot_required_for_dispatch(Some(
+            &BaseSpec::WithOverlay {
+                base: BaseTarget::Commit { oid: "abc".into() },
+                overlays: vec![],
+            }
+        )));
+    }
 
     #[test]
     fn resolve_base_branch_unwraps_with_overlay() {
