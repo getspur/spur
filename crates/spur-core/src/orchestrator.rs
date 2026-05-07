@@ -2938,6 +2938,7 @@ impl Orchestrator {
             mcp_server
                 .set_brain_session_id(brain_session_id.clone())
                 .expect("set once");
+            Arc::clone(&mcp_server).spawn_startup_recovery_if_ready();
             brain_session_id_cell
                 .set(brain_session_id.as_session_id().clone())
                 .expect("set once");
@@ -4796,6 +4797,7 @@ impl Orchestrator {
             mcp_server
                 .set_brain_session_id(brain_session_id.clone())
                 .expect("set once");
+            Arc::clone(&mcp_server).spawn_startup_recovery_if_ready();
             brain_session_id_cell
                 .set(brain_session_id.as_session_id().clone())
                 .expect("set once");
@@ -5139,6 +5141,7 @@ impl Orchestrator {
             mcp_server
                 .set_brain_session_id(brain_session_id.clone())
                 .expect("set once");
+            Arc::clone(&mcp_server).spawn_startup_recovery_if_ready();
             brain_session_id_cell
                 .set(brain_session_id.as_session_id().clone())
                 .expect("set once");
