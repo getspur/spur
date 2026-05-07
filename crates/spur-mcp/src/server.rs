@@ -1693,17 +1693,33 @@ fn topological_order(tasks: &[crate::plan::PlanTask]) -> Result<Vec<usize>, Stri
     Ok(out)
 }
 
-async fn snapshot_plan_base(
+async fn resolve_plan_base(
     repo_root: Option<&std::path::PathBuf>,
+    base_target: Option<&crate::tools::BaseTarget>,
 ) -> Result<PlanBaseSnapshot, String> {
     let Some(root) = repo_root.cloned() else {
         return Ok(PlanBaseSnapshot::default());
     };
     let manager = WorktreeManager::new(root);
-    let branch = manager
-        .snapshot_brain_state()
-        .await
-        .map_err(|e| format!("failed to snapshot plan base: {e}"))?;
+
+    let branch = match base_target {
+        // Legacy / explicit RepoMain: snapshot the brain working tree.
+        None | Some(crate::tools::BaseTarget::RepoMain) => manager
+            .snapshot_brain_state()
+            .await
+            .map_err(|e| format!("failed to snapshot plan base: {e}"))?,
+        // Explicit branch: resolve the ref and create a snapshot ref pointed
+        // at the same OID. Brain working tree is never touched.
+        Some(crate::tools::BaseTarget::Branch { name }) => manager
+            .snapshot_at_ref(name)
+            .await
+            .map_err(|e| format!("failed to resolve plan base branch '{name}': {e}"))?,
+        Some(crate::tools::BaseTarget::Commit { oid }) => manager
+            .snapshot_at_ref(oid)
+            .await
+            .map_err(|e| format!("failed to resolve plan base commit '{oid}': {e}"))?,
+    };
+
     let oid = Some(
         run_git_capture(
             &manager.repo_root,
@@ -1722,6 +1738,119 @@ async fn snapshot_plan_base(
 struct PlanBaseSnapshot {
     branch: Option<String>,
     oid: Option<String>,
+}
+
+#[cfg(test)]
+mod resolve_plan_base_tests {
+    use super::*;
+    use crate::tools::BaseTarget;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    fn run_git(repo: &std::path::Path, args: &[&str]) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {:?} failed", args);
+    }
+
+    fn capture(repo: &std::path::Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {:?} failed", args);
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    fn seed_repo(repo: &std::path::Path) {
+        run_git(repo, &["init", "-q", "-b", "main"]);
+        run_git(repo, &["config", "user.email", "t@t"]);
+        run_git(repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("a"), "1").unwrap();
+        run_git(repo, &["add", "a"]);
+        run_git(repo, &["commit", "-q", "-m", "seed"]);
+    }
+
+    #[tokio::test]
+    async fn resolve_plan_base_none_falls_back_to_brain_snapshot() {
+        let dir = TempDir::new().unwrap();
+        seed_repo(dir.path());
+        let head_oid = capture(dir.path(), &["rev-parse", "HEAD"]);
+        let root = dir.path().to_path_buf();
+
+        let snap = resolve_plan_base(Some(&root), None).await.unwrap();
+        assert!(snap
+            .branch
+            .as_deref()
+            .unwrap()
+            .starts_with("spur/brain-snapshot-"));
+        assert_eq!(snap.oid.as_deref(), Some(head_oid.as_str()));
+    }
+
+    #[tokio::test]
+    async fn resolve_plan_base_branch_target_skips_stash_and_uses_named_branch() {
+        let dir = TempDir::new().unwrap();
+        seed_repo(dir.path());
+        run_git(dir.path(), &["checkout", "-q", "-b", "phase0"]);
+        std::fs::write(dir.path().join("b"), "2").unwrap();
+        run_git(dir.path(), &["add", "b"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "phase0 work"]);
+        let phase0_oid = capture(dir.path(), &["rev-parse", "HEAD"]);
+        run_git(dir.path(), &["checkout", "-q", "main"]);
+
+        // Dirty the WT — must not affect snapshot.
+        std::fs::write(dir.path().join("a"), "dirty").unwrap();
+
+        let root = dir.path().to_path_buf();
+        let target = BaseTarget::Branch {
+            name: "phase0".into(),
+        };
+        let snap = resolve_plan_base(Some(&root), Some(&target)).await.unwrap();
+
+        assert_eq!(snap.oid.as_deref(), Some(phase0_oid.as_str()));
+        let a_contents = std::fs::read_to_string(dir.path().join("a")).unwrap();
+        assert_eq!(a_contents, "dirty", "WT must be untouched");
+    }
+
+    #[tokio::test]
+    async fn resolve_plan_base_commit_target_uses_oid() {
+        let dir = TempDir::new().unwrap();
+        seed_repo(dir.path());
+        let seed_oid = capture(dir.path(), &["rev-parse", "HEAD"]);
+        std::fs::write(dir.path().join("a"), "2").unwrap();
+        run_git(dir.path(), &["add", "a"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "second"]);
+        let head_oid = capture(dir.path(), &["rev-parse", "HEAD"]);
+        assert_ne!(seed_oid, head_oid);
+
+        let root = dir.path().to_path_buf();
+        let target = BaseTarget::Commit {
+            oid: seed_oid.clone(),
+        };
+        let snap = resolve_plan_base(Some(&root), Some(&target)).await.unwrap();
+        assert_eq!(snap.oid.as_deref(), Some(seed_oid.as_str()));
+    }
+
+    #[tokio::test]
+    async fn resolve_plan_base_unknown_branch_fails_loudly() {
+        let dir = TempDir::new().unwrap();
+        seed_repo(dir.path());
+        let root = dir.path().to_path_buf();
+        let target = BaseTarget::Branch {
+            name: "does-not-exist".into(),
+        };
+        let err = resolve_plan_base(Some(&root), Some(&target))
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("does-not-exist"),
+            "error must mention the bad ref; got: {err}"
+        );
+    }
 }
 
 #[derive(Debug, Default)]
@@ -5010,7 +5139,8 @@ impl McpCallbackServer {
             build_entries_with_task_map(tasks, epic_subgraph.as_ref().map(|sg| &sg.task_map));
 
         let task_count = entries.len();
-        let base_snapshot = match snapshot_plan_base(self.repo_root.as_ref()).await {
+        // base_target wired up in Task 5; for compile parity, pass None here.
+        let base_snapshot = match resolve_plan_base(self.repo_root.as_ref(), None).await {
             Ok(snapshot) => snapshot,
             Err(e) => return JsonRpcResponse::internal_error(id, e),
         };
@@ -5380,7 +5510,7 @@ impl McpCallbackServer {
             .collect();
 
         let task_count = entries.len();
-        let base_snapshot = match snapshot_plan_base(self.repo_root.as_ref()).await {
+        let base_snapshot = match resolve_plan_base(self.repo_root.as_ref(), None).await {
             Ok(snapshot) => snapshot,
             Err(e) => {
                 self.plan_registry.lock().await.by_epic.remove(&epic_id);
@@ -7975,7 +8105,7 @@ async fn init_beads_pm(
 
 #[cfg(test)]
 mod merge_plan_tests {
-    use super::{integrate_plan_branches, run_git_capture, snapshot_plan_base, JsonRpcResponse};
+    use super::{integrate_plan_branches, resolve_plan_base, run_git_capture, JsonRpcResponse};
     use crate::plan::audit_sentinel::{encode_comment, AuditSentinelKind, CompletionState};
     use crate::plan::{PlanMergeState, PlanTask};
     use serde_json::{json, Value};
@@ -8721,14 +8851,14 @@ mod merge_plan_tests {
     }
 
     #[tokio::test]
-    async fn snapshot_plan_base_captures_oid() {
+    async fn resolve_plan_base_captures_oid() {
         let dir = init_repo().await;
         commit_file(dir.path(), "base.txt", "base\n", "seed").await;
 
         let repo_root = dir.path().to_path_buf();
-        let snapshot = snapshot_plan_base(Some(&repo_root))
+        let snapshot = resolve_plan_base(Some(&repo_root), None)
             .await
-            .expect("snapshot_plan_base");
+            .expect("resolve_plan_base");
 
         let expected_oid = run_git_capture(
             dir.path(),
