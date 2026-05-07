@@ -6,12 +6,18 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 
 use crate::components::mini_input::MiniInput;
-use crate::components::query_source::{QueryMode, QuerySource, RetrievalAccept, RetrievalRow};
+use crate::components::query_source::{
+    QueryMode, QuerySource, RetrievalAccept, RetrievalPreview, RetrievalRow,
+};
+
+/// Below 100 cols total terminal width, the preview pane is suppressed and
+/// the picker renders single-pane to preserve readability.
+const MIN_PREVIEW_WIDTH: u16 = 100;
 
 /// Result of handling a key event inside the shell.
 #[derive(Debug)]
@@ -226,12 +232,26 @@ impl PickerShell {
     /// Render above `anchor` (the InputBar's rect), clipped to `container`.
     pub fn render(&self, frame: &mut Frame, anchor: Rect, container: Rect) {
         let query_mode_owned = self.source.query_mode() == QueryMode::OwnedByShell;
+        let active_preview = self
+            .list_state
+            .selected()
+            .and_then(|idx| self.source.preview_for(idx));
+        let show_preview = active_preview.is_some() && container.width >= MIN_PREVIEW_WIDTH;
         let list_rows = self.rows.len().clamp(1, 8) as u16;
         let query_rows = if query_mode_owned { 1 } else { 0 };
-        let inner_rows = list_rows + query_rows;
+        let preview_rows = active_preview
+            .as_ref()
+            .filter(|_| show_preview)
+            .map(|preview| preview.lines.len().saturating_add(1).clamp(3, 8) as u16)
+            .unwrap_or(0);
+        let inner_rows = (list_rows + query_rows).max(preview_rows);
         let popup_height = inner_rows + 2; // +2 for block border
 
-        let popup_width = (container.width / 2).clamp(30, container.width);
+        let popup_width = if show_preview {
+            (container.width.saturating_mul(2) / 3).clamp(80, container.width.saturating_sub(2))
+        } else {
+            (container.width / 2).clamp(30, container.width)
+        };
         let x = anchor
             .x
             .saturating_add(2)
@@ -255,10 +275,26 @@ impl PickerShell {
         }
 
         let mut cursor_cell: Option<(u16, u16)> = None;
+        let (list_column, preview_area) = if show_preview {
+            let available = inner.width.saturating_sub(1);
+            let list_width = available / 2;
+            let preview_width = available.saturating_sub(list_width);
+            (
+                Rect::new(inner.x, inner.y, list_width, inner.height),
+                Some(Rect::new(
+                    inner.x.saturating_add(list_width).saturating_add(1),
+                    inner.y,
+                    preview_width,
+                    inner.height,
+                )),
+            )
+        } else {
+            (inner, None)
+        };
 
         let list_area = if query_mode_owned {
             // Render query line at top of inner area.
-            let q_area = Rect::new(inner.x, inner.y, inner.width, 1);
+            let q_area = Rect::new(list_column.x, list_column.y, list_column.width, 1);
             let prompt = "search: ";
             let prompt_len = prompt.len() as u16;
             let q_text = self.query.text();
@@ -272,83 +308,20 @@ impl PickerShell {
             let cx = q_area.x + prompt_len + self.query.cursor() as u16;
             let cy = q_area.y;
             cursor_cell = Some((cx, cy));
-            Rect::new(inner.x, inner.y + 1, inner.width, inner.height - 1)
+            Rect::new(
+                list_column.x,
+                list_column.y + 1,
+                list_column.width,
+                list_column.height.saturating_sub(1),
+            )
         } else {
-            inner
+            list_column
         };
 
-        if self.rows.is_empty() {
-            let p = Paragraph::new(Line::from(Span::styled(
-                "No matches. Type to refine, Esc to dismiss.",
-                Style::default().fg(Color::DarkGray),
-            )));
-            frame.render_widget(p, list_area);
-        } else {
-            let items: Vec<ListItem> = self
-                .rows
-                .iter()
-                .map(|r| {
-                    let mut spans = Vec::with_capacity(4);
-                    // Primary with atom-span styling.
-                    if r.atoms.is_empty() {
-                        spans.push(Span::styled(
-                            r.primary.clone(),
-                            Style::default()
-                                .fg(Color::Green)
-                                .add_modifier(Modifier::BOLD),
-                        ));
-                    } else {
-                        let mut cursor = 0usize;
-                        for &(a, b) in &r.atoms {
-                            if a > cursor && a <= r.primary.len() {
-                                spans.push(Span::styled(
-                                    r.primary[cursor..a].to_string(),
-                                    Style::default()
-                                        .fg(Color::Green)
-                                        .add_modifier(Modifier::BOLD),
-                                ));
-                            }
-                            let end = b.min(r.primary.len());
-                            if end > a {
-                                spans.push(Span::styled(
-                                    r.primary[a..end].to_string(),
-                                    Style::default()
-                                        .fg(Color::LightBlue)
-                                        .add_modifier(Modifier::UNDERLINED),
-                                ));
-                                cursor = end;
-                            }
-                        }
-                        if cursor < r.primary.len() {
-                            spans.push(Span::styled(
-                                r.primary[cursor..].to_string(),
-                                Style::default()
-                                    .fg(Color::Green)
-                                    .add_modifier(Modifier::BOLD),
-                            ));
-                        }
-                    }
-                    if !r.secondary.is_empty() {
-                        spans.push(Span::raw("  "));
-                        spans.push(Span::styled(
-                            r.secondary.clone(),
-                            Style::default().fg(Color::White),
-                        ));
-                    }
-                    if !r.tag.is_empty() {
-                        spans.push(Span::raw("  "));
-                        spans.push(Span::styled(
-                            r.tag.clone(),
-                            Style::default().fg(Color::DarkGray),
-                        ));
-                    }
-                    ListItem::new(Line::from(spans))
-                })
-                .collect();
-            let list =
-                List::new(items).highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-            let mut list_state = self.list_state.clone();
-            frame.render_stateful_widget(list, list_area, &mut list_state);
+        self.render_rows(frame, list_area);
+
+        if let (Some(preview), Some(area)) = (active_preview, preview_area) {
+            self.render_preview(frame, area, preview);
         }
 
         if let Some((cx, cy)) = cursor_cell {
@@ -357,14 +330,103 @@ impl PickerShell {
             }
         }
     }
+
+    fn render_rows(&self, frame: &mut Frame, list_area: Rect) {
+        if self.rows.is_empty() {
+            let p = Paragraph::new(Line::from(Span::styled(
+                "No matches. Type to refine, Esc to dismiss.",
+                Style::default().fg(Color::DarkGray),
+            )));
+            frame.render_widget(p, list_area);
+            return;
+        }
+
+        let items: Vec<ListItem> = self
+            .rows
+            .iter()
+            .map(|r| {
+                let mut spans = Vec::with_capacity(4);
+                // Primary with atom-span styling.
+                if r.atoms.is_empty() {
+                    spans.push(Span::styled(
+                        r.primary.clone(),
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                } else {
+                    let mut cursor = 0usize;
+                    for &(a, b) in &r.atoms {
+                        if a > cursor && a <= r.primary.len() {
+                            spans.push(Span::styled(
+                                r.primary[cursor..a].to_string(),
+                                Style::default()
+                                    .fg(Color::Green)
+                                    .add_modifier(Modifier::BOLD),
+                            ));
+                        }
+                        let end = b.min(r.primary.len());
+                        if end > a {
+                            spans.push(Span::styled(
+                                r.primary[a..end].to_string(),
+                                Style::default()
+                                    .fg(Color::LightBlue)
+                                    .add_modifier(Modifier::UNDERLINED),
+                            ));
+                            cursor = end;
+                        }
+                    }
+                    if cursor < r.primary.len() {
+                        spans.push(Span::styled(
+                            r.primary[cursor..].to_string(),
+                            Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                    }
+                }
+                if !r.secondary.is_empty() {
+                    spans.push(Span::raw("  "));
+                    spans.push(Span::styled(
+                        r.secondary.clone(),
+                        Style::default().fg(Color::White),
+                    ));
+                }
+                if !r.tag.is_empty() {
+                    spans.push(Span::raw("  "));
+                    spans.push(Span::styled(
+                        r.tag.clone(),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+                ListItem::new(Line::from(spans))
+            })
+            .collect();
+        let list =
+            List::new(items).highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        let mut list_state = self.list_state.clone();
+        frame.render_stateful_widget(list, list_area, &mut list_state);
+    }
+
+    fn render_preview(&self, frame: &mut Frame, area: Rect, preview: RetrievalPreview) {
+        let block = Block::default().borders(Borders::LEFT).title(Span::styled(
+            format!(" {} ", preview.title),
+            Style::default().fg(Color::Cyan),
+        ));
+        let paragraph = Paragraph::new(preview.lines)
+            .block(block)
+            .wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, area);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::query_source::{HistoryQuerySource, RetrievalAccept};
+    use crate::components::query_source::{HistoryQuerySource, RetrievalAccept, RetrievalPreview};
     use crate::input_history::{InputHistoryEntry, InputStateSnapshot};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::{backend::TestBackend, Terminal};
 
     fn mk(text: &str) -> InputHistoryEntry {
         InputHistoryEntry::new(InputStateSnapshot::from_text(text))
@@ -372,6 +434,60 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn rendered_shell_text(shell: &PickerShell, width: u16) -> String {
+        let height = 12;
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let anchor = Rect::new(0, height - 1, width, 1);
+                let container = Rect::new(0, 0, width, height);
+                shell.render(f, anchor, container);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer.cell((x, y)).expect("in-bounds buffer cell").symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    struct PreviewSource;
+
+    impl QuerySource for PreviewSource {
+        fn title(&self) -> &str {
+            "Mentions · @"
+        }
+
+        fn query_mode(&self) -> QueryMode {
+            QueryMode::ReadFromInputBar
+        }
+
+        fn refresh(&mut self, _query: &str) -> Vec<RetrievalRow> {
+            vec![RetrievalRow {
+                primary: "🎟 bd-1234 Short issue row".to_string(),
+                secondary: "open · alice".to_string(),
+                tag: "P2".to_string(),
+                atoms: Vec::new(),
+            }]
+        }
+
+        fn accept(&self, _row_idx: usize) -> Option<RetrievalAccept> {
+            None
+        }
+
+        fn preview_for(&self, row_idx: usize) -> Option<RetrievalPreview> {
+            (row_idx == 0).then(|| RetrievalPreview {
+                title: "bd-1234".to_string(),
+                lines: vec![Line::raw("Preview-only disambiguating title")],
+            })
+        }
     }
 
     #[test]
@@ -474,5 +590,26 @@ mod tests {
         let mut shell = PickerShell::open(Box::new(src));
         let act = shell.handle_key(key(KeyCode::Enter));
         assert!(matches!(act, PickerAction::Cancel));
+    }
+
+    #[test]
+    fn wide_issue_picker_renders_preview_pane() {
+        let shell = PickerShell::open(Box::new(PreviewSource));
+
+        let text = rendered_shell_text(&shell, 120);
+
+        assert!(text.contains("Preview-only disambiguating title"), "{text}");
+    }
+
+    #[test]
+    fn narrow_issue_picker_suppresses_preview_pane() {
+        let shell = PickerShell::open(Box::new(PreviewSource));
+
+        let text = rendered_shell_text(&shell, 80);
+
+        assert!(
+            !text.contains("Preview-only disambiguating title"),
+            "{text}"
+        );
     }
 }

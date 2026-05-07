@@ -2,6 +2,7 @@
 //! snapshot supplied by the dashboard/app.
 
 use std::path::Path;
+use std::rc::Rc;
 
 use spur_pm::{IssueSummary, PmSource};
 
@@ -20,6 +21,7 @@ pub struct IssueMentionDescriptor {
     pub priority: Option<i32>,
     pub issue_type: Option<String>,
     pub labels: Vec<String>,
+    pub url: String,
 }
 
 impl From<&IssueSummary> for IssueMentionDescriptor {
@@ -33,6 +35,7 @@ impl From<&IssueSummary> for IssueMentionDescriptor {
             priority: issue.priority,
             issue_type: issue.issue_type.clone(),
             labels: issue.labels.clone(),
+            url: issue.url.clone(),
         }
     }
 }
@@ -57,6 +60,7 @@ impl MentionSource for IssueMentionSource {
             .snapshot
             .iter()
             .map(|descriptor| {
+                let preview = Rc::new(descriptor.clone());
                 let mut search_text = String::new();
                 push_issue_search_text(
                     &mut search_text,
@@ -82,6 +86,7 @@ impl MentionSource for IssueMentionSource {
                     tag: descriptor.priority.map(|priority| format!("P{}", priority)),
                     search_text: Some(search_text),
                     atom_text: Some(format!("@{}", descriptor.id)),
+                    issue_preview: Some(preview),
                 }
             })
             .collect())
@@ -133,6 +138,7 @@ mod tests {
             priority: Some(1),
             issue_type: Some("bug".to_string()),
             labels: vec!["mentions".to_string(), "tui".to_string()],
+            url: format!("https://example.test/{id}"),
         }
     }
 
@@ -176,6 +182,24 @@ mod tests {
                 "search text {search_text:?} missing {expected:?}",
             );
         }
+    }
+
+    #[test]
+    fn issue_entries_carry_preview_descriptor_handle() {
+        let mut source = IssueMentionSource::new(vec![
+            descriptor(PmSource::Beads, "bd-1"),
+            descriptor(PmSource::GitHub, "GH-2"),
+        ]);
+
+        let entries = source.build(Path::new(".")).expect("build succeeds");
+
+        assert!(entries.iter().all(|entry| entry.issue_preview.is_some()));
+        let preview = entries[0].issue_preview.as_ref().expect("issue preview");
+        assert_eq!(preview.id, "bd-1");
+        assert_eq!(preview.title, "Fix mention picker matching");
+        assert_eq!(preview.labels, vec!["mentions", "tui"]);
+        let second_preview = entries[1].issue_preview.as_ref().expect("issue preview");
+        assert_eq!(second_preview.id, "GH-2");
     }
 
     #[test]
