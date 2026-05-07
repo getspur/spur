@@ -9,6 +9,8 @@ use spur_acp::SessionId;
 
 use super::entry::{MentionEntry, MentionKind, MentionSource};
 use super::file_source::FileMentionSource;
+use super::issue_source::{IssueMentionDescriptor, IssueMentionSource};
+use super::worker_source::{WorkerMentionDescriptor, WorkerMentionSource};
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
@@ -71,7 +73,7 @@ impl MentionRegistry {
         Self {
             sources: vec![
                 Box::new(FileMentionSource),
-                Box::new(super::WorkerMentionSource::new(workers)),
+                Box::new(WorkerMentionSource::new(workers)),
             ],
             cache: HashMap::new(),
         }
@@ -91,6 +93,33 @@ impl MentionRegistry {
     /// support is added (out of scope for v1).
     pub fn clear_cache(&mut self) {
         self.cache.clear();
+    }
+
+    pub fn set_issue_snapshot(&mut self, issues: Vec<IssueMentionDescriptor>) {
+        if let Some(source) = self
+            .sources
+            .iter_mut()
+            .find(|source| source.name() == "issue")
+        {
+            *source = Box::new(IssueMentionSource::new(issues));
+        } else {
+            self.sources.push(Box::new(IssueMentionSource::new(issues)));
+        }
+        self.clear_cache();
+    }
+
+    pub fn set_worker_snapshot_in_place(&mut self, workers: Vec<WorkerMentionDescriptor>) {
+        if let Some(source) = self
+            .sources
+            .iter_mut()
+            .find(|source| source.name() == "worker")
+        {
+            *source = Box::new(WorkerMentionSource::new(workers));
+        } else {
+            self.sources
+                .push(Box::new(WorkerMentionSource::new(workers)));
+        }
+        self.clear_cache();
     }
 
     pub fn query(
@@ -160,8 +189,9 @@ impl MentionRegistry {
         let mut scored: Vec<(u32, MentionEntry)> = entries
             .iter()
             .filter_map(|e| {
+                let haystack = e.search_text.as_deref().unwrap_or(&e.display);
                 let raw = pattern.score(
-                    nucleo_matcher::Utf32Str::new(&e.display, &mut Vec::new()),
+                    nucleo_matcher::Utf32Str::new(haystack, &mut Vec::new()),
                     &mut matcher,
                 )?;
                 let boosted = if e.kind == MentionKind::Worker {
@@ -187,5 +217,67 @@ impl MentionRegistry {
 impl Default for MentionRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+    use crate::mentions::{IssueMentionDescriptor, IssueMentionSource};
+    use spur_pm::PmSource;
+
+    fn issue(id: &str, title: &str, assignee: Option<&str>) -> IssueMentionDescriptor {
+        IssueMentionDescriptor {
+            id: id.to_string(),
+            title: title.to_string(),
+            source: PmSource::Beads,
+            status: "open".to_string(),
+            assignee: assignee.map(str::to_string),
+            priority: None,
+            issue_type: Some("task".to_string()),
+            labels: vec!["mentions".to_string()],
+        }
+    }
+
+    #[test]
+    fn query_matches_issue_search_text_not_just_display() {
+        let mut registry = MentionRegistry {
+            sources: vec![Box::new(IssueMentionSource::new(vec![issue(
+                "bd-1",
+                "Picker rows",
+                Some("alice"),
+            )]))],
+            cache: HashMap::new(),
+        };
+
+        let results = registry.query(CompletionScope::PreSession, Path::new("."), "alice", 10);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].uri, "issue://beads/bd-1");
+    }
+
+    #[test]
+    fn set_issue_snapshot_clears_cache_for_next_query() {
+        let mut registry = MentionRegistry {
+            sources: vec![Box::new(IssueMentionSource::new(vec![issue(
+                "bd-1",
+                "Old title",
+                None,
+            )]))],
+            cache: HashMap::new(),
+        };
+
+        let first = registry.query(CompletionScope::PreSession, Path::new("."), "old", 10);
+        assert_eq!(first[0].display, "bd-1 Old title");
+
+        registry.set_issue_snapshot(vec![issue("bd-2", "New title", None)]);
+        let old = registry.query(CompletionScope::PreSession, Path::new("."), "old", 10);
+        let new = registry.query(CompletionScope::PreSession, Path::new("."), "new", 10);
+
+        assert!(old.is_empty());
+        assert_eq!(new.len(), 1);
+        assert_eq!(new[0].display, "bd-2 New title");
     }
 }

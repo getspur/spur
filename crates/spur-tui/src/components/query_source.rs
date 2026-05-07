@@ -331,14 +331,20 @@ impl QuerySource for MentionQuerySource {
                     MentionKind::Directory => "\u{1F4C1}", // 📁
                     MentionKind::File => "\u{1F4C4}",      // 📄
                     MentionKind::Worker => "\u{1F916}",    // 🤖
+                    MentionKind::Issue => "\u{1F39F}",     // 🎟
                 };
                 let tag_render = m
                     .tag
                     .clone()
                     .map(|t| format!("\u{27E8}{}\u{27E9}", t)) // ⟨tier⟩
                     .unwrap_or_default();
+                let primary = if m.kind == MentionKind::Issue {
+                    format!("{} {}", icon, m.display)
+                } else {
+                    format!("{} @{}", icon, m.display)
+                };
                 RetrievalRow {
-                    primary: format!("{} @{}", icon, m.display),
+                    primary,
                     secondary: m.secondary.clone().unwrap_or_default(),
                     tag: tag_render,
                     atoms: Vec::new(),
@@ -350,11 +356,25 @@ impl QuerySource for MentionQuerySource {
     }
 
     fn accept(&self, row_idx: usize) -> Option<RetrievalAccept> {
+        use crate::mentions::MentionKind;
+
         let hit = self.last_hits.get(row_idx)?;
+        let text = hit
+            .atom_text
+            .clone()
+            .unwrap_or_else(|| format!("@{}", hit.display));
+        let name = if hit.kind == MentionKind::Issue {
+            hit.atom_text
+                .as_deref()
+                .map(|text| text.trim_start_matches('@').to_string())
+                .unwrap_or_else(|| hit.display.clone())
+        } else {
+            hit.display.clone()
+        };
         Some(RetrievalAccept::InsertAtom {
-            text: format!("@{}", hit.display),
+            text,
             uri: hit.uri.clone(),
-            name: hit.display.clone(),
+            name,
             replace_from: Some(self.prefix_start),
         })
     }
@@ -755,6 +775,50 @@ mod tests {
             "primary missing icon prefix: {:?}",
             rows[0].primary
         );
+    }
+
+    #[test]
+    fn mention_source_accepts_issue_as_id_atom() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = Rc::new(RefCell::new(MentionRegistry::new()));
+        registry
+            .borrow_mut()
+            .set_issue_snapshot(vec![crate::mentions::IssueMentionDescriptor {
+                id: "bd-1".to_string(),
+                title: "Mention picker issue rows".to_string(),
+                source: spur_pm::PmSource::Beads,
+                status: "open".to_string(),
+                assignee: Some("alice".to_string()),
+                priority: Some(2),
+                issue_type: Some("task".to_string()),
+                labels: vec!["mentions".to_string()],
+            }]);
+        let mut src = MentionQuerySource::new(
+            Rc::clone(&registry),
+            crate::mentions::CompletionScope::PreSession,
+            tmp.path().to_path_buf(),
+            3,
+        );
+
+        let rows = src.refresh("alice");
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].primary.contains("bd-1 Mention picker issue rows"));
+
+        let accept = src.accept(0).expect("row 0 exists");
+        match accept {
+            RetrievalAccept::InsertAtom {
+                text,
+                uri,
+                name,
+                replace_from,
+            } => {
+                assert_eq!(text, "@bd-1");
+                assert_eq!(uri, "issue://beads/bd-1");
+                assert_eq!(name, "bd-1");
+                assert_eq!(replace_from, Some(3));
+            }
+            other => panic!("expected InsertAtom, got {other:?}"),
+        }
     }
 
     #[test]

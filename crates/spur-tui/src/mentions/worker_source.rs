@@ -42,6 +42,8 @@ impl MentionSource for WorkerMentionSource {
                 display: format!("worker:{}", d.name),
                 secondary: d.description.clone(),
                 tag: d.tier.clone(),
+                search_text: None,
+                atom_text: None,
             })
             .collect())
     }

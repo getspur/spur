@@ -261,6 +261,23 @@ impl DashboardView {
         self.mention_registry = std::rc::Rc::new(std::cell::RefCell::new(
             crate::mentions::MentionRegistry::for_brain_session(workers),
         ));
+        self.refresh_mention_issues();
+    }
+
+    pub fn set_issue_snapshot(&mut self, issues: Vec<spur_pm::IssueSummary>) {
+        self.tracked_issues = issues;
+        self.refresh_mention_issues();
+    }
+
+    fn refresh_mention_issues(&mut self) {
+        let descriptors = self
+            .tracked_issues
+            .iter()
+            .map(crate::mentions::IssueMentionDescriptor::from)
+            .collect();
+        self.mention_registry
+            .borrow_mut()
+            .set_issue_snapshot(descriptors);
     }
 
     /// Advance rotating example prompts. Call from App::tick().
@@ -1989,6 +2006,7 @@ impl View for DashboardView {
                 status,
                 assignee,
             } => {
+                let mut updated_issue = false;
                 if let Some(issue) = self.tracked_issues.iter_mut().find(|i| i.id == *id) {
                     if let Some(ref s) = status {
                         issue.status = s.clone();
@@ -1996,6 +2014,10 @@ impl View for DashboardView {
                     if let Some(a) = assignee {
                         issue.assignee = Some(a.clone());
                     }
+                    updated_issue = true;
+                }
+                if updated_issue {
+                    self.refresh_mention_issues();
                 }
                 let status_suffix = status
                     .as_ref()
@@ -2010,7 +2032,7 @@ impl View for DashboardView {
             }
 
             SpurEventBody::IssuesLoaded { issues } => {
-                self.tracked_issues = issues
+                let mut loaded_issues = issues
                     .iter()
                     .map(|i| spur_pm::IssueSummary {
                         id: i.id.clone(),
@@ -2028,10 +2050,11 @@ impl View for DashboardView {
                         issue_type: i.issue_type.clone(),
                         assignee: i.assignee.clone(),
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
                 // Sort by priority ascending (critical first)
-                self.tracked_issues
+                loaded_issues
                     .sort_by(|a, b| a.priority.unwrap_or(99).cmp(&b.priority.unwrap_or(99)));
+                self.set_issue_snapshot(loaded_issues);
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),
                     prefix: "[pm]".into(),

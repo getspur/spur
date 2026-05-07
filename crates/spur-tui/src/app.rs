@@ -2389,13 +2389,14 @@ impl App {
                     self.force_flush_active_draft();
 
                     let agent_cfg = self.resolve_agent_config(agent);
-                    let mut view = SessionDetailView::new(
+                    let mut view = SessionDetailView::new_with_issue_snapshot(
                         session.clone(),
                         agent.clone(),
                         "brain".to_string(),
                         std::env::current_dir().unwrap_or_default(),
                         agent_cfg,
                         self.build_worker_snapshot(),
+                        self.dashboard.tracked_issues().to_vec(),
                     );
                     #[cfg(feature = "markdown")]
                     view.set_render_picker(self.mermaid_picker.clone());
@@ -2600,7 +2601,16 @@ impl App {
             tombstone: None,
             transient_hint_override: None,
         };
+        let issue_snapshot_changed = matches!(
+            &event.body,
+            SpurEventBody::IssuesLoaded { .. } | SpurEventBody::IssueUpdated { .. }
+        );
         self.dashboard.handle_spur_event(&event, &ctx);
+        if issue_snapshot_changed {
+            if let Some(ref mut detail) = self.session_detail {
+                detail.set_issue_snapshot(self.dashboard.tracked_issues().to_vec());
+            }
+        }
         if let Some(ref mut picker) = self.session_picker {
             picker.handle_spur_event(&event, &ctx);
         }
