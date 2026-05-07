@@ -676,6 +676,7 @@ async fn t_v0c_10_startup_reclaims_mid_plan_and_continues_dispatch() {
         .start()
         .await
         .expect("start server (loopback bind already probed at fn entry)");
+    server.__test_wait_startup_recovery().await;
     Arc::clone(&server)
         .enable_reconciler()
         .await
@@ -741,6 +742,7 @@ async fn t_v0c_11_startup_reclaim_clears_stale_dispatch_before_redispatch() {
         .start()
         .await
         .expect("start server (loopback bind already probed at fn entry)");
+    server.__test_wait_startup_recovery().await;
     Arc::clone(&server)
         .enable_reconciler()
         .await
