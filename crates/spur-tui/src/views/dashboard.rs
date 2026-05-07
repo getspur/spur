@@ -714,7 +714,12 @@ impl DashboardView {
                         .issue_id
                         .as_ref()
                         .map(|iid| format_issue_badge(iid, &self.tracked_issues));
-                    let trace = worker_streams.get_mut(&id.0);
+                    let mut trace = worker_streams.get_mut(&id.0);
+                    if let Some(t) = trace.as_deref_mut() {
+                        // Push the active theme onto the trace before render so
+                        // token resolution honors the user's theme choice.
+                        t.set_theme(ctx.theme);
+                    }
                     self.detail_pane.render(
                         frame,
                         chunks[log_chunk],

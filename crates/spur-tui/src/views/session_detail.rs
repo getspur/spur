@@ -2386,9 +2386,13 @@ impl SessionDetailView {
         }
 
         // ── React trace ─────────────────────────────────────────────────
+        // Push the active theme onto the trace before render so token
+        // resolution honors the user's theme choice (ReactTrace caches
+        // theme as component state; see set_theme docs in mod.rs).
+        self.react_trace.set_theme(ctx.theme);
         #[cfg(feature = "markdown")]
         {
-            let mut ctx = crate::components::react_trace::RenderContext {
+            let mut rt_ctx = crate::components::react_trace::RenderContext {
                 mermaid_registry: &self.mermaid_registry,
                 picker: self.render_picker.as_ref(),
                 image_cache: &mut self.image_cache,
@@ -2396,7 +2400,7 @@ impl SessionDetailView {
             self.react_trace.render_with_ctx_focused(
                 frame,
                 chunks[1],
-                &mut ctx,
+                &mut rt_ctx,
                 lineage,
                 self.focused_panel == FocusedSessionPanel::ReactTrace,
             );
