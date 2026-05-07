@@ -8,6 +8,8 @@ use ratatui::{
 
 use spur_pm::IssueSummary;
 
+use crate::mentions::issue_search::push_issue_summary_search_text;
+
 /// Find the longest tracked-issue id that is a dot-prefix ancestor of `id`.
 /// Used to surface "↳ <parent>" annotations in the flat issues panel without
 /// reintroducing the lineage rendering surface (see `bd-2u0n.13`). Pure id
@@ -22,26 +24,6 @@ fn parent_id_for_prefix_child<'a>(id: &str, issues: &'a [IssueSummary]) -> Optio
                 .map(|_| other.id.as_str())
         })
         .max_by_key(|parent_id| parent_id.len())
-}
-
-fn push_issue_search_text(search: &mut String, issue: &IssueSummary) {
-    search.push_str(&issue.id);
-    search.push(' ');
-    search.push_str(&issue.title);
-    for label in &issue.labels {
-        search.push(' ');
-        search.push_str(label);
-    }
-    if let Some(assignee) = &issue.assignee {
-        search.push(' ');
-        search.push_str(assignee);
-    }
-    if let Some(issue_type) = &issue.issue_type {
-        search.push(' ');
-        search.push_str(issue_type);
-    }
-    search.push(' ');
-    search.push_str(&issue.status);
 }
 
 pub struct IssuesPanel {
@@ -249,7 +231,7 @@ impl IssuesPanel {
 
             for (idx, issue) in issues.iter().enumerate() {
                 self.search_scratch.clear();
-                push_issue_search_text(&mut self.search_scratch, issue);
+                push_issue_summary_search_text(&mut self.search_scratch, issue);
 
                 self.match_scratch.clear();
                 let haystack = Utf32Str::new(&self.search_scratch, &mut self.match_scratch);

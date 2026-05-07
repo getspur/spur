@@ -5,6 +5,7 @@ pub enum MentionKind {
     File,
     Directory,
     Worker,
+    Issue,
 }
 
 #[derive(Debug, Clone)]
@@ -19,6 +20,10 @@ pub struct MentionEntry {
     pub secondary: Option<String>,
     /// Optional right-aligned tag (worker tier; None for files).
     pub tag: Option<String>,
+    /// Optional richer haystack used for ranking.
+    pub search_text: Option<String>,
+    /// Optional visible InputBar atom text, including the leading `@`.
+    pub atom_text: Option<String>,
 }
 
 pub trait MentionSource: Send {
@@ -40,7 +45,9 @@ pub fn entry_for_path(cwd: &Path, abs: &Path) -> Option<MentionEntry> {
     let display = match kind {
         MentionKind::Directory => format!("{}/", rel_str),
         MentionKind::File => rel_str.to_string(),
-        MentionKind::Worker => unreachable!("entry_for_path never builds Worker"),
+        MentionKind::Worker | MentionKind::Issue => {
+            unreachable!("entry_for_path never builds non-file mentions")
+        }
     };
     let abs_str = abs.to_str()?;
     let uri = format!("file://{}", abs_str);
@@ -50,5 +57,7 @@ pub fn entry_for_path(cwd: &Path, abs: &Path) -> Option<MentionEntry> {
         display,
         secondary: None,
         tag: None,
+        search_text: None,
+        atom_text: None,
     })
 }
