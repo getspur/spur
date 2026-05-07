@@ -315,9 +315,10 @@ fn palette_entry_mut<'a>(palette: &'a mut Palette, key: &str) -> Option<&'a mut 
 
 #[cfg(test)]
 mod tests {
-    use super::{load_built_in, load_theme_from_str, RawTheme, ThemeError};
+    use super::{load_built_in, load_theme_from_str, RawTheme, Theme, ThemeError};
     use crate::theme::palette::{Palette, PaletteEntry};
     use crate::theme::tokens::TokenMap;
+    use crate::theme::{resolve_token, ColorDepth};
     use ratatui::style::Color;
 
     fn load_without_parent(yaml: &str) -> Result<super::Theme, ThemeError> {
@@ -666,5 +667,91 @@ palette:
 
         assert_eq!(theme.palette.accent.rgb, Color::Rgb(0, 0, 0));
         assert_eq!(theme.palette.accent.ansi, Some(Color::Blue));
+    }
+
+    #[test]
+    fn truecolor_resolution_returns_rgb_entry() {
+        let theme = load_without_parent(
+            r##"
+version: 1
+name: truecolor
+palette:
+  accent:
+    rgb: "#123456"
+    ansi: magenta
+"##,
+        )
+        .expect("theme loads");
+
+        assert_eq!(
+            resolve_token(&theme, "spinner.fg", ColorDepth::Truecolor),
+            Color::Rgb(0x12, 0x34, 0x56)
+        );
+    }
+
+    #[test]
+    fn ansi16_resolution_returns_explicit_ansi_entry() {
+        let theme = load_without_parent(
+            r##"
+version: 1
+name: ansi-explicit
+palette:
+  accent:
+    rgb: "#123456"
+    ansi: magenta
+"##,
+        )
+        .expect("theme loads");
+
+        assert_eq!(
+            resolve_token(&theme, "spinner.fg", ColorDepth::Ansi16),
+            Color::Magenta
+        );
+    }
+
+    #[test]
+    fn ansi16_resolution_falls_back_to_parent_ansi_entry() {
+        let parent = raw_theme(
+            r##"
+version: 1
+name: parent
+palette:
+  accent:
+    rgb: "#000000"
+    ansi: magenta
+"##,
+        );
+
+        let theme = load_theme_from_str(
+            r##"
+version: 1
+name: child
+extends: parent
+palette:
+  accent: "#123456"
+"##,
+            |name| (name == "parent").then(|| parent.clone()),
+        )
+        .expect("child theme loads");
+
+        assert_eq!(
+            resolve_token(&theme, "spinner.fg", ColorDepth::Ansi16),
+            Color::Magenta
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "theme `malformed` token `spinner.fg` palette entry `accent` has no ANSI fallback"
+    )]
+    fn ansi16_resolution_panics_when_no_ansi_fallback_exists() {
+        let theme = Theme {
+            name: "malformed".to_string(),
+            palette: Palette::light_default(),
+            tokens: TokenMap::dark_default(),
+            diagnostics: Vec::new(),
+        };
+
+        resolve_token(&theme, "spinner.fg", ColorDepth::Ansi16);
     }
 }
