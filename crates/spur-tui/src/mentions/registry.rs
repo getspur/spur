@@ -238,6 +238,7 @@ mod tests {
             priority: None,
             issue_type: Some("task".to_string()),
             labels: vec!["mentions".to_string()],
+            url: format!("https://example.test/{id}"),
         }
     }
 
