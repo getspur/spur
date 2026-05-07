@@ -318,7 +318,7 @@ async fn t31_enable_worker_mcp_false_preserves_empty_vec() {
         let (url, token) = fetch();
         vec![McpServer::Http(McpServerHttp::new(
             "spur-worker-mcp",
-            &format!("{url}?token={token}"),
+            format!("{url}?token={token}"),
         ))]
     }
 

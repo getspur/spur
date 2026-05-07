@@ -47,22 +47,46 @@ impl DispatchOutcome {
 pub enum SkipReason {
     MissingPlanId,
     TaskMissingFromProjection,
-    TaskStatusNotReady { blocked_by: Vec<String> },
+    TaskStatusNotReady {
+        blocked_by: Vec<String>,
+    },
     PlanMissingCompleteEpic,
     PlanHasPendingEpic,
-    PlanOwnedByAnotherBrain { owner: String },
+    PlanOwnedByAnotherBrain {
+        owner: String,
+    },
     EpicNotOpen,
     MissingIssueId,
     DuplicateIssueId,
-    ProjectorFailed { error: String },
-    PersistError { msg: String },
-    DispatchSendFailed { msg: String },
+    ProjectorFailed {
+        error: String,
+    },
+    PersistError {
+        msg: String,
+    },
+    DispatchSendFailed {
+        msg: String,
+    },
     MissingDispatchLeaseExpiry,
-    UnsupportedReadyIssueType { issue_type: Option<String> },
-    BaseSpecBuildFailed { error: String },
-    PersistDispatchIntentFailed { error: String },
-    HydrationGetIssueFailed { error: String },
-    PlanAllowsDispatchFailed { error: String },
+    UnsupportedReadyIssueType {
+        issue_type: Option<String>,
+    },
+    BaseSpecBuildFailed {
+        error: String,
+    },
+    PredispatchOverlayConflict {
+        dep_task_id: String,
+        files: Vec<String>,
+    },
+    PersistDispatchIntentFailed {
+        error: String,
+    },
+    HydrationGetIssueFailed {
+        error: String,
+    },
+    PlanAllowsDispatchFailed {
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -185,6 +209,7 @@ enum SkipReasonKey {
     MissingDispatchLeaseExpiry,
     UnsupportedReadyIssueType,
     BaseSpecBuildFailed,
+    PredispatchOverlayConflict,
     PersistDispatchIntentFailed,
     HydrationGetIssueFailed,
     PlanAllowsDispatchFailed,
@@ -210,6 +235,7 @@ impl From<&SkipReason> for SkipReasonKey {
             SkipReason::MissingDispatchLeaseExpiry => Self::MissingDispatchLeaseExpiry,
             SkipReason::UnsupportedReadyIssueType { .. } => Self::UnsupportedReadyIssueType,
             SkipReason::BaseSpecBuildFailed { .. } => Self::BaseSpecBuildFailed,
+            SkipReason::PredispatchOverlayConflict { .. } => Self::PredispatchOverlayConflict,
             SkipReason::PersistDispatchIntentFailed { .. } => Self::PersistDispatchIntentFailed,
             SkipReason::HydrationGetIssueFailed { .. } => Self::HydrationGetIssueFailed,
             SkipReason::PlanAllowsDispatchFailed { .. } => Self::PlanAllowsDispatchFailed,

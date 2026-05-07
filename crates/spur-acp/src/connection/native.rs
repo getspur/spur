@@ -109,6 +109,7 @@ pub async fn spawn_native_worker_for_test(
 // ─── Commands sent to the dedicated ACP thread ──────────────────────────────
 
 /// Commands sent from the main (Send) world to the dedicated !Send ACP thread.
+#[allow(clippy::large_enum_variant)]
 enum AcpCommand {
     Initialize {
         request: InitializeRequest,

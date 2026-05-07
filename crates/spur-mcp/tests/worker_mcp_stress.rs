@@ -108,6 +108,7 @@ async fn call_jsonrpc(url_with_token: &str, method: &str, params: Value) -> Valu
 
 /// Build an `Orchestrator` + `McpCallbackServer` rooted at `repo` with the
 /// Pro feature gate active so `emit_read_aggregate` is not gated out.
+#[allow(clippy::arc_with_non_send_sync)]
 async fn build_orch_and_brain(
     repo: &Path,
     brain_session_id: &BrainSessionId,

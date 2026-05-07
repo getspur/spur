@@ -306,6 +306,71 @@ async fn persist_setup_overlay_conflict(
     Ok(())
 }
 
+async fn persist_predispatch_overlay_conflict(
+    pm: &spur_pm::PmService,
+    issue_id: &str,
+    feature_gate: &spur_license::FeatureGate,
+    plan_id: &str,
+    source_task_id: &str,
+    files: &[String],
+) -> anyhow::Result<()> {
+    crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        feature_gate,
+    )
+    .map_err(|error| anyhow::anyhow!(crate::server::feature_error_message(error)))?;
+    let adv = pm
+        .advanced()
+        .ok_or_else(|| anyhow::anyhow!("setup conflict routing requires beads backend"))?;
+    let signal_id = uuid::Uuid::new_v4().to_string();
+    let reason = serde_json::to_string(&serde_json::json!({
+        "dep_task_id": source_task_id,
+        "files": files,
+    }))?;
+
+    adv.add_comment(
+        issue_id,
+        &crate::plan::audit_sentinel::encode_comment(
+            &crate::plan::audit_sentinel::AuditSentinelKind::Signal {
+                signal_id: signal_id.clone(),
+                delegation_id: String::new(),
+                kind: "integration-conflict".to_string(),
+                severity: 1.0,
+                reason,
+            },
+        ),
+    )
+    .await?;
+    let signal_comment = format!(
+        "{}\n{}",
+        crate::plan::signals::SENTINEL_PREFIX,
+        serde_json::to_string(&serde_json::json!({
+            "signal_id": signal_id,
+            "kind": "integration_conflict",
+            "dep_task_id": source_task_id,
+            "files": files,
+        }))?
+    );
+    adv.add_comment(issue_id, &signal_comment).await?;
+
+    pm.update_issue(
+        issue_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![crate::plan::labels::SIGNAL_LABEL_INTEGRATION_CONFLICT.to_string()],
+            ..Default::default()
+        },
+    )
+    .await?;
+    tracing::warn!(
+        %plan_id,
+        %issue_id,
+        dep_task_id = %source_task_id,
+        files = ?files,
+        "routed predispatch overlay conflict to integration-conflict signal"
+    );
+    Ok(())
+}
+
 async fn prune_projected_terminal_task_outcomes(
     outcomes: &Arc<tokio::sync::Mutex<OutcomeStore>>,
     plan_id: &str,
@@ -420,12 +485,26 @@ pub struct HydratedReady {
     pub plan_state: Option<Arc<crate::plan::PlanState>>,
 }
 
+/// Strategy for the pre-dispatch overlay dry-run. Production uses `Real`;
+/// tests inject deterministic outcomes without touching git.
+#[derive(Debug, Clone, Default)]
+pub enum PreviewStrategy {
+    #[default]
+    Real,
+    AlwaysClean,
+    AlwaysConflict {
+        dep_task_id: String,
+        files: Vec<String>,
+    },
+}
+
 pub struct ReconcilerConfig {
     pub base_interval: Duration,
     pub idle_ceiling: Duration,
     pub backoff_factor: u32,
     pub dispatch_lease_duration: Duration,
     pub repo_root: PathBuf,
+    pub predispatch_preview: PreviewStrategy,
 }
 
 impl Default for ReconcilerConfig {
@@ -436,6 +515,7 @@ impl Default for ReconcilerConfig {
             backoff_factor: 2,
             dispatch_lease_duration: Duration::from_secs(600),
             repo_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            predispatch_preview: PreviewStrategy::Real,
         }
     }
 }
@@ -665,6 +745,55 @@ impl Reconciler {
         Ok(projected)
     }
 
+    async fn active_plan_handle(
+        &self,
+        plan_id: &str,
+    ) -> Option<Arc<tokio::sync::Mutex<crate::plan::PlanState>>> {
+        match self.project_plan_from_beads(plan_id).await {
+            Ok(projected) => Some(Arc::new(tokio::sync::Mutex::new(projected))),
+            Err(error) => {
+                tracing::warn!(
+                    %plan_id,
+                    "predispatch preview: failed to project active plan handle: {error}"
+                );
+                None
+            }
+        }
+    }
+
+    async fn transition_to_blocked_on_setup_conflict(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+        dep_task_id: &str,
+        files: &[String],
+    ) -> anyhow::Result<()> {
+        let projected = self.project_plan_from_beads(plan_id).await?;
+        let issue_id = projected
+            .tasks
+            .iter()
+            .find(|entry| entry.spec.task_id == task_id)
+            .and_then(|entry| entry.spec.issue_id.as_deref())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "task '{task_id}' in plan '{plan_id}' has no issue_id for setup-conflict transition"
+                )
+            })?;
+
+        persist_predispatch_overlay_conflict(
+            self.pm.as_ref(),
+            issue_id,
+            self.feature_gate.as_ref(),
+            plan_id,
+            dep_task_id,
+            files,
+        )
+        .await?;
+        self.fast_forward.notify_one();
+        self.emit_snapshot_for_plan(plan_id).await;
+        Ok(())
+    }
+
     async fn emit_snapshot_for_plan(&self, plan_id: &str) {
         let Some(sink) = self
             .dispatch
@@ -847,6 +976,96 @@ impl Reconciler {
                     continue;
                 }
             };
+            let has_overlays = matches!(
+                &base_spec,
+                crate::tools::BaseSpec::WithOverlay { overlays, .. } if !overlays.is_empty()
+            );
+            let preview_outcome = if has_overlays {
+                match &self.config.predispatch_preview {
+                    PreviewStrategy::AlwaysClean => None,
+                    PreviewStrategy::AlwaysConflict { dep_task_id, files } => {
+                        Some(crate::tool_schemas::PreviewConflict {
+                            dep_task_id: dep_task_id.clone(),
+                            files: files.clone(),
+                        })
+                    }
+                    PreviewStrategy::Real => match self.active_plan_handle(plan_id).await {
+                        Some(plan_arc) => {
+                            match crate::plan::preview::preview_overlay(
+                                &plan_arc,
+                                plan_id,
+                                &task.spec.task_id,
+                                &self.config.repo_root,
+                            )
+                            .await
+                            {
+                                Ok(output) => output.conflict,
+                                Err(error) => {
+                                    tracing::warn!(
+                                        %plan_id,
+                                        task_id = %task.spec.task_id,
+                                        "predispatch preview: helper errored, falling through to live dispatch: {error}"
+                                    );
+                                    None
+                                }
+                            }
+                        }
+                        None => {
+                            tracing::warn!(
+                                %plan_id,
+                                task_id = %task.spec.task_id,
+                                "predispatch preview: no active plan handle; skipping check"
+                            );
+                            None
+                        }
+                    },
+                }
+            } else {
+                None
+            };
+            if let Some(conflict) = preview_outcome {
+                tracing::info!(
+                    %plan_id,
+                    task_id = %task.spec.task_id,
+                    dep_task_id = %conflict.dep_task_id,
+                    files = ?conflict.files,
+                    "predispatch preview: overlay conflict predicted; blocking without worker spawn"
+                );
+                if let Err(error) = self
+                    .transition_to_blocked_on_setup_conflict(
+                        plan_id,
+                        &task.spec.task_id,
+                        &conflict.dep_task_id,
+                        &conflict.files,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        %plan_id,
+                        task_id = %task.spec.task_id,
+                        "predispatch preview: failed to persist setup-conflict transition: {error}"
+                    );
+                    self.record_skipped(
+                        Some(plan_id),
+                        &task.spec.task_id,
+                        SkipReason::PersistError {
+                            msg: error.to_string(),
+                        },
+                    )
+                    .await;
+                    continue;
+                }
+                self.record_skipped(
+                    Some(plan_id),
+                    &task.spec.task_id,
+                    SkipReason::PredispatchOverlayConflict {
+                        dep_task_id: conflict.dep_task_id,
+                        files: conflict.files,
+                    },
+                )
+                .await;
+                continue;
+            }
             if let Err(error) = crate::plan::persist_dispatch_intent(
                 self.pm.as_ref(),
                 &summary.id,
@@ -2483,6 +2702,243 @@ mod tests {
                 .expect("PmService::try_new failed")
                 .expect("expected beads pm"),
         )
+    }
+
+    fn test_dispatch_ctx(
+        delegation_tx: tokio::sync::mpsc::Sender<crate::tools::DelegationRequest>,
+        brain_session_id: spur_acp::BrainSessionId,
+    ) -> ReconcilerDispatchCtx {
+        ReconcilerDispatchCtx {
+            delegation_tx,
+            task_tracker: tokio_util::task::TaskTracker::new(),
+            brain_session_id,
+            event_sink: None,
+            materializer: Arc::new(crate::outcome_materializer::OutcomeMaterializer::new(
+                Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            )),
+            continuation_ctx: Arc::new(crate::server::DetachedContinuationCtx {
+                on_complete: Arc::new(|_, _| Box::pin(async {})),
+            }),
+        }
+    }
+
+    async fn seed_ready_overlay_plan(
+        repo: &std::path::Path,
+        plan_id: &str,
+        brain_session_id: &spur_acp::BrainSessionId,
+    ) -> (Arc<spur_pm::PmService>, String, String) {
+        let empty = spur_pm::test_workspace::TestBeadsWorkspace::init();
+        let beads_dir = repo.join(".beads");
+        std::fs::create_dir(&beads_dir).expect("create test .beads directory");
+        empty.copy_db_to(&beads_dir);
+        let pm = pm_for_beads_repo(repo).await;
+        let feature_gate = pro_feature_gate();
+        crate::server::require_feature(
+            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+            feature_gate.as_ref(),
+        )
+        .expect("test feature gate should allow beads advanced");
+        let adv = pm.advanced().expect("beads advanced");
+
+        let epic_id = pm
+            .create_issue(spur_pm::IssueCreate {
+                title: "Predispatch Preview Plan".into(),
+                description: Some("test plan".into()),
+                issue_type: Some("epic".into()),
+                labels: vec![
+                    crate::plan::labels::plan_id(plan_id),
+                    crate::plan::labels::PLAN_COMPLETE.to_string(),
+                    crate::plan::labels::plan_owner(&brain_session_id.as_session_id().0),
+                ],
+                ..Default::default()
+            })
+            .await
+            .expect("create epic");
+        let dep_issue_id = pm
+            .create_issue(spur_pm::IssueCreate {
+                title: "X: approved dep".into(),
+                description: Some("approved dependency".into()),
+                issue_type: Some("task".into()),
+                labels: vec![
+                    crate::plan::labels::plan_id(plan_id),
+                    crate::plan::labels::plan_task_id("X"),
+                    crate::plan::labels::agent("codex"),
+                ],
+                parent: Some(epic_id.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("create dep task");
+        let ready_issue_id = pm
+            .create_issue(spur_pm::IssueCreate {
+                title: "Y: ready task".into(),
+                description: Some("ready task".into()),
+                issue_type: Some("task".into()),
+                labels: vec![
+                    crate::plan::labels::plan_id(plan_id),
+                    crate::plan::labels::plan_task_id("Y"),
+                    crate::plan::labels::agent("codex"),
+                ],
+                parent: Some(epic_id.clone()),
+                depends_on: vec![dep_issue_id.clone()],
+                ..Default::default()
+            })
+            .await
+            .expect("create ready task");
+
+        adv.add_comment(
+            &epic_id,
+            &crate::plan::audit_sentinel::encode_comment(
+                &crate::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
+                    plan_id: plan_id.to_string(),
+                    epic_issue_id: epic_id.clone(),
+                    task_ids: vec![dep_issue_id.clone(), ready_issue_id.clone()],
+                    base_snapshot_branch: Some("HEAD".to_string()),
+                    base_snapshot_oid: None,
+                    execution_mode: None,
+                    brain_session_id: Some(brain_session_id.as_session_id().0.clone()),
+                },
+            ),
+        )
+        .await
+        .expect("plan submit audit");
+        crate::plan::emit_task_spec_audit(adv, &dep_issue_id, "X", &["x.rs".to_string()])
+            .await
+            .expect("dep task spec audit");
+        crate::plan::emit_task_spec_audit(adv, &ready_issue_id, "Y", &["y.rs".to_string()])
+            .await
+            .expect("ready task spec audit");
+
+        let base_oid = "1111111111111111111111111111111111111111";
+        let worker_tip = "2222222222222222222222222222222222222222";
+        crate::plan::emit_completion_audit(
+            Some(pm.as_ref()),
+            &Some(dep_issue_id.clone()),
+            feature_gate.as_ref(),
+            plan_id,
+            "del-X",
+            crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+            false,
+            crate::plan::audit_sentinel::CompletionAuditFields {
+                worker_branch: Some(worker_tip.to_string()),
+                result_summary: Some("approved dep".into()),
+                dispatched_base_oid: Some(base_oid.to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("completion audit");
+        crate::plan::emit_approval_audit(
+            Some(pm.as_ref()),
+            &Some(dep_issue_id.clone()),
+            feature_gate.as_ref(),
+            plan_id,
+            "del-X",
+        )
+        .await;
+        pm.update_issue(
+            &dep_issue_id,
+            spur_pm::IssueUpdate {
+                status: Some(pm.closed_status().to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("close dep task");
+
+        (pm, dep_issue_id, ready_issue_id)
+    }
+
+    #[tokio::test]
+    async fn tick_once_predicts_overlay_conflict_and_blocks_without_dispatch() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let plan_id = "PREDISPATCH-CONFLICT";
+        let brain_session_id =
+            spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-conflict".into()));
+        let (pm, _dep_issue_id, ready_issue_id) =
+            seed_ready_overlay_plan(dir.path(), plan_id, &brain_session_id).await;
+        let (delegation_tx, mut delegation_rx) =
+            tokio::sync::mpsc::channel::<crate::tools::DelegationRequest>(1);
+        let config = ReconcilerConfig {
+            repo_root: dir.path().to_path_buf(),
+            predispatch_preview: super::PreviewStrategy::AlwaysConflict {
+                dep_task_id: "X".into(),
+                files: vec!["a.rs".into()],
+            },
+            ..Default::default()
+        };
+        let reconciler = Reconciler::new(
+            config,
+            pm,
+            Arc::new(Notify::new()),
+            Some(test_dispatch_ctx(delegation_tx, brain_session_id)),
+            Some(plan_id.into()),
+            pro_feature_gate(),
+        );
+
+        let did_work = reconciler.tick_once().await.expect("tick once");
+
+        assert!(
+            !did_work,
+            "blocked task should not count as dispatched work"
+        );
+        assert!(
+            delegation_rx.try_recv().is_err(),
+            "predicted conflict must not dispatch a worker"
+        );
+        let projected = reconciler
+            .project_plan_from_beads(plan_id)
+            .await
+            .expect("project plan");
+        let ready_task = projected
+            .tasks
+            .iter()
+            .find(|entry| entry.spec.issue_id.as_deref() == Some(ready_issue_id.as_str()))
+            .expect("ready task projection");
+        assert!(
+            matches!(
+                &ready_task.status,
+                crate::plan::PlanTaskStatus::BlockedOnSetupConflict { dep_task_id, files }
+                    if dep_task_id == "X" && files == &vec!["a.rs".to_string()]
+            ),
+            "ready task should be blocked on predicted conflict, got {:?}",
+            ready_task.status
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_once_with_clean_preview_dispatches_normally() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let plan_id = "PREDISPATCH-CLEAN";
+        let brain_session_id =
+            spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-clean".into()));
+        let (pm, _dep_issue_id, ready_issue_id) =
+            seed_ready_overlay_plan(dir.path(), plan_id, &brain_session_id).await;
+        let (delegation_tx, mut delegation_rx) =
+            tokio::sync::mpsc::channel::<crate::tools::DelegationRequest>(1);
+        let config = ReconcilerConfig {
+            repo_root: dir.path().to_path_buf(),
+            predispatch_preview: super::PreviewStrategy::AlwaysClean,
+            ..Default::default()
+        };
+        let reconciler = Reconciler::new(
+            config,
+            pm,
+            Arc::new(Notify::new()),
+            Some(test_dispatch_ctx(delegation_tx, brain_session_id)),
+            Some(plan_id.into()),
+            pro_feature_gate(),
+        );
+
+        let did_work = reconciler.tick_once().await.expect("tick once");
+        let request = delegation_rx.recv().await.expect("dispatch request");
+
+        assert!(did_work, "clean preview should allow normal dispatch");
+        assert_eq!(request.issue_id.as_deref(), Some(ready_issue_id.as_str()));
+        assert!(matches!(
+            request.base,
+            Some(crate::tools::BaseSpec::WithOverlay { .. })
+        ));
     }
 
     #[tokio::test]
