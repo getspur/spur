@@ -1,9 +1,13 @@
+use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
+use chrono::{SecondsFormat, Utc};
+use rusqlite::params;
 use spur_acp::{BrainSessionId, SessionId};
 use spur_mcp::plan::{labels, PlanTask};
 use spur_mcp::server::{DetachedContinuationCtx, McpCallbackServer, StartupRecoveryProbe};
-use spur_pm::{IssueUpdate, PmService};
+use spur_pm::{IssueCreate, IssueUpdate, PmService};
 use tempfile::TempDir;
 
 mod common;
@@ -65,6 +69,47 @@ async fn create_persisted_plan(
     subgraph.epic_id
 }
 
+async fn create_pending_plan(pm: &PmService, plan_id: &str) -> (String, String) {
+    let epic_id = pm
+        .create_issue(IssueCreate {
+            title: format!("Pending epic {plan_id}"),
+            issue_type: Some("epic".to_string()),
+            labels: vec![labels::PLAN_PENDING.to_string(), labels::plan_id(plan_id)],
+            ..Default::default()
+        })
+        .await
+        .expect("create pending epic");
+
+    let child_id = pm
+        .create_issue(IssueCreate {
+            title: format!("Pending task {plan_id}"),
+            issue_type: Some("task".to_string()),
+            parent: Some(epic_id.clone()),
+            labels: vec![
+                labels::plan_id(plan_id),
+                labels::plan_task_id("pending-task"),
+            ],
+            ..Default::default()
+        })
+        .await
+        .expect("create pending child");
+
+    (epic_id, child_id)
+}
+
+fn set_created_at(repo: &Path, issue_id: &str, seconds_ago: i64) {
+    let timestamp = (Utc::now() - chrono::Duration::seconds(seconds_ago))
+        .to_rfc3339_opts(SecondsFormat::Micros, true);
+    let conn = rusqlite::Connection::open(repo.join(".beads/beads.db")).expect("open beads db");
+    let changed = conn
+        .execute(
+            "UPDATE issues SET created_at = ?1, updated_at = ?1 WHERE id = ?2",
+            params![timestamp, issue_id],
+        )
+        .expect("backdate issue");
+    assert_eq!(changed, 1, "issue {issue_id} must exist");
+}
+
 #[tokio::test]
 async fn start_does_not_recover_before_brain_session_is_bound() {
     skip_if_no_loopback!("start_does_not_recover_before_brain_session_is_bound");
@@ -114,6 +159,74 @@ async fn start_does_not_recover_before_brain_session_is_bound() {
         1,
         "pending recovery should run after the brain session id is bound"
     );
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn start_returns_before_deferred_pending_sweep_finishes() {
+    skip_if_no_loopback!("start_returns_before_deferred_pending_sweep_finishes");
+
+    let dir = TempDir::new().expect("tempdir");
+    let (_beads, pm) = common::beads::init_beads_pm(dir.path()).await;
+    let owner = BrainSessionId::new(SessionId("brain-current".into()));
+    let (epic_id, child_id) = create_pending_plan(pm.as_ref(), "pending-startup").await;
+    set_created_at(dir.path(), &epic_id, 5);
+
+    let probe = Arc::new(StartupRecoveryProbe::new());
+    let _probe_guard = McpCallbackServer::__test_install_startup_recovery_probe(Arc::clone(&probe));
+
+    let (mut server, _channel) = McpCallbackServer::new(
+        Some(&owner),
+        Some(Arc::clone(&pm)),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        common::server_builder::pro_feature_gate(),
+    );
+    server.set_repo_root(dir.path().to_path_buf());
+    server.set_plan_pending_grace(Duration::from_secs(1));
+
+    let server = Arc::new(server);
+    let start = Arc::clone(&server).start();
+    tokio::pin!(start);
+    let (_url, handle) = tokio::time::timeout(Duration::from_secs(1), &mut start)
+        .await
+        .expect("start should return while pending sweep is paused")
+        .expect("start should bind before pending sweep completes");
+
+    tokio::time::timeout(Duration::from_secs(5), probe.wait_until_entered())
+        .await
+        .expect("deferred startup task should pause before sweeping pending plans");
+
+    let epic = pm
+        .get_issue(&epic_id)
+        .await
+        .expect("get epic while sweep is paused");
+    assert_eq!(
+        epic.status, "open",
+        "start must return before the deferred sweep closes stale pending epics"
+    );
+    assert!(
+        epic.labels
+            .iter()
+            .any(|label| label == labels::PLAN_PENDING),
+        "start must return before the deferred sweep removes the pending label"
+    );
+
+    probe.release();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        server.__test_wait_startup_recovery(),
+    )
+    .await
+    .expect("deferred startup task should complete after probe release");
+
+    let epic = pm.get_issue(&epic_id).await.expect("get swept epic");
+    let child = pm.get_issue(&child_id).await.expect("get swept child");
+    assert_eq!(epic.status, pm.closed_status());
+    assert_eq!(child.status, pm.closed_status());
 
     handle.abort();
     let _ = handle.await;

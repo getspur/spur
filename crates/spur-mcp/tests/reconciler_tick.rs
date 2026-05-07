@@ -2687,6 +2687,7 @@ async fn submit_plan_default_notify_path_dispatches_ready_task() {
         .start()
         .await
         .expect("start server (loopback bind already probed at fn entry)");
+    server.__test_wait_startup_recovery().await;
     Arc::clone(&server)
         .enable_reconciler()
         .await
@@ -2797,6 +2798,7 @@ async fn execute_epic_default_notify_path_dispatches_ready_task() {
         .start()
         .await
         .expect("start server (loopback bind already probed at fn entry)");
+    server.__test_wait_startup_recovery().await;
     Arc::clone(&server)
         .enable_reconciler()
         .await
