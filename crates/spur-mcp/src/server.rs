@@ -4879,7 +4879,7 @@ impl McpCallbackServer {
             None => return JsonRpcResponse::invalid_params(id, "Missing required field 'tasks'"),
         };
 
-        let tasks: Vec<crate::plan::PlanTask> = match tasks_val
+        let mut tasks: Vec<crate::plan::PlanTask> = match tasks_val
             .into_iter()
             .map(serde_json::from_value)
             .collect::<Result<Vec<_>, _>>()
@@ -4890,9 +4890,10 @@ impl McpCallbackServer {
             }
         };
 
-        if let Err(e) = crate::plan::validate_plan(&tasks) {
-            return JsonRpcResponse::invalid_params(id, e);
-        }
+        let auto_serialized = match crate::plan::submit_plan_normalize_tasks(&mut tasks) {
+            Ok(overlaps) => overlaps,
+            Err(e) => return JsonRpcResponse::invalid_params(id, e),
+        };
 
         // ─── Persist-as-epic extraction (T2.1) ─────────────────────────
         let persist_as_epic = args
@@ -5087,10 +5088,32 @@ impl McpCallbackServer {
             )
         };
 
+        let response_text = if auto_serialized.is_empty() {
+            response_text
+        } else {
+            let edges: Vec<String> = auto_serialized
+                .iter()
+                .map(|o| {
+                    format!(
+                        "  {} → {} (shared: {})",
+                        o.from,
+                        o.to,
+                        o.shared_files.join(", ")
+                    )
+                })
+                .collect();
+            format!(
+                "{response_text}\n\nAuto-serialized {} sibling pair(s) with overlapping context_files:\n{}",
+                auto_serialized.len(),
+                edges.join("\n")
+            )
+        };
+
         JsonRpcResponse::success(
             id,
             json!({
                 "continuation_will_fire": true,
+                "auto_serialized": auto_serialized,
                 "content": [{
                     "type": "text",
                     "text": response_text
