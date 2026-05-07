@@ -1303,7 +1303,12 @@ mod base_target_round_trip {
         })
         .unwrap();
         let back: BaseTarget = serde_json::from_value(v).unwrap();
-        assert_eq!(back, BaseTarget::Branch { name: "feature/x".into() });
+        assert_eq!(
+            back,
+            BaseTarget::Branch {
+                name: "feature/x".into()
+            }
+        );
     }
 
     #[test]
@@ -1313,6 +1318,11 @@ mod base_target_round_trip {
         })
         .unwrap();
         let back: BaseTarget = serde_json::from_value(v).unwrap();
-        assert_eq!(back, BaseTarget::Commit { oid: "abc123".into() });
+        assert_eq!(
+            back,
+            BaseTarget::Commit {
+                oid: "abc123".into()
+            }
+        );
     }
 }

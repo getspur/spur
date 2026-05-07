@@ -2797,6 +2797,7 @@ mod tests {
                     base_snapshot_oid: None,
                     execution_mode: None,
                     brain_session_id: Some(brain_session_id.as_session_id().0.clone()),
+                    explicit_base: None,
                 },
             ),
         )
