@@ -36,6 +36,7 @@ pub struct PickerShell {
     query: MiniInput,
     rows: Vec<RetrievalRow>,
     list_state: ListState,
+    active_preview: Option<(usize, RetrievalPreview)>,
 }
 
 impl PickerShell {
@@ -52,6 +53,7 @@ impl PickerShell {
             query: MiniInput::new(),
             rows,
             list_state,
+            active_preview: None,
         }
     }
 
@@ -70,6 +72,7 @@ impl PickerShell {
             } else {
                 shell.query.paste(query);
                 shell.rows = shell.source.refresh(shell.query.text());
+                shell.active_preview = None;
                 if !shell.rows.is_empty() {
                     shell.list_state.select(Some(0));
                 }
@@ -160,6 +163,7 @@ impl PickerShell {
 
     fn select_prev(&mut self) {
         if self.rows.is_empty() {
+            self.active_preview = None;
             return;
         }
         let len = self.rows.len();
@@ -167,17 +171,24 @@ impl PickerShell {
             .list_state
             .selected()
             .map_or(0, |i| (i + len - 1) % len);
+        if self.list_state.selected() != Some(i) {
+            self.active_preview = None;
+        }
         self.list_state.select(Some(i));
     }
 
     fn select_next(&mut self) {
         if self.rows.is_empty() {
+            self.active_preview = None;
             return;
         }
         let i = self
             .list_state
             .selected()
             .map_or(0, |i| (i + 1) % self.rows.len());
+        if self.list_state.selected() != Some(i) {
+            self.active_preview = None;
+        }
         self.list_state.select(Some(i));
     }
 
@@ -194,6 +205,7 @@ impl PickerShell {
     /// Refresh rows from the source using the current query; preserve
     /// selection on the same logical row where possible.
     fn refilter(&mut self) {
+        self.active_preview = None;
         let prev_primary = self
             .list_state
             .selected()
@@ -230,19 +242,17 @@ impl PickerShell {
     // ── Rendering ──────────────────────────────────────────────────────
 
     /// Render above `anchor` (the InputBar's rect), clipped to `container`.
-    pub fn render(&self, frame: &mut Frame, anchor: Rect, container: Rect) {
+    pub fn render(&mut self, frame: &mut Frame, anchor: Rect, container: Rect) {
         let query_mode_owned = self.source.query_mode() == QueryMode::OwnedByShell;
-        let active_preview = self
-            .list_state
-            .selected()
-            .and_then(|idx| self.source.preview_for(idx));
-        let show_preview = active_preview.is_some() && container.width >= MIN_PREVIEW_WIDTH;
+        self.update_active_preview();
+        let show_preview = self.active_preview.is_some() && container.width >= MIN_PREVIEW_WIDTH;
         let list_rows = self.rows.len().clamp(1, 8) as u16;
         let query_rows = if query_mode_owned { 1 } else { 0 };
-        let preview_rows = active_preview
+        let preview_rows = self
+            .active_preview
             .as_ref()
             .filter(|_| show_preview)
-            .map(|preview| preview.lines.len().saturating_add(1).clamp(3, 8) as u16)
+            .map(|(_, preview)| preview.lines.len().saturating_add(1).clamp(3, 8) as u16)
             .unwrap_or(0);
         let inner_rows = (list_rows + query_rows).max(preview_rows);
         let popup_height = inner_rows + 2; // +2 for block border
@@ -320,7 +330,7 @@ impl PickerShell {
 
         self.render_rows(frame, list_area);
 
-        if let (Some(preview), Some(area)) = (active_preview, preview_area) {
+        if let (Some((_, preview)), Some(area)) = (self.active_preview.as_ref(), preview_area) {
             self.render_preview(frame, area, preview);
         }
 
@@ -329,6 +339,17 @@ impl PickerShell {
                 frame.set_cursor_position((cx, cy));
             }
         }
+    }
+
+    fn update_active_preview(&mut self) {
+        let Some(idx) = self.list_state.selected() else {
+            self.active_preview = None;
+            return;
+        };
+        if matches!(self.active_preview.as_ref(), Some((cached_idx, _)) if *cached_idx == idx) {
+            return;
+        }
+        self.active_preview = self.source.preview_for(idx).map(|preview| (idx, preview));
     }
 
     fn render_rows(&self, frame: &mut Frame, list_area: Rect) {
@@ -408,16 +429,80 @@ impl PickerShell {
         frame.render_stateful_widget(list, list_area, &mut list_state);
     }
 
-    fn render_preview(&self, frame: &mut Frame, area: Rect, preview: RetrievalPreview) {
+    fn render_preview(&self, frame: &mut Frame, area: Rect, preview: &RetrievalPreview) {
         let block = Block::default().borders(Borders::LEFT).title(Span::styled(
             format!(" {} ", preview.title),
             Style::default().fg(Color::Cyan),
         ));
-        let paragraph = Paragraph::new(preview.lines)
+        let body_rows = area.height.saturating_sub(1) as usize;
+        let body_width = area.width.saturating_sub(1) as usize;
+        let lines = truncate_preview_lines_to_fit(preview.lines.clone(), body_rows, body_width);
+        let paragraph = Paragraph::new(lines)
             .block(block)
             .wrap(Wrap { trim: false });
         frame.render_widget(paragraph, area);
     }
+}
+
+fn truncate_preview_lines(lines: Vec<Line<'static>>, max_rows: usize) -> Vec<Line<'static>> {
+    if lines.len() <= max_rows {
+        return lines;
+    }
+    if max_rows == 0 {
+        return Vec::new();
+    }
+
+    let dropped = lines.len().saturating_sub(max_rows.saturating_sub(1));
+    let keep = max_rows.saturating_sub(1);
+    let mut out: Vec<Line<'static>> = lines.into_iter().take(keep).collect();
+    out.push(Line::from(Span::styled(
+        format!("  +{dropped} more …"),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
+    )));
+    out
+}
+
+fn truncate_preview_lines_to_fit(
+    lines: Vec<Line<'static>>,
+    max_rows: usize,
+    max_width: usize,
+) -> Vec<Line<'static>> {
+    if max_rows == 0 {
+        return Vec::new();
+    }
+    if preview_visual_rows(&lines, max_width) <= max_rows {
+        return lines;
+    }
+
+    let mut used_rows = 0usize;
+    let mut keep_count = 0usize;
+    let row_budget = max_rows.saturating_sub(1);
+    for line in &lines {
+        let line_rows = wrapped_line_rows(line, max_width);
+        if used_rows.saturating_add(line_rows) > row_budget {
+            break;
+        }
+        used_rows += line_rows;
+        keep_count += 1;
+    }
+
+    truncate_preview_lines(lines, keep_count.saturating_add(1))
+}
+
+fn preview_visual_rows(lines: &[Line<'static>], max_width: usize) -> usize {
+    lines
+        .iter()
+        .map(|line| wrapped_line_rows(line, max_width))
+        .sum()
+}
+
+fn wrapped_line_rows(line: &Line<'static>, max_width: usize) -> usize {
+    if max_width == 0 {
+        return 1;
+    }
+    line.width().max(1).div_ceil(max_width)
 }
 
 #[cfg(test)]
@@ -426,7 +511,9 @@ mod tests {
     use crate::components::query_source::{HistoryQuerySource, RetrievalAccept, RetrievalPreview};
     use crate::input_history::{InputHistoryEntry, InputStateSnapshot};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
+    use std::cell::Cell;
+    use std::rc::Rc;
 
     fn mk(text: &str) -> InputHistoryEntry {
         InputHistoryEntry::new(InputStateSnapshot::from_text(text))
@@ -436,18 +523,31 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    fn rendered_shell_text(shell: &PickerShell, width: u16) -> String {
-        let height = 12;
+    fn rendered_shell_buffer(shell: &mut PickerShell, width: u16, height: u16) -> Buffer {
+        rendered_shell_buffer_with_anchor_x(shell, width, height, 0)
+    }
+
+    fn rendered_shell_buffer_with_anchor_x(
+        shell: &mut PickerShell,
+        width: u16,
+        height: u16,
+        anchor_x: u16,
+    ) -> Buffer {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                let anchor = Rect::new(0, height - 1, width, 1);
+                let anchor = Rect::new(anchor_x, height - 1, width.saturating_sub(anchor_x), 1);
                 let container = Rect::new(0, 0, width, height);
                 shell.render(f, anchor, container);
             })
             .unwrap();
-        let buffer = terminal.backend().buffer();
+        terminal.backend().buffer().clone()
+    }
+
+    fn rendered_shell_text(shell: &mut PickerShell, width: u16) -> String {
+        let height = 12;
+        let buffer = rendered_shell_buffer(shell, width, height);
         (0..height)
             .map(|y| {
                 (0..width)
@@ -456,6 +556,31 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn find_text_start(
+        buffer: &Buffer,
+        width: u16,
+        height: u16,
+        needle: &str,
+    ) -> Option<(u16, u16)> {
+        let needle_chars: Vec<String> = needle.chars().map(|ch| ch.to_string()).collect();
+        if needle_chars.is_empty() {
+            return None;
+        }
+        for y in 0..height {
+            for x in 0..width.saturating_sub(needle_chars.len() as u16 - 1) {
+                let matches = needle_chars.iter().enumerate().all(|(offset, expected)| {
+                    buffer
+                        .cell((x + offset as u16, y))
+                        .is_some_and(|cell| cell.symbol() == expected)
+                });
+                if matches {
+                    return Some((x, y));
+                }
+            }
+        }
+        None
     }
 
     struct PreviewSource;
@@ -486,6 +611,74 @@ mod tests {
             (row_idx == 0).then(|| RetrievalPreview {
                 title: "bd-1234".to_string(),
                 lines: vec![Line::raw("Preview-only disambiguating title")],
+            })
+        }
+    }
+
+    struct LongPreviewSource;
+
+    impl QuerySource for LongPreviewSource {
+        fn title(&self) -> &str {
+            "Mentions · @"
+        }
+
+        fn query_mode(&self) -> QueryMode {
+            QueryMode::ReadFromInputBar
+        }
+
+        fn refresh(&mut self, _query: &str) -> Vec<RetrievalRow> {
+            vec![RetrievalRow {
+                primary: "bd-1234 Long preview row".to_string(),
+                secondary: String::new(),
+                tag: String::new(),
+                atoms: Vec::new(),
+            }]
+        }
+
+        fn accept(&self, _row_idx: usize) -> Option<RetrievalAccept> {
+            None
+        }
+    }
+
+    struct CountingPreviewSource {
+        count: Rc<Cell<usize>>,
+    }
+
+    impl QuerySource for CountingPreviewSource {
+        fn title(&self) -> &str {
+            "Mentions · @"
+        }
+
+        fn query_mode(&self) -> QueryMode {
+            QueryMode::ReadFromInputBar
+        }
+
+        fn refresh(&mut self, _query: &str) -> Vec<RetrievalRow> {
+            vec![
+                RetrievalRow {
+                    primary: "bd-1 First".to_string(),
+                    secondary: String::new(),
+                    tag: String::new(),
+                    atoms: Vec::new(),
+                },
+                RetrievalRow {
+                    primary: "bd-2 Second".to_string(),
+                    secondary: String::new(),
+                    tag: String::new(),
+                    atoms: Vec::new(),
+                },
+            ]
+        }
+
+        fn accept(&self, _row_idx: usize) -> Option<RetrievalAccept> {
+            None
+        }
+
+        fn preview_for(&self, row_idx: usize) -> Option<RetrievalPreview> {
+            self.count.set(self.count.get() + 1);
+            Some(RetrievalPreview {
+                title: format!("bd-{}", row_idx + 1),
+                lines: vec![Line::raw(format!("preview {}", row_idx + 1))],
             })
         }
     }
@@ -594,22 +787,87 @@ mod tests {
 
     #[test]
     fn wide_issue_picker_renders_preview_pane() {
-        let shell = PickerShell::open(Box::new(PreviewSource));
+        let mut shell = PickerShell::open(Box::new(PreviewSource));
+        let width = 120;
 
-        let text = rendered_shell_text(&shell, 120);
+        let buffer = rendered_shell_buffer_with_anchor_x(&mut shell, width, 12, width / 3);
+        let preview_pos = find_text_start(&buffer, width, 12, "Preview-only disambiguating title")
+            .expect("preview title coordinate");
+        let list_pos =
+            find_text_start(&buffer, width, 12, "Short issue row").expect("list row coordinate");
 
-        assert!(text.contains("Preview-only disambiguating title"), "{text}");
+        assert!(
+            preview_pos.0 > width / 2,
+            "preview x={} should be on right half",
+            preview_pos.0
+        );
+        assert!(
+            list_pos.0 < width / 2,
+            "list x={} should be on left half",
+            list_pos.0
+        );
     }
 
     #[test]
     fn narrow_issue_picker_suppresses_preview_pane() {
-        let shell = PickerShell::open(Box::new(PreviewSource));
+        let mut shell = PickerShell::open(Box::new(PreviewSource));
 
-        let text = rendered_shell_text(&shell, 80);
+        let text = rendered_shell_text(&mut shell, 80);
 
         assert!(
             !text.contains("Preview-only disambiguating title"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn preview_body_shows_truncation_trailer_when_area_is_short() {
+        let shell = PickerShell::open(Box::new(LongPreviewSource));
+        let lines = (1..=20)
+            .map(|n| Line::raw(format!("line-{n:02}")))
+            .collect();
+        let preview = RetrievalPreview {
+            title: "bd-1234".to_string(),
+            lines,
+        };
+        let width = 40;
+        let height = 5;
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| shell.render_preview(f, Rect::new(0, 0, width, height), &preview))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let text = (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer.cell((x, y)).expect("cell").symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("+17 more"), "{text}");
+        for n in 4..=20 {
+            assert!(!text.contains(&format!("line-{n:02}")), "{text}");
+        }
+    }
+
+    #[test]
+    fn preview_for_is_cached_until_selection_changes() {
+        let count = Rc::new(Cell::new(0));
+        let mut shell = PickerShell::open(Box::new(CountingPreviewSource {
+            count: Rc::clone(&count),
+        }));
+
+        let _ = rendered_shell_text(&mut shell, 120);
+        let _ = rendered_shell_text(&mut shell, 120);
+        assert_eq!(count.get(), 1);
+
+        shell.handle_key(key(KeyCode::Down));
+        let _ = rendered_shell_text(&mut shell, 120);
+        let _ = rendered_shell_text(&mut shell, 120);
+        assert_eq!(count.get(), 2);
     }
 }

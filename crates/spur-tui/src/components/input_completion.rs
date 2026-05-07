@@ -195,8 +195,8 @@ impl InputCompletionPort {
         }
     }
 
-    pub fn render(&self, frame: &mut Frame, input_rect: Rect, area: Rect) {
-        if let Some(shell) = self.picker_shell.as_ref() {
+    pub fn render(&mut self, frame: &mut Frame, input_rect: Rect, area: Rect) {
+        if let Some(shell) = self.picker_shell.as_mut() {
             shell.render(frame, input_rect, area);
         }
     }

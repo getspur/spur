@@ -2,7 +2,7 @@
 //! snapshot supplied by the dashboard/app.
 
 use std::path::Path;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use spur_pm::{IssueSummary, PmSource};
 
@@ -41,12 +41,14 @@ impl From<&IssueSummary> for IssueMentionDescriptor {
 }
 
 pub struct IssueMentionSource {
-    snapshot: Vec<IssueMentionDescriptor>,
+    snapshot: Vec<Arc<IssueMentionDescriptor>>,
 }
 
 impl IssueMentionSource {
     pub fn new(snapshot: Vec<IssueMentionDescriptor>) -> Self {
-        Self { snapshot }
+        Self {
+            snapshot: snapshot.into_iter().map(Arc::new).collect(),
+        }
     }
 }
 
@@ -60,7 +62,8 @@ impl MentionSource for IssueMentionSource {
             .snapshot
             .iter()
             .map(|descriptor| {
-                let preview = Rc::new(descriptor.clone());
+                let preview = Arc::clone(descriptor);
+                let title = sanitize_single_line(&descriptor.title);
                 let mut search_text = String::new();
                 push_issue_search_text(
                     &mut search_text,
@@ -79,7 +82,7 @@ impl MentionSource for IssueMentionSource {
                         descriptor.id
                     ),
                     display: truncate_chars(
-                        &format!("{} {}", descriptor.id, descriptor.title),
+                        &format!("{} {}", descriptor.id, title),
                         DISPLAY_CHAR_LIMIT,
                     ),
                     secondary: issue_secondary(&descriptor.status, descriptor.assignee.as_deref()),
@@ -118,6 +121,23 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     } else {
         value.chars().take(max_chars).collect()
     }
+}
+
+pub(crate) fn sanitize_single_line(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut in_line_break = false;
+    for ch in value.chars() {
+        if ch == '\r' || ch == '\n' {
+            if !in_line_break {
+                out.push(' ');
+                in_line_break = true;
+            }
+        } else {
+            out.push(ch);
+            in_line_break = false;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -190,11 +210,13 @@ mod tests {
             descriptor(PmSource::Beads, "bd-1"),
             descriptor(PmSource::GitHub, "GH-2"),
         ]);
+        let first_source_preview = source.snapshot[0].clone();
 
         let entries = source.build(Path::new(".")).expect("build succeeds");
 
         assert!(entries.iter().all(|entry| entry.issue_preview.is_some()));
         let preview = entries[0].issue_preview.as_ref().expect("issue preview");
+        assert!(std::sync::Arc::ptr_eq(&first_source_preview, preview));
         assert_eq!(preview.id, "bd-1");
         assert_eq!(preview.title, "Fix mention picker matching");
         assert_eq!(preview.labels, vec!["mentions", "tui"]);
