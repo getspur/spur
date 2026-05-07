@@ -675,6 +675,7 @@ pub fn parse_parallel_tasks(
             base: task.base,
             dispatched_base_oid_tx: None,
             attempt_tracker: new_attempt_tracker(),
+            enable_worker_mcp: task.enable_worker_mcp,
         });
     }
     Ok(out)
@@ -2190,6 +2191,23 @@ impl McpCallbackServer {
         self.repo_root = Some(root);
     }
 
+    /// Borrow the configured repo root, if any. Used by Phase 5 / Task 26
+    /// when constructing a `WorkerMcpDeps` so worker MCP handlers can
+    /// reconstruct diffs from persisted worker branches.
+    pub fn repo_root(&self) -> Option<&std::path::Path> {
+        self.repo_root.as_deref()
+    }
+
+    /// Clone-shared handle to the ephemeral reconciler outcome buffer.
+    /// Used by Phase 5 / Task 26 to inject the buffer into the per-
+    /// `BrainSession` `WorkerMcpServer` so `get_plan_status` reflects the
+    /// reconciler view from the same brain.
+    pub fn reconciler_outcomes_handle(
+        &self,
+    ) -> Arc<tokio::sync::Mutex<crate::plan::outcomes::OutcomeStore>> {
+        Arc::clone(&self.reconciler_outcomes)
+    }
+
     /// v0e: opt-in auto-merge/PR on durable epic completion.
     pub fn set_auto_merge_approved_plans(&mut self, enabled: bool) {
         self.auto_merge_approved_plans = enabled;
@@ -3020,6 +3038,7 @@ impl McpCallbackServer {
             base: parsed.base,
             dispatched_base_oid_tx: None,
             attempt_tracker: Arc::clone(&attempt_tracker),
+            enable_worker_mcp: parsed.enable_worker_mcp,
         };
 
         info!(agent = %parsed.agent, request_id = %request_id, "Sending delegation request");
