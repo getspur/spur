@@ -2,6 +2,7 @@
 //! snapshot supplied by the dashboard/app.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use spur_pm::{IssueSummary, PmSource};
 
@@ -20,6 +21,7 @@ pub struct IssueMentionDescriptor {
     pub priority: Option<i32>,
     pub issue_type: Option<String>,
     pub labels: Vec<String>,
+    pub url: String,
 }
 
 impl From<&IssueSummary> for IssueMentionDescriptor {
@@ -33,17 +35,20 @@ impl From<&IssueSummary> for IssueMentionDescriptor {
             priority: issue.priority,
             issue_type: issue.issue_type.clone(),
             labels: issue.labels.clone(),
+            url: issue.url.clone(),
         }
     }
 }
 
 pub struct IssueMentionSource {
-    snapshot: Vec<IssueMentionDescriptor>,
+    snapshot: Vec<Arc<IssueMentionDescriptor>>,
 }
 
 impl IssueMentionSource {
     pub fn new(snapshot: Vec<IssueMentionDescriptor>) -> Self {
-        Self { snapshot }
+        Self {
+            snapshot: snapshot.into_iter().map(Arc::new).collect(),
+        }
     }
 }
 
@@ -57,6 +62,8 @@ impl MentionSource for IssueMentionSource {
             .snapshot
             .iter()
             .map(|descriptor| {
+                let preview = Arc::clone(descriptor);
+                let title = sanitize_single_line(&descriptor.title);
                 let mut search_text = String::new();
                 push_issue_search_text(
                     &mut search_text,
@@ -75,13 +82,14 @@ impl MentionSource for IssueMentionSource {
                         descriptor.id
                     ),
                     display: truncate_chars(
-                        &format!("{} {}", descriptor.id, descriptor.title),
+                        &format!("{} {}", descriptor.id, title),
                         DISPLAY_CHAR_LIMIT,
                     ),
                     secondary: issue_secondary(&descriptor.status, descriptor.assignee.as_deref()),
                     tag: descriptor.priority.map(|priority| format!("P{}", priority)),
                     search_text: Some(search_text),
                     atom_text: Some(format!("@{}", descriptor.id)),
+                    issue_preview: Some(preview),
                 }
             })
             .collect())
@@ -115,6 +123,23 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     }
 }
 
+pub(crate) fn sanitize_single_line(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut in_line_break = false;
+    for ch in value.chars() {
+        if ch == '\r' || ch == '\n' {
+            if !in_line_break {
+                out.push(' ');
+                in_line_break = true;
+            }
+        } else {
+            out.push(ch);
+            in_line_break = false;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -133,6 +158,7 @@ mod tests {
             priority: Some(1),
             issue_type: Some("bug".to_string()),
             labels: vec!["mentions".to_string(), "tui".to_string()],
+            url: format!("https://example.test/{id}"),
         }
     }
 
@@ -176,6 +202,26 @@ mod tests {
                 "search text {search_text:?} missing {expected:?}",
             );
         }
+    }
+
+    #[test]
+    fn issue_entries_carry_preview_descriptor_handle() {
+        let mut source = IssueMentionSource::new(vec![
+            descriptor(PmSource::Beads, "bd-1"),
+            descriptor(PmSource::GitHub, "GH-2"),
+        ]);
+        let first_source_preview = source.snapshot[0].clone();
+
+        let entries = source.build(Path::new(".")).expect("build succeeds");
+
+        assert!(entries.iter().all(|entry| entry.issue_preview.is_some()));
+        let preview = entries[0].issue_preview.as_ref().expect("issue preview");
+        assert!(std::sync::Arc::ptr_eq(&first_source_preview, preview));
+        assert_eq!(preview.id, "bd-1");
+        assert_eq!(preview.title, "Fix mention picker matching");
+        assert_eq!(preview.labels, vec!["mentions", "tui"]);
+        let second_preview = entries[1].issue_preview.as_ref().expect("issue preview");
+        assert_eq!(second_preview.id, "GH-2");
     }
 
     #[test]

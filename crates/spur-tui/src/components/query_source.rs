@@ -5,6 +5,10 @@
 //! `InputBar`.
 
 use crate::input_history::InputStateSnapshot;
+use ratatui::{
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+};
 
 /// Where the popup's query string lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +38,16 @@ pub struct RetrievalRow {
     /// implementors are responsible for validating against any truncation
     /// they applied before returning.
     pub atoms: Vec<(usize, usize)>,
+}
+
+/// Optional side-pane preview for a retrieval row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetrievalPreview {
+    /// Title shown in the preview pane header (e.g. the bare issue id).
+    pub title: String,
+    /// Body lines. Each line is already styled by the source. Renderer
+    /// wraps long lines using ratatui's word-aware Paragraph.
+    pub lines: Vec<Line<'static>>,
 }
 
 /// Payload dispatched by the view when the user accepts a row.
@@ -81,6 +95,12 @@ pub trait QuerySource {
     /// Build the accept payload for the row at `row_idx`. Returns `None`
     /// if `row_idx` is out of bounds or the source has no state to accept.
     fn accept(&self, row_idx: usize) -> Option<RetrievalAccept>;
+
+    /// Optional preview for the row at row_idx. None means the picker
+    /// should not render a side pane for this row. Default: None.
+    fn preview_for(&self, _row_idx: usize) -> Option<RetrievalPreview> {
+        None
+    }
 }
 
 use crate::input_history::InputHistoryEntry;
@@ -307,6 +327,128 @@ impl MentionQuerySource {
     }
 }
 
+fn issue_preview_for_descriptor(
+    descriptor: &crate::mentions::IssueMentionDescriptor,
+) -> RetrievalPreview {
+    let mut lines = Vec::new();
+    lines.push(Line::from(vec![
+        Span::raw(descriptor.id.clone()),
+        Span::raw("  "),
+        Span::styled(
+            descriptor.source.to_string(),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+
+    let title = crate::mentions::issue_source::sanitize_single_line(&descriptor.title);
+    if !title.trim().is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            title,
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(labeled_preview_line(
+        "Status:",
+        required_preview_value(&descriptor.status),
+    ));
+    lines.push(labeled_preview_line(
+        "Type:",
+        optional_preview_value(descriptor.issue_type.as_deref()),
+    ));
+    lines.push(labeled_preview_line(
+        "Priority:",
+        descriptor
+            .priority
+            .map(|priority| format!("P{priority}"))
+            .unwrap_or_else(|| "-".to_string()),
+    ));
+    lines.push(labeled_preview_line(
+        "Assignee:",
+        optional_preview_value(descriptor.assignee.as_deref()),
+    ));
+
+    if !descriptor.labels.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "Labels:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        lines.push(labels_preview_line(&descriptor.labels));
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(url_preview_line(&descriptor.url));
+
+    RetrievalPreview {
+        title: descriptor.id.clone(),
+        lines,
+    }
+}
+
+fn required_preview_value(value: &str) -> String {
+    let value = value.trim();
+    if value.is_empty() {
+        "-".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn optional_preview_value(value: Option<&str>) -> String {
+    value
+        .map(required_preview_value)
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn labeled_preview_line(label: &'static str, value: String) -> Line<'static> {
+    Line::from(vec![Span::raw(label), Span::raw(" "), Span::raw(value)])
+}
+
+fn labels_preview_line(labels: &[String]) -> Line<'static> {
+    const LABEL_PREVIEW_LIMIT: usize = 6;
+
+    let mut spans = Vec::new();
+    for (idx, label) in labels.iter().take(LABEL_PREVIEW_LIMIT).enumerate() {
+        if idx > 0 {
+            spans.push(Span::raw(", "));
+        }
+        spans.push(Span::raw(label.clone()));
+    }
+    let remaining = labels.len().saturating_sub(LABEL_PREVIEW_LIMIT);
+    if remaining > 0 {
+        if !spans.is_empty() {
+            spans.push(Span::raw(", "));
+        }
+        spans.push(Span::styled(
+            format!("+{remaining} more"),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn url_preview_line(url: &str) -> Line<'static> {
+    let url = url.trim();
+    if url.is_empty() {
+        Line::raw("URL: -")
+    } else {
+        Line::from(vec![
+            Span::raw("URL: "),
+            Span::styled(
+                url.to_string(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::UNDERLINED),
+            ),
+        ])
+    }
+}
+
 impl QuerySource for MentionQuerySource {
     fn title(&self) -> &str {
         "Mentions · @"
@@ -377,6 +519,18 @@ impl QuerySource for MentionQuerySource {
             name,
             replace_from: Some(self.prefix_start),
         })
+    }
+
+    fn preview_for(&self, row_idx: usize) -> Option<RetrievalPreview> {
+        use crate::mentions::MentionKind;
+
+        let hit = self.last_hits.get(row_idx)?;
+        if hit.kind != MentionKind::Issue {
+            return None;
+        }
+        hit.issue_preview
+            .as_deref()
+            .map(issue_preview_for_descriptor)
     }
 }
 
@@ -679,6 +833,41 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
+    fn preview_text(preview: &RetrievalPreview) -> String {
+        preview
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    fn issue_descriptor() -> crate::mentions::IssueMentionDescriptor {
+        crate::mentions::IssueMentionDescriptor {
+            id: "bd-1".to_string(),
+            title: "Mention picker issue rows".to_string(),
+            source: spur_pm::PmSource::Beads,
+            status: "open".to_string(),
+            assignee: Some("alice".to_string()),
+            priority: Some(2),
+            issue_type: Some("task".to_string()),
+            labels: vec!["mentions".to_string()],
+            url: "https://example.test/bd-1".to_string(),
+        }
+    }
+
     fn make_mention_registry_with_cwd(cwd: &std::path::Path) -> Rc<RefCell<MentionRegistry>> {
         let mut r = MentionRegistry::new();
         // Prime the cache by running one query; cwd must actually exist so
@@ -792,6 +981,7 @@ mod tests {
                 priority: Some(2),
                 issue_type: Some("task".to_string()),
                 labels: vec!["mentions".to_string()],
+                url: "https://example.test/bd-1".to_string(),
             }]);
         let mut src = MentionQuerySource::new(
             Rc::clone(&registry),
@@ -819,6 +1009,93 @@ mod tests {
             }
             other => panic!("expected InsertAtom, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn mention_source_preview_for_issue_rows_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let full_title = "Preview-only title that is much longer than the list row";
+        let registry = Rc::new(RefCell::new(MentionRegistry::for_brain_session(vec![
+            crate::mentions::WorkerMentionDescriptor {
+                name: "codex".to_string(),
+                description: Some("Writes patches".to_string()),
+                tier: Some("generalist".to_string()),
+            },
+        ])));
+        registry
+            .borrow_mut()
+            .set_issue_snapshot(vec![crate::mentions::IssueMentionDescriptor {
+                id: "bd-42".to_string(),
+                title: full_title.to_string(),
+                source: spur_pm::PmSource::Beads,
+                status: "open".to_string(),
+                assignee: Some("alice".to_string()),
+                priority: Some(2),
+                issue_type: Some("task".to_string()),
+                labels: vec!["mentions".to_string(), "preview".to_string()],
+                url: "https://example.test/bd-42".to_string(),
+            }]);
+        let mut src = MentionQuerySource::new(
+            Rc::clone(&registry),
+            crate::mentions::CompletionScope::PreSession,
+            tmp.path().to_path_buf(),
+            3,
+        );
+
+        let rows = src.refresh("");
+        let worker_idx = rows
+            .iter()
+            .position(|row| row.primary.contains("worker:codex"))
+            .expect("worker row");
+        let issue_idx = rows
+            .iter()
+            .position(|row| row.primary.contains("bd-42"))
+            .expect("issue row");
+
+        assert!(src.preview_for(worker_idx).is_none());
+        let preview = src.preview_for(issue_idx).expect("issue preview");
+        assert_eq!(preview.title, "bd-42");
+        let text = preview_text(&preview);
+        assert!(text.contains(full_title), "{text}");
+        assert!(text.contains("Labels:"), "{text}");
+        assert!(text.contains("mentions"), "{text}");
+        assert!(text.contains("preview"), "{text}");
+        assert!(text.contains("URL: https://example.test/bd-42"), "{text}");
+    }
+
+    #[test]
+    fn issue_preview_caps_label_line_after_six_labels() {
+        let mut descriptor = issue_descriptor();
+        descriptor.labels = (1..=10).map(|n| format!("label-{n}")).collect();
+
+        let preview = issue_preview_for_descriptor(&descriptor);
+
+        let labels_line = preview
+            .lines
+            .iter()
+            .map(line_text)
+            .find(|text| text.starts_with("label-1"))
+            .expect("labels value line");
+        assert_eq!(
+            labels_line,
+            "label-1, label-2, label-3, label-4, label-5, label-6, +4 more"
+        );
+    }
+
+    #[test]
+    fn issue_preview_sanitizes_newlines_in_title() {
+        let mut descriptor = issue_descriptor();
+        descriptor.title = "first\nsecond".to_string();
+
+        let preview = issue_preview_for_descriptor(&descriptor);
+
+        let title_line = preview
+            .lines
+            .iter()
+            .map(line_text)
+            .find(|text| text == "first second")
+            .expect("sanitized title line");
+        assert_eq!(title_line, "first second");
     }
 
     #[test]

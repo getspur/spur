@@ -11,7 +11,7 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -115,6 +115,13 @@ impl ReadAuditBuffer {
 
     pub fn delegation_id(&self) -> &str {
         &self.delegation_id
+    }
+
+    /// Drain the buffer and return the accumulated entries. Used by
+    /// [`WorkerMcpServer::flush_delegation`] to forward entries on the
+    /// flush channel in-band rather than relying on the buffer's `Drop`.
+    pub fn take_entries(&self) -> Vec<ReadAuditEntry> {
+        std::mem::take(&mut *self.entries.lock())
     }
 
     /// Test-only escape hatch so unit tests can populate the buffer without
@@ -233,6 +240,13 @@ impl Drop for ActiveCallGuard {
     }
 }
 
+/// One worker-MCP call recorded on the per-delegation summary guard.
+struct CallRecord {
+    tool_name: String,
+    latency_ms: u64,
+    is_error: bool,
+}
+
 /// Per-delegation tracker that emits a `WorkerMcpDelegationSummary` event on
 /// Drop. Held in [`DispatcherDeps::delegation_guards`] and removed by
 /// [`WorkerMcpServer::complete_delegation`] (or on server shutdown) so the
@@ -241,10 +255,14 @@ pub struct DelegationDispatchGuard {
     delegation_id: String,
     brain_session_id: String,
     funnel: Arc<dyn McpEventSink>,
-    tool_calls: AtomicU32,
-    audits_emitted: AtomicU32,
-    start: Instant,
-    outcome: AtomicBool, // true = success, false = error
+    calls: Mutex<Vec<CallRecord>>,
+    /// Delegation-level error count, separate from per-call `is_error`.
+    /// Bumped by [`mark_error`] when the brain reports a terminal error
+    /// outcome or the flush channel closes; added to the per-call error
+    /// count in the emitted `WorkerMcpDelegationSummary`. This preserves
+    /// the delegation-level outcome bit even when no per-call errors
+    /// occurred (e.g. clean dispatch, then flush channel closure).
+    extra_errors: AtomicU64,
     /// Set to `true` by [`WorkerMcpServer::complete_delegation`] so the
     /// summary only fires on explicit delegation close, not on server
     /// shutdown or map eviction.
@@ -261,25 +279,48 @@ impl DelegationDispatchGuard {
             delegation_id,
             brain_session_id,
             funnel,
-            tool_calls: AtomicU32::new(0),
-            audits_emitted: AtomicU32::new(0),
-            start: Instant::now(),
-            outcome: AtomicBool::new(true),
+            calls: Mutex::new(Vec::new()),
+            extra_errors: AtomicU64::new(0),
             completed: AtomicBool::new(false),
         }
     }
 
-    pub fn record_tool_call(&self) {
-        self.tool_calls.fetch_add(1, Ordering::Relaxed);
+    /// Record one completed worker-MCP call with its tool name, observed
+    /// latency, and whether it returned an error to the worker.
+    pub fn record_call(&self, tool_name: &str, latency_ms: u64, is_error: bool) {
+        self.calls.lock().push(CallRecord {
+            tool_name: tool_name.to_string(),
+            latency_ms,
+            is_error,
+        });
     }
 
-    pub fn record_audit(&self) {
-        self.audits_emitted.fetch_add(1, Ordering::Relaxed);
-    }
-
+    /// Bump a delegation-level error counter. Used by
+    /// [`WorkerMcpServer::flush_delegation`] when the brain reports a
+    /// terminal error outcome or the audit-flush channel closes — so the
+    /// emitted `WorkerMcpDelegationSummary.errors` reflects the
+    /// delegation-level failure even when no per-call errors occurred.
     pub fn mark_error(&self) {
-        self.outcome.store(false, Ordering::Relaxed);
+        self.extra_errors.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// Compute p99 latency from a slice of successful-call latencies in
+/// milliseconds. Per spec: if fewer than 2 samples, return the max observed
+/// (or 0 when empty). Otherwise use nearest-rank: `idx = ceil(0.99 * n) - 1`.
+fn compute_p99_latency_ms(latencies: &[u64]) -> u64 {
+    if latencies.is_empty() {
+        return 0;
+    }
+    let mut sorted: Vec<u64> = latencies.to_vec();
+    sorted.sort_unstable();
+    if sorted.len() < 2 {
+        return *sorted.last().expect("len >= 1");
+    }
+    let n = sorted.len();
+    let rank = ((n as f64) * 0.99).ceil() as usize;
+    let idx = rank.saturating_sub(1).min(n - 1);
+    sorted[idx]
 }
 
 impl Drop for DelegationDispatchGuard {
@@ -287,17 +328,33 @@ impl Drop for DelegationDispatchGuard {
         if !self.completed.load(Ordering::Relaxed) {
             return;
         }
+        let calls = self.calls.lock();
+        let calls_total = calls.len() as u64;
+        let mut calls_by_tool: std::collections::BTreeMap<String, u64> =
+            std::collections::BTreeMap::new();
+        let mut success_latencies: Vec<u64> = Vec::with_capacity(calls.len());
+        let mut errors: u64 = 0;
+        for call in calls.iter() {
+            *calls_by_tool.entry(call.tool_name.clone()).or_insert(0) += 1;
+            if call.is_error {
+                errors += 1;
+            } else {
+                success_latencies.push(call.latency_ms);
+            }
+        }
+        let p99_latency_ms = compute_p99_latency_ms(&success_latencies);
+        // Add delegation-level errors (set via `mark_error` from
+        // `flush_delegation` on terminal-error outcome or flush channel
+        // closure) so the summary reflects failures even when no
+        // per-call errors occurred.
+        let errors = errors + self.extra_errors.load(Ordering::Relaxed);
         let body = spur_acp::SpurEventBody::WorkerMcpDelegationSummary {
             delegation_id: self.delegation_id.clone(),
             brain_session_id: self.brain_session_id.clone(),
-            tool_calls: self.tool_calls.load(Ordering::Relaxed),
-            audits_emitted: self.audits_emitted.load(Ordering::Relaxed),
-            duration_ms: self.start.elapsed().as_millis() as u64,
-            outcome: if self.outcome.load(Ordering::Relaxed) {
-                "success".into()
-            } else {
-                "error".into()
-            },
+            calls_total,
+            calls_by_tool,
+            p99_latency_ms,
+            errors,
         };
         // `try_emit` so a full broadcast bus doesn't back-pressure the Drop.
         let _ = self.funnel.try_emit(body);
@@ -348,6 +405,18 @@ struct DispatcherDeps {
 pub enum BindError {
     #[error("worker MCP listener bind failed: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// Errors returned by [`WorkerMcpServer::flush_delegation`]. The flush is
+/// best-effort: a failure here means the audit aggregate could not be
+/// queued, but the per-delegation summary funnel event is still emitted.
+#[derive(Debug, thiserror::Error)]
+pub enum FlushDelegationError {
+    /// The background audit flusher's receiver has been dropped (the server
+    /// is mid-shutdown). Aggregated read-tool audits queued for this
+    /// delegation cannot be persisted to the PM.
+    #[error("read-audit flush channel closed (server shutting down)")]
+    ChannelClosed,
 }
 
 /// Outcome of [`WorkerMcpServer::shutdown`]'s drain phase. `drained` is `true`
@@ -505,17 +574,88 @@ impl WorkerMcpServer {
 
     /// Signal that a delegation has reached a terminal state. Removes the
     /// cached context and drops the per-delegation summary guard, which emits
-    /// one `WorkerMcpDelegationSummary` event.
-    pub fn complete_delegation(&self, delegation_id: &str, outcome: &str) {
+    /// one `WorkerMcpDelegationSummary` event. The `_outcome` parameter is
+    /// retained for API stability; per-call error counts in the summary now
+    /// come from the dispatcher's `record_call` telemetry.
+    pub fn complete_delegation(&self, delegation_id: &str, _outcome: &str) {
         self.deps.delegations.lock().remove(delegation_id);
         self.deps.read_audit_buffers.lock().remove(delegation_id);
         if let Some(guard) = self.deps.delegation_guards.lock().remove(delegation_id) {
-            if outcome == "error" {
-                guard.mark_error();
-            }
             guard.completed.store(true, Ordering::Relaxed);
             // Explicit drop to trigger the summary emission.
             drop(guard);
+        }
+    }
+
+    /// Phase 5 / Task 27. Drain the per-delegation read-tool audit aggregator
+    /// and emit the `WorkerMcpDelegationSummary` event for `delegation_id`.
+    /// The orchestrator calls this immediately before emitting
+    /// `DelegationCompleted` so downstream consumers observe the audit
+    /// summary first.
+    ///
+    /// Idempotent: a second call (or a call for a delegation that was never
+    /// registered, e.g. dispatched without `enable_worker_mcp`) is a no-op
+    /// returning `Ok(())`.
+    ///
+    /// `outcome` is the audit-trail string (`"success"`, `"cancelled"`,
+    /// `"rejected"`, or `"error"`). Only `"error"` flips the summary
+    /// guard's outcome; the cleaner terminations (`"cancelled"`,
+    /// `"rejected"`) preserve the guard's default success bit so the
+    /// emitted `WorkerMcpDelegationSummary.outcome` stays `"success"`
+    /// for those — but the audit-trail outcome string is propagated to
+    /// callers that surface it elsewhere.
+    ///
+    /// Returns `Err(FlushDelegationError::ChannelClosed)` only when the
+    /// background flusher's receiver has been dropped (server shutdown
+    /// in progress). The summary event is still emitted in that case;
+    /// callers should log the warning, emit a `WorkerMcpSubkind::FlushFailed`
+    /// audit if they have an issue context, and continue.
+    pub async fn flush_delegation(
+        &self,
+        delegation_id: &str,
+        outcome: &str,
+    ) -> Result<(), FlushDelegationError> {
+        self.deps.delegations.lock().remove(delegation_id);
+
+        // Drain the read-audit buffer in-band rather than relying on its Drop
+        // so that send-failures surface to the caller as a Result.
+        let entries = self
+            .deps
+            .read_audit_buffers
+            .lock()
+            .remove(delegation_id)
+            .map(|buf| buf.take_entries())
+            .unwrap_or_default();
+
+        let mut flush_err: Option<FlushDelegationError> = None;
+        if !entries.is_empty()
+            && self
+                .deps
+                .flush_tx
+                .send(FlushMessage {
+                    delegation_id: delegation_id.to_string(),
+                    entries,
+                })
+                .is_err()
+        {
+            flush_err = Some(FlushDelegationError::ChannelClosed);
+        }
+
+        // Drop the per-delegation summary guard regardless of flush outcome.
+        // The summary event is part of the contract; losing it would leave
+        // the funnel stream missing a sentinel.
+        let removed_guard = self.deps.delegation_guards.lock().remove(delegation_id);
+        if let Some(guard) = removed_guard {
+            if outcome == "error" || flush_err.is_some() {
+                guard.mark_error();
+            }
+            guard.completed.store(true, Ordering::Relaxed);
+            drop(guard);
+        }
+
+        match flush_err {
+            Some(e) => Err(e),
+            None => Ok(()),
         }
     }
 
@@ -558,6 +698,15 @@ impl WorkerMcpServer {
     /// observe pressure without reaching into `DispatcherDeps`.
     pub fn active_count(&self) -> u32 {
         self.active_delegations.load(Ordering::SeqCst)
+    }
+
+    /// `true` while the accept loop is still running — i.e. [`shutdown`]
+    /// has not been called and the cancellation token has not been
+    /// triggered. Read by orchestrator cache code so a stale cached
+    /// `Arc<WorkerMcpServer>` (e.g. one whose accept loop was aborted by
+    /// a session retire) is evicted and rebooted on next ensure.
+    pub fn is_running(&self) -> bool {
+        !self.shutdown.is_cancelled()
     }
 
     /// Cancel the accept loop, drain in-flight dispatchers up to `deadline`,
@@ -881,7 +1030,7 @@ async fn dispatch_tool_call(
         .cloned()
         .unwrap_or_else(|| json!({}));
 
-    record_tool_call(&deps, &ctx.delegation_id);
+    let call_start = Instant::now();
 
     let result: Result<Value, McpHandlerError> = match name.as_str() {
         "get_issue" => {
@@ -910,7 +1059,6 @@ async fn dispatch_tool_call(
                         issue_id,
                     )
                     .await;
-                    record_audit(&deps, &ctx.delegation_id);
                 }
             }
             result
@@ -934,9 +1082,10 @@ async fn dispatch_tool_call(
                 .copied()
                 .unwrap_or_default();
             if !delegation_ctx.enable_worker_progress {
-                return success_response(id, json!({ "ok": true }));
+                Ok(json!({ "ok": true }))
+            } else {
+                crate::handlers::report_progress(deps.funnel.as_ref(), &ctx, args).await
             }
-            crate::handlers::report_progress(deps.funnel.as_ref(), &ctx, args).await
         }
         "get_plan_status" => {
             append_read_audit_entry(
@@ -992,14 +1141,21 @@ async fn dispatch_tool_call(
             .await
         }
         other => {
+            // Unknown tool name: record as an errored call so the summary
+            // event reflects the dispatch attempt.
+            let latency_ms = call_start.elapsed().as_millis() as u64;
+            record_call(&deps, &ctx.delegation_id, &name, latency_ms, true);
             return error_response(id, -32601, format!("Method not found: {other}"));
         }
     };
 
+    let latency_ms = call_start.elapsed().as_millis() as u64;
+    let is_error = result.is_err();
+    record_call(&deps, &ctx.delegation_id, &name, latency_ms, is_error);
+
     match result {
         Ok(value) => success_response(id, value),
         Err(err) => {
-            mark_delegation_error(&deps, &ctx.delegation_id);
             let resp = err.to_jsonrpc_response(id);
             serde_json::to_string(&resp).unwrap_or_else(|_| {
                 r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"response serialization failed"},"id":null}"#.to_string()
@@ -1038,30 +1194,18 @@ fn append_read_audit_entry(
     });
 }
 
-/// Record one tool call on the per-delegation summary guard. No-op if the
-/// guard has not been created yet (e.g., unregistered delegation).
-fn record_tool_call(deps: &DispatcherDeps, delegation_id: &str) {
+/// Record one completed tool call on the per-delegation summary guard. No-op
+/// if the guard has not been created yet (e.g., unregistered delegation).
+fn record_call(
+    deps: &DispatcherDeps,
+    delegation_id: &str,
+    tool_name: &str,
+    latency_ms: u64,
+    is_error: bool,
+) {
     let map = deps.delegation_guards.lock();
     if let Some(guard) = map.get(delegation_id) {
-        guard.record_tool_call();
-    }
-}
-
-/// Record one audit on the per-delegation summary guard. No-op if the guard
-/// has not been created yet.
-fn record_audit(deps: &DispatcherDeps, delegation_id: &str) {
-    let map = deps.delegation_guards.lock();
-    if let Some(guard) = map.get(delegation_id) {
-        guard.record_audit();
-    }
-}
-
-/// Mark the per-delegation summary guard as errored. No-op if the guard has
-/// not been created yet.
-fn mark_delegation_error(deps: &DispatcherDeps, delegation_id: &str) {
-    let map = deps.delegation_guards.lock();
-    if let Some(guard) = map.get(delegation_id) {
-        guard.mark_error();
+        guard.record_call(tool_name, latency_ms, is_error);
     }
 }
 
@@ -1563,9 +1707,9 @@ mod tests {
             "session-test".into(),
             Arc::clone(&sink) as Arc<dyn crate::events::McpEventSink>,
         );
-        guard.record_tool_call();
-        guard.record_tool_call();
-        guard.record_audit();
+        guard.record_call("get_issue", 10, false);
+        guard.record_call("get_issue", 20, false);
+        guard.record_call("update_issue", 30, true);
         guard.completed.store(true, Ordering::Relaxed);
         drop(guard);
 
@@ -1574,17 +1718,18 @@ mod tests {
         if let spur_acp::SpurEventBody::WorkerMcpDelegationSummary {
             delegation_id,
             brain_session_id,
-            tool_calls,
-            audits_emitted,
-            outcome,
+            calls_total,
+            calls_by_tool,
+            errors,
             ..
         } = &events[0]
         {
             assert_eq!(delegation_id, "d-test");
             assert_eq!(brain_session_id, "session-test");
-            assert_eq!(*tool_calls, 2);
-            assert_eq!(*audits_emitted, 1);
-            assert_eq!(outcome, "success");
+            assert_eq!(*calls_total, 3);
+            assert_eq!(calls_by_tool.get("get_issue"), Some(&2));
+            assert_eq!(calls_by_tool.get("update_issue"), Some(&1));
+            assert_eq!(*errors, 1);
         } else {
             panic!("expected WorkerMcpDelegationSummary, got: {:?}", events[0]);
         }
@@ -1599,12 +1744,30 @@ mod tests {
             "session-full".into(),
             Arc::clone(&sink2) as Arc<dyn crate::events::McpEventSink>,
         );
-        guard2.record_tool_call();
+        guard2.record_call("get_issue", 5, false);
         guard2.completed.store(true, Ordering::Relaxed);
         drop(guard2);
         assert!(
             sink2.events.lock().unwrap().is_empty(),
             "event must be dropped when sink is full"
         );
+    }
+
+    #[test]
+    fn compute_p99_latency_ms_matches_spec() {
+        // Empty: 0
+        assert_eq!(compute_p99_latency_ms(&[]), 0);
+        // Single sample: max observed.
+        assert_eq!(compute_p99_latency_ms(&[42]), 42);
+        // <2 was already covered; for n>=2 use nearest-rank.
+        // Two samples: ceil(0.99*2) = 2 → idx 1 → max.
+        assert_eq!(compute_p99_latency_ms(&[10, 100]), 100);
+        // 100 evenly-spaced samples 1..=100: ceil(0.99*100) = 99 → idx 98 → 99.
+        let samples: Vec<u64> = (1..=100).collect();
+        assert_eq!(compute_p99_latency_ms(&samples), 99);
+        // Unsorted input: still uses sorted nearest-rank.
+        let unsorted: Vec<u64> = vec![50, 5, 200, 100, 25];
+        // Sorted: [5,25,50,100,200]; ceil(0.99*5) = 5 → idx 4 → 200.
+        assert_eq!(compute_p99_latency_ms(&unsorted), 200);
     }
 }

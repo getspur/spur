@@ -21,10 +21,10 @@ use spur_acp::registry::AgentRegistry;
 use spur_acp::session_lock::{AcquireOutcome, SessionAttachGuard};
 use spur_acp::types::*;
 use spur_acp::{
-    CancellationControl, DelegationAbortHandle, DelegationAbortReason, DelegationResult,
-    DelegationStatus, GraphEdgeEvent, GraphNodeEvent, LifecycleState, PlanLifecycleEvent,
-    PlanLoadWarningEvent, PlanOwnerStateEvent, PlanSummaryCountsEvent, PlanSummaryEvent,
-    ReviewKind, ReviewPayload, SpurEvent, SpurEventBody, TimeoutFallback,
+    CancellationControl, DelegationAbortHandle, DelegationAbortReason, DelegationDispatchError,
+    DelegationResult, DelegationStatus, GraphEdgeEvent, GraphNodeEvent, LifecycleState,
+    PlanLifecycleEvent, PlanLoadWarningEvent, PlanOwnerStateEvent, PlanSummaryCountsEvent,
+    PlanSummaryEvent, ReviewKind, ReviewPayload, SpurEvent, SpurEventBody, TimeoutFallback,
 };
 use spur_pm::{Issue, IssueSummary};
 
@@ -39,9 +39,12 @@ use spur_blob_store::{
 use spur_cost::CostTracker;
 use spur_license::SpurLicense;
 use spur_mcp::tools::{BaseSpec, BaseTarget};
+use spur_mcp::worker_server::{WorkerMcpDeps, WorkerMcpServer};
 use spur_mcp::{
     build_worker_info, DelegationChannel, DelegationRequest, McpCallbackServer, WorkerInfo,
 };
+
+use dashmap::DashMap;
 use spur_pm::PmService;
 use spur_worktree::git_blob_store::GitBlobOutcomeStore;
 use spur_worktree::{manager::WorktreeError, WorktreeManager};
@@ -1316,10 +1319,24 @@ async fn retire_brain_session<S: RetirableMcpServer + ?Sized>(
     session: &SessionId,
     mcp_server: &mut Option<Arc<S>>,
     mcp_guard: Option<&mut Option<AbortOnDropHandle<()>>>,
+    worker_mcp_servers: &DashMap<spur_acp::BrainSessionId, Arc<WorkerMcpServer>>,
     scheduler: &mut crate::scheduler::BrainScheduler,
     overflow: &crate::continuation_bridge::OverflowBuf,
     new_active: Option<spur_acp::types::BrainSessionId>,
 ) {
+    if let Some((_session, worker_server)) =
+        worker_mcp_servers.remove(&spur_acp::BrainSessionId::from(session.clone()))
+    {
+        let outcome = worker_server.shutdown(MCP_SHUTDOWN_TIMEOUT).await;
+        if !outcome.drained {
+            warn!(
+                session = %session,
+                timeout_ms = MCP_SHUTDOWN_TIMEOUT.as_millis() as u64,
+                active_at_deadline = outcome.active_at_deadline,
+                "Worker MCP server drain timed out; forcing shutdown"
+            );
+        }
+    }
     shutdown_mcp_server(funnel, session, mcp_server, mcp_guard).await;
     scheduler.note_session_swap(new_active, overflow);
 }
@@ -2303,6 +2320,12 @@ pub struct Orchestrator {
     /// Feature gate for dynamic quota/feature enforcement.
     feature_gate: Option<std::sync::Arc<spur_license::FeatureGate>>,
     pub(crate) peer_mailbox: Option<crate::peer_mailbox::PeerMailboxBundle>,
+    /// Per-`BrainSession` worker MCP servers, lazily started on first
+    /// dispatch with `enable_worker_mcp = true`. Phase 5 / Task 25 —
+    /// the field exists; population happens via
+    /// [`Orchestrator::ensure_worker_mcp_server`]. Wiring into the
+    /// dispatch path lands in a follow-up task.
+    pub(crate) worker_mcp_servers: Arc<DashMap<spur_acp::BrainSessionId, Arc<WorkerMcpServer>>>,
     fault_injection_hooks: FaultInjectionHooks,
     /// Abort handle for the production peer-mailbox reconciler task spawned
     /// by `Orchestrator::new` when `peer_mailbox_enabled = true`. Stored
@@ -2457,6 +2480,173 @@ fn enforce_log_cap(dir: &std::path::Path, cap: u64) {
     }
 }
 
+/// Phase 5 / Task 26 — clonable bundle of orchestrator state needed to
+/// lazily ensure (and mint a token against) the per-`BrainSession`
+/// [`WorkerMcpServer`]. Captured by `handle_delegations` and threaded
+/// through `execute_delegation` so the static dispatch path can call
+/// back into the orchestrator's cache without holding `&self`.
+#[derive(Clone)]
+pub(crate) struct WorkerMcpFetcher {
+    pub(crate) cache: Arc<DashMap<spur_acp::BrainSessionId, Arc<WorkerMcpServer>>>,
+    pub(crate) pm_service: Option<Arc<PmService>>,
+    feature_gate: Option<std::sync::Arc<spur_license::FeatureGate>>,
+    funnel: crate::event_funnel::FunnelHandle,
+    /// Per-`BrainSession` brain MCP server. Doubles as `PlanResolver`
+    /// (via its `impl crate::handlers::PlanResolver`) and supplies the
+    /// reconciler outcome handle that worker `get_plan_status` reads.
+    mcp_server: Arc<McpCallbackServer>,
+    outcome_store: Arc<dyn OutcomeStore>,
+    repo_root: Option<PathBuf>,
+}
+
+impl WorkerMcpFetcher {
+    /// Same body as [`Orchestrator::ensure_worker_mcp_server`] — kept here
+    /// so the orchestrator method can delegate, preserving a single
+    /// source of truth for the lazy-start / cache contract.
+    pub(crate) async fn ensure(
+        &self,
+        brain: &spur_acp::BrainSessionId,
+    ) -> Result<Arc<WorkerMcpServer>, DelegationDispatchError> {
+        cache_or_start(
+            &self.cache,
+            brain.clone(),
+            || async {
+                let pm = self.pm_service.clone().ok_or_else(|| {
+                    DelegationDispatchError::WorkerMcpUnavailable {
+                        reason: "pm_service not configured on orchestrator".into(),
+                    }
+                })?;
+                let gate = self.feature_gate.clone().ok_or_else(|| {
+                    DelegationDispatchError::WorkerMcpUnavailable {
+                        reason: "feature_gate not configured on orchestrator".into(),
+                    }
+                })?;
+                let funnel: Arc<dyn spur_mcp::McpEventSink> = Arc::new(self.funnel.clone());
+                let plan_resolver: Arc<dyn spur_mcp::handlers::PlanResolver> =
+                    Arc::clone(&self.mcp_server) as Arc<dyn spur_mcp::handlers::PlanResolver>;
+                let reconciler_outcomes = self.mcp_server.reconciler_outcomes_handle();
+                let deps = WorkerMcpDeps {
+                    pm_service: pm,
+                    feature_gate: gate,
+                    funnel,
+                    plan_resolver,
+                    reconciler_outcomes,
+                    outcome_store: Arc::clone(&self.outcome_store),
+                    repo_root: self.repo_root.clone(),
+                };
+                let server = WorkerMcpServer::start(brain.to_string(), deps)
+                    .await
+                    .map_err(|e| DelegationDispatchError::WorkerMcpUnavailable {
+                        reason: format!("listener bind failed: {e}"),
+                    })?;
+                tracing::info!(
+                    brain_session_id = %brain,
+                    url = %server.url(),
+                    "WorkerMcpServer started"
+                );
+                Ok(server)
+            },
+            |server: &WorkerMcpServer| server.is_running(),
+        )
+        .await
+    }
+
+    /// Convenience: ensure the per-`BrainSession` server is up and mint
+    /// a 1-hour HMAC token bound to `(brain, delegation_id)`. Returns
+    /// the server's URL and the freshly minted token; the caller
+    /// assembles the final `?token=` URL.
+    pub(crate) async fn fetch_url_token(
+        &self,
+        brain: &spur_acp::BrainSessionId,
+        delegation_id: &str,
+    ) -> Result<(String, String), DelegationDispatchError> {
+        let server = self.ensure(brain).await?;
+        let token = server.issue_token(delegation_id, std::time::Duration::from_secs(3600));
+        Ok((server.url(), token))
+    }
+}
+
+/// Phase 5 / Task 26 — pure decision helper for the worker dispatch site.
+///
+/// Returns `Vec::new()` when `enable_worker_mcp` is `None` or
+/// `Some(false)` (preserves the historical "Workers get no MCP servers"
+/// contract). When the flag is `Some(true)`, awaits `fetch` to obtain
+/// `(url, token)`, assembles the `?token=` URL, and returns a single
+/// `McpServer::Http` entry named `spur-worker-mcp`. Any error from
+/// `fetch` is propagated.
+async fn build_worker_mcp_servers_with<F, Fut>(
+    enable_worker_mcp: Option<bool>,
+    fetch: F,
+) -> Result<Vec<McpServer>, DelegationDispatchError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(String, String), DelegationDispatchError>>,
+{
+    if !enable_worker_mcp.unwrap_or(false) {
+        return Ok(Vec::new());
+    }
+    let (url, token) = fetch().await?;
+    let url_with_token = format!("{}?token={}", url, token);
+    Ok(vec![McpServer::Http(McpServerHttp::new(
+        "spur-worker-mcp",
+        &url_with_token,
+    ))])
+}
+
+/// Compute-once cache helper for [`Orchestrator::ensure_worker_mcp_server`].
+///
+/// Generic over the value/error types so the cache contract (`first miss
+/// runs the starter; subsequent calls — including racing concurrent
+/// callers — return the same `Arc`) can be unit-tested without booting a
+/// real `WorkerMcpServer`. The starter runs *outside* any DashMap shard
+/// lock; if two callers race the miss, both run the starter but only one
+/// `Arc` wins the insert and the loser is dropped.
+///
+/// `is_alive` is consulted on cache hit to decide whether the cached
+/// value is still usable. A `false` return evicts the entry and the
+/// starter runs to mint a fresh value — protecting against handing out
+/// a stale `Arc<WorkerMcpServer>` whose accept loop has been aborted by
+/// `retire_brain_session` or other shutdown paths.
+async fn cache_or_start<K, V, F, Fut, E, A>(
+    map: &DashMap<K, Arc<V>>,
+    key: K,
+    start: F,
+    is_alive: A,
+) -> Result<Arc<V>, E>
+where
+    K: Eq + std::hash::Hash + Clone,
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Arc<V>, E>>,
+    A: Fn(&V) -> bool,
+{
+    if let Some(existing) = map.get(&key) {
+        if is_alive(existing.value().as_ref()) {
+            return Ok(Arc::clone(existing.value()));
+        }
+        // Drop the read guard before mutating.
+        drop(existing);
+        map.remove(&key);
+    }
+    let candidate = start().await?;
+    use dashmap::mapref::entry::Entry;
+    match map.entry(key) {
+        Entry::Occupied(mut slot) => {
+            // A racing caller already inserted. Reuse if alive; else
+            // overwrite with the freshly minted candidate.
+            if is_alive(slot.get().as_ref()) {
+                Ok(Arc::clone(slot.get()))
+            } else {
+                slot.insert(Arc::clone(&candidate));
+                Ok(candidate)
+            }
+        }
+        Entry::Vacant(slot) => {
+            slot.insert(Arc::clone(&candidate));
+            Ok(candidate)
+        }
+    }
+}
+
 impl Orchestrator {
     /// Create a new orchestrator for the given repo directory.
     pub fn new(
@@ -2535,6 +2725,7 @@ impl Orchestrator {
             continuation_overflow: None,
             feature_gate,
             peer_mailbox: None,
+            worker_mcp_servers: Arc::new(DashMap::new()),
             fault_injection_hooks: FaultInjectionHooks::default(),
             peer_mailbox_reconciler_abort: None,
         };
@@ -2646,6 +2837,42 @@ impl Orchestrator {
     pub fn with_fault_injection_hooks(mut self, hooks: FaultInjectionHooks) -> Self {
         self.fault_injection_hooks = hooks;
         self
+    }
+
+    /// Phase 5 / Task 25/26 — return the existing per-`BrainSession`
+    /// [`WorkerMcpServer`], booting one on first call. Concurrent callers
+    /// for the same `brain` collapse to a single server: at most one boot
+    /// wins the `DashMap` insert and any others drop the loser server.
+    ///
+    /// `mcp_server` is the per-`BrainSession` [`McpCallbackServer`] that
+    /// supplies the `PlanResolver` + reconciler outcome buffer the worker
+    /// MCP dispatcher needs. The orchestrator captures the same instance
+    /// when building [`WorkerMcpFetcher`] for the dispatch path so a
+    /// direct call here observes the same cache.
+    pub async fn ensure_worker_mcp_server(
+        &self,
+        brain: &spur_acp::BrainSessionId,
+        mcp_server: Arc<McpCallbackServer>,
+    ) -> Result<Arc<WorkerMcpServer>, DelegationDispatchError> {
+        self.worker_mcp_fetcher_for(mcp_server).ensure(brain).await
+    }
+
+    /// Construct a clonable [`WorkerMcpFetcher`] capturing all deps the
+    /// dispatch path needs to lazily ensure (and mint a token against)
+    /// the per-`BrainSession` `WorkerMcpServer` from a static context.
+    pub(crate) fn worker_mcp_fetcher_for(
+        &self,
+        mcp_server: Arc<McpCallbackServer>,
+    ) -> WorkerMcpFetcher {
+        WorkerMcpFetcher {
+            cache: Arc::clone(&self.worker_mcp_servers),
+            pm_service: self.pm_service.clone(),
+            feature_gate: self.feature_gate.clone(),
+            funnel: self.funnel.clone(),
+            mcp_server,
+            outcome_store: self.outcome_store.clone(),
+            repo_root: Some(self.repo_root.clone()),
+        }
     }
 
     /// Wire in the sender half of the `run_interactive` ingress channel so
@@ -3022,6 +3249,7 @@ impl Orchestrator {
                 self.fault_injection_hooks.clone(),
                 std::time::Duration::from_secs(self.config.spur.dispatch_lease_secs),
                 std::time::Duration::from_secs(self.config.spur.dispatch_lease_heartbeat_secs),
+                self.worker_mcp_fetcher_for(Arc::clone(&mcp_server)),
             ));
 
             // Stream brain output. For native (ACP-transport) agents prompt()
@@ -4077,6 +4305,7 @@ impl Orchestrator {
                             &dead.spur_session_id,
                             &mut dead.mcp_server,
                             Some(&mut dead.mcp_guard),
+                            &self.worker_mcp_servers,
                             &mut scheduler,
                             &overflow_continuations,
                             None,
@@ -4121,6 +4350,7 @@ impl Orchestrator {
                         &dead.spur_session_id,
                         &mut dead.mcp_server,
                         Some(&mut dead.mcp_guard),
+                        &self.worker_mcp_servers,
                         &mut scheduler,
                         &overflow_continuations,
                         None,
@@ -4538,6 +4768,7 @@ impl Orchestrator {
             &b.spur_session_id,
             &mut b.mcp_server,
             Some(&mut b.mcp_guard),
+            &self.worker_mcp_servers,
             scheduler,
             overflow,
             None,
@@ -4878,6 +5109,7 @@ impl Orchestrator {
             self.fault_injection_hooks.clone(),
             std::time::Duration::from_secs(self.config.spur.dispatch_lease_secs),
             std::time::Duration::from_secs(self.config.spur.dispatch_lease_heartbeat_secs),
+            self.worker_mcp_fetcher_for(Arc::clone(&mcp_server)),
         ));
 
         // Spawn the vendor-extension notification pump (if the transport
@@ -5227,6 +5459,7 @@ impl Orchestrator {
             self.fault_injection_hooks.clone(),
             std::time::Duration::from_secs(self.config.spur.dispatch_lease_secs),
             std::time::Duration::from_secs(self.config.spur.dispatch_lease_heartbeat_secs),
+            self.worker_mcp_fetcher_for(Arc::clone(&mcp_server)),
         ));
 
         // Pump vendor-extension notifications onto the event stream.
@@ -6007,6 +6240,7 @@ impl Orchestrator {
         fault_injection_hooks: FaultInjectionHooks,
         dispatch_lease_duration: std::time::Duration,
         dispatch_lease_heartbeat: std::time::Duration,
+        worker_mcp_fetcher: WorkerMcpFetcher,
     ) {
         let semaphore = Arc::new(Semaphore::new(max_concurrent.max(1)));
         // Debounce: skip post-delegation refresh if another completed <3s ago.
@@ -6029,6 +6263,7 @@ impl Orchestrator {
                 base,
                 dispatched_base_oid_tx,
                 attempt_tracker,
+                enable_worker_mcp,
             } = request;
             // Phase 4: `DelegationRequest.id` is now a typed `DelegationId`
             // newtype. Downstream delegation plumbing (funnel events,
@@ -6055,6 +6290,12 @@ impl Orchestrator {
             let last_refresh_at = Arc::clone(&last_refresh_at);
             let peer_mailbox = peer_mailbox.clone();
             let fault_injection_hooks = fault_injection_hooks.clone();
+            let worker_mcp_fetcher = worker_mcp_fetcher.clone();
+            // Bind the fetcher's cache for the flush helpers
+            // (`flush_then_emit_completed`) which look up cached servers
+            // by brain_session_id without needing the fetcher's other
+            // fields.
+            let worker_mcp_servers = Arc::clone(&worker_mcp_fetcher.cache);
 
             // INV-6: register a cancellation token BEFORE spawning so
             // cancel() arriving between dispatch and spawn still works.
@@ -6079,10 +6320,17 @@ impl Orchestrator {
                     biased;
                     _ = abort_handle.cancelled() => {
                         let status = crate::delegation_watchdog::status_from_abort_reason(&abort_handle).await;
-                        funnel.emit(SpurEventBody::DelegationCompleted {
-                            worker_session: spur_acp::types::SessionId(request_id.clone()),
-                            status: status.clone(),
-                        });
+                        flush_then_emit_completed(
+                            &funnel,
+                            &worker_mcp_servers,
+                            pm_service.as_ref(),
+                            &brain_session_id,
+                            &request_id,
+                            issue_id.as_deref(),
+                            spur_acp::types::SessionId(request_id.clone()),
+                            &status,
+                        )
+                        .await;
                         if let Some(respond_to) = guard.respond_to.take() {
                             let _ = respond_to.send(DelegationResult {
                                 status,
@@ -6188,11 +6436,21 @@ impl Orchestrator {
                         let status = crate::delegation_watchdog::status_from_abort_reason(&abort_handle).await;
                         // Emit DelegationCompleted so TUI, lineage, and
                         // other funnel subscribers don't see a stale
-                        // "active" entry for this delegation.
-                        funnel.emit(SpurEventBody::DelegationCompleted {
-                            worker_session: spur_acp::types::SessionId(request_id.clone()),
-                            status: status.clone(),
-                        });
+                        // "active" entry for this delegation. Routes
+                        // through `flush_then_emit_completed` so the
+                        // worker MCP audit summary precedes the
+                        // DelegationCompleted event (Phase 5 / Task 27).
+                        flush_then_emit_completed(
+                            &funnel,
+                            &worker_mcp_servers,
+                            pm_service.as_ref(),
+                            &brain_session_id,
+                            &request_id,
+                            issue_id.as_deref(),
+                            spur_acp::types::SessionId(request_id.clone()),
+                            &status,
+                        )
+                        .await;
                         (
                             DelegationResult {
                                 status,
@@ -6211,7 +6469,7 @@ impl Orchestrator {
                         task,
                         context_files,
                         request_id.clone(),
-                        brain_session_id,
+                        brain_session_id.clone(),
                         delegation_plan,
                         issue_id.clone(),
                         repo_root,
@@ -6223,6 +6481,9 @@ impl Orchestrator {
                         base,
                         dispatched_base_oid_tx,
                         fault_injection_hooks,
+                        enable_worker_mcp,
+                        worker_mcp_fetcher,
+                        pm_service.clone(),
                     ) => r,
                 };
                 drop(dispatch_lease_heartbeat_handle);
@@ -6345,7 +6606,15 @@ impl Orchestrator {
         base: Option<BaseSpec>,
         dispatched_base_oid_tx: Option<tokio::sync::watch::Sender<Option<String>>>,
         fault_injection_hooks: FaultInjectionHooks,
+        enable_worker_mcp: Option<bool>,
+        worker_mcp_fetcher: WorkerMcpFetcher,
+        pm_service: Option<Arc<PmService>>,
     ) -> (DelegationResult, Option<ExecutorId>) {
+        // Bind cache for the flush helpers (`finalize` + abort path)
+        // which look up cached servers by brain_session_id without
+        // needing the fetcher's other fields.
+        let worker_mcp_servers: Arc<DashMap<spur_acp::BrainSessionId, Arc<WorkerMcpServer>>> =
+            Arc::clone(&worker_mcp_fetcher.cache);
         // Shadow `original_task` with the Relevant Files-prepended form
         // so retry loops at orchestrator.rs:3013 reuse the formatted
         // base. No-op when context_files is empty.
@@ -6380,6 +6649,43 @@ impl Orchestrator {
                     DelegationResult {
                         status: DelegationStatus::Failed {
                             error: format!("Worker agent '{}' not found", agent),
+                        },
+                        diff: None,
+                        diff_summary: None,
+                        summary: None,
+                        estimated_cost_usd: 0.0,
+                        worker_branch: None,
+                        artifact: None,
+                    },
+                    None,
+                );
+            }
+        };
+
+        // Phase 5 / Task 26 — resolve the worker `mcp_servers` vec ONCE per
+        // delegation. When `enable_worker_mcp` is unset/false the vec is
+        // empty (preserving the historical "Workers get no MCP servers"
+        // contract). When `Some(true)`, the per-`BrainSession` worker MCP
+        // server is ensured (lazy boot via `WorkerMcpFetcher::ensure`) and
+        // a 1-hour HMAC token is minted; the token rides ONLY in the
+        // structured `mcp_servers` URL — never in argv or env.
+        let worker_mcp_dispatch_vec = match build_worker_mcp_servers_with(enable_worker_mcp, || {
+            worker_mcp_fetcher.fetch_url_token(&brain_session_id, &request_id)
+        })
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    request_id = %request_id,
+                    brain_session_id = %brain_session_id,
+                    error = %e,
+                    "worker MCP dispatch failed; aborting delegation"
+                );
+                return (
+                    DelegationResult {
+                        status: DelegationStatus::Failed {
+                            error: format!("worker MCP unavailable: {e}"),
                         },
                         diff: None,
                         diff_summary: None,
@@ -6443,6 +6749,7 @@ impl Orchestrator {
                     base: base.clone(),
                     dispatched_base_oid_tx: dispatched_base_oid_tx.clone(),
                     fault_injection_hooks: &fault_injection_hooks,
+                    worker_mcp_servers: &worker_mcp_dispatch_vec,
                 },
                 &mut worktrees,
                 &funnel,
@@ -6486,6 +6793,11 @@ impl Orchestrator {
                     return (
                         finalize(
                             &funnel,
+                            &worker_mcp_servers,
+                            pm_service.as_ref(),
+                            &brain_session_id,
+                            &request_id,
+                            issue_id.as_deref(),
                             next_worker_session,
                             status,
                             None,
@@ -6494,7 +6806,8 @@ impl Orchestrator {
                             total_cost,
                             None,
                             None,
-                        ),
+                        )
+                        .await,
                         executor_id.clone(),
                     );
                 }
@@ -6522,6 +6835,11 @@ impl Orchestrator {
                 return (
                     finalize(
                         &funnel,
+                        &worker_mcp_servers,
+                        pm_service.as_ref(),
+                        &brain_session_id,
+                        &request_id,
+                        issue_id.as_deref(),
                         outcome.worker_session,
                         outcome.candidate_status,
                         outcome.diff,
@@ -6530,7 +6848,8 @@ impl Orchestrator {
                         total_cost,
                         preserved_branch,
                         None,
-                    ),
+                    )
+                    .await,
                     executor_id.clone(),
                 );
             }
@@ -6569,6 +6888,11 @@ impl Orchestrator {
                     return (
                         finalize(
                             &funnel,
+                            &worker_mcp_servers,
+                            pm_service.as_ref(),
+                            &brain_session_id,
+                            &request_id,
+                            issue_id.as_deref(),
                             outcome.worker_session,
                             failed_status,
                             outcome.diff,
@@ -6577,7 +6901,8 @@ impl Orchestrator {
                             total_cost,
                             preserved_branch,
                             None,
-                        ),
+                        )
+                        .await,
                         executor_id.clone(),
                     );
                 }
@@ -6694,6 +7019,11 @@ impl Orchestrator {
                     return (
                         finalize(
                             &funnel,
+                            &worker_mcp_servers,
+                            pm_service.as_ref(),
+                            &brain_session_id,
+                            &request_id,
+                            issue_id.as_deref(),
                             outcome.worker_session,
                             final_status,
                             outcome.diff,
@@ -6702,7 +7032,8 @@ impl Orchestrator {
                             total_cost,
                             preserved_branch,
                             None,
-                        ),
+                        )
+                        .await,
                         executor_id.clone(),
                     );
                 }
@@ -6728,6 +7059,11 @@ impl Orchestrator {
                     return (
                         finalize(
                             &funnel,
+                            &worker_mcp_servers,
+                            pm_service.as_ref(),
+                            &brain_session_id,
+                            &request_id,
+                            issue_id.as_deref(),
                             outcome.worker_session,
                             final_status,
                             outcome.diff,
@@ -6736,7 +7072,8 @@ impl Orchestrator {
                             total_cost,
                             preserved_branch,
                             None,
-                        ),
+                        )
+                        .await,
                         executor_id.clone(),
                     );
                 }
@@ -6761,6 +7098,11 @@ impl Orchestrator {
                     return (
                         finalize(
                             &funnel,
+                            &worker_mcp_servers,
+                            pm_service.as_ref(),
+                            &brain_session_id,
+                            &request_id,
+                            issue_id.as_deref(),
                             outcome.worker_session,
                             final_status,
                             outcome.diff,
@@ -6769,7 +7111,8 @@ impl Orchestrator {
                             total_cost,
                             preserved_branch,
                             None,
-                        ),
+                        )
+                        .await,
                         executor_id.clone(),
                     );
                 }
@@ -6794,6 +7137,11 @@ impl Orchestrator {
                     return (
                         finalize(
                             &funnel,
+                            &worker_mcp_servers,
+                            pm_service.as_ref(),
+                            &brain_session_id,
+                            &request_id,
+                            issue_id.as_deref(),
                             outcome.worker_session,
                             final_status,
                             outcome.diff,
@@ -6802,7 +7150,8 @@ impl Orchestrator {
                             total_cost,
                             preserved_branch,
                             None,
-                        ),
+                        )
+                        .await,
                         executor_id.clone(),
                     );
                 }
@@ -6835,6 +7184,11 @@ impl Orchestrator {
                         return (
                             finalize(
                                 &funnel,
+                                &worker_mcp_servers,
+                                pm_service.as_ref(),
+                                &brain_session_id,
+                                &request_id,
+                                issue_id.as_deref(),
                                 outcome.worker_session,
                                 final_status,
                                 outcome.diff,
@@ -6843,7 +7197,8 @@ impl Orchestrator {
                                 total_cost,
                                 preserved_branch,
                                 None,
-                            ),
+                            )
+                            .await,
                             executor_id.clone(),
                         );
                     }
@@ -6937,6 +7292,11 @@ impl Orchestrator {
                     return (
                         finalize(
                             &funnel,
+                            &worker_mcp_servers,
+                            pm_service.as_ref(),
+                            &brain_session_id,
+                            &request_id,
+                            issue_id.as_deref(),
                             outcome.worker_session,
                             final_status,
                             outcome.diff,
@@ -6945,7 +7305,8 @@ impl Orchestrator {
                             total_cost,
                             preserved_branch,
                             None,
-                        ),
+                        )
+                        .await,
                         executor_id.clone(),
                     );
                 }
@@ -7124,9 +7485,22 @@ impl Drop for DelegationGuard {
 /// constructs the `DelegationResult`. Centralizing this makes the
 /// "every terminal emits DelegationCompleted" invariant locally
 /// verifiable (one call site per terminal arm in `execute_delegation`).
+///
+/// Phase 5 / Task 27: routes the `DelegationCompleted` emit through
+/// [`flush_then_emit_completed`] so the per-delegation worker-MCP
+/// read-tool audit aggregator drains and the
+/// `WorkerMcpDelegationSummary` event lands BEFORE
+/// `DelegationCompleted`. The same helper is used by the abort-path
+/// branches in `handle_delegations` so the ordering invariant is
+/// preserved on every terminal exit.
 #[allow(clippy::too_many_arguments)]
-fn finalize(
+async fn finalize(
     funnel: &crate::event_funnel::FunnelHandle,
+    worker_mcp_servers: &Arc<DashMap<spur_acp::BrainSessionId, Arc<WorkerMcpServer>>>,
+    pm_service: Option<&Arc<PmService>>,
+    brain_session_id: &spur_acp::BrainSessionId,
+    delegation_id: &str,
+    issue_id: Option<&str>,
     worker_session: SessionId,
     final_status: DelegationStatus,
     diff: Option<String>,
@@ -7136,10 +7510,17 @@ fn finalize(
     worker_branch: Option<String>,
     artifact: Option<spur_acp::WorkerArtifact>,
 ) -> DelegationResult {
-    funnel.emit(SpurEventBody::DelegationCompleted {
+    flush_then_emit_completed(
+        funnel,
+        worker_mcp_servers,
+        pm_service,
+        brain_session_id,
+        delegation_id,
+        issue_id,
         worker_session,
-        status: final_status.clone(),
-    });
+        &final_status,
+    )
+    .await;
     DelegationResult {
         status: final_status,
         diff,
@@ -7148,6 +7529,144 @@ fn finalize(
         estimated_cost_usd: total_cost,
         worker_branch,
         artifact,
+    }
+}
+
+/// Map a terminal [`DelegationStatus`] onto the audit-trail outcome
+/// string forwarded to `WorkerMcpServer::flush_delegation`. Four-way:
+/// `"success"` (clean approval), `"cancelled"` and `"rejected"` (clean
+/// terminations preserved in the audit trail), and `"error"` (every
+/// other terminal failure mode — Failed, Timeout, TimedOut, Conflict,
+/// SetupFailed, Modified is treated as success-with-caveat).
+fn outcome_for_status(status: &DelegationStatus) -> &'static str {
+    match status {
+        DelegationStatus::Success | DelegationStatus::Modified { .. } => "success",
+        DelegationStatus::Cancelled { .. } => "cancelled",
+        DelegationStatus::Rejected { .. } => "rejected",
+        // `DelegationStatus` is `#[non_exhaustive]`; map every other
+        // current and future variant onto "error" so a future
+        // success-like variant doesn't silently get summarised here
+        // — that audit-trail bug is harder to spot than this default.
+        _ => "error",
+    }
+}
+
+/// Phase 5 / Task 27 — shared helper invoked by `finalize` and the
+/// abort-path branches in `handle_delegations` so every terminal exit
+/// uses the same flush-then-complete ordering. Drains the
+/// per-delegation worker-MCP audit aggregate (which emits the
+/// `WorkerMcpDelegationSummary` funnel event), then emits
+/// `DelegationCompleted`.
+#[allow(clippy::too_many_arguments)]
+async fn flush_then_emit_completed(
+    funnel: &crate::event_funnel::FunnelHandle,
+    worker_mcp_servers: &Arc<DashMap<spur_acp::BrainSessionId, Arc<WorkerMcpServer>>>,
+    pm_service: Option<&Arc<PmService>>,
+    brain_session_id: &spur_acp::BrainSessionId,
+    delegation_id: &str,
+    issue_id: Option<&str>,
+    worker_session: SessionId,
+    final_status: &DelegationStatus,
+) {
+    flush_worker_mcp_audits(
+        worker_mcp_servers,
+        pm_service,
+        brain_session_id,
+        delegation_id,
+        issue_id,
+        final_status,
+    )
+    .await;
+    funnel.emit(SpurEventBody::DelegationCompleted {
+        worker_session,
+        status: final_status.clone(),
+    });
+}
+
+/// Flush the per-delegation worker-MCP audit aggregator before the
+/// orchestrator emits `DelegationCompleted`. No-op when the brain has
+/// no worker MCP server (delegation dispatched without
+/// `enable_worker_mcp`).
+///
+/// Phase 5 / Task 27. On flush failure: log a warning at
+/// `target: "spur.worker_mcp.audit"` AND emit a
+/// `WorkerMcpSubkind::FlushFailed` audit sentinel as a beads comment
+/// when `pm_service` and `issue_id` are both available, then continue.
+/// The `WorkerMcpDelegationSummary` event is emitted by
+/// `flush_delegation` itself even on channel-closed errors.
+async fn flush_worker_mcp_audits(
+    worker_mcp_servers: &Arc<DashMap<spur_acp::BrainSessionId, Arc<WorkerMcpServer>>>,
+    pm_service: Option<&Arc<PmService>>,
+    brain_session_id: &spur_acp::BrainSessionId,
+    delegation_id: &str,
+    issue_id: Option<&str>,
+    status: &DelegationStatus,
+) {
+    let server = match worker_mcp_servers.get(brain_session_id) {
+        Some(entry) => Arc::clone(entry.value()),
+        None => return,
+    };
+    let outcome = outcome_for_status(status);
+    let Err(error) = server.flush_delegation(delegation_id, outcome).await else {
+        return;
+    };
+    tracing::warn!(
+        target: "spur.worker_mcp.audit",
+        delegation_id = %delegation_id,
+        brain_session_id = %brain_session_id,
+        outcome = %outcome,
+        error = %error,
+        "flush_delegation failed; emitting DelegationCompleted anyway"
+    );
+    emit_flush_failed_audit_sentinel(pm_service, delegation_id, issue_id, &error).await;
+}
+
+/// Emit a `[[spur-audit v1]] worker-mcp/flush-failed` sentinel as a
+/// beads comment on the delegation's target issue. Best-effort —
+/// missing `pm_service`, missing `issue_id`, advanced unsupported by
+/// the active backend, or a beads write failure all degrade silently
+/// to a tracing warning. Mirrors the timeout/error handling of
+/// `emit_worker_write_audit_inner` so a stuck PM can't stall the
+/// terminal `DelegationCompleted` emission.
+async fn emit_flush_failed_audit_sentinel(
+    pm_service: Option<&Arc<PmService>>,
+    delegation_id: &str,
+    issue_id: Option<&str>,
+    error: &spur_mcp::worker_server::FlushDelegationError,
+) {
+    let (Some(pm), Some(issue_id)) = (pm_service, issue_id) else {
+        return;
+    };
+    let Some(adv) = pm.advanced() else {
+        return;
+    };
+    let kind = spur_mcp::plan::audit_sentinel::AuditSentinelKind::WorkerMcp {
+        delegation_id: delegation_id.to_string(),
+        subkind: spur_mcp::plan::audit_sentinel::WorkerMcpSubkind::FlushFailed,
+        tool_name: None,
+        target_issue_id: Some(issue_id.to_string()),
+        error: Some(error.to_string()),
+    };
+    let body = spur_mcp::plan::audit_sentinel::encode_comment(&kind);
+    let timeout = std::time::Duration::from_secs(2);
+    match tokio::time::timeout(timeout, adv.add_comment(issue_id, &body)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            tracing::warn!(
+                target: "spur.worker_mcp.audit",
+                delegation_id = %delegation_id,
+                issue_id = %issue_id,
+                "FlushFailed audit comment emission failed: {e}"
+            );
+        }
+        Err(_) => {
+            tracing::warn!(
+                target: "spur.worker_mcp.audit",
+                delegation_id = %delegation_id,
+                issue_id = %issue_id,
+                "FlushFailed audit comment emission timed out"
+            );
+        }
     }
 }
 
@@ -7427,6 +7946,10 @@ struct WorkerAttemptCtx<'a> {
     /// Publishes the resolved post-overlay worktree HEAD back to the reconciler.
     dispatched_base_oid_tx: Option<tokio::sync::watch::Sender<Option<String>>>,
     fault_injection_hooks: &'a FaultInjectionHooks,
+    /// Phase 5 / Task 26 — worker `mcp_servers` config. Empty unless the
+    /// delegation request set `enable_worker_mcp = Some(true)`. Resolved
+    /// once in `execute_delegation` so retries reuse the same token URL.
+    worker_mcp_servers: &'a [McpServer],
 }
 
 /// Returns `Ok(WorkerAttemptOutcome)` for any flow that produced a
@@ -7601,12 +8124,17 @@ async fn run_one_worker_attempt(
         executor_id: worker_session.0.clone(),
     });
 
-    // Workers get no MCP servers (per spec).
+    // Phase 5 / Task 26 — worker MCP injection is gated on the delegation
+    // request's `enable_worker_mcp` flag (resolved once in
+    // `execute_delegation`). When the flag is unset/false this slice is
+    // empty, preserving the historical "Workers get no MCP servers"
+    // contract. When set, it carries exactly one `spur-worker-mcp`
+    // entry whose URL embeds the per-delegation HMAC token.
     let session_response = match crate::skip_perm::new_session_with_bypass(
         &mut *connection,
         ctx.agent_config,
         worktree_info.path.clone(),
-        vec![],
+        ctx.worker_mcp_servers.to_vec(),
     )
     .await
     {
@@ -10613,7 +11141,9 @@ mod phase5_orchestrator_finalization_tests {
     use crate::continuation_bridge::{new_overflow_buf, ContinuationEventSink, RenderOutcome};
     use crate::event_funnel::spawn_funnel;
     use crate::scheduler::{BrainScheduler, ScheduledAction};
+    use async_trait::async_trait;
     use chrono::Utc;
+    use dashmap::DashMap;
     use futures::FutureExt;
     use spur_acp::domain::delegation::DelegationStatus;
     use spur_acp::domain::events::SpurEventBody;
@@ -10622,11 +11152,20 @@ mod phase5_orchestrator_finalization_tests {
         DropReason,
     };
     use spur_acp::types::SessionId;
+    use spur_license::policy::PolicyResolver;
+    use spur_license::FeatureGate;
+    use spur_mcp::handlers::PlanResolver;
+    use spur_mcp::plan::PlanState;
+    use spur_mcp::worker_server::{WorkerMcpDeps, WorkerMcpServer};
+    use spur_pm::test_workspace::TestBeadsWorkspace;
     use std::future::Future;
+    use std::path::Path;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
+    use tempfile::TempDir;
+    use tokio::net::TcpStream;
     use tokio::sync::{broadcast, Notify};
 
     #[derive(Default)]
@@ -10690,6 +11229,51 @@ mod phase5_orchestrator_finalization_tests {
         let (tx, rx) = broadcast::channel(32);
         let seq = Arc::new(AtomicU64::new(0));
         (spawn_funnel(tx, seq), rx)
+    }
+
+    struct NullWorkerMcpEventSink;
+
+    impl spur_mcp::events::McpEventSink for NullWorkerMcpEventSink {
+        fn emit(&self, _event: SpurEventBody) {}
+    }
+
+    struct NullWorkerPlanResolver;
+
+    #[async_trait]
+    impl PlanResolver for NullWorkerPlanResolver {
+        async fn load_or_project_plan(
+            &self,
+            plan_id: &str,
+        ) -> Result<Arc<tokio::sync::Mutex<PlanState>>, String> {
+            Err(format!("test resolver: unknown plan_id '{plan_id}'"))
+        }
+    }
+
+    async fn test_worker_pm_service(repo: &Path) -> Arc<spur_pm::PmService> {
+        let workspace = TestBeadsWorkspace::init();
+        let beads_dir = repo.join(".beads");
+        std::fs::create_dir_all(&beads_dir).expect("create test .beads directory");
+        workspace.copy_db_to(&beads_dir);
+        Arc::new(
+            spur_pm::PmService::try_new(None, true, false, repo, None)
+                .await
+                .expect("PmService::try_new failed")
+                .expect("expected beads pm"),
+        )
+    }
+
+    fn test_worker_deps(pm: Arc<spur_pm::PmService>) -> WorkerMcpDeps {
+        WorkerMcpDeps {
+            pm_service: pm,
+            feature_gate: Arc::new(FeatureGate::new(PolicyResolver::embedded())),
+            funnel: Arc::new(NullWorkerMcpEventSink),
+            plan_resolver: Arc::new(NullWorkerPlanResolver),
+            reconciler_outcomes: Arc::new(tokio::sync::Mutex::new(
+                spur_mcp::plan::outcomes::OutcomeStore::default(),
+            )),
+            outcome_store: Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            repo_root: None,
+        }
     }
 
     enum ShutdownMode {
@@ -10763,12 +11347,14 @@ mod phase5_orchestrator_finalization_tests {
         let overflow = new_overflow_buf();
         let server = Arc::new(MockRetiringServer::ready());
         let mut mcp_server = Some(server.clone());
+        let worker_mcp_servers = DashMap::new();
 
         retire_brain_session(
             &funnel,
             &old_session,
             &mut mcp_server,
             None,
+            &worker_mcp_servers,
             &mut scheduler,
             &overflow,
             Some(new_session.clone().into()),
@@ -10785,6 +11371,57 @@ mod phase5_orchestrator_finalization_tests {
         assert_eq!(scheduler.pending_continuation_len(), 1);
     }
 
+    #[tokio::test]
+    async fn test_retire_brain_session_shuts_down_worker_mcp_server() {
+        let session = SessionId("brain-worker-mcp".into());
+        let brain_session = spur_acp::types::BrainSessionId::from(session.clone());
+        let (funnel, _rx) = test_funnel();
+        let (mut scheduler, _sink) = mk_scheduler(Some(session.clone()));
+        let overflow = new_overflow_buf();
+        let dir = TempDir::new().expect("tempdir");
+        let pm = test_worker_pm_service(dir.path()).await;
+        let worker_server = WorkerMcpServer::start(session.to_string(), test_worker_deps(pm))
+            .await
+            .expect("worker MCP server starts");
+        let worker_addr = worker_server
+            .url()
+            .strip_prefix("http://")
+            .and_then(|url| url.strip_suffix("/mcp"))
+            .expect("worker MCP URL shape")
+            .to_string();
+        let worker_mcp_servers = DashMap::new();
+        worker_mcp_servers.insert(brain_session.clone(), worker_server);
+        let mut mcp_server: Option<Arc<MockRetiringServer>> = None;
+
+        retire_brain_session(
+            &funnel,
+            &session,
+            &mut mcp_server,
+            None,
+            &worker_mcp_servers,
+            &mut scheduler,
+            &overflow,
+            None,
+        )
+        .await;
+
+        assert!(
+            !worker_mcp_servers.contains_key(&brain_session),
+            "retire must remove the worker MCP server entry"
+        );
+        let probe = tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(&worker_addr))
+            .await
+            .expect("connect must complete within 2s after retire");
+        let connect_err = probe.expect_err("listener must be closed after retire");
+        assert!(
+            matches!(
+                connect_err.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset
+            ),
+            "expected ConnectionRefused/Reset, got {connect_err:?}"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn test_retire_brain_session_timeout_force_aborts() {
         let session = SessionId("brain-timeout".into());
@@ -10793,12 +11430,14 @@ mod phase5_orchestrator_finalization_tests {
         let overflow = new_overflow_buf();
         let server = Arc::new(MockRetiringServer::blocked(Arc::new(Notify::new())));
         let mut mcp_server = Some(server.clone());
+        let worker_mcp_servers = DashMap::new();
 
         retire_brain_session(
             &funnel,
             &session,
             &mut mcp_server,
             None,
+            &worker_mcp_servers,
             &mut scheduler,
             &overflow,
             None,
@@ -10819,12 +11458,14 @@ mod phase5_orchestrator_finalization_tests {
         let overflow = new_overflow_buf();
         let server = Arc::new(MockRetiringServer::blocked(Arc::new(Notify::new())));
         let mut mcp_server = Some(server);
+        let worker_mcp_servers = DashMap::new();
 
         retire_brain_session(
             &funnel,
             &session,
             &mut mcp_server,
             None,
+            &worker_mcp_servers,
             &mut scheduler,
             &overflow,
             None,
@@ -10850,6 +11491,7 @@ mod phase5_orchestrator_finalization_tests {
         let overflow = new_overflow_buf();
         let server = Arc::new(MockRetiringServer::ready());
         let mut mcp_server = Some(server);
+        let worker_mcp_servers = DashMap::new();
 
         scheduler.push_continuation(mk_cont("pending-1", 1, &old_session));
         {
@@ -10862,6 +11504,7 @@ mod phase5_orchestrator_finalization_tests {
             &old_session,
             &mut mcp_server,
             None,
+            &worker_mcp_servers,
             &mut scheduler,
             &overflow,
             Some(new_session.clone().into()),
@@ -11226,6 +11869,556 @@ mod beads_startup_warning_tests {
         assert_eq!(
             startup_beads_warning(&config, Some(gate.as_ref()), true, true, false),
             None
+        );
+    }
+}
+
+#[cfg(test)]
+mod worker_mcp_cache_tests {
+    //! Phase 5 / Task 25/26 — cache contract for
+    //! [`Orchestrator::ensure_worker_mcp_server`]. The full helper boots a
+    //! `WorkerMcpServer` whose construction needs production-grade deps
+    //! (PmService, FeatureGate, PlanResolver, …); rather than wire all of
+    //! that here we exercise the underlying [`cache_or_start`] generic that
+    //! `ensure_worker_mcp_server` delegates to.
+
+    use super::cache_or_start;
+    use dashmap::DashMap;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// `is_alive` is a no-op (always true) — exercises the steady-state
+    /// "everything's healthy" branch.
+    fn always_alive<V>(_: &V) -> bool {
+        true
+    }
+
+    #[tokio::test]
+    async fn double_call_returns_same_arc_and_starts_once() {
+        let map: DashMap<String, Arc<u32>> = DashMap::new();
+        let starts = Arc::new(AtomicUsize::new(0));
+
+        let starts_a = Arc::clone(&starts);
+        let first = cache_or_start::<_, _, _, _, (), _>(
+            &map,
+            "brain-1".into(),
+            || async move {
+                starts_a.fetch_add(1, Ordering::SeqCst);
+                Ok(Arc::new(42u32))
+            },
+            always_alive,
+        )
+        .await
+        .expect("first ensure must succeed");
+
+        let starts_b = Arc::clone(&starts);
+        let second = cache_or_start::<_, _, _, _, (), _>(
+            &map,
+            "brain-1".into(),
+            || async move {
+                starts_b.fetch_add(1, Ordering::SeqCst);
+                Ok(Arc::new(99u32))
+            },
+            always_alive,
+        )
+        .await
+        .expect("second ensure must succeed");
+
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "double-call must return the same Arc (no duplicate boot)"
+        );
+        assert_eq!(*first, 42, "cached value must be the first-boot value");
+        assert_eq!(
+            starts.load(Ordering::SeqCst),
+            1,
+            "starter must run exactly once across the two calls"
+        );
+        assert_eq!(map.len(), 1, "exactly one entry per brain session");
+    }
+
+    #[tokio::test]
+    async fn distinct_keys_get_distinct_values() {
+        let map: DashMap<String, Arc<u32>> = DashMap::new();
+
+        let a = cache_or_start::<_, _, _, _, (), _>(
+            &map,
+            "brain-a".into(),
+            || async { Ok(Arc::new(1u32)) },
+            always_alive,
+        )
+        .await
+        .expect("brain-a");
+        let b = cache_or_start::<_, _, _, _, (), _>(
+            &map,
+            "brain-b".into(),
+            || async { Ok(Arc::new(2u32)) },
+            always_alive,
+        )
+        .await
+        .expect("brain-b");
+
+        assert!(!Arc::ptr_eq(&a, &b));
+        assert_eq!(map.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn start_failure_does_not_populate_cache() {
+        let map: DashMap<String, Arc<u32>> = DashMap::new();
+        let err = cache_or_start::<_, u32, _, _, &'static str, _>(
+            &map,
+            "brain-1".into(),
+            || async { Err("boom") },
+            always_alive,
+        )
+        .await
+        .expect_err("must propagate starter error");
+        assert_eq!(err, "boom");
+        assert!(
+            map.is_empty(),
+            "failed start must leave the cache untouched"
+        );
+    }
+
+    /// Phase 5 / Task 26 — cache liveness check. A cached entry whose
+    /// `is_alive` returns `false` (modeling a `WorkerMcpServer` whose
+    /// accept loop has been aborted) MUST be evicted and the starter
+    /// rerun. Otherwise retries hand back a stale URL → 502.
+    #[tokio::test]
+    async fn dead_cached_entry_evicted_and_rebooted() {
+        struct Probe {
+            id: u32,
+            alive: AtomicBool,
+        }
+
+        let map: DashMap<String, Arc<Probe>> = DashMap::new();
+        let starts = Arc::new(AtomicUsize::new(0));
+
+        let starts_a = Arc::clone(&starts);
+        let first = cache_or_start::<_, _, _, _, (), _>(
+            &map,
+            "brain-1".into(),
+            || async move {
+                starts_a.fetch_add(1, Ordering::SeqCst);
+                Ok(Arc::new(Probe {
+                    id: 1,
+                    alive: AtomicBool::new(true),
+                }))
+            },
+            |p: &Probe| p.alive.load(Ordering::SeqCst),
+        )
+        .await
+        .expect("first start");
+        assert_eq!(first.id, 1);
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+
+        // Simulate the accept loop being aborted (e.g. retire_brain_session)
+        // — the cached Arc is still in the map but no longer functional.
+        first.alive.store(false, Ordering::SeqCst);
+
+        let starts_b = Arc::clone(&starts);
+        let second = cache_or_start::<_, _, _, _, (), _>(
+            &map,
+            "brain-1".into(),
+            || async move {
+                starts_b.fetch_add(1, Ordering::SeqCst);
+                Ok(Arc::new(Probe {
+                    id: 2,
+                    alive: AtomicBool::new(true),
+                }))
+            },
+            |p: &Probe| p.alive.load(Ordering::SeqCst),
+        )
+        .await
+        .expect("reboot after cache eviction");
+
+        assert_eq!(
+            second.id, 2,
+            "dead cache entry must be evicted and starter re-run"
+        );
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "must not return the dead Arc"
+        );
+        assert_eq!(
+            starts.load(Ordering::SeqCst),
+            2,
+            "starter must run a second time after eviction"
+        );
+        assert_eq!(map.len(), 1, "exactly one live entry remains");
+    }
+}
+
+#[cfg(test)]
+mod worker_mcp_dispatch_tests {
+    //! Phase 5 / Task 26 — dispatch-site gating for worker `mcp_servers`
+    //! injection. Locks the contract that drives `execute_delegation`'s
+    //! one-shot worker MCP resolution: the helper either returns an
+    //! empty vec (preserving the historical "Workers get no MCP servers"
+    //! contract) or a single `spur-worker-mcp` entry whose URL embeds
+    //! the per-delegation HMAC token.
+    //!
+    //! The fetch closure is stubbed so the test never touches a real
+    //! `WorkerMcpServer` (which would need PmService / FeatureGate /
+    //! PlanResolver to boot). The contract under test is the gating
+    //! logic and URL assembly.
+
+    use super::build_worker_mcp_servers_with;
+    use agent_client_protocol::schema::McpServer;
+    use spur_acp::DelegationDispatchError;
+
+    #[tokio::test]
+    async fn flag_none_emits_zero_entries_and_skips_fetch() {
+        let mut fetch_called = false;
+        let result = build_worker_mcp_servers_with(None, || {
+            fetch_called = true;
+            async {
+                Ok::<_, DelegationDispatchError>(("http://127.0.0.1:1/mcp".into(), "tok".into()))
+            }
+        })
+        .await
+        .expect("None flag must succeed");
+        assert!(result.is_empty(), "None flag must produce zero entries");
+        assert!(
+            !fetch_called,
+            "fetch closure must NOT run when flag is None (no accidental boot)"
+        );
+    }
+
+    #[tokio::test]
+    async fn flag_some_false_emits_zero_entries_and_skips_fetch() {
+        let mut fetch_called = false;
+        let result = build_worker_mcp_servers_with(Some(false), || {
+            fetch_called = true;
+            async {
+                Ok::<_, DelegationDispatchError>(("http://127.0.0.1:1/mcp".into(), "tok".into()))
+            }
+        })
+        .await
+        .expect("Some(false) flag must succeed");
+        assert!(
+            result.is_empty(),
+            "Some(false) flag must produce zero entries"
+        );
+        assert!(
+            !fetch_called,
+            "fetch closure must NOT run when flag is Some(false)"
+        );
+    }
+
+    #[tokio::test]
+    async fn flag_some_true_emits_one_entry_with_token_in_url() {
+        let result = build_worker_mcp_servers_with(Some(true), || async {
+            Ok::<_, DelegationDispatchError>((
+                "http://127.0.0.1:54321/mcp".into(),
+                "tok-abc-123".into(),
+            ))
+        })
+        .await
+        .expect("Some(true) flag must succeed");
+        assert_eq!(result.len(), 1, "flag-true must produce exactly 1 entry");
+        match &result[0] {
+            McpServer::Http(http) => {
+                assert_eq!(
+                    http.name, "spur-worker-mcp",
+                    "entry must be named spur-worker-mcp"
+                );
+                assert!(
+                    http.url.contains("?token=tok-abc-123"),
+                    "URL must embed token: {}",
+                    http.url
+                );
+                assert!(
+                    http.url.starts_with("http://127.0.0.1:54321/mcp"),
+                    "URL must start with the server URL: {}",
+                    http.url
+                );
+            }
+            other => panic!("expected McpServer::Http, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn flag_some_true_propagates_fetch_error() {
+        let result = build_worker_mcp_servers_with::<_, _>(Some(true), || async {
+            Err::<(String, String), _>(DelegationDispatchError::WorkerMcpUnavailable {
+                reason: "stub: deps not configured".into(),
+            })
+        })
+        .await;
+        match result {
+            Err(DelegationDispatchError::WorkerMcpUnavailable { reason }) => {
+                assert!(reason.contains("stub: deps not configured"));
+            }
+            other => panic!("expected WorkerMcpUnavailable, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod flush_ordering_tests {
+    //! Phase 5 / Task 27 ordering invariant: when a delegation completes
+    //! with a registered worker MCP server, the orchestrator MUST emit
+    //! `WorkerMcpDelegationSummary` before `DelegationCompleted` on the
+    //! event funnel — including on abort-path branches in
+    //! `handle_delegations`. Both the happy `finalize` exit and the
+    //! cancellation branches share the `flush_then_emit_completed`
+    //! helper, so a single ordering test for each branch type is
+    //! sufficient to lock the invariant.
+    //!
+    //! Outcome-string mapping is also locked here so future tweaks to
+    //! `outcome_for_status` can't silently collapse `Cancelled`/`Rejected`
+    //! into `"error"` again.
+    use super::*;
+
+    use spur_acp::SpurEventBody;
+    use spur_license::policy::PolicyResolver;
+    use spur_license::FeatureGate;
+    use spur_mcp::handlers::PlanResolver;
+    use spur_mcp::plan::PlanState;
+    use spur_mcp::worker_server::{DelegationContext, WorkerMcpDeps, WorkerMcpServer};
+    use spur_mcp::McpEventSink;
+    use std::time::Duration;
+
+    struct NullPlanResolver;
+
+    #[async_trait::async_trait]
+    impl PlanResolver for NullPlanResolver {
+        async fn load_or_project_plan(
+            &self,
+            plan_id: &str,
+        ) -> Result<Arc<tokio::sync::Mutex<PlanState>>, String> {
+            Err(format!("test resolver: unknown plan_id '{plan_id}'"))
+        }
+    }
+
+    async fn build_pm_service(repo: &std::path::Path) -> Arc<spur_pm::PmService> {
+        let beads = spur_pm::test_workspace::TestBeadsWorkspace::init();
+        let beads_dir = repo.join(".beads");
+        std::fs::create_dir_all(&beads_dir).expect("create .beads");
+        beads.copy_db_to(&beads_dir);
+        Arc::new(
+            spur_pm::PmService::try_new(None, true, false, repo, None)
+                .await
+                .expect("PmService::try_new")
+                .expect("expected Some(PmService)"),
+        )
+    }
+
+    fn make_funnel_sink(funnel: &crate::event_funnel::FunnelHandle) -> Arc<dyn McpEventSink> {
+        Arc::new(funnel.clone())
+    }
+
+    /// Build a `WorkerMcpServer` registered for the test brain session,
+    /// pre-registering `delegation_id` so the per-delegation summary
+    /// guard exists.
+    async fn make_registered_server(
+        funnel: &crate::event_funnel::FunnelHandle,
+        repo: &std::path::Path,
+        brain_session_id: &spur_acp::BrainSessionId,
+        delegation_id: &str,
+    ) -> Arc<WorkerMcpServer> {
+        let pm = build_pm_service(repo).await;
+        let deps = WorkerMcpDeps {
+            pm_service: pm,
+            feature_gate: Arc::new(FeatureGate::new(PolicyResolver::embedded())),
+            funnel: make_funnel_sink(funnel),
+            plan_resolver: Arc::new(NullPlanResolver),
+            reconciler_outcomes: Arc::new(tokio::sync::Mutex::new(
+                spur_mcp::plan::outcomes::OutcomeStore::default(),
+            )),
+            outcome_store: Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            repo_root: None,
+        };
+        let server = WorkerMcpServer::start(brain_session_id.to_string(), deps)
+            .await
+            .expect("worker MCP server starts");
+        server.register_delegation(
+            delegation_id.to_string(),
+            DelegationContext {
+                enable_worker_progress: false,
+            },
+        );
+        server
+    }
+
+    /// Drain the funnel test channel until both sentinel bodies have
+    /// arrived (or the deadline elapses). The funnel forwards via a
+    /// spawned task so events are NOT in `body_rx` synchronously after
+    /// `emit`.
+    async fn drain_until_pair(
+        body_rx: &mut tokio::sync::mpsc::UnboundedReceiver<SpurEventBody>,
+    ) -> Vec<SpurEventBody> {
+        let mut events: Vec<SpurEventBody> = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let summary_seen = events
+                .iter()
+                .any(|e| matches!(e, SpurEventBody::WorkerMcpDelegationSummary { .. }));
+            let completed_seen = events
+                .iter()
+                .any(|e| matches!(e, SpurEventBody::DelegationCompleted { .. }));
+            if summary_seen && completed_seen {
+                break;
+            }
+            match tokio::time::timeout_at(deadline, body_rx.recv()).await {
+                Ok(Some(body)) => events.push(body),
+                Ok(None) | Err(_) => break,
+            }
+        }
+        events
+    }
+
+    fn assert_summary_precedes_completed(events: &[SpurEventBody]) {
+        let summary_pos = events
+            .iter()
+            .position(|e| matches!(e, SpurEventBody::WorkerMcpDelegationSummary { .. }))
+            .unwrap_or_else(|| panic!("missing summary; events: {events:?}"));
+        let completed_pos = events
+            .iter()
+            .position(|e| matches!(e, SpurEventBody::DelegationCompleted { .. }))
+            .unwrap_or_else(|| panic!("missing DelegationCompleted; events: {events:?}"));
+        assert!(
+            summary_pos < completed_pos,
+            "WorkerMcpDelegationSummary must precede DelegationCompleted; events: {events:?}"
+        );
+    }
+
+    /// `finalize` (the happy-path terminal helper) must drive
+    /// `WorkerMcpDelegationSummary` ahead of `DelegationCompleted`
+    /// whenever a worker-MCP server is registered for the brain session.
+    #[tokio::test]
+    async fn finalize_emits_summary_before_delegation_completed() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let (funnel, mut body_rx) = crate::event_funnel::test_channel();
+        let brain_session_id = spur_acp::BrainSessionId::new(spur_acp::types::SessionId::new());
+        let delegation_id = "d-flush-ordering-finalize";
+
+        let server =
+            make_registered_server(&funnel, dir.path(), &brain_session_id, delegation_id).await;
+
+        let servers: Arc<DashMap<spur_acp::BrainSessionId, Arc<WorkerMcpServer>>> =
+            Arc::new(DashMap::new());
+        servers.insert(brain_session_id.clone(), Arc::clone(&server));
+
+        let _ = finalize(
+            &funnel,
+            &servers,
+            None, // no pm_service in this test
+            &brain_session_id,
+            delegation_id,
+            None,
+            spur_acp::types::SessionId::new(),
+            DelegationStatus::Success,
+            None,
+            None,
+            None,
+            0.0,
+            None,
+            None,
+        )
+        .await;
+
+        let events = drain_until_pair(&mut body_rx).await;
+        assert_summary_precedes_completed(&events);
+    }
+
+    /// Abort-path ordering: `flush_then_emit_completed` (used by the
+    /// `handle_delegations` cancellation branches) must emit the summary
+    /// before `DelegationCompleted` even when the delegation never
+    /// reached `execute_delegation`. Also asserts no panic when the
+    /// delegation_guards lock is taken alongside the summary drop.
+    #[tokio::test]
+    async fn abort_path_emits_summary_before_delegation_completed() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let (funnel, mut body_rx) = crate::event_funnel::test_channel();
+        let brain_session_id = spur_acp::BrainSessionId::new(spur_acp::types::SessionId::new());
+        let delegation_id = "d-flush-ordering-abort";
+
+        let server =
+            make_registered_server(&funnel, dir.path(), &brain_session_id, delegation_id).await;
+
+        let servers: Arc<DashMap<spur_acp::BrainSessionId, Arc<WorkerMcpServer>>> =
+            Arc::new(DashMap::new());
+        servers.insert(brain_session_id.clone(), Arc::clone(&server));
+
+        let cancelled_status = DelegationStatus::Cancelled {
+            reason: "test abort".into(),
+        };
+
+        flush_then_emit_completed(
+            &funnel,
+            &servers,
+            None,
+            &brain_session_id,
+            delegation_id,
+            None,
+            spur_acp::types::SessionId(delegation_id.to_string()),
+            &cancelled_status,
+        )
+        .await;
+
+        let events = drain_until_pair(&mut body_rx).await;
+        assert_summary_precedes_completed(&events);
+
+        // The Cancelled status must not bump the summary's `errors`
+        // count — clean termination is not a per-delegation error.
+        // Post-br-8gw the WorkerMcpDelegationSummary uses `errors: u64`
+        // (per-call + delegation-level) instead of a single `outcome`
+        // string, so the contract here is `errors == 0` for a clean
+        // Cancelled exit with no per-call errors.
+        let errors = events
+            .iter()
+            .find_map(|e| {
+                if let SpurEventBody::WorkerMcpDelegationSummary { errors, .. } = e {
+                    Some(*errors)
+                } else {
+                    None
+                }
+            })
+            .expect("summary present");
+        assert_eq!(
+            errors, 0,
+            "Cancelled does not bump the per-delegation summary's `errors`; events: {events:?}"
+        );
+    }
+
+    /// Outcome-string contract: `outcome_for_status` must keep the
+    /// 4-way mapping `success` / `cancelled` / `rejected` / `error` so
+    /// the audit-trail outcome forwarded to `flush_delegation` retains
+    /// the clean-termination distinction. Locks the regression that
+    /// previously collapsed everything-not-Success to `"error"`.
+    #[test]
+    fn outcome_for_status_is_four_way() {
+        assert_eq!(outcome_for_status(&DelegationStatus::Success), "success");
+        assert_eq!(
+            outcome_for_status(&DelegationStatus::Modified {
+                reviewer_note: "lgtm with caveat".into(),
+            }),
+            "success"
+        );
+        assert_eq!(
+            outcome_for_status(&DelegationStatus::Cancelled {
+                reason: "operator abort".into(),
+            }),
+            "cancelled"
+        );
+        assert_eq!(
+            outcome_for_status(&DelegationStatus::Rejected {
+                reason: "missing tests".into(),
+            }),
+            "rejected"
+        );
+        assert_eq!(
+            outcome_for_status(&DelegationStatus::Failed {
+                error: "exit 1".into(),
+            }),
+            "error"
+        );
+        assert_eq!(outcome_for_status(&DelegationStatus::Timeout), "error");
+        assert_eq!(
+            outcome_for_status(&DelegationStatus::Conflict { files: vec![] }),
+            "error"
         );
     }
 }

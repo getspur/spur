@@ -311,20 +311,21 @@ async fn dispatcher_drop_emits_summary_event_with_correct_counts() {
         if let SpurEventBody::WorkerMcpDelegationSummary {
             delegation_id,
             brain_session_id,
-            tool_calls,
-            audits_emitted,
-            outcome,
+            calls_total,
+            calls_by_tool,
+            errors,
             ..
         } = &summaries[0]
         {
             assert_eq!(delegation_id, "d-summary");
             assert_eq!(brain_session_id, "session-summary");
             assert_eq!(
-                *tool_calls, 2,
+                *calls_total, 2,
                 "expected 2 tool calls (get_issue + update_issue)"
             );
-            assert_eq!(*audits_emitted, 1, "expected 1 audit (update_issue)");
-            assert_eq!(outcome, "success");
+            assert_eq!(calls_by_tool.get("get_issue"), Some(&1));
+            assert_eq!(calls_by_tool.get("update_issue"), Some(&1));
+            assert_eq!(*errors, 0, "no calls returned errors");
         } else {
             panic!(
                 "expected WorkerMcpDelegationSummary, got: {:?}",
