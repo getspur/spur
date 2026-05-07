@@ -41,6 +41,7 @@ def test_sccache_worktree_falls_back_to_rustc_when_sccache_is_missing(tmp_path):
     env = os.environ.copy()
     env["PATH"] = str(bin_dir)
     env["SPUR_ROOT"] = str(ROOT)
+    env.pop("CODEX_SANDBOX", None)
 
     result = subprocess.run(
         [str(WRAPPER), str(rustc), "-vV"],
@@ -100,6 +101,7 @@ def test_sccache_worktree_uses_sccache_when_available(tmp_path):
     env = os.environ.copy()
     env["PATH"] = str(bin_dir)
     env["SPUR_ROOT"] = str(ROOT)
+    env.pop("CODEX_SANDBOX", None)
 
     result = subprocess.run(
         [str(WRAPPER), str(rustc), "-vV"],
@@ -114,6 +116,99 @@ def test_sccache_worktree_uses_sccache_when_available(tmp_path):
         str(rustc),
         "-vV",
         f"basedirs={worktree_root}:{ROOT}",
+    ]
+
+
+def test_sccache_worktree_bypasses_sccache_in_codex_sandbox(tmp_path):
+    bin_dir = make_isolated_bin(tmp_path)
+
+    sccache_log = tmp_path / "sccache.log"
+    sccache = bin_dir / "sccache"
+    sccache.write_text(
+        "\n".join(
+            [
+                "#!/bin/sh",
+                f"printf 'called\\n' > {shlex.quote(str(sccache_log))}",
+                "exit 99",
+            ]
+        )
+        + "\n"
+    )
+    sccache.chmod(0o755)
+
+    rustc_log = tmp_path / "rustc.log"
+    rustc = tmp_path / "rustc"
+    rustc.write_text(
+        "\n".join(
+            [
+                "#!/bin/sh",
+                f"printf '%s\\n' \"$0\" \"$@\" > {shlex.quote(str(rustc_log))}",
+                f"printf 'basedirs=%s\\n' \"$SCCACHE_BASEDIRS\" >> {shlex.quote(str(rustc_log))}",
+            ]
+        )
+        + "\n"
+    )
+    rustc.chmod(0o755)
+
+    env = os.environ.copy()
+    env["PATH"] = str(bin_dir)
+    env["SPUR_ROOT"] = str(ROOT)
+    env["CODEX_SANDBOX"] = "seatbelt"
+
+    result = subprocess.run(
+        [str(WRAPPER), str(rustc), "-vV"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not sccache_log.exists()
+    assert rustc_log.read_text().splitlines() == [
+        str(rustc),
+        "-vV",
+        f"basedirs={ROOT}",
+    ]
+
+
+def test_sccache_worktree_allows_sccache_outside_codex_sandbox(tmp_path):
+    bin_dir = make_isolated_bin(tmp_path)
+
+    sccache_log = tmp_path / "sccache.log"
+    sccache = bin_dir / "sccache"
+    sccache.write_text(
+        "\n".join(
+            [
+                "#!/bin/sh",
+                f"printf '%s\\n' \"$@\" > {shlex.quote(str(sccache_log))}",
+            ]
+        )
+        + "\n"
+    )
+    sccache.chmod(0o755)
+
+    rustc = tmp_path / "rustc"
+    rustc.write_text("#!/bin/sh\nexit 3\n")
+    rustc.chmod(0o755)
+
+    env = os.environ.copy()
+    env["PATH"] = str(bin_dir)
+    env["SPUR_ROOT"] = str(ROOT)
+    env.pop("CODEX_SANDBOX", None)
+
+    result = subprocess.run(
+        [str(WRAPPER), str(rustc), "-vV"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert sccache_log.read_text().splitlines() == [
+        str(rustc),
+        "-vV",
     ]
 
 
