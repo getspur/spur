@@ -92,3 +92,45 @@ fn persist_as_epic_without_title_is_documented_as_handler_error() {
         "epic_title description must document its conditional-required semantics; got: {desc}",
     );
 }
+
+#[test]
+fn schema_advertises_base_oneof() {
+    let schema = submit_plan_def();
+    let prop = schema
+        .get("properties")
+        .and_then(|p| p.get("base"))
+        .expect("base must be advertised");
+    let one_of = prop
+        .get("oneOf")
+        .and_then(|v| v.as_array())
+        .expect("base must be a oneOf union");
+    assert_eq!(
+        one_of.len(),
+        3,
+        "base must list repo_main / branch / commit"
+    );
+    let kinds: Vec<&str> = one_of
+        .iter()
+        .filter_map(|variant| {
+            variant
+                .get("properties")
+                .and_then(|p| p.get("kind"))
+                .and_then(|k| k.get("const"))
+                .and_then(|c| c.as_str())
+        })
+        .collect();
+    assert!(kinds.contains(&"repo_main"));
+    assert!(kinds.contains(&"branch"));
+    assert!(kinds.contains(&"commit"));
+}
+
+#[test]
+fn schema_base_field_is_optional() {
+    let schema = submit_plan_def();
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    assert!(!required.contains(&"base"), "base must not be required");
+}
