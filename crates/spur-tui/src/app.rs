@@ -6678,38 +6678,47 @@ mod synopsis_wire_tests {
 #[cfg(test)]
 mod theme_threading_tests {
     use super::*;
+    use crate::theme::runtime::test_support::with_isolated_dirs;
 
     /// Boots `App` with `tui.theme = "light"` and confirms (a) construction
     /// does not panic even though no surface consumes the theme yet, and
     /// (b) the resolved theme is the requested one. This guards the cascade
     /// from regressing into a `dark`-only fallback path.
+    ///
+    /// Wrapped in `with_isolated_dirs` so a stray `~/.spur/themes/light.yaml`
+    /// or `.spur/themes/light.yaml` in the developer's environment cannot
+    /// shadow the built-in and break the assertion.
     #[test]
     fn light_theme_boots_without_panic() {
-        let mut spur_config = spur_acp::SpurConfig::default();
-        spur_config.tui.theme = "light".to_string();
+        with_isolated_dirs(|_, _| {
+            let mut spur_config = spur_acp::SpurConfig::default();
+            spur_config.tui.theme = "light".to_string();
 
-        let app = App::new_with_config(
-            None,
-            false,
-            std::sync::Arc::new(spur_config),
-            crate::landing::LandingDecision::ShowDashboard,
-        );
+            let app = App::new_with_config(
+                None,
+                false,
+                std::sync::Arc::new(spur_config),
+                crate::landing::LandingDecision::ShowDashboard,
+            );
 
-        assert_eq!(app.theme.name, "light");
+            assert_eq!(app.theme.name, "light");
+        });
     }
 
     #[test]
     fn unknown_theme_falls_back_to_dark_without_panic() {
-        let mut spur_config = spur_acp::SpurConfig::default();
-        spur_config.tui.theme = "definitely-not-a-theme".to_string();
+        with_isolated_dirs(|_, _| {
+            let mut spur_config = spur_acp::SpurConfig::default();
+            spur_config.tui.theme = "definitely-not-a-theme".to_string();
 
-        let app = App::new_with_config(
-            None,
-            false,
-            std::sync::Arc::new(spur_config),
-            crate::landing::LandingDecision::ShowDashboard,
-        );
+            let app = App::new_with_config(
+                None,
+                false,
+                std::sync::Arc::new(spur_config),
+                crate::landing::LandingDecision::ShowDashboard,
+            );
 
-        assert_eq!(app.theme.name, "dark");
+            assert_eq!(app.theme.name, "dark");
+        });
     }
 }

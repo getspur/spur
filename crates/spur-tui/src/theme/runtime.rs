@@ -112,33 +112,58 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
+/// Test-only helpers shared with `app::theme_threading_tests` so cwd/HOME
+/// mutation stays serialized and panic-safe across both modules.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
+pub(crate) mod test_support {
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
     use tempfile::TempDir;
 
-    /// `set_current_dir` is process-global — running these tests serially
-    /// avoids races. Each test owns its tempdir lifetime.
-    fn with_isolated_dirs<F: FnOnce(&Path, &Path)>(f: F) {
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = TempDir::new().expect("project tempdir");
-        let home = TempDir::new().expect("home tempdir");
-        let prev_cwd = std::env::current_dir().ok();
-        let prev_home = std::env::var_os("HOME");
-        std::env::set_current_dir(cwd.path()).expect("set cwd");
-        std::env::set_var("HOME", home.path());
-        f(cwd.path(), home.path());
-        if let Some(prev) = prev_cwd {
-            let _ = std::env::set_current_dir(prev);
-        }
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
+    pub(crate) static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Restores cwd + HOME on drop. Runs even if the test closure panics,
+    /// so a single failing test cannot corrupt env for subsequent tests.
+    struct EnvGuard {
+        prev_cwd: Option<PathBuf>,
+        prev_home: Option<OsString>,
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(p) = self.prev_cwd.take() {
+                let _ = std::env::set_current_dir(p);
+            }
+            match self.prev_home.take() {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
         }
     }
 
-    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// Run `f` with cwd + HOME each pointing at a fresh tempdir. Both are
+    /// restored on return AND on panic. Serialized via `TEST_LOCK` because
+    /// `set_current_dir` and `HOME` are process-global.
+    pub(crate) fn with_isolated_dirs<F: FnOnce(&Path, &Path)>(f: F) {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = TempDir::new().expect("project tempdir");
+        let home = TempDir::new().expect("home tempdir");
+        let _guard = EnvGuard {
+            prev_cwd: std::env::current_dir().ok(),
+            prev_home: std::env::var_os("HOME"),
+        };
+        std::env::set_current_dir(cwd.path()).expect("set cwd");
+        std::env::set_var("HOME", home.path());
+        f(cwd.path(), home.path());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::with_isolated_dirs;
+    use super::*;
+    use std::fs;
 
     #[test]
     fn falls_back_to_dark_when_built_in_unknown() {
