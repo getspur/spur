@@ -159,7 +159,6 @@ async fn run_plan_pushes_continuation_and_event_for_failed_task() {
             .await
             .expect("plan task should dispatch")
             .expect("delegation request should be present");
-    let delegation_id = request.id.to_string();
     request
         .respond_to
         .send(DelegationResult {
@@ -174,6 +173,27 @@ async fn run_plan_pushes_continuation_and_event_for_failed_task() {
             artifact: None,
         })
         .expect("send worker result");
+
+    let retry_request =
+        tokio::time::timeout(std::time::Duration::from_secs(1), channel.request_rx.recv())
+            .await
+            .expect("plan task should auto-retry")
+            .expect("retry delegation request should be present");
+    let delegation_id = retry_request.id.to_string();
+    retry_request
+        .respond_to
+        .send(DelegationResult {
+            status: DelegationStatus::Failed {
+                error: "worker failed again".into(),
+            },
+            diff: None,
+            diff_summary: None,
+            summary: Some("worker failed again".into()),
+            estimated_cost_usd: 0.0,
+            worker_branch: None,
+            artifact: None,
+        })
+        .expect("send retry worker result");
 
     let cont = tokio::time::timeout(std::time::Duration::from_secs(1), continuation_rx.recv())
         .await
@@ -200,13 +220,13 @@ async fn run_plan_pushes_continuation_and_event_for_failed_task() {
             SpurEventBody::PlanTaskFailed {
                 plan_id: found_plan_id,
                 task_id,
-                attempt: 1,
+                attempt: 2,
                 max_attempts: 3,
                 error,
                 delegation_id: found_delegation_id,
             } if found_plan_id == &plan_id
                 && task_id == "t1"
-                && error == "worker failed"
+                && error == "worker failed again"
                 && found_delegation_id == &delegation_id
         )),
         "PlanTaskFailed event missing from {events:?}"
@@ -284,6 +304,26 @@ async fn event_emission_does_not_race_with_state_update_for_failed_task() {
             artifact: None,
         })
         .expect("send worker result");
+
+    let retry_request =
+        tokio::time::timeout(std::time::Duration::from_secs(1), channel.request_rx.recv())
+            .await
+            .expect("plan task should auto-retry")
+            .expect("retry delegation request should be present");
+    retry_request
+        .respond_to
+        .send(DelegationResult {
+            status: DelegationStatus::Failed {
+                error: "race detection again".into(),
+            },
+            diff: None,
+            diff_summary: None,
+            summary: Some("race again".into()),
+            estimated_cost_usd: 0.0,
+            worker_branch: None,
+            artifact: None,
+        })
+        .expect("send retry worker result");
 
     // Wait for emit() to rendezvous on the terminal-event sink. While the
     // sender is blocked here, the worker thread is paused inside emit().

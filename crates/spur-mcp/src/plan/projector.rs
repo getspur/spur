@@ -64,29 +64,65 @@ pub fn project_attempt_facts(audits: &[AuditSentinelKind]) -> (u32, Option<Strin
     (count.max(1), last_delegation_id)
 }
 
+fn latest_audit_advances_next_attempt(audits: &[AuditSentinelKind]) -> bool {
+    for audit in audits.iter().rev() {
+        match audit {
+            AuditSentinelKind::RetryRequested { .. } | AuditSentinelKind::ReviewFeedback { .. } => {
+                return true
+            }
+            AuditSentinelKind::Dispatch { .. }
+            | AuditSentinelKind::Completion { .. }
+            | AuditSentinelKind::Approval { .. }
+            | AuditSentinelKind::Rejection { .. } => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
+pub fn project_entry_attempt(audits: &[AuditSentinelKind], status: &PlanTaskStatus) -> u32 {
+    let (attempt, _) = project_attempt_facts(audits);
+    if matches!(status, PlanTaskStatus::Pending | PlanTaskStatus::Ready)
+        && latest_audit_advances_next_attempt(audits)
+    {
+        attempt.saturating_add(1)
+    } else {
+        attempt
+    }
+}
+
 pub fn project_attempt_history(audits: &[AuditSentinelKind]) -> Vec<super::AttemptRecord> {
     audits
         .iter()
-        .filter_map(|audit| {
-            if let AuditSentinelKind::ReviewFeedback {
+        .filter_map(|audit| match audit {
+            AuditSentinelKind::ReviewFeedback {
                 delegation_id: _,
                 attempt,
                 feedback,
                 worker_branch,
                 summary,
-            } = audit
-            {
-                Some(super::AttemptRecord {
-                    attempt: *attempt,
-                    worker_branch: worker_branch.clone(),
-                    diff_summary: None,
-                    summary: summary.clone(),
-                    feedback: feedback.clone(),
-                    dispatched_base_oid: None,
-                })
-            } else {
-                None
-            }
+            } => Some(super::AttemptRecord {
+                attempt: *attempt,
+                worker_branch: worker_branch.clone(),
+                diff_summary: None,
+                summary: summary.clone(),
+                feedback: feedback.clone(),
+                dispatched_base_oid: None,
+            }),
+            AuditSentinelKind::RetryRequested {
+                delegation_id: _,
+                attempt,
+                error,
+                worker_branch,
+            } => Some(super::AttemptRecord {
+                attempt: *attempt,
+                worker_branch: worker_branch.clone(),
+                diff_summary: None,
+                summary: None,
+                feedback: super::worker_failure_recovery_feedback(error),
+                dispatched_base_oid: None,
+            }),
+            _ => None,
         })
         .collect()
 }
@@ -309,6 +345,9 @@ pub fn project_closed_status(
                     feedback: Some(feedback.clone()),
                 };
             }
+            AuditSentinelKind::RetryRequested { .. } => {
+                return PlanTaskStatus::Pending;
+            }
             AuditSentinelKind::Completion {
                 completion_state,
                 result_summary,
@@ -508,7 +547,7 @@ pub async fn project_plan_from_beads(
     let mut entries = Vec::with_capacity(projected_tasks.len());
 
     for projected_task in projected_tasks {
-        let (attempt, last_delegation_id) = project_attempt_facts(&projected_task.audits);
+        let (_attempt_count, last_delegation_id) = project_attempt_facts(&projected_task.audits);
         let history = project_attempt_history(&projected_task.audits);
         let completion = latest_completion_facts(&projected_task.audits);
         let (worker_branch, dispatched_base_oid) = completion
@@ -522,6 +561,7 @@ pub async fn project_plan_from_beads(
             false,
             &closed_status,
         );
+        let attempt = project_entry_attempt(&projected_task.audits, &status);
         let depends_on = projected_task
             .issue
             .blocked_by
@@ -1107,6 +1147,58 @@ mod tests {
 
         let status = super::project_closed_status(&issue, &audits);
         assert!(matches!(status, PlanTaskStatus::Failed { error } if error == "cargo test failed"));
+    }
+
+    #[test]
+    fn projector_recovers_pending_after_retry_requested_sentinel() {
+        let issue = issue("bd-9", "closed", Vec::new(), Vec::new());
+        let audits = vec![
+            AuditSentinelKind::Completion {
+                delegation_id: "del-A".into(),
+                completion_state: CompletionState::Failed,
+                superseded: false,
+                worker_branch: Some("spur/worker-a".into()),
+                result_summary: Some("worker crashed".into()),
+                artifact_uri: None,
+                dispatched_base_oid: None,
+            },
+            AuditSentinelKind::RetryRequested {
+                delegation_id: "del-A".into(),
+                attempt: 1,
+                error: "worker crashed".into(),
+                worker_branch: Some("spur/worker-a".into()),
+            },
+        ];
+
+        let status = super::project_closed_status(&issue, &audits);
+        assert!(matches!(status, PlanTaskStatus::Pending));
+    }
+
+    #[test]
+    fn projector_completion_failed_after_retry_requested_falls_back_to_failed() {
+        let issue = issue("bd-9", "closed", Vec::new(), Vec::new());
+        let audits = vec![
+            AuditSentinelKind::RetryRequested {
+                delegation_id: "del-A".into(),
+                attempt: 1,
+                error: "worker crashed".into(),
+                worker_branch: Some("spur/worker-a".into()),
+            },
+            AuditSentinelKind::Completion {
+                delegation_id: "del-B".into(),
+                completion_state: CompletionState::Failed,
+                superseded: false,
+                worker_branch: Some("spur/worker-b".into()),
+                result_summary: Some("worker crashed again".into()),
+                artifact_uri: None,
+                dispatched_base_oid: None,
+            },
+        ];
+
+        let status = super::project_closed_status(&issue, &audits);
+        assert!(
+            matches!(status, PlanTaskStatus::Failed { error } if error == "worker crashed again")
+        );
     }
 
     #[test]

@@ -1113,6 +1113,19 @@ pub(crate) async fn reconstruct_historical_attempts(
                     }
                 }
             }
+            crate::plan::audit_sentinel::AuditSentinelKind::RetryRequested {
+                delegation_id,
+                error,
+                worker_branch,
+                ..
+            } => {
+                if let Some(record) = attempts_by_delegation.get_mut(&delegation_id) {
+                    record.feedback = crate::plan::worker_failure_recovery_feedback(&error);
+                    if record.worker_branch.is_none() {
+                        record.worker_branch = worker_branch;
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -8403,6 +8416,78 @@ mod merge_plan_tests {
             plan_id: plan_id.to_string(),
             epic_id: subgraph.epic_id,
         }
+    }
+
+    #[tokio::test]
+    async fn reconstruct_historical_attempts_classifies_retry_requested_as_worker_failure_recovery()
+    {
+        let dir = init_repo().await;
+        let (_beads, pm) = super::init_beads_pm(dir.path()).await;
+        let feature_gate = super::pro_feature_gate();
+        let task_issue_id = pm
+            .create_issue(spur_pm::IssueCreate {
+                title: "Retry reconstruction task".into(),
+                description: Some("task body".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("create task issue");
+        super::require_feature(
+            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+            feature_gate.as_ref(),
+        )
+        .expect("pro gate");
+        let adv = pm.advanced().expect("advanced beads backend");
+
+        for audit in [
+            AuditSentinelKind::Dispatch {
+                delegation_id: "del-1".into(),
+                worker: "codex".into(),
+                attempt: 1,
+            },
+            AuditSentinelKind::Completion {
+                delegation_id: "del-1".into(),
+                completion_state: CompletionState::Failed,
+                superseded: false,
+                worker_branch: Some("spur/worker-failed".into()),
+                result_summary: Some("worker crashed".into()),
+                artifact_uri: None,
+                dispatched_base_oid: None,
+            },
+            AuditSentinelKind::RetryRequested {
+                delegation_id: "del-1".into(),
+                attempt: 1,
+                error: "worker crashed".into(),
+                worker_branch: Some("spur/worker-failed".into()),
+            },
+            AuditSentinelKind::Dispatch {
+                delegation_id: "del-2".into(),
+                worker: "codex".into(),
+                attempt: 2,
+            },
+        ] {
+            adv.add_comment(&task_issue_id, &encode_comment(&audit))
+                .await
+                .expect("attempt audit");
+        }
+
+        let history = super::reconstruct_historical_attempts(
+            pm.as_ref(),
+            feature_gate.as_ref(),
+            &task_issue_id,
+            2,
+        )
+        .await
+        .expect("reconstruct history");
+
+        assert_eq!(history.len(), 1);
+        let attempt = &history[0];
+        assert_eq!(attempt.attempt, 1);
+        assert_eq!(attempt.worker_branch.as_deref(), Some("spur/worker-failed"));
+        assert_eq!(
+            attempt.kind(),
+            crate::plan::AttemptRecordKind::WorkerFailureRecovery
+        );
     }
 
     async fn setup_cached_overlay_diff_plan(

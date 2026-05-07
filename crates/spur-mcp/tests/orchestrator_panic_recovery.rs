@@ -9,7 +9,7 @@ mod common;
 use common::g_strict_harness::{FaultInjectionHooks, TestHarness};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn orchestrator_panic_mid_oid_send_fails_loud() {
+async fn orchestrator_panic_mid_oid_send_fails_loud_and_retries_without_stale_base_oid() {
     let mut harness = TestHarness::new().await;
     let plan_id = harness
         .submit_plan_with_tasks(
@@ -52,15 +52,17 @@ async fn orchestrator_panic_mid_oid_send_fails_loud() {
         "panic payload should identify the injected fault: {panic_message}"
     );
 
-    let t2 = harness.wait_for_terminal(&plan_id, "T2").await;
+    let status = harness.wait_for_task_status(&plan_id, "T2", "ready").await;
+    let t2 = harness
+        .task_status_entry(&status, "T2")
+        .expect("T2 status entry");
     assert_eq!(
-        t2["status"], "failed",
-        "T2 must fail loudly instead of awaiting review or remaining dispatched: {t2}"
+        t2["attempt"], 2,
+        "T2 should auto-retry once after the loud failure: {t2}"
     );
-    let error = t2["error"].as_str().expect("T2 failed error");
-    assert!(
-        error.contains("orchestrator disconnected") || error.contains("dropped"),
-        "T2 diagnostic should mention the dropped/disconnected completion channel: {error}"
+    assert_eq!(
+        t2["history_count"], 1,
+        "T2 should retain the failed attempt in history: {t2}"
     );
 
     let t2_audit = harness.latest_completion_audit_for("T2");

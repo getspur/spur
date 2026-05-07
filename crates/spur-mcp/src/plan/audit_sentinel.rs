@@ -143,6 +143,13 @@ pub enum AuditSentinelKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<String>,
     },
+    RetryRequested {
+        delegation_id: String,
+        attempt: u32,
+        error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worker_branch: Option<String>,
+    },
     Signal {
         signal_id: String,
         #[serde(default)]
@@ -276,6 +283,7 @@ impl AuditSentinelKind {
             Self::Approval { .. } => "approval",
             Self::Rejection { .. } => "rejection",
             Self::ReviewFeedback { .. } => "review-feedback",
+            Self::RetryRequested { .. } => "retry-requested",
             Self::Signal { .. } => "signal",
             Self::MutationPlan { .. } => "mutation-plan",
             Self::MutationCommit { .. } => "mutation-commit",
@@ -424,6 +432,12 @@ mod tests {
                 feedback: "add null check".into(),
                 worker_branch: Some("spur/worker-x".into()),
                 summary: Some("did thing".into()),
+            },
+            AuditSentinelKind::RetryRequested {
+                delegation_id: "del-A".into(),
+                attempt: 1,
+                error: "worker crashed".into(),
+                worker_branch: Some("spur/worker-x".into()),
             },
             AuditSentinelKind::Signal {
                 signal_id: "sig-1".into(),
@@ -581,6 +595,12 @@ mod tests {
                 feedback: "fix edge case".into(),
                 worker_branch: None,
                 summary: None,
+            },
+            AuditSentinelKind::RetryRequested {
+                delegation_id: "del-B".into(),
+                attempt: 2,
+                error: "dispatch lease expired".into(),
+                worker_branch: None,
             },
             AuditSentinelKind::Signal {
                 signal_id: "sig-1".into(),
@@ -873,6 +893,20 @@ mod tests {
         let parsed = parse_comment(&encoded).unwrap().unwrap();
         assert_eq!(parsed, kind);
         assert_eq!(parsed.kind_str(), "review-feedback");
+    }
+
+    #[test]
+    fn retry_requested_variant_round_trips() {
+        let kind = AuditSentinelKind::RetryRequested {
+            delegation_id: "del-A".into(),
+            attempt: 1,
+            error: "worker exited before producing output".into(),
+            worker_branch: Some("spur/worker-x".into()),
+        };
+        let encoded = encode_comment(&kind);
+        let parsed = parse_comment(&encoded).unwrap().unwrap();
+        assert_eq!(parsed, kind);
+        assert_eq!(parsed.kind_str(), "retry-requested");
     }
 
     #[test]
