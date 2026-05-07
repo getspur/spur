@@ -311,10 +311,7 @@ fn build_compact_lines_from(
                     1 => "-".to_string(),
                     _ => " ".chars().chain(std::iter::repeat_n('-', w - 1)).collect(),
                 };
-                lines.push(Line::from(Span::styled(
-                    sep,
-                    Style::default().fg(Color::DarkGray),
-                )));
+                lines.push(Line::from(Span::styled(sep, Style::default().fg(subtle))));
                 row += 1;
             }
         }
@@ -323,7 +320,7 @@ fn build_compact_lines_from(
         // Record the row of this entry's content line BEFORE pushing it.
         entry_row_starts.push(row);
 
-        let (prefix, style) = compact_prefix_style(&entry.kind);
+        let (prefix, style) = compact_prefix_style(theme, &entry.kind);
         let ts = entry.timestamp.clone();
         let ts_display = format!(" {}", ts);
 
@@ -367,7 +364,7 @@ fn build_compact_lines_from(
             Span::styled(prefix.to_string(), style),
             Span::styled(display_text, style),
             Span::raw(padding),
-            Span::styled(ts_display, Style::default().fg(Color::DarkGray)),
+            Span::styled(ts_display, Style::default().fg(subtle)),
         ]));
         row += 1;
     }
@@ -487,8 +484,9 @@ mod tests {
             ),
         ];
 
+        let theme = crate::theme::fallback_theme();
         for (entry, expected) in entries {
-            assert_eq!(compact_prefix_style(&entry.kind).0, expected);
+            assert_eq!(compact_prefix_style(theme, &entry.kind).0, expected);
         }
     }
 }
