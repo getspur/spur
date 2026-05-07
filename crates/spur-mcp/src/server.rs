@@ -378,42 +378,12 @@ pub(crate) fn project_section(
     serde_json::to_string(&projected).map_err(ProjectionError::SerializeFailed)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-enum DelegationDispatchError {
-    #[error("SessionRetiring")]
-    SessionRetiring,
-    #[allow(dead_code)]
-    #[error("worker MCP server unavailable: {reason}")]
-    // TODO(worker-mcp): remove once dispatch wiring constructs this error.
-    #[allow(dead_code)]
-    WorkerMcpUnavailable { reason: String },
-}
-
-impl DelegationDispatchError {
-    fn json_rpc_code(&self) -> i64 {
-        match self {
-            Self::SessionRetiring => -32001,
-            Self::WorkerMcpUnavailable { .. } => -32002,
-        }
-    }
-
-    fn into_response(self, id: Value) -> JsonRpcResponse {
-        JsonRpcResponse::error(id, self.json_rpc_code(), self.to_string())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::DelegationDispatchError;
-
-    #[test]
-    fn worker_mcp_unavailable_jsonrpc_code_is_minus_32002() {
-        let err = DelegationDispatchError::WorkerMcpUnavailable {
-            reason: "port exhausted".into(),
-        };
-        assert_eq!(err.json_rpc_code(), -32002);
-        assert!(err.to_string().contains("port exhausted"));
-    }
+/// Convert a `DelegationDispatchError` (defined in `spur-acp`) into the
+/// crate-local `JsonRpcResponse`. Lives here because `JsonRpcResponse`
+/// is private to this crate and the orphan rules forbid an inherent
+/// `impl` on the foreign enum.
+fn dispatch_error_response(err: DelegationDispatchError, id: Value) -> JsonRpcResponse {
+    JsonRpcResponse::error(id, err.json_rpc_code(), err.to_string())
 }
 
 // ─── Worker info (static data set at startup) ─────────────────────────
@@ -3024,7 +2994,7 @@ impl McpCallbackServer {
 
     async fn handle_delegate_to_worker(&self, id: Value, args: Value) -> JsonRpcResponse {
         if let Err(error) = self.ensure_accepting_delegations() {
-            return error.into_response(id);
+            return dispatch_error_response(error, id);
         }
         let parsed: crate::tool_schemas::DelegateToWorkerInput =
             match serde_json::from_value(args.clone()) {
@@ -3193,7 +3163,7 @@ impl McpCallbackServer {
 
     async fn handle_delegate_parallel(&self, id: Value, args: Value) -> JsonRpcResponse {
         if let Err(error) = self.ensure_accepting_delegations() {
-            return error.into_response(id);
+            return dispatch_error_response(error, id);
         }
         if let Some(batch_plan) = args.get("delegation_plan") {
             tracing::info!(
