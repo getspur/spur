@@ -44,6 +44,7 @@ impl MentionSource for WorkerMentionSource {
                 tag: d.tier.clone(),
                 search_text: None,
                 atom_text: None,
+                issue_preview: None,
             })
             .collect())
     }
