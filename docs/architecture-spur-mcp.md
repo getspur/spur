@@ -133,6 +133,33 @@ The brain has three strategies for dispatching work:
 | **Async + Poll** | `delegate_async` → `check_delegation_status` / `wait_delegation` | No (initial), then optional block | Long-running tasks, brain does other work meanwhile |
 | **Parallel** | `delegate_parallel` | Yes (90s cap) | Independent subtasks, brain waits for all |
 
+### Plan-level base (br-osl)
+
+`submit_plan` accepts an optional `base: BaseTarget` parameter. When omitted (or set to `{"kind":"repo_main"}`), the plan engine snapshots the brain working tree HEAD into `spur/brain-snapshot-*` (legacy default — convenient for "extend my desk" workflows).
+
+To dispatch a plan against an explicit ref instead, pass:
+
+```json
+{ "tasks": [...], "base": { "kind": "branch", "name": "<branch>" } }
+```
+
+or
+
+```json
+{ "tasks": [...], "base": { "kind": "commit", "oid": "<oid>" } }
+```
+
+In these explicit cases:
+- The brain working tree is **not** touched (no stash, no `index.lock` contention).
+- A `spur/brain-snapshot-*` ref is created pointing at the resolved OID, decoupling the plan's base from any later movement of the source branch.
+- `merge_plan` cherry-picks worker branches onto this snapshot ref exactly as before.
+- The reconciler still emits `WithOverlay { base: Branch{<snapshot ref>}, overlays: [<approved deps>] }` for every dispatch.
+- The `PlanSubmit` audit sentinel records the operator-supplied `BaseTarget` in `explicit_base` for forensics.
+
+Use case: stacking phased plans. Phase N+1 specifies `base: { kind: "branch", name: "spur/plan-merge-<phase-N-id>" }` so its workers see Phase N's approved-but-unmerged work as their foundation.
+
+Out of scope (not in this implementation): plan-level `WithOverlay`, per-task `base` overrides. File a follow-up issue if either becomes necessary.
+
 ### Sentinel Agent Convention
 
 PM and internal operations reuse the `DelegationRequest` channel with magic agent name prefixes:
