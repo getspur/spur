@@ -1,0 +1,117 @@
+version: 1
+name: dark
+
+palette:
+  bg:
+    rgb: "#000000"
+    ansi: black
+  bg_panel:
+    rgb: "#0c0c0c"
+    ansi: black
+  bg_selection:
+    rgb: "#005f87"
+    ansi: blue
+  bg_overlay:
+    rgb: "#181818"
+    ansi: black
+  fg:
+    rgb: "#ffffff"
+    ansi: white
+  fg_muted:
+    rgb: "#808080"
+    ansi: gray
+  fg_subtle:
+    rgb: "#606060"
+    ansi: dark-gray
+  fg_on_accent:
+    rgb: "#000000"
+    ansi: black
+  fg_on_success:
+    rgb: "#000000"
+    ansi: black
+  fg_on_warning:
+    rgb: "#000000"
+    ansi: black
+  fg_on_danger:
+    rgb: "#ffffff"
+    ansi: white
+  fg_on_info:
+    rgb: "#ffffff"
+    ansi: white
+  fg_on_overlay:
+    rgb: "#ffffff"
+    ansi: white
+  border:
+    rgb: "#606060"
+    ansi: dark-gray
+  border_focused:
+    rgb: "#00ffff"
+    ansi: cyan
+  accent:
+    rgb: "#00ffff"
+    ansi: cyan
+  accent_alt:
+    rgb: "#ff00ff"
+    ansi: magenta
+  success:
+    rgb: "#00ff00"
+    ansi: green
+  warning:
+    rgb: "#ffff00"
+    ansi: yellow
+  danger:
+    rgb: "#ff0000"
+    ansi: red
+  info:
+    rgb: "#0000ff"
+    ansi: blue
+  highlight:
+    rgb: "#ffff80"
+    ansi: light-yellow
+  diff_add:
+    rgb: "#00ff00"
+    ansi: green
+  diff_del:
+    rgb: "#ff0000"
+    ansi: red
+
+tokens:
+  status_bar.bg: bg_panel
+  status_bar.fg: fg
+  border.normal: border
+  border.focused: border_focused
+  spinner.fg: accent
+  picker.selected.bg: bg_selection
+  picker.selected.fg: fg
+  picker.match.fg: highlight
+  picker.hint.fg: fg_subtle
+  tool.family.thinking: accent_alt
+  tool.family.edit: accent
+  tool.family.read: info
+  tool.family.bash: success
+  tool.family.task: accent_alt
+  license_badge.neutral.bg: bg_panel
+  license_badge.neutral.fg: fg_muted
+  license_badge.success.bg: success
+  license_badge.success.fg: fg_on_success
+  license_badge.warning.bg: warning
+  license_badge.warning.fg: fg_on_warning
+  license_badge.danger.bg: danger
+  license_badge.danger.fg: fg_on_danger
+  plan.stage.queued: fg_muted
+  plan.stage.running: info
+  plan.stage.done: success
+  plan.stage.failed: danger
+  plan.stage.blocked: warning
+  diff.add.fg: diff_add
+  diff.del.fg: diff_del
+  diff.context.fg: fg_muted
+  activity.think: fg_muted
+  activity.act: accent_alt
+  activity.observe: success
+  activity.delegate: accent
+  activity.complete: success
+  activity.error: danger
+  activity.user_message: accent
+  activity.permission: warning
+  activity.info: fg
