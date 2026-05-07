@@ -1329,6 +1329,7 @@ async fn shutdown_mcp_server<S: RetirableMcpServer + ?Sized>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn retire_brain_session<S: RetirableMcpServer + ?Sized>(
     funnel: &crate::event_funnel::FunnelHandle,
     session: &SessionId,

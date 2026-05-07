@@ -518,21 +518,11 @@ fn render_mermaid(nodes: &[GraphNode], edges: &[GraphEdge]) -> String {
     out
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GraphEngineConfig {
     pub score: ScoreConfig,
     pub insight: InsightConfig,
     pub alert: AlertConfig,
-}
-
-impl Default for GraphEngineConfig {
-    fn default() -> Self {
-        Self {
-            score: ScoreConfig::default(),
-            insight: InsightConfig::default(),
-            alert: AlertConfig::default(),
-        }
-    }
 }
 
 pub struct GraphEngine {

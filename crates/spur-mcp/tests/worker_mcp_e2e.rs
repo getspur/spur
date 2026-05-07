@@ -177,7 +177,7 @@ async fn end_to_end_orchestrator_worker_mcp_get_issue() {
     // locks the contract that the public surface (URL + token) the test
     // observes is the same shape that lands in `session/new`.
     let url_with_token = format!("{}?token={}", server_url, token);
-    let mcp_servers = vec![McpServer::Http(McpServerHttp::new(
+    let mcp_servers = [McpServer::Http(McpServerHttp::new(
         "spur-worker-mcp",
         &url_with_token,
     ))];
