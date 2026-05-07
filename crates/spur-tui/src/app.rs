@@ -52,6 +52,7 @@ const LEGACY_CLOSE_HINT: &str = "d \u{2192} close renamed to x";
 const DASHBOARD_TAB_DEPRECATION_HINT: &str =
     "Tab now cycles panels; press Ctrl+E to cycle examples";
 const PANIC_RESET_HINT: &str = "Returned to Dashboard root";
+const EXECUTE_EDIT_HINT: &str = "Prompt loaded \u{2014} review and press Enter to send";
 const PANIC_RESET_ESC_WINDOW: Duration = Duration::from_millis(1000);
 
 // ─── Supporting types ──────────────────────────────────────────────────
@@ -2682,6 +2683,47 @@ impl App {
         self.dirty = true;
     }
 
+    fn build_execute_prompt(&self, id: &str) -> String {
+        let issue = self
+            .dashboard
+            .tracked_issues()
+            .iter()
+            .find(|issue| issue.id == id);
+
+        // Removed constraint: any issue type can now be executed.
+
+        let (title, status, pri, issue_type) = issue
+            .map(|issue| {
+                (
+                    issue.title.clone(),
+                    issue.status.clone(),
+                    issue
+                        .priority
+                        .map(|p| format!("P{}", p))
+                        .unwrap_or_default(),
+                    issue.issue_type.clone().unwrap_or_else(|| "task".into()),
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    String::new(),
+                    "unknown".into(),
+                    String::new(),
+                    "unknown".into(),
+                )
+            });
+
+        format!(
+            "The user wants to execute this work item.\n\n\
+             Item: {} \u{2014} {}\n\
+             Type: {} | Status: {} | Priority: {}\n\n\
+             Please analyze this item, gather necessary information, and determine how to execute it. \
+             If it requires a multi-step plan, use the appropriate tools to structure it. \
+             If it's a single task, figure out the best way to get it done.",
+            id, title, issue_type, status, pri,
+        )
+    }
+
     /// Process a single Action returned by a view.
     pub(crate) fn process_action(&mut self, action: Action) {
         #[cfg(any(test, debug_assertions))]
@@ -3663,6 +3705,20 @@ impl App {
             Action::FlashHint { message } => {
                 self.flash_hint_short(message);
             }
+            Action::PrefillInput { text } => {
+                match &self.current_view {
+                    ViewId::Dashboard => {
+                        self.dashboard.prefill_input(text);
+                    }
+                    ViewId::SessionDetail(_) => {
+                        if let Some(ref mut detail) = self.session_detail {
+                            detail.prefill_input(text);
+                        }
+                    }
+                    _ => {}
+                }
+                self.dirty = true;
+            }
             Action::Issue(issue_action) => {
                 match issue_action {
                     crate::action::IssueAction::ViewDetail { id } => {
@@ -3777,44 +3833,7 @@ impl App {
                         }
                     }
                     crate::action::IssueAction::Execute { id } => {
-                        let issue = self
-                            .dashboard
-                            .tracked_issues()
-                            .iter()
-                            .find(|issue| issue.id == id);
-
-                        // Removed constraint: any issue type can now be executed.
-
-                        let (title, status, pri, issue_type) = issue
-                            .map(|issue| {
-                                (
-                                    issue.title.clone(),
-                                    issue.status.clone(),
-                                    issue
-                                        .priority
-                                        .map(|p| format!("P{}", p))
-                                        .unwrap_or_default(),
-                                    issue.issue_type.clone().unwrap_or_else(|| "task".into()),
-                                )
-                            })
-                            .unwrap_or_else(|| {
-                                (
-                                    String::new(),
-                                    "unknown".into(),
-                                    String::new(),
-                                    "unknown".into(),
-                                )
-                            });
-
-                        let prompt = format!(
-                            "The user wants to execute this work item.\n\n\
-                             Item: {} \u{2014} {}\n\
-                             Type: {} | Status: {} | Priority: {}\n\n\
-                             Please analyze this item, gather necessary information, and determine how to execute it. \
-                             If it requires a multi-step plan, use the appropriate tools to structure it. \
-                             If it's a single task, figure out the best way to get it done.",
-                            id, title, issue_type, status, pri,
-                        );
+                        let prompt = self.build_execute_prompt(&id);
 
                         let blocks = vec![spur_acp::ContentBlock::Text(
                             spur_acp::TextContent::new(prompt),
@@ -3832,6 +3851,26 @@ impl App {
                                 interrupt: false,
                             });
                         }
+                    }
+                    crate::action::IssueAction::ExecuteEdit { id } => {
+                        let prompt = self.build_execute_prompt(&id);
+
+                        if let Some(session_id) = self
+                            .session_detail
+                            .as_ref()
+                            .map(|detail| detail.session_id().clone())
+                        {
+                            self.process_action(Action::NavigateTo(ViewId::SessionDetail(
+                                session_id,
+                            )));
+                        } else {
+                            self.process_action(Action::NavigateTo(ViewId::Dashboard));
+                        }
+
+                        self.process_action(Action::PrefillInput { text: prompt });
+                        self.process_action(Action::FlashHint {
+                            message: EXECUTE_EDIT_HINT.to_string(),
+                        });
                     }
                 }
             }

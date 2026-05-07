@@ -17,6 +17,9 @@ pub enum IssueAction {
     Execute {
         id: String,
     },
+    ExecuteEdit {
+        id: String,
+    },
 }
 
 /// Actions that flow between components and the app controller.
@@ -213,6 +216,10 @@ pub enum Action {
     /// Show a short status-bar hint owned by the App transient hint channel.
     FlashHint {
         message: String,
+    },
+    /// Replace the active view's InputBar contents and focus the composer.
+    PrefillInput {
+        text: String,
     },
     /// An issue-related action from the IssuesPanel or slash commands.
     Issue(IssueAction),

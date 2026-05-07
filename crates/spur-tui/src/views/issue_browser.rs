@@ -656,6 +656,11 @@ impl IssueBrowserView {
                     self.execute_modal = None;
                     Some(Action::Issue(IssueAction::Execute { id }))
                 }
+                KeyCode::Char('e') => {
+                    let id = modal.epic_id.clone();
+                    self.execute_modal = None;
+                    Some(Action::Issue(IssueAction::ExecuteEdit { id }))
+                }
                 KeyCode::Esc => {
                     self.execute_modal = None;
                     None
@@ -1616,6 +1621,26 @@ mod tests {
 
         assert!(action.is_none());
         assert!(!view.filter_mode);
+    }
+
+    #[test]
+    fn execute_modal_e_emits_edit_action() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.execute_modal = Some(ExecuteModal {
+            epic_id: "bd-1".into(),
+            epic_title: "Epic".into(),
+            variant: ExecuteModalVariant::Confirm,
+        });
+
+        let action = view.handle_key(key(KeyCode::Char('e')), &ctx);
+
+        assert!(matches!(
+            action,
+            Some(Action::Issue(IssueAction::ExecuteEdit { ref id })) if id == "bd-1"
+        ));
+        assert!(view.execute_modal.is_none());
     }
 
     #[test]

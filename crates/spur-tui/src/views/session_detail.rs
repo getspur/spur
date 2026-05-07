@@ -632,6 +632,13 @@ impl SessionDetailView {
         self.last_persisted_draft = draft.to_string();
     }
 
+    pub fn prefill_input(&mut self, text: String) {
+        let cursor = text.len();
+        self.completion.reset();
+        self.input_bar.set_text(text, cursor);
+        self.last_draft_change_at = Some(std::time::Instant::now());
+    }
+
     /// Seed the InputBar with global input history (loaded from metadata).
     pub fn seed_input_history(&mut self, entries: Vec<InputHistoryEntry>) {
         self.input_bar.seed_history(entries);

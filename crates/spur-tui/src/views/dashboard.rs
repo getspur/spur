@@ -435,6 +435,14 @@ impl DashboardView {
         self.input_bar.insert_paste(text);
     }
 
+    pub fn prefill_input(&mut self, text: String) {
+        let cursor = text.len();
+        self.mode = DashboardMode::Compose;
+        self.completion.reset();
+        self.input_bar.set_text(text, cursor);
+        self.input_bar.set_active(true);
+    }
+
     pub fn focused_node(&self) -> Option<&ExecutorId> {
         self.focused_node.as_ref()
     }

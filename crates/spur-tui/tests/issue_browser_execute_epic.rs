@@ -173,6 +173,99 @@ fn e_on_non_epic_opens_modal_and_enter_dispatches_active_session_prompt() {
 }
 
 #[test]
+fn e_in_execute_modal_prefills_active_session_prompt_without_dispatch() {
+    let (mut app, mut rx, mut terminal) =
+        seeded_issue_browser_app(vec![summary("bd-epic", "Launch migration", Some("epic"))]);
+    spur_tui::test_support::process_action(
+        &mut app,
+        Action::ResumeSession {
+            session_id: "active-session".into(),
+        },
+    );
+    match rx.try_recv() {
+        Ok(UserInput::ResumeSession { session_id }) => assert_eq!(session_id, "active-session"),
+        Ok(_) => panic!("expected ResumeSession after test setup"),
+        Err(err) => panic!("expected ResumeSession after test setup, got {err}"),
+    }
+    spur_tui::test_support::process_action(&mut app, Action::NavigateTo(ViewId::IssueBrowser));
+
+    app.handle_crossterm_event_for_test(key('e'));
+    let modal = render_text(&mut app, &mut terminal);
+    assert!(
+        modal.contains("[e] Edit in input bar"),
+        "rendered:\n{modal}"
+    );
+
+    app.handle_crossterm_event_for_test(key('e'));
+
+    assert_eq!(
+        app.current_view(),
+        &ViewId::SessionDetail(spur_acp::SessionId("active-session".into()))
+    );
+    let detail =
+        spur_tui::test_support::session_detail(&app).expect("session detail should be active");
+    let prompt = detail.input_bar_text_for_test();
+    assert!(
+        prompt.contains("The user wants to execute this work item."),
+        "prompt:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("Item: bd-epic — Launch migration"),
+        "prompt:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("Type: epic | Status: open | Priority: P1"),
+        "prompt:\n{prompt}"
+    );
+    assert_eq!(
+        app.transient_hint_text(),
+        Some("Prompt loaded — review and press Enter to send")
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "editing the prompt must not dispatch to the backend"
+    );
+}
+
+#[test]
+fn e_in_execute_modal_prefills_dashboard_prompt_without_session() {
+    let (mut app, mut rx, mut terminal) =
+        seeded_issue_browser_app(vec![summary("bd-task", "Task item", Some("task"))]);
+
+    app.handle_crossterm_event_for_test(key('e'));
+    let modal = render_text(&mut app, &mut terminal);
+    assert!(
+        modal.contains("[e] Edit in input bar"),
+        "rendered:\n{modal}"
+    );
+
+    app.handle_crossterm_event_for_test(key('e'));
+
+    assert_eq!(app.current_view(), &ViewId::Dashboard);
+    let prompt = app.dashboard_mut_for_test().input_bar_text_for_test();
+    assert!(
+        prompt.contains("The user wants to execute this work item."),
+        "prompt:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("Item: bd-task — Task item"),
+        "prompt:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("Type: task | Status: open | Priority: P1"),
+        "prompt:\n{prompt}"
+    );
+    assert_eq!(
+        app.transient_hint_text(),
+        Some("Prompt loaded — review and press Enter to send")
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "editing the prompt must not dispatch to the backend"
+    );
+}
+
+#[test]
 fn esc_in_execute_modal_dismisses_without_dispatch() {
     let (mut app, mut rx, mut terminal) =
         seeded_issue_browser_app(vec![summary("bd-epic", "Launch migration", Some("epic"))]);
