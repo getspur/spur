@@ -1751,6 +1751,7 @@ mod current_session_shortcut_tests {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            theme: crate::theme::fallback_theme(),
         }
     }
 
@@ -1970,6 +1971,7 @@ mod preview_render_tests {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            theme: crate::theme::fallback_theme(),
         };
 
         let mut metadata = SessionMetadata::default();
@@ -2023,6 +2025,7 @@ mod preview_render_tests {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            theme: crate::theme::fallback_theme(),
         };
 
         let mut metadata = SessionMetadata::default();
@@ -2115,6 +2118,7 @@ mod preview_render_tests {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            theme: crate::theme::fallback_theme(),
         };
 
         let mut metadata = SessionMetadata::default();
@@ -2196,6 +2200,7 @@ mod preview_render_tests {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            theme: crate::theme::fallback_theme(),
         };
 
         let mut metadata = SessionMetadata::default();
@@ -2283,6 +2288,7 @@ mod preview_render_tests {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            theme: crate::theme::fallback_theme(),
         };
 
         let mut metadata = SessionMetadata::default();

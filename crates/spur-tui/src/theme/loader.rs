@@ -61,6 +61,12 @@ pub enum ThemeError {
     UnknownBuiltIn { name: String },
     #[error("invalid theme YAML: {0}")]
     InvalidYaml(#[from] serde_yml::Error),
+    #[error("failed to read theme file `{path}`: {source}")]
+    Io {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 #[derive(Default)]

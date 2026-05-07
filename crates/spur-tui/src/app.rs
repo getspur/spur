@@ -394,6 +394,12 @@ pub struct App {
     /// at session-creation time (see `resolve_agent_config`). Defaults to
     /// `SpurConfig::default()` when no config is supplied.
     config: std::sync::Arc<spur_acp::SpurConfig>,
+    /// Active theme resolved at startup from `config.tui.theme` via the
+    /// project → user → built-in cascade. Surfaces read tokens off this
+    /// reference; the dark built-in is a pixel-perfect reproduction of
+    /// pre-theme TUI colors so unmigrated `Color::` sites stay visually
+    /// stable until PR3/PR4 swap them out.
+    pub(crate) theme: std::sync::Arc<crate::theme::Theme>,
     palette_visible: bool,
     palette_state: crate::components::palette::PaletteState,
     pub transient_hint: Option<TransientHint>,
@@ -589,6 +595,17 @@ impl App {
         let metadata_store = SessionMetadataStore::load(&metadata_path);
         let start_in_picker = start_in_picker_with_preselect.is_some();
 
+        // Resolve the active theme from `tui.theme` config. The runtime
+        // loader logs and falls back internally; it never panics.
+        let (theme, theme_outcome) = crate::theme::load_runtime_theme(&config.tui.theme);
+        tracing::info!(
+            target: "spur_tui::theme",
+            theme = %theme.name,
+            outcome = ?theme_outcome,
+            "active theme resolved"
+        );
+        let theme = std::sync::Arc::new(theme);
+
         let (current_view, session_picker) = if let Some(preselect) = start_in_picker_with_preselect
         {
             let mut picker = SessionPickerView::with_preselect(preselect);
@@ -672,6 +689,7 @@ impl App {
             tombstones: crate::components::tombstone::TombstoneSlots::new(),
             tombstone_undo_replay: false,
             config,
+            theme,
             palette_visible: false,
             palette_state: crate::components::palette::PaletteState::new(),
             transient_hint: None,
@@ -1843,6 +1861,7 @@ impl App {
                     flag_summary: self.flag_summary,
                     tombstone: None,
                     transient_hint_override: None,
+                    theme: &self.theme,
                 };
                 let action = match self.current_view {
                     ViewId::Dashboard => self.dashboard.handle_key_with_worker_streams(
@@ -2600,6 +2619,7 @@ impl App {
             flag_summary: self.flag_summary,
             tombstone: None,
             transient_hint_override: None,
+            theme: &self.theme,
         };
         let issue_snapshot_changed = matches!(
             &event.body,
@@ -4232,6 +4252,7 @@ impl App {
             flag_summary: self.flag_summary,
             tombstone: self.tombstones.peek(self.current_view()),
             transient_hint_override,
+            theme: &self.theme,
         };
 
         #[cfg(feature = "analytics")]
@@ -6651,5 +6672,44 @@ mod synopsis_wire_tests {
             1,
             "filter should see title_override applied after SessionsListed"
         );
+    }
+}
+
+#[cfg(test)]
+mod theme_threading_tests {
+    use super::*;
+
+    /// Boots `App` with `tui.theme = "light"` and confirms (a) construction
+    /// does not panic even though no surface consumes the theme yet, and
+    /// (b) the resolved theme is the requested one. This guards the cascade
+    /// from regressing into a `dark`-only fallback path.
+    #[test]
+    fn light_theme_boots_without_panic() {
+        let mut spur_config = spur_acp::SpurConfig::default();
+        spur_config.tui.theme = "light".to_string();
+
+        let app = App::new_with_config(
+            None,
+            false,
+            std::sync::Arc::new(spur_config),
+            crate::landing::LandingDecision::ShowDashboard,
+        );
+
+        assert_eq!(app.theme.name, "light");
+    }
+
+    #[test]
+    fn unknown_theme_falls_back_to_dark_without_panic() {
+        let mut spur_config = spur_acp::SpurConfig::default();
+        spur_config.tui.theme = "definitely-not-a-theme".to_string();
+
+        let app = App::new_with_config(
+            None,
+            false,
+            std::sync::Arc::new(spur_config),
+            crate::landing::LandingDecision::ShowDashboard,
+        );
+
+        assert_eq!(app.theme.name, "dark");
     }
 }

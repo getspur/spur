@@ -358,6 +358,7 @@ fn plan_inspector_renders_wide_lane_board() {
         flag_summary: None,
         tombstone: None,
         transient_hint_override: None,
+        theme: spur_tui::theme::fallback_theme(),
     };
 
     terminal
@@ -387,6 +388,7 @@ fn plan_inspector_renders_stacked_layout_below_90_cols() {
         flag_summary: None,
         tombstone: None,
         transient_hint_override: None,
+        theme: spur_tui::theme::fallback_theme(),
     };
 
     terminal
@@ -414,6 +416,7 @@ fn plan_inspector_stacked_mode_j_moves_across_stage_boundaries() {
         flag_summary: None,
         tombstone: None,
         transient_hint_override: None,
+        theme: spur_tui::theme::fallback_theme(),
     };
 
     terminal
@@ -448,6 +451,7 @@ fn plan_inspector_stacked_mode_uses_visible_stage_order_when_tasks_are_permuted(
         flag_summary: None,
         tombstone: None,
         transient_hint_override: None,
+        theme: spur_tui::theme::fallback_theme(),
     };
 
     terminal
@@ -486,6 +490,7 @@ fn plan_inspector_alt_p_requests_navigate_back() {
         flag_summary: None,
         tombstone: None,
         transient_hint_override: None,
+        theme: spur_tui::theme::fallback_theme(),
     };
 
     let action = view.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT), &ctx);
@@ -507,6 +512,7 @@ fn plan_inspector_enter_requests_issue_detail() {
         flag_summary: None,
         tombstone: None,
         transient_hint_override: None,
+        theme: spur_tui::theme::fallback_theme(),
     };
 
     let action = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &ctx);
@@ -531,6 +537,7 @@ fn plan_inspector_enter_no_issue_task_flashes_hint() {
         flag_summary: None,
         tombstone: None,
         transient_hint_override: None,
+        theme: spur_tui::theme::fallback_theme(),
     };
 
     let action = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &ctx);
@@ -557,6 +564,7 @@ fn plan_inspector_esc_closes_open_issue_detail() {
         flag_summary: None,
         tombstone: None,
         transient_hint_override: None,
+        theme: spur_tui::theme::fallback_theme(),
     };
 
     let action = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &ctx);
@@ -587,6 +595,7 @@ fn plan_inspector_task_detail_scroll_affordance() {
         flag_summary: None,
         tombstone: None,
         transient_hint_override: None,
+        theme: spur_tui::theme::fallback_theme(),
     };
     let backend = TestBackend::new(120, 32);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -639,6 +648,7 @@ fn plan_inspector_detail_scroll_reset_when_switching_tasks() {
         flag_summary: None,
         tombstone: None,
         transient_hint_override: None,
+        theme: spur_tui::theme::fallback_theme(),
     };
     let backend = TestBackend::new(120, 32);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -780,6 +790,7 @@ fn plan_inspector_renders_issue_detail_loading_and_fetched() {
         flag_summary: None,
         tombstone: None,
         transient_hint_override: None,
+        theme: spur_tui::theme::fallback_theme(),
     };
 
     let backend = TestBackend::new(120, 32);
@@ -832,6 +843,7 @@ fn plan_inspector_issue_detail_error_without_id_targets_open_issue_when_unique()
         flag_summary: None,
         tombstone: None,
         transient_hint_override: None,
+        theme: spur_tui::theme::fallback_theme(),
     };
 
     let backend = TestBackend::new(120, 32);
@@ -885,6 +897,7 @@ fn plan_inspector_issue_detail_error_without_id_ignores_with_multiple_in_flight(
         flag_summary: None,
         tombstone: None,
         transient_hint_override: None,
+        theme: spur_tui::theme::fallback_theme(),
     };
 
     let backend = TestBackend::new(120, 32);
@@ -946,6 +959,7 @@ fn plan_inspector_esc_requests_navigate_back() {
         flag_summary: None,
         tombstone: None,
         transient_hint_override: None,
+        theme: spur_tui::theme::fallback_theme(),
     };
 
     let action = view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &ctx);
@@ -969,6 +983,7 @@ fn plan_inspector_prefers_live_executor_state_over_stale_higher_id() {
         flag_summary: None,
         tombstone: None,
         transient_hint_override: None,
+        theme: spur_tui::theme::fallback_theme(),
     };
 
     terminal
@@ -1002,6 +1017,7 @@ fn plan_inspector_renders_blocked_deps_and_retry_chips() {
         flag_summary: None,
         tombstone: None,
         transient_hint_override: None,
+        theme: spur_tui::theme::fallback_theme(),
     };
 
     terminal
@@ -1049,6 +1065,7 @@ fn plan_inspector_stacked_mode_shows_meta_chips() {
         flag_summary: None,
         tombstone: None,
         transient_hint_override: None,
+        theme: spur_tui::theme::fallback_theme(),
     };
 
     terminal
