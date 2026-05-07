@@ -63,6 +63,7 @@ async fn create_persisted_plan(
         None,
         Some("test"),
         owner.map(BrainSessionId::as_session_id),
+        None,
     )
     .await;
 

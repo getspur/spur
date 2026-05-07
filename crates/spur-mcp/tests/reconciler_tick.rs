@@ -516,6 +516,7 @@ async fn tick_once_dispatches_ready_task_with_approved_dep_overlay() {
         Some("base-snapshot-oid"),
         None,
         Some(&SessionId("brain".to_string())),
+        None,
     )
     .await;
     adv.add_comment(
@@ -690,6 +691,7 @@ async fn overlay_conflict_routes_to_blocked_on_setup_conflict() {
         Some("base-snapshot-oid"),
         None,
         Some(&SessionId("brain".to_string())),
+        None,
     )
     .await;
     adv.add_comment(

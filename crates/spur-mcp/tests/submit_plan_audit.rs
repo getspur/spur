@@ -12,6 +12,7 @@ use serde_json::json;
 use spur_acp::{BrainSessionId, SessionId};
 use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
 use spur_mcp::plan::PlanTask;
+use spur_mcp::tools::BaseTarget;
 use tempfile::TempDir;
 
 mod common;
@@ -176,6 +177,7 @@ async fn emit_plan_submit_audit_writes_sentinel_on_epic() {
         None,
         None,
         Some(&spur_acp::SessionId("brain-1".into())),
+        None,
     )
     .await;
 
@@ -252,6 +254,7 @@ async fn plan_submit_audit_includes_brain_session_id() {
         None,
         Some("submit_plan"),
         Some(&spur_acp::SessionId("brain-99".into())),
+        None,
     )
     .await;
 
@@ -274,6 +277,67 @@ async fn plan_submit_audit_includes_brain_session_id() {
             brain_session_id: Some(brain_session_id),
             ..
         } if plan_id == "P1b" && brain_session_id == "brain-99"
+    )));
+}
+
+#[tokio::test]
+async fn plan_submit_audit_includes_explicit_base() {
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init failed");
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected Some(PmService)");
+
+    let subgraph = spur_mcp::build_epic_subgraph(
+        &pm,
+        common::server_builder::pro_feature_gate().as_ref(),
+        "P1c",
+        "Audit Test Epic",
+        None,
+        &minimal_tasks(),
+    )
+    .await
+    .expect("build_epic_subgraph must succeed");
+
+    let adv = pm
+        .advanced()
+        .expect("beads-backed PmService must return advanced()");
+    let explicit_base = BaseTarget::Branch {
+        name: "feature/br-osl".into(),
+    };
+    spur_mcp::emit_plan_submit_audit(
+        adv,
+        "P1c",
+        &subgraph,
+        None,
+        None,
+        Some("submit_plan"),
+        Some(&spur_acp::SessionId("brain-explicit".into())),
+        Some(&explicit_base),
+    )
+    .await;
+
+    let list_out = run_br(dir.path(), &["comments", "list", &subgraph.epic_id])
+        .expect("br comments list failed");
+    let items: serde_json::Value =
+        serde_json::from_str(&list_out).expect("br comments list output must be valid JSON");
+    let texts: Vec<String> = items
+        .as_array()
+        .expect("comments list must be a JSON array")
+        .iter()
+        .filter_map(|c| c.get("text").and_then(|t| t.as_str()).map(String::from))
+        .collect();
+    let sentinels = collect_sentinels(&texts);
+
+    assert!(sentinels.iter().any(|sentinel| matches!(
+        sentinel,
+        AuditSentinelKind::PlanSubmit {
+            plan_id,
+            explicit_base: Some(BaseTarget::Branch { name }),
+            ..
+        } if plan_id == "P1c" && name == "feature/br-osl"
     )));
 }
 
@@ -309,6 +373,7 @@ async fn plan_submit_audit_includes_merge_base_and_execution_mode() {
         Some("0123456789abcdef0123456789abcdef01234567"),
         Some("execute_epic"),
         Some(&spur_acp::SessionId("brain-2".into())),
+        None,
     )
     .await;
 
@@ -371,6 +436,7 @@ async fn plan_submit_sentinel_round_trips_base_snapshot_oid() {
         base_snapshot_oid: Some("0123456789abcdef0123456789abcdef01234567".into()),
         execution_mode: Some("submit_plan".into()),
         brain_session_id: Some("brain-3".into()),
+        explicit_base: None,
     };
     adv.add_comment(
         &subgraph.epic_id,

@@ -815,6 +815,7 @@ pub async fn emit_plan_submit_audit(
     base_snapshot_oid: Option<&str>,
     execution_mode: Option<&str>,
     brain_session_id: Option<&SessionId>,
+    explicit_base: Option<&crate::tools::BaseTarget>,
 ) {
     let kind = crate::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
         plan_id: plan_id.to_string(),
@@ -824,6 +825,7 @@ pub async fn emit_plan_submit_audit(
         base_snapshot_oid: base_snapshot_oid.map(str::to_string),
         execution_mode: execution_mode.map(str::to_string),
         brain_session_id: brain_session_id.map(ToString::to_string),
+        explicit_base: explicit_base.cloned(),
     };
     let body = crate::plan::audit_sentinel::encode_comment(&kind);
     if let Err(e) = advanced.add_comment(&sg.epic_id, &body).await {
@@ -5190,6 +5192,7 @@ impl McpCallbackServer {
                     base_snapshot_oid.as_deref(),
                     Some("submit_plan"),
                     Some(self.brain_session_id().as_session_id()),
+                    explicit_base.as_ref(),
                 )
                 .await;
             }
@@ -5661,6 +5664,7 @@ impl McpCallbackServer {
                 base_snapshot_oid.as_deref(),
                 Some("execute_epic"),
                 Some(self.brain_session_id().as_session_id()),
+                None,
             )
             .await;
 
@@ -8248,6 +8252,7 @@ mod merge_plan_tests {
             Some(base_snapshot_oid.as_str()),
             Some("submit_plan"),
             None,
+            None,
         )
         .await;
 
@@ -8449,6 +8454,7 @@ mod merge_plan_tests {
             Some("spur/brain-snapshot-test"),
             Some(base_snapshot_oid.as_str()),
             Some("submit_plan"),
+            None,
             None,
         )
         .await;
@@ -8685,6 +8691,7 @@ mod merge_plan_tests {
             Some("spur/brain-snapshot-test"),
             Some(base_snapshot_oid.as_str()),
             Some("submit_plan"),
+            None,
             None,
         )
         .await;
@@ -9898,6 +9905,7 @@ mod reconciler_fast_forward_tests {
             Some("abc123"),
             Some("test"),
             None,
+            None,
         )
         .await;
 
@@ -9943,7 +9951,7 @@ mod reconciler_fast_forward_tests {
         )
         .expect("pro gate");
         let adv = pm.advanced().expect("advanced");
-        crate::emit_plan_submit_audit(adv, "plan-1", &sg, None, None, None, None).await;
+        crate::emit_plan_submit_audit(adv, "plan-1", &sg, None, None, None, None, None).await;
 
         // The detector must report that legacy reclaim is still needed.
         let needs_reclaim =
