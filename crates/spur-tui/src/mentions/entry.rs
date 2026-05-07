@@ -1,4 +1,7 @@
 use std::path::Path;
+use std::sync::Arc;
+
+use super::issue_source::IssueMentionDescriptor;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MentionKind {
@@ -24,6 +27,8 @@ pub struct MentionEntry {
     pub search_text: Option<String>,
     /// Optional visible InputBar atom text, including the leading `@`.
     pub atom_text: Option<String>,
+    /// Optional issue descriptor retained for richer issue-row previews.
+    pub issue_preview: Option<Arc<IssueMentionDescriptor>>,
 }
 
 pub trait MentionSource: Send {
@@ -59,5 +64,6 @@ pub fn entry_for_path(cwd: &Path, abs: &Path) -> Option<MentionEntry> {
         tag: None,
         search_text: None,
         atom_text: None,
+        issue_preview: None,
     })
 }

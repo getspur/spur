@@ -81,6 +81,31 @@ impl PartialEq<String> for DelegationId {
     }
 }
 
+/// Dispatch-time failure for a worker delegation.
+///
+/// Raised before the worker is spawned. Each variant maps to a stable
+/// JSON-RPC error code surfaced to the brain so it can branch on the
+/// failure mode (e.g. retry without `enable_worker_mcp`).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum DelegationDispatchError {
+    #[error("SessionRetiring")]
+    SessionRetiring,
+    /// Lazy-start of the per-`BrainSession` `WorkerMcpServer` failed
+    /// (port bind, token issuance, etc.). Worker is NOT spawned.
+    #[error("worker MCP server unavailable: {reason}")]
+    WorkerMcpUnavailable { reason: String },
+}
+
+impl DelegationDispatchError {
+    pub fn json_rpc_code(&self) -> i64 {
+        match self {
+            Self::SessionRetiring => -32001,
+            Self::WorkerMcpUnavailable { .. } => -32002,
+        }
+    }
+}
+
 /// Result status of a delegation to a worker.
 ///
 /// `Rejected` is reserved for human-issued rejections arriving via the
@@ -445,6 +470,32 @@ mod delegation_result_tests {
         let json = r#"{"status":"Success","diff":null,"summary":null,"estimated_cost_usd":0.0}"#;
         let back: DelegationResult = serde_json::from_str(json).unwrap();
         assert!(back.diff_summary.is_none());
+    }
+}
+
+#[cfg(test)]
+mod dispatch_error_tests {
+    use super::*;
+
+    #[test]
+    fn worker_mcp_unavailable_round_trips_display() {
+        let err = DelegationDispatchError::WorkerMcpUnavailable {
+            reason: "port exhausted".into(),
+        };
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("port exhausted"),
+            "Display must preserve `reason`, got: {rendered}"
+        );
+        assert_eq!(err.json_rpc_code(), -32002);
+    }
+
+    #[test]
+    fn session_retiring_maps_to_minus_32001() {
+        assert_eq!(
+            DelegationDispatchError::SessionRetiring.json_rpc_code(),
+            -32001
+        );
     }
 }
 
