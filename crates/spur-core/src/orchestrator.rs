@@ -1319,10 +1319,24 @@ async fn retire_brain_session<S: RetirableMcpServer + ?Sized>(
     session: &SessionId,
     mcp_server: &mut Option<Arc<S>>,
     mcp_guard: Option<&mut Option<AbortOnDropHandle<()>>>,
+    worker_mcp_servers: &DashMap<spur_acp::BrainSessionId, Arc<WorkerMcpServer>>,
     scheduler: &mut crate::scheduler::BrainScheduler,
     overflow: &crate::continuation_bridge::OverflowBuf,
     new_active: Option<spur_acp::types::BrainSessionId>,
 ) {
+    if let Some((_session, worker_server)) =
+        worker_mcp_servers.remove(&spur_acp::BrainSessionId::from(session.clone()))
+    {
+        let outcome = worker_server.shutdown(MCP_SHUTDOWN_TIMEOUT).await;
+        if !outcome.drained {
+            warn!(
+                session = %session,
+                timeout_ms = MCP_SHUTDOWN_TIMEOUT.as_millis() as u64,
+                active_at_deadline = outcome.active_at_deadline,
+                "Worker MCP server drain timed out; forcing shutdown"
+            );
+        }
+    }
     shutdown_mcp_server(funnel, session, mcp_server, mcp_guard).await;
     scheduler.note_session_swap(new_active, overflow);
 }
@@ -4158,6 +4172,7 @@ impl Orchestrator {
                             &dead.spur_session_id,
                             &mut dead.mcp_server,
                             Some(&mut dead.mcp_guard),
+                            &self.worker_mcp_servers,
                             &mut scheduler,
                             &overflow_continuations,
                             None,
@@ -4202,6 +4217,7 @@ impl Orchestrator {
                         &dead.spur_session_id,
                         &mut dead.mcp_server,
                         Some(&mut dead.mcp_guard),
+                        &self.worker_mcp_servers,
                         &mut scheduler,
                         &overflow_continuations,
                         None,
@@ -4619,6 +4635,7 @@ impl Orchestrator {
             &b.spur_session_id,
             &mut b.mcp_server,
             Some(&mut b.mcp_guard),
+            &self.worker_mcp_servers,
             scheduler,
             overflow,
             None,
@@ -10694,7 +10711,9 @@ mod phase5_orchestrator_finalization_tests {
     use crate::continuation_bridge::{new_overflow_buf, ContinuationEventSink, RenderOutcome};
     use crate::event_funnel::spawn_funnel;
     use crate::scheduler::{BrainScheduler, ScheduledAction};
+    use async_trait::async_trait;
     use chrono::Utc;
+    use dashmap::DashMap;
     use futures::FutureExt;
     use spur_acp::domain::delegation::DelegationStatus;
     use spur_acp::domain::events::SpurEventBody;
@@ -10703,11 +10722,20 @@ mod phase5_orchestrator_finalization_tests {
         DropReason,
     };
     use spur_acp::types::SessionId;
+    use spur_license::policy::PolicyResolver;
+    use spur_license::FeatureGate;
+    use spur_mcp::handlers::PlanResolver;
+    use spur_mcp::plan::PlanState;
+    use spur_mcp::worker_server::{WorkerMcpDeps, WorkerMcpServer};
+    use spur_pm::test_workspace::TestBeadsWorkspace;
     use std::future::Future;
+    use std::path::Path;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
+    use tempfile::TempDir;
+    use tokio::net::TcpStream;
     use tokio::sync::{broadcast, Notify};
 
     #[derive(Default)]
@@ -10771,6 +10799,51 @@ mod phase5_orchestrator_finalization_tests {
         let (tx, rx) = broadcast::channel(32);
         let seq = Arc::new(AtomicU64::new(0));
         (spawn_funnel(tx, seq), rx)
+    }
+
+    struct NullWorkerMcpEventSink;
+
+    impl spur_mcp::events::McpEventSink for NullWorkerMcpEventSink {
+        fn emit(&self, _event: SpurEventBody) {}
+    }
+
+    struct NullWorkerPlanResolver;
+
+    #[async_trait]
+    impl PlanResolver for NullWorkerPlanResolver {
+        async fn load_or_project_plan(
+            &self,
+            plan_id: &str,
+        ) -> Result<Arc<tokio::sync::Mutex<PlanState>>, String> {
+            Err(format!("test resolver: unknown plan_id '{plan_id}'"))
+        }
+    }
+
+    async fn test_worker_pm_service(repo: &Path) -> Arc<spur_pm::PmService> {
+        let workspace = TestBeadsWorkspace::init();
+        let beads_dir = repo.join(".beads");
+        std::fs::create_dir_all(&beads_dir).expect("create test .beads directory");
+        workspace.copy_db_to(&beads_dir);
+        Arc::new(
+            spur_pm::PmService::try_new(None, true, false, repo, None)
+                .await
+                .expect("PmService::try_new failed")
+                .expect("expected beads pm"),
+        )
+    }
+
+    fn test_worker_deps(pm: Arc<spur_pm::PmService>) -> WorkerMcpDeps {
+        WorkerMcpDeps {
+            pm_service: pm,
+            feature_gate: Arc::new(FeatureGate::new(PolicyResolver::embedded())),
+            funnel: Arc::new(NullWorkerMcpEventSink),
+            plan_resolver: Arc::new(NullWorkerPlanResolver),
+            reconciler_outcomes: Arc::new(tokio::sync::Mutex::new(
+                spur_mcp::plan::outcomes::OutcomeStore::default(),
+            )),
+            outcome_store: Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            repo_root: None,
+        }
     }
 
     enum ShutdownMode {
@@ -10844,12 +10917,14 @@ mod phase5_orchestrator_finalization_tests {
         let overflow = new_overflow_buf();
         let server = Arc::new(MockRetiringServer::ready());
         let mut mcp_server = Some(server.clone());
+        let worker_mcp_servers = DashMap::new();
 
         retire_brain_session(
             &funnel,
             &old_session,
             &mut mcp_server,
             None,
+            &worker_mcp_servers,
             &mut scheduler,
             &overflow,
             Some(new_session.clone().into()),
@@ -10866,6 +10941,57 @@ mod phase5_orchestrator_finalization_tests {
         assert_eq!(scheduler.pending_continuation_len(), 1);
     }
 
+    #[tokio::test]
+    async fn test_retire_brain_session_shuts_down_worker_mcp_server() {
+        let session = SessionId("brain-worker-mcp".into());
+        let brain_session = spur_acp::types::BrainSessionId::from(session.clone());
+        let (funnel, _rx) = test_funnel();
+        let (mut scheduler, _sink) = mk_scheduler(Some(session.clone()));
+        let overflow = new_overflow_buf();
+        let dir = TempDir::new().expect("tempdir");
+        let pm = test_worker_pm_service(dir.path()).await;
+        let worker_server = WorkerMcpServer::start(session.to_string(), test_worker_deps(pm))
+            .await
+            .expect("worker MCP server starts");
+        let worker_addr = worker_server
+            .url()
+            .strip_prefix("http://")
+            .and_then(|url| url.strip_suffix("/mcp"))
+            .expect("worker MCP URL shape")
+            .to_string();
+        let worker_mcp_servers = DashMap::new();
+        worker_mcp_servers.insert(brain_session.clone(), worker_server);
+        let mut mcp_server: Option<Arc<MockRetiringServer>> = None;
+
+        retire_brain_session(
+            &funnel,
+            &session,
+            &mut mcp_server,
+            None,
+            &worker_mcp_servers,
+            &mut scheduler,
+            &overflow,
+            None,
+        )
+        .await;
+
+        assert!(
+            !worker_mcp_servers.contains_key(&brain_session),
+            "retire must remove the worker MCP server entry"
+        );
+        let probe = tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(&worker_addr))
+            .await
+            .expect("connect must complete within 2s after retire");
+        let connect_err = probe.expect_err("listener must be closed after retire");
+        assert!(
+            matches!(
+                connect_err.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset
+            ),
+            "expected ConnectionRefused/Reset, got {connect_err:?}"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn test_retire_brain_session_timeout_force_aborts() {
         let session = SessionId("brain-timeout".into());
@@ -10874,12 +11000,14 @@ mod phase5_orchestrator_finalization_tests {
         let overflow = new_overflow_buf();
         let server = Arc::new(MockRetiringServer::blocked(Arc::new(Notify::new())));
         let mut mcp_server = Some(server.clone());
+        let worker_mcp_servers = DashMap::new();
 
         retire_brain_session(
             &funnel,
             &session,
             &mut mcp_server,
             None,
+            &worker_mcp_servers,
             &mut scheduler,
             &overflow,
             None,
@@ -10900,12 +11028,14 @@ mod phase5_orchestrator_finalization_tests {
         let overflow = new_overflow_buf();
         let server = Arc::new(MockRetiringServer::blocked(Arc::new(Notify::new())));
         let mut mcp_server = Some(server);
+        let worker_mcp_servers = DashMap::new();
 
         retire_brain_session(
             &funnel,
             &session,
             &mut mcp_server,
             None,
+            &worker_mcp_servers,
             &mut scheduler,
             &overflow,
             None,
@@ -10931,6 +11061,7 @@ mod phase5_orchestrator_finalization_tests {
         let overflow = new_overflow_buf();
         let server = Arc::new(MockRetiringServer::ready());
         let mut mcp_server = Some(server);
+        let worker_mcp_servers = DashMap::new();
 
         scheduler.push_continuation(mk_cont("pending-1", 1, &old_session));
         {
@@ -10943,6 +11074,7 @@ mod phase5_orchestrator_finalization_tests {
             &old_session,
             &mut mcp_server,
             None,
+            &worker_mcp_servers,
             &mut scheduler,
             &overflow,
             Some(new_session.clone().into()),
