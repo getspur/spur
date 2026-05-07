@@ -1754,6 +1754,13 @@ struct PlanBaseSnapshot {
     oid: Option<String>,
 }
 
+#[derive(Debug)]
+struct SubmitPlanInternalResult {
+    plan_id: String,
+    task_count: usize,
+    auto_serialized: Vec<crate::plan::SiblingOverlap>,
+}
+
 #[cfg(test)]
 mod resolve_plan_base_tests {
     use super::*;
@@ -3130,6 +3137,9 @@ impl McpCallbackServer {
             "get_reconciler_status" => self.handle_get_reconciler_status(id).await,
             "get_task_diff" => self.handle_get_task_diff(id, arguments).await,
             "preview_task_base" => self.handle_preview_task_base(id, arguments).await,
+            "plan_truncate_and_restart" => {
+                self.handle_plan_truncate_and_restart(id, arguments).await
+            }
             "review_task" => {
                 if let Some(plan_id) = arguments.get("plan_id").and_then(|v| v.as_str()) {
                     if let Err((code, message)) =
@@ -5016,6 +5026,51 @@ impl McpCallbackServer {
 
     // ─── Plan execution handlers ──────────────────────────────────
 
+    async fn submit_plan_internal(
+        &self,
+        mut tasks: Vec<crate::plan::PlanTask>,
+        base_branch_override: Option<String>,
+        brain_session_id: BrainSessionId,
+        precomputed_auto_serialized: Option<Vec<crate::plan::SiblingOverlap>>,
+    ) -> Result<SubmitPlanInternalResult, String> {
+        let auto_serialized = match precomputed_auto_serialized {
+            Some(overlaps) => overlaps,
+            None => crate::plan::submit_plan_normalize_tasks(&mut tasks)?,
+        };
+        let plan_id = uuid::Uuid::new_v4().to_string();
+        let entries: Vec<crate::plan::PlanTaskEntry> = build_entries_with_task_map(tasks, None);
+        let task_count = entries.len();
+        let (base_snapshot_branch, base_snapshot_oid) = match base_branch_override {
+            Some(branch) => (Some(branch), None),
+            None => {
+                let snapshot = resolve_plan_base(self.repo_root.as_ref(), None).await?;
+                (snapshot.branch, snapshot.oid)
+            }
+        };
+        let state = crate::plan::PlanState {
+            plan_id: plan_id.clone(),
+            tasks: entries,
+            brain_session_id,
+            base_snapshot_branch,
+            base_snapshot_oid,
+            merge_state: crate::plan::PlanMergeState::NotStarted,
+            epic_id: None,
+        };
+        let state = Arc::new(tokio::sync::Mutex::new(state));
+        self.active_plans
+            .lock()
+            .await
+            .insert(plan_id.clone(), Arc::clone(&state));
+        self.spawn_ephemeral_plan_runner(state);
+        info!(plan_id = %plan_id, tasks = task_count, "Plan submitted");
+
+        Ok(SubmitPlanInternalResult {
+            plan_id,
+            task_count,
+            auto_serialized,
+        })
+    }
+
     async fn handle_submit_plan(&self, id: Value, args: Value) -> JsonRpcResponse {
         let tasks_val = match args.get("tasks").and_then(|v| v.as_array()) {
             Some(t) => t.clone(),
@@ -5081,6 +5136,62 @@ impl McpCallbackServer {
                 );
             }
         }
+
+        if !persist_as_epic {
+            let submitted = match self
+                .submit_plan_internal(
+                    tasks,
+                    None,
+                    self.brain_session_id().clone(),
+                    Some(auto_serialized),
+                )
+                .await
+            {
+                Ok(submitted) => submitted,
+                Err(error) => return JsonRpcResponse::invalid_params(id, error),
+            };
+
+            let response_text = format!(
+                "Plan submitted: {} tasks. plan_id: {}\n\
+                 A continuation will fire on each per-task failure/awaiting-review and on plan completion. \
+                 Polling get_plan_status remains available as a safety net.",
+                submitted.task_count, submitted.plan_id
+            );
+            let response_text = if submitted.auto_serialized.is_empty() {
+                response_text
+            } else {
+                let edges: Vec<String> = submitted
+                    .auto_serialized
+                    .iter()
+                    .map(|o| {
+                        format!(
+                            "  {} → {} (shared: {})",
+                            o.from,
+                            o.to,
+                            o.shared_files.join(", ")
+                        )
+                    })
+                    .collect();
+                format!(
+                    "{response_text}\n\nAuto-serialized {} sibling pair(s) with overlapping context_files:\n{}",
+                    submitted.auto_serialized.len(),
+                    edges.join("\n")
+                )
+            };
+
+            return JsonRpcResponse::success(
+                id,
+                json!({
+                    "continuation_will_fire": true,
+                    "auto_serialized": submitted.auto_serialized,
+                    "content": [{
+                        "type": "text",
+                        "text": response_text
+                    }]
+                }),
+            );
+        }
+
         let plan_id = uuid::Uuid::new_v4().to_string();
 
         // Parse optional explicit base. Tolerant: `BaseTarget`'s manual
@@ -5979,6 +6090,111 @@ impl McpCallbackServer {
                     JsonRpcResponse::internal_error(id, message)
                 }
             }
+        }
+    }
+
+    async fn handle_plan_truncate_and_restart(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let input: crate::tool_schemas::PlanTruncateAndRestartInput =
+            match serde_json::from_value(args) {
+                Ok(input) => input,
+                Err(error) => return JsonRpcResponse::invalid_params(id, error.to_string()),
+            };
+
+        let repo_root = match self.repo_root.as_ref() {
+            Some(root) => root.clone(),
+            None => {
+                return JsonRpcResponse::internal_error(id, "Repository root not configured");
+            }
+        };
+
+        let plan_arc = match self.load_or_project_plan(&input.plan_id).await {
+            Ok(plan) => plan,
+            Err(error) => return JsonRpcResponse::invalid_params(id, error),
+        };
+
+        let snapshot = {
+            let state = plan_arc.lock().await;
+            crate::plan::PlanState {
+                plan_id: state.plan_id.clone(),
+                tasks: state.tasks.clone(),
+                brain_session_id: state.brain_session_id.clone(),
+                base_snapshot_branch: state.base_snapshot_branch.clone(),
+                base_snapshot_oid: state.base_snapshot_oid.clone(),
+                merge_state: state.merge_state.clone(),
+                epic_id: state.epic_id.clone(),
+            }
+        };
+
+        if !snapshot
+            .tasks
+            .iter()
+            .any(|entry| entry.spec.task_id == input.blocked_task_id)
+        {
+            return JsonRpcResponse::invalid_params(
+                id,
+                format!(
+                    "Unknown blocked_task_id '{}' in plan '{}'",
+                    input.blocked_task_id, input.plan_id
+                ),
+            );
+        }
+
+        let build = match crate::plan::staging::build_staging_branch(&snapshot, &repo_root).await {
+            Ok(build) => build,
+            Err(error) => return JsonRpcResponse::internal_error(id, error.to_string()),
+        };
+
+        let (new_tasks, superseded_task_ids) = crate::plan::staging::shape_new_plan(&snapshot);
+        let superseded_set: HashSet<&str> =
+            superseded_task_ids.iter().map(String::as_str).collect();
+
+        {
+            let mut state = plan_arc.lock().await;
+            let mutation_id = uuid::Uuid::new_v4().to_string();
+            for entry in state.tasks.iter_mut() {
+                if superseded_set.contains(entry.spec.task_id.as_str()) {
+                    entry.status = crate::plan::PlanTaskStatus::Superseded {
+                        mutation_id: mutation_id.clone(),
+                        by: Vec::new(),
+                    };
+                }
+            }
+        }
+
+        let submitted = match self
+            .submit_plan_internal(
+                new_tasks,
+                Some(build.branch.clone()),
+                snapshot.brain_session_id.clone(),
+                None,
+            )
+            .await
+        {
+            Ok(submitted) => submitted,
+            Err(error) => {
+                return JsonRpcResponse::internal_error(
+                    id,
+                    format!("new plan submission failed: {error}"),
+                );
+            }
+        };
+
+        let output = crate::tool_schemas::PlanTruncateAndRestartOutput {
+            staging_branch: build.branch,
+            superseded_task_ids,
+            new_plan_id: submitted.plan_id,
+            conflict: build.conflict,
+        };
+
+        match serde_json::to_string_pretty(&output) {
+            Ok(text) => JsonRpcResponse::success(
+                id,
+                json!({ "content": [{ "type": "text", "text": text }] }),
+            ),
+            Err(error) => JsonRpcResponse::internal_error(
+                id,
+                format!("failed to serialize plan_truncate_and_restart response: {error}"),
+            ),
         }
     }
 
@@ -7954,6 +8170,303 @@ mod clobber_review_tests {
             }
             signal => panic!("expected PotentialClobber signal, got {signal:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod plan_truncate_and_restart_tests {
+    use super::*;
+    use serde_json::json;
+    use spur_acp::{BrainSessionId, SessionId};
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    fn no_op_ctx() -> DetachedContinuationCtx {
+        DetachedContinuationCtx {
+            on_complete: Arc::new(|_, _| Box::pin(async {})),
+        }
+    }
+
+    async fn run_git(repo: &std::path::Path, args: &[&str]) -> String {
+        super::run_git_capture(repo, None, args)
+            .await
+            .unwrap_or_else(|error| panic!("git {args:?} failed: {error}"))
+    }
+
+    async fn init_repo() -> TempDir {
+        let dir = TempDir::new().expect("tempdir");
+        run_git(dir.path(), &["init", "-q", "-b", "main"]).await;
+        run_git(dir.path(), &["config", "user.email", "test@spur"]).await;
+        run_git(dir.path(), &["config", "user.name", "spur-test"]).await;
+        std::fs::write(dir.path().join("README.md"), "seed\n").expect("write seed");
+        run_git(dir.path(), &["add", "README.md"]).await;
+        run_git(dir.path(), &["commit", "-q", "-m", "seed"]).await;
+        dir
+    }
+
+    async fn commit_file_on_branch(
+        repo: &std::path::Path,
+        branch: &str,
+        base: &str,
+        path: &str,
+        content: &str,
+    ) -> String {
+        run_git(repo, &["checkout", "-q", "-B", branch, base]).await;
+        std::fs::write(repo.join(path), content).expect("write file");
+        run_git(repo, &["add", path]).await;
+        run_git(repo, &["commit", "-q", "-m", &format!("write {path}")]).await;
+        let tip = run_git(repo, &["rev-parse", "--verify", "HEAD"]).await;
+        run_git(repo, &["checkout", "-q", "main"]).await;
+        tip
+    }
+
+    fn entry_for(
+        task_id: &str,
+        deps: &[&str],
+        status: crate::plan::PlanTaskStatus,
+    ) -> crate::plan::PlanTaskEntry {
+        crate::plan::PlanTaskEntry {
+            spec: crate::plan::PlanTask {
+                task_id: task_id.into(),
+                agent: "codex".into(),
+                task: format!("task {task_id}"),
+                depends_on: deps.iter().map(|dep| dep.to_string()).collect(),
+                issue_id: Some(format!("bd-{task_id}")),
+                context_files: Vec::new(),
+            },
+            status,
+            result: None,
+            worker_branch: None,
+            attempt: 1,
+            history: Vec::new(),
+            last_delegation_id: None,
+            dispatched_base_oid: None,
+        }
+    }
+
+    fn approved_entry(
+        task_id: &str,
+        deps: &[&str],
+        worker_branch: &str,
+        dispatched_base_oid: &str,
+    ) -> crate::plan::PlanTaskEntry {
+        let mut entry = entry_for(
+            task_id,
+            deps,
+            crate::plan::PlanTaskStatus::Approved { summary: None },
+        );
+        entry.worker_branch = Some(worker_branch.to_string());
+        entry.dispatched_base_oid = Some(dispatched_base_oid.to_string());
+        entry
+    }
+
+    fn plan_with(
+        plan_id: &str,
+        entries: Vec<crate::plan::PlanTaskEntry>,
+    ) -> crate::plan::PlanState {
+        crate::plan::PlanState {
+            plan_id: plan_id.into(),
+            tasks: entries,
+            brain_session_id: BrainSessionId::new(SessionId("brain".into())),
+            base_snapshot_branch: Some("main".into()),
+            base_snapshot_oid: None,
+            merge_state: crate::plan::PlanMergeState::NotStarted,
+            epic_id: None,
+        }
+    }
+
+    fn new_server(repo: &std::path::Path) -> (McpCallbackServer, DelegationChannel) {
+        let session_id = BrainSessionId::new(SessionId("brain".into()));
+        let (mut server, channel) = McpCallbackServer::new(
+            Some(&session_id),
+            None,
+            None,
+            no_op_ctx(),
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            community_feature_gate(),
+        );
+        server.set_repo_root(repo.to_path_buf());
+        (server, channel)
+    }
+
+    fn output_json(response: serde_json::Value) -> serde_json::Value {
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected success response, got {response}"));
+        serde_json::from_str(text).expect("response text is JSON")
+    }
+
+    #[tokio::test]
+    async fn handle_plan_truncate_and_restart_happy_path() {
+        let dir = init_repo().await;
+        let base_oid = run_git(dir.path(), &["rev-parse", "--verify", "main"]).await;
+        commit_file_on_branch(dir.path(), "spur/test-task-a", "main", "a.txt", "task A\n").await;
+
+        let (server, mut channel) = new_server(dir.path());
+        server
+            .__test_install_plan(plan_with(
+                "recover-plan",
+                vec![
+                    approved_entry("A", &[], "spur/test-task-a", &base_oid),
+                    entry_for(
+                        "B",
+                        &["A"],
+                        crate::plan::PlanTaskStatus::BlockedOnSetupConflict {
+                            dep_task_id: "A".into(),
+                            files: vec!["a.txt".into()],
+                        },
+                    ),
+                    entry_for("C", &["B"], crate::plan::PlanTaskStatus::Pending),
+                ],
+            ))
+            .await;
+
+        let response = server
+            .__test_call_tool(
+                "plan_truncate_and_restart",
+                json!({
+                    "plan_id": "recover-plan",
+                    "blocked_task_id": "B",
+                }),
+            )
+            .await;
+        let output = output_json(response);
+        assert_eq!(output["staging_branch"], "spur/plan-staging/recover-plan");
+        assert_eq!(output["superseded_task_ids"], json!(["B", "C"]));
+        assert_eq!(output["conflict"], serde_json::Value::Null);
+        let new_plan_id = output["new_plan_id"].as_str().expect("new_plan_id");
+
+        assert_eq!(
+            run_git(
+                dir.path(),
+                &["show", "spur/plan-staging/recover-plan:a.txt"],
+            )
+            .await,
+            "task A"
+        );
+
+        let original = server
+            .active_plans
+            .lock()
+            .await
+            .get("recover-plan")
+            .cloned()
+            .expect("original plan");
+        let original = original.lock().await;
+        assert!(matches!(
+            original.tasks[1].status,
+            crate::plan::PlanTaskStatus::Superseded { .. }
+        ));
+        assert!(matches!(
+            original.tasks[2].status,
+            crate::plan::PlanTaskStatus::Superseded { .. }
+        ));
+        drop(original);
+
+        let restarted = server
+            .active_plans
+            .lock()
+            .await
+            .get(new_plan_id)
+            .cloned()
+            .expect("new plan");
+        let restarted = restarted.lock().await;
+        assert_eq!(
+            restarted.base_snapshot_branch.as_deref(),
+            Some("spur/plan-staging/recover-plan")
+        );
+        let restarted_ids: Vec<&str> = restarted
+            .tasks
+            .iter()
+            .map(|entry| entry.spec.task_id.as_str())
+            .collect();
+        assert_eq!(restarted_ids, vec!["B", "C"]);
+        assert_eq!(restarted.tasks[0].spec.depends_on, Vec::<String>::new());
+        assert_eq!(restarted.tasks[1].spec.depends_on, vec!["B".to_string()]);
+        drop(restarted);
+
+        let request =
+            tokio::time::timeout(std::time::Duration::from_secs(2), channel.request_rx.recv())
+                .await
+                .expect("restarted plan should dispatch")
+                .expect("delegation request");
+        assert_eq!(request.agent, "codex");
+        assert!(matches!(
+            request.base,
+            Some(crate::tools::BaseSpec::Branch { ref name })
+                if name == "spur/plan-staging/recover-plan"
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_plan_truncate_and_restart_returns_conflict_when_cherry_pick_fails() {
+        let dir = init_repo().await;
+        std::fs::write(dir.path().join("conflict.txt"), "base\n").expect("write base");
+        run_git(dir.path(), &["add", "conflict.txt"]).await;
+        run_git(dir.path(), &["commit", "-q", "-m", "conflict base"]).await;
+        let base_oid = run_git(dir.path(), &["rev-parse", "--verify", "main"]).await;
+        commit_file_on_branch(
+            dir.path(),
+            "spur/test-task-a",
+            "main",
+            "conflict.txt",
+            "task A\n",
+        )
+        .await;
+        commit_file_on_branch(
+            dir.path(),
+            "spur/test-task-b",
+            "main",
+            "conflict.txt",
+            "task B\n",
+        )
+        .await;
+
+        let (server, _channel) = new_server(dir.path());
+        server
+            .__test_install_plan(plan_with(
+                "conflict-plan",
+                vec![
+                    approved_entry("A", &[], "spur/test-task-a", &base_oid),
+                    approved_entry("B", &[], "spur/test-task-b", &base_oid),
+                    entry_for(
+                        "C",
+                        &["A", "B"],
+                        crate::plan::PlanTaskStatus::BlockedOnSetupConflict {
+                            dep_task_id: "B".into(),
+                            files: vec!["conflict.txt".into()],
+                        },
+                    ),
+                ],
+            ))
+            .await;
+
+        let response = server
+            .__test_call_tool(
+                "plan_truncate_and_restart",
+                json!({
+                    "plan_id": "conflict-plan",
+                    "blocked_task_id": "C",
+                }),
+            )
+            .await;
+        let output = output_json(response);
+        assert_eq!(output["conflict"]["dep_task_id"], "B");
+        assert!(output["conflict"]["files"]
+            .as_array()
+            .expect("conflict files")
+            .iter()
+            .any(|file| file == "conflict.txt"));
+        assert_eq!(output["superseded_task_ids"], json!(["C"]));
+        assert!(output["new_plan_id"].as_str().is_some());
+        assert_eq!(
+            run_git(
+                dir.path(),
+                &["show", "spur/plan-staging/conflict-plan:conflict.txt"],
+            )
+            .await,
+            "task A"
+        );
     }
 }
 
