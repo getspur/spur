@@ -11,13 +11,23 @@ const DARK_DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("picker.selected.fg", "fg"),
     ("picker.match.fg", "highlight"),
     ("picker.hint.fg", "fg_subtle"),
-    ("tool.family.thinking", "accent_alt"),
-    ("tool.family.edit", "accent"),
-    ("tool.family.read", "info"),
-    ("tool.family.bash", "success"),
-    ("tool.family.task", "accent_alt"),
+    ("status_bar.tombstone.fg", "fg_subtle"),
+    ("status_bar.issue_count.fg", "accent"),
+    ("status_bar.separator.fg", "fg_subtle"),
+    ("tool.family.thinking", "fg_subtle"),
+    ("tool.family.edit", "warning"),
+    ("tool.family.read", "accent"),
+    ("tool.family.delete", "danger"),
+    ("tool.family.move", "warning"),
+    ("tool.family.search", "info"),
+    ("tool.family.bash", "accent_alt"),
+    ("tool.family.fetch", "info"),
+    ("tool.family.switch_mode", "accent"),
+    ("tool.family.task", "accent"),
+    ("tool.family.mcp", "fg_subtle"),
+    ("tool.family.unknown", "warning"),
     ("license_badge.neutral.bg", "bg_panel"),
-    ("license_badge.neutral.fg", "fg_muted"),
+    ("license_badge.neutral.fg", "fg_subtle"),
     ("license_badge.success.bg", "success"),
     ("license_badge.success.fg", "fg_on_success"),
     ("license_badge.warning.bg", "warning"),
@@ -110,7 +120,7 @@ mod tests {
 
     #[test]
     fn dark_default_contains_all_spec_sample_bindings() {
-        assert_eq!(TokenMap::dark_default().0.len(), 39);
+        assert_eq!(TokenMap::dark_default().0.len(), 49);
     }
 
     #[test]
@@ -149,20 +159,20 @@ mod tests {
     }
 
     #[test]
-    fn corrected_bindings_use_neutral_and_success_palette_keys() {
+    fn migration_bindings_preserve_current_literal_colors() {
         let tokens = TokenMap::dark_default();
 
         assert_eq!(
             tokens.0.get("tool.family.edit"),
-            Some(&"accent".to_string())
+            Some(&"warning".to_string())
         );
         assert_eq!(
-            tokens.0.get("activity.act"),
+            tokens.0.get("tool.family.bash"),
             Some(&"accent_alt".to_string())
         );
         assert_eq!(
-            tokens.0.get("license_badge.success.fg"),
-            Some(&"fg_on_success".to_string())
+            tokens.0.get("status_bar.separator.fg"),
+            Some(&"fg_subtle".to_string())
         );
     }
 }
