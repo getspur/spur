@@ -100,6 +100,37 @@ impl ReconcilerTaskHandle {
         let _ = self.handle.await;
     }
 }
+
+struct StartupRecoveryTaskHandle {
+    cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    handle: AbortOnDropHandle<()>,
+}
+
+impl StartupRecoveryTaskHandle {
+    fn abort(mut self) {
+        if let Some(tx) = self.cancel_tx.take() {
+            let _ = tx.send(());
+        }
+        self.handle.abort();
+    }
+
+    async fn shutdown(mut self) {
+        if let Some(tx) = self.cancel_tx.take() {
+            let _ = tx.send(());
+        }
+        let _ = self.handle.await;
+    }
+
+    async fn wait(self) {
+        let _ = self.handle.await;
+    }
+}
+
+#[derive(Default)]
+struct StartupRecoveryState {
+    pending: bool,
+    handle: Option<StartupRecoveryTaskHandle>,
+}
 #[cfg(test)]
 const PRODUCER_MAX_FIELD_BYTES: usize = 8192;
 const MCP_NOT_LICENSED_ERROR_CODE: i32 = -32041;
@@ -479,6 +510,10 @@ pub struct McpCallbackServer {
     /// Handle to the optional beads reconciler task. It is enabled only after
     /// the orchestrator binds this server to a derived brain_session_id.
     reconciler_handle: Mutex<Option<ReconcilerTaskHandle>>,
+    /// Optional startup recovery for legacy persisted plans. `start()` only
+    /// decides whether it is needed; the task is spawned after the server has
+    /// a brain_session_id so recovery can be owner-aware.
+    startup_recovery: Mutex<StartupRecoveryState>,
     /// v0a.3: if true, `enable_reconciler` may spawn the reconciler after
     /// the brain_session_id is bound. Wired via `set_reconciler_enabled`.
     reconciler_enabled: bool,
@@ -1066,6 +1101,7 @@ async fn apply_issue_update(
     Ok(())
 }
 
+#[cfg(test)]
 fn discover_plan_ids(issues: &[spur_pm::IssueSummary]) -> Vec<String> {
     let mut plan_ids = std::collections::BTreeSet::new();
     for issue in issues {
@@ -1082,6 +1118,61 @@ fn discover_plan_ids(issues: &[spur_pm::IssueSummary]) -> Vec<String> {
                 .any(|label| label == crate::plan::labels::PLAN_COMPLETE)
         {
             continue;
+        }
+        for label in &issue.labels {
+            if let Some(plan_id) = crate::plan::labels::parse_plan_id(label) {
+                plan_ids.insert(plan_id.to_string());
+            }
+        }
+    }
+    plan_ids.into_iter().collect()
+}
+
+fn discover_plan_ids_owned_by(
+    issues: &[spur_pm::IssueSummary],
+    current_brain_session: &spur_acp::SessionId,
+) -> Vec<String> {
+    let mut plan_ids = std::collections::BTreeSet::new();
+    for issue in issues {
+        if issue.status != "open" || issue.issue_type.as_deref() != Some("epic") {
+            continue;
+        }
+        if issue
+            .labels
+            .iter()
+            .any(|label| label == crate::plan::labels::PLAN_PENDING)
+            || !issue
+                .labels
+                .iter()
+                .any(|label| label == crate::plan::labels::PLAN_COMPLETE)
+        {
+            continue;
+        }
+        match crate::plan::ownership::classify_owner(&issue.labels, current_brain_session) {
+            crate::plan::ownership::PlanOwnerMatch::OwnedByCurrent => {}
+            crate::plan::ownership::PlanOwnerMatch::OwnedByOther { owner } => {
+                tracing::debug!(
+                    epic_id = %issue.id,
+                    %owner,
+                    "startup recovery skipped plan owned by another brain"
+                );
+                continue;
+            }
+            crate::plan::ownership::PlanOwnerMatch::Ambiguous { owners } => {
+                tracing::debug!(
+                    epic_id = %issue.id,
+                    owner = %owners.join(","),
+                    "startup recovery skipped plan with ambiguous owner labels"
+                );
+                continue;
+            }
+            crate::plan::ownership::PlanOwnerMatch::Unowned => {
+                tracing::debug!(
+                    epic_id = %issue.id,
+                    "startup recovery skipped unowned plan"
+                );
+                continue;
+            }
         }
         for label in &issue.labels {
             if let Some(plan_id) = crate::plan::labels::parse_plan_id(label) {
@@ -1815,6 +1906,7 @@ impl McpCallbackServer {
             cancel_token: CancellationToken::new(),
             root_handle: Mutex::new(None),
             reconciler_handle: Mutex::new(None),
+            startup_recovery: Mutex::new(StartupRecoveryState::default()),
             reconciler_enabled: false,
             reconciler_fast_forward: None,
             repo_root: None,
@@ -1876,6 +1968,64 @@ impl McpCallbackServer {
         }
     }
 
+    fn request_startup_recovery(&self) {
+        let mut state = self.startup_recovery.lock().unwrap();
+        if state.handle.is_none() {
+            state.pending = true;
+        }
+    }
+
+    /// Spawn legacy persisted-plan recovery after the brain session id is
+    /// available. Safe no-op when startup did not request recovery, when the
+    /// task is already running, or when the brain has not been bound yet.
+    #[doc(hidden)]
+    pub fn spawn_startup_recovery_if_ready(self: Arc<Self>) {
+        let mut state = self.startup_recovery.lock().unwrap();
+        if !state.pending || state.handle.is_some() {
+            return;
+        }
+        if self.task_tracker.is_closed() {
+            state.pending = false;
+            return;
+        }
+        if self.brain_session_id.get().is_none() {
+            return;
+        }
+        let Some(pm) = self.pm_service.as_ref().cloned() else {
+            state.pending = false;
+            return;
+        };
+        if self
+            .require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED)
+            .is_err()
+            || pm.advanced().is_none()
+        {
+            state.pending = false;
+            return;
+        }
+
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let server = Arc::clone(&self);
+        let handle = AbortOnDropHandle::new(tokio::spawn(async move {
+            let result = tokio::select! {
+                _ = cancel_rx => {
+                    tracing::debug!("persisted-plan startup recovery cancelled");
+                    return;
+                }
+                result = server.reclaim_persisted_plans_on_startup(pm) => result,
+            };
+            if let Err(error) = result {
+                tracing::warn!(%error, "persisted-plan startup recovery failed");
+            }
+        }));
+
+        state.pending = false;
+        state.handle = Some(StartupRecoveryTaskHandle {
+            cancel_tx: Some(cancel_tx),
+            handle,
+        });
+    }
+
     /// Return the feature gate snapshot shared with the license runtime.
     pub fn feature_gate(&self) -> Arc<spur_license::FeatureGate> {
         Arc::clone(&self.feature_gate)
@@ -1917,6 +2067,14 @@ impl McpCallbackServer {
 
     pub fn force_abort(&self) {
         self.task_tracker.close();
+        let startup_recovery_handle = {
+            let mut state = self.startup_recovery.lock().unwrap();
+            state.pending = false;
+            state.handle.take()
+        };
+        if let Some(handle) = startup_recovery_handle {
+            handle.abort();
+        }
         if let Some(handle) = self.reconciler_handle.lock().unwrap().take() {
             handle.abort();
         }
@@ -2133,6 +2291,14 @@ impl McpCallbackServer {
     /// for all in-flight result collectors to finish.
     pub async fn shutdown(&self) {
         self.task_tracker.close();
+        let startup_recovery_handle = {
+            let mut state = self.startup_recovery.lock().unwrap();
+            state.pending = false;
+            state.handle.take()
+        };
+        if let Some(handle) = startup_recovery_handle {
+            handle.shutdown().await;
+        }
         let reconciler_handle = self.reconciler_handle.lock().unwrap().take();
         if let Some(handle) = reconciler_handle {
             handle.shutdown().await;
@@ -2320,6 +2486,22 @@ impl McpCallbackServer {
         self.reconciler_handle.lock().unwrap().is_some()
     }
 
+    /// Test-only: report whether legacy startup recovery has been requested
+    /// but is waiting for a bound brain_session_id.
+    #[doc(hidden)]
+    pub fn __test_startup_recovery_pending(&self) -> bool {
+        self.startup_recovery.lock().unwrap().pending
+    }
+
+    /// Test-only: wait for the spawned startup recovery task to complete.
+    #[doc(hidden)]
+    pub async fn __test_wait_startup_recovery(&self) {
+        let handle = self.startup_recovery.lock().unwrap().handle.take();
+        if let Some(handle) = handle {
+            handle.wait().await;
+        }
+    }
+
     /// Remove completed delegation results older than `COMPLETED_TTL`.
     /// Called lazily from polling handlers to bound memory growth.
     async fn evict_stale_completions(&self) {
@@ -2479,9 +2661,7 @@ impl McpCallbackServer {
                     LegacyReclaimMode::Skip
                 };
                 if matches!(mode, LegacyReclaimMode::DetectAndRun) {
-                    self.reclaim_persisted_plans_on_startup(Arc::clone(pm))
-                        .await
-                        .context("failed to reclaim persisted plans before startup")?;
+                    self.request_startup_recovery();
                 }
             }
         }
@@ -2549,6 +2729,7 @@ impl McpCallbackServer {
             let _ = root_done_tx.send(());
         });
         *self.root_handle.lock().unwrap() = Some(root_handle);
+        Arc::clone(&self).spawn_startup_recovery_if_ready();
 
         let server_for_drop = Arc::clone(&self);
         struct AbortRootOnDrop {
@@ -2557,6 +2738,14 @@ impl McpCallbackServer {
 
         impl Drop for AbortRootOnDrop {
             fn drop(&mut self) {
+                let startup_recovery_handle = {
+                    let mut state = self.server.startup_recovery.lock().unwrap();
+                    state.pending = false;
+                    state.handle.take()
+                };
+                if let Some(handle) = startup_recovery_handle {
+                    handle.abort();
+                }
                 if let Some(handle) = self.server.reconciler_handle.lock().unwrap().take() {
                     handle.abort();
                 }
@@ -5916,6 +6105,7 @@ impl McpCallbackServer {
     }
 
     async fn recover_persisted_plans(&self, pm: Arc<spur_pm::PmService>) -> anyhow::Result<()> {
+        let brain_session_id = self.brain_session_id_ready().await.clone();
         let epics = pm
             .list_issues(spur_pm::IssueFilter {
                 status: Some("open".to_string()),
@@ -5925,7 +6115,7 @@ impl McpCallbackServer {
             })
             .await?;
 
-        for plan_id in discover_plan_ids(&epics) {
+        for plan_id in discover_plan_ids_owned_by(&epics, brain_session_id.as_session_id()) {
             let projected = crate::plan::projector::project_plan_from_beads(
                 pm.as_ref(),
                 &plan_id,

@@ -242,7 +242,7 @@ async fn recover_persisted_plans_emits_plan_snapshot_updated() {
 
     let sink = Arc::new(CaptureSink::default());
     let sink_ref: Arc<dyn McpEventSink> = Arc::clone(&sink) as Arc<dyn McpEventSink>;
-    let session_id = BrainSessionId::new(SessionId("brain-2".into()));
+    let session_id = BrainSessionId::new(SessionId("brain".into()));
     let (mut server, _channel) = McpCallbackServer::new(
         Some(&session_id),
         Some(Arc::clone(&fixture.pm)),
@@ -265,7 +265,7 @@ async fn recover_persisted_plans_emits_plan_snapshot_updated() {
 }
 
 #[tokio::test]
-async fn recover_persisted_plans_uses_legacy_session_fallback_when_missing() {
+async fn recover_persisted_plans_skips_unowned_legacy_plan() {
     let dir = TempDir::new().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
     run_git(dir.path(), &["config", "user.email", "test@spur"]);
@@ -324,12 +324,10 @@ async fn recover_persisted_plans_uses_legacy_session_fallback_when_missing() {
 
     let events = sink.events.lock().unwrap();
     let snapshots = snapshot_events(&events);
-    let (latest_session_id, latest) = snapshots.last().expect("latest legacy plan snapshot");
-    assert_eq!(
-        *latest_session_id,
-        SessionId("persisted-plan:legacy-plan".into())
+    assert!(
+        snapshots.is_empty(),
+        "owner-aware startup recovery must skip unowned legacy plans"
     );
-    assert_eq!(latest.plan_id, "legacy-plan");
 }
 
 #[tokio::test]
