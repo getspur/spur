@@ -1162,6 +1162,7 @@ mod tests {
             base_snapshot_oid: None,
             execution_mode: Some("submit_plan".into()),
             brain_session_id: None,
+            explicit_base: None,
         }];
 
         let base_snapshot_branch = super::plan_submit_base_snapshot(&audits);
@@ -1178,6 +1179,7 @@ mod tests {
             base_snapshot_oid: None,
             execution_mode: Some("submit_plan".into()),
             brain_session_id: Some("brain-123".into()),
+            explicit_base: None,
         }];
 
         let brain_session_id = super::plan_submit_brain_session_id(&audits);
