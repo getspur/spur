@@ -51,6 +51,43 @@ const DARK_DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("activity.user_message", "accent"),
     ("activity.permission", "warning"),
     ("activity.info", "fg"),
+    // status_bar metric & badge tokens (PR3 wave-1 migration).
+    ("status_bar.review_pending.fg", "warning"),
+    ("status_bar.cost.fg", "warning"),
+    ("status_bar.mode.fg", "accent_alt"),
+    ("status_bar.brand.fg", "accent"),
+    ("status_bar.alert_critical.fg", "danger"),
+    ("status_bar.alert_warning.fg", "warning"),
+    ("status_bar.flag_on.fg", "success"),
+    ("status_bar.flag_partial.fg", "warning"),
+    ("status_bar.flag_off.fg", "danger"),
+    ("status_bar.usage.fg", "info"),
+    ("status_bar.analytics.fg", "info"),
+    ("status_bar.effort.fg", "accent_alt"),
+    ("license_badge.success.text_fg", "success"),
+    ("license_badge.warning.text_fg", "warning"),
+    ("license_badge.danger.text_fg", "danger"),
+    // ReAct trace tokens (PR3 wave-1 migration).
+    ("react_trace.timestamp.fg", "fg_subtle"),
+    ("react_trace.think.fg", "fg_subtle"),
+    ("react_trace.message.title.fg", "accent"),
+    ("react_trace.message.body.fg", "fg"),
+    ("react_trace.user_message.fg", "warning"),
+    ("react_trace.permission.fg", "warning"),
+    ("react_trace.spinner.fg", "warning"),
+    ("react_trace.outcome.success.fg", "success"),
+    ("react_trace.outcome.error.fg", "danger"),
+    ("react_trace.outcome.pending.fg", "warning"),
+    ("react_trace.diff.context.fg", "fg_subtle"),
+    ("react_trace.delegate.fg", "accent"),
+    ("react_trace.observe.fg", "success"),
+    ("react_trace.command.fg", "accent_alt"),
+    ("react_trace.partial_card.fg", "accent_alt"),
+    ("react_trace.partial_card.hint.fg", "fg_subtle"),
+    ("react_trace.title.claude.fg", "accent_alt"),
+    ("react_trace.title.codex.fg", "warning"),
+    ("react_trace.title.kiro.fg", "accent"),
+    ("react_trace.title.generic.fg", "fg_subtle"),
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -120,7 +157,7 @@ mod tests {
 
     #[test]
     fn dark_default_contains_all_spec_sample_bindings() {
-        assert_eq!(TokenMap::dark_default().0.len(), 49);
+        assert_eq!(TokenMap::dark_default().0.len(), 84);
     }
 
     #[test]

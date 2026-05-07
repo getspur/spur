@@ -90,6 +90,11 @@ pub struct ReactTrace {
     /// Cache for the external body-lines path used by DetailPane Stream.
     /// Independent from `line_cache` and `compact_cache`.
     pub(in crate::components::react_trace) body_cache: Option<render::BodyCacheEntry>,
+    /// Active theme used by builder/render to resolve color tokens.
+    /// Defaults to the dark fallback in `new()`; production callers
+    /// (SessionDetailView) call `set_theme(ctx.theme)` before render so
+    /// the trace tracks the user's configured theme.
+    pub(super) theme: crate::theme::Theme,
 }
 
 /// Inverse of `resolve_anchor` for the Row variant: given a row index,
@@ -226,6 +231,21 @@ impl ReactTrace {
             line_cache: None,
             compact_cache: None,
             body_cache: None,
+            theme: crate::theme::fallback_theme().clone(),
+        }
+    }
+
+    /// Update the active theme used for color-token resolution. Production
+    /// callers invoke this from their render path with `ctx.theme` so the
+    /// trace tracks the user's configured palette. Bumps generation so
+    /// cached lines rebuild against the new tokens on next render.
+    pub fn set_theme(&mut self, theme: &crate::theme::Theme) {
+        if self.theme.name != theme.name {
+            self.theme = theme.clone();
+            self.invalidate_cache();
+        } else if self.theme != *theme {
+            self.theme = theme.clone();
+            self.invalidate_cache();
         }
     }
 
@@ -297,13 +317,40 @@ impl ReactTrace {
     /// Build the styled pane title + accent color from `agent_kind` and
     /// optional mode badge.
     pub(super) fn pane_title_and_color(&self) -> (String, Color) {
+        use crate::theme::{resolve_token, ColorDepth};
         let (base_title, accent) = match self.agent_kind {
-            AgentKind::ClaudeCodeAcp | AgentKind::ClaudeStreamJson => {
-                (" Session · claude ", Color::Magenta)
-            }
-            AgentKind::CodexAcp => (" Session · codex ", Color::Yellow),
-            AgentKind::Kiro => (" Session · kiro ", Color::Cyan),
-            AgentKind::Generic => (" Session ", Color::DarkGray),
+            AgentKind::ClaudeCodeAcp | AgentKind::ClaudeStreamJson => (
+                " Session · claude ",
+                resolve_token(
+                    &self.theme,
+                    "react_trace.title.claude.fg",
+                    ColorDepth::Truecolor,
+                ),
+            ),
+            AgentKind::CodexAcp => (
+                " Session · codex ",
+                resolve_token(
+                    &self.theme,
+                    "react_trace.title.codex.fg",
+                    ColorDepth::Truecolor,
+                ),
+            ),
+            AgentKind::Kiro => (
+                " Session · kiro ",
+                resolve_token(
+                    &self.theme,
+                    "react_trace.title.kiro.fg",
+                    ColorDepth::Truecolor,
+                ),
+            ),
+            AgentKind::Generic => (
+                " Session ",
+                resolve_token(
+                    &self.theme,
+                    "react_trace.title.generic.fg",
+                    ColorDepth::Truecolor,
+                ),
+            ),
         };
         let mut title = if let Some(mode_id) = &self.current_mode {
             if let Some(badge) = mode_badge(mode_id, self.agent_kind) {
@@ -955,12 +1002,12 @@ impl ReactTrace {
                     ..
                 } = &entry.kind
                 {
-                    let (act_glyph, _) = family_glyph(*family);
+                    let (act_glyph, _) = family_glyph(&self.theme, *family);
                     let id_str = input_summary(input, tool);
                     let tail = match status {
                         ActStatus::Pending | ActStatus::InProgress { .. } => "\u{2026}".to_string(),
                         ActStatus::Completed(Some(p)) => {
-                            let (glyph, _, stats) = observe_compact(p);
+                            let (glyph, _, stats) = observe_compact(&self.theme, p);
                             if stats.is_empty() {
                                 glyph.to_string()
                             } else {
@@ -1054,14 +1101,14 @@ impl ReactTrace {
                     status,
                     ..
                 } => {
-                    let (glyph, _) = family_glyph(*family);
+                    let (glyph, _) = family_glyph(&self.theme, *family);
                     lines.push(format!("{} {} {}", entry.timestamp, glyph, tool));
                     if matches!(input, ToolInputDisplay::Empty) {
                         for text_line in entry.text.lines() {
                             lines.push(format!("   {}", text_line));
                         }
                     } else {
-                        for l in input_display_lines(input) {
+                        for l in input_display_lines(&self.theme, input) {
                             let joined: String =
                                 l.spans.iter().map(|s| s.content.as_ref()).collect();
                             lines.push(joined);
@@ -1072,9 +1119,9 @@ impl ReactTrace {
                     match status {
                         ActStatus::Completed(Some(p)) => {
                             let verb = observe_verb(p);
-                            let (glyph, _) = outcome_glyph(p);
+                            let (glyph, _) = outcome_glyph(&self.theme, p);
                             lines.push(format!("{} {} {}", entry.timestamp, glyph, verb));
-                            for l in observe_payload_lines(p, self.observe_collapsed) {
+                            for l in observe_payload_lines(&self.theme, p, self.observe_collapsed) {
                                 let joined: String =
                                     l.spans.iter().map(|s| s.content.as_ref()).collect();
                                 lines.push(joined);
@@ -1083,7 +1130,7 @@ impl ReactTrace {
                         ActStatus::Failed(Some(p)) => {
                             let verb = observe_verb(p);
                             lines.push(format!("{} ✗ {}", entry.timestamp, verb));
-                            for l in observe_payload_lines(p, self.observe_collapsed) {
+                            for l in observe_payload_lines(&self.theme, p, self.observe_collapsed) {
                                 let joined: String =
                                     l.spans.iter().map(|s| s.content.as_ref()).collect();
                                 lines.push(joined);
@@ -1101,10 +1148,10 @@ impl ReactTrace {
 
                 TraceKind::Observe { payload } => {
                     if let Some(p) = payload {
-                        let (glyph, _) = outcome_glyph(p);
+                        let (glyph, _) = outcome_glyph(&self.theme, p);
                         let verb = observe_verb(p);
                         lines.push(format!("{} {} {}", entry.timestamp, glyph, verb));
-                        for l in observe_payload_lines(p, self.observe_collapsed) {
+                        for l in observe_payload_lines(&self.theme, p, self.observe_collapsed) {
                             let joined: String =
                                 l.spans.iter().map(|s| s.content.as_ref()).collect();
                             lines.push(joined);
