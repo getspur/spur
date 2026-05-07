@@ -81,6 +81,11 @@ pub enum AuditSentinelKind {
         execution_mode: Option<String>,
         #[serde(default)]
         brain_session_id: Option<String>,
+        /// Operator-supplied `base` parameter from `submit_plan`.
+        /// `None` for legacy submissions and for omitted-base submissions.
+        /// Pure forensics — dispatch reads `base_snapshot_branch`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        explicit_base: Option<crate::tools::BaseTarget>,
     },
     TaskSpec {
         task_id: String,
@@ -363,6 +368,7 @@ mod tests {
             base_snapshot_oid: None,
             execution_mode: None,
             brain_session_id: None,
+            explicit_base: None,
         }
     }
 
@@ -1020,6 +1026,65 @@ mod tests {
         for (sub, expected) in cases {
             let json = serde_json::to_string(&sub).unwrap();
             assert_eq!(json, format!("\"{expected}\""));
+        }
+    }
+}
+
+#[cfg(test)]
+mod plan_submit_explicit_base_round_trip {
+    use super::*;
+    use crate::tools::BaseTarget;
+
+    #[test]
+    fn plan_submit_with_explicit_base_round_trips() {
+        let original = AuditSentinelKind::PlanSubmit {
+            plan_id: "p1".into(),
+            epic_issue_id: "br-1".into(),
+            task_ids: vec!["t1".into()],
+            base_snapshot_branch: Some("spur/brain-snapshot-x".into()),
+            base_snapshot_oid: Some("deadbeef".into()),
+            execution_mode: Some("submit_plan".into()),
+            brain_session_id: Some("brain-1".into()),
+            explicit_base: Some(BaseTarget::Branch {
+                name: "spur/plan-merge-phase0".into(),
+            }),
+        };
+        let body = encode_comment(&original);
+        let parsed = parse_comment(&body)
+            .expect("must parse")
+            .expect("must succeed");
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn plan_submit_omitting_explicit_base_round_trips() {
+        let original = AuditSentinelKind::PlanSubmit {
+            plan_id: "p1".into(),
+            epic_issue_id: "br-1".into(),
+            task_ids: vec!["t1".into()],
+            base_snapshot_branch: None,
+            base_snapshot_oid: None,
+            execution_mode: None,
+            brain_session_id: None,
+            explicit_base: None,
+        };
+        let body = encode_comment(&original);
+        let parsed = parse_comment(&body).unwrap().unwrap();
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn legacy_plan_submit_without_explicit_base_field_decodes() {
+        // Pre-br-osl serialized form (no explicit_base key). serde(default)
+        // must let this decode as None.
+        let legacy_json =
+            r#"{"kind":"plan-submit","plan_id":"p1","epic_issue_id":"br-1","task_ids":["t1"]}"#;
+        let kind: AuditSentinelKind = serde_json::from_str(legacy_json).unwrap();
+        match kind {
+            AuditSentinelKind::PlanSubmit { explicit_base, .. } => {
+                assert!(explicit_base.is_none());
+            }
+            other => panic!("unexpected variant: {other:?}"),
         }
     }
 }
