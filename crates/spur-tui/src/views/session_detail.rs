@@ -3137,6 +3137,7 @@ mod invalidate_protocols_tests {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            theme: crate::theme::fallback_theme(),
         }
     }
 
@@ -3253,6 +3254,7 @@ mod cancel_state_tests {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            theme: crate::theme::fallback_theme(),
         }
     }
 
@@ -3856,6 +3858,7 @@ mod composer_routing_tests {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            theme: crate::theme::fallback_theme(),
         }
     }
 
@@ -3940,6 +3943,7 @@ mod composer_routing_tests {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            theme: crate::theme::fallback_theme(),
         }
     }
 
@@ -4122,6 +4126,7 @@ mod tests {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            theme: crate::theme::fallback_theme(),
         }
     }
 
@@ -4286,6 +4291,7 @@ mod tests {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            theme: crate::theme::fallback_theme(),
         };
 
         let backend = TestBackend::new(80, 24);

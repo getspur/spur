@@ -672,6 +672,7 @@ mod tests {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            theme: crate::theme::fallback_theme(),
         }
     }
 
