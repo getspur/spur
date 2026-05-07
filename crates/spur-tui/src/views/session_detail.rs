@@ -201,16 +201,42 @@ impl SessionDetailView {
         agent_cfg: std::sync::Arc<spur_acp::AgentConfig>,
         worker_snapshot: Vec<crate::mentions::WorkerMentionDescriptor>,
     ) -> Self {
+        Self::new_with_issue_snapshot(
+            session_id,
+            agent_name,
+            role,
+            cwd,
+            agent_cfg,
+            worker_snapshot,
+            Vec::new(),
+        )
+    }
+
+    pub fn new_with_issue_snapshot(
+        session_id: SessionId,
+        agent_name: String,
+        role: String,
+        cwd: std::path::PathBuf,
+        agent_cfg: std::sync::Arc<spur_acp::AgentConfig>,
+        worker_snapshot: Vec<crate::mentions::WorkerMentionDescriptor>,
+        issue_snapshot: Vec<spur_pm::IssueSummary>,
+    ) -> Self {
         let command_registry =
             crate::commands::CommandRegistry::from_configs(std::slice::from_ref(&*agent_cfg));
         let agent_kind = agent_cfg.kind;
         let known_worker_names: std::collections::HashSet<String> =
             worker_snapshot.iter().map(|d| d.name.clone()).collect();
-        let mention_registry = if role == "brain" {
-            crate::mentions::MentionRegistry::for_brain_session(worker_snapshot.clone())
+        let mut mention_registry = if role == "brain" {
+            crate::mentions::MentionRegistry::for_brain_session(worker_snapshot)
         } else {
             crate::mentions::MentionRegistry::for_direct_session()
         };
+        mention_registry.set_issue_snapshot(
+            issue_snapshot
+                .iter()
+                .map(crate::mentions::IssueMentionDescriptor::from)
+                .collect(),
+        );
         Self {
             session_id,
             agent_name,
@@ -343,6 +369,16 @@ impl SessionDetailView {
             session_config_options: Vec::new(),
             spur_agent_caps: None,
         }
+    }
+
+    pub fn set_issue_snapshot(&mut self, issues: Vec<spur_pm::IssueSummary>) {
+        let descriptors = issues
+            .iter()
+            .map(crate::mentions::IssueMentionDescriptor::from)
+            .collect();
+        self.mention_registry
+            .borrow_mut()
+            .set_issue_snapshot(descriptors);
     }
 
     /// Construct a pre-ready `SessionDetailView` for a session that has been
