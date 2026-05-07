@@ -447,12 +447,32 @@ pub enum EditorMode {
 
 /// TUI presentation preferences. New fields land here without schema churn.
 /// Future additions (mouse, density, keymap) extend this struct.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TuiConfig {
     pub edit_mode: EditorMode,
     #[serde(default, skip_serializing_if = "is_false")]
     pub disable_paste_burst: bool,
+    /// Active theme name. Resolved at startup via `.spur/themes/<name>.yaml`
+    /// (project) → `~/.spur/themes/<name>.yaml` (user) → built-in. Defaults
+    /// to `"dark"` for backwards compatibility — the dark built-in is a
+    /// pixel-perfect reproduction of pre-theme TUI colors.
+    #[serde(default = "default_theme_name")]
+    pub theme: String,
+}
+
+impl Default for TuiConfig {
+    fn default() -> Self {
+        Self {
+            edit_mode: EditorMode::default(),
+            disable_paste_burst: false,
+            theme: default_theme_name(),
+        }
+    }
+}
+
+fn default_theme_name() -> String {
+    "dark".to_string()
 }
 
 impl TuiConfig {

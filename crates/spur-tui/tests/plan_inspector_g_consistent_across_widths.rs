@@ -112,6 +112,7 @@ fn assert_g_and_shift_g_are_lane_local_at_width(width: u16) {
         flag_summary: None,
         tombstone: None,
         transient_hint_override: None,
+        theme: spur_tui::theme::fallback_theme(),
     };
 
     terminal

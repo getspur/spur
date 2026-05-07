@@ -139,6 +139,10 @@ pub struct ViewContext<'a> {
     pub flag_summary: Option<(usize, usize)>,
     pub tombstone: Option<&'a Tombstone>,
     pub transient_hint_override: Option<HintOverride<'a>>,
+    /// Active theme. Resolved at startup by `theme::load_runtime_theme`
+    /// using `TuiConfig.theme`. Surfaces (PR3+) read tokens off this
+    /// reference instead of hardcoded `Color::` literals.
+    pub theme: &'a crate::theme::Theme,
 }
 
 /// Test-only default context backed by empty lineage and idle status.
@@ -165,6 +169,7 @@ impl ViewContext<'_> {
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
+            theme: crate::theme::fallback_theme(),
         }
     }
 }
