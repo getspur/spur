@@ -5069,6 +5069,21 @@ impl McpCallbackServer {
         }
         let plan_id = uuid::Uuid::new_v4().to_string();
 
+        // Parse optional explicit base. Tolerant: `BaseTarget`'s manual
+        // Deserialize accepts both `{"kind":...}` and JSON-stringified-object.
+        let explicit_base: Option<crate::tools::BaseTarget> = match args.get("base") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(v) => match serde_json::from_value::<crate::tools::BaseTarget>(v.clone()) {
+                Ok(target) => Some(target),
+                Err(e) => {
+                    return JsonRpcResponse::invalid_params(
+                        id,
+                        format!("submit_plan: invalid 'base' parameter: {e}"),
+                    );
+                }
+            },
+        };
+
         // Build the beads epic subgraph before spawning the executor so
         // any creation error is surfaced synchronously.
         let epic_subgraph: Option<EpicSubgraph> = if persist_as_epic {
@@ -5139,11 +5154,11 @@ impl McpCallbackServer {
             build_entries_with_task_map(tasks, epic_subgraph.as_ref().map(|sg| &sg.task_map));
 
         let task_count = entries.len();
-        // base_target wired up in Task 5; for compile parity, pass None here.
-        let base_snapshot = match resolve_plan_base(self.repo_root.as_ref(), None).await {
-            Ok(snapshot) => snapshot,
-            Err(e) => return JsonRpcResponse::internal_error(id, e),
-        };
+        let base_snapshot =
+            match resolve_plan_base(self.repo_root.as_ref(), explicit_base.as_ref()).await {
+                Ok(snapshot) => snapshot,
+                Err(e) => return JsonRpcResponse::internal_error(id, e),
+            };
         let state = crate::plan::PlanState {
             plan_id: plan_id.clone(),
             tasks: entries,

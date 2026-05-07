@@ -869,6 +869,32 @@ fn submit_plan_def() -> ToolDefinition {
                 "epic_body": {
                     "type": "string",
                     "description": "Epic description / rationale. Optional when `persist_as_epic` is true. Ignored otherwise."
+                },
+                "base": {
+                    "description": "Optional explicit base for the plan. Omit (or pass {\"kind\":\"repo_main\"}) for legacy behavior — the plan engine snapshots the brain working tree HEAD. Pass {\"kind\":\"branch\",\"name\":\"<branch>\"} or {\"kind\":\"commit\",\"oid\":\"<oid>\"} to base the plan on a named ref instead; the brain working tree is not touched. Useful for stacking plans on a prior phase's integration branch.",
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": { "kind": { "const": "repo_main" } },
+                            "required": ["kind"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": { "const": "branch" },
+                                "name": { "type": "string" }
+                            },
+                            "required": ["kind", "name"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": { "const": "commit" },
+                                "oid": { "type": "string" }
+                            },
+                            "required": ["kind", "oid"]
+                        }
+                    ]
                 }
             },
             "required": ["tasks"]
