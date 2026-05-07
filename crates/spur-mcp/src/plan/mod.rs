@@ -12,6 +12,7 @@ pub mod mutation;
 pub mod mutation_executor;
 pub mod outcomes;
 pub mod ownership;
+pub mod preview;
 pub mod projector;
 pub mod proposers;
 pub mod reconciler;
