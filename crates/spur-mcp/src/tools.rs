@@ -962,6 +962,14 @@ fn preview_task_base_def() -> ToolDefinition {
     }
 }
 
+fn plan_truncate_and_restart_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "plan_truncate_and_restart".into(),
+        description: "Recovery tool for plans blocked by overlay conflicts. Cherry-picks approved task tips in DAG order onto a fresh `spur/plan-staging/{plan_id}` branch, marks remaining tasks Superseded in the original plan, and submits a new plan whose tasks dispatch against the staging branch. Use after `BlockedOnSetupConflict` when the conflict is across approved siblings (i.e. cannot be unwound by re-dispatching a single upstream task).".into(),
+        input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::PlanTruncateAndRestartInput>(),
+    }
+}
+
 pub fn review_task_def() -> ToolDefinition {
     ToolDefinition {
         name: "review_task".to_string(),
@@ -1109,6 +1117,7 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         get_reconciler_status_def(),
         get_task_diff_def(),
         preview_task_base_def(),
+        plan_truncate_and_restart_def(),
         review_task_def(),
         report_signal_def(),
         report_progress_def(),
@@ -1122,9 +1131,10 @@ pub fn tools_list() -> Vec<ToolDefinition> {
 /// signal tools (`report_signal`, `report_progress`). Brain-only orchestration
 /// tools (delegate_*, submit_plan, merge_plan, execute_epic, review_task,
 /// create_pr, create_issue, add_dependency, cancel_delegation,
-/// list_available_workers, get_reconciler_status, graph_*, preview_task_base)
-/// are intentionally excluded — exposing them to workers would invert the
-/// brain→worker authority direction and let workers self-dispatch.
+/// list_available_workers, get_reconciler_status, graph_*, preview_task_base,
+/// plan_truncate_and_restart) are intentionally excluded — exposing them to
+/// workers would invert the brain→worker authority direction and let workers
+/// self-dispatch.
 pub fn worker_tools_list() -> Vec<ToolDefinition> {
     vec![
         get_issue_def(),
@@ -1175,6 +1185,16 @@ mod schema_truthfulness_tests {
         assert!(
             names.contains(&"fetch_outcome_artifact"),
             "fetch_outcome_artifact must appear in tools/list, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn plan_truncate_and_restart_appears_in_tools_list() {
+        let tools = tools_list();
+        let names: Vec<_> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            names.contains(&"plan_truncate_and_restart"),
+            "plan_truncate_and_restart must appear in tools/list, got: {names:?}"
         );
     }
 
@@ -1256,6 +1276,7 @@ mod worker_tools_subset_tests {
             "execute_epic",
             "get_reconciler_status",
             "preview_task_base",
+            "plan_truncate_and_restart",
             "review_task",
             "graph_triage",
             "graph_plan",

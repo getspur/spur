@@ -20,8 +20,9 @@ pub mod scope_snapshot;
 pub mod signal_watcher;
 pub mod signals;
 pub mod snapshot;
+pub mod staging;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -233,6 +234,54 @@ pub struct PlanState {
 }
 
 impl PlanState {
+    /// Returns plan tasks in topological dependency order. Equal-rank tasks are
+    /// ordered by task_id for deterministic staging and dispatch previews.
+    pub fn topo_ordered_tasks(&self) -> Vec<&PlanTaskEntry> {
+        let id_to_idx: HashMap<&str, usize> = self
+            .tasks
+            .iter()
+            .enumerate()
+            .map(|(idx, entry)| (entry.spec.task_id.as_str(), idx))
+            .collect();
+
+        let mut in_degree: Vec<usize> = self
+            .tasks
+            .iter()
+            .map(|entry| entry.spec.depends_on.len())
+            .collect();
+        let mut ready: BTreeSet<&str> = in_degree
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, degree)| {
+                if *degree == 0 {
+                    Some(self.tasks[idx].spec.task_id.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let mut ordered = Vec::with_capacity(self.tasks.len());
+        while let Some(task_id) = ready.iter().next().copied() {
+            ready.remove(task_id);
+            let Some(&idx) = id_to_idx.get(task_id) else {
+                continue;
+            };
+            ordered.push(&self.tasks[idx]);
+
+            for (dependent_idx, dependent) in self.tasks.iter().enumerate() {
+                if dependent.spec.depends_on.iter().any(|dep| dep == task_id) {
+                    in_degree[dependent_idx] = in_degree[dependent_idx].saturating_sub(1);
+                    if in_degree[dependent_idx] == 0 {
+                        ready.insert(dependent.spec.task_id.as_str());
+                    }
+                }
+            }
+        }
+
+        ordered
+    }
+
     /// Compute the topologically ordered transitive closure of `task_id`'s
     /// dependencies, restricted to currently approved tasks. The entry-point
     /// task itself is never returned.
@@ -570,6 +619,32 @@ mod approved_dep_closure_tests {
         ]);
 
         assert_eq!(ids(state.approved_dep_closure("M3")), vec!["root", "M1"]);
+    }
+
+    #[test]
+    fn topo_ordered_tasks_respects_dependencies() {
+        let state = state(vec![
+            entry("M3", &["M1", "M2"], PlanTaskStatus::Pending),
+            entry("M2", &["root"], PlanTaskStatus::Approved { summary: None }),
+            entry("root", &[], PlanTaskStatus::Approved { summary: None }),
+            entry("M1", &["root"], PlanTaskStatus::Approved { summary: None }),
+        ]);
+
+        assert_eq!(
+            ids(state.topo_ordered_tasks()),
+            vec!["root", "M1", "M2", "M3"]
+        );
+    }
+
+    #[test]
+    fn topo_ordered_tasks_orders_equal_rank_by_task_id() {
+        let state = state(vec![
+            entry("C", &[], PlanTaskStatus::Pending),
+            entry("A", &[], PlanTaskStatus::Pending),
+            entry("B", &[], PlanTaskStatus::Pending),
+        ]);
+
+        assert_eq!(ids(state.topo_ordered_tasks()), vec!["A", "B", "C"]);
     }
 }
 
@@ -2767,7 +2842,13 @@ pub async fn run_plan(
 
     loop {
         // ── Single-lock pass: compute ready, mark Dispatched, collect specs ──
-        let ready: Vec<(PlanTask, String, u32, String)> = {
+        let ready: Vec<(
+            PlanTask,
+            String,
+            u32,
+            String,
+            Option<crate::tools::BaseSpec>,
+        )> = {
             let mut p = plan.lock().await;
             let completed: HashSet<String> = p
                 .tasks
@@ -2775,6 +2856,15 @@ pub async fn run_plan(
                 .filter(|t| matches!(t.status, PlanTaskStatus::Approved { .. }))
                 .map(|t| t.spec.task_id.clone())
                 .collect();
+            let plan_base = p
+                .base_snapshot_branch
+                .clone()
+                .map(|name| crate::tools::BaseSpec::Branch { name })
+                .or_else(|| {
+                    p.base_snapshot_oid
+                        .clone()
+                        .map(|oid| crate::tools::BaseSpec::Commit { oid })
+                });
 
             let mut batch = Vec::new();
             for entry in &mut p.tasks {
@@ -2792,13 +2882,19 @@ pub async fn run_plan(
                     };
                     entry.last_delegation_id = Some(delegation_id.clone());
                     let task_text = build_dispatch_task_text(entry);
-                    batch.push((entry.spec.clone(), delegation_id, attempt, task_text));
+                    batch.push((
+                        entry.spec.clone(),
+                        delegation_id,
+                        attempt,
+                        task_text,
+                        plan_base.clone(),
+                    ));
                 }
             }
             batch
         }; // Lock released.
 
-        for (task_spec, delegation_id, task_attempt, task_text) in ready {
+        for (task_spec, delegation_id, task_attempt, task_text, task_base) in ready {
             let (tx, rx) = oneshot::channel::<DelegationResult>();
 
             let request = DelegationRequest {
@@ -2810,7 +2906,7 @@ pub async fn run_plan(
                 brain_session_id: brain_sid.clone(),
                 delegation_plan: None,
                 issue_id: task_spec.issue_id.clone(),
-                base: None,
+                base: task_base,
                 dispatched_base_oid_tx: None,
                 attempt_tracker: Arc::new(std::sync::atomic::AtomicU32::new(task_attempt)),
                 enable_worker_mcp: None,
