@@ -57,6 +57,8 @@ pub enum ThemeError {
     InvalidAnsi { key: String, value: String },
     #[error("parent theme `{name}` was not found")]
     UnknownParent { name: String },
+    #[error("built-in theme `{name}` was not found")]
+    UnknownBuiltIn { name: String },
     #[error("invalid theme YAML: {0}")]
     InvalidYaml(#[from] serde_yml::Error),
 }
@@ -73,6 +75,21 @@ pub fn load_theme_from_str(
 ) -> Result<Theme, ThemeError> {
     let raw = serde_yml::from_str(yaml)?;
     load_theme(raw, &parent_resolver)
+}
+
+pub fn load_built_in(name: &str) -> Result<Theme, ThemeError> {
+    let yaml = match name {
+        "dark" => include_str!("../../themes/dark.yaml"),
+        "light" => include_str!("../../themes/light.yaml"),
+        "high-contrast" => include_str!("../../themes/high-contrast.yaml"),
+        _ => {
+            return Err(ThemeError::UnknownBuiltIn {
+                name: name.to_string(),
+            });
+        }
+    };
+
+    load_theme_from_str(yaml, |_| None)
 }
 
 fn load_theme(
@@ -298,7 +315,9 @@ fn palette_entry_mut<'a>(palette: &'a mut Palette, key: &str) -> Option<&'a mut 
 
 #[cfg(test)]
 mod tests {
-    use super::{load_theme_from_str, RawTheme, ThemeError};
+    use super::{load_built_in, load_theme_from_str, RawTheme, ThemeError};
+    use crate::theme::palette::{Palette, PaletteEntry};
+    use crate::theme::tokens::TokenMap;
     use ratatui::style::Color;
 
     fn load_without_parent(yaml: &str) -> Result<super::Theme, ThemeError> {
@@ -307,6 +326,71 @@ mod tests {
 
     fn raw_theme(yaml: &str) -> RawTheme {
         serde_yml::from_str(yaml).expect("raw theme parses")
+    }
+
+    fn palette_entries(palette: &Palette) -> [&PaletteEntry; 24] {
+        [
+            &palette.bg,
+            &palette.bg_panel,
+            &palette.bg_selection,
+            &palette.bg_overlay,
+            &palette.fg,
+            &palette.fg_muted,
+            &palette.fg_subtle,
+            &palette.fg_on_accent,
+            &palette.fg_on_success,
+            &palette.fg_on_warning,
+            &palette.fg_on_danger,
+            &palette.fg_on_info,
+            &palette.fg_on_overlay,
+            &palette.border,
+            &palette.border_focused,
+            &palette.accent,
+            &palette.accent_alt,
+            &palette.success,
+            &palette.warning,
+            &palette.danger,
+            &palette.info,
+            &palette.highlight,
+            &palette.diff_add,
+            &palette.diff_del,
+        ]
+    }
+
+    #[test]
+    fn built_in_themes_load_without_error() {
+        for name in ["dark", "light", "high-contrast"] {
+            let theme = load_built_in(name).unwrap_or_else(|err| panic!("{name}: {err}"));
+
+            assert_eq!(theme.name, name);
+            assert!(
+                theme.diagnostics.is_empty(),
+                "{name}: {:?}",
+                theme.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn dark_built_in_round_trips_dark_defaults() {
+        let theme = load_built_in("dark").expect("dark built-in loads");
+
+        assert_eq!(theme.palette, Palette::dark_default());
+        assert_eq!(theme.tokens, TokenMap::dark_default());
+    }
+
+    #[test]
+    fn built_in_palettes_have_full_ansi_maps() {
+        for name in ["dark", "light", "high-contrast"] {
+            let theme = load_built_in(name).unwrap_or_else(|err| panic!("{name}: {err}"));
+
+            assert!(
+                palette_entries(&theme.palette)
+                    .iter()
+                    .all(|entry| entry.ansi.is_some()),
+                "{name} has a missing ansi fallback"
+            );
+        }
     }
 
     #[test]
