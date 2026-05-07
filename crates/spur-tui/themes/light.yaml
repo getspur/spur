@@ -1,0 +1,76 @@
+version: 1
+name: light
+
+palette:
+  bg:
+    rgb: "#ffffff"
+    ansi: white
+  bg_panel:
+    rgb: "#f3f4f6"
+    ansi: white
+  bg_selection:
+    rgb: "#bfdbfe"
+    ansi: light-cyan
+  bg_overlay:
+    rgb: "#ffffff"
+    ansi: white
+  fg:
+    rgb: "#111827"
+    ansi: black
+  fg_muted:
+    rgb: "#4b5563"
+    ansi: dark-gray
+  fg_subtle:
+    rgb: "#6b7280"
+    ansi: gray
+  fg_on_accent:
+    rgb: "#ffffff"
+    ansi: white
+  fg_on_success:
+    rgb: "#ffffff"
+    ansi: white
+  fg_on_warning:
+    rgb: "#111827"
+    ansi: black
+  fg_on_danger:
+    rgb: "#ffffff"
+    ansi: white
+  fg_on_info:
+    rgb: "#ffffff"
+    ansi: white
+  fg_on_overlay:
+    rgb: "#111827"
+    ansi: black
+  border:
+    rgb: "#d1d5db"
+    ansi: gray
+  border_focused:
+    rgb: "#2563eb"
+    ansi: blue
+  accent:
+    rgb: "#2563eb"
+    ansi: blue
+  accent_alt:
+    rgb: "#7c3aed"
+    ansi: magenta
+  success:
+    rgb: "#15803d"
+    ansi: green
+  warning:
+    rgb: "#ca8a04"
+    ansi: yellow
+  danger:
+    rgb: "#dc2626"
+    ansi: red
+  info:
+    rgb: "#0284c7"
+    ansi: blue
+  highlight:
+    rgb: "#92400e"
+    ansi: magenta
+  diff_add:
+    rgb: "#166534"
+    ansi: green
+  diff_del:
+    rgb: "#b91c1c"
+    ansi: red

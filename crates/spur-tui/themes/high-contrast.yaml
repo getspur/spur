@@ -1,0 +1,76 @@
+version: 1
+name: high-contrast
+
+palette:
+  bg:
+    rgb: "#000000"
+    ansi: black
+  bg_panel:
+    rgb: "#000000"
+    ansi: black
+  bg_selection:
+    rgb: "#0000ff"
+    ansi: blue
+  bg_overlay:
+    rgb: "#000000"
+    ansi: black
+  fg:
+    rgb: "#ffffff"
+    ansi: white
+  fg_muted:
+    rgb: "#e0e0e0"
+    ansi: gray
+  fg_subtle:
+    rgb: "#a0a0a0"
+    ansi: dark-gray
+  fg_on_accent:
+    rgb: "#000000"
+    ansi: black
+  fg_on_success:
+    rgb: "#000000"
+    ansi: black
+  fg_on_warning:
+    rgb: "#000000"
+    ansi: black
+  fg_on_danger:
+    rgb: "#ffffff"
+    ansi: white
+  fg_on_info:
+    rgb: "#ffffff"
+    ansi: white
+  fg_on_overlay:
+    rgb: "#ffffff"
+    ansi: white
+  border:
+    rgb: "#a0a0a0"
+    ansi: dark-gray
+  border_focused:
+    rgb: "#00ffff"
+    ansi: cyan
+  accent:
+    rgb: "#00ffff"
+    ansi: cyan
+  accent_alt:
+    rgb: "#ff00ff"
+    ansi: magenta
+  success:
+    rgb: "#00ff00"
+    ansi: green
+  warning:
+    rgb: "#ffff00"
+    ansi: yellow
+  danger:
+    rgb: "#ff0000"
+    ansi: red
+  info:
+    rgb: "#0080ff"
+    ansi: blue
+  highlight:
+    rgb: "#ffff00"
+    ansi: light-yellow
+  diff_add:
+    rgb: "#00ff00"
+    ansi: green
+  diff_del:
+    rgb: "#ff0000"
+    ansi: red
