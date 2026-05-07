@@ -5561,6 +5561,123 @@ mod tests {
         );
     }
 
+    /// Integration test for Phase 0 (RCA bd-2m2u): three Dispatch sentinels
+    /// — even when each carries the buggy `attempt: 1` field — must project
+    /// to `attempt = 3` via count-based `project_attempt_facts`, which then
+    /// trips the `MAX_ATTEMPTS` gate in `review_task(request_changes)`.
+    /// Before Phase 0 this gate was dead code in production.
+    #[tokio::test]
+    async fn request_changes_at_3_dispatches_auto_rejects() {
+        use super::*;
+        use crate::plan::audit_sentinel::AuditSentinelKind;
+        use crate::plan::projector::{project_attempt_facts, project_attempt_history};
+
+        // Three Dispatch sentinels all stamped with the buggy attempt: 1
+        // (mimicking what the reconciler emits today). Two ReviewFeedback
+        // sentinels for the first two attempts so request_changes is the
+        // expected next call after the third dispatch produced AwaitingReview.
+        let audits = vec![
+            AuditSentinelKind::Dispatch {
+                delegation_id: "del-1".into(),
+                worker: "codex".into(),
+                attempt: 1,
+            },
+            AuditSentinelKind::ReviewFeedback {
+                delegation_id: "del-1".into(),
+                attempt: 1,
+                feedback: "fix one".into(),
+                worker_branch: Some("spur/worker-1".into()),
+                summary: Some("partial 1".into()),
+            },
+            AuditSentinelKind::Dispatch {
+                delegation_id: "del-2".into(),
+                worker: "codex".into(),
+                attempt: 1,
+            },
+            AuditSentinelKind::ReviewFeedback {
+                delegation_id: "del-2".into(),
+                attempt: 1,
+                feedback: "fix two".into(),
+                worker_branch: Some("spur/worker-2".into()),
+                summary: Some("partial 2".into()),
+            },
+            AuditSentinelKind::Dispatch {
+                delegation_id: "del-3".into(),
+                worker: "codex".into(),
+                attempt: 1,
+            },
+        ];
+
+        let (projected_attempt, last_delegation_id) = project_attempt_facts(&audits);
+        assert_eq!(
+            projected_attempt, 3,
+            "count-based projection must yield 3 even though each Dispatch.attempt is 1"
+        );
+        assert_eq!(last_delegation_id.as_deref(), Some("del-3"));
+
+        let history = project_attempt_history(&audits);
+        assert_eq!(history.len(), 2);
+
+        let entry = PlanTaskEntry {
+            spec: task("T1", &[]),
+            status: PlanTaskStatus::AwaitingReview {
+                summary: Some("third attempt awaiting review".into()),
+            },
+            result: None,
+            worker_branch: Some("spur/worker-3".into()),
+            attempt: projected_attempt,
+            history,
+            last_delegation_id,
+            dispatched_base_oid: None,
+        };
+        assert_eq!(entry.attempt, MAX_ATTEMPTS);
+
+        let mut state = PlanState {
+            plan_id: "p1".into(),
+            tasks: vec![entry],
+            brain_session_id: BrainSessionId::new(spur_acp::SessionId("test-brain".into())),
+            base_snapshot_branch: None,
+            base_snapshot_oid: None,
+            merge_state: PlanMergeState::NotStarted,
+            epic_id: None,
+        };
+
+        let resp = review_task(
+            "p1",
+            "T1",
+            "request_changes",
+            Some("please retry"),
+            &mut state,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("MAX_ATTEMPTS reached should auto-reject (Ok), not Err");
+
+        let entry = &state.tasks[0];
+        assert!(
+            matches!(entry.status, PlanTaskStatus::Rejected { .. }),
+            "expected Rejected after 3rd dispatch hits MAX_ATTEMPTS, got {:?}",
+            entry.status
+        );
+
+        let obj = resp.as_object().expect("resp is object");
+        assert_eq!(obj.get("decision").and_then(|v| v.as_str()), Some("reject"));
+        let warnings = obj
+            .get("warnings")
+            .and_then(|v| v.as_array())
+            .expect("warnings array");
+        assert!(
+            warnings.iter().any(|w| w
+                .as_str()
+                .is_some_and(|s| s.contains("auto-rejected") && s.contains("MAX_ATTEMPTS"))),
+            "expected MAX_ATTEMPTS auto-reject warning, got {warnings:?}"
+        );
+    }
+
     #[test]
     fn build_task_diff_fields_emits_marker_when_diff_none() {
         let result = spur_acp::DelegationResult {
