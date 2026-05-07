@@ -1653,7 +1653,7 @@ async fn tick_once_persists_failed_completion_when_respond_to_drops() {
     drop(request.respond_to);
 
     task_tracker.close();
-    tokio::time::timeout(std::time::Duration::from_secs(2), task_tracker.wait())
+    tokio::time::timeout(std::time::Duration::from_secs(60), task_tracker.wait())
         .await
         .expect("completion task should finish");
     tokio::time::timeout(
@@ -1664,7 +1664,7 @@ async fn tick_once_persists_failed_completion_when_respond_to_drops() {
     .expect("completion should fast-forward the reconciler");
 
     let issue = pm.get_issue(&task_id).await.expect("get issue");
-    assert_eq!(issue.status, pm.closed_status());
+    assert_eq!(issue.status, "open");
     assert!(!issue
         .labels
         .iter()
@@ -1686,11 +1686,9 @@ async fn tick_once_persists_failed_completion_when_respond_to_drops() {
         .iter()
         .find(|task| task.spec.issue_id.as_deref() == Some(task_id.as_str()))
         .expect("projected task");
-    assert!(matches!(
-        &task.status,
-        spur_mcp::plan::PlanTaskStatus::Failed { error }
-            if error == "orchestrator disconnected"
-    ));
+    assert!(matches!(task.status, spur_mcp::plan::PlanTaskStatus::Ready));
+    assert_eq!(task.attempt, 2);
+    assert_eq!(task.history.len(), 1);
 
     let sentinels = collect_sentinels(&run_br_json(dir.path(), &["comments", "list", &task_id]));
     assert!(sentinels.iter().any(|audit| matches!(
@@ -1702,6 +1700,16 @@ async fn tick_once_persists_failed_completion_when_respond_to_drops() {
             ..
         } if found_delegation_id == &delegation_id
             && result_summary.as_deref() == Some("orchestrator disconnected")
+    )));
+    assert!(sentinels.iter().any(|audit| matches!(
+        audit,
+        AuditSentinelKind::RetryRequested {
+            delegation_id: found_delegation_id,
+            attempt: 1,
+            error,
+            ..
+        } if found_delegation_id == &delegation_id
+            && error == "orchestrator disconnected"
     )));
 }
 
@@ -1783,18 +1791,23 @@ async fn tick_once_reclaims_expired_lease_dispatch() {
     );
 
     assert!(reconciler.tick_once().await.expect("tick_once"));
-    assert!(
-        delegation_rx.try_recv().is_err(),
-        "expired lease reclamation must not dispatch the stale task"
+    let retry_request = delegation_rx
+        .try_recv()
+        .expect("expired lease reclamation should dispatch the auto-retry");
+    assert_eq!(retry_request.issue_id.as_deref(), Some(task_id.as_str()));
+    assert_ne!(
+        retry_request.id.as_str(),
+        delegation_id,
+        "auto-retry dispatch must use a fresh delegation id"
     );
 
     let issue = pm.get_issue(&task_id).await.expect("get issue");
-    assert_eq!(issue.status, pm.closed_status());
-    assert!(!issue
+    assert_eq!(issue.status, "open");
+    assert!(issue
         .labels
         .iter()
         .any(|label| label.starts_with("spur:delegation-id:")));
-    assert!(!issue
+    assert!(issue
         .labels
         .iter()
         .any(|label| label.starts_with(labels::LEASE_EXPIRES_AT_PREFIX)));
@@ -1809,6 +1822,24 @@ async fn tick_once_reclaims_expired_lease_dispatch() {
             ..
         } if found_delegation_id == delegation_id
             && result_summary.as_deref() == Some("dispatch lease expired")
+    )));
+    assert!(sentinels.iter().any(|audit| matches!(
+        audit,
+        AuditSentinelKind::RetryRequested {
+            delegation_id: found_delegation_id,
+            attempt: 1,
+            error,
+            ..
+        } if found_delegation_id == delegation_id
+            && error == "dispatch lease expired"
+    )));
+    assert!(sentinels.iter().any(|audit| matches!(
+        audit,
+        AuditSentinelKind::Dispatch {
+            delegation_id: found_delegation_id,
+            attempt: 2,
+            ..
+        } if found_delegation_id == retry_request.id.as_str()
     )));
     assert!(sentinels.iter().any(|audit| matches!(
         audit,

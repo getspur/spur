@@ -1098,22 +1098,7 @@ impl Reconciler {
             let (respond_to, rx) = tokio::sync::oneshot::channel();
             let (dispatched_base_oid_tx, dispatched_base_oid_rx) =
                 tokio::sync::watch::channel(None);
-            let task_text = if task.history.is_empty() {
-                task.spec.task.clone()
-            } else {
-                let current_feedback = task
-                    .history
-                    .last()
-                    .map(|r| r.feedback.as_str())
-                    .unwrap_or("");
-                crate::plan::build_enriched_task(
-                    &task.spec.task,
-                    &task.history,
-                    current_feedback,
-                    task.attempt,
-                    crate::plan::MAX_ATTEMPTS,
-                )
-            };
+            let task_text = crate::plan::build_dispatch_task_text(task);
             let request = crate::tools::DelegationRequest {
                 id: delegation_id.clone().into(),
                 agent: task.spec.agent.clone(),

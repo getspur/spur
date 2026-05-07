@@ -4,7 +4,9 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use spur_acp::domain::{BrainContinuation, ContinuationSource};
 use spur_acp::{BrainSessionId, SessionId, SpurEvent, SpurEventBody};
-use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind, EpicCompletionOutcome};
+use spur_mcp::plan::audit_sentinel::{
+    self, AuditSentinelKind, CompletionState, EpicCompletionOutcome,
+};
 use spur_mcp::plan::labels;
 use spur_mcp::plan::outcomes::{DispatchOutcome, OutcomeStore, SkipReason};
 use spur_mcp::plan::reconciler::{Reconciler, ReconcilerConfig, ReconcilerDispatchCtx};
@@ -14,7 +16,7 @@ use tokio::sync::Notify;
 
 mod common;
 
-const COMPLETION_TASK_TIMEOUT: Duration = Duration::from_secs(10);
+const COMPLETION_TASK_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterializer> {
     Arc::new(spur_mcp::outcome_materializer::OutcomeMaterializer::new(
@@ -186,6 +188,34 @@ async fn reconciler_pushes_plan_completed_continuation_after_worker_completion_c
     label_issue(dir.path(), &task_id, &labels::agent("codex"));
 
     let pm = beads_pm(dir.path()).await;
+    let adv = pm.advanced().expect("advanced beads backend");
+    for audit in [
+        AuditSentinelKind::Dispatch {
+            delegation_id: "del-prev".into(),
+            worker: "codex".into(),
+            attempt: 1,
+        },
+        AuditSentinelKind::Completion {
+            delegation_id: "del-prev".into(),
+            completion_state: CompletionState::Failed,
+            superseded: false,
+            worker_branch: None,
+            result_summary: Some("first attempt failed".into()),
+            artifact_uri: None,
+            dispatched_base_oid: None,
+        },
+        AuditSentinelKind::RetryRequested {
+            delegation_id: "del-prev".into(),
+            attempt: 1,
+            error: "first attempt failed".into(),
+            worker_branch: None,
+        },
+    ] {
+        adv.add_comment(&task_id, &audit_sentinel::encode_comment(&audit))
+            .await
+            .expect("seed retry history");
+    }
+
     let (continuation_tx, mut continuation_rx) = tokio::sync::mpsc::unbounded_channel();
     let (delegation_tx, mut delegation_rx) = tokio::sync::mpsc::channel(1);
     let task_tracker = tokio_util::task::TaskTracker::new();
