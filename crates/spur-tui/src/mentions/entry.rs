@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use super::issue_source::IssueMentionDescriptor;
 
@@ -28,7 +28,7 @@ pub struct MentionEntry {
     /// Optional visible InputBar atom text, including the leading `@`.
     pub atom_text: Option<String>,
     /// Optional issue descriptor retained for richer issue-row previews.
-    pub issue_preview: Option<Rc<IssueMentionDescriptor>>,
+    pub issue_preview: Option<Arc<IssueMentionDescriptor>>,
 }
 
 pub trait MentionSource: Send {
