@@ -12,6 +12,7 @@ test-helpers = []
 fault-injection = []
 
 [dependencies]
+dashmap = "6"
 fs4 = "0.13"
 libc = "0.2"
 rand = "0.8"
