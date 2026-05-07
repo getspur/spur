@@ -6748,6 +6748,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "criterion",
+ "dashmap",
  "directories",
  "fs4",
  "futures",

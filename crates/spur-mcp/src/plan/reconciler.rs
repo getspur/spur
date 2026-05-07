@@ -909,6 +909,7 @@ impl Reconciler {
                 attempt_tracker: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(
                     task_attempt,
                 )),
+                enable_worker_mcp: None,
             };
 
             if let Err(error) = dispatch.delegation_tx.send(request).await {

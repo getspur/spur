@@ -169,6 +169,12 @@ pub struct DelegationRequest {
     /// retries advance so detached continuations can report the final
     /// 1-based worker attempt that produced the result.
     pub attempt_tracker: Arc<AtomicU32>,
+    /// Phase 5 / Task 26 — opt-in to the curated worker MCP subset.
+    /// `None` or `Some(false)` preserves the historical "Workers get no
+    /// MCP servers" contract; `Some(true)` triggers the orchestrator's
+    /// per-`BrainSession` `WorkerMcpServer` boot and a 1-hour HMAC
+    /// token URL injection into the worker's `mcp_servers` config.
+    pub enable_worker_mcp: Option<bool>,
 }
 
 /// Channel the orchestrator holds to receive requests from the MCP server.
