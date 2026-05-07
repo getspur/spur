@@ -2,6 +2,23 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **⚠️ WORKER CONTRACT — EXACTLY ONE COMMIT PER TOP-LEVEL TASK ⚠️**
+>
+> SPUR's worker output invariant requires the worker branch to contain **exactly one commit** beyond the dispatch base. Treat every per-step `git commit` block in this plan as a *save point during development* — they MUST be squashed into a single final commit before the task ends.
+>
+> **Recommended workflow inside the worker worktree:**
+> 1. Work through the sub-tasks normally; you may make intermediate commits as you go (helpful for git bisect / your own undo).
+> 2. **Final step (mandatory) before declaring the task done:**
+>    ```bash
+>    # Replace <DISPATCH_BASE> with the worktree's initial commit oid (the parent of your first commit on this branch).
+>    git reset --soft <DISPATCH_BASE>
+>    git commit -m "feat(spur-mcp): <one-line summary> (<beads-issue-id>, br-xh7 task N)"
+>    ```
+>    Use `git log --oneline --first-parent` to find the dispatch base; it's the commit that existed before any of your work.
+> 3. Verify with `git rev-list --count <DISPATCH_BASE>..HEAD` — must print `1`.
+>
+> Worker outputs with multiple commits are rejected post-hoc by the SPUR system with `worker output invariant violated: branch has N commits; expected exactly 1` and the task transitions to `failed`. Don't lose your work to this — squash before signoff.
+
 **Goal:** Eliminate the parallel-sibling overlay-conflict failure class by (1) auto-serializing tasks with overlapping `context_files` at plan submit time, (2) running a pre-dispatch overlay dry-run in the reconciler as defense-in-depth, and (3) exposing a `plan_truncate_and_restart` MCP tool for mid-plan recovery when prevention fails.
 
 **Architecture:** Three layered changes to spur-mcp's plan engine, dispatched serially to avoid the very failure mode they fix.
@@ -987,12 +1004,33 @@ Expected: Pass.
 Run: `cargo test -p spur-mcp`
 Expected: All tests pass.
 
-- [ ] **Step 2B.10: Commit**
+- [ ] **Step 2B.10: Commit (intermediate save — will be squashed)**
 
 ```bash
 git add crates/spur-mcp/src/plan/reconciler.rs
 git commit -m "feat(spur-mcp): pre-dispatch overlay dry-run blocks on predicted conflict (br-xh7 task 2B)"
 ```
+
+### Sub-task 2-final: Squash to ONE commit (mandatory before signoff)
+
+- [ ] **Step 2-final.1: Identify the dispatch base**
+
+Run: `git log --oneline --first-parent | head -10` and find the commit that existed BEFORE any of your work on this branch. That oid is your `<DISPATCH_BASE>`.
+
+- [ ] **Step 2-final.2: Squash all task-2 commits into one**
+
+```bash
+# Replace <DISPATCH_BASE> with the oid from the previous step.
+git reset --soft <DISPATCH_BASE>
+git commit -m "feat(spur-mcp): pre-dispatch overlay dry-run + preview helper extraction (br-1ah, br-xh7 task 2)"
+```
+
+- [ ] **Step 2-final.3: Verify exactly one commit**
+
+Run: `git rev-list --count <DISPATCH_BASE>..HEAD`
+Expected: `1`
+
+If the count is anything other than 1, the SPUR worker contract validator will reject the output. Re-run the squash.
 
 ---
 
@@ -1601,12 +1639,33 @@ git commit -m "style(spur-mcp): apply rustfmt (br-xh7 task 3D)"
 Run: `grep -n preview_task_base /Volumes/Projects/spur/AGENTS.md /Volumes/Projects/spur/docs/superpowers/skills/spurpower-spur-way/SKILL.md 2>/dev/null` (or equivalent — look in repo docs).
 If found, add `plan_truncate_and_restart` to the same section with a one-line description matching the tool's `description` field.
 
-- [ ] **Step 3D.4: Commit doc update if any**
+- [ ] **Step 3D.4: Commit doc update if any (intermediate save — will be squashed)**
 
 ```bash
 git add docs/ AGENTS.md 2>/dev/null
 git commit -m "docs: register plan_truncate_and_restart in tool index (br-xh7 task 3D)" || echo "no doc updates needed"
 ```
+
+### Sub-task 3-final: Squash to ONE commit (mandatory before signoff)
+
+- [ ] **Step 3-final.1: Identify the dispatch base**
+
+Run: `git log --oneline --first-parent | head -10` and find the commit that existed BEFORE any of your work on this branch. That oid is your `<DISPATCH_BASE>`.
+
+- [ ] **Step 3-final.2: Squash all task-3 commits into one**
+
+```bash
+# Replace <DISPATCH_BASE> with the oid from the previous step.
+git reset --soft <DISPATCH_BASE>
+git commit -m "feat(spur-mcp): plan_truncate_and_restart MCP tool + staging-branch builder (br-s5c, br-xh7 task 3)"
+```
+
+- [ ] **Step 3-final.3: Verify exactly one commit**
+
+Run: `git rev-list --count <DISPATCH_BASE>..HEAD`
+Expected: `1`
+
+If the count is anything other than 1, the SPUR worker contract validator will reject the output. Re-run the squash.
 
 ---
 
