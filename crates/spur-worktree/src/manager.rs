@@ -476,6 +476,29 @@ impl WorktreeManager {
         Ok(branch_name)
     }
 
+    /// Create a `spur/brain-snapshot-*` branch pointed at a caller-supplied
+    /// ref (branch name, tag, or commit OID). Unlike `snapshot_brain_state`,
+    /// this does not stash the working tree — the brain WT is never touched.
+    /// Used by `submit_plan` when the operator passed an explicit `base`.
+    pub async fn snapshot_at_ref(&self, target_ref: &str) -> Result<String> {
+        // Resolve to an OID first so the snapshot branch is decoupled from
+        // any subsequent movement of the source ref.
+        let oid = self
+            .run_git(&["rev-parse", "--verify", target_ref], None)
+            .await
+            .with_context(|| format!("failed to resolve ref '{target_ref}'"))?;
+
+        let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
+        let seq = SNAPSHOT_SEQ.fetch_add(1, Ordering::Relaxed);
+        let branch_name = format!("spur/brain-snapshot-{timestamp}-{seq}");
+
+        self.run_git_with_retry(&["branch", &branch_name, &oid], None, false)
+            .await
+            .context("failed to create snapshot branch at resolved ref")?;
+
+        Ok(branch_name)
+    }
+
     /// Create a worktree under the v2 branch namespace
     /// `spur/worker/v2/{agent}/{brain_session_id}/{worker_session_id}`.
     pub async fn create_worktree_v2(
@@ -1686,5 +1709,123 @@ mod v2_branch_tests {
     fn parse_v2_rejects_when_session_not_uuid() {
         let b = "spur/worker/v2/claude/not-a-uuid/deadbeef-1111-2222-3333-444455556666";
         assert!(parse_v2_branch(b).is_none());
+    }
+}
+
+#[cfg(test)]
+mod snapshot_at_ref_tests {
+    use super::WorktreeManager;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    fn run_git(repo: &std::path::Path, args: &[&str]) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git spawn");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn capture_git(repo: &std::path::Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git spawn");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    #[tokio::test]
+    async fn snapshot_at_ref_creates_branch_at_named_oid_without_touching_wt() {
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path();
+        run_git(repo, &["init", "-q", "-b", "main"]);
+        run_git(repo, &["config", "user.email", "t@t"]);
+        run_git(repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("a"), "1").unwrap();
+        run_git(repo, &["add", "a"]);
+        run_git(repo, &["commit", "-q", "-m", "first"]);
+        let main_oid = capture_git(repo, &["rev-parse", "HEAD"]);
+
+        // Branch off main, advance, then jump back so HEAD != target_branch's tip.
+        run_git(repo, &["checkout", "-q", "-b", "target"]);
+        std::fs::write(repo.join("b"), "2").unwrap();
+        run_git(repo, &["add", "b"]);
+        run_git(repo, &["commit", "-q", "-m", "second"]);
+        let target_oid = capture_git(repo, &["rev-parse", "HEAD"]);
+        run_git(repo, &["checkout", "-q", "main"]);
+
+        // Make WT dirty — must NOT cause snapshot_at_ref to fail.
+        std::fs::write(repo.join("a"), "dirty").unwrap();
+
+        let manager = WorktreeManager::new(repo.to_path_buf());
+        let snap_branch = manager
+            .snapshot_at_ref(&target_oid)
+            .await
+            .expect("snapshot_at_ref must succeed despite dirty WT");
+
+        assert!(
+            snap_branch.starts_with("spur/brain-snapshot-"),
+            "snapshot branch name must follow convention; got {snap_branch}"
+        );
+        let snap_oid = capture_git(repo, &["rev-parse", &snap_branch]);
+        assert_eq!(
+            snap_oid, target_oid,
+            "snapshot must point at the requested target OID, not main HEAD ({main_oid}) and not a stash commit"
+        );
+        // Brain WT untouched (file still says "dirty" because we never stashed).
+        let a_contents = std::fs::read_to_string(repo.join("a")).unwrap();
+        assert_eq!(a_contents, "dirty");
+    }
+
+    #[tokio::test]
+    async fn snapshot_at_ref_resolves_branch_name_to_oid() {
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path();
+        run_git(repo, &["init", "-q", "-b", "main"]);
+        run_git(repo, &["config", "user.email", "t@t"]);
+        run_git(repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("a"), "1").unwrap();
+        run_git(repo, &["add", "a"]);
+        run_git(repo, &["commit", "-q", "-m", "first"]);
+        run_git(repo, &["branch", "feature/x"]);
+        let feature_oid = capture_git(repo, &["rev-parse", "feature/x"]);
+
+        let manager = WorktreeManager::new(repo.to_path_buf());
+        let snap_branch = manager.snapshot_at_ref("feature/x").await.unwrap();
+        let snap_oid = capture_git(repo, &["rev-parse", &snap_branch]);
+        assert_eq!(snap_oid, feature_oid);
+    }
+
+    #[tokio::test]
+    async fn snapshot_at_ref_fails_loudly_on_unknown_ref() {
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path();
+        run_git(repo, &["init", "-q", "-b", "main"]);
+        run_git(repo, &["config", "user.email", "t@t"]);
+        run_git(repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("a"), "1").unwrap();
+        run_git(repo, &["add", "a"]);
+        run_git(repo, &["commit", "-q", "-m", "first"]);
+
+        let manager = WorktreeManager::new(repo.to_path_buf());
+        let err = manager.snapshot_at_ref("does/not/exist").await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("does/not/exist") || msg.to_lowercase().contains("unknown"),
+            "error must mention the bad ref; got: {msg}"
+        );
     }
 }
