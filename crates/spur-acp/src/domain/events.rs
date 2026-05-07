@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -762,10 +762,10 @@ pub enum SpurEventBody {
     WorkerMcpDelegationSummary {
         delegation_id: String,
         brain_session_id: String,
-        tool_calls: u32,
-        audits_emitted: u32,
-        duration_ms: u64,
-        outcome: String,
+        calls_total: u64,
+        calls_by_tool: BTreeMap<String, u64>,
+        p99_latency_ms: u64,
+        errors: u64,
     },
     ConflictDetected {
         files: Vec<PathBuf>,
@@ -1241,13 +1241,16 @@ mod tests {
 
     #[test]
     fn worker_mcp_delegation_summary_round_trip() {
+        let mut calls_by_tool = BTreeMap::new();
+        calls_by_tool.insert("get_issue".to_string(), 5u64);
+        calls_by_tool.insert("update_issue".to_string(), 2u64);
         let event = SpurEventBody::WorkerMcpDelegationSummary {
             delegation_id: "abc-123".into(),
             brain_session_id: "session-99".into(),
-            tool_calls: 42,
-            audits_emitted: 7,
-            duration_ms: 1234,
-            outcome: "success".into(),
+            calls_total: 7,
+            calls_by_tool,
+            p99_latency_ms: 1234,
+            errors: 1,
         };
         let json = serde_json::to_string(&event).unwrap();
         let decoded: SpurEventBody = serde_json::from_str(&json).unwrap();
