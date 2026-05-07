@@ -7,6 +7,7 @@ pub mod input_history;
 pub mod landing;
 pub mod mentions;
 pub mod session_metadata;
+pub mod theme;
 pub mod tui;
 pub mod views;
 pub mod worker_streams;
