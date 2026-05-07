@@ -1,5 +1,5 @@
 use ratatui::{
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
 };
 
@@ -7,6 +7,7 @@ use crate::components::trace_format::{
     derive_delegate_status, family_glyph, input_display_lines, input_summary, observe_compact,
     observe_payload_lines, observe_verb, outcome_glyph, terminal_safe_text,
 };
+use crate::theme::{resolve_token, ColorDepth};
 
 use super::types::{ActStatus, TraceKind};
 use super::ReactTrace;
@@ -22,6 +23,19 @@ impl ReactTrace {
         spinner_frame: &str,
         lineage: Option<&spur_core::lineage::projection::ExecutorLineage>,
     ) -> Vec<Line<'static>> {
+        let theme = &self.theme;
+        let tok = |name: &str| resolve_token(theme, name, ColorDepth::Truecolor);
+        let timestamp_color = tok("react_trace.timestamp.fg");
+        let think_color = tok("react_trace.think.fg");
+        let message_title_color = tok("react_trace.message.title.fg");
+        let message_body_color = tok("react_trace.message.body.fg");
+        let user_color = tok("react_trace.user_message.fg");
+        let permission_color = tok("react_trace.permission.fg");
+        let spinner_color = tok("react_trace.spinner.fg");
+        let success_color = tok("react_trace.outcome.success.fg");
+        let error_color = tok("react_trace.outcome.error.fg");
+        let observe_color = tok("react_trace.observe.fg");
+        let delegate_color = tok("react_trace.delegate.fg");
         let collapsed = self.observe_collapsed;
         let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -30,7 +44,7 @@ impl ReactTrace {
             let entry = &self.entries[i];
             let ts_span = Span::styled(
                 format!("{} ", entry.timestamp),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(timestamp_color),
             );
 
             // Collapsed mode: render Act as a one-line summary.
@@ -43,7 +57,7 @@ impl ReactTrace {
                     ..
                 } = &entry.kind
                 {
-                    let (act_glyph, act_color) = family_glyph(*family);
+                    let (act_glyph, act_color) = family_glyph(theme, *family);
                     let id_str = input_summary(input, tool);
                     let mut spans = vec![
                         ts_span.clone(),
@@ -57,11 +71,11 @@ impl ReactTrace {
                         ActStatus::Pending | ActStatus::InProgress { .. } => {
                             spans.push(Span::styled(
                                 spinner_frame.to_string(),
-                                Style::default().fg(Color::Yellow),
+                                Style::default().fg(spinner_color),
                             ));
                         }
                         ActStatus::Completed(Some(p)) => {
-                            let (obs_glyph, obs_color, stats) = observe_compact(p);
+                            let (obs_glyph, obs_color, stats) = observe_compact(theme, p);
                             spans.push(Span::styled(
                                 obs_glyph.to_string(),
                                 Style::default().fg(obs_color).add_modifier(Modifier::BOLD),
@@ -70,7 +84,7 @@ impl ReactTrace {
                                 spans.push(Span::raw(" "));
                                 spans.push(Span::styled(
                                     stats,
-                                    Style::default().fg(Color::DarkGray),
+                                    Style::default().fg(timestamp_color),
                                 ));
                             }
                         }
@@ -78,14 +92,16 @@ impl ReactTrace {
                             spans.push(Span::styled(
                                 "✓".to_string(),
                                 Style::default()
-                                    .fg(Color::Green)
+                                    .fg(success_color)
                                     .add_modifier(Modifier::BOLD),
                             ));
                         }
                         ActStatus::Failed(_) => {
                             spans.push(Span::styled(
                                 "✗".to_string(),
-                                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                                Style::default()
+                                    .fg(error_color)
+                                    .add_modifier(Modifier::BOLD),
                             ));
                         }
                     }
@@ -103,7 +119,7 @@ impl ReactTrace {
                         Span::styled(
                             "🧠 THINK",
                             Style::default()
-                                .fg(Color::DarkGray)
+                                .fg(think_color)
                                 .add_modifier(Modifier::BOLD),
                         ),
                     ]));
@@ -112,7 +128,7 @@ impl ReactTrace {
                             Span::raw("   "),
                             Span::styled(
                                 terminal_safe_text(text_line),
-                                Style::default().fg(Color::DarkGray),
+                                Style::default().fg(think_color),
                             ),
                         ]));
                     }
@@ -124,7 +140,7 @@ impl ReactTrace {
                         Span::styled(
                             format!("📨 {}", agent),
                             Style::default()
-                                .fg(Color::Cyan)
+                                .fg(message_title_color)
                                 .add_modifier(Modifier::BOLD),
                         ),
                     ]));
@@ -148,7 +164,7 @@ impl ReactTrace {
                                     Span::raw("   "),
                                     Span::styled(
                                         terminal_safe_text(text_line),
-                                        Style::default().fg(Color::White),
+                                        Style::default().fg(message_body_color),
                                     ),
                                 ]));
                             }
@@ -161,7 +177,7 @@ impl ReactTrace {
                             Span::raw("   "),
                             Span::styled(
                                 terminal_safe_text(text_line),
-                                Style::default().fg(Color::White),
+                                Style::default().fg(message_body_color),
                             ),
                         ]));
                     }
@@ -174,7 +190,7 @@ impl ReactTrace {
                     status,
                     ..
                 } => {
-                    let (glyph, glyph_color) = family_glyph(*family);
+                    let (glyph, glyph_color) = family_glyph(theme, *family);
                     lines.push(Line::from(vec![
                         ts_span.clone(),
                         Span::styled(
@@ -195,13 +211,13 @@ impl ReactTrace {
                             ]));
                         }
                     } else {
-                        lines.extend(input_display_lines(input));
+                        lines.extend(input_display_lines(theme, input));
                     }
                     // Render outcome body inline from `status` — no paired
                     // Observe entry exists in the new model.
                     match status {
                         ActStatus::Completed(Some(p)) => {
-                            let (og, oc) = outcome_glyph(p);
+                            let (og, oc) = outcome_glyph(theme, p);
                             let verb = observe_verb(p);
                             lines.push(Line::from(vec![
                                 ts_span.clone(),
@@ -210,7 +226,7 @@ impl ReactTrace {
                                     Style::default().fg(oc).add_modifier(Modifier::BOLD),
                                 ),
                             ]));
-                            lines.extend(observe_payload_lines(p, collapsed));
+                            lines.extend(observe_payload_lines(theme, p, collapsed));
                         }
                         ActStatus::Failed(Some(p)) => {
                             let verb = observe_verb(p);
@@ -218,10 +234,12 @@ impl ReactTrace {
                                 ts_span.clone(),
                                 Span::styled(
                                     format!("✗ {}", verb),
-                                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                                    Style::default()
+                                        .fg(error_color)
+                                        .add_modifier(Modifier::BOLD),
                                 ),
                             ]));
-                            lines.extend(observe_payload_lines(p, collapsed));
+                            lines.extend(observe_payload_lines(theme, p, collapsed));
                         }
                         ActStatus::Completed(None) => {
                             lines.push(Line::from(vec![
@@ -229,7 +247,7 @@ impl ReactTrace {
                                 Span::styled(
                                     "✓ done".to_string(),
                                     Style::default()
-                                        .fg(Color::Green)
+                                        .fg(success_color)
                                         .add_modifier(Modifier::BOLD),
                                 ),
                             ]));
@@ -239,7 +257,9 @@ impl ReactTrace {
                                 ts_span.clone(),
                                 Span::styled(
                                     "✗ failed".to_string(),
-                                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                                    Style::default()
+                                        .fg(error_color)
+                                        .add_modifier(Modifier::BOLD),
                                 ),
                             ]));
                         }
@@ -249,7 +269,7 @@ impl ReactTrace {
 
                 TraceKind::Observe { payload } => {
                     if let Some(p) = payload {
-                        let (glyph, glyph_color) = outcome_glyph(p);
+                        let (glyph, glyph_color) = outcome_glyph(theme, p);
                         let verb = observe_verb(p);
                         lines.push(Line::from(vec![
                             ts_span.clone(),
@@ -260,14 +280,14 @@ impl ReactTrace {
                                     .add_modifier(Modifier::BOLD),
                             ),
                         ]));
-                        lines.extend(observe_payload_lines(p, collapsed));
+                        lines.extend(observe_payload_lines(theme, p, collapsed));
                     } else {
                         lines.push(Line::from(vec![
                             ts_span.clone(),
                             Span::styled(
                                 "👁 OBSERVE",
                                 Style::default()
-                                    .fg(Color::Green)
+                                    .fg(observe_color)
                                     .add_modifier(Modifier::BOLD),
                             ),
                         ]));
@@ -276,7 +296,7 @@ impl ReactTrace {
                                 Span::raw("   "),
                                 Span::styled(
                                     terminal_safe_text(text_line),
-                                    Style::default().fg(Color::Green),
+                                    Style::default().fg(observe_color),
                                 ),
                             ]));
                         }
@@ -295,14 +315,14 @@ impl ReactTrace {
                         Span::styled(
                             format!("→ DELEGATE to {}", agent),
                             Style::default()
-                                .fg(Color::Cyan)
+                                .fg(delegate_color)
                                 .add_modifier(Modifier::BOLD),
                         ),
                     ]));
                     if !task.is_empty() {
                         lines.push(Line::from(vec![
                             Span::raw("   "),
-                            Span::styled(task.clone(), Style::default().fg(Color::Cyan)),
+                            Span::styled(task.clone(), Style::default().fg(delegate_color)),
                         ]));
                     }
                     let effective_status = derive_delegate_status(executor_id.as_deref(), lineage)
@@ -317,7 +337,7 @@ impl ReactTrace {
                         };
                         lines.push(Line::from(vec![Span::styled(
                             status_text,
-                            Style::default().fg(Color::Cyan),
+                            Style::default().fg(delegate_color),
                         )]));
                     }
                     if let (Some(eid), Some(lin)) = (executor_id.as_ref(), lineage) {
@@ -337,9 +357,7 @@ impl ReactTrace {
                         ts_span.clone(),
                         Span::styled(
                             "💬 YOU",
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD),
+                            Style::default().fg(user_color).add_modifier(Modifier::BOLD),
                         ),
                     ]));
                     for text_line in entry.text.lines() {
@@ -347,7 +365,7 @@ impl ReactTrace {
                             Span::raw("   "),
                             Span::styled(
                                 terminal_safe_text(text_line),
-                                Style::default().fg(Color::Yellow),
+                                Style::default().fg(user_color),
                             ),
                         ]));
                     }
@@ -363,7 +381,7 @@ impl ReactTrace {
                         Span::styled(
                             format!("⚠ PERMISSION: {}", description),
                             Style::default()
-                                .fg(Color::Yellow)
+                                .fg(permission_color)
                                 .add_modifier(Modifier::BOLD),
                         ),
                     ]));
@@ -376,7 +394,7 @@ impl ReactTrace {
                         lines.push(Line::from(vec![Span::styled(
                             hint_text,
                             Style::default()
-                                .fg(Color::Yellow)
+                                .fg(permission_color)
                                 .add_modifier(Modifier::RAPID_BLINK),
                         )]));
                     }
@@ -386,7 +404,7 @@ impl ReactTrace {
                                 Span::raw("   "),
                                 Span::styled(
                                     terminal_safe_text(text_line),
-                                    Style::default().fg(Color::Yellow),
+                                    Style::default().fg(permission_color),
                                 ),
                             ]));
                         }
@@ -516,6 +534,19 @@ impl ReactTrace {
         Vec<usize>,
         Vec<Option<std::ops::Range<usize>>>,
     ) {
+        let theme = &self.theme;
+        let tok = |name: &str| resolve_token(theme, name, ColorDepth::Truecolor);
+        let timestamp_color = tok("react_trace.timestamp.fg");
+        let think_color = tok("react_trace.think.fg");
+        let message_title_color = tok("react_trace.message.title.fg");
+        let message_body_color = tok("react_trace.message.body.fg");
+        let user_color = tok("react_trace.user_message.fg");
+        let permission_color = tok("react_trace.permission.fg");
+        let spinner_color = tok("react_trace.spinner.fg");
+        let success_color = tok("react_trace.outcome.success.fg");
+        let error_color = tok("react_trace.outcome.error.fg");
+        let observe_color = tok("react_trace.observe.fg");
+        let delegate_color = tok("react_trace.delegate.fg");
         let spinner_frame = spinner::frame(spinner::BRAILLE, self.tick_counter as u32);
         let collapsed = self.observe_collapsed;
 
@@ -549,7 +580,7 @@ impl ReactTrace {
             let entry = &self.entries[i];
             let ts_span = Span::styled(
                 format!("{} ", entry.timestamp),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(timestamp_color),
             );
 
             // Collapsed mode: render Act as a one-line summary.
@@ -562,7 +593,7 @@ impl ReactTrace {
                     ..
                 } = &entry.kind
                 {
-                    let (act_glyph, act_color) = family_glyph(*family);
+                    let (act_glyph, act_color) = family_glyph(theme, *family);
                     let id_str = input_summary(input, tool);
                     let mut spans = vec![
                         ts_span.clone(),
@@ -576,11 +607,11 @@ impl ReactTrace {
                         ActStatus::Pending | ActStatus::InProgress { .. } => {
                             spans.push(Span::styled(
                                 spinner_frame.to_string(),
-                                Style::default().fg(Color::Yellow),
+                                Style::default().fg(spinner_color),
                             ));
                         }
                         ActStatus::Completed(Some(p)) => {
-                            let (obs_glyph, obs_color, stats) = observe_compact(p);
+                            let (obs_glyph, obs_color, stats) = observe_compact(theme, p);
                             spans.push(Span::styled(
                                 obs_glyph.to_string(),
                                 Style::default().fg(obs_color).add_modifier(Modifier::BOLD),
@@ -589,7 +620,7 @@ impl ReactTrace {
                                 spans.push(Span::raw(" "));
                                 spans.push(Span::styled(
                                     stats,
-                                    Style::default().fg(Color::DarkGray),
+                                    Style::default().fg(timestamp_color),
                                 ));
                             }
                         }
@@ -597,14 +628,16 @@ impl ReactTrace {
                             spans.push(Span::styled(
                                 "✓".to_string(),
                                 Style::default()
-                                    .fg(Color::Green)
+                                    .fg(success_color)
                                     .add_modifier(Modifier::BOLD),
                             ));
                         }
                         ActStatus::Failed(_) => {
                             spans.push(Span::styled(
                                 "✗".to_string(),
-                                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                                Style::default()
+                                    .fg(error_color)
+                                    .add_modifier(Modifier::BOLD),
                             ));
                         }
                     }
@@ -642,7 +675,7 @@ impl ReactTrace {
                             Span::styled(
                                 "🧠 THINK",
                                 Style::default()
-                                    .fg(Color::DarkGray)
+                                    .fg(think_color)
                                     .add_modifier(Modifier::BOLD),
                             ),
                         ]),
@@ -656,7 +689,7 @@ impl ReactTrace {
                                 Span::raw("   "),
                                 Span::styled(
                                     terminal_safe_text(text_line),
-                                    Style::default().fg(Color::DarkGray),
+                                    Style::default().fg(think_color),
                                 ),
                             ]),
                         );
@@ -673,7 +706,7 @@ impl ReactTrace {
                             Span::styled(
                                 format!("📨 {}", agent),
                                 Style::default()
-                                    .fg(Color::Cyan)
+                                    .fg(message_title_color)
                                     .add_modifier(Modifier::BOLD),
                             ),
                         ]),
@@ -724,7 +757,7 @@ impl ReactTrace {
                                     Span::raw("   "),
                                     Span::styled(
                                         terminal_safe_text(text_line),
-                                        Style::default().fg(Color::White),
+                                        Style::default().fg(message_body_color),
                                     ),
                                 ]),
                             );
@@ -739,7 +772,7 @@ impl ReactTrace {
                     status,
                     ..
                 } => {
-                    let (glyph, glyph_color) = family_glyph(*family);
+                    let (glyph, glyph_color) = family_glyph(theme, *family);
                     push_wrapped(
                         &mut rows,
                         &mut byte_ranges,
@@ -770,13 +803,13 @@ impl ReactTrace {
                             );
                         }
                     } else {
-                        for line in input_display_lines(input) {
+                        for line in input_display_lines(theme, input) {
                             push_wrapped(&mut rows, &mut byte_ranges, content_range.clone(), line);
                         }
                     }
                     match status {
                         ActStatus::Completed(Some(p)) => {
-                            let (og, oc) = outcome_glyph(p);
+                            let (og, oc) = outcome_glyph(theme, p);
                             let verb = observe_verb(p);
                             push_wrapped(
                                 &mut rows,
@@ -790,7 +823,7 @@ impl ReactTrace {
                                     ),
                                 ]),
                             );
-                            for l in observe_payload_lines(p, collapsed) {
+                            for l in observe_payload_lines(theme, p, collapsed) {
                                 push_wrapped(&mut rows, &mut byte_ranges, content_range.clone(), l);
                             }
                         }
@@ -805,12 +838,12 @@ impl ReactTrace {
                                     Span::styled(
                                         format!("✗ {}", verb),
                                         Style::default()
-                                            .fg(Color::Red)
+                                            .fg(error_color)
                                             .add_modifier(Modifier::BOLD),
                                     ),
                                 ]),
                             );
-                            for l in observe_payload_lines(p, collapsed) {
+                            for l in observe_payload_lines(theme, p, collapsed) {
                                 push_wrapped(&mut rows, &mut byte_ranges, content_range.clone(), l);
                             }
                         }
@@ -824,7 +857,7 @@ impl ReactTrace {
                                     Span::styled(
                                         "✓ done".to_string(),
                                         Style::default()
-                                            .fg(Color::Green)
+                                            .fg(success_color)
                                             .add_modifier(Modifier::BOLD),
                                     ),
                                 ]),
@@ -840,7 +873,7 @@ impl ReactTrace {
                                     Span::styled(
                                         "✗ failed".to_string(),
                                         Style::default()
-                                            .fg(Color::Red)
+                                            .fg(error_color)
                                             .add_modifier(Modifier::BOLD),
                                     ),
                                 ]),
@@ -852,7 +885,7 @@ impl ReactTrace {
 
                 TraceKind::Observe { payload } => {
                     if let Some(p) = payload {
-                        let (glyph, glyph_color) = outcome_glyph(p);
+                        let (glyph, glyph_color) = outcome_glyph(theme, p);
                         let verb = observe_verb(p);
                         push_wrapped(
                             &mut rows,
@@ -868,7 +901,7 @@ impl ReactTrace {
                                 ),
                             ]),
                         );
-                        for line in observe_payload_lines(p, collapsed) {
+                        for line in observe_payload_lines(theme, p, collapsed) {
                             push_wrapped(&mut rows, &mut byte_ranges, content_range.clone(), line);
                         }
                     } else {
@@ -881,7 +914,7 @@ impl ReactTrace {
                                 Span::styled(
                                     "👁 OBSERVE",
                                     Style::default()
-                                        .fg(Color::Green)
+                                        .fg(observe_color)
                                         .add_modifier(Modifier::BOLD),
                                 ),
                             ]),
@@ -895,7 +928,7 @@ impl ReactTrace {
                                     Span::raw("   "),
                                     Span::styled(
                                         terminal_safe_text(text_line),
-                                        Style::default().fg(Color::Green),
+                                        Style::default().fg(observe_color),
                                     ),
                                 ]),
                             );
@@ -919,7 +952,7 @@ impl ReactTrace {
                             Span::styled(
                                 format!("→ DELEGATE to {}", agent),
                                 Style::default()
-                                    .fg(Color::Cyan)
+                                    .fg(delegate_color)
                                     .add_modifier(Modifier::BOLD),
                             ),
                         ]),
@@ -931,7 +964,7 @@ impl ReactTrace {
                             content_range.clone(),
                             Line::from(vec![
                                 Span::raw("   "),
-                                Span::styled(task.clone(), Style::default().fg(Color::Cyan)),
+                                Span::styled(task.clone(), Style::default().fg(delegate_color)),
                             ]),
                         );
                     }
@@ -951,7 +984,7 @@ impl ReactTrace {
                             content_range.clone(),
                             Line::from(vec![Span::styled(
                                 status_text,
-                                Style::default().fg(Color::Cyan),
+                                Style::default().fg(delegate_color),
                             )]),
                         );
                     }
@@ -976,9 +1009,7 @@ impl ReactTrace {
                             ts_span.clone(),
                             Span::styled(
                                 "💬 YOU",
-                                Style::default()
-                                    .fg(Color::Yellow)
-                                    .add_modifier(Modifier::BOLD),
+                                Style::default().fg(user_color).add_modifier(Modifier::BOLD),
                             ),
                         ]),
                     );
@@ -991,7 +1022,7 @@ impl ReactTrace {
                                 Span::raw("   "),
                                 Span::styled(
                                     terminal_safe_text(text_line),
-                                    Style::default().fg(Color::Yellow),
+                                    Style::default().fg(user_color),
                                 ),
                             ]),
                         );
@@ -1012,7 +1043,7 @@ impl ReactTrace {
                             Span::styled(
                                 format!("⚠ PERMISSION: {}", description),
                                 Style::default()
-                                    .fg(Color::Yellow)
+                                    .fg(permission_color)
                                     .add_modifier(Modifier::BOLD),
                             ),
                         ]),
@@ -1030,7 +1061,7 @@ impl ReactTrace {
                             Line::from(vec![Span::styled(
                                 hint_text,
                                 Style::default()
-                                    .fg(Color::Yellow)
+                                    .fg(permission_color)
                                     .add_modifier(Modifier::RAPID_BLINK),
                             )]),
                         );
@@ -1045,7 +1076,7 @@ impl ReactTrace {
                                     Span::raw("   "),
                                     Span::styled(
                                         terminal_safe_text(text_line),
-                                        Style::default().fg(Color::Yellow),
+                                        Style::default().fg(permission_color),
                                     ),
                                 ]),
                             );

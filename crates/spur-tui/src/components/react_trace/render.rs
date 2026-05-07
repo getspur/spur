@@ -10,6 +10,11 @@ use ratatui::{
 use ratatui::style::Modifier;
 
 use crate::components::line_wrap::wrap_line_to_width;
+use crate::theme::{resolve_token, ColorDepth, Theme};
+
+fn token_color(theme: &Theme, name: &str) -> Color {
+    resolve_token(theme, name, ColorDepth::Truecolor)
+}
 
 #[cfg(feature = "markdown")]
 use super::types::{RenderContext, Segment, VirtualRow};
@@ -356,10 +361,14 @@ pub(crate) fn render_partial_card(
     total_rows: u16,
     first_row_within: u16,
     run_len: u16,
+    theme: &Theme,
 ) {
     if run_len == 0 {
         return;
     }
+
+    let card_color = token_color(theme, "react_trace.partial_card.fg");
+    let hint_color = token_color(theme, "react_trace.partial_card.hint.fg");
 
     let visible_pct = if total_rows == 0 {
         100u16
@@ -379,9 +388,7 @@ pub(crate) fn render_partial_card(
     let lines: Vec<Line<'static>> = match run_len {
         1 => vec![Line::from(Span::styled(
             format!("[📊 mermaid #{} · {}% · {}]", id.0, visible_pct, direction),
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(card_color).add_modifier(Modifier::BOLD),
         ))],
         2 => vec![
             Line::from(Span::styled(
@@ -389,15 +396,11 @@ pub(crate) fn render_partial_card(
                     "📊 mermaid #{} · {}% visible · {}",
                     id.0, visible_pct, direction
                 ),
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(card_color).add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
                 "Alt-v · open in full viewer",
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::DIM),
+                Style::default().fg(hint_color).add_modifier(Modifier::DIM),
             )),
         ],
         _ => {
@@ -408,16 +411,12 @@ pub(crate) fn render_partial_card(
                         "📊 mermaid #{} · {}% visible · {}",
                         id.0, visible_pct, direction
                     ),
-                    Style::default()
-                        .fg(Color::Magenta)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(card_color).add_modifier(Modifier::BOLD),
                 )),
                 Line::from(""),
                 Line::from(Span::styled(
                     "Alt-v · open in full viewer",
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::DIM),
+                    Style::default().fg(hint_color).add_modifier(Modifier::DIM),
                 )),
             ]
         }
@@ -579,10 +578,11 @@ impl ReactTrace {
 
         if let Some(pos) = Self::position_indicator(total_lines, visible_height, offset, area.width)
         {
+            let pos_color = token_color(&self.theme, "react_trace.timestamp.fg");
             block = block.title_bottom(
                 Line::from(pos)
                     .right_aligned()
-                    .style(Style::default().fg(Color::DarkGray)),
+                    .style(Style::default().fg(pos_color)),
             );
         }
 
@@ -741,10 +741,11 @@ impl ReactTrace {
         let segments = segment_visible_rows(rows, offset, visible_end);
 
         if let Some(pos) = Self::position_indicator(total, visible_height, offset, area.width) {
+            let pos_color = token_color(&self.theme, "react_trace.timestamp.fg");
             block = block.title_bottom(
                 Line::from(pos)
                     .right_aligned()
-                    .style(Style::default().fg(Color::DarkGray)),
+                    .style(Style::default().fg(pos_color)),
             );
         }
         frame.render_widget(block, area);
@@ -805,6 +806,7 @@ impl ReactTrace {
                                 total_rows,
                                 first_row_within,
                                 run_len,
+                                &self.theme,
                             );
                         } else {
                             // Pending / Rendering / Error — single-line dim
@@ -817,10 +819,12 @@ impl ReactTrace {
                                 }
                                 _ => format!("   [⏳ mermaid #{} rendering…]", id.0),
                             };
+                            let placeholder_color =
+                                token_color(&self.theme, "react_trace.partial_card.hint.fg");
                             let line = Line::from(Span::styled(
                                 msg,
                                 Style::default()
-                                    .fg(Color::DarkGray)
+                                    .fg(placeholder_color)
                                     .add_modifier(Modifier::DIM),
                             ));
                             frame.render_widget(Paragraph::new(vec![line]), rect);
@@ -1343,7 +1347,7 @@ mod card_tests {
     fn card_top_visible_says_scroll_down() {
         // first_row_within=0, run_len=5, total_rows=20 → top visible, bottom cropped.
         let lines = render_into(5, |f, r| {
-            render_partial_card(f, r, MermaidId(7), 20, 0, 5);
+            render_partial_card(f, r, MermaidId(7), 20, 0, 5, crate::theme::fallback_theme());
         });
         let joined = lines.join("\n");
         assert!(
@@ -1356,7 +1360,15 @@ mod card_tests {
     fn card_bottom_visible_says_scroll_up() {
         // first_row_within=15, run_len=5, total_rows=20 → top cropped, bottom visible.
         let lines = render_into(5, |f, r| {
-            render_partial_card(f, r, MermaidId(3), 20, 15, 5);
+            render_partial_card(
+                f,
+                r,
+                MermaidId(3),
+                20,
+                15,
+                5,
+                crate::theme::fallback_theme(),
+            );
         });
         let joined = lines.join("\n");
         assert!(
@@ -1369,7 +1381,7 @@ mod card_tests {
     fn card_mid_window_says_scroll_for_more() {
         // first_row_within=8, run_len=5, total_rows=20 → both edges cropped.
         let lines = render_into(5, |f, r| {
-            render_partial_card(f, r, MermaidId(2), 20, 8, 5);
+            render_partial_card(f, r, MermaidId(2), 20, 8, 5, crate::theme::fallback_theme());
         });
         let joined = lines.join("\n");
         assert!(
@@ -1381,7 +1393,15 @@ mod card_tests {
     #[test]
     fn card_visible_pct_at_50() {
         let lines = render_into(5, |f, r| {
-            render_partial_card(f, r, MermaidId(1), 20, 0, 10);
+            render_partial_card(
+                f,
+                r,
+                MermaidId(1),
+                20,
+                0,
+                10,
+                crate::theme::fallback_theme(),
+            );
         });
         let joined = lines.join("\n");
         assert!(joined.contains("50%"), "expected 50% indicator: {joined}");
@@ -1390,7 +1410,7 @@ mod card_tests {
     #[test]
     fn card_visible_pct_total_zero_returns_100() {
         let lines = render_into(3, |f, r| {
-            render_partial_card(f, r, MermaidId(1), 0, 0, 1);
+            render_partial_card(f, r, MermaidId(1), 0, 0, 1, crate::theme::fallback_theme());
         });
         let joined = lines.join("\n");
         assert!(
@@ -1402,7 +1422,7 @@ mod card_tests {
     #[test]
     fn card_one_line_variant_when_run_len_1() {
         let lines = render_into(1, |f, r| {
-            render_partial_card(f, r, MermaidId(1), 20, 0, 1);
+            render_partial_card(f, r, MermaidId(1), 20, 0, 1, crate::theme::fallback_theme());
         });
         // Exactly one non-blank line.
         let non_blank = lines.iter().filter(|l| !l.is_empty()).count();
@@ -1415,7 +1435,7 @@ mod card_tests {
     #[test]
     fn card_two_line_variant_when_run_len_2() {
         let lines = render_into(2, |f, r| {
-            render_partial_card(f, r, MermaidId(1), 20, 0, 2);
+            render_partial_card(f, r, MermaidId(1), 20, 0, 2, crate::theme::fallback_theme());
         });
         let non_blank = lines.iter().filter(|l| !l.is_empty()).count();
         assert_eq!(
@@ -1427,7 +1447,7 @@ mod card_tests {
     #[test]
     fn card_three_line_variant_when_run_len_3_or_more() {
         let lines = render_into(3, |f, r| {
-            render_partial_card(f, r, MermaidId(1), 20, 0, 3);
+            render_partial_card(f, r, MermaidId(1), 20, 0, 3, crate::theme::fallback_theme());
         });
         // 3-line variant: title, blank, hint → 2 non-blank.
         let non_blank = lines.iter().filter(|l| !l.is_empty()).count();
@@ -1437,7 +1457,7 @@ mod card_tests {
     #[test]
     fn card_early_returns_when_run_len_0() {
         let lines = render_into(1, |f, r| {
-            render_partial_card(f, r, MermaidId(1), 20, 0, 0);
+            render_partial_card(f, r, MermaidId(1), 20, 0, 0, crate::theme::fallback_theme());
         });
         // No content rendered.
         assert!(
@@ -1450,7 +1470,15 @@ mod card_tests {
     fn card_centers_when_run_len_exceeds_card_height() {
         // run_len=11, card=3 lines → top padding (11-3)/2 = 4. Card at rows 4..7.
         let lines = render_into(11, |f, r| {
-            render_partial_card(f, r, MermaidId(1), 20, 0, 11);
+            render_partial_card(
+                f,
+                r,
+                MermaidId(1),
+                20,
+                0,
+                11,
+                crate::theme::fallback_theme(),
+            );
         });
         // Rows 0..4 should be blank; row 4 has the title.
         for (i, l) in lines.iter().take(4).enumerate() {

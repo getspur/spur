@@ -13,9 +13,14 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::components::trace_format::terminal_safe_text;
+use crate::theme::{resolve_token, ColorDepth, Theme};
 
 use super::types::{ActStatus, TraceEntry, TraceKind};
 use super::ReactTrace;
+
+fn token(theme: &Theme, name: &str) -> Color {
+    resolve_token(theme, name, ColorDepth::Truecolor)
+}
 
 /// Below 10 columns, the widest compact prefix (`"  > "`, 4 cols) plus
 /// the timestamp display (`" 12:00"`, 6 cols) no longer fit on one row.
@@ -46,7 +51,7 @@ impl ReactTrace {
     /// Build the compact display lines plus the per-entry row-start vector.
     /// Returned lines have `'static` content.
     pub(super) fn build_compact_lines(&self, width: u16) -> (Vec<Line<'static>>, Vec<usize>) {
-        build_compact_lines_from(&self.entries, width, None, 0)
+        build_compact_lines_from(&self.entries, width, None, 0, &self.theme)
     }
 
     #[cfg(test)]
@@ -134,6 +139,7 @@ impl ReactTrace {
                     width,
                     prev_kind_tag,
                     prefix_row_count,
+                    &self.theme,
                 );
                 c.lines.extend(tail_lines);
                 c.entry_row_starts.extend(tail_starts);
@@ -188,38 +194,49 @@ fn compact_kind_tag(k: &TraceKind) -> &'static str {
     }
 }
 
-fn compact_prefix_style(k: &TraceKind) -> (&'static str, Style) {
+fn compact_prefix_style(theme: &Theme, k: &TraceKind) -> (&'static str, Style) {
     match k {
-        TraceKind::Think => ("  · ", Style::default().fg(Color::DarkGray)),
-        TraceKind::AgentMessage { .. } => ("  ▸ ", Style::default().fg(Color::White)),
+        TraceKind::Think => (
+            "  · ",
+            Style::default().fg(token(theme, "react_trace.think.fg")),
+        ),
+        TraceKind::AgentMessage { .. } => (
+            "  ▸ ",
+            Style::default().fg(token(theme, "react_trace.message.body.fg")),
+        ),
         TraceKind::Act { status, .. } => {
             let color = match status {
-                ActStatus::Pending | ActStatus::InProgress { .. } => Color::Yellow,
-                ActStatus::Completed(_) => Color::Green,
-                ActStatus::Failed(_) => Color::Red,
+                ActStatus::Pending | ActStatus::InProgress { .. } => {
+                    token(theme, "react_trace.outcome.pending.fg")
+                }
+                ActStatus::Completed(_) => token(theme, "react_trace.outcome.success.fg"),
+                ActStatus::Failed(_) => token(theme, "react_trace.outcome.error.fg"),
             };
             (
                 "  ▶ ",
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             )
         }
-        TraceKind::Observe { .. } => ("  ◂ ", Style::default().fg(Color::DarkGray)),
+        TraceKind::Observe { .. } => (
+            "  ◂ ",
+            Style::default().fg(token(theme, "react_trace.diff.context.fg")),
+        ),
         TraceKind::Delegate { .. } => (
             "  ⇲ ",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(token(theme, "react_trace.delegate.fg"))
                 .add_modifier(Modifier::BOLD),
         ),
         TraceKind::UserMessage => (
             "  > ",
             Style::default()
-                .fg(Color::White)
+                .fg(token(theme, "react_trace.message.body.fg"))
                 .add_modifier(Modifier::BOLD),
         ),
         TraceKind::Permission { .. } => (
             "  ? ",
             Style::default()
-                .fg(Color::Yellow)
+                .fg(token(theme, "react_trace.permission.fg"))
                 .add_modifier(Modifier::BOLD),
         ),
     }
@@ -268,12 +285,14 @@ fn build_compact_lines_from(
     width: u16,
     seed_prev_kind_tag: Option<&'static str>,
     base_row: usize,
+    theme: &Theme,
 ) -> (Vec<Line<'static>>, Vec<usize>) {
+    let subtle = token(theme, "react_trace.diff.context.fg");
     let w = width as usize;
     if entries.is_empty() && seed_prev_kind_tag.is_none() {
         let placeholder = vec![Line::from(Span::styled(
             "(waiting for worker output...)",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(subtle),
         ))];
         return (placeholder, Vec::new());
     }
