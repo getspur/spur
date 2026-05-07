@@ -1284,3 +1284,35 @@ mod worker_tools_subset_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod base_target_round_trip {
+    use super::BaseTarget;
+
+    #[test]
+    fn repo_main_round_trips() {
+        let v = serde_json::to_value(BaseTarget::RepoMain).unwrap();
+        let back: BaseTarget = serde_json::from_value(v).unwrap();
+        assert_eq!(back, BaseTarget::RepoMain);
+    }
+
+    #[test]
+    fn branch_round_trips() {
+        let v = serde_json::to_value(BaseTarget::Branch {
+            name: "feature/x".into(),
+        })
+        .unwrap();
+        let back: BaseTarget = serde_json::from_value(v).unwrap();
+        assert_eq!(back, BaseTarget::Branch { name: "feature/x".into() });
+    }
+
+    #[test]
+    fn commit_round_trips() {
+        let v = serde_json::to_value(BaseTarget::Commit {
+            oid: "abc123".into(),
+        })
+        .unwrap();
+        let back: BaseTarget = serde_json::from_value(v).unwrap();
+        assert_eq!(back, BaseTarget::Commit { oid: "abc123".into() });
+    }
+}
