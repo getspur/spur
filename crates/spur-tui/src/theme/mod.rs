@@ -12,3 +12,8 @@ pub enum ColorDepth {
     Truecolor,
     Ansi16,
 }
+
+#[cfg(test)]
+mod tests {
+    mod fidelity;
+}
