@@ -35,6 +35,8 @@ Additional revisions from review feedback:
 - **Phase 2 op set narrowed.** Initial v1 proposed 6 ops; revised to 3 (RetryTask, ModifyTaskSpec, AbandonTask). InsertTaskBefore / AddDependency / CancelTask deferred until generic rollback proven.
 - **Phase ordering refined** into Phase 0 → 1 → 2a-2e (see Order of Operations below).
 
+See `br-osl` for the explicit-base mechanism added to `submit_plan` for stacked phases.
+
 ---
 
 ## Executive Summary
