@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use spur_acp::{BrainSessionId, SessionId};
 use spur_mcp::plan::{labels, PlanTask};
-use spur_mcp::server::{DetachedContinuationCtx, McpCallbackServer};
+use spur_mcp::server::{DetachedContinuationCtx, McpCallbackServer, StartupRecoveryProbe};
 use spur_pm::{IssueUpdate, PmService};
 use tempfile::TempDir;
 
@@ -118,6 +118,52 @@ async fn start_does_not_recover_before_brain_session_is_bound() {
 
     handle.abort();
     let _ = handle.await;
+}
+
+#[tokio::test]
+async fn dropping_startup_recovery_handle_cancels_in_flight_task() {
+    let dir = TempDir::new().expect("tempdir");
+    let (_beads, pm) = common::beads::init_beads_pm(dir.path()).await;
+    let owner = BrainSessionId::new(SessionId("brain-current".into()));
+    create_persisted_plan(pm.as_ref(), "cancel-plan", Some(&owner)).await;
+
+    let probe = Arc::new(StartupRecoveryProbe::new());
+    let _probe_guard = McpCallbackServer::__test_install_startup_recovery_probe(Arc::clone(&probe));
+
+    let (mut server, _channel) = McpCallbackServer::new(
+        None,
+        Some(Arc::clone(&pm)),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        common::server_builder::pro_feature_gate(),
+    );
+    server.set_repo_root(dir.path().to_path_buf());
+
+    let server = Arc::new(server);
+    server.__test_request_startup_recovery();
+    assert!(
+        server.__test_startup_recovery_pending(),
+        "recovery should remain pending until the brain session id is bound"
+    );
+
+    server
+        .set_brain_session_id(owner)
+        .expect("brain_session_id set once");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        probe.wait_until_entered(),
+    )
+    .await
+    .expect("startup recovery should spawn and enter the probed recovery path");
+
+    server.__test_drop_startup_recovery_handle();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        probe.wait_until_dropped(),
+    )
+    .await
+    .expect("dropping the start handle should cancel the in-flight recovery task");
 }
 
 #[tokio::test]
