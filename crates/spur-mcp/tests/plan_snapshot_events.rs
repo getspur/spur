@@ -302,6 +302,7 @@ async fn recover_persisted_plans_skips_unowned_legacy_plan() {
         None,
         Some("submit_plan"),
         None,
+        None,
     )
     .await;
 

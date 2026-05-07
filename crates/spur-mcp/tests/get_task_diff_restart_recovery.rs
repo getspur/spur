@@ -136,6 +136,7 @@ async fn t_v0d_4_get_task_diff_works_after_restart_for_latest_attempt() {
         Some(base_snapshot_oid.as_str()),
         Some("submit_plan"),
         Some(&spur_acp::SessionId("brain".into())),
+        None,
     )
     .await;
 
