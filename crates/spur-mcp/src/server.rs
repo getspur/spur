@@ -2031,10 +2031,10 @@ impl McpCallbackServer {
     /// Set the brain_session_id once. Idempotent on the same value; returns
     /// Err if already set to a different value.
     pub fn set_brain_session_id(
-        &self,
+        self: &Arc<Self>,
         id: spur_acp::BrainSessionId,
     ) -> Result<(), spur_acp::BrainSessionId> {
-        if let Some(existing) = self.brain_session_id.get() {
+        let result = if let Some(existing) = self.brain_session_id.get() {
             if existing == &id {
                 self.brain_session_id_notify.notify_waiters();
                 Ok(())
@@ -2050,7 +2050,11 @@ impl McpCallbackServer {
                 Err(tokio::sync::SetError::AlreadyInitializedError(id))
                 | Err(tokio::sync::SetError::InitializingError(id)) => Err(id),
             }
+        };
+        if result.is_ok() {
+            Arc::clone(self).spawn_startup_recovery_if_ready();
         }
+        result
     }
 
     fn request_startup_recovery(&self) {
