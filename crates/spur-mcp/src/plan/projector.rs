@@ -52,22 +52,16 @@ pub fn collect_sorted_audits_for_issue(
 }
 
 pub fn project_attempt_facts(audits: &[AuditSentinelKind]) -> (u32, Option<String>) {
-    let mut attempt = 1u32;
+    let mut count = 0u32;
     let mut last_delegation_id = None;
-
     for audit in audits {
-        if let AuditSentinelKind::Dispatch {
-            delegation_id,
-            attempt: dispatch_attempt,
-            ..
-        } = audit
-        {
-            attempt = *dispatch_attempt;
+        if let AuditSentinelKind::Dispatch { delegation_id, .. } = audit {
+            count += 1;
             last_delegation_id = Some(delegation_id.clone());
         }
     }
-
-    (attempt, last_delegation_id)
+    // attempt 1 == 1st dispatch ever; saturating start ensures pre-dispatch tasks see 1.
+    (count.max(1), last_delegation_id)
 }
 
 pub fn project_attempt_history(audits: &[AuditSentinelKind]) -> Vec<super::AttemptRecord> {
@@ -832,8 +826,11 @@ mod tests {
         assert_eq!(kinds, vec!["dispatch", "completion", "approval"]);
     }
 
+    /// Two Dispatch sentinels project as `attempt = 2` (count of dispatches).
+    /// Under count-based projection, this no longer depends on the value of
+    /// the `attempt` field on each Dispatch sentinel — it counts occurrences.
     #[test]
-    fn latest_dispatch_sets_attempt_and_last_delegation_id() {
+    fn count_based_projection_returns_dispatch_count() {
         let audits = vec![
             AuditSentinelKind::Dispatch {
                 delegation_id: "del-1".into(),
@@ -850,6 +847,100 @@ mod tests {
         let (attempt, last_delegation_id) = super::project_attempt_facts(&audits);
         assert_eq!(attempt, 2);
         assert_eq!(last_delegation_id.as_deref(), Some("del-2"));
+    }
+
+    #[test]
+    fn project_attempt_facts_returns_one_for_no_dispatch() {
+        let audits: Vec<AuditSentinelKind> = vec![];
+        let (attempt, last_delegation_id) = super::project_attempt_facts(&audits);
+        assert_eq!(attempt, 1);
+        assert!(last_delegation_id.is_none());
+    }
+
+    #[test]
+    fn project_attempt_facts_returns_count_not_field() {
+        let audits = vec![
+            AuditSentinelKind::Dispatch {
+                delegation_id: "del-1".into(),
+                worker: "codex".into(),
+                attempt: 1,
+            },
+            AuditSentinelKind::Dispatch {
+                delegation_id: "del-2".into(),
+                worker: "codex".into(),
+                attempt: 1,
+            },
+            AuditSentinelKind::Dispatch {
+                delegation_id: "del-3".into(),
+                worker: "codex".into(),
+                attempt: 1,
+            },
+        ];
+
+        let (attempt, last_delegation_id) = super::project_attempt_facts(&audits);
+        assert_eq!(attempt, 3, "count-based: 3 dispatches => attempt 3");
+        assert_eq!(last_delegation_id.as_deref(), Some("del-3"));
+    }
+
+    #[test]
+    fn project_attempt_facts_legacy_correct_field_ignored() {
+        let audits = vec![
+            AuditSentinelKind::Dispatch {
+                delegation_id: "del-1".into(),
+                worker: "codex".into(),
+                attempt: 1,
+            },
+            AuditSentinelKind::Dispatch {
+                delegation_id: "del-2".into(),
+                worker: "codex".into(),
+                attempt: 2,
+            },
+            AuditSentinelKind::Dispatch {
+                delegation_id: "del-3".into(),
+                worker: "codex".into(),
+                attempt: 3,
+            },
+        ];
+
+        let (attempt, last_delegation_id) = super::project_attempt_facts(&audits);
+        assert_eq!(attempt, 3);
+        assert_eq!(last_delegation_id.as_deref(), Some("del-3"));
+    }
+
+    #[test]
+    fn project_attempt_facts_last_delegation_id_tracks_most_recent() {
+        let audits = vec![
+            AuditSentinelKind::Dispatch {
+                delegation_id: "del-first".into(),
+                worker: "codex".into(),
+                attempt: 1,
+            },
+            AuditSentinelKind::ReviewFeedback {
+                delegation_id: "del-first".into(),
+                attempt: 1,
+                feedback: "fix".into(),
+                worker_branch: None,
+                summary: None,
+            },
+            AuditSentinelKind::Dispatch {
+                delegation_id: "del-middle".into(),
+                worker: "codex".into(),
+                attempt: 1,
+            },
+            AuditSentinelKind::Dispatch {
+                delegation_id: "del-latest".into(),
+                worker: "codex".into(),
+                attempt: 1,
+            },
+        ];
+
+        let (attempt, last_delegation_id) = super::project_attempt_facts(&audits);
+        assert_eq!(attempt, 3);
+        assert_eq!(
+            last_delegation_id.as_deref(),
+            Some("del-latest"),
+            "must track LAST Dispatch's delegation_id, not first or middle"
+        );
     }
 
     #[test]
