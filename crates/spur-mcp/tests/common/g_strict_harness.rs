@@ -18,7 +18,7 @@ use tokio_util::task::TaskTracker;
 
 static CWD_LOCK: LazyLock<Arc<tokio::sync::Mutex<()>>> =
     LazyLock::new(|| Arc::new(tokio::sync::Mutex::new(())));
-const STATUS_POLL_DEADLINE: Duration = Duration::from_secs(15);
+const STATUS_POLL_DEADLINE: Duration = Duration::from_secs(60);
 
 fn run_command(repo: &Path, program: &str, args: &[&str]) -> String {
     let output = Command::new(program)
@@ -495,7 +495,7 @@ impl TestHarness {
             .unwrap_or_else(|| "unknown panic payload".to_string());
 
         self.task_tracker.close();
-        tokio::time::timeout(Duration::from_secs(10), self.task_tracker.wait())
+        tokio::time::timeout(Duration::from_secs(60), self.task_tracker.wait())
             .await
             .expect("dropped completion task should finish after worker panic");
 

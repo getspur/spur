@@ -119,6 +119,40 @@ pub struct AttemptRecord {
     pub dispatched_base_oid: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AttemptRecordKind {
+    #[default]
+    BrainRequestedChanges,
+    WorkerFailureRecovery,
+}
+
+const WORKER_FAILURE_RECOVERY_FEEDBACK_PREFIX: &str =
+    "[[spur-attempt-kind:worker-failure-recovery]]\n";
+
+impl AttemptRecord {
+    pub fn kind(&self) -> AttemptRecordKind {
+        if self
+            .feedback
+            .starts_with(WORKER_FAILURE_RECOVERY_FEEDBACK_PREFIX)
+        {
+            AttemptRecordKind::WorkerFailureRecovery
+        } else {
+            AttemptRecordKind::BrainRequestedChanges
+        }
+    }
+
+    fn feedback_text(&self) -> &str {
+        self.feedback
+            .strip_prefix(WORKER_FAILURE_RECOVERY_FEEDBACK_PREFIX)
+            .unwrap_or(&self.feedback)
+    }
+}
+
+pub(crate) fn worker_failure_recovery_feedback(error: &str) -> String {
+    format!("{WORKER_FAILURE_RECOVERY_FEEDBACK_PREFIX}{error}")
+}
+
 /// A task entry in the plan state (spec + runtime status).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanTaskEntry {
@@ -684,6 +718,11 @@ mod scope_snapshot_integration_tests {
 /// `review_task(request_changes)` returns an error — the brain must approve,
 /// reject, or leave the task as-is.
 pub const MAX_ATTEMPTS: u32 = 3;
+pub const AUTO_RETRY_BUDGET: u32 = 1;
+
+fn should_auto_retry(attempt: u32) -> bool {
+    attempt <= AUTO_RETRY_BUDGET
+}
 
 /// Tracks the active plan for each epic so re-calling `execute_epic(epic_id)`
 /// while a plan is running returns the existing plan_id. Lazy cleanup — a
@@ -1044,7 +1083,7 @@ pub(crate) fn build_enriched_task(
                     .as_ref()
                     .map(|d| format!("+{}/-{} across {} files", d.insertions, d.deletions, d.files_changed))
                     .unwrap_or_else(|| "—".to_string()),
-                feedback = rec.feedback,
+                feedback = rec.feedback_text(),
             ));
         }
     }
@@ -1060,6 +1099,77 @@ pub(crate) fn build_enriched_task(
     }
     out.push('\n');
     out
+}
+
+pub fn build_failure_recovery_task(
+    original_task: &str,
+    history: &[AttemptRecord],
+    failure_reason: &str,
+    worker_branch: Option<&str>,
+    new_attempt: u32,
+    max_attempts: u32,
+) -> String {
+    let mut out = String::with_capacity(original_task.len() + failure_reason.len() + 512);
+    out.push_str(original_task);
+    out.push_str(&format!(
+        "\n\n## Recovery context (Attempt {new_attempt} of {max_attempts})\n\n"
+    ));
+    out.push_str("The previous attempt(s) failed:\n");
+
+    let mut wrote_current_failure = false;
+    for rec in history {
+        let branch = rec
+            .worker_branch
+            .as_deref()
+            .or(worker_branch)
+            .unwrap_or("(no branch)");
+        out.push_str(&format!(
+            "- Attempt {attempt}: {error} (branch: {branch})\n",
+            attempt = rec.attempt,
+            error = rec.feedback_text()
+        ));
+        if rec.feedback_text() == failure_reason && rec.worker_branch.as_deref() == worker_branch {
+            wrote_current_failure = true;
+        }
+    }
+
+    if history.is_empty() || !wrote_current_failure {
+        let failed_attempt = new_attempt.saturating_sub(1).max(1);
+        out.push_str(&format!(
+            "- Attempt {failed_attempt}: {failure_reason} (branch: {branch})\n",
+            branch = worker_branch.unwrap_or("(no branch)")
+        ));
+    }
+
+    out.push_str(
+        "\nInspect the worker branch state with `git log <base>..<branch>`, \
+identify what went wrong, and recover from there to complete the original task.\n",
+    );
+    out
+}
+
+pub(crate) fn build_dispatch_task_text(task: &PlanTaskEntry) -> String {
+    let Some(last) = task.history.last() else {
+        return task.spec.task.clone();
+    };
+    let new_attempt = last.attempt.saturating_add(1);
+    match last.kind() {
+        AttemptRecordKind::BrainRequestedChanges => build_enriched_task(
+            &task.spec.task,
+            &task.history,
+            last.feedback_text(),
+            new_attempt,
+            MAX_ATTEMPTS,
+        ),
+        AttemptRecordKind::WorkerFailureRecovery => build_failure_recovery_task(
+            &task.spec.task,
+            &task.history,
+            last.feedback_text(),
+            last.worker_branch.as_deref(),
+            new_attempt,
+            MAX_ATTEMPTS,
+        ),
+    }
 }
 
 // ─── Validation ──────────────────────────────────────────────────────
@@ -1582,6 +1692,48 @@ pub(crate) async fn emit_review_feedback_audit(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn emit_retry_requested_audit(
+    pm: Option<&dyn PmLike>,
+    issue_id: &Option<String>,
+    feature_gate: &spur_license::FeatureGate,
+    plan_id: &str,
+    delegation_id: &str,
+    attempt: u32,
+    error: &str,
+    worker_branch: Option<String>,
+) -> anyhow::Result<()> {
+    let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
+        return Ok(());
+    };
+    if let Err(error) = crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        feature_gate,
+    ) {
+        warn!(
+            target: "spur.audit.emit_failure",
+            kind = "retry_requested",
+            issue_id = %issue_id,
+            plan_id = %plan_id,
+            delegation_id = %delegation_id,
+            "RetryRequested audit comment emission skipped: {error:?}"
+        );
+        return Ok(());
+    }
+    let Some(adv) = pm.advanced() else {
+        return Ok(());
+    };
+    let kind = crate::plan::audit_sentinel::AuditSentinelKind::RetryRequested {
+        delegation_id: delegation_id.to_string(),
+        attempt,
+        error: error.to_string(),
+        worker_branch,
+    };
+    let body = crate::plan::audit_sentinel::encode_comment(&kind);
+    adv.add_comment(issue_id, &body).await?;
+    Ok(())
+}
+
 /// Build the persisted label mutation used when a task is about to be sent
 /// to a worker.
 pub fn dispatch_intent_update(
@@ -1739,6 +1891,14 @@ pub fn completion_terminal_update(closed_status: &str) -> spur_pm::IssueUpdate {
     }
 }
 
+fn completion_retry_update() -> spur_pm::IssueUpdate {
+    spur_pm::IssueUpdate {
+        status: Some("open".to_string()),
+        remove_labels: review_ready_label_removals(),
+        ..Default::default()
+    }
+}
+
 fn review_ready_label_removals() -> Vec<String> {
     vec![
         crate::plan::labels::READY_FOR_REVIEW.to_string(),
@@ -1825,13 +1985,60 @@ fn apply_worker_output_invariant(
         match crate::plan::audit_sentinel::count_worker_commits(repo_root, base, branch) {
             Ok(1) => return (completion_state, fields),
             Ok(count) => format!(
-                "worker output invariant violated: branch {branch} has {count} commits in {base}..; expected exactly 1. Squash or use --amend."
+                "worker output invariant violated: branch {branch} has {count} commits in {base}..; expected exactly 1. you produced {count} commits; please make exactly 1 squashed commit with git commit --amend or an interactive rebase."
             ),
             Err(error) => format!("worker output invariant check failed: {error}"),
         };
 
     fields.result_summary = Some(diagnostic);
     (CompletionState::Failed, fields)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CompletionPersistenceAction {
+    Completed(crate::plan::audit_sentinel::CompletionState),
+    AutoRetried {
+        error: String,
+        worker_branch: Option<String>,
+    },
+}
+
+/// Ephemeral `run_plan` worker-failure chokepoint. This path does not persist
+/// completion audits, so it applies the same `should_auto_retry(attempt)`
+/// policy in memory that `persist_completion_result_with_retry` applies for
+/// persisted plans. Keep the two branches in sync when changing auto-retry
+/// behavior.
+fn apply_worker_failure_status(
+    entry: &mut PlanTaskEntry,
+    error: String,
+    result: Option<&DelegationResult>,
+) -> bool {
+    if should_auto_retry(entry.attempt) {
+        let worker_branch = result
+            .and_then(|r| r.worker_branch.clone())
+            .or_else(|| entry.worker_branch.clone());
+        let record = AttemptRecord {
+            attempt: entry.attempt,
+            worker_branch,
+            diff_summary: result
+                .and_then(|r| r.diff_summary.clone())
+                .or_else(|| entry.result.as_ref().and_then(|r| r.diff_summary.clone())),
+            summary: result
+                .and_then(|r| r.summary.clone())
+                .or_else(|| entry.result.as_ref().and_then(|r| r.summary.clone())),
+            feedback: worker_failure_recovery_feedback(&error),
+            dispatched_base_oid: entry.dispatched_base_oid.take(),
+        };
+        entry.history.push(record);
+        entry.result = None;
+        entry.worker_branch = None;
+        entry.status = PlanTaskStatus::Pending;
+        entry.attempt = entry.attempt.saturating_add(1);
+        true
+    } else {
+        entry.status = PlanTaskStatus::Failed { error };
+        false
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1860,6 +2067,33 @@ async fn persist_completion_result_after_worker_output_invariant(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) async fn persist_completion_result_after_worker_output_invariant_with_retry(
+    pm: &dyn PmLike,
+    issue_id: &str,
+    feature_gate: &spur_license::FeatureGate,
+    plan_id: &str,
+    delegation_id: &str,
+    completion_state: crate::plan::audit_sentinel::CompletionState,
+    fields: crate::plan::audit_sentinel::CompletionAuditFields,
+    already_emitted: bool,
+    attempt: u32,
+) -> anyhow::Result<CompletionPersistenceAction> {
+    let (completion_state, fields) = apply_worker_output_invariant(completion_state, fields);
+    persist_completion_result_with_retry(
+        pm,
+        issue_id,
+        feature_gate,
+        plan_id,
+        delegation_id,
+        completion_state,
+        fields,
+        already_emitted,
+        Some(attempt),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn persist_completion_result(
     pm: &dyn PmLike,
     issue_id: &str,
@@ -1870,7 +2104,49 @@ pub async fn persist_completion_result(
     fields: crate::plan::audit_sentinel::CompletionAuditFields,
     already_emitted: bool,
 ) -> anyhow::Result<()> {
+    persist_completion_result_with_retry(
+        pm,
+        issue_id,
+        feature_gate,
+        plan_id,
+        delegation_id,
+        completion_state,
+        fields,
+        already_emitted,
+        None,
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Persisted worker-failure chokepoint. All persisted completion writers flow
+/// through this function after worker-output invariant checks, so the
+/// auto-retry decision lives here to emit `Completion` and `RetryRequested`
+/// audits consistently. Keep this policy in sync with
+/// `apply_worker_failure_status`, which covers the ephemeral `run_plan` path.
+#[allow(clippy::too_many_arguments)]
+async fn persist_completion_result_with_retry(
+    pm: &dyn PmLike,
+    issue_id: &str,
+    feature_gate: &spur_license::FeatureGate,
+    plan_id: &str,
+    delegation_id: &str,
+    completion_state: crate::plan::audit_sentinel::CompletionState,
+    fields: crate::plan::audit_sentinel::CompletionAuditFields,
+    already_emitted: bool,
+    retry_attempt: Option<u32>,
+) -> anyhow::Result<CompletionPersistenceAction> {
     use crate::plan::audit_sentinel::CompletionState;
+
+    let auto_retry =
+        completion_state == CompletionState::Failed && retry_attempt.is_some_and(should_auto_retry);
+    let retry_error = auto_retry.then(|| {
+        fields
+            .result_summary
+            .clone()
+            .unwrap_or_else(|| "worker failed".to_string())
+    });
+    let retry_worker_branch = auto_retry.then(|| fields.worker_branch.clone()).flatten();
 
     if !already_emitted && completion_state != CompletionState::Superseded {
         emit_completion_audit(
@@ -1898,9 +2174,24 @@ pub async fn persist_completion_result(
         .await?;
     }
 
+    if let (Some(attempt), Some(error)) = (retry_attempt, retry_error.as_deref()) {
+        emit_retry_requested_audit(
+            Some(pm),
+            &Some(issue_id.to_string()),
+            feature_gate,
+            plan_id,
+            delegation_id,
+            attempt,
+            error,
+            retry_worker_branch.clone(),
+        )
+        .await?;
+    }
+
     let current_labels = pm.issue_labels(issue_id).await?;
     let mut update = match completion_state {
         CompletionState::AwaitingReview => completion_success_update(),
+        CompletionState::Failed if auto_retry => completion_retry_update(),
         CompletionState::Failed | CompletionState::Cancelled => {
             completion_terminal_update(pm.closed_status())
         }
@@ -1909,7 +2200,14 @@ pub async fn persist_completion_result(
     let clear = clear_dispatch_intent_update(delegation_id, &current_labels);
     update.remove_labels.extend(clear.remove_labels);
     apply_issue_update(pm, issue_id, update).await?;
-    Ok(())
+    Ok(if let Some(error) = retry_error {
+        CompletionPersistenceAction::AutoRetried {
+            error,
+            worker_branch: retry_worker_branch,
+        }
+    } else {
+        CompletionPersistenceAction::Completed(completion_state)
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2155,7 +2453,7 @@ async fn persist_completion_inner(
         )
     });
 
-    persist_completion_result_after_worker_output_invariant(
+    let persistence_action = persist_completion_result_after_worker_output_invariant_with_retry(
         pm,
         issue_id,
         feature_gate,
@@ -2164,15 +2462,43 @@ async fn persist_completion_inner(
         completion_state,
         crate::plan::audit_sentinel::CompletionAuditFields {
             worker_branch: result.worker_branch.clone(),
-            result_summary: cont.payload.summary.clone(),
+            result_summary: cont
+                .payload
+                .summary
+                .clone()
+                .or_else(|| failure_reason_from_status(&result.status)),
             artifact_uri,
             dispatched_base_oid,
             repo_root: None,
         },
         already_emitted,
+        attempt,
     )
     .await?;
     crate::server::notify_fast_forward(fast_forward);
+
+    let completion_state = match persistence_action {
+        CompletionPersistenceAction::AutoRetried {
+            error,
+            worker_branch,
+        } => {
+            let event = task_id.map(|tid| {
+                PlanTaskNotificationEventPayload::AutoRetried(PlanTaskAutoRetriedEventPayload {
+                    plan_id: plan_id.to_string(),
+                    task_id: tid.to_string(),
+                    delegation_id: delegation_id.to_string(),
+                    attempt,
+                    error,
+                    worker_branch,
+                })
+            });
+            return Ok(event.map(|event| DeferredCompletionPush {
+                cont: None,
+                event: Some(event),
+            }));
+        }
+        CompletionPersistenceAction::Completed(completion_state) => completion_state,
+    };
 
     // Cancelled completions persist audit but emit no event/continuation.
     if !matches!(
@@ -2182,16 +2508,21 @@ async fn persist_completion_inner(
         return Ok(None);
     }
 
-    let event = task_id.map(|tid| PlanTaskTerminalEventPayload {
-        plan_id: plan_id.to_string(),
-        task_id: tid.to_string(),
-        delegation_id: delegation_id.to_string(),
-        attempt,
-        completion_state,
-        result_status: result.status.clone(),
+    let event = task_id.map(|tid| {
+        PlanTaskNotificationEventPayload::Terminal(PlanTaskTerminalEventPayload {
+            plan_id: plan_id.to_string(),
+            task_id: tid.to_string(),
+            delegation_id: delegation_id.to_string(),
+            attempt,
+            completion_state,
+            result_status: result.status.clone(),
+        })
     });
     let _ = source; // ContinuationSource lives on `cont` already; field elided.
-    Ok(Some(DeferredCompletionPush { cont, event }))
+    Ok(Some(DeferredCompletionPush {
+        cont: Some(cont),
+        event,
+    }))
 }
 
 pub(crate) fn completion_state_from_status(
@@ -2209,6 +2540,16 @@ pub(crate) fn completion_state_from_status(
     }
 }
 
+fn failure_reason_from_status(status: &DelegationStatus) -> Option<String> {
+    match status {
+        DelegationStatus::Failed { error } => Some(error.clone()),
+        DelegationStatus::SetupFailed { error } => Some(error.to_string()),
+        DelegationStatus::Cancelled { reason } => Some(reason.clone()),
+        DelegationStatus::Success | DelegationStatus::Modified { .. } => None,
+        other => Some(format!("{other:?}")),
+    }
+}
+
 /// Payload `persist_completion_inner` packages for the caller to emit AFTER
 /// updating the in-memory plan state. Held by [`DeferredCompletionPush`] and
 /// consumed by [`DeferredCompletionPush::deliver`].
@@ -2221,34 +2562,64 @@ pub struct PlanTaskTerminalEventPayload {
     pub result_status: DelegationStatus,
 }
 
-/// Deferred terminal-state notifications a plan-completion caller MUST drain
-/// after updating in-memory `PlanState` and dropping the lock. Carries both
-/// the brain re-prompt continuation and the observability event payload so
-/// emission ordering is consistent across both observers — events and
-/// continuations both fire AFTER the in-memory state is terminal.
+pub struct PlanTaskAutoRetriedEventPayload {
+    pub plan_id: String,
+    pub task_id: String,
+    pub delegation_id: String,
+    pub attempt: u32,
+    pub error: String,
+    pub worker_branch: Option<String>,
+}
+
+pub enum PlanTaskNotificationEventPayload {
+    Terminal(PlanTaskTerminalEventPayload),
+    AutoRetried(PlanTaskAutoRetriedEventPayload),
+}
+
+/// Deferred plan-task notifications a plan-completion caller MUST drain after
+/// updating in-memory `PlanState` and dropping the lock. Carries the optional
+/// brain re-prompt continuation and observability event payload so emission
+/// ordering is consistent across observers — events and continuations both
+/// fire AFTER the in-memory state reflects the completion or retry decision.
 ///
 /// Contract: caller calls `Self::deliver(...)` exactly once, AFTER updating
-/// the in-memory plan state. Dropping the value silently elides the
-/// notifications and is rejected at compile time by `#[must_use]`.
-#[must_use = "deferred completion notifications dropped — brain will not be re-prompted"]
+/// the in-memory plan state. Dropping the value silently elides notifications
+/// and is rejected at compile time by `#[must_use]`.
+#[must_use = "deferred plan-task notifications dropped"]
 pub struct DeferredCompletionPush {
-    pub cont: spur_acp::domain::BrainContinuation,
-    pub event: Option<PlanTaskTerminalEventPayload>,
+    pub cont: Option<spur_acp::domain::BrainContinuation>,
+    pub event: Option<PlanTaskNotificationEventPayload>,
 }
 
 impl DeferredCompletionPush {
-    /// Emit the terminal event AND push the brain continuation. Call AFTER
-    /// updating the in-memory PlanState and dropping the lock.
+    /// Emit the plan-task event and, when present, push the brain continuation.
+    /// Call AFTER updating the in-memory PlanState and dropping the lock.
     pub async fn deliver(
         self,
         event_sink: Option<&dyn crate::events::McpEventSink>,
         continuation_ctx: &crate::server::DetachedContinuationCtx,
     ) {
         if let Some(payload) = self.event.as_ref() {
-            emit_plan_task_terminal_event(event_sink, payload);
+            emit_plan_task_notification_event(event_sink, payload);
         }
-        let delegation_id = self.cont.delegation_id.as_str().to_string();
-        (continuation_ctx.on_complete)(self.cont, delegation_id).await;
+        if let Some(cont) = self.cont {
+            let delegation_id = cont.delegation_id.as_str().to_string();
+            (continuation_ctx.on_complete)(cont, delegation_id).await;
+        }
+    }
+}
+
+fn emit_plan_task_notification_event(
+    sink: Option<&dyn crate::events::McpEventSink>,
+    payload: &PlanTaskNotificationEventPayload,
+) {
+    match payload {
+        PlanTaskNotificationEventPayload::Terminal(payload) => {
+            emit_plan_task_terminal_event(sink, payload);
+        }
+        PlanTaskNotificationEventPayload::AutoRetried(payload) => {
+            emit_plan_task_auto_retried_event(sink, payload);
+        }
     }
 }
 
@@ -2285,6 +2656,24 @@ fn emit_plan_task_terminal_event(
         crate::plan::audit_sentinel::CompletionState::Cancelled
         | crate::plan::audit_sentinel::CompletionState::Superseded => {}
     }
+}
+
+fn emit_plan_task_auto_retried_event(
+    sink: Option<&dyn crate::events::McpEventSink>,
+    payload: &PlanTaskAutoRetriedEventPayload,
+) {
+    let Some(sink) = sink else {
+        return;
+    };
+    sink.emit(spur_acp::SpurEventBody::PlanTaskAutoRetried {
+        plan_id: payload.plan_id.clone(),
+        task_id: payload.task_id.clone(),
+        delegation_id: payload.delegation_id.clone(),
+        attempt: payload.attempt,
+        max_attempts: MAX_ATTEMPTS,
+        error: payload.error.clone(),
+        worker_branch: payload.worker_branch.clone(),
+    });
 }
 
 async fn materialize_and_push_detached_continuation(
@@ -2378,7 +2767,7 @@ pub async fn run_plan(
 
     loop {
         // ── Single-lock pass: compute ready, mark Dispatched, collect specs ──
-        let ready: Vec<(PlanTask, String, u32)> = {
+        let ready: Vec<(PlanTask, String, u32, String)> = {
             let mut p = plan.lock().await;
             let completed: HashSet<String> = p
                 .tasks
@@ -2402,19 +2791,20 @@ pub async fn run_plan(
                         delegation_id: delegation_id.clone(),
                     };
                     entry.last_delegation_id = Some(delegation_id.clone());
-                    batch.push((entry.spec.clone(), delegation_id, attempt));
+                    let task_text = build_dispatch_task_text(entry);
+                    batch.push((entry.spec.clone(), delegation_id, attempt, task_text));
                 }
             }
             batch
         }; // Lock released.
 
-        for (task_spec, delegation_id, task_attempt) in ready {
+        for (task_spec, delegation_id, task_attempt, task_text) in ready {
             let (tx, rx) = oneshot::channel::<DelegationResult>();
 
             let request = DelegationRequest {
                 id: delegation_id.clone().into(),
                 agent: task_spec.agent.clone(),
-                task: task_spec.task.clone(),
+                task: task_text,
                 context_files: task_spec.context_files.clone(),
                 respond_to: tx,
                 brain_session_id: brain_sid.clone(),
@@ -2438,9 +2828,7 @@ pub async fn run_plan(
                     .iter_mut()
                     .find(|t| t.spec.task_id == task_spec.task_id)
                 {
-                    entry.status = PlanTaskStatus::Failed {
-                        error: "Delegation channel closed".into(),
-                    };
+                    apply_worker_failure_status(entry, "Delegation channel closed".into(), None);
                 }
                 continue;
             }
@@ -2524,6 +2912,7 @@ pub async fn run_plan(
                         if let Some(entry) =
                             p.tasks.iter_mut().find(|t| t.spec.task_id == tid)
                         {
+                            let mut retain_result = true;
                             match &result.status {
                                 DelegationStatus::Success | DelegationStatus::Modified { .. } => {
                                     info!(plan_id = %pid, task_id = %tid, "Plan task awaiting review");
@@ -2537,11 +2926,17 @@ pub async fn run_plan(
                                 }
                                 DelegationStatus::Failed { error } => {
                                     warn!(plan_id = %pid, task_id = %tid, "Plan task failed: {error}");
-                                    entry.status = PlanTaskStatus::Failed {
-                                        error: error.clone(),
-                                    };
-                                    completion_state =
-                                        Some(crate::plan::audit_sentinel::CompletionState::Failed);
+                                    if apply_worker_failure_status(
+                                        entry,
+                                        error.clone(),
+                                        Some(&result),
+                                    ) {
+                                        retain_result = false;
+                                    } else {
+                                        completion_state = Some(
+                                            crate::plan::audit_sentinel::CompletionState::Failed,
+                                        );
+                                    }
                                 }
                                 DelegationStatus::Cancelled { reason } => {
                                     warn!(plan_id = %pid, task_id = %tid, "Plan task cancelled: {reason}");
@@ -2564,22 +2959,36 @@ pub async fn run_plan(
                                 }
                                 DelegationStatus::SetupFailed { error } => {
                                     warn!(plan_id = %pid, task_id = %tid, "Plan task setup failed: {error}");
-                                    entry.status = PlanTaskStatus::Failed {
-                                        error: error.to_string(),
-                                    };
-                                    completion_state =
-                                        Some(crate::plan::audit_sentinel::CompletionState::Failed);
+                                    if apply_worker_failure_status(
+                                        entry,
+                                        error.to_string(),
+                                        Some(&result),
+                                    ) {
+                                        retain_result = false;
+                                    } else {
+                                        completion_state = Some(
+                                            crate::plan::audit_sentinel::CompletionState::Failed,
+                                        );
+                                    }
                                 }
                                 other => {
                                     warn!(plan_id = %pid, task_id = %tid, "Plan task ended: {other:?}");
-                                    entry.status = PlanTaskStatus::Failed {
-                                        error: format!("{other:?}"),
-                                    };
-                                    completion_state =
-                                        Some(crate::plan::audit_sentinel::CompletionState::Failed);
+                                    if apply_worker_failure_status(
+                                        entry,
+                                        format!("{other:?}"),
+                                        Some(&result),
+                                    ) {
+                                        retain_result = false;
+                                    } else {
+                                        completion_state = Some(
+                                            crate::plan::audit_sentinel::CompletionState::Failed,
+                                        );
+                                    }
                                 }
                             }
-                            entry.result = Some(result.clone());
+                            if retain_result {
+                                entry.result = Some(result.clone());
+                            }
                         }
                         drop(p);
 
@@ -2613,16 +3022,21 @@ pub async fn run_plan(
                                             None,
                                         )
                                         .await;
-                                    let event = Some(PlanTaskTerminalEventPayload {
-                                        plan_id: pid.clone(),
-                                        task_id: tid.clone(),
-                                        delegation_id: delegation_id_for_completion.clone(),
-                                        attempt: task_attempt,
-                                        completion_state: state,
-                                        result_status: result.status.clone(),
-                                    });
+                                    let event = Some(PlanTaskNotificationEventPayload::Terminal(
+                                        PlanTaskTerminalEventPayload {
+                                            plan_id: pid.clone(),
+                                            task_id: tid.clone(),
+                                            delegation_id: delegation_id_for_completion.clone(),
+                                            attempt: task_attempt,
+                                            completion_state: state,
+                                            result_status: result.status.clone(),
+                                        },
+                                    ));
                                     let _ = source;
-                                    deferred = Some(DeferredCompletionPush { cont, event });
+                                    deferred = Some(DeferredCompletionPush {
+                                        cont: Some(cont),
+                                        event,
+                                    });
                                 }
                             }
                         }
@@ -2641,9 +3055,11 @@ pub async fn run_plan(
                         if let Some(entry) =
                             p.tasks.iter_mut().find(|t| t.spec.task_id == tid)
                         {
-                            entry.status = PlanTaskStatus::Failed {
-                                error: "Orchestrator channel dropped".into(),
-                            };
+                            apply_worker_failure_status(
+                                entry,
+                                "Orchestrator channel dropped".into(),
+                                None,
+                            );
                         }
                     }
                 }
@@ -4174,6 +4590,7 @@ mod tests {
     use spur_acp::SessionId;
     use std::path::Path;
     use std::process::Command;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     fn task(id: &str, deps: &[&str]) -> PlanTask {
@@ -4651,6 +5068,129 @@ mod tests {
         }];
         let enriched = super::build_enriched_task("Task", &history, "more", 2, super::MAX_ATTEMPTS);
         assert!(!enriched.contains("git show"));
+    }
+
+    #[test]
+    fn build_failure_recovery_task_uses_worker_frame_not_brain_feedback() {
+        let history = vec![super::AttemptRecord {
+            attempt: 1,
+            worker_branch: Some("spur/worker-failed".into()),
+            diff_summary: None,
+            summary: Some("partial".into()),
+            feedback: super::worker_failure_recovery_feedback("worker crashed"),
+            dispatched_base_oid: Some("base-oid".into()),
+        }];
+
+        let task = super::build_failure_recovery_task(
+            "Implement the task",
+            &history,
+            "worker crashed",
+            Some("spur/worker-failed"),
+            2,
+            super::MAX_ATTEMPTS,
+        );
+
+        assert!(task.contains("Implement the task"));
+        assert!(task.contains("## Recovery context (Attempt 2 of 3)"));
+        assert!(task.contains("Attempt 1: worker crashed"));
+        assert!(task.contains("branch: spur/worker-failed"));
+        assert!(!task.contains("Brain feedback:"));
+    }
+
+    #[test]
+    fn auto_retry_amended_prompt_includes_failure_reason_and_branch_state() {
+        let history = vec![super::AttemptRecord {
+            attempt: 1,
+            worker_branch: Some("spur/worker-bd-2m2u".into()),
+            diff_summary: None,
+            summary: None,
+            feedback: super::worker_failure_recovery_feedback("Delegation channel closed"),
+            dispatched_base_oid: Some("abc123".into()),
+        }];
+
+        let task = super::build_failure_recovery_task(
+            "Fix retry handling",
+            &history,
+            "Delegation channel closed",
+            Some("spur/worker-bd-2m2u"),
+            2,
+            super::MAX_ATTEMPTS,
+        );
+
+        assert!(task.contains("Delegation channel closed"));
+        assert!(task.contains("spur/worker-bd-2m2u"));
+        assert!(task.contains("git log <base>..<branch>"));
+        assert!(task.contains("recover from there"));
+    }
+
+    #[test]
+    fn reconciler_dispatch_picks_failure_recovery_template_for_worker_failure_history() {
+        let entry = super::PlanTaskEntry {
+            spec: super::PlanTask {
+                task_id: "T1".into(),
+                agent: "codex".into(),
+                task: "Implement worker retry".into(),
+                depends_on: vec![],
+                issue_id: Some("bd-1".into()),
+                context_files: vec![],
+            },
+            status: super::PlanTaskStatus::Ready,
+            result: None,
+            worker_branch: None,
+            attempt: 1,
+            history: vec![super::AttemptRecord {
+                attempt: 1,
+                worker_branch: Some("spur/worker-failed".into()),
+                diff_summary: None,
+                summary: None,
+                feedback: super::worker_failure_recovery_feedback(
+                    "worker failed before producing output",
+                ),
+                dispatched_base_oid: None,
+            }],
+            last_delegation_id: Some("del-A".into()),
+            dispatched_base_oid: None,
+        };
+
+        let task_text = super::build_dispatch_task_text(&entry);
+
+        assert!(task_text.contains("## Recovery context"));
+        assert!(task_text.contains("worker failed before producing output"));
+        assert!(!task_text.contains("Brain feedback:"));
+    }
+
+    #[test]
+    fn reconciler_dispatch_picks_enriched_template_for_review_feedback_history() {
+        let entry = super::PlanTaskEntry {
+            spec: super::PlanTask {
+                task_id: "T1".into(),
+                agent: "codex".into(),
+                task: "Implement review feedback".into(),
+                depends_on: vec![],
+                issue_id: Some("bd-1".into()),
+                context_files: vec![],
+            },
+            status: super::PlanTaskStatus::Ready,
+            result: None,
+            worker_branch: None,
+            attempt: 1,
+            history: vec![super::AttemptRecord {
+                attempt: 1,
+                worker_branch: Some("spur/worker-review".into()),
+                diff_summary: None,
+                summary: Some("partial".into()),
+                feedback: "add the missing test".into(),
+                dispatched_base_oid: None,
+            }],
+            last_delegation_id: Some("del-A".into()),
+            dispatched_base_oid: None,
+        };
+
+        let task_text = super::build_dispatch_task_text(&entry);
+
+        assert!(task_text.contains("Brain feedback: add the missing test"));
+        assert!(task_text.contains("## Current Request"));
+        assert!(!task_text.contains("## Recovery context"));
     }
 
     #[test]
@@ -5578,6 +6118,116 @@ mod tests {
             Some("spur://outcome/brain-test/del-A/2")
         );
         assert_eq!(completion.1.as_deref(), Some("worker done"));
+    }
+
+    #[tokio::test]
+    async fn worker_failure_at_attempt_1_resets_to_pending_with_amended_prompt() {
+        use std::time::Duration;
+
+        let (plan, delegation_tx, mut delegation_rx) = build_run_plan_fixture(None);
+        let runner = tokio::spawn({
+            let plan = Arc::clone(&plan);
+            async move {
+                run_plan(
+                    plan,
+                    delegation_tx,
+                    None,
+                    None,
+                    None,
+                    test_continuation_ctx(),
+                    test_materializer(),
+                    pro_feature_gate(),
+                )
+                .await
+            }
+        });
+
+        let first = delegation_rx.recv().await.expect("initial dispatch");
+        let _ = first.respond_to.send(spur_acp::DelegationResult {
+            status: spur_acp::DelegationStatus::Failed {
+                error: "worker crashed".into(),
+            },
+            diff: None,
+            diff_summary: None,
+            summary: Some("worker crashed".into()),
+            estimated_cost_usd: 0.0,
+            worker_branch: Some("spur/worker-failed".into()),
+            artifact: None,
+        });
+
+        let second = tokio::time::timeout(Duration::from_secs(1), delegation_rx.recv())
+            .await
+            .expect("auto-retry should redispatch")
+            .expect("retry dispatch request");
+
+        assert!(second.task.contains("## Recovery context"));
+        assert!(second.task.contains("worker crashed"));
+        assert!(second.task.contains("spur/worker-failed"));
+        assert!(!second.task.contains("Brain feedback:"));
+
+        let entry = plan.lock().await.tasks[0].clone();
+        assert_eq!(entry.history.len(), 1);
+        assert!(matches!(
+            entry.history[0].kind(),
+            super::AttemptRecordKind::WorkerFailureRecovery
+        ));
+
+        runner.abort();
+        let _ = runner.await;
+    }
+
+    #[tokio::test]
+    async fn worker_failure_at_attempt_2_terminates_failed() {
+        use std::time::Duration;
+
+        let (plan, delegation_tx, mut delegation_rx) = build_run_plan_fixture(None);
+        {
+            let mut state = plan.lock().await;
+            state.tasks[0].attempt = 2;
+        }
+        let runner = tokio::spawn({
+            let plan = Arc::clone(&plan);
+            async move {
+                run_plan(
+                    plan,
+                    delegation_tx,
+                    None,
+                    None,
+                    None,
+                    test_continuation_ctx(),
+                    test_materializer(),
+                    pro_feature_gate(),
+                )
+                .await
+            }
+        });
+
+        let first = delegation_rx.recv().await.expect("initial dispatch");
+        let _ = first.respond_to.send(spur_acp::DelegationResult {
+            status: spur_acp::DelegationStatus::Failed {
+                error: "worker crashed again".into(),
+            },
+            diff: None,
+            diff_summary: None,
+            summary: Some("worker crashed again".into()),
+            estimated_cost_usd: 0.0,
+            worker_branch: None,
+            artifact: None,
+        });
+
+        match tokio::time::timeout(Duration::from_millis(150), delegation_rx.recv()).await {
+            Ok(Some(_request)) => panic!("attempt 2 must not retry"),
+            Ok(None) | Err(_) => {}
+        }
+
+        let status = plan.lock().await.tasks[0].status.clone();
+        assert!(
+            matches!(status, super::PlanTaskStatus::Failed { ref error } if error == "worker crashed again"),
+            "attempt 2 failure should be terminal Failed, got {status:?}"
+        );
+
+        runner.abort();
+        let _ = runner.await;
     }
 
     #[tokio::test]
@@ -6719,7 +7369,7 @@ mod tests {
                     "diagnostic should include branch and count: {summary}"
                 );
                 assert!(
-                    summary.contains("expected exactly 1. Squash or use --amend."),
+                    summary.contains("you produced 2 commits; please make exactly 1"),
                     "diagnostic should tell the worker how to repair output: {summary}"
                 );
             }
@@ -6744,6 +7394,152 @@ mod tests {
             !labels.contains(&crate::plan::labels::READY_FOR_REVIEW.to_string()),
             "downgraded completion must not add ready-for-review"
         );
+    }
+
+    #[tokio::test]
+    async fn invariant_violation_at_attempt_1_retries_with_recovery_prompt() {
+        let (repo, base) = worker_output_repo(0);
+        let delegation_label = crate::plan::labels::delegation_id("del-A");
+        let lease_label = crate::plan::labels::lease_expires_at(1_777_777_777);
+        let pm = CompletionWritebackPm::new(vec![delegation_label.clone(), lease_label.clone()]);
+
+        let action = super::persist_completion_result_after_worker_output_invariant_with_retry(
+            &pm,
+            "bd-1",
+            pro_feature_gate().as_ref(),
+            "plan-1",
+            "del-A",
+            crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+            crate::plan::audit_sentinel::CompletionAuditFields {
+                worker_branch: Some("worker".to_string()),
+                dispatched_base_oid: Some(base),
+                repo_root: Some(repo.path().to_path_buf()),
+                ..completion_audit_fields()
+            },
+            false,
+            1,
+        )
+        .await
+        .expect("persist retryable invariant violation");
+
+        assert!(matches!(
+            action,
+            super::CompletionPersistenceAction::AutoRetried { .. }
+        ));
+        assert_eq!(
+            pm.status.lock().expect("status lock").as_deref(),
+            Some("open"),
+            "attempt 1 invariant failure should keep the issue open for retry"
+        );
+
+        let comments = pm.advanced.comments.lock().expect("comments lock");
+        let retry = comments
+            .iter()
+            .filter_map(|body| crate::plan::audit_sentinel::parse_comment(body))
+            .filter_map(Result::ok)
+            .find_map(|kind| match kind {
+                crate::plan::audit_sentinel::AuditSentinelKind::RetryRequested {
+                    error,
+                    worker_branch,
+                    ..
+                } => Some((error, worker_branch)),
+                _ => None,
+            })
+            .expect("RetryRequested audit");
+        assert!(
+            retry
+                .0
+                .contains("you produced 0 commits; please make exactly 1"),
+            "retry reason should tell the worker how to repair the invariant: {}",
+            retry.0
+        );
+        assert_eq!(retry.1.as_deref(), Some("worker"));
+    }
+
+    #[derive(Default)]
+    struct RecordingPlanEventSink {
+        events: std::sync::Mutex<Vec<spur_acp::SpurEventBody>>,
+    }
+
+    impl crate::events::McpEventSink for RecordingPlanEventSink {
+        fn emit(&self, event: spur_acp::SpurEventBody) {
+            self.events.lock().expect("events lock").push(event);
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_retry_completion_emits_event_without_brain_continuation() {
+        let delegation_label = crate::plan::labels::delegation_id("del-A");
+        let pm = CompletionWritebackPm::new(vec![delegation_label]);
+        let result = DelegationResult {
+            status: DelegationStatus::Failed {
+                error: "worker crashed".to_string(),
+            },
+            diff: None,
+            diff_summary: None,
+            summary: None,
+            estimated_cost_usd: 0.0,
+            worker_branch: Some("spur/worker-failed".to_string()),
+            artifact: None,
+        };
+
+        let deferred = super::persist_worker_completion_and_notify(
+            &pm,
+            "bd-1",
+            pro_feature_gate().as_ref(),
+            "plan-1",
+            "del-A",
+            &None,
+            &result,
+            &spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
+            1,
+            test_materializer().as_ref(),
+            None,
+            Some("task-1"),
+        )
+        .await
+        .expect("auto-retry completion should persist")
+        .expect("auto-retry completion should defer an event");
+
+        let continuation_count = Arc::new(AtomicUsize::new(0));
+        let continuation_count_for_ctx = Arc::clone(&continuation_count);
+        let continuation_ctx = crate::server::DetachedContinuationCtx {
+            on_complete: Arc::new(move |_, _| {
+                continuation_count_for_ctx.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async {})
+            }),
+        };
+        let sink = RecordingPlanEventSink::default();
+
+        deferred.deliver(Some(&sink), &continuation_ctx).await;
+
+        assert_eq!(
+            continuation_count.load(Ordering::SeqCst),
+            0,
+            "auto-retry should not re-prompt the brain"
+        );
+        let events = sink.events.lock().expect("events lock");
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            spur_acp::SpurEventBody::PlanTaskAutoRetried {
+                plan_id,
+                task_id,
+                delegation_id,
+                attempt,
+                max_attempts,
+                error,
+                worker_branch,
+            } => {
+                assert_eq!(plan_id, "plan-1");
+                assert_eq!(task_id, "task-1");
+                assert_eq!(delegation_id, "del-A");
+                assert_eq!(*attempt, 1);
+                assert_eq!(*max_attempts, MAX_ATTEMPTS);
+                assert_eq!(error, "worker crashed");
+                assert_eq!(worker_branch.as_deref(), Some("spur/worker-failed"));
+            }
+            other => panic!("expected PlanTaskAutoRetried event, got {other:?}"),
+        }
     }
 
     #[tokio::test]

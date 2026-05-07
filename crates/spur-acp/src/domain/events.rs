@@ -1095,6 +1095,19 @@ pub enum SpurEventBody {
         delegation_id: String,
     },
 
+    /// A failed plan task was kept open and scheduled for an automatic retry.
+    PlanTaskAutoRetried {
+        plan_id: String,
+        task_id: String,
+        delegation_id: String,
+        /// Attempt being retried, i.e. the failed attempt.
+        attempt: u32,
+        max_attempts: u32,
+        error: String,
+        #[serde(default)]
+        worker_branch: Option<String>,
+    },
+
     /// A plan task completed worker execution and is waiting for brain review.
     PlanTaskAwaitingReview {
         plan_id: String,
