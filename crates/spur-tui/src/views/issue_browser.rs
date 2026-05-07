@@ -297,6 +297,10 @@ impl IssueBrowserView {
         matches!(self.issue_focus, IssueFocus::Loaded { .. })
     }
 
+    pub fn is_filter_mode(&self) -> bool {
+        self.filter_mode
+    }
+
     fn prefetch_selected_graph(&mut self) {
         if self.tracked_issues.len() < 2 {
             self.pending_prefetch = None;
