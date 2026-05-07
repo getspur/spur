@@ -18,6 +18,7 @@ use tokio_util::task::TaskTracker;
 
 static CWD_LOCK: LazyLock<Arc<tokio::sync::Mutex<()>>> =
     LazyLock::new(|| Arc::new(tokio::sync::Mutex::new(())));
+const STATUS_POLL_DEADLINE: Duration = Duration::from_secs(15);
 
 fn run_command(repo: &Path, program: &str, args: &[&str]) -> String {
     let output = Command::new(program)
@@ -397,12 +398,18 @@ impl TestHarness {
         task_id: &str,
         worker: F,
     ) where
-        F: FnOnce(&Path),
+        F: FnOnce(&Path) + Send + 'static,
     {
         self.reconciler.tick_once().await.expect("reconciler tick");
         let request = self.dispatch_request_for_task(task_id).await;
+        let repo = self.repo.clone();
+        let worker_task_id = task_id.to_string();
 
-        self.run_mock_worker(task_id, request, worker).await;
+        tokio::task::spawn_blocking(move || {
+            run_mock_worker_sync(&repo, &worker_task_id, request, worker)
+        })
+        .await
+        .expect("mock worker task");
         self.wait_for_task_status(plan_id, task_id, "awaiting_review")
             .await;
 
@@ -501,7 +508,8 @@ impl TestHarness {
         task_id: &str,
         expected: &str,
     ) -> Value {
-        for _ in 0..50 {
+        let start = tokio::time::Instant::now();
+        while start.elapsed() < STATUS_POLL_DEADLINE {
             let status = self.plan_status(plan_id).await;
             if task_status(&status, task_id).as_deref() == Some(expected) {
                 return status;
@@ -514,7 +522,8 @@ impl TestHarness {
     }
 
     pub async fn wait_for_terminal(&self, plan_id: &str, task_id: &str) -> Value {
-        for _ in 0..50 {
+        let start = tokio::time::Instant::now();
+        while start.elapsed() < STATUS_POLL_DEADLINE {
             let status = self.plan_status(plan_id).await;
             if let Some(task) = self.task_status_entry(&status, task_id) {
                 if matches!(
@@ -613,48 +622,6 @@ impl TestHarness {
         self.reconciler.tick_once().await
     }
 
-    async fn run_mock_worker<F>(&self, task_id: &str, request: DelegationRequest, worker: F)
-    where
-        F: FnOnce(&Path),
-    {
-        let branch = format!("spur/g-strict-e2e-{task_id}");
-        let worktree = self.repo.join(".spur/worktrees").join(task_id);
-        self.create_worker_worktree(&worktree, &branch, request.base.as_ref());
-
-        let dispatched_base_oid = run_git(&worktree, &["rev-parse", "HEAD"]);
-        if let Some(tx) = request.dispatched_base_oid_tx.as_ref() {
-            tx.send(Some(dispatched_base_oid.clone()))
-                .expect("publish dispatched base oid");
-        }
-
-        worker(&worktree);
-
-        run_git(&worktree, &["add", "."]);
-        run_git(
-            &worktree,
-            &["commit", "-q", "-m", &format!("{task_id} contribution")],
-        );
-        let diff_range = format!("{dispatched_base_oid}..HEAD");
-        let diff = run_git(&worktree, &["diff", &diff_range]);
-
-        request
-            .respond_to
-            .send(DelegationResult {
-                status: DelegationStatus::Success,
-                diff: Some(diff),
-                diff_summary: None,
-                summary: Some(format!("{task_id} complete")),
-                estimated_cost_usd: 0.0,
-                worker_branch: Some(branch),
-                artifact: None,
-            })
-            .expect("send delegation result");
-
-        // Keep the linked worktree alive until TempDir cleanup. Removing it
-        // immediately after replying races the reconciler's branch invariant
-        // checks on some git versions.
-    }
-
     fn create_worker_worktree(&self, worktree: &Path, branch: &str, base: Option<&BaseSpec>) {
         std::fs::create_dir_all(worktree.parent().expect("worktree parent"))
             .expect("create worktree parent");
@@ -706,6 +673,48 @@ fn run_mock_worker_until_oid_send(
         tx.send(Some(dispatched_base_oid))
             .expect("publish dispatched base oid");
     }
+}
+
+fn run_mock_worker_sync<F>(repo: &Path, task_id: &str, request: DelegationRequest, worker: F)
+where
+    F: FnOnce(&Path),
+{
+    let branch = format!("spur/g-strict-e2e-{task_id}");
+    let worktree = repo.join(".spur/worktrees").join(task_id);
+    create_worker_worktree(repo, &worktree, &branch, request.base.as_ref());
+
+    let dispatched_base_oid = run_git(&worktree, &["rev-parse", "HEAD"]);
+    if let Some(tx) = request.dispatched_base_oid_tx.as_ref() {
+        tx.send(Some(dispatched_base_oid.clone()))
+            .expect("publish dispatched base oid");
+    }
+
+    worker(&worktree);
+
+    run_git(&worktree, &["add", "."]);
+    run_git(
+        &worktree,
+        &["commit", "-q", "-m", &format!("{task_id} contribution")],
+    );
+    let diff_range = format!("{dispatched_base_oid}..HEAD");
+    let diff = run_git(&worktree, &["diff", &diff_range]);
+
+    request
+        .respond_to
+        .send(DelegationResult {
+            status: DelegationStatus::Success,
+            diff: Some(diff),
+            diff_summary: None,
+            summary: Some(format!("{task_id} complete")),
+            estimated_cost_usd: 0.0,
+            worker_branch: Some(branch),
+            artifact: None,
+        })
+        .expect("send delegation result");
+
+    // Keep the linked worktree alive until TempDir cleanup. Removing it
+    // immediately after replying races the reconciler's branch invariant
+    // checks on some git versions.
 }
 
 fn create_worker_worktree(repo: &Path, worktree: &Path, branch: &str, base: Option<&BaseSpec>) {
