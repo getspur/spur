@@ -149,10 +149,12 @@ async fn start_server_for_sweep(
     server.set_repo_root(repo.to_path_buf());
     server.set_plan_pending_grace(grace);
 
-    let (_url, handle) = Arc::new(server)
+    let server = Arc::new(server);
+    let (_url, handle) = Arc::clone(&server)
         .start()
         .await
         .expect("server start should run pending sweep");
+    server.__test_wait_startup_recovery().await;
     drop(handle);
 }
 

@@ -137,6 +137,7 @@ struct StartupRecoveryState {
 pub struct StartupRecoveryProbe {
     entered: AtomicBool,
     dropped: AtomicBool,
+    released: AtomicBool,
     entered_notify: tokio::sync::Notify,
     dropped_notify: tokio::sync::Notify,
     release_notify: tokio::sync::Notify,
@@ -148,6 +149,7 @@ impl StartupRecoveryProbe {
         Self {
             entered: AtomicBool::new(false),
             dropped: AtomicBool::new(false),
+            released: AtomicBool::new(false),
             entered_notify: tokio::sync::Notify::new(),
             dropped_notify: tokio::sync::Notify::new(),
             release_notify: tokio::sync::Notify::new(),
@@ -164,6 +166,11 @@ impl StartupRecoveryProbe {
         while !self.dropped.load(Ordering::SeqCst) {
             self.dropped_notify.notified().await;
         }
+    }
+
+    pub fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
+        self.release_notify.notify_waiters();
     }
 
     async fn pause(self: Arc<Self>) {
@@ -183,7 +190,9 @@ impl StartupRecoveryProbe {
         };
         self.entered.store(true, Ordering::SeqCst);
         self.entered_notify.notify_waiters();
-        self.release_notify.notified().await;
+        while !self.released.load(Ordering::SeqCst) {
+            self.release_notify.notified().await;
+        }
     }
 }
 
@@ -1386,12 +1395,6 @@ fn invert_label_update(update: &spur_pm::IssueUpdate) -> spur_pm::IssueUpdate {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LegacyReclaimMode {
-    Skip,
-    DetectAndRun,
-}
-
 fn legacy_reclaim_needed(has_rev1_merge_base_metadata: bool) -> bool {
     !has_rev1_merge_base_metadata
 }
@@ -1400,6 +1403,8 @@ async fn any_open_epic_lacks_rev1_metadata(
     pm: &spur_pm::PmService,
     feature_gate: &spur_license::FeatureGate,
 ) -> anyhow::Result<bool> {
+    #[cfg(any(test, feature = "test-support"))]
+    pause_startup_recovery_if_probed().await;
     let epics = pm
         .list_issues(spur_pm::IssueFilter {
             status: Some("open".to_string()),
@@ -2761,19 +2766,7 @@ impl McpCallbackServer {
                 .is_ok()
                 && pm.advanced().is_some()
             {
-                self.sweep_stale_pending_plans_on_startup(Arc::clone(pm))
-                    .await
-                    .context("failed to sweep stale pending plans before startup")?;
-                let has_rev1_metadata =
-                    !any_open_epic_lacks_rev1_metadata(pm, self.feature_gate.as_ref()).await?;
-                let mode = if legacy_reclaim_needed(has_rev1_metadata) {
-                    LegacyReclaimMode::DetectAndRun
-                } else {
-                    LegacyReclaimMode::Skip
-                };
-                if matches!(mode, LegacyReclaimMode::DetectAndRun) {
-                    self.request_startup_recovery();
-                }
+                self.request_startup_recovery();
             }
         }
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -6267,6 +6260,8 @@ impl McpCallbackServer {
         &self,
         pm: Arc<spur_pm::PmService>,
     ) -> anyhow::Result<()> {
+        #[cfg(any(test, feature = "test-support"))]
+        pause_startup_recovery_if_probed().await;
         let pending_epics = pm
             .list_issues(spur_pm::IssueFilter {
                 labels: vec![crate::plan::labels::PLAN_PENDING.to_string()],
@@ -6494,7 +6489,69 @@ impl McpCallbackServer {
         &self,
         pm: Arc<spur_pm::PmService>,
     ) -> anyhow::Result<()> {
-        self.recover_persisted_plans(pm).await
+        debug!("startup recovery maintenance started");
+
+        debug!("startup pending-plan sweep started");
+        match self
+            .sweep_stale_pending_plans_on_startup(Arc::clone(&pm))
+            .await
+        {
+            Ok(()) => {
+                debug!("startup pending-plan sweep finished");
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "startup pending-plan sweep failed; continuing startup recovery"
+                );
+            }
+        }
+
+        debug!("startup rev1 metadata check started");
+        let has_rev1_metadata = match any_open_epic_lacks_rev1_metadata(
+            pm.as_ref(),
+            self.feature_gate.as_ref(),
+        )
+        .await
+        {
+            Ok(lacks_rev1_metadata) => {
+                let has_rev1_metadata = !lacks_rev1_metadata;
+                debug!(
+                    has_rev1_metadata,
+                    legacy_reclaim_needed = legacy_reclaim_needed(has_rev1_metadata),
+                    "startup rev1 metadata check finished"
+                );
+                has_rev1_metadata
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "startup rev1 metadata check failed; skipping legacy persisted-plan recovery"
+                );
+                debug!("startup recovery maintenance finished");
+                return Ok(());
+            }
+        };
+
+        if legacy_reclaim_needed(has_rev1_metadata) {
+            debug!("legacy persisted-plan startup recovery started");
+            match self.recover_persisted_plans(pm).await {
+                Ok(()) => {
+                    debug!("legacy persisted-plan startup recovery finished");
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "legacy persisted-plan startup recovery failed"
+                    );
+                }
+            }
+        } else {
+            debug!("legacy persisted-plan startup recovery skipped");
+        }
+
+        debug!("startup recovery maintenance finished");
+        Ok(())
     }
 
     async fn load_or_project_plan(
@@ -9484,6 +9541,7 @@ mod reconciler_fast_forward_tests {
     async fn reclaim_persisted_plans_hydrates_empty_cache() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let (_beads, pm) = super::init_beads_pm(dir.path()).await;
+        let session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
         let tasks = vec![crate::plan::PlanTask {
             task_id: "t1".into(),
             agent: "codex".into(),
@@ -9493,7 +9551,7 @@ mod reconciler_fast_forward_tests {
             context_files: Vec::new(),
         }];
         let feature_gate = super::pro_feature_gate();
-        crate::build_epic_subgraph(
+        let subgraph = crate::build_epic_subgraph(
             pm.as_ref(),
             feature_gate.as_ref(),
             "plan-1",
@@ -9503,8 +9561,18 @@ mod reconciler_fast_forward_tests {
         )
         .await
         .expect("build epic subgraph");
+        pm.update_issue(
+            &subgraph.epic_id,
+            spur_pm::IssueUpdate {
+                add_labels: vec![crate::plan::labels::plan_owner(
+                    &session_id.as_session_id().0,
+                )],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("stamp owner label");
 
-        let session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
         let continuation_ctx = super::DetachedContinuationCtx {
             on_complete: Arc::new(|_, _| Box::pin(async {})),
         };

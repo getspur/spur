@@ -16,6 +16,8 @@ use uuid::Uuid;
 
 mod common;
 
+const INJECTOR_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
 fn run_br(repo: &Path, args: &[&str]) -> Result<String, String> {
     common::beads::run_br(repo, args)
 }
@@ -112,7 +114,7 @@ async fn inject_cycle_when_children_exist(
         let ids = match issue_ids_for_label_pm(pm.as_ref(), &label).await {
             Ok(ids) => ids,
             Err(err) if is_busy_message(&err) => {
-                sleep(Duration::from_millis(2)).await;
+                sleep(INJECTOR_POLL_INTERVAL).await;
                 continue;
             }
             Err(err) => return Err(err),
@@ -121,13 +123,13 @@ async fn inject_cycle_when_children_exist(
             match insert_dependency_cycle(&repo, &ids) {
                 Ok(()) => return Ok(()),
                 Err(err) if is_sqlite_busy(&err) => {
-                    sleep(Duration::from_millis(2)).await;
+                    sleep(INJECTOR_POLL_INTERVAL).await;
                     continue;
                 }
                 Err(err) => return Err(err.to_string()),
             }
         }
-        sleep(Duration::from_millis(2)).await;
+        sleep(INJECTOR_POLL_INTERVAL).await;
     }
     Err("timed out waiting for mutation children before injecting cycle".into())
 }
