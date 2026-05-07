@@ -3,12 +3,14 @@
 //!
 //! Without G-strict, this is the bd-2dww failure mode: downstream workers
 //! are based on stale main and lose upstream-created content. With G-strict,
-//! the reconciler dispatches downstream tasks with the full approved
-//! dependency overlay closure.
+//! the reconciler dispatches downstream tasks from approved dependency work,
+//! either by using a single parent branch directly or by applying overlays.
 
 mod common;
 
 use common::g_strict_harness::TestHarness;
+use serde_json::json;
+use spur_mcp::tools::BaseSpec;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn g_strict_prevents_bd_2dww_class_loss() {
@@ -84,6 +86,66 @@ async fn g_strict_prevents_bd_2dww_class_loss() {
     assert!(
         main.contains("use foo::Foo"),
         "merged main.rs must retain T3 import, got: {main}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn single_parent_fast_path_emits_base_branch() {
+    let mut harness = TestHarness::new().await;
+    let plan_id = harness
+        .submit_plan_with_tasks(
+            "G-strict single-parent branch fast path",
+            json!([
+                {
+                    "task_id": "T1",
+                    "agent": "mock",
+                    "task": "create parent.rs",
+                    "depends_on": [],
+                },
+                {
+                    "task_id": "T2",
+                    "agent": "mock",
+                    "task": "create child.rs after reading parent.rs",
+                    "depends_on": ["T1"],
+                },
+            ]),
+        )
+        .await;
+
+    harness
+        .dispatch_and_approve_with_mock(&plan_id, "T1", |worktree| {
+            std::fs::write(worktree.join("parent.rs"), "pub const PARENT: u8 = 1;\n")
+                .expect("write T1 parent.rs");
+        })
+        .await;
+
+    let t1_worker_branch = harness.completion_worker_branch("T1");
+    let t1_tip_oid = harness.rev_parse(&t1_worker_branch);
+
+    harness.tick_reconciler().await.expect("reconciler tick");
+    let request = harness.dispatch_request_for_task("T2").await;
+    match request.base.as_ref() {
+        Some(BaseSpec::Branch { name }) => assert_eq!(name, &t1_worker_branch),
+        other => panic!("T2 should dispatch from T1 worker_branch, got {other:?}"),
+    }
+
+    harness
+        .complete_and_approve_dispatch_with_mock(&plan_id, "T2", request, |worktree| {
+            let parent = std::fs::read_to_string(worktree.join("parent.rs"))
+                .expect("T2 worker must see parent.rs from T1");
+            assert!(
+                parent.contains("PARENT"),
+                "T2 worker must see T1 contribution, got: {parent}"
+            );
+            std::fs::write(worktree.join("child.rs"), "pub const CHILD: u8 = 2;\n")
+                .expect("write T2 child.rs");
+        })
+        .await;
+
+    let t2_dispatched_base_oid = harness.completion_dispatched_base_oid("T2");
+    assert_eq!(
+        t2_dispatched_base_oid, t1_tip_oid,
+        "T2 dispatched_base_oid must be T1 worker_branch tip"
     );
 }
 

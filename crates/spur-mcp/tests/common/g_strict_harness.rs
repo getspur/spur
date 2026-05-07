@@ -402,6 +402,19 @@ impl TestHarness {
     {
         self.reconciler.tick_once().await.expect("reconciler tick");
         let request = self.dispatch_request_for_task(task_id).await;
+        self.complete_and_approve_dispatch_with_mock(plan_id, task_id, request, worker)
+            .await;
+    }
+
+    pub async fn complete_and_approve_dispatch_with_mock<F>(
+        &mut self,
+        plan_id: &str,
+        task_id: &str,
+        request: DelegationRequest,
+        worker: F,
+    ) where
+        F: FnOnce(&Path) + Send + 'static,
+    {
         let repo = self.repo.clone();
         let worker_task_id = task_id.to_string();
 
@@ -433,7 +446,7 @@ impl TestHarness {
         );
     }
 
-    async fn dispatch_request_for_task(&mut self, task_id: &str) -> DelegationRequest {
+    pub async fn dispatch_request_for_task(&mut self, task_id: &str) -> DelegationRequest {
         let expected_issue_id = self
             .task_issue_ids
             .get(task_id)
@@ -607,6 +620,18 @@ impl TestHarness {
             .into_iter()
             .rfind(|sentinel| matches!(sentinel, AuditSentinelKind::Completion { .. }))
             .unwrap_or_else(|| panic!("missing completion audit for {task_id}"))
+    }
+
+    pub fn completion_worker_branch(&self, task_id: &str) -> String {
+        match self.latest_completion_audit_for(task_id) {
+            AuditSentinelKind::Completion { worker_branch, .. } => worker_branch
+                .unwrap_or_else(|| panic!("missing completion worker_branch for {task_id}")),
+            other => panic!("latest completion audit for {task_id} had wrong kind: {other:?}"),
+        }
+    }
+
+    pub fn rev_parse(&self, spec: &str) -> String {
+        run_git(&self.repo, &["rev-parse", spec])
     }
 
     pub fn add_audit_comment_for_task(&self, task_id: &str, audit: &AuditSentinelKind) {
