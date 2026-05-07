@@ -21,10 +21,10 @@ use spur_acp::registry::AgentRegistry;
 use spur_acp::session_lock::{AcquireOutcome, SessionAttachGuard};
 use spur_acp::types::*;
 use spur_acp::{
-    CancellationControl, DelegationAbortHandle, DelegationAbortReason, DelegationResult,
-    DelegationStatus, GraphEdgeEvent, GraphNodeEvent, LifecycleState, PlanLifecycleEvent,
-    PlanLoadWarningEvent, PlanOwnerStateEvent, PlanSummaryCountsEvent, PlanSummaryEvent,
-    ReviewKind, ReviewPayload, SpurEvent, SpurEventBody, TimeoutFallback,
+    CancellationControl, DelegationAbortHandle, DelegationAbortReason, DelegationDispatchError,
+    DelegationResult, DelegationStatus, GraphEdgeEvent, GraphNodeEvent, LifecycleState,
+    PlanLifecycleEvent, PlanLoadWarningEvent, PlanOwnerStateEvent, PlanSummaryCountsEvent,
+    PlanSummaryEvent, ReviewKind, ReviewPayload, SpurEvent, SpurEventBody, TimeoutFallback,
 };
 use spur_pm::{Issue, IssueSummary};
 
@@ -39,9 +39,12 @@ use spur_blob_store::{
 use spur_cost::CostTracker;
 use spur_license::SpurLicense;
 use spur_mcp::tools::{BaseSpec, BaseTarget};
+use spur_mcp::worker_server::WorkerMcpServer;
 use spur_mcp::{
     build_worker_info, DelegationChannel, DelegationRequest, McpCallbackServer, WorkerInfo,
 };
+
+use dashmap::DashMap;
 use spur_pm::PmService;
 use spur_worktree::git_blob_store::GitBlobOutcomeStore;
 use spur_worktree::{manager::WorktreeError, WorktreeManager};
@@ -2303,6 +2306,12 @@ pub struct Orchestrator {
     /// Feature gate for dynamic quota/feature enforcement.
     feature_gate: Option<std::sync::Arc<spur_license::FeatureGate>>,
     pub(crate) peer_mailbox: Option<crate::peer_mailbox::PeerMailboxBundle>,
+    /// Per-`BrainSession` worker MCP servers, lazily started on first
+    /// dispatch with `enable_worker_mcp = true`. Phase 5 / Task 25 —
+    /// the field exists; population happens via
+    /// [`Orchestrator::ensure_worker_mcp_server`]. Wiring into the
+    /// dispatch path lands in a follow-up task.
+    pub(crate) worker_mcp_servers: Arc<DashMap<spur_acp::BrainSessionId, Arc<WorkerMcpServer>>>,
     fault_injection_hooks: FaultInjectionHooks,
     /// Abort handle for the production peer-mailbox reconciler task spawned
     /// by `Orchestrator::new` when `peer_mailbox_enabled = true`. Stored
@@ -2457,6 +2466,38 @@ fn enforce_log_cap(dir: &std::path::Path, cap: u64) {
     }
 }
 
+/// Compute-once cache helper for [`Orchestrator::ensure_worker_mcp_server`].
+///
+/// Generic over the value/error types so the cache contract (`first miss
+/// runs the starter; subsequent calls — including racing concurrent
+/// callers — return the same `Arc`) can be unit-tested without booting a
+/// real `WorkerMcpServer`. The starter runs *outside* any DashMap shard
+/// lock; if two callers race the miss, both run the starter but only one
+/// `Arc` wins the insert and the loser is dropped.
+async fn cache_or_start<K, V, F, Fut, E>(
+    map: &DashMap<K, Arc<V>>,
+    key: K,
+    start: F,
+) -> Result<Arc<V>, E>
+where
+    K: Eq + std::hash::Hash + Clone,
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Arc<V>, E>>,
+{
+    if let Some(existing) = map.get(&key) {
+        return Ok(Arc::clone(existing.value()));
+    }
+    let candidate = start().await?;
+    use dashmap::mapref::entry::Entry;
+    match map.entry(key) {
+        Entry::Occupied(slot) => Ok(Arc::clone(slot.get())),
+        Entry::Vacant(slot) => {
+            slot.insert(Arc::clone(&candidate));
+            Ok(candidate)
+        }
+    }
+}
+
 impl Orchestrator {
     /// Create a new orchestrator for the given repo directory.
     pub fn new(
@@ -2535,6 +2576,7 @@ impl Orchestrator {
             continuation_overflow: None,
             feature_gate,
             peer_mailbox: None,
+            worker_mcp_servers: Arc::new(DashMap::new()),
             fault_injection_hooks: FaultInjectionHooks::default(),
             peer_mailbox_reconciler_abort: None,
         };
@@ -2646,6 +2688,45 @@ impl Orchestrator {
     pub fn with_fault_injection_hooks(mut self, hooks: FaultInjectionHooks) -> Self {
         self.fault_injection_hooks = hooks;
         self
+    }
+
+    /// Phase 5 / Task 25 — return the existing per-`BrainSession`
+    /// [`WorkerMcpServer`], booting one on first call. Concurrent callers
+    /// for the same `brain` collapse to a single server: at most one boot
+    /// wins the `DashMap` insert and any others drop the loser server.
+    ///
+    /// The actual deps wiring (`PlanResolver`, reconciler outcome store,
+    /// repo root) lands in the dispatch path under Task 26
+    /// (`orch-inject-mcp-url`); until then the constructor closure returns
+    /// `Err(WorkerMcpUnavailable)` when `pm_service`/`feature_gate` are
+    /// not configured, leaving the cache contract intact.
+    pub async fn ensure_worker_mcp_server(
+        &self,
+        brain: &spur_acp::BrainSessionId,
+    ) -> Result<Arc<WorkerMcpServer>, DelegationDispatchError> {
+        cache_or_start(&self.worker_mcp_servers, brain.clone(), || async {
+            let pm = self.pm_service.clone().ok_or_else(|| {
+                DelegationDispatchError::WorkerMcpUnavailable {
+                    reason: "pm_service not configured on orchestrator".into(),
+                }
+            })?;
+            let gate = self.feature_gate.clone().ok_or_else(|| {
+                DelegationDispatchError::WorkerMcpUnavailable {
+                    reason: "feature_gate not configured on orchestrator".into(),
+                }
+            })?;
+            let funnel: Arc<dyn spur_mcp::McpEventSink> = Arc::new(self.funnel.clone());
+            // Worker dispatch (Task 26) supplies plan_resolver + reconciler_outcomes
+            // from the per-run brain `McpCallbackServer`; until that wiring lands
+            // we have nothing sensible to inject here, so refuse to boot rather
+            // than fabricate a partial server. The cache contract (this function's
+            // unit-tested invariant) is unaffected.
+            let _ = (pm, gate, funnel);
+            Err(DelegationDispatchError::WorkerMcpUnavailable {
+                reason: "worker MCP deps not yet wired (Phase 5 / Task 26)".into(),
+            })
+        })
+        .await
     }
 
     /// Wire in the sender half of the `run_interactive` ingress channel so
@@ -11226,6 +11307,91 @@ mod beads_startup_warning_tests {
         assert_eq!(
             startup_beads_warning(&config, Some(gate.as_ref()), true, true, false),
             None
+        );
+    }
+}
+
+#[cfg(test)]
+mod worker_mcp_cache_tests {
+    //! Phase 5 / Task 25 — cache contract for
+    //! [`Orchestrator::ensure_worker_mcp_server`]. The full helper boots a
+    //! `WorkerMcpServer` whose construction needs production-grade deps
+    //! (PmService, FeatureGate, PlanResolver, …); rather than wire all of
+    //! that here we exercise the underlying [`cache_or_start`] generic that
+    //! `ensure_worker_mcp_server` delegates to. The contract under test is
+    //! "double-call returns the same `Arc` (no duplicate server per
+    //! BrainSession)" — identical for any value type.
+
+    use super::cache_or_start;
+    use dashmap::DashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn double_call_returns_same_arc_and_starts_once() {
+        let map: DashMap<String, Arc<u32>> = DashMap::new();
+        let starts = Arc::new(AtomicUsize::new(0));
+
+        let starts_a = Arc::clone(&starts);
+        let first = cache_or_start::<_, _, _, _, ()>(&map, "brain-1".into(), || async move {
+            starts_a.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new(42u32))
+        })
+        .await
+        .expect("first ensure must succeed");
+
+        let starts_b = Arc::clone(&starts);
+        let second = cache_or_start::<_, _, _, _, ()>(&map, "brain-1".into(), || async move {
+            starts_b.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new(99u32))
+        })
+        .await
+        .expect("second ensure must succeed");
+
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "double-call must return the same Arc (no duplicate boot)"
+        );
+        assert_eq!(*first, 42, "cached value must be the first-boot value");
+        assert_eq!(
+            starts.load(Ordering::SeqCst),
+            1,
+            "starter must run exactly once across the two calls"
+        );
+        assert_eq!(map.len(), 1, "exactly one entry per brain session");
+    }
+
+    #[tokio::test]
+    async fn distinct_keys_get_distinct_values() {
+        let map: DashMap<String, Arc<u32>> = DashMap::new();
+
+        let a = cache_or_start::<_, _, _, _, ()>(&map, "brain-a".into(), || async {
+            Ok(Arc::new(1u32))
+        })
+        .await
+        .expect("brain-a");
+        let b = cache_or_start::<_, _, _, _, ()>(&map, "brain-b".into(), || async {
+            Ok(Arc::new(2u32))
+        })
+        .await
+        .expect("brain-b");
+
+        assert!(!Arc::ptr_eq(&a, &b));
+        assert_eq!(map.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn start_failure_does_not_populate_cache() {
+        let map: DashMap<String, Arc<u32>> = DashMap::new();
+        let err = cache_or_start::<_, u32, _, _, &'static str>(&map, "brain-1".into(), || async {
+            Err("boom")
+        })
+        .await
+        .expect_err("must propagate starter error");
+        assert_eq!(err, "boom");
+        assert!(
+            map.is_empty(),
+            "failed start must leave the cache untouched"
         );
     }
 }
