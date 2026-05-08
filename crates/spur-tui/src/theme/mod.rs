@@ -1,6 +1,5 @@
 //! Theme system scaffolding for palette, token, and loader support.
 
-pub mod compat;
 pub mod loader;
 pub mod palette;
 mod resolver;
