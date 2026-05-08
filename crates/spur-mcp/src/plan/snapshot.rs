@@ -3,7 +3,8 @@ use spur_acp::{PlanSnapshot, PlanSnapshotCounts, PlanSnapshotTask, SpurEventBody
 use crate::events::McpEventSink;
 
 use super::{
-    build_plan_status, display_name, PlanState, PlanTaskEntry, PlanTaskStatus, MAX_ATTEMPTS,
+    build_plan_status, display_name, AttemptRecordKind, PlanState, PlanTaskEntry, PlanTaskStatus,
+    MAX_ATTEMPTS,
 };
 
 pub fn build_plan_snapshot(state: &PlanState) -> PlanSnapshot {
@@ -75,6 +76,16 @@ fn build_snapshot_counts(state: &PlanState) -> PlanSnapshotCounts {
                 counts.cancelled += 1
             }
             PlanTaskStatus::BlockedOnSetupConflict { .. } => counts.pending += 1,
+            // bd-2m2u Phase 2d — currently-escalated tasks pause the engine
+            // until brain `submit_plan_mutation` resolves them.
+            PlanTaskStatus::EscalatedToBrain { .. } => counts.escalated += 1,
+        }
+        // bd-2m2u Phase 2d — observability roll-up: every WorkerFailureRecovery
+        // history record on every task contributes to `auto_retried`.
+        for record in &task.history {
+            if matches!(record.kind(), AttemptRecordKind::WorkerFailureRecovery) {
+                counts.auto_retried += 1;
+            }
         }
     }
     counts
@@ -244,6 +255,22 @@ fn build_task_snapshot(state: &PlanState, task: &PlanTaskEntry) -> PlanSnapshotT
             None,
             Vec::new(),
         ),
+        PlanTaskStatus::EscalatedToBrain { last_error } => (
+            "escalated_to_brain".to_string(),
+            task.result
+                .as_ref()
+                .and_then(|result| result.summary.clone()),
+            None,
+            Some(last_error.clone()),
+            task.worker_branch.clone().or_else(|| {
+                task.result
+                    .as_ref()
+                    .and_then(|result| result.worker_branch.clone())
+            }),
+            task.last_delegation_id.clone(),
+            None,
+            Vec::new(),
+        ),
     };
 
     PlanSnapshotTask {
@@ -312,6 +339,10 @@ fn task_next_action(task: &PlanTaskEntry) -> String {
         PlanTaskStatus::AwaitingReview { .. } => "review".to_string(),
         PlanTaskStatus::Rejected { .. } | PlanTaskStatus::Failed { .. } => "inspect".to_string(),
         PlanTaskStatus::BlockedOnSetupConflict { .. } => "inspect".to_string(),
+        // bd-2m2u Phase 2d — brain must call `submit_plan_mutation` to
+        // resolve. Surfaced as "submit_mutation" so TUI / brain UX can
+        // route directly to the recovery flow.
+        PlanTaskStatus::EscalatedToBrain { .. } => "submit_mutation".to_string(),
         PlanTaskStatus::Pending | PlanTaskStatus::Ready | PlanTaskStatus::Dispatched { .. } => {
             "wait".to_string()
         }

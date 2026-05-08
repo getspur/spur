@@ -993,6 +993,11 @@ async fn add_labels_individually(pm: &PmService, issue_id: &str, labels: &[Strin
 /// Apply RetryTask, registering a partial-state `ExecutedOp` in `executed_ops`
 /// before attempting any mutating step. On error the caller's rollback path
 /// can undo whatever portion was committed.
+///
+/// bd-2m2u Phase 2d — brain-directed retries count toward `MAX_ATTEMPTS`.
+/// If `project_attempt_facts(prior_audits) >= MAX_ATTEMPTS`, the next
+/// dispatch would exceed the cap, so this op is rejected with no
+/// side-effects (caller flips back to `AbandonTask` to terminate).
 async fn apply_retry_task(
     pm: &PmService,
     adv: &dyn BeadsAdvanced,
@@ -1005,6 +1010,22 @@ async fn apply_retry_task(
         .await
         .with_context(|| format!("load retry target {issue_id}"))?;
     let original_status = issue.status.clone();
+
+    // Read attempt facts before any mutating side-effect so the MAX_ATTEMPTS
+    // guard rejects cleanly without a rollback record.
+    let prior_audits = super::projector::collect_sorted_audits_for_issue(
+        issue_id,
+        adv.list_comments(issue_id)
+            .await
+            .with_context(|| format!("list comments for retry target {issue_id}"))?,
+    );
+    let (attempt, last_delegation_id) = super::projector::project_attempt_facts(&prior_audits);
+    if attempt >= super::MAX_ATTEMPTS {
+        return Err(anyhow!(
+            "RetryTask refused: task '{issue_id}' has reached MAX_ATTEMPTS={} (current attempt={attempt}); brain must AbandonTask or ModifyTaskSpec instead",
+            super::MAX_ATTEMPTS,
+        ));
+    }
 
     let removable: Vec<String> = issue
         .labels
@@ -1033,14 +1054,6 @@ async fn apply_retry_task(
     )
     .await
     .with_context(|| format!("retry_task open issue {issue_id}"))?;
-
-    let prior_audits = super::projector::collect_sorted_audits_for_issue(
-        issue_id,
-        adv.list_comments(issue_id)
-            .await
-            .with_context(|| format!("list comments for retry target {issue_id}"))?,
-    );
-    let (attempt, last_delegation_id) = super::projector::project_attempt_facts(&prior_audits);
 
     adv.add_comment(
         issue_id,

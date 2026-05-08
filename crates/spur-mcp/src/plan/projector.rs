@@ -369,6 +369,29 @@ pub fn project_status_for_issue(
         };
     }
 
+    // bd-2m2u Phase 2d — `signal:escalated` marks an open issue whose
+    // `AUTO_RETRY_BUDGET` is exhausted and is awaiting a brain
+    // `submit_plan_mutation` decision. The label is cleared by
+    // `submit_plan_mutation` on success, so a present label is authoritative
+    // for the projection.
+    if issue
+        .labels
+        .iter()
+        .any(|label| label.as_str() == crate::plan::mutation_executor::SIGNAL_ESCALATED_LABEL)
+    {
+        let last_error = audits
+            .iter()
+            .rev()
+            .find_map(|audit| match audit {
+                AuditSentinelKind::EscalationRequested { last_error, .. } => {
+                    Some(last_error.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| "escalated to brain".to_string());
+        return PlanTaskStatus::EscalatedToBrain { last_error };
+    }
+
     if has_ready_for_review_label_compat(&issue.labels) {
         let summary =
             latest_completion_facts(audits).and_then(|(_, _, result_summary, _, _)| result_summary);
@@ -1252,6 +1275,47 @@ mod tests {
         assert!(
             matches!(status, PlanTaskStatus::Failed { error } if error == "worker crashed again")
         );
+    }
+
+    #[test]
+    fn project_status_for_open_issue_with_signal_escalated_returns_escalated_to_brain() {
+        // bd-2m2u Phase 2d — open issue carrying `signal:escalated` MUST
+        // project as `EscalatedToBrain` (not Ready/Pending/AwaitingReview)
+        // so the engine pauses traversal and the brain continuation drives
+        // recovery via `submit_plan_mutation`.
+        let issue = spur_pm::Issue {
+            id: "bd-1".into(),
+            source: spur_pm::PmSource::Beads,
+            title: "Task".into(),
+            body: "Body".into(),
+            status: "open".into(),
+            labels: vec![crate::plan::mutation_executor::SIGNAL_ESCALATED_LABEL.to_string()],
+            assignee: None,
+            url: String::new(),
+            priority: None,
+            issue_type: Some("task".into()),
+            blocked_by: vec![],
+            due_at: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let audits = vec![AuditSentinelKind::EscalationRequested {
+            plan_id: "p1".into(),
+            task_id: "bd-1".into(),
+            attempt: 2,
+            last_error: "exhausted recovery budget".into(),
+            worker_branch: Some("spur/worker-x".into()),
+            delegation_id: Some("del-Z".into()),
+        }];
+
+        let status = super::project_status_for_issue(&issue, &audits, true, "closed");
+
+        match status {
+            PlanTaskStatus::EscalatedToBrain { last_error } => {
+                assert_eq!(last_error, "exhausted recovery budget");
+            }
+            other => panic!("expected EscalatedToBrain, got {other:?}"),
+        }
     }
 
     #[test]

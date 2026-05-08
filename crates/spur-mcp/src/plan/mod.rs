@@ -87,6 +87,11 @@ pub enum PlanTaskStatus {
         dep_task_id: String,
         files: Vec<String>,
     },
+    /// bd-2m2u Phase 2d — `AUTO_RETRY_BUDGET` exhausted; brain must drive
+    /// recovery via `submit_plan_mutation`. Issue stays open with the
+    /// `signal:escalated` label so the engine pauses traversal of the task
+    /// without closing the underlying beads issue.
+    EscalatedToBrain { last_error: String },
 }
 
 impl PlanTaskStatus {
@@ -445,6 +450,10 @@ impl PlanState {
                         hasher.update(file.as_bytes());
                         hasher.update(b"\0");
                     }
+                }
+                PlanTaskStatus::EscalatedToBrain { last_error } => {
+                    hasher.update(b"\x0a");
+                    hasher.update(last_error.as_bytes());
                 }
             }
             hasher.update(b"\0");
@@ -1840,6 +1849,55 @@ pub(crate) async fn emit_retry_requested_audit(
     Ok(())
 }
 
+/// bd-2m2u Phase 2d — emit `EscalationRequested` audit on the task's issue.
+/// Mirrors `emit_retry_requested_audit`. `task_id` may be empty when the
+/// caller cannot resolve a stable plan task id — the projector / brain
+/// observer can still scope the audit by `plan_id` + `issue_id`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn emit_escalation_requested_audit(
+    pm: Option<&dyn PmLike>,
+    issue_id: &Option<String>,
+    feature_gate: &spur_license::FeatureGate,
+    plan_id: &str,
+    task_id: &str,
+    delegation_id: &str,
+    attempt: u32,
+    last_error: &str,
+    worker_branch: Option<String>,
+) -> anyhow::Result<()> {
+    let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
+        return Ok(());
+    };
+    if let Err(error) = crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        feature_gate,
+    ) {
+        warn!(
+            target: "spur.audit.emit_failure",
+            kind = "escalation_requested",
+            issue_id = %issue_id,
+            plan_id = %plan_id,
+            delegation_id = %delegation_id,
+            "EscalationRequested audit comment emission skipped: {error:?}"
+        );
+        return Ok(());
+    }
+    let Some(adv) = pm.advanced() else {
+        return Ok(());
+    };
+    let kind = crate::plan::audit_sentinel::AuditSentinelKind::EscalationRequested {
+        plan_id: plan_id.to_string(),
+        task_id: task_id.to_string(),
+        attempt,
+        last_error: last_error.to_string(),
+        worker_branch,
+        delegation_id: Some(delegation_id.to_string()),
+    };
+    let body = crate::plan::audit_sentinel::encode_comment(&kind);
+    adv.add_comment(issue_id, &body).await?;
+    Ok(())
+}
+
 /// Build the persisted label mutation used when a task is about to be sent
 /// to a worker.
 pub fn dispatch_intent_update(
@@ -2005,6 +2063,19 @@ fn completion_retry_update() -> spur_pm::IssueUpdate {
     }
 }
 
+/// bd-2m2u Phase 2d — keeps the beads issue OPEN, removes the
+/// `READY_FOR_REVIEW` label so the SignalWatcher does NOT pick it up
+/// (option A routing), and adds `signal:escalated` so brain tooling /
+/// `submit_plan_mutation` can clear it on resolution.
+fn completion_escalation_update() -> spur_pm::IssueUpdate {
+    spur_pm::IssueUpdate {
+        status: Some("open".to_string()),
+        add_labels: vec![crate::plan::mutation_executor::SIGNAL_ESCALATED_LABEL.to_string()],
+        remove_labels: review_ready_label_removals(),
+        ..Default::default()
+    }
+}
+
 fn review_ready_label_removals() -> Vec<String> {
     vec![
         crate::plan::labels::READY_FOR_REVIEW.to_string(),
@@ -2107,6 +2178,27 @@ pub(crate) enum CompletionPersistenceAction {
         error: String,
         worker_branch: Option<String>,
     },
+    /// bd-2m2u Phase 2d — `AUTO_RETRY_BUDGET` exhausted; the issue is kept
+    /// open with `signal:escalated`, an `EscalationRequested` audit is
+    /// emitted, and the caller pushes a `BrainContinuation` with
+    /// `ContinuationSource::PlanTaskEscalated`.
+    Escalated {
+        last_error: String,
+        worker_branch: Option<String>,
+    },
+}
+
+/// Outcome of applying a worker-failure terminal result to an in-memory
+/// `PlanTaskEntry`. bd-2m2u Phase 2d replaces the previous `bool` (true =
+/// auto-retried, false = terminal-failed) with a tri-state because retry-budget
+/// exhaustion now promotes to `EscalatedToBrain` rather than `Failed`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkerFailureAction {
+    AutoRetried,
+    Escalated {
+        last_error: String,
+        worker_branch: Option<String>,
+    },
 }
 
 /// Ephemeral `run_plan` worker-failure chokepoint. This path does not persist
@@ -2118,14 +2210,14 @@ fn apply_worker_failure_status(
     entry: &mut PlanTaskEntry,
     error: String,
     result: Option<&DelegationResult>,
-) -> bool {
+) -> WorkerFailureAction {
+    let worker_branch = result
+        .and_then(|r| r.worker_branch.clone())
+        .or_else(|| entry.worker_branch.clone());
     if should_auto_retry(entry.attempt) {
-        let worker_branch = result
-            .and_then(|r| r.worker_branch.clone())
-            .or_else(|| entry.worker_branch.clone());
         let record = AttemptRecord {
             attempt: entry.attempt,
-            worker_branch,
+            worker_branch: worker_branch.clone(),
             diff_summary: result
                 .and_then(|r| r.diff_summary.clone())
                 .or_else(|| entry.result.as_ref().and_then(|r| r.diff_summary.clone())),
@@ -2140,10 +2232,15 @@ fn apply_worker_failure_status(
         entry.worker_branch = None;
         entry.status = PlanTaskStatus::Pending;
         entry.attempt = entry.attempt.saturating_add(1);
-        true
+        WorkerFailureAction::AutoRetried
     } else {
-        entry.status = PlanTaskStatus::Failed { error };
-        false
+        entry.status = PlanTaskStatus::EscalatedToBrain {
+            last_error: error.clone(),
+        };
+        WorkerFailureAction::Escalated {
+            last_error: error,
+            worker_branch,
+        }
     }
 }
 
@@ -2183,9 +2280,10 @@ pub(crate) async fn persist_completion_result_after_worker_output_invariant_with
     fields: crate::plan::audit_sentinel::CompletionAuditFields,
     already_emitted: bool,
     attempt: u32,
+    task_id: Option<&str>,
 ) -> anyhow::Result<CompletionPersistenceAction> {
     let (completion_state, fields) = apply_worker_output_invariant(completion_state, fields);
-    persist_completion_result_with_retry(
+    persist_completion_result_with_retry_for_task(
         pm,
         issue_id,
         feature_gate,
@@ -2195,6 +2293,7 @@ pub(crate) async fn persist_completion_result_after_worker_output_invariant_with
         fields,
         already_emitted,
         Some(attempt),
+        task_id,
     )
     .await
 }
@@ -2242,17 +2341,52 @@ async fn persist_completion_result_with_retry(
     already_emitted: bool,
     retry_attempt: Option<u32>,
 ) -> anyhow::Result<CompletionPersistenceAction> {
+    persist_completion_result_with_retry_for_task(
+        pm,
+        issue_id,
+        feature_gate,
+        plan_id,
+        delegation_id,
+        completion_state,
+        fields,
+        already_emitted,
+        retry_attempt,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn persist_completion_result_with_retry_for_task(
+    pm: &dyn PmLike,
+    issue_id: &str,
+    feature_gate: &spur_license::FeatureGate,
+    plan_id: &str,
+    delegation_id: &str,
+    completion_state: crate::plan::audit_sentinel::CompletionState,
+    fields: crate::plan::audit_sentinel::CompletionAuditFields,
+    already_emitted: bool,
+    retry_attempt: Option<u32>,
+    task_id: Option<&str>,
+) -> anyhow::Result<CompletionPersistenceAction> {
     use crate::plan::audit_sentinel::CompletionState;
 
     let auto_retry =
         completion_state == CompletionState::Failed && retry_attempt.is_some_and(should_auto_retry);
-    let retry_error = auto_retry.then(|| {
+    // bd-2m2u Phase 2d — if retry budget is exhausted, promote to escalation
+    // instead of terminal-Failed. `should_escalate(attempt) = !should_auto_retry(attempt)`.
+    let escalate = completion_state == CompletionState::Failed
+        && retry_attempt.is_some_and(|attempt| !should_auto_retry(attempt));
+    let failure_message = || {
         fields
             .result_summary
             .clone()
             .unwrap_or_else(|| "worker failed".to_string())
-    });
+    };
+    let retry_error = auto_retry.then(failure_message);
     let retry_worker_branch = auto_retry.then(|| fields.worker_branch.clone()).flatten();
+    let escalation_error = escalate.then(failure_message);
+    let escalation_worker_branch = escalate.then(|| fields.worker_branch.clone()).flatten();
 
     if !already_emitted && completion_state != CompletionState::Superseded {
         emit_completion_audit(
@@ -2294,10 +2428,26 @@ async fn persist_completion_result_with_retry(
         .await?;
     }
 
+    if let (Some(attempt), Some(error)) = (retry_attempt, escalation_error.as_deref()) {
+        emit_escalation_requested_audit(
+            Some(pm),
+            &Some(issue_id.to_string()),
+            feature_gate,
+            plan_id,
+            task_id.unwrap_or(""),
+            delegation_id,
+            attempt,
+            error,
+            escalation_worker_branch.clone(),
+        )
+        .await?;
+    }
+
     let current_labels = pm.issue_labels(issue_id).await?;
     let mut update = match completion_state {
         CompletionState::AwaitingReview => completion_success_update(),
         CompletionState::Failed if auto_retry => completion_retry_update(),
+        CompletionState::Failed if escalate => completion_escalation_update(),
         CompletionState::Failed | CompletionState::Cancelled => {
             completion_terminal_update(pm.closed_status())
         }
@@ -2310,6 +2460,11 @@ async fn persist_completion_result_with_retry(
         CompletionPersistenceAction::AutoRetried {
             error,
             worker_branch: retry_worker_branch,
+        }
+    } else if let Some(last_error) = escalation_error {
+        CompletionPersistenceAction::Escalated {
+            last_error,
+            worker_branch: escalation_worker_branch,
         }
     } else {
         CompletionPersistenceAction::Completed(completion_state)
@@ -2579,6 +2734,7 @@ async fn persist_completion_inner(
         },
         already_emitted,
         attempt,
+        task_id,
     )
     .await?;
     crate::server::notify_fast_forward(fast_forward);
@@ -2601,6 +2757,34 @@ async fn persist_completion_inner(
             return Ok(event.map(|event| DeferredCompletionPush {
                 cont: None,
                 event: Some(event),
+            }));
+        }
+        CompletionPersistenceAction::Escalated {
+            last_error,
+            worker_branch,
+        } => {
+            // bd-2m2u Phase 2d — option A. Re-materialize the continuation
+            // with `PlanTaskEscalated` source so the brain awakens with the
+            // right discriminator. The originally-built `cont` was created
+            // with `PlanTaskFailed`; reuse that artifact's audit_uri /
+            // payload but swap the source.
+            let escalated_cont = spur_acp::domain::BrainContinuation {
+                source: spur_acp::domain::ContinuationSource::PlanTaskEscalated,
+                ..cont
+            };
+            let event = task_id.map(|tid| {
+                PlanTaskNotificationEventPayload::Escalated(PlanTaskEscalatedEventPayload {
+                    plan_id: plan_id.to_string(),
+                    task_id: tid.to_string(),
+                    delegation_id: delegation_id.to_string(),
+                    attempt,
+                    last_error,
+                    worker_branch,
+                })
+            });
+            return Ok(Some(DeferredCompletionPush {
+                cont: Some(escalated_cont),
+                event,
             }));
         }
         CompletionPersistenceAction::Completed(completion_state) => completion_state,
@@ -2677,9 +2861,22 @@ pub struct PlanTaskAutoRetriedEventPayload {
     pub worker_branch: Option<String>,
 }
 
+/// bd-2m2u Phase 2d — payload for the `PlanTaskEscalated` event emitted when
+/// a plan task exhausts `AUTO_RETRY_BUDGET` and is promoted to
+/// `EscalatedToBrain`.
+pub struct PlanTaskEscalatedEventPayload {
+    pub plan_id: String,
+    pub task_id: String,
+    pub delegation_id: String,
+    pub attempt: u32,
+    pub last_error: String,
+    pub worker_branch: Option<String>,
+}
+
 pub enum PlanTaskNotificationEventPayload {
     Terminal(PlanTaskTerminalEventPayload),
     AutoRetried(PlanTaskAutoRetriedEventPayload),
+    Escalated(PlanTaskEscalatedEventPayload),
 }
 
 /// Deferred plan-task notifications a plan-completion caller MUST drain after
@@ -2725,6 +2922,9 @@ fn emit_plan_task_notification_event(
         }
         PlanTaskNotificationEventPayload::AutoRetried(payload) => {
             emit_plan_task_auto_retried_event(sink, payload);
+        }
+        PlanTaskNotificationEventPayload::Escalated(payload) => {
+            emit_plan_task_escalated_event(sink, payload);
         }
     }
 }
@@ -2778,6 +2978,24 @@ fn emit_plan_task_auto_retried_event(
         attempt: payload.attempt,
         max_attempts: MAX_ATTEMPTS,
         error: payload.error.clone(),
+        worker_branch: payload.worker_branch.clone(),
+    });
+}
+
+fn emit_plan_task_escalated_event(
+    sink: Option<&dyn crate::events::McpEventSink>,
+    payload: &PlanTaskEscalatedEventPayload,
+) {
+    let Some(sink) = sink else {
+        return;
+    };
+    sink.emit(spur_acp::SpurEventBody::PlanTaskEscalated {
+        plan_id: payload.plan_id.clone(),
+        task_id: payload.task_id.clone(),
+        delegation_id: payload.delegation_id.clone(),
+        attempt: payload.attempt,
+        max_attempts: MAX_ATTEMPTS,
+        last_error: payload.last_error.clone(),
         worker_branch: payload.worker_branch.clone(),
     });
 }
@@ -3035,11 +3253,26 @@ pub async fn run_plan(
                         };
 
                         let mut completion_state = None;
+                        let mut escalation: Option<(String, Option<String>, u32)> = None;
                         let mut p = plan_ref.lock().await;
                         if let Some(entry) =
                             p.tasks.iter_mut().find(|t| t.spec.task_id == tid)
                         {
                             let mut retain_result = true;
+                            let handle_failure = |entry: &mut PlanTaskEntry, error: String| {
+                                let action = apply_worker_failure_status(
+                                    entry,
+                                    error,
+                                    Some(&result),
+                                );
+                                match action {
+                                    WorkerFailureAction::AutoRetried => (true, None, None),
+                                    WorkerFailureAction::Escalated {
+                                        last_error,
+                                        worker_branch,
+                                    } => (false, None, Some((last_error, worker_branch))),
+                                }
+                            };
                             match &result.status {
                                 DelegationStatus::Success | DelegationStatus::Modified { .. } => {
                                     info!(plan_id = %pid, task_id = %tid, "Plan task awaiting review");
@@ -3053,16 +3286,11 @@ pub async fn run_plan(
                                 }
                                 DelegationStatus::Failed { error } => {
                                     warn!(plan_id = %pid, task_id = %tid, "Plan task failed: {error}");
-                                    if apply_worker_failure_status(
-                                        entry,
-                                        error.clone(),
-                                        Some(&result),
-                                    ) {
-                                        retain_result = false;
-                                    } else {
-                                        completion_state = Some(
-                                            crate::plan::audit_sentinel::CompletionState::Failed,
-                                        );
+                                    let (drop_result, cs, esc) = handle_failure(entry, error.clone());
+                                    retain_result = !drop_result;
+                                    completion_state = cs;
+                                    if let Some((err, wb)) = esc {
+                                        escalation = Some((err, wb, task_attempt));
                                     }
                                 }
                                 DelegationStatus::Cancelled { reason } => {
@@ -3086,30 +3314,20 @@ pub async fn run_plan(
                                 }
                                 DelegationStatus::SetupFailed { error } => {
                                     warn!(plan_id = %pid, task_id = %tid, "Plan task setup failed: {error}");
-                                    if apply_worker_failure_status(
-                                        entry,
-                                        error.to_string(),
-                                        Some(&result),
-                                    ) {
-                                        retain_result = false;
-                                    } else {
-                                        completion_state = Some(
-                                            crate::plan::audit_sentinel::CompletionState::Failed,
-                                        );
+                                    let (drop_result, cs, esc) = handle_failure(entry, error.to_string());
+                                    retain_result = !drop_result;
+                                    completion_state = cs;
+                                    if let Some((err, wb)) = esc {
+                                        escalation = Some((err, wb, task_attempt));
                                     }
                                 }
                                 other => {
                                     warn!(plan_id = %pid, task_id = %tid, "Plan task ended: {other:?}");
-                                    if apply_worker_failure_status(
-                                        entry,
-                                        format!("{other:?}"),
-                                        Some(&result),
-                                    ) {
-                                        retain_result = false;
-                                    } else {
-                                        completion_state = Some(
-                                            crate::plan::audit_sentinel::CompletionState::Failed,
-                                        );
+                                    let (drop_result, cs, esc) = handle_failure(entry, format!("{other:?}"));
+                                    retain_result = !drop_result;
+                                    completion_state = cs;
+                                    if let Some((err, wb)) = esc {
+                                        escalation = Some((err, wb, task_attempt));
                                     }
                                 }
                             }
@@ -3160,6 +3378,46 @@ pub async fn run_plan(
                                         },
                                     ));
                                     let _ = source;
+                                    deferred = Some(DeferredCompletionPush {
+                                        cont: Some(cont),
+                                        event,
+                                    });
+                                }
+                            }
+                            // bd-2m2u Phase 2d — escalation continuation. We
+                            // hit this branch when AUTO_RETRY_BUDGET is
+                            // exhausted in the ephemeral path; option A pushes
+                            // a `PlanTaskEscalated` continuation directly so
+                            // the brain wakes via the same channel as
+                            // AwaitingReview (no SignalWatcher detour).
+                            if deferred.is_none() {
+                                if let Some((last_error, worker_branch, attempt_at_escalation)) =
+                                    escalation.clone()
+                                {
+                                    let cont = materializer_ref
+                                        .materialize(
+                                            result.clone(),
+                                            spur_acp::DelegationId::from(
+                                                delegation_id_for_completion.as_str(),
+                                            ),
+                                            attempt_at_escalation,
+                                            brain_sid_ref.clone(),
+                                            spur_acp::domain::ContinuationSource::PlanTaskEscalated,
+                                            None,
+                                        )
+                                        .await;
+                                    let event = Some(
+                                        PlanTaskNotificationEventPayload::Escalated(
+                                            PlanTaskEscalatedEventPayload {
+                                                plan_id: pid.clone(),
+                                                task_id: tid.clone(),
+                                                delegation_id: delegation_id_for_completion.clone(),
+                                                attempt: attempt_at_escalation,
+                                                last_error,
+                                                worker_branch,
+                                            },
+                                        ),
+                                    );
                                     deferred = Some(DeferredCompletionPush {
                                         cont: Some(cont),
                                         event,
@@ -3292,7 +3550,8 @@ pub async fn run_plan(
                 | PlanTaskStatus::Failed { .. }
                 | PlanTaskStatus::Cancelled { .. }
                 | PlanTaskStatus::Superseded { .. }
-                | PlanTaskStatus::BlockedOnSetupConflict { .. } => {}
+                | PlanTaskStatus::BlockedOnSetupConflict { .. }
+                | PlanTaskStatus::EscalatedToBrain { .. } => {}
             }
         }
     }
@@ -3373,6 +3632,7 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
     let mut n_failed = 0usize;
     let mut n_cancelled = 0usize;
     let mut n_blocked_on_setup_conflict = 0usize;
+    let mut n_escalated = 0usize;
 
     for t in &state.tasks {
         match &t.status {
@@ -3388,11 +3648,17 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
             // cancelled for aggregate metrics. Lineage tracked via `by`.
             PlanTaskStatus::Superseded { .. } => n_cancelled += 1,
             PlanTaskStatus::BlockedOnSetupConflict { .. } => n_blocked_on_setup_conflict += 1,
+            // bd-2m2u Phase 2d — surfaced separately so the overall plan
+            // status can render "escalated" instead of falling into "running".
+            PlanTaskStatus::EscalatedToBrain { .. } => n_escalated += 1,
         }
     }
 
-    let all_workers_done =
-        n_dispatched == 0 && n_pending == 0 && n_ready == 0 && n_blocked_on_setup_conflict == 0;
+    let all_workers_done = n_dispatched == 0
+        && n_pending == 0
+        && n_ready == 0
+        && n_blocked_on_setup_conflict == 0
+        && n_escalated == 0;
     let ready_to_merge = all_workers_done
         && n_awaiting_review == 0
         && n_rejected == 0
@@ -3402,6 +3668,11 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
 
     let overall = if n_blocked_on_setup_conflict > 0 {
         "blocked_on_setup_conflict"
+    } else if n_escalated > 0 {
+        // bd-2m2u Phase 2d — escalation is a non-terminal "wait on brain"
+        // state. Surface it ahead of "running" / "awaiting_review" so the
+        // overall string communicates the bottleneck unambiguously.
+        "escalated"
     } else if n_dispatched > 0 || n_pending > 0 || n_ready > 0 {
         "running"
     } else if n_awaiting_review > 0 {
@@ -3540,6 +3811,13 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
                     obj["dep_task_id"] = dep_task_id.clone().into();
                     obj["files"] = serde_json::json!(files);
                 }
+                PlanTaskStatus::EscalatedToBrain { last_error } => {
+                    obj["status"] = "escalated_to_brain".into();
+                    obj["last_error"] = last_error.clone().into();
+                    if let Some(ref wb) = t.worker_branch {
+                        obj["worker_branch"] = wb.clone().into();
+                    }
+                }
             }
             obj
         })
@@ -3609,6 +3887,9 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
         "blocked_on_setup_conflict" => {
             "Resolve the setup overlay conflict, then retry the blocked task.".to_string()
         }
+        "escalated" => {
+            "One or more tasks exhausted AUTO_RETRY_BUDGET. Inspect the failed worker branch and call submit_plan_mutation (RetryTask / ModifyTaskSpec / AbandonTask) to resolve.".to_string()
+        }
         "has_failures" => "Some tasks failed. Use get_task_diff to inspect failures.".to_string(),
         "has_rejections" => "Some tasks rejected. Revise the plan or re-submit.".to_string(),
         "failed" => "All tasks failed. Use get_task_diff to inspect errors.".to_string(),
@@ -3630,6 +3911,7 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
             "approved": n_approved,
             "rejected": n_rejected,
             "failed": n_failed,
+            "escalated": n_escalated,
             "blocked_on_setup_conflict": n_blocked_on_setup_conflict,
         },
         "all_workers_done": all_workers_done,
@@ -3644,6 +3926,9 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
 /// `build_plan_status`'s `"status"` field) is a terminal state — no further
 /// task transitions will happen without brain intervention. Non-terminal
 /// plans can still receive worker results or brain reviews.
+///
+/// bd-2m2u Phase 2d — `"escalated"` is NOT terminal: brain
+/// `submit_plan_mutation` resumes traversal.
 pub fn is_terminal_plan_status(overall: &str) -> bool {
     matches!(
         overall,
@@ -3757,6 +4042,7 @@ pub async fn review_task(
                     PlanTaskStatus::Rejected { .. } => "rejected",
                     PlanTaskStatus::Failed { .. } => "failed",
                     PlanTaskStatus::BlockedOnSetupConflict { .. } => "blocked_on_setup_conflict",
+                    PlanTaskStatus::EscalatedToBrain { .. } => "escalated_to_brain",
                     _ => "unknown",
                 };
                 return Err(format!(
@@ -4147,6 +4433,7 @@ fn apply_decision_and_extract(
                     PlanTaskStatus::Rejected { .. } => "rejected",
                     PlanTaskStatus::Failed { .. } => "failed",
                     PlanTaskStatus::BlockedOnSetupConflict { .. } => "blocked_on_setup_conflict",
+                    PlanTaskStatus::EscalatedToBrain { .. } => "escalated_to_brain",
                     _ => "unknown",
                 };
                 return Err(format!(
@@ -6304,7 +6591,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn worker_failure_at_attempt_2_terminates_failed() {
+    async fn phase1_terminal_failure_promoted_to_escalated_to_brain() {
+        // bd-2m2u Phase 2d migration of `worker_failure_at_attempt_2_terminates_failed`.
+        // Phase 1 stamped attempt 2 failures as terminal `Failed`; Phase 2d
+        // promotes the same path to `EscalatedToBrain` so brain
+        // `submit_plan_mutation` can drive recovery instead of stalling.
         use std::time::Duration;
 
         let (plan, delegation_tx, mut delegation_rx) = build_run_plan_fixture(None);
@@ -6338,7 +6629,7 @@ mod tests {
             diff_summary: None,
             summary: Some("worker crashed again".into()),
             estimated_cost_usd: 0.0,
-            worker_branch: None,
+            worker_branch: Some("spur/worker-final".into()),
             artifact: None,
         });
 
@@ -6349,12 +6640,145 @@ mod tests {
 
         let status = plan.lock().await.tasks[0].status.clone();
         assert!(
-            matches!(status, super::PlanTaskStatus::Failed { ref error } if error == "worker crashed again"),
-            "attempt 2 failure should be terminal Failed, got {status:?}"
+            matches!(
+                status,
+                super::PlanTaskStatus::EscalatedToBrain { ref last_error }
+                    if last_error == "worker crashed again"
+            ),
+            "Phase 2d: attempt-2 failure must escalate, not terminate-Failed; got {status:?}"
         );
 
         runner.abort();
         let _ = runner.await;
+    }
+
+    #[tokio::test]
+    async fn escalation_pushes_brain_continuation_with_plan_task_escalated_source() {
+        use std::sync::Arc as StdArc;
+        use std::sync::Mutex as StdMutex;
+        use std::time::Duration;
+
+        let (plan, delegation_tx, mut delegation_rx) = build_run_plan_fixture(None);
+        {
+            let mut state = plan.lock().await;
+            state.tasks[0].attempt = 2;
+        }
+
+        // Capture the BrainContinuation pushed by the escalation path so we
+        // can assert on its source discriminator.
+        let captured: StdArc<StdMutex<Vec<spur_acp::domain::BrainContinuation>>> =
+            StdArc::new(StdMutex::new(Vec::new()));
+        let captured_clone = StdArc::clone(&captured);
+        let ctx = StdArc::new(crate::server::DetachedContinuationCtx {
+            on_complete: StdArc::new(move |cont, _delegation_id| {
+                let captured = StdArc::clone(&captured_clone);
+                Box::pin(async move {
+                    captured.lock().expect("captured lock").push(cont);
+                })
+            }),
+        });
+
+        let runner = tokio::spawn({
+            let plan = Arc::clone(&plan);
+            async move {
+                run_plan(
+                    plan,
+                    delegation_tx,
+                    None,
+                    None,
+                    None,
+                    ctx,
+                    test_materializer(),
+                    pro_feature_gate(),
+                )
+                .await
+            }
+        });
+
+        let first = delegation_rx.recv().await.expect("initial dispatch");
+        let _ = first.respond_to.send(spur_acp::DelegationResult {
+            status: spur_acp::DelegationStatus::Failed {
+                error: "second crash".into(),
+            },
+            diff: None,
+            diff_summary: None,
+            summary: Some("second crash".into()),
+            estimated_cost_usd: 0.0,
+            worker_branch: Some("spur/worker-final".into()),
+            artifact: None,
+        });
+
+        // Allow the escalation push to land.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let conts = captured.lock().expect("captured lock").clone();
+        assert!(
+            conts.iter().any(|c| matches!(
+                c.source,
+                spur_acp::domain::ContinuationSource::PlanTaskEscalated
+            )),
+            "expected at least one BrainContinuation with source=PlanTaskEscalated, got {:?}",
+            conts.iter().map(|c| &c.source).collect::<Vec<_>>()
+        );
+
+        runner.abort();
+        let _ = runner.await;
+    }
+
+    #[test]
+    fn escalated_to_brain_blocks_recompute_open_statuses_promotion() {
+        // bd-2m2u Phase 2d — `recompute_open_statuses` must not promote an
+        // EscalatedToBrain task to Ready even when its dependencies are
+        // satisfied. Brain `submit_plan_mutation(RetryTask)` is the only
+        // way back to Pending → Ready.
+        use crate::plan::projector::recompute_open_statuses;
+
+        let mut tasks = vec![
+            PlanTaskEntry {
+                spec: PlanTask {
+                    task_id: "dep".into(),
+                    agent: "a".into(),
+                    task: "T".into(),
+                    depends_on: vec![],
+                    issue_id: None,
+                    context_files: vec![],
+                },
+                status: PlanTaskStatus::Approved { summary: None },
+                result: None,
+                worker_branch: None,
+                attempt: 1,
+                history: vec![],
+                last_delegation_id: None,
+                dispatched_base_oid: None,
+            },
+            PlanTaskEntry {
+                spec: PlanTask {
+                    task_id: "esc".into(),
+                    agent: "a".into(),
+                    task: "T".into(),
+                    depends_on: vec!["dep".into()],
+                    issue_id: None,
+                    context_files: vec![],
+                },
+                status: PlanTaskStatus::EscalatedToBrain {
+                    last_error: "exhausted".into(),
+                },
+                result: None,
+                worker_branch: None,
+                attempt: 2,
+                history: vec![],
+                last_delegation_id: None,
+                dispatched_base_oid: None,
+            },
+        ];
+
+        recompute_open_statuses(&mut tasks);
+
+        assert!(
+            matches!(tasks[1].status, PlanTaskStatus::EscalatedToBrain { .. }),
+            "EscalatedToBrain must NOT be auto-promoted to Ready by recompute_open_statuses; got {:?}",
+            tasks[1].status
+        );
     }
 
     #[tokio::test]
@@ -7545,6 +7969,7 @@ mod tests {
             },
             false,
             1,
+            Some("t1"),
         )
         .await
         .expect("persist retryable invariant violation");
@@ -7891,6 +8316,87 @@ mod tests {
         assert!(
             label_update.remove_labels.contains(&lease_label),
             "lease label must be removed in the same IssueUpdate"
+        );
+    }
+
+    // ─── bd-2m2u Phase 2d — persisted-path escalation tests ──────────────────
+
+    #[tokio::test]
+    async fn escalated_task_keeps_beads_issue_open_and_signal_escalated_label() {
+        // Phase 2d invariant: when `persist_completion_result_with_retry_for_task`
+        // observes attempt-2 worker failure (i.e. retry budget exhausted),
+        // it must (a) keep the beads issue OPEN, (b) add the
+        // `signal:escalated` label, (c) emit an `EscalationRequested`
+        // audit, and (d) return `Escalated` rather than completing.
+        let pm = CompletionWritebackPm::new(vec![]);
+
+        let action = super::persist_completion_result_with_retry_for_task(
+            &pm,
+            "bd-1",
+            pro_feature_gate().as_ref(),
+            "plan-esc",
+            "del-esc",
+            crate::plan::audit_sentinel::CompletionState::Failed,
+            crate::plan::audit_sentinel::CompletionAuditFields {
+                worker_branch: Some("spur/worker-bust".into()),
+                result_summary: Some("worker crashed".into()),
+                artifact_uri: None,
+                dispatched_base_oid: None,
+                repo_root: None,
+            },
+            false,
+            Some(2),
+            Some("t-esc"),
+        )
+        .await
+        .expect("persist completion (escalation path)");
+
+        match action {
+            super::CompletionPersistenceAction::Escalated {
+                ref last_error,
+                ref worker_branch,
+            } => {
+                assert_eq!(last_error, "worker crashed");
+                assert_eq!(worker_branch.as_deref(), Some("spur/worker-bust"));
+            }
+            other => panic!("expected CompletionPersistenceAction::Escalated, got {other:?}"),
+        }
+
+        let status = pm.status.lock().expect("status lock").clone();
+        assert_eq!(
+            status.as_deref(),
+            Some("open"),
+            "escalation must keep beads issue OPEN; got {status:?}"
+        );
+
+        let labels = pm.labels.lock().expect("labels lock").clone();
+        assert!(
+            labels
+                .iter()
+                .any(|l| l == crate::plan::mutation_executor::SIGNAL_ESCALATED_LABEL),
+            "escalation must add `signal:escalated` label; got labels={labels:?}"
+        );
+        assert!(
+            !labels.iter().any(|l| l == crate::plan::labels::READY_FOR_REVIEW),
+            "escalation must remove `READY_FOR_REVIEW` (option A: SignalWatcher should not pick it up); got labels={labels:?}"
+        );
+
+        let comments = pm.advanced.comments.lock().expect("comments lock").clone();
+        let kinds: Vec<_> = comments
+            .iter()
+            .filter_map(|body| {
+                crate::plan::audit_sentinel::parse_comment(body).and_then(|r| r.ok())
+            })
+            .collect();
+        assert!(
+            kinds.iter().any(|k| matches!(
+                k,
+                crate::plan::audit_sentinel::AuditSentinelKind::EscalationRequested {
+                    plan_id, task_id, attempt, last_error, ..
+                }
+                if plan_id == "plan-esc" && task_id == "t-esc" && *attempt == 2 && last_error == "worker crashed"
+            )),
+            "EscalationRequested audit (plan_id=plan-esc, task_id=t-esc, attempt=2) must be emitted; got {kinds:?}"
         );
     }
 }
