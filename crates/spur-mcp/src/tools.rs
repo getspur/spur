@@ -1056,13 +1056,18 @@ fn report_signal_def() -> ToolDefinition {
                 "task_id": { "type": "string" },
                 "signal": {
                     "type": "object",
-                    "required": ["kind", "signal_id", "severity", "reason"],
+                    "required": ["kind", "signal_id"],
                     "properties": {
-                        "kind": { "type": "string", "enum": ["scope_drift"] },
+                        "kind": { "type": "string", "enum": ["scope_drift", "retry_exhausted"] },
                         "signal_id": { "type": "string", "format": "uuid" },
+                        // ScopeDrift fields
                         "severity": { "type": "number", "minimum": 0, "maximum": 1 },
                         "reason": { "type": "string" },
-                        "estimated_subtasks": { "type": ["integer", "null"], "minimum": 1 }
+                        "estimated_subtasks": { "type": ["integer", "null"], "minimum": 1 },
+                        // RetryExhausted fields (bd-2m2u Phase 2e)
+                        "task_id": { "type": "string" },
+                        "attempt": { "type": "integer", "minimum": 0 },
+                        "last_error": { "type": "string" }
                     }
                 }
             }

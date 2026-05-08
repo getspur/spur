@@ -38,6 +38,17 @@ pub enum WorkerSignal {
         /// OID at the current worker's tip where the conflicting content lives.
         worker_tip: String,
     },
+    /// bd-2m2u Phase 2e — emitted when a task has exhausted its in-engine
+    /// `AUTO_RETRY_BUDGET` (Phase 1) and the autonomous-recovery proposer
+    /// path is desired in addition to / instead of the brain escalation
+    /// continuation (Phase 2d option A). v0 deterministic proposer matches
+    /// on this signal and emits `RetryTask` while attempts < MAX_ATTEMPTS.
+    RetryExhausted {
+        signal_id: Uuid,
+        task_id: String,
+        attempt: u32,
+        last_error: String,
+    },
 }
 
 impl WorkerSignal {
@@ -46,6 +57,7 @@ impl WorkerSignal {
         match self {
             WorkerSignal::ScopeDrift { signal_id, .. } => *signal_id,
             WorkerSignal::PotentialClobber { signal_id, .. } => *signal_id,
+            WorkerSignal::RetryExhausted { signal_id, .. } => *signal_id,
         }
     }
 
@@ -54,6 +66,7 @@ impl WorkerSignal {
         match self {
             WorkerSignal::ScopeDrift { .. } => "scope-drift",
             WorkerSignal::PotentialClobber { .. } => "potential-clobber",
+            WorkerSignal::RetryExhausted { .. } => "retry-exhausted",
         }
     }
 }
