@@ -9929,6 +9929,8 @@ mod reconciler_fast_forward_tests {
             AuditSentinelKind::MutationCommit {
                 mutation_id: "mut-2".into(),
                 children_created: vec!["bd-2".into()],
+                op_tags: vec!["split_task".into()],
+                affected_task_ids: vec!["bd-1".into(), "bd-2".into()],
             },
         ];
 
