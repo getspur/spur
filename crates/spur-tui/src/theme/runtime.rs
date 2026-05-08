@@ -189,7 +189,11 @@ fn home_dir() -> Option<PathBuf> {
 /// shell metacharacters into a filesystem lookup. Built-ins
 /// (`dark`/`light`/`high-contrast`) and unadorned identifiers pass.
 fn is_safe_theme_name(name: &str) -> bool {
+    // `~` is rejected defensively even though `Path::join` does not
+    // shell-expand it — keeps the contract explicit so any future
+    // consumer that does expand (e.g. shellexpand crate) stays safe.
     !name.is_empty()
+        && !name.starts_with('~')
         && !name.contains('/')
         && !name.contains('\\')
         && !name.contains("..")
@@ -356,6 +360,34 @@ mod tests {
             assert_eq!(theme.name, "dark");
             assert!(matches!(outcome, ThemeLoadOutcome::FellBackToDark { .. }));
         });
+    }
+
+    /// Unit-test the predicate directly so each forbidden pattern is
+    /// exercised in isolation. The integration-style `rejects_path_
+    /// traversal_theme_name` test only covers a combined `/` + `..`
+    /// payload; this guards each rejection branch separately.
+    #[test]
+    fn is_safe_theme_name_rejects_each_dangerous_pattern() {
+        // Allowed names.
+        assert!(is_safe_theme_name("dark"));
+        assert!(is_safe_theme_name("my-custom"));
+        assert!(is_safe_theme_name("my.theme"));
+        // Rejected: empty.
+        assert!(!is_safe_theme_name(""));
+        // Rejected: tilde prefix (defensive).
+        assert!(!is_safe_theme_name("~user"));
+        assert!(!is_safe_theme_name("~"));
+        // Rejected: forward slash.
+        assert!(!is_safe_theme_name("foo/bar"));
+        assert!(!is_safe_theme_name("/etc/passwd"));
+        // Rejected: backslash.
+        assert!(!is_safe_theme_name("foo\\bar"));
+        assert!(!is_safe_theme_name("C:\\Windows"));
+        // Rejected: parent traversal.
+        assert!(!is_safe_theme_name(".."));
+        assert!(!is_safe_theme_name("foo..bar"));
+        // Rejected: null byte.
+        assert!(!is_safe_theme_name("foo\0bar"));
     }
 
     #[test]
