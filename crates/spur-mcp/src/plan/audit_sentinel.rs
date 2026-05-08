@@ -159,6 +159,20 @@ pub enum AuditSentinelKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         worker_branch: Option<String>,
     },
+    /// bd-2m2u Phase 2d — emitted on a beads task issue when its
+    /// `AUTO_RETRY_BUDGET` is exhausted and the task is promoted to
+    /// `EscalatedToBrain`. Mirrors `RetryRequested` but signals the brain
+    /// must drive recovery via `submit_plan_mutation` (option A routing).
+    EscalationRequested {
+        plan_id: String,
+        task_id: String,
+        attempt: u32,
+        last_error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worker_branch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delegation_id: Option<String>,
+    },
     Signal {
         signal_id: String,
         #[serde(default)]
@@ -304,6 +318,7 @@ impl AuditSentinelKind {
             Self::Rejection { .. } => "rejection",
             Self::ReviewFeedback { .. } => "review-feedback",
             Self::RetryRequested { .. } => "retry-requested",
+            Self::EscalationRequested { .. } => "escalation-requested",
             Self::Signal { .. } => "signal",
             Self::MutationPlan { .. } => "mutation-plan",
             Self::MutationCommit { .. } => "mutation-commit",
@@ -920,6 +935,22 @@ mod tests {
         let parsed = parse_comment(&encoded).unwrap().unwrap();
         assert_eq!(parsed, kind);
         assert_eq!(parsed.kind_str(), "review-feedback");
+    }
+
+    #[test]
+    fn escalation_requested_variant_round_trips() {
+        let kind = AuditSentinelKind::EscalationRequested {
+            plan_id: "plan-bd-2m2u".into(),
+            task_id: "bd-1428.1".into(),
+            attempt: 2,
+            last_error: "worker output invariant violated: 0 commits".into(),
+            worker_branch: Some("spur/worker-bd-1428-1".into()),
+            delegation_id: Some("del-Z".into()),
+        };
+        let encoded = encode_comment(&kind);
+        let parsed = parse_comment(&encoded).unwrap().unwrap();
+        assert_eq!(parsed, kind);
+        assert_eq!(parsed.kind_str(), "escalation-requested");
     }
 
     #[test]

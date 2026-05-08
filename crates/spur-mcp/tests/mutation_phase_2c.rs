@@ -612,3 +612,197 @@ async fn submit_plan_mutation_clears_signal_escalated_label_on_success() {
         issue.labels
     );
 }
+
+// ─── bd-2m2u Phase 2d — submit_plan_mutation round-trip after escalation ─
+
+/// Phase 2d round-trip integration: simulate a task that escalated via the
+/// persisted Phase 2d path (signal:escalated label set, EscalationRequested
+/// audit present, prior Completion(Failed) audit, issue still open). Brain
+/// observes the escalation, decides to retry, and calls `submit_plan_mutation`
+/// with `RetryTask`. Verify the mutation:
+///   1. clears the `signal:escalated` label,
+///   2. leaves the issue OPEN (so the engine can re-dispatch),
+///   3. removes any READY_FOR_REVIEW label (defensive),
+///   4. emits a `RetryRequested` audit (so the next dispatch increments
+///      the attempt counter through the projector),
+///   5. preserves prior `Completion(Failed)` and `EscalationRequested`
+///      audits as durable history.
+#[tokio::test]
+async fn submit_plan_mutation_after_escalation_clears_signal_and_resumes_engine() {
+    let dir = TempDir::new().unwrap();
+    run_br(dir.path(), &["init"]).unwrap();
+    let issue_id = br_id(
+        &run_br(
+            dir.path(),
+            &["create", "Escalated task", "--silent", "-t", "task"],
+        )
+        .unwrap(),
+    );
+
+    // Mark the issue exactly as the persisted Phase 2d escalation path
+    // would: open + signal:escalated label, prior Completion(Failed) +
+    // EscalationRequested audits.
+    run_br(
+        dir.path(),
+        &["label", "add", &issue_id, "-l", "signal:escalated"],
+    )
+    .unwrap();
+
+    let pm = pm_for(&dir).await;
+    let adv = pm.advanced().expect("adv");
+    emit_completion_failed(adv, &issue_id).await;
+    let escalation_comment =
+        audit_sentinel::encode_comment(&AuditSentinelKind::EscalationRequested {
+            plan_id: "plan-esc".into(),
+            task_id: issue_id.clone(),
+            delegation_id: Some("del-prior".into()),
+            attempt: 2,
+            last_error: "worker crashed".into(),
+            worker_branch: Some("spur/worker-prior".into()),
+        });
+    adv.add_comment(&issue_id, &escalation_comment)
+        .await
+        .expect("seed escalation audit");
+
+    // Sanity check: the seed state matches what the persisted path produces.
+    let pre = pm.get_issue(&issue_id).await.unwrap();
+    assert_ne!(
+        pre.status,
+        pm.closed_status(),
+        "escalated issue must start OPEN"
+    );
+    assert!(
+        pre.labels.iter().any(|l| l == "signal:escalated"),
+        "escalated issue must start with signal:escalated"
+    );
+
+    // Brain calls submit_plan_mutation(RetryTask).
+    submit_plan_mutation(
+        pm.clone(),
+        common::server_builder::pro_feature_gate(),
+        Uuid::new_v4(),
+        issue_id.clone(),
+        vec![PlanMutationOp::RetryTask {
+            issue_id: issue_id.clone(),
+        }],
+    )
+    .await
+    .expect("RetryTask must succeed against an escalated task");
+
+    // Round-trip assertions.
+    let after = pm.get_issue(&issue_id).await.unwrap();
+    assert!(
+        !after.labels.iter().any(|l| l == "signal:escalated"),
+        "signal:escalated must be cleared (engine resumes traversal); labels={:?}",
+        after.labels
+    );
+    assert_ne!(
+        after.status,
+        pm.closed_status(),
+        "issue must stay OPEN so the engine can redispatch; status={:?}",
+        after.status
+    );
+    assert!(
+        !after.labels.iter().any(|l| l == labels::READY_FOR_REVIEW),
+        "READY_FOR_REVIEW must not be present after retry; labels={:?}",
+        after.labels
+    );
+
+    let comments = adv.list_comments(&issue_id).await.unwrap();
+    let sents = sentinels(&comments);
+    assert!(
+        sents
+            .iter()
+            .any(|s| matches!(s, AuditSentinelKind::RetryRequested { .. })),
+        "RetryRequested audit must be emitted by RetryTask"
+    );
+    assert!(
+        sents
+            .iter()
+            .any(|s| matches!(s, AuditSentinelKind::EscalationRequested { .. })),
+        "prior EscalationRequested audit must be preserved"
+    );
+    assert!(
+        sents.iter().any(|s| matches!(
+            s,
+            AuditSentinelKind::Completion {
+                completion_state: CompletionState::Failed,
+                ..
+            }
+        )),
+        "prior Completion(Failed) audit must be preserved"
+    );
+}
+
+/// Phase 2d cap: brain-directed retries via `RetryTask` must count toward
+/// `MAX_ATTEMPTS = 3` (Phase 0). When attempt count from the audit history
+/// already equals MAX_ATTEMPTS, RetryTask must be REJECTED — brain has to
+/// `AbandonTask` or `ModifyTaskSpec` instead.
+#[tokio::test]
+async fn brain_directed_retries_capped_by_max_attempts() {
+    let dir = TempDir::new().unwrap();
+    run_br(dir.path(), &["init"]).unwrap();
+    let issue_id = br_id(
+        &run_br(
+            dir.path(),
+            &["create", "Capped task", "--silent", "-t", "task"],
+        )
+        .unwrap(),
+    );
+
+    let pm = pm_for(&dir).await;
+    let adv = pm.advanced().expect("adv");
+
+    // Seed three Dispatch audits → attempt count == MAX_ATTEMPTS = 3.
+    // Each one models a previous (now-completed) attempt.
+    for n in 1..=3u32 {
+        let dispatch = audit_sentinel::encode_comment(&AuditSentinelKind::Dispatch {
+            delegation_id: format!("del-{n}"),
+            worker: "claude-code-acp".into(),
+            attempt: n,
+        });
+        adv.add_comment(&issue_id, &dispatch)
+            .await
+            .expect("seed dispatch audit");
+    }
+    emit_completion_failed(adv, &issue_id).await;
+    close_failed(pm.as_ref(), &issue_id).await;
+
+    let err = submit_plan_mutation(
+        pm.clone(),
+        common::server_builder::pro_feature_gate(),
+        Uuid::new_v4(),
+        issue_id.clone(),
+        vec![PlanMutationOp::RetryTask {
+            issue_id: issue_id.clone(),
+        }],
+    )
+    .await
+    .expect_err("RetryTask must be rejected at MAX_ATTEMPTS cap");
+
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("MAX_ATTEMPTS"),
+        "rejection error must mention MAX_ATTEMPTS, got: {msg}"
+    );
+
+    // Rollback: issue must remain CLOSED (no partial open).
+    let after = pm.get_issue(&issue_id).await.unwrap();
+    assert_eq!(
+        after.status,
+        pm.closed_status(),
+        "MAX_ATTEMPTS rejection must roll back any partial open; status={:?}",
+        after.status
+    );
+
+    // No new RetryRequested audit was emitted (cap enforced before write).
+    let comments = adv.list_comments(&issue_id).await.unwrap();
+    let retry_count = sentinels(&comments)
+        .iter()
+        .filter(|s| matches!(s, AuditSentinelKind::RetryRequested { .. }))
+        .count();
+    assert_eq!(
+        retry_count, 0,
+        "cap must reject before emitting RetryRequested; got {retry_count} RetryRequested audits"
+    );
+}

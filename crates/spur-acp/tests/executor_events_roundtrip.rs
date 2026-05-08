@@ -176,6 +176,8 @@ fn plan_snapshot_updated_roundtrips() {
                 rejected: 0,
                 failed: 0,
                 cancelled: 0,
+                escalated: 0,
+                auto_retried: 0,
             },
             tasks: vec![PlanSnapshotTask {
                 task_id: "task-projection".into(),

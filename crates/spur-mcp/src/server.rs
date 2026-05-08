@@ -1145,6 +1145,21 @@ pub(crate) async fn reconstruct_historical_attempts(
     Ok(history)
 }
 
+/// bd-2m2u Phase 2d — best-effort lookup of the `plan_id` carried as a
+/// `spur:plan-id:*` label on the trigger task issue, used by
+/// `handle_submit_plan_mutation` to populate the `PlanMutationApplied` event.
+/// Returns `None` if the issue cannot be fetched or carries no plan id label.
+async fn derive_plan_id_from_trigger_issue(
+    pm: &spur_pm::PmService,
+    issue_id: &str,
+) -> Option<String> {
+    let issue = pm.get_issue(issue_id).await.ok()?;
+    issue
+        .labels
+        .iter()
+        .find_map(|label| crate::plan::labels::parse_plan_id(label).map(str::to_string))
+}
+
 async fn apply_issue_update(
     pm: &spur_pm::PmService,
     issue_id: &str,
@@ -6009,6 +6024,10 @@ impl McpCallbackServer {
     /// `MutationBatch` from the request payload, runs cycle detection +
     /// rollback via the generic executor, and clears `signal:escalated` labels
     /// on success.
+    ///
+    /// bd-2m2u Phase 2d — emits `PlanMutationApplied` on success so observers
+    /// (TUI, brain, dashboards) follow the recovery without parsing the audit
+    /// log directly.
     async fn handle_submit_plan_mutation(&self, id: Value, args: Value) -> JsonRpcResponse {
         if let Some(response) =
             self.require_feature_response(id.clone(), FeatureKey::PM_PRO_BEADS_ADVANCED)
@@ -6056,8 +6075,18 @@ impl McpCallbackServer {
             .and_then(|s| uuid::Uuid::parse_str(s).ok())
             .unwrap_or_else(uuid::Uuid::new_v4);
 
+        // bd-2m2u Phase 2d — snapshot the op tags + plan_id BEFORE moving
+        // the ops into the executor, so we can emit `PlanMutationApplied`
+        // on success. Plan id is recovered from the trigger task's beads
+        // labels (best effort — observability only).
+        let op_tags: Vec<String> = ops
+            .iter()
+            .map(|op| crate::plan::mutation::op_tag_for(op).to_string())
+            .collect();
+        let trigger_task_id_for_event = trigger_task_id.clone();
+
         match crate::plan::mutation_executor::submit_plan_mutation(
-            pm,
+            pm.clone(),
             Arc::clone(&self.feature_gate),
             mutation_id,
             trigger_task_id,
@@ -6066,6 +6095,19 @@ impl McpCallbackServer {
         .await
         {
             Ok(result) => {
+                if let Some(sink) = self.event_sink.as_deref() {
+                    let plan_id =
+                        derive_plan_id_from_trigger_issue(pm.as_ref(), &trigger_task_id_for_event)
+                            .await
+                            .unwrap_or_default();
+                    sink.emit(spur_acp::SpurEventBody::PlanMutationApplied {
+                        plan_id,
+                        mutation_id: result.mutation_id.clone(),
+                        trigger_task_id: trigger_task_id_for_event,
+                        op_tags,
+                        affected_task_ids: result.affected_task_ids.clone(),
+                    });
+                }
                 let payload = json!({
                     "mutation_id": result.mutation_id,
                     "children_created": result.children_created,

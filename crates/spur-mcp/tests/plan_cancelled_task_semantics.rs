@@ -251,6 +251,7 @@ async fn test_delegation_cancelled_result_does_not_cascade() {
         | PlanTaskStatus::Cancelled { .. }
         | PlanTaskStatus::Superseded { .. }
         | PlanTaskStatus::BlockedOnSetupConflict { .. }
+        | PlanTaskStatus::EscalatedToBrain { .. }
         | PlanTaskStatus::Ready => {}
     }
 }

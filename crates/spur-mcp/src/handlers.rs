@@ -439,7 +439,14 @@ pub async fn get_task_diff(
                     "task '{task_id}' is still running — diff not available yet"
                 )));
             }
-            _ => {}
+            crate::plan::PlanTaskStatus::AwaitingReview { .. }
+            | crate::plan::PlanTaskStatus::Approved { .. }
+            | crate::plan::PlanTaskStatus::Rejected { .. }
+            | crate::plan::PlanTaskStatus::Failed { .. }
+            | crate::plan::PlanTaskStatus::EscalatedToBrain { .. }
+            | crate::plan::PlanTaskStatus::Cancelled { .. }
+            | crate::plan::PlanTaskStatus::Superseded { .. }
+            | crate::plan::PlanTaskStatus::BlockedOnSetupConflict { .. } => {}
         }
 
         let status_str = match &entry.status {
@@ -447,13 +454,29 @@ pub async fn get_task_diff(
             crate::plan::PlanTaskStatus::Approved { .. } => "approved",
             crate::plan::PlanTaskStatus::Rejected { .. } => "rejected",
             crate::plan::PlanTaskStatus::Failed { .. } => "failed",
-            _ => "unknown",
+            crate::plan::PlanTaskStatus::EscalatedToBrain { .. } => "escalated",
+            crate::plan::PlanTaskStatus::Cancelled { .. } => "cancelled",
+            crate::plan::PlanTaskStatus::Superseded { .. } => "superseded",
+            crate::plan::PlanTaskStatus::BlockedOnSetupConflict { .. } => {
+                "blocked_on_setup_conflict"
+            }
+            crate::plan::PlanTaskStatus::Pending
+            | crate::plan::PlanTaskStatus::Ready
+            | crate::plan::PlanTaskStatus::Dispatched { .. } => "unknown",
         }
         .to_string();
         let status_summary = match &entry.status {
             crate::plan::PlanTaskStatus::AwaitingReview { summary }
             | crate::plan::PlanTaskStatus::Approved { summary } => summary.clone(),
-            _ => None,
+            crate::plan::PlanTaskStatus::Pending
+            | crate::plan::PlanTaskStatus::Ready
+            | crate::plan::PlanTaskStatus::Dispatched { .. }
+            | crate::plan::PlanTaskStatus::Rejected { .. }
+            | crate::plan::PlanTaskStatus::Failed { .. }
+            | crate::plan::PlanTaskStatus::EscalatedToBrain { .. }
+            | crate::plan::PlanTaskStatus::Cancelled { .. }
+            | crate::plan::PlanTaskStatus::Superseded { .. }
+            | crate::plan::PlanTaskStatus::BlockedOnSetupConflict { .. } => None,
         };
 
         (

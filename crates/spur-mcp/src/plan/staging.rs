@@ -177,6 +177,9 @@ fn should_carry_forward(status: &PlanTaskStatus) -> bool {
             | PlanTaskStatus::Dispatched { .. }
             | PlanTaskStatus::AwaitingReview { .. }
             | PlanTaskStatus::BlockedOnSetupConflict { .. }
+            // bd-2m2u Phase 2d — escalated tasks remain in the open set
+            // until brain `submit_plan_mutation` resolves them.
+            | PlanTaskStatus::EscalatedToBrain { .. }
     )
 }
 
