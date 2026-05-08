@@ -400,6 +400,11 @@ pub struct App {
     /// pre-theme TUI colors so unmigrated `Color::` sites stay visually
     /// stable until PR3/PR4 swap them out.
     pub(crate) theme: std::sync::Arc<crate::theme::Theme>,
+    /// Theme name as requested via `config.tui.theme` or the most recent
+    /// successful `/theme <name>` switch. Distinct from `theme.name`,
+    /// which reflects the YAML-declared name (a project file can rename
+    /// itself). `/theme reload` re-resolves this string against the cascade.
+    pub(crate) active_theme_name: String,
     palette_visible: bool,
     palette_state: crate::components::palette::PaletteState,
     pub transient_hint: Option<TransientHint>,
@@ -597,7 +602,8 @@ impl App {
 
         // Resolve the active theme from `tui.theme` config. The runtime
         // loader logs and falls back internally; it never panics.
-        let (theme, theme_outcome) = crate::theme::load_runtime_theme(&config.tui.theme);
+        let active_theme_name = config.tui.theme.clone();
+        let (theme, theme_outcome) = crate::theme::load_runtime_theme(&active_theme_name);
         tracing::info!(
             target: "spur_tui::theme",
             theme = %theme.name,
@@ -690,6 +696,7 @@ impl App {
             tombstone_undo_replay: false,
             config,
             theme,
+            active_theme_name,
             palette_visible: false,
             palette_state: crate::components::palette::PaletteState::new(),
             transient_hint: None,
@@ -833,6 +840,78 @@ impl App {
 
     pub fn flash_hint_short(&mut self, msg: impl Into<String>) {
         self.flash_hint(msg, Duration::from_secs(2));
+    }
+
+    /// Service `/theme` slash command: list / switch / reload. Runtime-only;
+    /// never mutates `config.tui.theme`. On a successful switch or reload
+    /// the `Arc<Theme>` on `self` is replaced atomically — every render
+    /// surface reads the new theme on its next frame.
+    fn handle_theme_command(&mut self, arg: String) {
+        let arg = arg.trim();
+        if arg.is_empty() {
+            let available = crate::theme::list_available_themes();
+            let active = &self.active_theme_name;
+            let mut parts: Vec<String> = available
+                .built_in
+                .iter()
+                .map(|name| {
+                    if name == active {
+                        format!("*{name}")
+                    } else {
+                        name.clone()
+                    }
+                })
+                .collect();
+            for name in available
+                .project
+                .iter()
+                .chain(available.user.iter())
+                .filter(|n| !available.built_in.iter().any(|b| b == *n))
+            {
+                let label = if name == active {
+                    format!("*{name}")
+                } else {
+                    name.clone()
+                };
+                if !parts.contains(&label) {
+                    parts.push(label);
+                }
+            }
+            self.flash_hint(
+                format!("themes: {} (active *)", parts.join(", ")),
+                Duration::from_secs(4),
+            );
+            return;
+        }
+
+        let target = if arg == "reload" {
+            self.active_theme_name.clone()
+        } else {
+            arg.to_string()
+        };
+
+        let (theme, outcome) = crate::theme::load_runtime_theme(&target);
+        if let crate::theme::ThemeLoadOutcome::FellBackToDark { reason } = &outcome {
+            tracing::warn!(target: "spur_tui::theme", target_name = %target, reason = %reason, "theme switch failed");
+            self.flash_hint_short(format!("theme `{target}` not found"));
+            return;
+        }
+
+        tracing::info!(
+            target: "spur_tui::theme",
+            theme = %theme.name,
+            requested = %target,
+            outcome = ?outcome,
+            "theme switched at runtime"
+        );
+        self.theme = std::sync::Arc::new(theme);
+        self.active_theme_name = target.clone();
+        self.dirty = true;
+        if arg == "reload" {
+            self.flash_hint_short(format!("theme reloaded: {target}"));
+        } else {
+            self.flash_hint_short(format!("theme: {target}"));
+        }
     }
 
     fn tick_transient_hint(&mut self, now: Instant) {
@@ -3741,6 +3820,9 @@ impl App {
             Action::FlashHint { message } => {
                 self.flash_hint_short(message);
             }
+            Action::ThemeCommand { arg } => {
+                self.handle_theme_command(arg);
+            }
             Action::PrefillInput { text } => {
                 match &self.current_view {
                     ViewId::Dashboard => {
@@ -5486,6 +5568,12 @@ mod worker_stream_routing_tests {
 
         // spur-tui does not depend on serial_test; this process-wide CWD
         // mutation can flake if another parallel test depends on CWD.
+        // Share `theme::runtime::test_support::TEST_LOCK` so that any
+        // `with_isolated_dirs` caller (e.g. theme threading + /theme
+        // command tests) is serialized against this cwd swap.
+        let _lock = crate::theme::runtime::test_support::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let cwd = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
@@ -6719,6 +6807,85 @@ mod theme_threading_tests {
             );
 
             assert_eq!(app.theme.name, "dark");
+        });
+    }
+
+    /// `/theme light` must atomically swap `App.theme` so the next render
+    /// pulls tokens from the light palette. Verifies both the resolved
+    /// `theme.name` and the tracked `active_theme_name` after dispatch.
+    #[test]
+    fn slash_theme_switch_swaps_app_theme_arc() {
+        with_isolated_dirs(|_, _| {
+            let mut spur_config = spur_acp::SpurConfig::default();
+            spur_config.tui.theme = "dark".to_string();
+
+            let mut app = App::new_with_config(
+                None,
+                false,
+                std::sync::Arc::new(spur_config),
+                crate::landing::LandingDecision::ShowDashboard,
+            );
+            assert_eq!(app.theme.name, "dark");
+            assert_eq!(app.active_theme_name, "dark");
+
+            app.process_action(crate::action::Action::ThemeCommand {
+                arg: "light".to_string(),
+            });
+
+            assert_eq!(app.theme.name, "light");
+            assert_eq!(app.active_theme_name, "light");
+            let hint = app
+                .transient_hint_for_test()
+                .expect("flash hint set on success");
+            assert!(
+                hint.text.contains("light"),
+                "hint should mention switched theme, got `{}`",
+                hint.text
+            );
+        });
+    }
+
+    /// `/theme definitely-not-a-theme` keeps the previous theme intact
+    /// and surfaces an error via the transient-hint mechanism. The
+    /// `Arc<Theme>` must NOT be replaced — verified via pointer equality.
+    #[test]
+    fn slash_theme_switch_unknown_keeps_previous_and_flashes_error() {
+        with_isolated_dirs(|_, _| {
+            let mut spur_config = spur_acp::SpurConfig::default();
+            spur_config.tui.theme = "light".to_string();
+
+            let mut app = App::new_with_config(
+                None,
+                false,
+                std::sync::Arc::new(spur_config),
+                crate::landing::LandingDecision::ShowDashboard,
+            );
+            let prev_theme_ptr = std::sync::Arc::as_ptr(&app.theme);
+            assert_eq!(app.theme.name, "light");
+            assert_eq!(app.active_theme_name, "light");
+
+            app.process_action(crate::action::Action::ThemeCommand {
+                arg: "definitely-not-a-theme".to_string(),
+            });
+
+            assert_eq!(app.theme.name, "light", "theme must not change on failure");
+            assert_eq!(
+                app.active_theme_name, "light",
+                "active_theme_name must not change on failure"
+            );
+            assert_eq!(
+                std::sync::Arc::as_ptr(&app.theme),
+                prev_theme_ptr,
+                "Arc<Theme> must not be replaced on failed switch"
+            );
+            let hint = app
+                .transient_hint_for_test()
+                .expect("flash hint set on failure");
+            assert!(
+                hint.text.contains("not found"),
+                "error hint should mention not-found, got `{}`",
+                hint.text
+            );
         });
     }
 }

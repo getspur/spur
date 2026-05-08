@@ -93,6 +93,23 @@ pub fn route_with_caps(
         }
     }
 
+    // /theme [<name>|reload] → carry the raw arg into Action::ThemeCommand.
+    // Intercepted ahead of the registry so the trailing arg is preserved
+    // (the registry-resolved variant in `spur_local` carries an empty arg
+    // and only services the bare `/theme` form).
+    if text == "/theme" {
+        return SubmitDecision::Local {
+            action: Action::ThemeCommand { arg: String::new() },
+        };
+    }
+    if let Some(rest) = text.strip_prefix("/theme ") {
+        return SubmitDecision::Local {
+            action: Action::ThemeCommand {
+                arg: rest.trim().to_string(),
+            },
+        };
+    }
+
     // /issue show <id> → issue ViewDetail action
     if let Some(rest) = text.strip_prefix("/issue show ") {
         let id = rest.trim().to_string();

@@ -236,6 +236,13 @@ pub enum Action {
         required_tier: Option<spur_license::Plan>,
     },
     OpenInsights,
+    /// Spur-local `/theme` slash command. `arg` is the raw rest after the
+    /// `/theme` token: `""` lists available themes, `"reload"` re-resolves
+    /// the active theme name from disk, and any other value is treated as
+    /// a theme name to switch to via `load_runtime_theme`.
+    ThemeCommand {
+        arg: String,
+    },
 }
 
 /// Which permission option the user selected.

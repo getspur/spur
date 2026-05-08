@@ -9,7 +9,10 @@ pub mod tokens;
 
 pub use loader::{load_built_in, load_theme_from_str, Theme, ThemeError};
 pub use resolver::resolve_token;
-pub use runtime::{load_runtime_theme, ThemeLoadOutcome};
+pub use runtime::{
+    list_available_themes, load_runtime_theme, AvailableThemes, ThemeLoadOutcome,
+    BUILT_IN_THEME_NAMES,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ColorDepth {
