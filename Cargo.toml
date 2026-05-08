@@ -112,6 +112,3 @@ debug = true
 strip = false
 codegen-units = 1
 lto = "thin"
-
-[patch."https://github.com/getspur/beads_rust"]
-beads_rust = { path = "/tmp/beads_rust_fork_brcwy" }

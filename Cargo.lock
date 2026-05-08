@@ -647,6 +647,7 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 [[package]]
 name = "beads_rust"
 version = "0.2.1"
+source = "git+https://github.com/getspur/beads_rust?rev=543495d5c52c9996acfea8c534708b6009bbe22e#543495d5c52c9996acfea8c534708b6009bbe22e"
 dependencies = [
  "anyhow",
  "chrono",
