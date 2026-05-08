@@ -11,6 +11,8 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 spur-acp = { workspace = true }
 spur-core = { workspace = true }
+spur-pm = { workspace = true }
 
 [dev-dependencies]
+chrono = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
