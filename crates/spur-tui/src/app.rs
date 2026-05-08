@@ -851,31 +851,25 @@ impl App {
         if arg.is_empty() {
             let available = crate::theme::list_available_themes();
             let active = &self.active_theme_name;
-            let mut parts: Vec<String> = available
-                .built_in
-                .iter()
-                .map(|name| {
-                    if name == active {
-                        format!("*{name}")
-                    } else {
-                        name.clone()
-                    }
-                })
-                .collect();
-            for name in available
-                .project
-                .iter()
-                .chain(available.user.iter())
-                .filter(|n| !available.built_in.iter().any(|b| b == *n))
-            {
-                let label = if name == active {
+            // Show every theme entry the cascade can resolve, tagged by
+            // origin so users can see when a project/user file shadows a
+            // built-in. The active marker `*` always attaches to the
+            // active name regardless of source — load_runtime_theme
+            // determines which file actually loaded (project > user >
+            // built-in cascade).
+            let mark = |name: &str| {
+                if name == active {
                     format!("*{name}")
                 } else {
-                    name.clone()
-                };
-                if !parts.contains(&label) {
-                    parts.push(label);
+                    name.to_string()
                 }
+            };
+            let mut parts: Vec<String> = available.built_in.iter().map(|n| mark(n)).collect();
+            for name in &available.project {
+                parts.push(format!("{} [project]", mark(name)));
+            }
+            for name in &available.user {
+                parts.push(format!("{} [user]", mark(name)));
             }
             self.flash_hint(
                 format!("themes: {} (active *)", parts.join(", ")),
