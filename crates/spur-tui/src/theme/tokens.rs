@@ -78,6 +78,7 @@ const DARK_DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("react_trace.outcome.success.fg", "success"),
     ("react_trace.outcome.error.fg", "danger"),
     ("react_trace.outcome.pending.fg", "warning"),
+    ("react_trace.outcome.unknown.fg", "warning"),
     ("react_trace.diff.context.fg", "fg_subtle"),
     ("react_trace.delegate.fg", "accent"),
     ("react_trace.observe.fg", "success"),
@@ -223,7 +224,7 @@ mod tests {
 
     #[test]
     fn dark_default_contains_all_spec_sample_bindings() {
-        assert_eq!(TokenMap::dark_default().0.len(), 146);
+        assert_eq!(TokenMap::dark_default().0.len(), 147);
     }
 
     #[test]

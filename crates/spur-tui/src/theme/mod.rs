@@ -14,9 +14,22 @@ pub use runtime::{
     BUILT_IN_THEME_NAMES,
 };
 
+/// Terminal color-rendering capability that drives `resolve_token`'s
+/// truecolor-vs-ANSI choice.
+///
+/// Selected once at startup (capability detection or `tui.color_depth`
+/// override) and threaded through every render site that pulls colors
+/// from the active `Theme`. The `dark` / `light` / `high-contrast`
+/// built-ins ship with both a 24-bit `rgb` and an `ansi` per palette
+/// entry, so either depth produces a usable rendering. Custom themes
+/// loaded from YAML inherit `ansi` from their parent (or the `dark`
+/// built-in) at load time — see `theme/loader.rs` and the spec's
+/// "Loader / resolver contract" subsection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ColorDepth {
+    /// 24-bit truecolor terminal — render the `rgb` palette entry.
     Truecolor,
+    /// 16-color ANSI terminal — render the `ansi` palette entry.
     Ansi16,
 }
 
