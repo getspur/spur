@@ -175,6 +175,8 @@ pub struct IssueBrowserView {
     issue_focus: IssueFocus,
     detail_mode: DetailMode,
     graph_pane: IssueGraphPane,
+    graph_data_epoch: u64,
+    graph_request_epochs: HashMap<String, u64>,
     graph_cache: HashMap<String, (Vec<GraphNodeEvent>, Vec<GraphEdgeEvent>)>,
     graph_cache_order: VecDeque<String>,
     graph_loading: Option<String>,
@@ -220,6 +222,8 @@ impl IssueBrowserView {
             issue_focus: IssueFocus::None,
             detail_mode: DetailMode::Text,
             graph_pane: IssueGraphPane::new(),
+            graph_data_epoch: 0,
+            graph_request_epochs: HashMap::new(),
             graph_cache: HashMap::new(),
             graph_cache_order: VecDeque::new(),
             graph_loading: None,
@@ -273,6 +277,7 @@ impl IssueBrowserView {
 
     pub fn seed_issues(&mut self, mut issues: Vec<spur_pm::IssueSummary>) {
         self.last_refresh_error = None;
+        self.bump_graph_data_epoch();
         self.invalidate_graph_cache();
         sort_issues_parent_first(&mut issues);
         self.tracked_issues = issues;
@@ -343,7 +348,7 @@ impl IssueBrowserView {
 
         self.graph_error = None;
         self.graph_loading = Some(id.clone());
-        self.pending_action = Some(Action::GetIssueGraph { id });
+        self.pending_action = Some(self.get_issue_graph_action(id));
     }
 
     pub fn scroll_issue_detail_up_by(&mut self, lines: u16) {
@@ -397,7 +402,7 @@ impl IssueBrowserView {
             // Eagerly request the graph so the cache is populated by the
             // time IssueDetailFetched flips to Graph mode.
             self.graph_loading = Some(id.clone());
-            self.pending_action = Some(Action::GetIssueGraph { id });
+            self.pending_action = Some(self.get_issue_graph_action(id));
         }
     }
 
@@ -482,8 +487,18 @@ impl IssueBrowserView {
             None
         } else {
             self.graph_loading = Some(id.clone());
-            Some(Action::GetIssueGraph { id })
+            Some(self.get_issue_graph_action(id))
         }
+    }
+
+    fn bump_graph_data_epoch(&mut self) {
+        self.graph_data_epoch = self.graph_data_epoch.wrapping_add(1);
+    }
+
+    fn get_issue_graph_action(&mut self, id: String) -> Action {
+        self.graph_request_epochs
+            .insert(id.clone(), self.graph_data_epoch);
+        Action::GetIssueGraph { id }
     }
 
     fn hint_override(full: &'static str, compact: &'static str) -> HintOverride<'static> {
@@ -1046,6 +1061,7 @@ impl View for IssueBrowserView {
     fn handle_spur_event(&mut self, event: &SpurEvent, _ctx: &super::ViewContext) {
         match &event.body {
             spur_acp::SpurEventBody::IssuesLoaded { issues } => {
+                self.bump_graph_data_epoch();
                 self.invalidate_graph_cache_preserving_inflight();
                 self.last_refresh_error = None;
 
@@ -1123,6 +1139,7 @@ impl View for IssueBrowserView {
                 status,
                 assignee,
             } => {
+                self.bump_graph_data_epoch();
                 if let Some(issue) = self.tracked_issues.iter_mut().find(|i| i.id == *id) {
                     if let Some(s) = status {
                         issue.status = s.clone();
@@ -1196,6 +1213,22 @@ impl View for IssueBrowserView {
                 nodes,
                 edges,
             } => {
+                if let Some(req_epoch) = self.graph_request_epochs.remove(requested_id) {
+                    if req_epoch < self.graph_data_epoch {
+                        tracing::info!(
+                            target: "issue_probe",
+                            site = "graph_response_stale",
+                            id = %requested_id,
+                            req_epoch,
+                            current_epoch = self.graph_data_epoch,
+                        );
+                        if self.graph_loading.as_deref() == Some(requested_id.as_str()) {
+                            self.graph_loading = None;
+                        }
+                        return;
+                    }
+                }
+
                 let matches_loading = self.graph_loading.as_deref() == Some(requested_id.as_str());
                 let matches_selected = self
                     .issues_panel
@@ -1716,6 +1749,55 @@ mod tests {
         assert!(!view.graph_cache.contains_key("bd-0"));
         assert!(view.graph_cache.contains_key("bd-1"));
         assert!(view.graph_cache.contains_key("bd-32"));
+    }
+
+    #[test]
+    fn graph_cache_epoch_drops_stale_response() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+
+        let action = view.request_graph_if_needed("bd-root".into());
+        assert!(matches!(
+            action,
+            Some(Action::GetIssueGraph { ref id }) if id == "bd-root"
+        ));
+
+        view.handle_spur_event(
+            &SpurEvent::now(spur_acp::SpurEventBody::IssueUpdated {
+                source: "beads".into(),
+                id: "bd-root".into(),
+                status: Some("closed".into()),
+                assignee: None,
+            }),
+            &ctx,
+        );
+        view.handle_spur_event(
+            &subgraph_loaded_event("bd-root", vec![graph_node("bd-root")]),
+            &ctx,
+        );
+
+        assert!(!view.graph_cache.contains_key("bd-root"));
+    }
+
+    #[test]
+    fn graph_cache_epoch_keeps_fresh_response() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+
+        let action = view.request_graph_if_needed("bd-root".into());
+        assert!(matches!(
+            action,
+            Some(Action::GetIssueGraph { ref id }) if id == "bd-root"
+        ));
+
+        view.handle_spur_event(
+            &subgraph_loaded_event("bd-root", vec![graph_node("bd-root")]),
+            &ctx,
+        );
+
+        assert!(view.graph_cache.contains_key("bd-root"));
     }
 
     #[test]
