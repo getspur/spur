@@ -67,7 +67,7 @@ palette:
     ansi: blue
   highlight:
     rgb: "#92400e"
-    ansi: magenta
+    ansi: yellow
   diff_add:
     rgb: "#166534"
     ansi: green
