@@ -140,7 +140,7 @@ pub(crate) fn observe_compact(
 ) -> (&'static str, Color, String) {
     let success = token(theme, "react_trace.outcome.success.fg");
     let error = token(theme, "react_trace.outcome.error.fg");
-    let pending = token(theme, "react_trace.outcome.unknown.fg");
+    let unknown = token(theme, "react_trace.outcome.unknown.fg");
     match payload {
         ObservePayload::CommandOutput {
             exit_code,
@@ -151,7 +151,7 @@ pub(crate) fn observe_compact(
             match exit_code {
                 Some(0) => ("✓", success, format!("{} lines", total)),
                 Some(c) => ("✗", error, format!("exit {} · {} lines", c, total)),
-                None => ("?", pending, format!("{} lines", total)),
+                None => ("?", unknown, format!("{} lines", total)),
             }
         }
         ObservePayload::FileRead {
