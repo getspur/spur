@@ -281,6 +281,43 @@ pub async fn apply_mutation(
                 .with_context(|| format!("apply abandon_task {issue_id}"))?;
                 affected_task_ids.extend(affected);
             }
+            PlanMutationOp::InsertTaskBefore {
+                target_issue_id,
+                draft,
+            } => {
+                let new_id = apply_insert_task_before(
+                    pm.as_ref(),
+                    adv,
+                    target_issue_id,
+                    draft,
+                    &batch.mutation_id,
+                    &mut executed_ops,
+                )
+                .await
+                .with_context(|| {
+                    format!("apply insert_task_before target={target_issue_id}")
+                })?;
+                children_created.push(new_id.clone());
+                affected_task_ids.push(target_issue_id.clone());
+                affected_task_ids.push(new_id);
+            }
+            PlanMutationOp::AddDependency {
+                issue_id,
+                depends_on,
+            } => {
+                affected_task_ids.push(issue_id.clone());
+                apply_add_dependency(pm.as_ref(), issue_id, depends_on, &mut executed_ops)
+                    .await
+                    .with_context(|| {
+                        format!("apply add_dependency {issue_id} -> {depends_on}")
+                    })?;
+            }
+            PlanMutationOp::CancelTask { issue_id, reason } => {
+                affected_task_ids.push(issue_id.clone());
+                apply_cancel_task(pm.as_ref(), adv, issue_id, reason, &mut executed_ops)
+                    .await
+                    .with_context(|| format!("apply cancel_task {issue_id}"))?;
+            }
         }
         }
         Ok(())
@@ -470,6 +507,9 @@ enum ExecutedOp {
     RetryTask(RetryExecution),
     ModifyTaskSpec(ModifyTaskSpecExecution),
     AbandonTask(AbandonTaskExecution),
+    InsertTaskBefore(InsertTaskBeforeExecution),
+    AddDependency(AddDependencyExecution),
+    CancelTask(CancelTaskExecution),
     #[cfg(test)]
     NoOp(NoOpExecution),
 }
@@ -498,6 +538,33 @@ struct ModifyTaskSpecExecution {
 #[derive(Debug)]
 struct AbandonTaskExecution {
     targets: Vec<(String, String)>,
+}
+
+/// bd-2m2u Phase 2e — captured pre-image for `InsertTaskBefore` rollback.
+/// `new_issue_id` is `None` until the new beads issue is created so a partial
+/// failure (e.g. dep add) leaves a meaningful rollback record.
+#[derive(Debug)]
+struct InsertTaskBeforeExecution {
+    target_issue_id: String,
+    target_original_status: String,
+    target_removed_labels: Vec<String>,
+    new_issue_id: Option<String>,
+    dep_added: bool,
+}
+
+/// bd-2m2u Phase 2e — captured pre-image for `AddDependency` rollback.
+#[derive(Debug)]
+struct AddDependencyExecution {
+    issue_id: String,
+    depends_on: String,
+}
+
+/// bd-2m2u Phase 2e — captured pre-image for `CancelTask` rollback. Mirrors
+/// `AbandonTaskExecution` but never cascades and tags the audit as Cancelled.
+#[derive(Debug)]
+struct CancelTaskExecution {
+    issue_id: String,
+    original_status: String,
 }
 
 /// Per-op compensating action. Implementations record outcomes onto
@@ -673,6 +740,9 @@ async fn rollback_executed_ops_in_reverse(
             ExecutedOp::RetryTask(retry) => retry.rollback(pm, adv, report).await,
             ExecutedOp::ModifyTaskSpec(modify) => modify.rollback(pm, adv, report).await,
             ExecutedOp::AbandonTask(abandon) => abandon.rollback(pm, adv, report).await,
+            ExecutedOp::InsertTaskBefore(insert) => insert.rollback(pm, adv, report).await,
+            ExecutedOp::AddDependency(add) => add.rollback(pm, adv, report).await,
+            ExecutedOp::CancelTask(cancel) => cancel.rollback(pm, adv, report).await,
             #[cfg(test)]
             ExecutedOp::NoOp(noop) => noop.rollback(pm, adv, report).await,
         }
@@ -689,6 +759,9 @@ fn executed_op_setup_id(op: &ExecutedOp) -> &str {
             .first()
             .map(|(id, _)| id.as_str())
             .unwrap_or("<no-target>"),
+        ExecutedOp::InsertTaskBefore(insert) => &insert.target_issue_id,
+        ExecutedOp::AddDependency(add) => &add.issue_id,
+        ExecutedOp::CancelTask(cancel) => &cancel.issue_id,
         #[cfg(test)]
         ExecutedOp::NoOp(noop) => &noop.label,
     }
@@ -821,6 +894,152 @@ impl ReversibleOp for AbandonTaskExecution {
                     format!("{error:#}"),
                 ),
             }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ReversibleOp for InsertTaskBeforeExecution {
+    /// Rollback ordering: (1) remove the dep edge target → child, (2) close
+    /// the inserted child issue, (3) restore the target's prior status +
+    /// labels. Steps 1 and 3 mirror the apply path's effects in reverse.
+    ///
+    /// **Why CLOSE the child instead of DELETE**: the spec said "delete child
+    /// issue", but we close it (status → closed) for two reasons:
+    /// 1. **Audit-trail preservation** — the inserted issue still bears the
+    ///    `MutationCommit` audit + the `mutation:<uuid>` label. Hard-deleting
+    ///    the issue orphans those records and makes post-mortem replay of a
+    ///    failed mutation harder. Closing keeps the historical row queryable.
+    /// 2. **PmService surface** — beads' `delete_issue` is best-effort and
+    ///    not a uniform contract across PM backends; `update_issue { status:
+    ///    closed }` is. The closed-status convention is the same one
+    ///    `CancelTask`/`AbandonTask` use, so rollback cleanup is uniform.
+    ///
+    /// The post-mutation projector treats a closed issue with no completion
+    /// audit as terminal-but-unreviewed; the rollback report's "successfully
+    /// rolled back" classification rests on the dep-edge removal + target
+    /// restore, not on the child's terminal state.
+    async fn rollback(
+        &self,
+        pm: &PmService,
+        _adv: &dyn BeadsAdvanced,
+        report: &mut RollbackReport,
+    ) {
+        if self.dep_added {
+            if let Some(new_id) = self.new_issue_id.as_deref() {
+                match pm
+                    .advanced()
+                    .ok_or_else(|| anyhow!("rollback requires beads"))
+                {
+                    Ok(adv) => match adv.remove_dependency(&self.target_issue_id, new_id).await {
+                        Ok(()) => report.record_success(
+                            "insert_remove_dep",
+                            &self.target_issue_id,
+                            Some(new_id),
+                        ),
+                        Err(error) => report.record_failure(
+                            "insert_remove_dep",
+                            &self.target_issue_id,
+                            Some(new_id),
+                            format!("{error:#}"),
+                        ),
+                    },
+                    Err(error) => report.record_failure(
+                        "insert_remove_dep",
+                        &self.target_issue_id,
+                        Some(new_id),
+                        format!("{error:#}"),
+                    ),
+                }
+            }
+        }
+        if let Some(new_id) = self.new_issue_id.as_deref() {
+            match pm
+                .update_issue(
+                    new_id,
+                    IssueUpdate {
+                        status: Some(pm.closed_status().to_string()),
+                        ..Default::default()
+                    },
+                )
+                .await
+            {
+                Ok(()) => report.record_success("close_inserted_child", new_id, None),
+                Err(error) => report.record_failure(
+                    "close_inserted_child",
+                    new_id,
+                    None,
+                    format!("{error:#}"),
+                ),
+            }
+        }
+        let restore = IssueUpdate {
+            status: Some(self.target_original_status.clone()),
+            add_labels: self.target_removed_labels.clone(),
+            ..Default::default()
+        };
+        match pm.update_issue(&self.target_issue_id, restore).await {
+            Ok(()) => report.record_success("restore_insert_target", &self.target_issue_id, None),
+            Err(error) => report.record_failure(
+                "restore_insert_target",
+                &self.target_issue_id,
+                None,
+                format!("{error:#}"),
+            ),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ReversibleOp for AddDependencyExecution {
+    async fn rollback(
+        &self,
+        _pm: &PmService,
+        adv: &dyn BeadsAdvanced,
+        report: &mut RollbackReport,
+    ) {
+        match adv
+            .remove_dependency(&self.issue_id, &self.depends_on)
+            .await
+        {
+            Ok(()) => {
+                report.record_success("remove_added_dep", &self.issue_id, Some(&self.depends_on))
+            }
+            Err(error) => report.record_failure(
+                "remove_added_dep",
+                &self.issue_id,
+                Some(&self.depends_on),
+                format!("{error:#}"),
+            ),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ReversibleOp for CancelTaskExecution {
+    async fn rollback(
+        &self,
+        pm: &PmService,
+        _adv: &dyn BeadsAdvanced,
+        report: &mut RollbackReport,
+    ) {
+        match pm
+            .update_issue(
+                &self.issue_id,
+                IssueUpdate {
+                    status: Some(self.original_status.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            Ok(()) => report.record_success("restore_cancelled_task", &self.issue_id, None),
+            Err(error) => report.record_failure(
+                "restore_cancelled_task",
+                &self.issue_id,
+                None,
+                format!("{error:#}"),
+            ),
         }
     }
 }
@@ -1281,6 +1500,203 @@ async fn apply_abandon_task(
     Ok(affected)
 }
 
+// bd-2m2u Phase 2e — apply helpers for InsertTaskBefore / AddDependency / CancelTask.
+
+/// Apply InsertTaskBefore: capture target pre-image, create the prerequisite
+/// child issue, wire `target.blocked_by += child`, then re-open + scrub
+/// review-ready labels on the target so it projects as Pending. Each step
+/// updates the rollback slot in place so a mid-op failure unwinds cleanly.
+async fn apply_insert_task_before(
+    pm: &PmService,
+    adv: &dyn BeadsAdvanced,
+    target_issue_id: &str,
+    draft: &super::mutation::TaskDraft,
+    mutation_id: &uuid::Uuid,
+    executed_ops: &mut Vec<ExecutedOp>,
+) -> Result<String> {
+    let target = pm
+        .get_issue(target_issue_id)
+        .await
+        .with_context(|| format!("load insert_task_before target {target_issue_id}"))?;
+    let target_original_status = target.status.clone();
+    let target_removed_labels: Vec<String> = target
+        .labels
+        .iter()
+        .filter(|label| {
+            label.as_str() == super::labels::READY_FOR_REVIEW
+                || label.as_str() == "ready-for-review"
+        })
+        .cloned()
+        .collect();
+    let parent_plan_id = target
+        .labels
+        .iter()
+        .find_map(|label| super::labels::parse_plan_id(label))
+        .map(str::to_string);
+    let parent_agent = target
+        .labels
+        .iter()
+        .find_map(|label| super::labels::parse_agent(label))
+        .map(str::to_string);
+
+    let exec_idx = executed_ops.len();
+    executed_ops.push(ExecutedOp::InsertTaskBefore(InsertTaskBeforeExecution {
+        target_issue_id: target_issue_id.to_string(),
+        target_original_status: target_original_status.clone(),
+        target_removed_labels: target_removed_labels.clone(),
+        new_issue_id: None,
+        dep_added: false,
+    }));
+
+    let new_id = pm
+        .create_issue(IssueCreate {
+            title: draft.title.clone(),
+            description: Some(draft.description.clone()),
+            issue_type: Some("task".into()),
+            parent: None,
+            assignee: draft.assignee.clone(),
+            priority: draft.priority,
+            labels: vec![mutation_id_label(mutation_id)],
+            ..Default::default()
+        })
+        .await
+        .context("create insert_task_before child issue")?;
+    if let ExecutedOp::InsertTaskBefore(slot) = &mut executed_ops[exec_idx] {
+        slot.new_issue_id = Some(new_id.clone());
+    }
+
+    if let (Some(plan_id), Some(agent)) = (parent_plan_id.as_deref(), parent_agent.as_deref()) {
+        add_labels_individually(
+            pm,
+            &new_id,
+            &[
+                super::labels::plan_id(plan_id),
+                super::labels::plan_task_id(&new_id),
+                super::labels::agent(agent),
+            ],
+        )
+        .await
+        .with_context(|| format!("persist plan scope on inserted child {new_id}"))?;
+    }
+
+    pm.add_dependency(target_issue_id, &new_id)
+        .await
+        .with_context(|| {
+            format!("wire {target_issue_id} blocked_by inserted prerequisite {new_id}")
+        })?;
+    if let ExecutedOp::InsertTaskBefore(slot) = &mut executed_ops[exec_idx] {
+        slot.dep_added = true;
+    }
+
+    pm.update_issue(
+        target_issue_id,
+        IssueUpdate {
+            status: Some("open".to_string()),
+            remove_labels: target_removed_labels,
+            ..Default::default()
+        },
+    )
+    .await
+    .with_context(|| format!("reopen insert target {target_issue_id}"))?;
+
+    let prior_audits = super::projector::collect_sorted_audits_for_issue(
+        target_issue_id,
+        adv.list_comments(target_issue_id)
+            .await
+            .with_context(|| format!("list comments for insert target {target_issue_id}"))?,
+    );
+    let (_attempt, last_delegation_id) = super::projector::project_attempt_facts(&prior_audits);
+    adv.add_comment(
+        target_issue_id,
+        &audit_encode(&AuditSentinelKind::RetryRequested {
+            delegation_id: last_delegation_id.unwrap_or_else(|| mutation_id.to_string()),
+            attempt: 0,
+            error: format!("brain-directed insert_task_before: prerequisite {new_id} created"),
+            worker_branch: None,
+        }),
+    )
+    .await
+    .with_context(|| format!("emit retry_requested audit for {target_issue_id}"))?;
+
+    Ok(new_id)
+}
+
+/// Apply AddDependency: a single edge add. Cycles surface from the post-hoc
+/// `dep_cycles_with_fallback` scan in `apply_mutation` and trigger rollback.
+///
+/// Self-reference (`issue_id == depends_on`) is rejected up-front rather than
+/// caught by the post-hoc cycle scan — the post-hoc path is correct but
+/// requires a full mutation + rollback round-trip; a cheap defensive guard
+/// here is strictly faster and produces a clearer error for the common typo.
+async fn apply_add_dependency(
+    pm: &PmService,
+    issue_id: &str,
+    depends_on: &str,
+    executed_ops: &mut Vec<ExecutedOp>,
+) -> Result<()> {
+    if issue_id == depends_on {
+        anyhow::bail!(
+            "add_dependency: self-reference rejected ({issue_id} cannot depend on itself)"
+        );
+    }
+    pm.add_dependency(issue_id, depends_on)
+        .await
+        .with_context(|| format!("add_dependency {issue_id} -> {depends_on}"))?;
+    executed_ops.push(ExecutedOp::AddDependency(AddDependencyExecution {
+        issue_id: issue_id.to_string(),
+        depends_on: depends_on.to_string(),
+    }));
+    Ok(())
+}
+
+/// Apply CancelTask: terminal cancellation, no cascade. Closes the issue and
+/// emits a `Completion(Cancelled)` audit so the projector can distinguish
+/// cancellation from `AbandonTask` (Failed).
+async fn apply_cancel_task(
+    pm: &PmService,
+    adv: &dyn BeadsAdvanced,
+    issue_id: &str,
+    reason: &str,
+    executed_ops: &mut Vec<ExecutedOp>,
+) -> Result<()> {
+    let issue = pm
+        .get_issue(issue_id)
+        .await
+        .with_context(|| format!("load cancel target {issue_id}"))?;
+    let original_status = issue.status.clone();
+
+    pm.update_issue(
+        issue_id,
+        IssueUpdate {
+            status: Some(pm.closed_status().to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .with_context(|| format!("cancel close {issue_id}"))?;
+    executed_ops.push(ExecutedOp::CancelTask(CancelTaskExecution {
+        issue_id: issue_id.to_string(),
+        original_status,
+    }));
+
+    adv.add_comment(
+        issue_id,
+        &audit_encode(&AuditSentinelKind::Completion {
+            delegation_id: format!("cancel:{issue_id}"),
+            completion_state: CompletionState::Cancelled,
+            superseded: false,
+            worker_branch: None,
+            result_summary: Some(reason.to_string()),
+            artifact_uri: None,
+            dispatched_base_oid: None,
+        }),
+    )
+    .await
+    .with_context(|| format!("emit cancel audit for {issue_id}"))?;
+
+    Ok(())
+}
+
 /// Walk `blocked_by` reverse edges from `root_id` to find every transitive
 /// descendant. The result excludes `root_id` itself.
 async fn collect_descendants(pm: &PmService, root_id: &str) -> Result<Vec<String>> {
@@ -1345,8 +1761,15 @@ pub async fn submit_plan_mutation(
             }
             PlanMutationOp::RetryTask { issue_id }
             | PlanMutationOp::ModifyTaskSpec { issue_id, .. }
-            | PlanMutationOp::AbandonTask { issue_id, .. } => {
+            | PlanMutationOp::AbandonTask { issue_id, .. }
+            | PlanMutationOp::AddDependency { issue_id, .. }
+            | PlanMutationOp::CancelTask { issue_id, .. } => {
                 affected.push(issue_id.clone());
+            }
+            PlanMutationOp::InsertTaskBefore {
+                target_issue_id, ..
+            } => {
+                affected.push(target_issue_id.clone());
             }
         }
     }
