@@ -28,16 +28,29 @@ pub enum ThemeLoadOutcome {
 /// emitted to stderr. The returned `Theme` is never an error variant —
 /// the TUI's startup must always have a usable theme.
 pub fn load_runtime_theme(name: &str) -> (Theme, ThemeLoadOutcome) {
-    let project_path = std::env::current_dir().ok().map(|cwd| {
-        cwd.join(".spur")
-            .join("themes")
-            .join(format!("{name}.yaml"))
-    });
-    let user_path = home_dir().map(|home| {
-        home.join(".spur")
-            .join("themes")
-            .join(format!("{name}.yaml"))
-    });
+    // Reject path-traversal payloads before they hit the filesystem. A
+    // name like `../../../../etc/passwd` would otherwise escape the
+    // themes directory; we fall through to built-in lookup which only
+    // matches the embedded `dark` / `light` / `high-contrast` set.
+    let safe_name = is_safe_theme_name(name);
+    let project_path = if safe_name {
+        std::env::current_dir().ok().map(|cwd| {
+            cwd.join(".spur")
+                .join("themes")
+                .join(format!("{name}.yaml"))
+        })
+    } else {
+        None
+    };
+    let user_path = if safe_name {
+        home_dir().map(|home| {
+            home.join(".spur")
+                .join("themes")
+                .join(format!("{name}.yaml"))
+        })
+    } else {
+        None
+    };
 
     let project_exists = project_path
         .as_deref()
@@ -172,6 +185,17 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
+/// Reject theme names that could escape the themes directory or smuggle
+/// shell metacharacters into a filesystem lookup. Built-ins
+/// (`dark`/`light`/`high-contrast`) and unadorned identifiers pass.
+fn is_safe_theme_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains("..")
+        && !name.contains('\0')
+}
+
 /// Test-only helpers shared with `app::theme_threading_tests` so cwd/HOME
 /// mutation stays serialized and panic-safe across both modules.
 #[cfg(test)]
@@ -260,6 +284,77 @@ mod tests {
             let (theme, outcome) = load_runtime_theme("dark");
             assert_eq!(theme.name, "project-dark");
             assert!(matches!(outcome, ThemeLoadOutcome::Project(_)));
+        });
+    }
+
+    #[test]
+    fn list_available_themes_picks_up_project_yamls() {
+        with_isolated_dirs(|cwd, _| {
+            let project_dir = cwd.join(".spur").join("themes");
+            fs::create_dir_all(&project_dir).unwrap();
+            fs::write(project_dir.join("solarized.yaml"), "version: 1\n").unwrap();
+            fs::write(project_dir.join("nord.yaml"), "version: 1\n").unwrap();
+
+            let available = list_available_themes();
+            assert_eq!(available.project, vec!["nord", "solarized"]);
+            assert!(available.user.is_empty());
+            assert_eq!(
+                available.built_in,
+                BUILT_IN_THEME_NAMES
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect::<Vec<_>>()
+            );
+        });
+    }
+
+    #[test]
+    fn list_available_themes_picks_up_user_yamls() {
+        with_isolated_dirs(|_, home| {
+            let user_dir = home.join(".spur").join("themes");
+            fs::create_dir_all(&user_dir).unwrap();
+            fs::write(user_dir.join("dracula.yaml"), "version: 1\n").unwrap();
+
+            let available = list_available_themes();
+            assert!(available.project.is_empty());
+            assert_eq!(available.user, vec!["dracula"]);
+        });
+    }
+
+    #[test]
+    fn list_available_themes_returns_empty_lists_when_dirs_missing() {
+        with_isolated_dirs(|_, _| {
+            // Neither `.spur/themes/` nor `~/.spur/themes/` exists.
+            let available = list_available_themes();
+            assert!(available.project.is_empty());
+            assert!(available.user.is_empty());
+            // Built-ins are always present regardless of filesystem state.
+            assert_eq!(available.built_in.len(), BUILT_IN_THEME_NAMES.len());
+        });
+    }
+
+    #[test]
+    fn list_available_themes_filters_out_non_yaml_files() {
+        with_isolated_dirs(|cwd, _| {
+            let project_dir = cwd.join(".spur").join("themes");
+            fs::create_dir_all(&project_dir).unwrap();
+            fs::write(project_dir.join("real.yaml"), "version: 1\n").unwrap();
+            fs::write(project_dir.join("readme.md"), "ignored\n").unwrap();
+            fs::write(project_dir.join("backup.yml"), "version: 1\n").unwrap();
+            fs::write(project_dir.join("noext"), "version: 1\n").unwrap();
+            fs::create_dir_all(project_dir.join("subdir")).unwrap();
+
+            let available = list_available_themes();
+            assert_eq!(available.project, vec!["real"]);
+        });
+    }
+
+    #[test]
+    fn rejects_path_traversal_theme_name() {
+        with_isolated_dirs(|_, _| {
+            let (theme, outcome) = load_runtime_theme("../../../../etc/passwd");
+            assert_eq!(theme.name, "dark");
+            assert!(matches!(outcome, ThemeLoadOutcome::FellBackToDark { .. }));
         });
     }
 

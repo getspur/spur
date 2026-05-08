@@ -716,7 +716,7 @@ palette:
     }
 
     #[test]
-    fn ansi16_resolution_falls_back_to_parent_ansi_entry() {
+    fn ansi16_resolution_uses_merged_parent_ansi_after_child_rgb_override() {
         let parent = raw_theme(
             r##"
 version: 1

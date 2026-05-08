@@ -266,6 +266,31 @@ diff_del        → Red
 - A custom theme that wants ANSI compat **must** declare `ansi:` for each palette entry it cares about. Entries without `ansi:` fall through to the parent theme's role map (via `extends:`), or to the built-in `dark` map if no parent is declared. This is documented behavior, not a heuristic.
 - The runtime never auto-snaps RGB → nearest ANSI for a single color. The choice is always: explicit role map, explicit per-entry `ansi:`, or fall through to a parent's role map.
 
+### Loader / resolver contract
+
+The fall-through chain above runs **at load time**, not at resolve time. The
+implementation collapses ANSI fallback into the loader's per-field merge:
+
+- When a theme `extends:` a parent, the loader materializes the parent's
+  palette into a `PaletteEntry { rgb, ansi: Some(_) }` for every entry, then
+  applies the child's palette as field-level patches. A child override of
+  `rgb:` alone leaves the parent's `ansi:` intact; a child override of
+  `ansi:` alone leaves the parent's `rgb:` intact.
+- When a theme has no `extends:`, the loader seeds from
+  `Palette::dark_default()` / `TokenMap::dark_default()` and applies the
+  child's palette/tokens on top. The seed is always fully populated, so
+  every entry in a loaded `Theme` carries `Some(ansi)`.
+- Net effect: themes loaded via `load_theme_from_str` or `load_built_in`
+  always satisfy the invariant *every palette entry has both `rgb` and
+  `Some(ansi)`*. The resolver does **not** walk the `extends:` chain at
+  render time — that walk happened once during load.
+- `resolver::resolve_token` therefore panics on `None` `ansi` in
+  `ColorDepth::Ansi16` mode. The panic is a programmer-error guard against
+  themes constructed in code that bypass the loader (e.g. by hand-rolling a
+  `Theme` struct in tests with a sparse palette). Production code never
+  triggers it because every code path that produces a `Theme` flows through
+  the loader.
+
 ### Backward compatibility
 
 - The default theme (`dark`) reproduces the current TUI exactly. Users who never set `theme:` see no visual change at any point.

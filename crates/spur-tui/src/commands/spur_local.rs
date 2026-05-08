@@ -34,11 +34,18 @@ impl SpurLocalSource {
     /// command name: any agent-advertised entry with the same name is
     /// suppressed from the registry. Entries NOT in this set can still
     /// coexist with agent entries of the same name (collision-display
-    /// logic applies). Currently only `/clear` is exclusive because it
-    /// must behave identically across every brain kind and forwarding it
-    /// to the agent produces inconsistent or broken results.
+    /// logic applies).
+    ///
+    /// - `/clear` — must behave identically across every brain kind and
+    ///   forwarding it to the agent produces inconsistent or broken
+    ///   results.
+    /// - `/theme` — owned end-to-end by the TUI (palette + active
+    ///   `Arc<Theme>`). `submit_router::route` always intercepts it
+    ///   ahead of the registry, but listing it here prevents collisions
+    ///   if an agent ever advertises a `/theme` command and a future
+    ///   route wires it through the registry path.
     pub fn exclusive_names() -> &'static [&'static str] {
-        &["clear"]
+        &["clear", "theme"]
     }
 
     pub fn entries() -> Vec<CommandEntry> {

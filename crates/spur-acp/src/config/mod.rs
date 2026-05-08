@@ -457,7 +457,7 @@ pub struct TuiConfig {
     /// (project) → `~/.spur/themes/<name>.yaml` (user) → built-in. Defaults
     /// to `"dark"` for backwards compatibility — the dark built-in is a
     /// pixel-perfect reproduction of pre-theme TUI colors.
-    #[serde(default = "default_theme_name")]
+    #[serde(default = "default_theme_name", skip_serializing_if = "is_dark_theme")]
     pub theme: String,
 }
 
@@ -486,6 +486,10 @@ impl TuiConfig {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn is_dark_theme(value: &str) -> bool {
+    value == "dark"
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

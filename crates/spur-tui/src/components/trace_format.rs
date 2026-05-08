@@ -99,7 +99,7 @@ pub(crate) fn outcome_glyph(theme: &Theme, p: &ObservePayload) -> (&'static str,
         } => ("✗", token(theme, "react_trace.outcome.error.fg")),
         ObservePayload::CommandOutput {
             exit_code: None, ..
-        } => ("?", token(theme, "react_trace.outcome.pending.fg")),
+        } => ("?", token(theme, "react_trace.outcome.unknown.fg")),
         ObservePayload::Error { .. } => ("✗", token(theme, "react_trace.outcome.error.fg")),
         _ => ("✓", token(theme, "react_trace.outcome.success.fg")),
     }
@@ -140,7 +140,7 @@ pub(crate) fn observe_compact(
 ) -> (&'static str, Color, String) {
     let success = token(theme, "react_trace.outcome.success.fg");
     let error = token(theme, "react_trace.outcome.error.fg");
-    let pending = token(theme, "react_trace.outcome.pending.fg");
+    let pending = token(theme, "react_trace.outcome.unknown.fg");
     match payload {
         ObservePayload::CommandOutput {
             exit_code,
