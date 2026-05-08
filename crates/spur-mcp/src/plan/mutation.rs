@@ -70,6 +70,35 @@ pub enum PlanMutationOp {
         reason: String,
         cascade_descendants: bool,
     },
+    /// bd-2m2u Phase 2e — insert a brand-new prerequisite task in front of
+    /// `target_issue_id`. The new beads issue is created from `draft`, then
+    /// `target_issue_id` gains a `blocked_by` edge on the new issue and is
+    /// reset to Pending so the engine waits for the new prerequisite.
+    InsertTaskBefore {
+        target_issue_id: String,
+        draft: TaskDraft,
+    },
+    /// bd-2m2u Phase 2e — add a single dependency edge `issue_id -> depends_on`.
+    /// Cycles are caught by `apply_mutation`'s post-hoc cycle scan and trigger
+    /// rollback.
+    AddDependency {
+        issue_id: String,
+        depends_on: String,
+    },
+    /// bd-2m2u Phase 2e — terminal cancellation, distinct from `AbandonTask`
+    /// (failure semantics) and `AbandonTask { cascade_descendants: true }`.
+    /// Closes the issue with a `Completion(Cancelled)` audit and explicitly
+    /// does NOT cascade to descendants — they remain open for the engine to
+    /// observe per their own dependencies.
+    ///
+    /// **Descendant unblocking semantics**: descendants of a cancelled task
+    /// become `Ready` once their other prerequisites are satisfied —
+    /// `Cancelled` is in the projector's "approved-or-cancelled" set
+    /// (projector.rs `approved_or_cancelled` ≈ line 473). This is intentional:
+    /// `CancelTask` means "skip this step and continue with the rest of the
+    /// plan". If the design intent is to terminate a subtree (cancel + block
+    /// descendants), use `AbandonTask { cascade_descendants: true }` instead.
+    CancelTask { issue_id: String, reason: String },
 }
 
 #[non_exhaustive]
@@ -90,6 +119,9 @@ pub fn op_tag_for(op: &PlanMutationOp) -> &'static str {
         PlanMutationOp::RetryTask { .. } => "retry_task",
         PlanMutationOp::ModifyTaskSpec { .. } => "modify_task_spec",
         PlanMutationOp::AbandonTask { .. } => "abandon_task",
+        PlanMutationOp::InsertTaskBefore { .. } => "insert_task_before",
+        PlanMutationOp::AddDependency { .. } => "add_dependency",
+        PlanMutationOp::CancelTask { .. } => "cancel_task",
     }
 }
 

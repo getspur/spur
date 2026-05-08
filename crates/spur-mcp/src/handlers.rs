@@ -665,12 +665,19 @@ pub async fn report_signal(
     let args: Args = serde_json::from_value(args)
         .map_err(|e| McpHandlerError::InvalidParams(format!("invalid args: {e}")))?;
 
-    // Defense-in-depth: the MCP tool schema declares `kind` enum is
-    // `["scope_drift"]`, but harness input-schema enforcement is best-effort
-    // across MCP runtimes. Reject non-worker-emittable variants explicitly so
-    // a hallucinating worker cannot spoof brain-side signals (e.g.,
-    // PotentialClobber, which carries OIDs the worker has no authority over).
-    if !matches!(args.signal, WorkerSignal::ScopeDrift { .. }) {
+    // Defense-in-depth: the MCP tool schema declares `kind` enum, but harness
+    // input-schema enforcement is best-effort across MCP runtimes. Reject
+    // non-worker-emittable variants explicitly so a hallucinating worker
+    // cannot spoof brain-side signals (e.g., PotentialClobber, which carries
+    // OIDs the worker has no authority over).
+    //
+    // bd-2m2u Phase 2e — `RetryExhausted` is now a worker-emittable kind so
+    // the autonomous recovery proposer (option B) can be triggered without
+    // going through a forged comment. `PotentialClobber` remains brain-only.
+    if !matches!(
+        args.signal,
+        WorkerSignal::ScopeDrift { .. } | WorkerSignal::RetryExhausted { .. }
+    ) {
         return Err(McpHandlerError::InvalidParams(format!(
             "report_signal: only worker-emittable signal kinds are accepted; got {}",
             args.signal.kind_label()
@@ -738,6 +745,9 @@ pub async fn report_signal(
             args.signal.kind_label().to_string(),
         ),
         WorkerSignal::PotentialClobber { .. } => {
+            (0.0, String::new(), args.signal.kind_label().to_string())
+        }
+        WorkerSignal::RetryExhausted { .. } => {
             (0.0, String::new(), args.signal.kind_label().to_string())
         }
     };
