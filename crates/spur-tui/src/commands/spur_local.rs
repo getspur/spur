@@ -108,6 +108,14 @@ impl SpurLocalSource {
                 arg_picker_spec: None,
             },
             CommandEntry {
+                name: "theme".into(),
+                description: "List, switch, or reload the active TUI theme".into(),
+                hint: Some("[name|reload]".into()),
+                source: CommandSource::Spur,
+                dispatch: Dispatch::SpurLocal(Action::ThemeCommand { arg: String::new() }),
+                arg_picker_spec: None,
+            },
+            CommandEntry {
                 name: "sprints".into(),
                 description: "Open sprint plan browser".into(),
                 hint: None,

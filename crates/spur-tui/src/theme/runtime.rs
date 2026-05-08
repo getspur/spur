@@ -88,6 +88,66 @@ pub fn load_runtime_theme(name: &str) -> (Theme, ThemeLoadOutcome) {
     }
 }
 
+/// Built-in theme names embedded in the binary, in the canonical
+/// listing order used by `/theme` (no args).
+pub const BUILT_IN_THEME_NAMES: &[&str] = &["dark", "light", "high-contrast"];
+
+/// Discovered set of theme names available to `/theme <name>`.
+/// `built_in` is fixed; `project` and `user` are scanned from
+/// `.spur/themes/*.yaml` and `~/.spur/themes/*.yaml` respectively.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AvailableThemes {
+    pub built_in: Vec<String>,
+    pub project: Vec<String>,
+    pub user: Vec<String>,
+}
+
+/// Scan the cascade roots for available custom theme files. Built-ins
+/// are always returned. Filesystem errors are silently ignored — this
+/// is a discovery helper, not a load path.
+pub fn list_available_themes() -> AvailableThemes {
+    let built_in = BUILT_IN_THEME_NAMES
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    let project = std::env::current_dir()
+        .ok()
+        .map(|cwd| scan_theme_dir(&cwd.join(".spur").join("themes")))
+        .unwrap_or_default();
+    let user = home_dir()
+        .map(|home| scan_theme_dir(&home.join(".spur").join("themes")))
+        .unwrap_or_default();
+    AvailableThemes {
+        built_in,
+        project,
+        user,
+    }
+}
+
+fn scan_theme_dir(dir: &Path) -> Vec<String> {
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = read_dir
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_file() {
+                return None;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
+                return None;
+            }
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
 fn load_from_file(path: &Path) -> Result<Theme, ThemeError> {
     let yaml = std::fs::read_to_string(path).map_err(|source| ThemeError::Io {
         path: path.to_path_buf(),
