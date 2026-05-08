@@ -99,6 +99,15 @@ pub struct InteractiveFrontendHost {
         Option<tokio::sync::mpsc::UnboundedReceiver<spur_acp::types::PermissionRequest>>,
     pub(crate) data_rx: Option<mpsc::Receiver<DataQuery>>,
     pub(crate) orch_handle: tokio::task::JoinHandle<()>,
+    data_loop_handle: Option<DataLoopTask>,
+}
+
+struct DataLoopTask(tokio::task::JoinHandle<()>);
+
+impl Drop for DataLoopTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 impl InteractiveFrontendHost {
@@ -120,6 +129,7 @@ impl InteractiveFrontendHost {
             permission_rx: Some(permission_rx),
             data_rx: Some(data_rx),
             orch_handle,
+            data_loop_handle: None,
         }
     }
 
@@ -151,8 +161,13 @@ impl InteractiveFrontendHost {
         let (user_tx, user_rx) = mpsc::channel::<InteractiveInput>(32);
         let (review_tx, review_rx) = mpsc::channel::<InteractiveInput>(32);
         let (data_tx, data_rx) = mpsc::channel::<DataQuery>(64);
+        let pm_service = orch.pm_service.clone();
+        let funnel = orch.event_funnel_handle();
 
         tokio::spawn(spur_core::review_dispatcher_loop(review_rx, review_sink));
+        let data_loop_handle = tokio::spawn(crate::data_loop::run_data_query_loop_with_provider(
+            data_rx, pm_service, funnel,
+        ));
 
         let overflow = spur_core::continuation_bridge::new_overflow_buf();
         orch.set_continuation_tx(user_tx.clone(), overflow.clone());
@@ -174,8 +189,9 @@ impl InteractiveFrontendHost {
             },
             event_rx: Some(event_rx),
             permission_rx: Some(permission_rx),
-            data_rx: Some(data_rx),
+            data_rx: None,
             orch_handle,
+            data_loop_handle: Some(DataLoopTask(data_loop_handle)),
         }
     }
 
@@ -183,6 +199,7 @@ impl InteractiveFrontendHost {
         self.event_rx.take();
         self.permission_rx.take();
         self.data_rx.take();
+        self.data_loop_handle.take();
         drop(self.handle);
         let mut handle = self.orch_handle;
         match tokio::time::timeout(std::time::Duration::from_secs(5), &mut handle).await {
