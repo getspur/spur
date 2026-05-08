@@ -215,13 +215,35 @@ impl BeadsCrateAdapter {
         let metrics = Arc::clone(&self.metrics);
         let db_path = self.beads_dir.join("beads.db");
         let lock_timeout_ms = self.config.lock_timeout_ms;
+        // PROBE: issue_detail_latency
+        let dispatch_started = Instant::now();
         tokio::task::spawn_blocking(move || -> anyhow::Result<T> {
+            // PROBE: issue_detail_latency — measure spawn_blocking queue wait,
+            // sqlite Connection::open + pragmas, and the read closure body.
+            let blocking_entered = Instant::now();
+            let spawn_blocking_queue_ms = blocking_entered
+                .duration_since(dispatch_started)
+                .as_millis() as u64;
             metrics.incr_read();
+            let open_started = Instant::now();
             let storage = beads_rust::storage::sqlite::SqliteStorage::open_with_timeout(
                 &db_path,
                 Some(lock_timeout_ms),
             )?;
-            f(&storage)
+            let sqlite_open_ms = open_started.elapsed().as_millis() as u64;
+            let closure_started = Instant::now();
+            let result = f(&storage);
+            let closure_ms = closure_started.elapsed().as_millis() as u64;
+            tracing::info!(
+                target: "issue_probe",
+                site = "beads_read",
+                spawn_blocking_queue_ms = spawn_blocking_queue_ms,
+                sqlite_open_ms = sqlite_open_ms,
+                closure_ms = closure_ms,
+                total_ms = dispatch_started.elapsed().as_millis() as u64,
+                "BeadsCrateAdapter::read timing",
+            );
+            result
         })
         .await?
     }

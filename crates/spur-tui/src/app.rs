@@ -3835,6 +3835,18 @@ impl App {
                 match issue_action {
                     crate::action::IssueAction::ViewDetail { id } => {
                         if let Some(ref tx) = self.user_input_tx {
+                            // PROBE: issue_detail_latency
+                            tracing::info!(
+                                target: "issue_probe",
+                                site = "ui_send",
+                                id = %id,
+                                queue_len = tx.capacity().saturating_sub(tx.max_capacity()),
+                                ts_ns = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_nanos() as u64)
+                                    .unwrap_or(0),
+                                "GetIssueDetail dispatched from TUI",
+                            );
                             let _ = tx.try_send(UserInput::GetIssueDetail { id });
                         }
                     }
