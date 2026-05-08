@@ -46,6 +46,30 @@ pub enum PlanMutationOp {
         children: Vec<TaskDraft>,
         dep_rewire: DepRewirePolicy,
     },
+    /// bd-2m2u Phase 2c — re-dispatch a previously-failed task as a fresh
+    /// attempt. Reopens the beads issue and emits a `RetryRequested` audit
+    /// sentinel that the projector reads as `Pending`.
+    RetryTask {
+        issue_id: String, // beads issue id
+    },
+    /// bd-2m2u Phase 2c — brain rewrites task text / agent / context / deps
+    /// before re-dispatch. Atomically updates the beads issue body, agent
+    /// label, `blocked_by`, and emits an extended `TaskSpec` audit sentinel.
+    ModifyTaskSpec {
+        issue_id: String,
+        new_task: Option<String>,
+        new_agent: Option<String>,
+        new_context_files: Option<Vec<String>>,
+        new_depends_on: Option<Vec<String>>,
+    },
+    /// bd-2m2u Phase 2c — terminal abandonment. Marks the issue Failed; if
+    /// `cascade_descendants` is true, all transitive descendants (any issue
+    /// `blocked_by` this issue, recursively) are marked Failed as well.
+    AbandonTask {
+        issue_id: String,
+        reason: String,
+        cascade_descendants: bool,
+    },
 }
 
 #[non_exhaustive]
@@ -63,6 +87,9 @@ pub struct MutationBatch {
 pub fn op_tag_for(op: &PlanMutationOp) -> &'static str {
     match op {
         PlanMutationOp::SplitTask { .. } => "split_task",
+        PlanMutationOp::RetryTask { .. } => "retry_task",
+        PlanMutationOp::ModifyTaskSpec { .. } => "modify_task_spec",
+        PlanMutationOp::AbandonTask { .. } => "abandon_task",
     }
 }
 

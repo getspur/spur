@@ -186,6 +186,7 @@ pub async fn update_issue(
         remove_labels,
         priority,
         assignee,
+        body: None,
     };
 
     pm.update_issue(id, update)

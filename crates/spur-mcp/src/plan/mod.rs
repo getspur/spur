@@ -1511,6 +1511,37 @@ pub(crate) async fn emit_task_spec_audit(
     let kind = crate::plan::audit_sentinel::AuditSentinelKind::TaskSpec {
         task_id: task_id.to_string(),
         context_files: context_files.to_vec(),
+        task_text: None,
+        agent: None,
+        depends_on: None,
+    };
+    advanced
+        .add_comment(
+            issue_id,
+            &crate::plan::audit_sentinel::encode_comment(&kind),
+        )
+        .await?;
+    Ok(())
+}
+
+/// bd-2m2u Phase 2c — emit a `TaskSpec` audit with extended fields populated by
+/// `ModifyTaskSpec`. The projector reads these to override the live beads-issue
+/// body / agent label / `blocked_by` set after a brain spec rewrite.
+pub(crate) async fn emit_extended_task_spec_audit(
+    advanced: &dyn spur_pm::BeadsAdvanced,
+    issue_id: &str,
+    task_id: &str,
+    context_files: &[String],
+    task_text: Option<&str>,
+    agent: Option<&str>,
+    depends_on: Option<&[String]>,
+) -> anyhow::Result<()> {
+    let kind = crate::plan::audit_sentinel::AuditSentinelKind::TaskSpec {
+        task_id: task_id.to_string(),
+        context_files: context_files.to_vec(),
+        task_text: task_text.map(str::to_string),
+        agent: agent.map(str::to_string),
+        depends_on: depends_on.map(<[String]>::to_vec),
     };
     advanced
         .add_comment(
