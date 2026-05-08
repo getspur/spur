@@ -34,7 +34,24 @@ pub struct InteractiveFrontendHandle {
 impl InteractiveFrontendHandle {
     pub async fn send_command(&self, input: InteractiveInput) -> anyhow::Result<()> {
         validate_frontend_command(&input)?;
+        // PROBE: issue_detail_latency
+        let probe_kind = match &input {
+            InteractiveInput::GetIssueDetail { id } => Some(("GetIssueDetail", id.clone())),
+            _ => None,
+        };
+        let send_started = std::time::Instant::now();
         self.user_tx.send(input).await?;
+        if let Some((kind, id)) = probe_kind {
+            tracing::info!(
+                target: "issue_probe",
+                site = "host_send",
+                kind = kind,
+                id = %id,
+                host_send_ms = send_started.elapsed().as_millis() as u64,
+                user_tx_capacity = self.user_tx.capacity(),
+                "InteractiveInput delivered to orchestrator mpsc",
+            );
+        }
         Ok(())
     }
 

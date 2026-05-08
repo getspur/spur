@@ -188,15 +188,35 @@ impl IssueTracker for BeadsCrateAdapter {
     async fn get_issue(&self, id: &str) -> anyhow::Result<Issue> {
         let id = id.to_string();
         self.read(move |s| {
+            // PROBE: issue_detail_latency — split the 3 SQLite queries so we
+            // know whether the cost is in the issues row read, the label join,
+            // or the dependency expansion.
+            let q1_started = std::time::Instant::now();
             let mut br = s
                 .get_issue(&id)?
                 .ok_or_else(|| anyhow::anyhow!("issue {id} not found"))?;
+            let q1_ms = q1_started.elapsed().as_millis() as u64;
             // `get_issue` only reads the `issues` table; labels are stored
             // out-of-line and must be loaded separately. Dependencies are also
             // stored out-of-line and back the PM `blocked_by` field.
+            let q2_started = std::time::Instant::now();
             let mut by_id = s.get_labels_for_issues(std::slice::from_ref(&id))?;
+            let q2_ms = q2_started.elapsed().as_millis() as u64;
             br.labels = by_id.remove(&id).unwrap_or_default();
+            let q3_started = std::time::Instant::now();
             br.dependencies = s.get_dependencies_full(&id)?;
+            let q3_ms = q3_started.elapsed().as_millis() as u64;
+            tracing::info!(
+                target: "issue_probe",
+                site = "beads_get_issue_queries",
+                id = %id,
+                q1_get_issue_ms = q1_ms,
+                q2_get_labels_ms = q2_ms,
+                q3_get_deps_ms = q3_ms,
+                n_labels = br.labels.len(),
+                n_deps = br.dependencies.len(),
+                "per-query timings inside get_issue closure",
+            );
             Ok(br_to_pm_issue(br))
         })
         .await

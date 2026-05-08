@@ -1152,6 +1152,30 @@ impl View for IssueBrowserView {
                 requested_id,
                 issue,
             } => {
+                // PROBE: issue_detail_latency — confirm the TUI received the
+                // event and whether `issue_focus` was still Loading for it
+                // (a no-op match here means the user navigated away or Esc'd
+                // before the round-trip completed, which still costs CPU).
+                let still_loading_match = matches!(
+                    &self.issue_focus,
+                    IssueFocus::Loading { id } if id == requested_id
+                );
+                let body_len: usize = issue.body.len();
+                let n_labels: usize = issue.labels.len();
+                let ts_ns: u64 = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0);
+                tracing::info!(
+                    target: "issue_probe",
+                    site = "tui_event_received",
+                    id = %requested_id,
+                    body_len = body_len,
+                    n_labels = n_labels,
+                    still_loading_match = still_loading_match,
+                    ts_ns = ts_ns,
+                    "IssueDetailFetched arrived in TUI view",
+                );
                 if let IssueFocus::Loading { id } = &self.issue_focus {
                     if id == requested_id {
                         let pm_issue = detail_event_to_issue(issue);
