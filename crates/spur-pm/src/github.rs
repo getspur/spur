@@ -338,6 +338,11 @@ impl IssueTracker for GitHubAdapter {
                 .await?;
         }
 
+        if let Some(ref body) = update.body {
+            self.run_gh(&["issue", "edit", id, "--repo", repo, "--body", body])
+                .await?;
+        }
+
         // Add labels
         if !update.add_labels.is_empty() {
             let labels = update.add_labels.join(",");

@@ -361,8 +361,10 @@ impl IssueTracker for BeadsCrateAdapter {
         let actor = self.actor();
         self.write(move |s| {
             validate_added_labels(&update.add_labels)?;
-            let has_field_update =
-                update.status.is_some() || update.priority.is_some() || update.assignee.is_some();
+            let has_field_update = update.status.is_some()
+                || update.priority.is_some()
+                || update.assignee.is_some()
+                || update.body.is_some();
 
             if has_field_update {
                 let mut br_update = beads_rust::storage::sqlite::IssueUpdate::default();
@@ -380,6 +382,9 @@ impl IssueTracker for BeadsCrateAdapter {
                     } else {
                         Some(Some(a.clone()))
                     };
+                }
+                if let Some(body) = update.body.as_deref() {
+                    br_update.description = Some(Some(body.to_string()));
                 }
                 s.update_issue(&id, &br_update, &actor)?;
             }

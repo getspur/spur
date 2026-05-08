@@ -3156,6 +3156,7 @@ impl McpCallbackServer {
                     Err(e) => JsonRpcResponse::internal_error(id, e),
                 }
             }
+            "submit_plan_mutation" => self.handle_submit_plan_mutation(id, arguments).await,
             "report_progress" => self.handle_report_progress(id, arguments).await,
             _ => JsonRpcResponse::error(id, -32601, format!("Unknown tool: {tool_name}")),
         }
@@ -6001,6 +6002,86 @@ impl McpCallbackServer {
             Err(crate::handlers::McpHandlerError::Internal(e)) => {
                 JsonRpcResponse::internal_error(id, e)
             }
+        }
+    }
+
+    /// bd-2m2u Phase 2c — `submit_plan_mutation` MCP entry. Builds a
+    /// `MutationBatch` from the request payload, runs cycle detection +
+    /// rollback via the generic executor, and clears `signal:escalated` labels
+    /// on success.
+    async fn handle_submit_plan_mutation(&self, id: Value, args: Value) -> JsonRpcResponse {
+        if let Some(response) =
+            self.require_feature_response(id.clone(), FeatureKey::PM_PRO_BEADS_ADVANCED)
+        {
+            return response;
+        }
+        let pm = match self.pm_service.clone() {
+            Some(pm) => pm,
+            None => {
+                return JsonRpcResponse::internal_error(
+                    id,
+                    "submit_plan_mutation: no PM service configured",
+                )
+            }
+        };
+
+        let trigger_task_id = match args.get("trigger_task_id").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => {
+                return JsonRpcResponse::invalid_params(
+                    id,
+                    "submit_plan_mutation: trigger_task_id is required",
+                )
+            }
+        };
+        let ops_value = match args.get("ops").cloned() {
+            Some(v) => v,
+            None => {
+                return JsonRpcResponse::invalid_params(id, "submit_plan_mutation: ops required")
+            }
+        };
+        let ops: Vec<crate::plan::mutation::PlanMutationOp> =
+            match serde_json::from_value(ops_value) {
+                Ok(v) => v,
+                Err(e) => {
+                    return JsonRpcResponse::invalid_params(
+                        id,
+                        format!("submit_plan_mutation: invalid ops: {e}"),
+                    )
+                }
+            };
+        let mutation_id = args
+            .get("mutation_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .unwrap_or_else(uuid::Uuid::new_v4);
+
+        match crate::plan::mutation_executor::submit_plan_mutation(
+            pm,
+            Arc::clone(&self.feature_gate),
+            mutation_id,
+            trigger_task_id,
+            ops,
+        )
+        .await
+        {
+            Ok(result) => {
+                let payload = json!({
+                    "mutation_id": result.mutation_id,
+                    "children_created": result.children_created,
+                    "affected_task_ids": result.affected_task_ids,
+                });
+                let text =
+                    serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
+                JsonRpcResponse::success(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }] }),
+                )
+            }
+            Err(error) => JsonRpcResponse::internal_error(
+                id,
+                format!("submit_plan_mutation failed: {error:#}"),
+            ),
         }
     }
 
