@@ -78,7 +78,7 @@ pub async fn apply_mutation(
     .context("mutation-plan audit write-ahead")?;
 
     let mut children_created: Vec<String> = Vec::new();
-    let mut executed_splits: Vec<SplitExecution> = Vec::new();
+    let mut executed_ops: Vec<ExecutedOp> = Vec::new();
 
     for op in &batch.ops {
         match op {
@@ -209,12 +209,12 @@ pub async fn apply_mutation(
                     .await
                     .with_context(|| format!("label parent {parent} with superseded-by markers"))?;
 
-                executed_splits.push(SplitExecution {
+                executed_ops.push(ExecutedOp::SplitTask(SplitExecution {
                     parent_id: parent.clone(),
                     original_parent_status: parent_issue.status,
                     child_ids,
                     removed_parent_from: rewire_plan.removed_parent_from,
-                });
+                }));
             }
         }
     }
@@ -222,7 +222,7 @@ pub async fn apply_mutation(
     let cycles = dep_cycles_with_fallback(adv).await?;
     if !cycles.is_empty() {
         let rollback_report =
-            rollback_mutation(pm.clone(), Arc::clone(&feature_gate), &executed_splits).await;
+            rollback_mutation(pm.clone(), Arc::clone(&feature_gate), &executed_ops).await;
         let rollback_status = if rollback_report.failed.is_empty() {
             "completed".to_string()
         } else {
@@ -362,40 +362,46 @@ fn rewire_plan(
     })
 }
 
-async fn rollback_mutation(
-    pm: Arc<PmService>,
-    feature_gate: Arc<spur_license::FeatureGate>,
-    executed_splits: &[SplitExecution],
-) -> RollbackReport {
-    let mut report = RollbackReport::default();
-    if let Err(error) = crate::server::require_feature(
-        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
-        feature_gate.as_ref(),
-    ) {
-        if let Some(split) = executed_splits.last() {
-            report.record_failure(
-                "rollback_setup",
-                &split.parent_id,
-                None,
-                crate::server::feature_error_message(error),
-            );
-        }
-        return report;
-    }
-    let Some(adv) = pm.advanced() else {
-        if let Some(split) = executed_splits.last() {
-            report.record_failure(
-                "rollback_setup",
-                &split.parent_id,
-                None,
-                "rollback requires beads backend",
-            );
-        }
-        return report;
-    };
+/// A unit of work that `apply_mutation` has executed and may need to undo
+/// during rollback. Each variant carries enough state to reverse itself via
+/// the [`ReversibleOp`] trait.
+#[derive(Debug)]
+enum ExecutedOp {
+    SplitTask(SplitExecution),
+    #[cfg(test)]
+    NoOp(NoOpExecution),
+}
 
-    for split in executed_splits.iter().rev() {
-        match dependencies_touching_children(pm.as_ref(), &split.child_ids).await {
+/// Per-op compensating action. Implementations record outcomes onto
+/// `report` rather than returning, so rollback always proceeds best-effort.
+#[async_trait::async_trait]
+trait ReversibleOp {
+    async fn rollback(&self, pm: &PmService, adv: &dyn BeadsAdvanced, report: &mut RollbackReport);
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct NoOpExecution {
+    pub label: String,
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl ReversibleOp for NoOpExecution {
+    async fn rollback(
+        &self,
+        _pm: &PmService,
+        _adv: &dyn BeadsAdvanced,
+        report: &mut RollbackReport,
+    ) {
+        report.record_success("noop", &self.label, None);
+    }
+}
+
+#[async_trait::async_trait]
+impl ReversibleOp for SplitExecution {
+    async fn rollback(&self, pm: &PmService, adv: &dyn BeadsAdvanced, report: &mut RollbackReport) {
+        match dependencies_touching_children(pm, &self.child_ids).await {
             Ok(pairs) => {
                 for (issue_id, depends_on_id) in pairs {
                     match adv.remove_dependency(&issue_id, &depends_on_id).await {
@@ -420,33 +426,33 @@ async fn rollback_mutation(
             Err(error) => {
                 report.record_failure(
                     "remove_dependency",
-                    &split.parent_id,
+                    &self.parent_id,
                     None,
                     format!("scan rollback dependencies: {error:#}"),
                 );
             }
         }
 
-        for downstream in &split.removed_parent_from {
-            match pm.add_dependency(downstream, &split.parent_id).await {
+        for downstream in &self.removed_parent_from {
+            match pm.add_dependency(downstream, &self.parent_id).await {
                 Ok(()) => {
-                    report.record_success("restore_dependency", downstream, Some(&split.parent_id));
+                    report.record_success("restore_dependency", downstream, Some(&self.parent_id));
                 }
                 Err(error) => {
                     report.record_failure(
                         "restore_dependency",
                         downstream,
-                        Some(&split.parent_id),
+                        Some(&self.parent_id),
                         format!(
                             "restore original downstream dependency {downstream} -> {}: {error:#}",
-                            split.parent_id
+                            self.parent_id
                         ),
                     );
                 }
             }
         }
 
-        for child_id in &split.child_ids {
+        for child_id in &self.child_ids {
             match pm
                 .update_issue(
                     child_id,
@@ -471,32 +477,32 @@ async fn rollback_mutation(
 
         match pm
             .update_issue(
-                &split.parent_id,
+                &self.parent_id,
                 IssueUpdate {
-                    status: Some(split.original_parent_status.clone()),
+                    status: Some(self.original_parent_status.clone()),
                     ..Default::default()
                 },
             )
             .await
         {
-            Ok(()) => report.record_success("restore_parent_status", &split.parent_id, None),
+            Ok(()) => report.record_success("restore_parent_status", &self.parent_id, None),
             Err(error) => {
                 report.record_failure(
                     "restore_parent_status",
-                    &split.parent_id,
+                    &self.parent_id,
                     None,
-                    format!("restore parent {}: {error:#}", split.parent_id),
+                    format!("restore parent {}: {error:#}", self.parent_id),
                 );
             }
         }
-        for label in superseded_by_labels(&split.child_ids) {
+        for label in superseded_by_labels(&self.child_ids) {
             let child_id = label
                 .strip_prefix("spur:superseded-by:")
                 .unwrap_or_default()
                 .to_string();
             match pm
                 .update_issue(
-                    &split.parent_id,
+                    &self.parent_id,
                     IssueUpdate {
                         remove_labels: vec![label],
                         ..Default::default()
@@ -507,25 +513,82 @@ async fn rollback_mutation(
                 Ok(()) => {
                     report.record_success(
                         "clear_superseded_by_label",
-                        &split.parent_id,
+                        &self.parent_id,
                         Some(&child_id),
                     );
                 }
                 Err(error) => {
                     report.record_failure(
                         "clear_superseded_by_label",
-                        &split.parent_id,
+                        &self.parent_id,
                         Some(&child_id),
                         format!(
                             "clear superseded-by labels from {}: {error:#}",
-                            split.parent_id
+                            self.parent_id
                         ),
                     );
                 }
             }
         }
     }
+}
 
+async fn rollback_executed_ops_in_reverse(
+    pm: &PmService,
+    adv: &dyn BeadsAdvanced,
+    ops: &[ExecutedOp],
+    report: &mut RollbackReport,
+) {
+    for op in ops.iter().rev() {
+        match op {
+            ExecutedOp::SplitTask(split) => split.rollback(pm, adv, report).await,
+            #[cfg(test)]
+            ExecutedOp::NoOp(noop) => noop.rollback(pm, adv, report).await,
+        }
+    }
+}
+
+fn executed_op_setup_id(op: &ExecutedOp) -> &str {
+    match op {
+        ExecutedOp::SplitTask(split) => &split.parent_id,
+        #[cfg(test)]
+        ExecutedOp::NoOp(noop) => &noop.label,
+    }
+}
+
+async fn rollback_mutation(
+    pm: Arc<PmService>,
+    feature_gate: Arc<spur_license::FeatureGate>,
+    executed_ops: &[ExecutedOp],
+) -> RollbackReport {
+    let mut report = RollbackReport::default();
+    if let Err(error) = crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        feature_gate.as_ref(),
+    ) {
+        if let Some(op) = executed_ops.last() {
+            report.record_failure(
+                "rollback_setup",
+                executed_op_setup_id(op),
+                None,
+                crate::server::feature_error_message(error),
+            );
+        }
+        return report;
+    }
+    let Some(adv) = pm.advanced() else {
+        if let Some(op) = executed_ops.last() {
+            report.record_failure(
+                "rollback_setup",
+                executed_op_setup_id(op),
+                None,
+                "rollback requires beads backend",
+            );
+        }
+        return report;
+    };
+
+    rollback_executed_ops_in_reverse(pm.as_ref(), adv, executed_ops, &mut report).await;
     report
 }
 
@@ -660,6 +723,87 @@ async fn add_labels_individually(pm: &PmService, issue_id: &str, labels: &[Strin
 mod tests {
     use super::*;
     use spur_pm::{IssueSummary, PmSource};
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    async fn test_pm() -> (Arc<spur_pm::PmService>, TempDir) {
+        let dir = TempDir::new().expect("tempdir");
+        let workspace = spur_pm::test_workspace::TestBeadsWorkspace::init();
+        let beads_dir = dir.path().join(".beads");
+        std::fs::create_dir_all(&beads_dir).expect("create .beads");
+        workspace.copy_db_to(&beads_dir);
+        let pm = Arc::new(
+            spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+                .await
+                .expect("PmService::try_new")
+                .expect("expected beads pm"),
+        );
+        (pm, dir)
+    }
+
+    #[tokio::test]
+    async fn executor_iterates_executed_ops_in_reverse_for_rollback() {
+        let (pm, _dir) = test_pm().await;
+        let adv = pm.advanced().expect("beads adv");
+        let executed: Vec<ExecutedOp> = vec![
+            ExecutedOp::NoOp(NoOpExecution {
+                label: "first".into(),
+            }),
+            ExecutedOp::NoOp(NoOpExecution {
+                label: "second".into(),
+            }),
+            ExecutedOp::NoOp(NoOpExecution {
+                label: "third".into(),
+            }),
+        ];
+        let mut report = RollbackReport::default();
+        rollback_executed_ops_in_reverse(pm.as_ref(), adv, &executed, &mut report).await;
+        let order: Vec<&str> = report
+            .succeeded
+            .iter()
+            .map(|op| op.issue_id.as_str())
+            .collect();
+        assert_eq!(order, vec!["third", "second", "first"]);
+    }
+
+    #[test]
+    fn existing_split_task_apply_rollback_unchanged() {
+        let split = SplitExecution {
+            parent_id: "bd-100".into(),
+            original_parent_status: "open".into(),
+            child_ids: vec!["bd-101".into(), "bd-102".into()],
+            removed_parent_from: vec!["bd-200".into()],
+        };
+        let snapshot = format!("{split:?}");
+        let op = ExecutedOp::SplitTask(split);
+        match &op {
+            ExecutedOp::SplitTask(round_trip) => {
+                assert_eq!(format!("{round_trip:?}"), snapshot);
+                assert_eq!(round_trip.parent_id, "bd-100");
+                assert_eq!(round_trip.original_parent_status, "open");
+                assert_eq!(round_trip.child_ids, vec!["bd-101", "bd-102"]);
+                assert_eq!(round_trip.removed_parent_from, vec!["bd-200"]);
+            }
+            #[allow(unreachable_patterns)]
+            _ => panic!("expected SplitTask variant"),
+        }
+    }
+
+    #[tokio::test]
+    async fn synthetic_noop_in_test_only_completes_via_reversible_trait() {
+        let (pm, _dir) = test_pm().await;
+        let adv = pm.advanced().expect("beads adv");
+        let op = NoOpExecution {
+            label: "noop-target".into(),
+        };
+        let mut report = RollbackReport::default();
+        ReversibleOp::rollback(&op, pm.as_ref(), adv, &mut report).await;
+        assert_eq!(report.failed, Vec::new());
+        assert_eq!(report.succeeded.len(), 1);
+        assert_eq!(report.succeeded[0].kind, "noop");
+        assert_eq!(report.succeeded[0].issue_id, "noop-target");
+        assert_eq!(report.succeeded[0].depends_on_id, None);
+    }
 
     fn summary(id: &str) -> IssueSummary {
         IssueSummary {
