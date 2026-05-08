@@ -353,6 +353,15 @@ pub struct PlanSnapshotCounts {
     pub rejected: u32,
     pub failed: u32,
     pub cancelled: u32,
+    /// bd-2m2u Phase 2d — count of tasks currently in `EscalatedToBrain`
+    /// awaiting a brain `submit_plan_mutation` decision.
+    #[serde(default)]
+    pub escalated: u32,
+    /// bd-2m2u Phase 2d — running count of attempts auto-retried with the
+    /// amended-prompt recovery path. Derived from `AttemptRecord` history;
+    /// observability surface only.
+    #[serde(default)]
+    pub auto_retried: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1113,6 +1122,32 @@ pub enum SpurEventBody {
         plan_id: String,
         task_id: String,
         delegation_id: String,
+    },
+
+    /// bd-2m2u Phase 2d — a plan task exhausted its `AUTO_RETRY_BUDGET` and
+    /// was promoted to `EscalatedToBrain`. Brain receives the matching
+    /// `BrainContinuation { source: PlanTaskEscalated }` and resolves via
+    /// `submit_plan_mutation`.
+    PlanTaskEscalated {
+        plan_id: String,
+        task_id: String,
+        delegation_id: String,
+        attempt: u32,
+        max_attempts: u32,
+        last_error: String,
+        #[serde(default)]
+        worker_branch: Option<String>,
+    },
+
+    /// bd-2m2u Phase 2d — `submit_plan_mutation` applied a `MutationBatch`
+    /// successfully. Surfaces op tags and affected task ids so observers can
+    /// follow the recovery action without parsing the audit log directly.
+    PlanMutationApplied {
+        plan_id: String,
+        mutation_id: String,
+        trigger_task_id: String,
+        op_tags: Vec<String>,
+        affected_task_ids: Vec<String>,
     },
 
     // ── Plan lifecycle events (INV-7) ─────────────────────────────────────────
