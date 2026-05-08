@@ -1007,6 +1007,42 @@ pub fn review_task_def() -> ToolDefinition {
     }
 }
 
+fn submit_plan_mutation_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "submit_plan_mutation".into(),
+        description: "Brain-side recovery tool. Apply an atomic batch of \
+            plan-graph mutations to recover an escalated/failed task: retry \
+            it as-is, rewrite its spec (task body, agent, context, deps), \
+            or abandon it. Wraps `apply_mutation` end-to-end with cycle \
+            detection + rollback. Clears `signal:escalated` from every \
+            affected issue on success."
+            .into(),
+        input_schema: json!({
+            "type": "object",
+            "required": ["trigger_task_id", "ops"],
+            "properties": {
+                "trigger_task_id": {
+                    "type": "string",
+                    "description": "Beads issue id used as the audit anchor for the batch. Typically the escalated task."
+                },
+                "mutation_id": {
+                    "type": "string",
+                    "description": "Optional UUID; auto-generated when absent."
+                },
+                "ops": {
+                    "type": "array",
+                    "description": "Ordered list of `PlanMutationOp` JSON values. Supported tags: split_task, retry_task, modify_task_spec, abandon_task.",
+                    "items": { "type": "object" }
+                },
+                "rationale": {
+                    "type": "string",
+                    "description": "Free-form explanation for the audit trail."
+                }
+            }
+        }),
+    }
+}
+
 fn report_signal_def() -> ToolDefinition {
     ToolDefinition {
         name: "report_signal".into(),
@@ -1119,6 +1155,7 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         preview_task_base_def(),
         plan_truncate_and_restart_def(),
         review_task_def(),
+        submit_plan_mutation_def(),
         report_signal_def(),
         report_progress_def(),
     ]
@@ -1273,6 +1310,7 @@ mod worker_tools_subset_tests {
             "create_pr",
             "merge_plan",
             "submit_plan",
+            "submit_plan_mutation",
             "execute_epic",
             "get_reconciler_status",
             "preview_task_base",

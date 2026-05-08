@@ -114,6 +114,10 @@ pub struct IssueUpdate {
     pub priority: Option<i32>,
     /// Some("alice") = assign, Some("") = unassign, None = no change
     pub assignee: Option<String>,
+    /// Some(text) replaces the issue body/description; None leaves it unchanged.
+    /// (bd-2m2u Phase 2c — required by `ModifyTaskSpec`.)
+    #[serde(default)]
+    pub body: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

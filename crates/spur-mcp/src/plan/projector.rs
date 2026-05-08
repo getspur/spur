@@ -183,6 +183,7 @@ pub fn latest_task_spec(audits: &[AuditSentinelKind]) -> Option<(String, Vec<Str
         if let AuditSentinelKind::TaskSpec {
             task_id,
             context_files,
+            ..
         } = audit
         {
             return Some((task_id.clone(), context_files.clone()));
@@ -190,6 +191,41 @@ pub fn latest_task_spec(audits: &[AuditSentinelKind]) -> Option<(String, Vec<Str
     }
 
     None
+}
+
+/// Latest extended `TaskSpec` fields (bd-2m2u Phase 2c). Returns the most
+/// recent `(task_text, agent, depends_on)` triple; each component is `None`
+/// if it was never set in any TaskSpec audit. Used by the projector to
+/// override live beads-issue fields after `ModifyTaskSpec` has been applied.
+pub fn latest_extended_task_spec(
+    audits: &[AuditSentinelKind],
+) -> (Option<String>, Option<String>, Option<Vec<String>>) {
+    let mut text = None;
+    let mut agent = None;
+    let mut deps = None;
+    for audit in audits.iter().rev() {
+        if let AuditSentinelKind::TaskSpec {
+            task_text,
+            agent: a,
+            depends_on,
+            ..
+        } = audit
+        {
+            if text.is_none() && task_text.is_some() {
+                text = task_text.clone();
+            }
+            if agent.is_none() && a.is_some() {
+                agent = a.clone();
+            }
+            if deps.is_none() && depends_on.is_some() {
+                deps = depends_on.clone();
+            }
+            if text.is_some() && agent.is_some() && deps.is_some() {
+                break;
+            }
+        }
+    }
+    (text, agent, deps)
 }
 
 /// Derive the human-readable outcome summary string from the most recent

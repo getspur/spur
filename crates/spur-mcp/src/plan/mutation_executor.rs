@@ -11,9 +11,16 @@ use spur_pm::{
     BeadsAdvanced, DependencyCycle, IssueCreate, IssueFilter, IssueSummary, IssueUpdate, PmService,
 };
 
-use super::audit_sentinel::{encode_comment as audit_encode, AuditSentinelKind, OpDescription};
+use super::audit_sentinel::{
+    encode_comment as audit_encode, AuditSentinelKind, CompletionState, OpDescription,
+};
 use super::labels::{mutation_id_label, signal_processed_label, superseded_by_labels};
 use super::mutation::{DepRewirePolicy, MutationBatch, PlanMutationOp};
+
+/// bd-2m2u Phase 2c — label that brain-side escalation pipelines apply to flag
+/// a task awaiting brain decision. `submit_plan_mutation` clears it on success
+/// to mark the escalation resolved.
+pub const SIGNAL_ESCALATED_LABEL: &str = "signal:escalated";
 
 const ISSUE_SCAN_PAGE_SIZE: usize = 500;
 
@@ -81,8 +88,13 @@ pub async fn apply_mutation(
     let mut affected_task_ids: Vec<String> = Vec::new();
     let mut executed_ops: Vec<ExecutedOp> = Vec::new();
 
-    for op in &batch.ops {
-        match op {
+    // bd-2m2u Phase 2c — wrap the apply loop so that any per-op error triggers
+    // rollback of the previously executed ops and emits a violation audit
+    // before propagating the original error. The post-hoc cycle detection
+    // below remains as a second safety net.
+    let apply_outcome: Result<()> = async {
+        for op in &batch.ops {
+            match op {
             PlanMutationOp::SplitTask {
                 parent,
                 children,
@@ -219,7 +231,89 @@ pub async fn apply_mutation(
                     removed_parent_from: rewire_plan.removed_parent_from,
                 }));
             }
+            PlanMutationOp::RetryTask { issue_id } => {
+                affected_task_ids.push(issue_id.clone());
+                apply_retry_task(
+                    pm.as_ref(),
+                    adv,
+                    issue_id,
+                    &batch.mutation_id,
+                    &mut executed_ops,
+                )
+                .await
+                .with_context(|| format!("apply retry_task {issue_id}"))?;
+            }
+            PlanMutationOp::ModifyTaskSpec {
+                issue_id,
+                new_task,
+                new_agent,
+                new_context_files,
+                new_depends_on,
+            } => {
+                affected_task_ids.push(issue_id.clone());
+                apply_modify_task_spec(
+                    pm.as_ref(),
+                    adv,
+                    issue_id,
+                    new_task.as_deref(),
+                    new_agent.as_deref(),
+                    new_context_files.as_deref(),
+                    new_depends_on.as_deref(),
+                    &mut executed_ops,
+                )
+                .await
+                .with_context(|| format!("apply modify_task_spec {issue_id}"))?;
+            }
+            PlanMutationOp::AbandonTask {
+                issue_id,
+                reason,
+                cascade_descendants,
+            } => {
+                let affected = apply_abandon_task(
+                    pm.as_ref(),
+                    adv,
+                    issue_id,
+                    reason,
+                    *cascade_descendants,
+                    &mut executed_ops,
+                )
+                .await
+                .with_context(|| format!("apply abandon_task {issue_id}"))?;
+                affected_task_ids.extend(affected);
+            }
         }
+        }
+        Ok(())
+    }
+    .await;
+
+    if let Err(apply_err) = apply_outcome {
+        let rollback_report =
+            rollback_mutation(pm.clone(), Arc::clone(&feature_gate), &executed_ops).await;
+        let rollback_status = if rollback_report.failed.is_empty() {
+            "completed".to_string()
+        } else {
+            format!(
+                "failed: {} rollback compensation op(s) failed",
+                rollback_report.failed.len()
+            )
+        };
+        let _ = adv
+            .add_comment(
+                &batch.trigger_task_id,
+                &audit_encode(&AuditSentinelKind::MutationInvariantViolation {
+                    mutation_id: batch.mutation_id.to_string(),
+                    violation: format!("op_failure: {apply_err:#}"),
+                    rollback_status,
+                    rollback_ops_succeeded: rollback_report.succeeded.clone(),
+                    rollback_ops_failed: rollback_report.failed.clone(),
+                }),
+            )
+            .await;
+        return Err(apply_err.context(format!(
+            "mutation {} rolled back after op failure",
+            batch.mutation_id
+        )));
     }
 
     let cycles = dep_cycles_with_fallback(adv).await?;
@@ -373,8 +467,37 @@ fn rewire_plan(
 #[derive(Debug)]
 enum ExecutedOp {
     SplitTask(SplitExecution),
+    RetryTask(RetryExecution),
+    ModifyTaskSpec(ModifyTaskSpecExecution),
+    AbandonTask(AbandonTaskExecution),
     #[cfg(test)]
     NoOp(NoOpExecution),
+}
+
+/// bd-2m2u Phase 2c — captured pre-image for `RetryTask` rollback.
+#[derive(Debug)]
+struct RetryExecution {
+    issue_id: String,
+    original_status: String,
+    removed_labels: Vec<String>,
+}
+
+/// bd-2m2u Phase 2c — captured pre-image for `ModifyTaskSpec` rollback.
+#[derive(Debug)]
+struct ModifyTaskSpecExecution {
+    issue_id: String,
+    body_change: Option<String>, // original body if we changed it
+    original_agent_label: Option<String>,
+    new_agent_label: Option<String>,
+    added_deps: Vec<String>,
+    removed_deps: Vec<String>,
+}
+
+/// bd-2m2u Phase 2c — captured pre-image for `AbandonTask` rollback. Each
+/// `(issue_id, original_status)` pair is restored on rollback.
+#[derive(Debug)]
+struct AbandonTaskExecution {
+    targets: Vec<(String, String)>,
 }
 
 /// Per-op compensating action. Implementations record outcomes onto
@@ -547,6 +670,9 @@ async fn rollback_executed_ops_in_reverse(
     for op in ops.iter().rev() {
         match op {
             ExecutedOp::SplitTask(split) => split.rollback(pm, adv, report).await,
+            ExecutedOp::RetryTask(retry) => retry.rollback(pm, adv, report).await,
+            ExecutedOp::ModifyTaskSpec(modify) => modify.rollback(pm, adv, report).await,
+            ExecutedOp::AbandonTask(abandon) => abandon.rollback(pm, adv, report).await,
             #[cfg(test)]
             ExecutedOp::NoOp(noop) => noop.rollback(pm, adv, report).await,
         }
@@ -556,8 +682,146 @@ async fn rollback_executed_ops_in_reverse(
 fn executed_op_setup_id(op: &ExecutedOp) -> &str {
     match op {
         ExecutedOp::SplitTask(split) => &split.parent_id,
+        ExecutedOp::RetryTask(retry) => &retry.issue_id,
+        ExecutedOp::ModifyTaskSpec(modify) => &modify.issue_id,
+        ExecutedOp::AbandonTask(abandon) => abandon
+            .targets
+            .first()
+            .map(|(id, _)| id.as_str())
+            .unwrap_or("<no-target>"),
         #[cfg(test)]
         ExecutedOp::NoOp(noop) => &noop.label,
+    }
+}
+
+#[async_trait::async_trait]
+impl ReversibleOp for RetryExecution {
+    async fn rollback(
+        &self,
+        pm: &PmService,
+        _adv: &dyn BeadsAdvanced,
+        report: &mut RollbackReport,
+    ) {
+        let restore = IssueUpdate {
+            status: Some(self.original_status.clone()),
+            add_labels: self.removed_labels.clone(),
+            ..Default::default()
+        };
+        match pm.update_issue(&self.issue_id, restore).await {
+            Ok(()) => report.record_success("restore_retry_task", &self.issue_id, None),
+            Err(error) => report.record_failure(
+                "restore_retry_task",
+                &self.issue_id,
+                None,
+                format!("{error:#}"),
+            ),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ReversibleOp for ModifyTaskSpecExecution {
+    async fn rollback(&self, pm: &PmService, adv: &dyn BeadsAdvanced, report: &mut RollbackReport) {
+        if let Some(original_body) = self.body_change.as_deref() {
+            match pm
+                .update_issue(
+                    &self.issue_id,
+                    IssueUpdate {
+                        body: Some(original_body.to_string()),
+                        ..Default::default()
+                    },
+                )
+                .await
+            {
+                Ok(()) => report.record_success("restore_body", &self.issue_id, None),
+                Err(error) => report.record_failure(
+                    "restore_body",
+                    &self.issue_id,
+                    None,
+                    format!("{error:#}"),
+                ),
+            }
+        }
+        if let Some(new_label) = self.new_agent_label.as_deref() {
+            let _ = pm
+                .update_issue(
+                    &self.issue_id,
+                    IssueUpdate {
+                        remove_labels: vec![new_label.to_string()],
+                        ..Default::default()
+                    },
+                )
+                .await;
+        }
+        if let Some(old_label) = self.original_agent_label.as_deref() {
+            let _ = pm
+                .update_issue(
+                    &self.issue_id,
+                    IssueUpdate {
+                        add_labels: vec![old_label.to_string()],
+                        ..Default::default()
+                    },
+                )
+                .await;
+        }
+        // Reverse the dep diff: remove what we added, re-add what we removed.
+        for dep in &self.added_deps {
+            match adv.remove_dependency(&self.issue_id, dep).await {
+                Ok(()) => {
+                    report.record_success("modify_remove_added_dep", &self.issue_id, Some(dep))
+                }
+                Err(error) => report.record_failure(
+                    "modify_remove_added_dep",
+                    &self.issue_id,
+                    Some(dep),
+                    format!("{error:#}"),
+                ),
+            }
+        }
+        for dep in &self.removed_deps {
+            match pm.add_dependency(&self.issue_id, dep).await {
+                Ok(()) => {
+                    report.record_success("modify_restore_removed_dep", &self.issue_id, Some(dep))
+                }
+                Err(error) => report.record_failure(
+                    "modify_restore_removed_dep",
+                    &self.issue_id,
+                    Some(dep),
+                    format!("{error:#}"),
+                ),
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ReversibleOp for AbandonTaskExecution {
+    async fn rollback(
+        &self,
+        pm: &PmService,
+        _adv: &dyn BeadsAdvanced,
+        report: &mut RollbackReport,
+    ) {
+        for (issue_id, original_status) in &self.targets {
+            match pm
+                .update_issue(
+                    issue_id,
+                    IssueUpdate {
+                        status: Some(original_status.clone()),
+                        ..Default::default()
+                    },
+                )
+                .await
+            {
+                Ok(()) => report.record_success("restore_abandoned_task", issue_id, None),
+                Err(error) => report.record_failure(
+                    "restore_abandoned_task",
+                    issue_id,
+                    None,
+                    format!("{error:#}"),
+                ),
+            }
+        }
     }
 }
 
@@ -722,6 +986,386 @@ async fn add_labels_individually(pm: &PmService, issue_id: &str, labels: &[Strin
         .with_context(|| format!("add label {label} to {issue_id}"))?;
     }
     Ok(())
+}
+
+// bd-2m2u Phase 2c — apply helpers for the new ops.
+
+/// Apply RetryTask, registering a partial-state `ExecutedOp` in `executed_ops`
+/// before attempting any mutating step. On error the caller's rollback path
+/// can undo whatever portion was committed.
+async fn apply_retry_task(
+    pm: &PmService,
+    adv: &dyn BeadsAdvanced,
+    issue_id: &str,
+    mutation_id: &uuid::Uuid,
+    executed_ops: &mut Vec<ExecutedOp>,
+) -> Result<()> {
+    let issue = pm
+        .get_issue(issue_id)
+        .await
+        .with_context(|| format!("load retry target {issue_id}"))?;
+    let original_status = issue.status.clone();
+
+    let removable: Vec<String> = issue
+        .labels
+        .iter()
+        .filter(|label| {
+            label.as_str() == super::labels::READY_FOR_REVIEW
+                || label.as_str() == "ready-for-review"
+        })
+        .cloned()
+        .collect();
+
+    // Register up front so any subsequent step's failure rolls back this op.
+    executed_ops.push(ExecutedOp::RetryTask(RetryExecution {
+        issue_id: issue_id.to_string(),
+        original_status,
+        removed_labels: removable.clone(),
+    }));
+
+    pm.update_issue(
+        issue_id,
+        IssueUpdate {
+            status: Some("open".to_string()),
+            remove_labels: removable,
+            ..Default::default()
+        },
+    )
+    .await
+    .with_context(|| format!("retry_task open issue {issue_id}"))?;
+
+    let prior_audits = super::projector::collect_sorted_audits_for_issue(
+        issue_id,
+        adv.list_comments(issue_id)
+            .await
+            .with_context(|| format!("list comments for retry target {issue_id}"))?,
+    );
+    let (attempt, last_delegation_id) = super::projector::project_attempt_facts(&prior_audits);
+
+    adv.add_comment(
+        issue_id,
+        &audit_encode(&AuditSentinelKind::RetryRequested {
+            delegation_id: last_delegation_id.unwrap_or_else(|| mutation_id.to_string()),
+            attempt,
+            error: "brain-directed retry via submit_plan_mutation".to_string(),
+            worker_branch: None,
+        }),
+    )
+    .await
+    .with_context(|| format!("emit retry_requested audit for {issue_id}"))?;
+
+    Ok(())
+}
+
+/// Apply ModifyTaskSpec while threading partial-state into `executed_ops` so a
+/// mid-sequence failure (e.g., a cycle-creating `add_dependency`) still leaves
+/// a rollback record covering the work already done.
+async fn apply_modify_task_spec(
+    pm: &PmService,
+    adv: &dyn BeadsAdvanced,
+    issue_id: &str,
+    new_task: Option<&str>,
+    new_agent: Option<&str>,
+    new_context_files: Option<&[String]>,
+    new_depends_on: Option<&[String]>,
+    executed_ops: &mut Vec<ExecutedOp>,
+) -> Result<()> {
+    let issue = pm
+        .get_issue(issue_id)
+        .await
+        .with_context(|| format!("load modify target {issue_id}"))?;
+
+    let original_body = issue.body.clone();
+    let original_agent_label = issue
+        .labels
+        .iter()
+        .find(|label| super::labels::parse_agent(label).is_some())
+        .cloned();
+    let original_blocked_by: Vec<String> = issue.blocked_by.clone();
+
+    // Reserve a rollback slot up-front. Subsequent steps mutate this entry as
+    // they commit, so a partial failure leaves a complete-as-of-now record.
+    let exec_idx = executed_ops.len();
+    executed_ops.push(ExecutedOp::ModifyTaskSpec(ModifyTaskSpecExecution {
+        issue_id: issue_id.to_string(),
+        body_change: None,
+        original_agent_label: original_agent_label.clone(),
+        new_agent_label: None,
+        added_deps: Vec::new(),
+        removed_deps: Vec::new(),
+    }));
+
+    // 1. Body update
+    if let Some(new) = new_task {
+        if new != original_body {
+            pm.update_issue(
+                issue_id,
+                IssueUpdate {
+                    body: Some(new.to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .with_context(|| format!("modify body for {issue_id}"))?;
+            if let ExecutedOp::ModifyTaskSpec(slot) = &mut executed_ops[exec_idx] {
+                slot.body_change = Some(original_body.clone());
+            }
+        }
+    }
+
+    // 2. Agent label swap
+    if let Some(agent_name) = new_agent {
+        let new_label = super::labels::agent(agent_name);
+        let mut remove = Vec::new();
+        if let Some(old) = original_agent_label.as_deref() {
+            if old != new_label.as_str() {
+                remove.push(old.to_string());
+            }
+        }
+        let already_present = issue.labels.iter().any(|l| l == &new_label);
+        let mut add = Vec::new();
+        if !already_present {
+            add.push(new_label.clone());
+        }
+        if !remove.is_empty() || !add.is_empty() {
+            pm.update_issue(
+                issue_id,
+                IssueUpdate {
+                    add_labels: add,
+                    remove_labels: remove,
+                    ..Default::default()
+                },
+            )
+            .await
+            .with_context(|| format!("swap agent label for {issue_id}"))?;
+        }
+        if !already_present {
+            if let ExecutedOp::ModifyTaskSpec(slot) = &mut executed_ops[exec_idx] {
+                slot.new_agent_label = Some(new_label);
+            }
+        }
+    }
+
+    // 3. Dependencies diff. Removed deps first (safe reverse), then add new
+    //    edges. add_dependency is the most likely source of mid-op failure
+    //    (cycle detection in beads_rust); the partial-state recording above
+    //    means rollback can clean up.
+    if let Some(targets) = new_depends_on {
+        let want: HashSet<&str> = targets.iter().map(String::as_str).collect();
+        let have: HashSet<&str> = original_blocked_by.iter().map(String::as_str).collect();
+        for dep in &original_blocked_by {
+            if !want.contains(dep.as_str()) {
+                adv.remove_dependency(issue_id, dep)
+                    .await
+                    .with_context(|| format!("modify remove dep {issue_id} -> {dep}"))?;
+                if let ExecutedOp::ModifyTaskSpec(slot) = &mut executed_ops[exec_idx] {
+                    slot.removed_deps.push(dep.clone());
+                }
+            }
+        }
+        for dep in targets {
+            if !have.contains(dep.as_str()) {
+                pm.add_dependency(issue_id, dep)
+                    .await
+                    .with_context(|| format!("modify add dep {issue_id} -> {dep}"))?;
+                if let ExecutedOp::ModifyTaskSpec(slot) = &mut executed_ops[exec_idx] {
+                    slot.added_deps.push(dep.clone());
+                }
+            }
+        }
+    }
+
+    // 4. Extended TaskSpec audit.
+    let prior_audits = super::projector::collect_sorted_audits_for_issue(
+        issue_id,
+        adv.list_comments(issue_id)
+            .await
+            .with_context(|| format!("list comments for modify target {issue_id}"))?,
+    );
+    let (prior_task_id, prior_context_files) = super::projector::latest_task_spec(&prior_audits)
+        .unwrap_or_else(|| (issue_id.to_string(), Vec::new()));
+    let context_files: Vec<String> = match new_context_files {
+        Some(files) => files.to_vec(),
+        None => prior_context_files,
+    };
+
+    super::emit_extended_task_spec_audit(
+        adv,
+        issue_id,
+        &prior_task_id,
+        &context_files,
+        new_task,
+        new_agent,
+        new_depends_on,
+    )
+    .await
+    .with_context(|| format!("emit extended task_spec audit for {issue_id}"))?;
+
+    Ok(())
+}
+
+/// Apply AbandonTask, recording each successfully-closed target into the
+/// executed-op slot as we go so a mid-cascade failure rolls back the targets
+/// that were already closed.
+async fn apply_abandon_task(
+    pm: &PmService,
+    adv: &dyn BeadsAdvanced,
+    issue_id: &str,
+    reason: &str,
+    cascade_descendants: bool,
+    executed_ops: &mut Vec<ExecutedOp>,
+) -> Result<Vec<String>> {
+    let mut targets: Vec<String> = vec![issue_id.to_string()];
+    if cascade_descendants {
+        let descendants = collect_descendants(pm, issue_id).await?;
+        targets.extend(descendants);
+    }
+
+    let exec_idx = executed_ops.len();
+    executed_ops.push(ExecutedOp::AbandonTask(AbandonTaskExecution {
+        targets: Vec::new(),
+    }));
+
+    let mut affected: Vec<String> = Vec::with_capacity(targets.len());
+    for id in &targets {
+        let issue = pm
+            .get_issue(id)
+            .await
+            .with_context(|| format!("load abandon target {id}"))?;
+        let original_status = issue.status.clone();
+
+        pm.update_issue(
+            id,
+            IssueUpdate {
+                status: Some(pm.closed_status().to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .with_context(|| format!("abandon close {id}"))?;
+        if let ExecutedOp::AbandonTask(slot) = &mut executed_ops[exec_idx] {
+            slot.targets.push((id.clone(), original_status));
+        }
+
+        adv.add_comment(
+            id,
+            &audit_encode(&AuditSentinelKind::Completion {
+                delegation_id: format!("abandon:{}", id),
+                completion_state: CompletionState::Failed,
+                superseded: false,
+                worker_branch: None,
+                result_summary: Some(reason.to_string()),
+                artifact_uri: None,
+                dispatched_base_oid: None,
+            }),
+        )
+        .await
+        .with_context(|| format!("emit abandon audit for {id}"))?;
+
+        affected.push(id.clone());
+    }
+
+    Ok(affected)
+}
+
+/// Walk `blocked_by` reverse edges from `root_id` to find every transitive
+/// descendant. The result excludes `root_id` itself.
+async fn collect_descendants(pm: &PmService, root_id: &str) -> Result<Vec<String>> {
+    let all_ids = list_all_issue_ids(pm).await?;
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut stack: Vec<String> = vec![root_id.to_string()];
+    while let Some(current) = stack.pop() {
+        for id in &all_ids {
+            if id == &current || seen.contains(id) {
+                continue;
+            }
+            let issue = pm
+                .get_issue(id)
+                .await
+                .with_context(|| format!("scan descendants for {current}"))?;
+            if issue.blocked_by.iter().any(|dep| dep == &current) {
+                seen.insert(id.clone());
+                out.push(id.clone());
+                stack.push(id.clone());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// bd-2m2u Phase 2c — `submit_plan_mutation` MCP entry. Wraps `apply_mutation`
+/// end-to-end: cycle detection + rollback via the now-generic executor, then
+/// clears `signal:escalated` labels from every affected issue on success so
+/// the engine resumes traversal.
+#[derive(Debug, Clone)]
+pub struct SubmitPlanMutationResult {
+    pub mutation_id: String,
+    pub children_created: Vec<String>,
+    pub affected_task_ids: Vec<String>,
+}
+
+pub async fn submit_plan_mutation(
+    pm: Arc<PmService>,
+    feature_gate: Arc<spur_license::FeatureGate>,
+    mutation_id: uuid::Uuid,
+    trigger_task_id: String,
+    ops: Vec<PlanMutationOp>,
+) -> Result<SubmitPlanMutationResult> {
+    let batch = MutationBatch {
+        mutation_id,
+        trigger_signal_id: None,
+        trigger_task_id: trigger_task_id.clone(),
+        ops,
+    };
+
+    let children_created = apply_mutation(pm.clone(), Arc::clone(&feature_gate), &batch).await?;
+
+    // Compute which issues the batch touched. SplitTask creates children; the
+    // other ops mutate existing issues. We strip `signal:escalated` from every
+    // affected id (idempotent — `remove_label` is a no-op when absent).
+    let mut affected: Vec<String> = vec![trigger_task_id];
+    for op in &batch.ops {
+        match op {
+            PlanMutationOp::SplitTask { parent, .. } => {
+                affected.push(parent.clone());
+            }
+            PlanMutationOp::RetryTask { issue_id }
+            | PlanMutationOp::ModifyTaskSpec { issue_id, .. }
+            | PlanMutationOp::AbandonTask { issue_id, .. } => {
+                affected.push(issue_id.clone());
+            }
+        }
+    }
+    affected.extend(children_created.iter().cloned());
+    let mut seen: HashSet<String> = HashSet::new();
+    affected.retain(|id| seen.insert(id.clone()));
+
+    for id in &affected {
+        if let Err(error) = pm
+            .update_issue(
+                id,
+                IssueUpdate {
+                    remove_labels: vec![SIGNAL_ESCALATED_LABEL.to_string()],
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            tracing::debug!(
+                target: "spur.mutation.signal_escalated_clear",
+                issue_id = %id,
+                error = %error,
+                "could not clear signal:escalated label (likely already absent)"
+            );
+        }
+    }
+
+    Ok(SubmitPlanMutationResult {
+        mutation_id: batch.mutation_id.to_string(),
+        children_created,
+        affected_task_ids: affected,
+    })
 }
 
 #[cfg(test)]

@@ -36,6 +36,7 @@ const EXPECTED: &[&str] = &[
     "preview_task_base",
     "plan_truncate_and_restart",
     "review_task",
+    "submit_plan_mutation",
     "report_signal",
     "report_progress",
 ];
