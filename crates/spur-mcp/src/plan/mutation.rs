@@ -57,13 +57,26 @@ pub struct MutationBatch {
     pub trigger_task_id: String,
 }
 
+/// Single source of truth for op → snake_case audit tag. Used by the
+/// `MutationCommit` audit `op_tags` field and the projector. New ops added
+/// in Phase 2c (RetryTask, ModifyTaskSpec, AbandonTask) extend this match.
+pub fn op_tag_for(op: &PlanMutationOp) -> &'static str {
+    match op {
+        PlanMutationOp::SplitTask { .. } => "split_task",
+    }
+}
+
 impl MutationBatch {
-    /// Short op tag for the `MutationPlan` audit record `op` field.
+    /// Short op tag for the `MutationPlan` audit record `op` field. Returns
+    /// the first op's tag (`"empty"` if the batch is empty).
     pub fn op_tag(&self) -> &'static str {
-        match self.ops.first() {
-            Some(PlanMutationOp::SplitTask { .. }) => "split",
-            None => "empty",
-        }
+        self.ops.first().map(op_tag_for).unwrap_or("empty")
+    }
+
+    /// Per-op tags for the `MutationCommit` audit `op_tags` field. One entry
+    /// per op in `ops`, in order.
+    pub fn op_tags(&self) -> Vec<&'static str> {
+        self.ops.iter().map(op_tag_for).collect()
     }
 }
 
@@ -97,6 +110,7 @@ mod tests {
         let json = serde_json::to_string(&batch).unwrap();
         let back: MutationBatch = serde_json::from_str(&json).unwrap();
         assert_eq!(back.trigger_task_id, "bd-102");
-        assert_eq!(back.op_tag(), "split");
+        assert_eq!(back.op_tag(), "split_task");
+        assert_eq!(back.op_tags(), vec!["split_task"]);
     }
 }

@@ -169,6 +169,17 @@ pub enum AuditSentinelKind {
     MutationCommit {
         mutation_id: String,
         children_created: Vec<String>,
+        /// One snake_case tag per op in the committed `MutationBatch`. Source of
+        /// truth: `crate::plan::mutation::op_tag_for`. Empty in legacy comments
+        /// emitted before bd-2m2u Phase 2b — the projector treats empty as
+        /// `["split_task"]` for backwards compat.
+        #[serde(default)]
+        op_tags: Vec<String>,
+        /// Issue ids the batch touched (parents superseded + children created
+        /// for SplitTask; future ops add their own affected ids). Empty in
+        /// legacy comments.
+        #[serde(default)]
+        affected_task_ids: Vec<String>,
     },
     MutationInvariantViolation {
         mutation_id: String,
@@ -455,6 +466,8 @@ mod tests {
             AuditSentinelKind::MutationCommit {
                 mutation_id: "mut-V".into(),
                 children_created: vec!["bd-201".into(), "bd-202".into()],
+                op_tags: vec!["split_task".into()],
+                affected_task_ids: vec!["bd-102".into(), "bd-201".into(), "bd-202".into()],
             },
             AuditSentinelKind::MutationInvariantViolation {
                 mutation_id: "mut-V".into(),
@@ -618,6 +631,8 @@ mod tests {
             AuditSentinelKind::MutationCommit {
                 mutation_id: "mut-V".into(),
                 children_created: vec!["bd-201".into(), "bd-202".into()],
+                op_tags: vec!["split_task".into()],
+                affected_task_ids: vec!["bd-102".into(), "bd-201".into(), "bd-202".into()],
             },
             AuditSentinelKind::MutationInvariantViolation {
                 mutation_id: "mut-V".into(),
@@ -939,6 +954,19 @@ mod tests {
     }
 
     #[test]
+    fn mutation_commit_round_trips_op_tags_and_affected_task_ids() {
+        let kind = AuditSentinelKind::MutationCommit {
+            mutation_id: "mut-V".into(),
+            children_created: vec!["bd-201".into(), "bd-202".into()],
+            op_tags: vec!["split_task".into()],
+            affected_task_ids: vec!["bd-100".into(), "bd-201".into(), "bd-202".into()],
+        };
+        let body = encode_comment(&kind);
+        let parsed = parse_comment(&body).unwrap().unwrap();
+        assert_eq!(parsed, kind);
+    }
+
+    #[test]
     fn mutation_plan_and_commit_round_trip() {
         let plan = AuditSentinelKind::MutationPlan {
             mutation_id: "mut-V".into(),
@@ -952,6 +980,8 @@ mod tests {
         let commit = AuditSentinelKind::MutationCommit {
             mutation_id: "mut-V".into(),
             children_created: vec!["bd-201".into(), "bd-202".into()],
+            op_tags: vec!["split_task".into()],
+            affected_task_ids: vec!["bd-102".into(), "bd-201".into(), "bd-202".into()],
         };
         let parsed_c = parse_comment(&encode_comment(&commit)).unwrap().unwrap();
         assert_eq!(parsed_c, commit);
