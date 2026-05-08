@@ -88,6 +88,72 @@ const DARK_DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("react_trace.title.codex.fg", "warning"),
     ("react_trace.title.kiro.fg", "accent"),
     ("react_trace.title.generic.fg", "fg_subtle"),
+    // session_picker tokens (PR4 wave-2 migration).
+    ("session_picker.title.fg", "accent"),
+    ("session_picker.spinner.fg", "accent"),
+    ("session_picker.banner.label.fg", "accent"),
+    ("session_picker.banner.timestamp.fg", "fg_subtle"),
+    ("session_picker.banner.action.fg", "success"),
+    ("session_picker.banner.muted.fg", "fg_subtle"),
+    ("session_picker.banner.error.fg", "danger"),
+    ("session_picker.banner.error_id.fg", "warning"),
+    ("session_picker.search.label.fg", "fg_subtle"),
+    ("session_picker.search.active.fg", "accent"),
+    ("session_picker.search.inactive.fg", "fg_muted"),
+    ("session_picker.new_row.fg", "success"),
+    ("session_picker.row.separator.fg", "fg_subtle"),
+    ("session_picker.row.archived.fg", "fg_subtle"),
+    ("session_picker.row.title_selected.fg", "fg"),
+    ("session_picker.row.muted.fg", "fg_subtle"),
+    ("session_picker.row.cursor.fg", "accent"),
+    ("session_picker.row.pinned.fg", "warning"),
+    ("session_picker.preview.draft.fg", "warning"),
+    ("session_picker.preview.intent.fg", "fg_muted"),
+    ("session_picker.preview.placeholder.fg", "fg_subtle"),
+    ("session_picker.preview.footer.fg", "fg_subtle"),
+    ("session_picker.prompt.confirm.fg", "warning"),
+    ("session_picker.prompt.rename.fg", "accent"),
+    ("session_picker.error.title.fg", "accent"),
+    ("session_picker.error.message.fg", "danger"),
+    ("session_picker.error.hint.fg", "fg_subtle"),
+    ("session_picker.footer_hint.fg", "fg_subtle"),
+    // session_detail tokens (PR4 wave-2 migration).
+    ("session_detail.auth_banner.fg", "fg"),
+    ("session_detail.auth_banner.bg", "danger"),
+    ("session_detail.error_banner.fg", "fg"),
+    ("session_detail.error_banner.bg", "danger"),
+    ("session_detail.cancel_modal.fg", "fg"),
+    ("session_detail.cancel_modal.bg", "fg_subtle"),
+    ("session_detail.breadcrumb.fg", "fg_subtle"),
+    ("session_detail.agent_name.fg", "accent"),
+    ("session_detail.role.fg", "fg_subtle"),
+    ("session_detail.elapsed.fg", "fg_subtle"),
+    ("session_detail.cost.fg", "warning"),
+    ("session_detail.unsafe_fs.fg", "fg_on_warning"),
+    ("session_detail.unsafe_fs.bg", "warning"),
+    // plan_browser tokens (PR4 wave-2 migration).
+    ("plan_browser.border.fg", "border"),
+    ("plan_browser.empty.fg", "fg_subtle"),
+    ("plan_browser.row.selected.fg", "warning"),
+    ("plan_browser.notice.error.fg", "danger"),
+    ("plan_browser.notice.warning.fg", "warning"),
+    ("plan_browser.field.label.fg", "fg_subtle"),
+    ("plan_browser.action_line.fg", "accent"),
+    ("plan_browser.confirm.title.fg", "warning"),
+    ("plan_browser.confirm.border.fg", "warning"),
+    ("plan_browser.confirm.primary_key.fg", "success"),
+    ("plan_browser.confirm.cancel_key.fg", "danger"),
+    // plan_inspector tokens (PR4 wave-2 migration).
+    ("plan_inspector.title.fg", "accent"),
+    ("plan_inspector.gauge.fill.fg", "success"),
+    ("plan_inspector.gauge.track.fg", "fg_subtle"),
+    ("plan_inspector.label.fg", "fg_subtle"),
+    ("plan_inspector.footer_hint.fg", "fg_subtle"),
+    ("plan_inspector.status.running.fg", "warning"),
+    ("plan_inspector.status.success.fg", "success"),
+    ("plan_inspector.status.failure.fg", "danger"),
+    ("plan_inspector.status.cancelled.fg", "accent_alt"),
+    ("plan_inspector.status.unknown.fg", "fg_subtle"),
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -157,7 +223,7 @@ mod tests {
 
     #[test]
     fn dark_default_contains_all_spec_sample_bindings() {
-        assert_eq!(TokenMap::dark_default().0.len(), 84);
+        assert_eq!(TokenMap::dark_default().0.len(), 146);
     }
 
     #[test]

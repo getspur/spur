@@ -71,7 +71,11 @@ impl LicenseBadge {
     }
 }
 
-pub fn render_tombstone_badge(slot: Option<&Tombstone>, now: std::time::Instant) -> Line<'static> {
+pub fn render_tombstone_badge(
+    slot: Option<&Tombstone>,
+    now: std::time::Instant,
+    theme: &Theme,
+) -> Line<'static> {
     let Some(tombstone) = slot else {
         return Line::default();
     };
@@ -89,7 +93,6 @@ pub fn render_tombstone_badge(slot: Option<&Tombstone>, now: std::time::Instant)
         tombstone.label.clone()
     };
 
-    let theme = crate::theme::fallback_theme();
     Line::from(vec![Span::styled(
         format!("  [{prefix} {label} {}s]", remaining.as_secs()),
         Style::default().fg(token(theme, "status_bar.tombstone.fg")),
@@ -143,6 +146,7 @@ impl<'a> HintOverride<'a> {
 #[derive(Clone, Copy)]
 pub struct StatusBarProps<'a> {
     pub view: &'a ViewId,
+    pub theme: &'a Theme,
     pub tombstone: Option<&'a Tombstone>,
     pub running: usize,
     pub pending_review: usize,
@@ -222,7 +226,7 @@ impl StatusBar {
     }
 
     pub fn render(frame: &mut Frame, area: Rect, props: StatusBarProps<'_>) {
-        let theme = crate::theme::fallback_theme();
+        let theme = props.theme;
         let mode_text = props
             .current_mode
             .filter(|m| !m.is_empty())
@@ -397,7 +401,8 @@ impl StatusBar {
                 spans.push(Span::styled("· ", Style::default().fg(sep_fg)));
             }
         }
-        let tombstone_badge = render_tombstone_badge(props.tombstone, std::time::Instant::now());
+        let tombstone_badge =
+            render_tombstone_badge(props.tombstone, std::time::Instant::now(), theme);
         if !tombstone_badge.spans.is_empty() {
             spans.extend(tombstone_badge.spans);
             spans.push(Span::styled(sep, Style::default().fg(sep_fg)));

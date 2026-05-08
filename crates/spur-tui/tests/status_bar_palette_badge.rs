@@ -12,8 +12,10 @@ fn render_status_for(view: &ViewId, width: u16) -> String {
             width,
             height: 1,
         };
+        let theme = spur_tui::theme::fallback_theme();
         let props = StatusBarProps {
             view,
+            theme,
             tombstone: None,
             running: 0,
             pending_review: 0,
