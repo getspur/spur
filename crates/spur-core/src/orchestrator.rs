@@ -4040,6 +4040,12 @@ impl Orchestrator {
 
                     // ── GetIssueDetail ────────────────────────────────────
                     InteractiveInput::GetIssueDetail { id } => {
+                        tracing::debug!(
+                            target: "issue_probe",
+                            site = "orch_legacy_handler",
+                            id = %id,
+                            "GetIssueDetail handled via legacy user_rx path — TUI should be on data_rx",
+                        );
                         // PROBE: issue_detail_latency
                         let handler_started = std::time::Instant::now();
                         tracing::info!(
@@ -4094,6 +4100,12 @@ impl Orchestrator {
 
                     // ── GetIssueGraph ────────────────────────────────────
                     InteractiveInput::GetIssueGraph { id } => {
+                        tracing::debug!(
+                            target: "issue_probe",
+                            site = "orch_legacy_handler",
+                            id = %id,
+                            "GetIssueGraph handled via legacy user_rx path — TUI should be on data_rx",
+                        );
                         handle_get_issue_graph(self.pm_service.as_deref(), &self.funnel, id).await;
                     }
 
@@ -4496,12 +4508,6 @@ impl Orchestrator {
                                     // the non-Message arm (orchestrator.rs `unexpected non-Message variant
                                     // dequeued from scheduler; skipping turn`) silently drops them.
                                     let probe_label = match &other {
-                                        InteractiveInput::GetIssueDetail { id } => {
-                                            Some(format!("GetIssueDetail({id})"))
-                                        }
-                                        InteractiveInput::GetIssueGraph { id } => {
-                                            Some(format!("GetIssueGraph({id})"))
-                                        }
                                         InteractiveInput::RefreshIssues => {
                                             Some("RefreshIssues".to_string())
                                         }
