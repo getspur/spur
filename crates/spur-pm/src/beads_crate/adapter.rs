@@ -185,6 +185,7 @@ impl BeadsCrateAdapter {
                 &beads_dir.join("beads.db"),
                 Some(lock_timeout_ms),
             )?;
+            storage.checkpoint_wal_on_drop();
             let jsonl = beads_dir.join("issues.jsonl");
             let outcome = beads_rust::sync::auto_flush(&mut storage, &beads_dir, &jsonl, false)?;
             if outcome.flushed {
@@ -305,6 +306,7 @@ impl BeadsCrateAdapter {
                 &beads_dir.join("beads.db"),
                 Some(lock_timeout_ms),
             )?;
+            storage.checkpoint_wal_on_drop();
             let current = read_data_version(&storage)?;
             if current != snapshot.data_version {
                 metrics.incr_conflict();
@@ -357,6 +359,7 @@ impl BeadsCrateAdapter {
                 &beads_dir.join("beads.db"),
                 Some(lock_timeout_ms),
             )?;
+            storage.checkpoint_wal_on_drop();
             metrics.incr_write();
             let result = f(&mut storage);
             if result.is_err() {

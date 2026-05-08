@@ -7,6 +7,8 @@ use beads_rust::storage::sqlite::SqliteStorage;
 use beads_rust::sync;
 use std::path::Path;
 
+const SKIP_PROBE_ENV: &str = "SPUR_BEADS_SKIP_PROBE";
+
 #[derive(Debug, thiserror::Error)]
 pub enum InitError {
     #[error(
@@ -15,6 +17,8 @@ pub enum InitError {
              Set allow_non_local_fs=true in config to bypass."
     )]
     NonLocalFilesystem { path: String, fs_type: String },
+    #[error("pre-open SQLite quick_check failed for {path}: {message}")]
+    QuickCheckFailed { path: String, message: String },
 }
 
 /// Returns Ok(()) for local filesystems; Err for known network mounts (NFS, SMB, etc.).
@@ -72,6 +76,38 @@ pub fn detect_local_fs(beads_dir: &Path) -> Result<(), InitError> {
         }
     }
     Ok(())
+}
+
+fn quick_check_probe_enabled() -> bool {
+    !std::env::var(SKIP_PROBE_ENV).is_ok_and(|value| value == "1")
+}
+
+fn pre_open_quick_check(db_path: &Path) -> Result<(), InitError> {
+    if !quick_check_probe_enabled() || !db_path.exists() {
+        return Ok(());
+    }
+
+    let conn =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|err| InitError::QuickCheckFailed {
+                path: db_path.display().to_string(),
+                message: err.to_string(),
+            })?;
+    let result: String = conn
+        .query_row("PRAGMA quick_check", [], |row| row.get(0))
+        .map_err(|err| InitError::QuickCheckFailed {
+            path: db_path.display().to_string(),
+            message: err.to_string(),
+        })?;
+
+    if result == "ok" {
+        Ok(())
+    } else {
+        Err(InitError::QuickCheckFailed {
+            path: db_path.display().to_string(),
+            message: result,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -253,7 +289,9 @@ pub(crate) fn init_writer_with_flush(
 ) -> anyhow::Result<()> {
     let _guard = sync::blocking_write_lock_with_timeout(beads_dir, Some(lock_timeout_ms))?;
     let db_path = beads_dir.join("beads.db");
+    pre_open_quick_check(&db_path)?;
     let mut storage = SqliteStorage::open_with_timeout(&db_path, Some(lock_timeout_ms))?;
+    storage.checkpoint_wal_on_drop();
     let _ = sweep_stale_jsonl_temps(beads_dir, stale_tmp_min_age);
     sync::auto_flush(&mut storage, beads_dir, jsonl_path, false)?;
     Ok(())
