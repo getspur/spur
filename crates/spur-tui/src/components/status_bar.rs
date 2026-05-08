@@ -10,6 +10,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::action::ViewId;
 use crate::components::tombstone::{Tombstone, TombstoneKind};
+use crate::theme::{resolve_token, ColorDepth, Theme};
+
+fn token(theme: &Theme, name: &str) -> Color {
+    resolve_token(theme, name, ColorDepth::Truecolor)
+}
 
 pub struct StatusBar;
 
@@ -48,18 +53,20 @@ impl LicenseBadge {
         }
     }
 
-    fn style(&self) -> Style {
+    fn style(&self, theme: &Theme) -> Style {
         match self.tone {
-            LicenseBadgeTone::Neutral => Style::default().fg(Color::DarkGray),
+            LicenseBadgeTone::Neutral => {
+                Style::default().fg(token(theme, "license_badge.neutral.fg"))
+            }
             LicenseBadgeTone::Success => Style::default()
-                .fg(Color::Green)
+                .fg(token(theme, "license_badge.success.text_fg"))
                 .add_modifier(Modifier::BOLD),
             LicenseBadgeTone::Warning => Style::default()
-                .fg(Color::Yellow)
+                .fg(token(theme, "license_badge.warning.text_fg"))
                 .add_modifier(Modifier::BOLD),
-            LicenseBadgeTone::Danger => {
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-            }
+            LicenseBadgeTone::Danger => Style::default()
+                .fg(token(theme, "license_badge.danger.text_fg"))
+                .add_modifier(Modifier::BOLD),
         }
     }
 }
@@ -82,9 +89,10 @@ pub fn render_tombstone_badge(slot: Option<&Tombstone>, now: std::time::Instant)
         tombstone.label.clone()
     };
 
+    let theme = crate::theme::fallback_theme();
     Line::from(vec![Span::styled(
         format!("  [{prefix} {label} {}s]", remaining.as_secs()),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(token(theme, "status_bar.tombstone.fg")),
     )])
 }
 
@@ -214,6 +222,7 @@ impl StatusBar {
     }
 
     pub fn render(frame: &mut Frame, area: Rect, props: StatusBarProps<'_>) {
+        let theme = crate::theme::fallback_theme();
         let mode_text = props
             .current_mode
             .filter(|m| !m.is_empty())
@@ -233,17 +242,18 @@ impl StatusBar {
             (true, _, _) => Some("ctx --%".to_string()),
         };
 
-        // Build the review span: yellow+bold when reviews are pending, dark-gray otherwise.
+        // Build the review span: warning+bold when reviews are pending, muted otherwise.
         let review_style = if props.pending_review > 0 {
             Style::default()
-                .fg(Color::Yellow)
+                .fg(token(theme, "status_bar.review_pending.fg"))
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(token(theme, "status_bar.separator.fg"))
         };
 
         // Try full metrics first; fall back to compact if they crowd out hints.
         let full_spans = Self::metric_spans(
+            theme,
             &props,
             mode_text.clone(),
             usage_text.clone(),
@@ -253,7 +263,8 @@ impl StatusBar {
         let full_line = Line::from(full_spans);
         let full_width = full_line.width() as u16;
 
-        let compact_spans = Self::metric_spans(&props, mode_text, usage_text, review_style, true);
+        let compact_spans =
+            Self::metric_spans(theme, &props, mode_text, usage_text, review_style, true);
         let compact_line = Line::from(compact_spans);
         let compact_width = compact_line.width() as u16;
 
@@ -318,7 +329,7 @@ impl StatusBar {
         let hints_line = Line::from(Span::styled(
             hints,
             Style::default()
-                .fg(Color::White)
+                .fg(token(theme, "status_bar.fg"))
                 .add_modifier(Modifier::DIM),
         ));
 
@@ -335,12 +346,14 @@ impl StatusBar {
     /// abbreviated symbols and drop low-priority items so the status bar
     /// stays readable on narrow terminals.
     fn metric_spans<'a>(
+        theme: &Theme,
         props: &StatusBarProps<'a>,
         mode_text: String,
         usage_text: Option<String>,
         review_style: Style,
         compact: bool,
     ) -> Vec<Span<'a>> {
+        let sep_fg = token(theme, "status_bar.separator.fg");
         let sep = if compact { " " } else { " · " };
         let mut spans: Vec<Span<'a>> = Vec::new();
 
@@ -351,16 +364,18 @@ impl StatusBar {
                 } else {
                     format!("{} issues", props.issue_count)
                 },
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(token(theme, "status_bar.issue_count.fg")),
             ));
-            spans.push(Span::styled(sep, Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(sep, Style::default().fg(sep_fg)));
         }
         if let Some((total, critical, _warning)) = props.alert_summary {
             if total > 0 {
                 let style = if critical > 0 {
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(token(theme, "status_bar.alert_critical.fg"))
+                        .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::Yellow)
+                    Style::default().fg(token(theme, "status_bar.alert_warning.fg"))
                 };
                 spans.push(Span::styled(
                     if compact {
@@ -370,37 +385,42 @@ impl StatusBar {
                     },
                     style,
                 ));
-                spans.push(Span::styled(sep, Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(sep, Style::default().fg(sep_fg)));
             }
         }
         if let Some(badge) = props.license_badge {
-            spans.push(Span::styled(format!("{} ", badge.label), badge.style()));
+            spans.push(Span::styled(
+                format!("{} ", badge.label),
+                badge.style(theme),
+            ));
             if !compact {
-                spans.push(Span::styled("· ", Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled("· ", Style::default().fg(sep_fg)));
             }
         }
         let tombstone_badge = render_tombstone_badge(props.tombstone, std::time::Instant::now());
         if !tombstone_badge.spans.is_empty() {
             spans.extend(tombstone_badge.spans);
-            spans.push(Span::styled(sep, Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(sep, Style::default().fg(sep_fg)));
         }
         #[cfg(feature = "analytics")]
         if via_analytics_visible() {
             spans.push(Span::styled(
                 "via analytics",
                 Style::default()
-                    .fg(Color::LightBlue)
+                    .fg(token(theme, "status_bar.analytics.fg"))
                     .add_modifier(Modifier::BOLD),
             ));
-            spans.push(Span::styled(sep, Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(sep, Style::default().fg(sep_fg)));
         }
         if let Some((active, total)) = props.flag_summary {
             let flag_style = if active == total {
-                Style::default().fg(Color::Green)
+                Style::default().fg(token(theme, "status_bar.flag_on.fg"))
             } else if active == 0 {
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(token(theme, "status_bar.flag_off.fg"))
+                    .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Yellow)
+                Style::default().fg(token(theme, "status_bar.flag_partial.fg"))
             };
             spans.push(Span::styled(
                 if compact {
@@ -410,7 +430,7 @@ impl StatusBar {
                 },
                 flag_style,
             ));
-            spans.push(Span::styled(sep, Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(sep, Style::default().fg(sep_fg)));
         }
 
         spans.push(Span::styled(
@@ -419,9 +439,9 @@ impl StatusBar {
             } else {
                 format!("{} running", props.running)
             },
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(sep_fg),
         ));
-        spans.push(Span::styled(sep, Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(sep, Style::default().fg(sep_fg)));
         spans.push(Span::styled(
             if compact {
                 format!("R{}", props.pending_review)
@@ -430,68 +450,65 @@ impl StatusBar {
             },
             review_style,
         ));
-        spans.push(Span::styled(sep, Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(sep, Style::default().fg(sep_fg)));
         spans.push(Span::styled(
             format!("${:.2}", props.total_cost),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(token(theme, "status_bar.cost.fg")),
         ));
-        spans.push(Span::styled(sep, Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(sep, Style::default().fg(sep_fg)));
         spans.push(Span::styled(
             format!("{} ", props.elapsed),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(sep_fg),
         ));
-        spans.push(Span::styled(mode_text, Style::default().fg(Color::Magenta)));
+        spans.push(Span::styled(
+            mode_text,
+            Style::default().fg(token(theme, "status_bar.mode.fg")),
+        ));
 
         let mut has_status_segment = false;
         if let Some(model) = props.current_model_label.filter(|label| !label.is_empty()) {
             let model = Self::truncate_model_label(model, if compact { 14 } else { 24 });
             spans.push(Span::styled(
                 format!(" {}", model),
-                Style::default().fg(Color::White),
+                Style::default().fg(token(theme, "status_bar.fg")),
             ));
             has_status_segment = true;
         }
         if !compact {
             if let Some(effort) = props.current_effort_label.filter(|label| !label.is_empty()) {
                 if has_status_segment {
-                    spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
+                    spans.push(Span::styled(" · ", Style::default().fg(sep_fg)));
                 } else {
                     spans.push(Span::raw(" "));
                 }
                 spans.push(Span::styled(
                     effort,
-                    Style::default().fg(Color::LightMagenta),
+                    Style::default().fg(token(theme, "status_bar.effort.fg")),
                 ));
                 has_status_segment = true;
             }
         }
         if let Some(usage_text) = usage_text {
             if has_status_segment {
-                spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(" · ", Style::default().fg(sep_fg)));
             } else {
                 spans.push(Span::raw(" "));
             }
             spans.push(Span::styled(
                 usage_text,
-                Style::default().fg(Color::LightBlue),
+                Style::default().fg(token(theme, "status_bar.usage.fg")),
             ));
         }
 
         if !compact {
-            spans.push(Span::styled(
-                "[Ctrl+K: go] ",
-                Style::default().fg(Color::DarkGray),
-            ));
-            spans.push(Span::styled(
-                "?: help",
-                Style::default().fg(Color::DarkGray),
-            ));
+            spans.push(Span::styled("[Ctrl+K: go] ", Style::default().fg(sep_fg)));
+            spans.push(Span::styled("?: help", Style::default().fg(sep_fg)));
             spans.push(Span::raw(" "));
         }
         spans.push(Span::styled(
             "spur",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(token(theme, "status_bar.brand.fg"))
                 .add_modifier(Modifier::BOLD),
         ));
         spans
