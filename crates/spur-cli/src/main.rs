@@ -925,31 +925,13 @@ async fn run() -> Result<()> {
             let event_rx = host.take_event_stream().expect("event stream");
             let perm_rx = host.take_permission_stream();
 
-            // TUI → spur-cli translation task: routes SubmitReview through
-            // send_review, everything else through send_command.
+            // TUI → spur-cli translation task: routes review and read-only PM
+            // lookups onto their dedicated lanes, keeping brain-ordered
+            // commands on user_input_tx.
             let (tui_tx, mut tui_rx) = tokio::sync::mpsc::channel::<spur_tui::UserInput>(32);
             tokio::spawn(async move {
                 while let Some(input) = tui_rx.recv().await {
-                    match input {
-                        spur_tui::UserInput::SubmitReview {
-                            executor_id,
-                            attempt_n,
-                            decision,
-                        } => {
-                            let _ = host_handle
-                                .send_review(spur_interactive::ReviewSubmission {
-                                    executor_id,
-                                    attempt_n,
-                                    decision,
-                                })
-                                .await;
-                        }
-                        other => {
-                            let _ = host_handle
-                                .send_command(tui_input_to_interactive(other))
-                                .await;
-                        }
-                    }
+                    let _ = route_tui_input_to_host(&host_handle, input).await;
                 }
             });
 
@@ -1010,6 +992,42 @@ async fn run() -> Result<()> {
             tui_result?;
 
             Ok(())
+        }
+    }
+}
+
+async fn route_tui_input_to_host(
+    host_handle: &spur_interactive::InteractiveFrontendHandle,
+    input: spur_tui::UserInput,
+) -> anyhow::Result<()> {
+    match input {
+        spur_tui::UserInput::SubmitReview {
+            executor_id,
+            attempt_n,
+            decision,
+        } => {
+            host_handle
+                .send_review(spur_interactive::ReviewSubmission {
+                    executor_id,
+                    attempt_n,
+                    decision,
+                })
+                .await
+        }
+        spur_tui::UserInput::GetIssueDetail { id } => {
+            host_handle
+                .send_data_query(spur_interactive::DataQuery::GetIssueDetail { id })
+                .await
+        }
+        spur_tui::UserInput::GetIssueGraph { id } => {
+            host_handle
+                .send_data_query(spur_interactive::DataQuery::GetIssueGraph { id })
+                .await
+        }
+        other => {
+            host_handle
+                .send_command(tui_input_to_interactive(other))
+                .await
         }
     }
 }
@@ -1270,6 +1288,93 @@ async fn run_gc_outcomes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn host_for_tui_routing_test() -> (
+        spur_interactive::InteractiveFrontendHost,
+        tokio::sync::mpsc::Receiver<spur_core::InteractiveInput>,
+        tokio::sync::mpsc::Receiver<spur_core::InteractiveInput>,
+    ) {
+        let (user_tx, user_rx) = tokio::sync::mpsc::channel(4);
+        let (review_tx, review_rx) = tokio::sync::mpsc::channel(4);
+        let (_event_tx, event_rx) = tokio::sync::broadcast::channel(4);
+        let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        (
+            spur_interactive::InteractiveFrontendHost::from_parts_for_test(
+                user_tx,
+                review_tx,
+                event_rx,
+                perm_rx,
+                tokio::spawn(async {}),
+            ),
+            user_rx,
+            review_rx,
+        )
+    }
+
+    #[tokio::test]
+    async fn tui_get_issue_detail_uses_data_lane() {
+        let (mut host, mut user_rx, mut review_rx) = host_for_tui_routing_test();
+        let handle = host.handle();
+        let mut data_rx = host.take_data_rx().expect("data receiver");
+
+        route_tui_input_to_host(
+            &handle,
+            spur_tui::UserInput::GetIssueDetail {
+                id: "bd-detail".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let query = data_rx.recv().await.unwrap();
+        assert!(matches!(
+            query,
+            spur_interactive::DataQuery::GetIssueDetail { id } if id == "bd-detail"
+        ));
+        assert!(user_rx.try_recv().is_err());
+        assert!(review_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn tui_get_issue_graph_uses_data_lane() {
+        let (mut host, mut user_rx, mut review_rx) = host_for_tui_routing_test();
+        let handle = host.handle();
+        let mut data_rx = host.take_data_rx().expect("data receiver");
+
+        route_tui_input_to_host(
+            &handle,
+            spur_tui::UserInput::GetIssueGraph {
+                id: "bd-graph".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let query = data_rx.recv().await.unwrap();
+        assert!(matches!(
+            query,
+            spur_interactive::DataQuery::GetIssueGraph { id } if id == "bd-graph"
+        ));
+        assert!(user_rx.try_recv().is_err());
+        assert!(review_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn tui_refresh_issues_stays_on_command_lane() {
+        let (mut host, mut user_rx, mut review_rx) = host_for_tui_routing_test();
+        let handle = host.handle();
+        let mut data_rx = host.take_data_rx().expect("data receiver");
+
+        route_tui_input_to_host(&handle, spur_tui::UserInput::RefreshIssues)
+            .await
+            .unwrap();
+
+        let input = user_rx.recv().await.unwrap();
+        assert!(matches!(input, spur_core::InteractiveInput::RefreshIssues));
+        assert!(data_rx.try_recv().is_err());
+        assert!(review_rx.try_recv().is_err());
+    }
 
     #[test]
     fn gc_outcomes_parses_older_than() {
