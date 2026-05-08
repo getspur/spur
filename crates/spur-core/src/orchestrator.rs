@@ -2850,6 +2850,12 @@ impl Orchestrator {
         self
     }
 
+    /// Clone the orchestrator's event funnel so adjacent frontend tasks can
+    /// emit through the same sequencing path as the orchestrator.
+    pub fn event_funnel_handle(&self) -> crate::event_funnel::FunnelHandle {
+        self.funnel.clone()
+    }
+
     pub fn with_fault_injection_hooks(mut self, hooks: FaultInjectionHooks) -> Self {
         self.fault_injection_hooks = hooks;
         self
