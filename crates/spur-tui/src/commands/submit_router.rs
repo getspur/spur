@@ -525,6 +525,92 @@ mod sessions_slash_tests {
         }
     }
 
+    /// Bare `/theme` routes to `Action::ThemeCommand` with an empty arg
+    /// — the App handler interprets that as "list available themes".
+    #[test]
+    fn slash_theme_bare_routes_to_theme_command_with_empty_arg() {
+        let registry = build_registry_for_test();
+        let decision = route("/theme", &[], &registry, false);
+        match decision {
+            SubmitDecision::Local {
+                action: Action::ThemeCommand { arg },
+            } => assert_eq!(arg, ""),
+            other => panic!("expected ThemeCommand {{ arg: \"\" }}, got {:?}", other),
+        }
+    }
+
+    /// `/theme <name>` carries the trimmed name into the action arg.
+    #[test]
+    fn slash_theme_with_name_routes_to_theme_command_with_arg() {
+        let registry = build_registry_for_test();
+        let decision = route("/theme light", &[], &registry, false);
+        match decision {
+            SubmitDecision::Local {
+                action: Action::ThemeCommand { arg },
+            } => assert_eq!(arg, "light"),
+            other => panic!(
+                "expected ThemeCommand {{ arg: \"light\" }}, got {:?}",
+                other
+            ),
+        }
+    }
+
+    /// `/theme reload` is a sentinel arg, not a separate action variant.
+    /// The App handler matches on `arg == "reload"` after the route.
+    #[test]
+    fn slash_theme_reload_carries_reload_arg() {
+        let registry = build_registry_for_test();
+        let decision = route("/theme reload", &[], &registry, false);
+        match decision {
+            SubmitDecision::Local {
+                action: Action::ThemeCommand { arg },
+            } => assert_eq!(arg, "reload"),
+            other => panic!(
+                "expected ThemeCommand {{ arg: \"reload\" }}, got {:?}",
+                other
+            ),
+        }
+    }
+
+    /// Double-space between `/theme` and the arg collapses through the
+    /// `strip_prefix("/theme ") + trim` pipeline. Prevents a regression
+    /// where the trailing space leaks into the arg.
+    #[test]
+    fn slash_theme_double_space_trims_to_single_arg() {
+        let registry = build_registry_for_test();
+        let decision = route("/theme  reload", &[], &registry, false);
+        match decision {
+            SubmitDecision::Local {
+                action: Action::ThemeCommand { arg },
+            } => assert_eq!(arg, "reload"),
+            other => panic!(
+                "expected ThemeCommand {{ arg: \"reload\" }}, got {:?}",
+                other
+            ),
+        }
+    }
+
+    /// `/theme reload extra-arg` keeps the full whitespace-trimmed tail
+    /// as the arg. Documented behavior: tail content past `reload` is
+    /// treated as a theme name (and will fail the `reload` sentinel
+    /// match in the App handler, falling through to "unknown theme").
+    /// Pinned here so a future refactor doesn't accidentally split on
+    /// whitespace and pick up a multi-word arg.
+    #[test]
+    fn slash_theme_reload_with_extra_arg_keeps_full_tail() {
+        let registry = build_registry_for_test();
+        let decision = route("/theme reload extra-arg", &[], &registry, false);
+        match decision {
+            SubmitDecision::Local {
+                action: Action::ThemeCommand { arg },
+            } => assert_eq!(arg, "reload extra-arg"),
+            other => panic!(
+                "expected ThemeCommand {{ arg: \"reload extra-arg\" }}, got {:?}",
+                other
+            ),
+        }
+    }
+
     /// Wave B.4: caps = None (resumed sessions before M9 wires
     /// LoadSessionResponse) preserve the existing decision shape.
     #[test]
