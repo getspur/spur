@@ -22,6 +22,7 @@ fn badge_renders_when_current_view_matches_slot() {
     let badge = spur_tui::components::status_bar::render_tombstone_badge(
         slots.peek(&ViewId::SessionPicker),
         now,
+        spur_tui::theme::fallback_theme(),
     );
     let text = format!("{}", badge); // ratatui::text::Line Display impl
     assert!(text.contains("[u:"), "expected `[u:` prefix, got: {text}");
@@ -35,7 +36,11 @@ fn badge_renders_when_current_view_matches_slot() {
 #[test]
 fn badge_returns_empty_line_when_slot_is_none() {
     let now = Instant::now();
-    let badge = spur_tui::components::status_bar::render_tombstone_badge(None, now);
+    let badge = spur_tui::components::status_bar::render_tombstone_badge(
+        None,
+        now,
+        spur_tui::theme::fallback_theme(),
+    );
     let text = format!("{}", badge);
     assert!(text.is_empty(), "expected empty line, got: {text}");
 }
@@ -60,6 +65,7 @@ fn badge_uses_revert_verb_for_queued_remote() {
     let badge = spur_tui::components::status_bar::render_tombstone_badge(
         slots.peek(&ViewId::Dashboard),
         now,
+        spur_tui::theme::fallback_theme(),
     );
     let text = format!("{}", badge);
     assert!(
@@ -89,6 +95,7 @@ fn badge_truncates_long_labels() {
     let badge = spur_tui::components::status_bar::render_tombstone_badge(
         slots.peek(&ViewId::SessionPicker),
         now,
+        spur_tui::theme::fallback_theme(),
     );
     let text = format!("{}", badge);
     assert!(

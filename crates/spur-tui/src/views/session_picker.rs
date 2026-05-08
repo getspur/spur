@@ -15,8 +15,13 @@ use crate::action::{Action, ViewId};
 use crate::components::status_bar::{HintOverride, StatusBar, StatusBarProps};
 use crate::components::tombstone::Tombstone;
 use crate::session_metadata::SessionMetadata;
+use crate::theme::{resolve_token, ColorDepth, Theme};
 
 use super::View;
+
+fn token(theme: &Theme, name: &str) -> Color {
+    resolve_token(theme, name, ColorDepth::Truecolor)
+}
 
 const PREVIEW_MAX_LINES: u16 = 12;
 
@@ -74,9 +79,12 @@ fn footer_hint_compact(
     }
 }
 
-fn render_footer_hint(frame: &mut Frame, area: Rect, hint: &str) {
+fn render_footer_hint(frame: &mut Frame, area: Rect, hint: &str, theme: &Theme) {
     frame.render_widget(
-        Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray))),
+        Paragraph::new(Span::styled(
+            hint,
+            Style::default().fg(token(theme, "session_picker.footer_hint.fg")),
+        )),
         area,
     );
 }
@@ -607,6 +615,7 @@ impl SessionPickerView {
         &self,
         frame: &mut Frame,
         area: Rect,
+        theme: &Theme,
         license_badge: Option<&crate::components::status_bar::LicenseBadge>,
         flag_summary: Option<(usize, usize)>,
         tombstone: Option<&Tombstone>,
@@ -616,7 +625,7 @@ impl SessionPickerView {
             Line::from(Span::styled(
                 "Sessions",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(token(theme, "session_picker.title.fg"))
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
@@ -624,7 +633,7 @@ impl SessionPickerView {
                 Span::raw("  Connecting to agent"),
                 Span::styled(
                     " \u{00b7}\u{00b7}\u{00b7}",
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(token(theme, "session_picker.spinner.fg")),
                 ),
             ]),
         ];
@@ -642,6 +651,7 @@ impl SessionPickerView {
             chunks[1],
             StatusBarProps {
                 view: &ViewId::SessionPicker,
+                theme,
                 tombstone,
                 running: 0,
                 pending_review: 0,
@@ -672,6 +682,7 @@ impl SessionPickerView {
         &self,
         acp_id: &str,
         synopsis: &spur_core::SessionSynopsisProjection,
+        theme: &Theme,
     ) -> Line<'static> {
         if let PickerState::Populated { sessions, .. } = &self.state {
             if let Some(session) = sessions.iter().find(|s| s.session_id.0.as_ref() == acp_id) {
@@ -689,7 +700,7 @@ impl SessionPickerView {
                     Span::styled(
                         label,
                         Style::default()
-                            .fg(Color::Cyan)
+                            .fg(token(theme, "session_picker.banner.label.fg"))
                             .add_modifier(Modifier::BOLD),
                     ),
                 ];
@@ -700,25 +711,49 @@ impl SessionPickerView {
                     .filter(|relative| !relative.is_empty())
                 {
                     spans.push(Span::raw("  ·  "));
-                    spans.push(Span::styled(relative, Style::default().fg(Color::DarkGray)));
+                    spans.push(Span::styled(
+                        relative,
+                        Style::default().fg(token(theme, "session_picker.banner.timestamp.fg")),
+                    ));
                 }
                 spans.extend([
                     Span::raw("  ·  "),
-                    Span::styled("[Enter] resume", Style::default().fg(Color::Green)),
+                    Span::styled(
+                        "[Enter] resume",
+                        Style::default().fg(token(theme, "session_picker.banner.action.fg")),
+                    ),
                     Span::raw("  ·  "),
-                    Span::styled("[n] new", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        "[n] new",
+                        Style::default().fg(token(theme, "session_picker.banner.muted.fg")),
+                    ),
                 ]);
                 return Line::from(spans);
             }
 
             let short = acp_id[..8.min(acp_id.len())].to_string();
             return Line::from(vec![
-                Span::styled(" Session ", Style::default().fg(Color::Red)),
-                Span::styled(short, Style::default().fg(Color::Yellow)),
-                Span::styled(" not found  ·  ", Style::default().fg(Color::Red)),
-                Span::styled("[Enter] new", Style::default().fg(Color::Green)),
+                Span::styled(
+                    " Session ",
+                    Style::default().fg(token(theme, "session_picker.banner.error.fg")),
+                ),
+                Span::styled(
+                    short,
+                    Style::default().fg(token(theme, "session_picker.banner.error_id.fg")),
+                ),
+                Span::styled(
+                    " not found  ·  ",
+                    Style::default().fg(token(theme, "session_picker.banner.error.fg")),
+                ),
+                Span::styled(
+                    "[Enter] new",
+                    Style::default().fg(token(theme, "session_picker.banner.action.fg")),
+                ),
                 Span::raw("  ·  "),
-                Span::styled("[Esc] cancel", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    "[Esc] cancel",
+                    Style::default().fg(token(theme, "session_picker.banner.muted.fg")),
+                ),
             ]);
         }
 
@@ -771,27 +806,33 @@ impl SessionPickerView {
             Span::styled(
                 "Sessions ",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(token(ctx.theme, "session_picker.title.fg"))
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("({})", agent), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("({})", agent),
+                Style::default().fg(token(ctx.theme, "session_picker.row.muted.fg")),
+            ),
         ];
         if self.show_archived {
             header_spans.push(Span::styled(
                 " [showing archived]",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(token(ctx.theme, "session_picker.row.muted.fg")),
             ));
         }
         let mut lines = vec![
             Line::from(header_spans),
             Line::from(vec![
-                Span::styled("  Search  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    "  Search  ",
+                    Style::default().fg(token(ctx.theme, "session_picker.search.label.fg")),
+                ),
                 Span::styled(
                     format!("{}{}", filter, if search_focused { "_" } else { "" }),
                     Style::default().fg(if search_focused {
-                        Color::Cyan
+                        token(ctx.theme, "session_picker.search.active.fg")
                     } else {
-                        Color::Gray
+                        token(ctx.theme, "session_picker.search.inactive.fg")
                     }),
                 ),
             ]),
@@ -805,7 +846,7 @@ impl SessionPickerView {
             Span::styled(
                 new_prefix,
                 if is_new_selected {
-                    Style::default().fg(Color::Green)
+                    Style::default().fg(token(ctx.theme, "session_picker.new_row.fg"))
                 } else {
                     Style::default()
                 },
@@ -814,16 +855,16 @@ impl SessionPickerView {
                 "+ Start new session",
                 if is_new_selected {
                     Style::default()
-                        .fg(Color::Green)
+                        .fg(token(ctx.theme, "session_picker.new_row.fg"))
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::Green)
+                    Style::default().fg(token(ctx.theme, "session_picker.new_row.fg"))
                 },
             ),
         ]));
         lines.push(Line::from(Span::styled(
             "  \u{2500}\u{2500}\u{2500}\u{2500}",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(token(ctx.theme, "session_picker.row.separator.fg")),
         )));
 
         let show_brain = Self::brains_are_heterogeneous(sessions, &self.metadata);
@@ -862,21 +903,21 @@ impl SessionPickerView {
             let brain = entry.and_then(|e| e.brain_name.as_deref()).unwrap_or("");
 
             let title_style = if archived {
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(token(ctx.theme, "session_picker.row.archived.fg"))
             } else if is_selected {
                 Style::default()
-                    .fg(Color::White)
+                    .fg(token(ctx.theme, "session_picker.row.title_selected.fg"))
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
-            let muted_style = Style::default().fg(Color::DarkGray);
+            let muted_style = Style::default().fg(token(ctx.theme, "session_picker.row.muted.fg"));
 
             let mut spans: Vec<Span> = Vec::with_capacity(10);
             spans.push(Span::styled(
                 prefix,
                 if is_selected {
-                    Style::default().fg(Color::Cyan)
+                    Style::default().fg(token(ctx.theme, "session_picker.row.cursor.fg"))
                 } else {
                     Style::default()
                 },
@@ -884,7 +925,7 @@ impl SessionPickerView {
             if pinned {
                 spans.push(Span::styled(
                     "\u{2b50} ",
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(token(ctx.theme, "session_picker.row.pinned.fg")),
                 ));
             }
             spans.push(Span::styled(display, title_style));
@@ -949,7 +990,7 @@ impl SessionPickerView {
 
         if self.preview_visible {
             use crate::components::session_preview::{PreviewContent, PreviewRow, SessionPreview};
-            use ratatui::style::{Color, Style};
+            use ratatui::style::Style;
 
             let content = if cursor == 0 {
                 PreviewContent {
@@ -1003,7 +1044,10 @@ impl SessionPickerView {
                         rows.push(PreviewRow {
                             label: "Draft".into(),
                             value_lines: vec![truncate_for_row(&draft, value_width)],
-                            value_style: Some(Style::default().fg(Color::Yellow)),
+                            value_style: Some(
+                                Style::default()
+                                    .fg(token(ctx.theme, "session_picker.preview.draft.fg")),
+                            ),
                         });
                     }
 
@@ -1015,7 +1059,10 @@ impl SessionPickerView {
                         rows.push(PreviewRow {
                             label: "Intent".into(),
                             value_lines: wrap_value(&first, value_width, 3),
-                            value_style: Some(Style::default().fg(Color::Gray)),
+                            value_style: Some(
+                                Style::default()
+                                    .fg(token(ctx.theme, "session_picker.preview.intent.fg")),
+                            ),
                         });
                     } else {
                         rows.push(PreviewRow {
@@ -1026,7 +1073,7 @@ impl SessionPickerView {
                             )],
                             value_style: Some(
                                 Style::default()
-                                    .fg(Color::DarkGray)
+                                    .fg(token(ctx.theme, "session_picker.preview.placeholder.fg"))
                                     .add_modifier(Modifier::ITALIC),
                             ),
                         });
@@ -1042,7 +1089,10 @@ impl SessionPickerView {
                             &format!("{cwd} \u{00b7} {brain} \u{00b7} {short_id}"),
                             footer_width,
                         )],
-                        value_style: Some(Style::default().fg(Color::DarkGray)),
+                        value_style: Some(
+                            Style::default()
+                                .fg(token(ctx.theme, "session_picker.preview.footer.fg")),
+                        ),
                     });
 
                     // Bounded by construction: Last <= 1, Draft <= 1, then
@@ -1077,7 +1127,7 @@ impl SessionPickerView {
                 Paragraph::new(Span::styled(
                     prompt,
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(token(ctx.theme, "session_picker.prompt.confirm.fg"))
                         .add_modifier(Modifier::BOLD),
                 )),
                 chunks[status_idx],
@@ -1088,7 +1138,7 @@ impl SessionPickerView {
                 Paragraph::new(Span::styled(
                     prompt,
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(token(ctx.theme, "session_picker.prompt.rename.fg"))
                         .add_modifier(Modifier::BOLD),
                 )),
                 chunks[status_idx],
@@ -1099,6 +1149,7 @@ impl SessionPickerView {
                 chunks[status_idx],
                 StatusBarProps {
                     view: &ViewId::SessionPicker,
+                    theme: ctx.theme,
                     tombstone: ctx.tombstone,
                     running: 0,
                     pending_review: 0,
@@ -1141,7 +1192,7 @@ impl SessionPickerView {
                 self.rename_state.is_some(),
                 self.confirm_switch.is_some(),
             );
-            render_footer_hint(frame, chunks[footer_idx], hint);
+            render_footer_hint(frame, chunks[footer_idx], hint, ctx.theme);
         }
     }
 
@@ -1154,17 +1205,17 @@ impl SessionPickerView {
             Line::from(Span::styled(
                 "Sessions",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(token(ctx.theme, "session_picker.error.title.fg"))
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
             Line::from(Span::styled(
                 format!("  {}", message),
-                Style::default().fg(Color::Red),
+                Style::default().fg(token(ctx.theme, "session_picker.error.message.fg")),
             )),
             Line::from(Span::styled(
                 "  Use --resume <id> to load a session by ID.",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(token(ctx.theme, "session_picker.error.hint.fg")),
             )),
         ];
         let chunks = Layout::vertical([Constraint::Min(4), Constraint::Length(1)]).split(area);
@@ -1181,6 +1232,7 @@ impl SessionPickerView {
             chunks[1],
             StatusBarProps {
                 view: &ViewId::SessionPicker,
+                theme: ctx.theme,
                 tombstone,
                 running: 0,
                 pending_review: 0,
@@ -1684,7 +1736,7 @@ impl View for SessionPickerView {
             let [banner, content] =
                 Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
             frame.render_widget(
-                Paragraph::new(self.build_preselect_banner(acp_id, ctx.synopsis)),
+                Paragraph::new(self.build_preselect_banner(acp_id, ctx.synopsis, ctx.theme)),
                 banner,
             );
             (Some(banner), content)
@@ -1696,6 +1748,7 @@ impl View for SessionPickerView {
             PickerState::Loading => self.render_loading(
                 frame,
                 content_area,
+                ctx.theme,
                 ctx.license_badge,
                 ctx.flag_summary,
                 ctx.tombstone,
@@ -1851,7 +1904,7 @@ mod current_session_shortcut_tests {
         session.updated_at = Some((chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339());
         picker.set_sessions("test-brain".into(), vec![session], test_ctx().synopsis);
 
-        let banner = picker.build_preselect_banner("B", test_ctx().synopsis);
+        let banner = picker.build_preselect_banner("B", test_ctx().synopsis, test_ctx().theme);
         let text = banner
             .spans
             .iter()
@@ -2081,7 +2134,10 @@ mod preview_render_tests {
             .buffer()
             .cell((placeholder_col as u16, placeholder_row as u16))
             .expect("placeholder cell should be in bounds");
-        assert_eq!(placeholder_cell.style().fg, Some(Color::DarkGray));
+        assert_eq!(
+            placeholder_cell.style().fg,
+            Some(Color::Rgb(0x60, 0x60, 0x60))
+        );
         assert!(placeholder_cell
             .style()
             .add_modifier
@@ -2330,8 +2386,9 @@ mod preview_render_tests {
         let intent_value_rows = (preview_content_start..=footer_row)
             .filter(|&y| {
                 rows[y].contains("intent")
-                    && (0..term.backend().buffer().area.width)
-                        .any(|x| term.backend().buffer()[(x, y as u16)].fg == Color::Gray)
+                    && (0..term.backend().buffer().area.width).any(|x| {
+                        term.backend().buffer()[(x, y as u16)].fg == Color::Rgb(128, 128, 128)
+                    })
             })
             .count();
 

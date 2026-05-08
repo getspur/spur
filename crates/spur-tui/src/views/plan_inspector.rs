@@ -12,8 +12,13 @@ use spur_acp::{SessionId, SpurEvent};
 use spur_core::TrackedPlan;
 
 use crate::action::{Action, IssueAction};
+use crate::theme::{resolve_token, ColorDepth, Theme};
 
 use super::View;
+
+fn token(theme: &Theme, name: &str) -> Color {
+    resolve_token(theme, name, ColorDepth::Truecolor)
+}
 
 pub struct PlanInspectorView {
     session_id: SessionId,
@@ -432,13 +437,13 @@ impl View for PlanInspectorView {
                 Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
                     .split(header_rows[0]);
 
-            let status_color = plan_status_color(&plan.status);
+            let status_color = plan_status_color(ctx.theme, &plan.status);
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
                     Span::styled(
                         format!(" Plan: {} ", plan.plan_id),
                         Style::default()
-                            .fg(Color::Cyan)
+                            .fg(token(ctx.theme, "plan_inspector.title.fg"))
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
@@ -469,14 +474,19 @@ impl View for PlanInspectorView {
                 Gauge::default()
                     .ratio(gauge_ratio.clamp(0.0, 1.0))
                     .label(format!("{} / {} done", plan.counts.approved, total_tasks))
-                    .gauge_style(Style::default().fg(Color::Green))
-                    .style(Style::default().fg(Color::DarkGray)),
+                    .gauge_style(
+                        Style::default().fg(token(ctx.theme, "plan_inspector.gauge.fill.fg")),
+                    )
+                    .style(Style::default().fg(token(ctx.theme, "plan_inspector.gauge.track.fg"))),
                 header_cols[1],
             );
 
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled(" next: ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        " next: ",
+                        Style::default().fg(token(ctx.theme, "plan_inspector.label.fg")),
+                    ),
                     Span::raw(truncate_display(
                         &plan.next_action,
                         area.width.saturating_sub(8) as usize,
@@ -497,9 +507,15 @@ impl View for PlanInspectorView {
                 .unwrap_or_else(|| "owner: --".into());
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled(" source: ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        " source: ",
+                        Style::default().fg(token(ctx.theme, "plan_inspector.label.fg")),
+                    ),
                     Span::raw(epic_text),
-                    Span::styled("  ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        "  ",
+                        Style::default().fg(token(ctx.theme, "plan_inspector.label.fg")),
+                    ),
                     Span::raw(owner_text),
                 ])),
                 header_rows[2],
@@ -608,7 +624,7 @@ impl View for PlanInspectorView {
                     " h/l: lane  j/k: task  {}  o: work item  g/G: ends  Alt+P/Esc: close {}",
                     enter_hint, scroll_hint
                 ),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(token(ctx.theme, "plan_inspector.footer_hint.fg")),
             )])),
             chunks[2],
         );
@@ -617,14 +633,15 @@ impl View for PlanInspectorView {
     fn tick(&mut self) {}
 }
 
-fn plan_status_color(status: &str) -> Color {
-    match status {
-        "running" | "active" => Color::Yellow,
-        "approved" | "completed" | "success" => Color::Green,
-        "failed" | "rejected" | "error" => Color::Red,
-        "cancelled" => Color::Magenta,
-        _ => Color::DarkGray,
-    }
+fn plan_status_color(theme: &Theme, status: &str) -> Color {
+    let key = match status {
+        "running" | "active" => "plan_inspector.status.running.fg",
+        "approved" | "completed" | "success" => "plan_inspector.status.success.fg",
+        "failed" | "rejected" | "error" => "plan_inspector.status.failure.fg",
+        "cancelled" => "plan_inspector.status.cancelled.fg",
+        _ => "plan_inspector.status.unknown.fg",
+    };
+    token(theme, key)
 }
 
 fn truncate_display(s: &str, max: usize) -> String {

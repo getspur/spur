@@ -15,6 +15,11 @@ use crate::action::{Action, ViewId};
 use crate::components::input_bar::{ActivityKind, EditMode, InputBar};
 use crate::components::react_trace::{ReactTrace, TraceEntry, TraceKind};
 use crate::components::status_bar::{HintOverride, StatusBar, StatusBarProps};
+use crate::theme::{resolve_token, ColorDepth, Theme};
+
+fn token(theme: &Theme, name: &str) -> Color {
+    resolve_token(theme, name, ColorDepth::Truecolor)
+}
 use crate::input_history::InputHistoryEntry;
 
 use super::View;
@@ -2146,12 +2151,12 @@ impl View for SessionDetailView {
     }
 }
 
-fn build_auth_banner_widget<'a>(message: &'a str) -> Paragraph<'a> {
+fn build_auth_banner_widget<'a>(message: &'a str, theme: &Theme) -> Paragraph<'a> {
     Paragraph::new(message)
         .style(
             Style::default()
-                .fg(Color::White)
-                .bg(Color::Red)
+                .fg(token(theme, "session_detail.auth_banner.fg"))
+                .bg(token(theme, "session_detail.auth_banner.bg"))
                 .add_modifier(Modifier::BOLD),
         )
         .wrap(Wrap { trim: false })
@@ -2162,13 +2167,13 @@ fn build_auth_banner_widget<'a>(message: &'a str) -> Paragraph<'a> {
         )
 }
 
-fn build_session_error_widget<'a>(message: &'a str) -> Paragraph<'a> {
+fn build_session_error_widget<'a>(message: &'a str, theme: &Theme) -> Paragraph<'a> {
     Paragraph::new(message)
         .alignment(Alignment::Center)
         .style(
             Style::default()
-                .fg(Color::White)
-                .bg(Color::Red)
+                .fg(token(theme, "session_detail.error_banner.fg"))
+                .bg(token(theme, "session_detail.error_banner.bg"))
                 .add_modifier(Modifier::BOLD),
         )
         .block(
@@ -2188,7 +2193,7 @@ fn build_session_error_widget<'a>(message: &'a str) -> Paragraph<'a> {
 /// recover). On terminals smaller than the preferred 50×5 the modal
 /// degrades to a compact single-line prompt clamped to the available
 /// width.
-fn render_cancel_confirm_modal(frame: &mut Frame, area: Rect) {
+fn render_cancel_confirm_modal(frame: &mut Frame, area: Rect, theme: &Theme) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -2209,8 +2214,8 @@ fn render_cancel_confirm_modal(frame: &mut Frame, area: Rect) {
     };
 
     let style = Style::default()
-        .fg(Color::White)
-        .bg(Color::DarkGray)
+        .fg(token(theme, "session_detail.cancel_modal.fg"))
+        .bg(token(theme, "session_detail.cancel_modal.bg"))
         .add_modifier(Modifier::BOLD);
 
     // Bordered block needs ≥3 cols × ≥3 rows for top/bottom borders +
@@ -2271,7 +2276,7 @@ impl SessionDetailView {
                 return;
             }
             LoadState::Failed { message } => {
-                render_error_label(frame, area, message);
+                render_error_label(frame, area, message, ctx.theme);
                 return;
             }
             LoadState::Ready => {
@@ -2312,7 +2317,7 @@ impl SessionDetailView {
         };
 
         if let (Some(banner_area), Some(msg)) = (banner_area, self.auth_error.as_ref()) {
-            let banner = build_auth_banner_widget(msg.as_str());
+            let banner = build_auth_banner_widget(msg.as_str(), ctx.theme);
             frame.render_widget(banner, banner_area);
         }
 
@@ -2350,30 +2355,36 @@ impl SessionDetailView {
         let [header_left, header_right] =
             Layout::horizontal([Constraint::Min(0), Constraint::Length(48)]).areas(chunks[0]);
         let header = Line::from(vec![
-            Span::styled(" Dashboard > ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                " Dashboard > ",
+                Style::default().fg(token(ctx.theme, "session_detail.breadcrumb.fg")),
+            ),
             Span::styled(
                 &self.agent_name,
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(token(ctx.theme, "session_detail.agent_name.fg"))
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!(" ({})", self.role),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(token(ctx.theme, "session_detail.role.fg")),
             ),
             Span::raw("  "),
-            Span::styled(&elapsed, Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                &elapsed,
+                Style::default().fg(token(ctx.theme, "session_detail.elapsed.fg")),
+            ),
             Span::raw("  "),
             Span::styled(
                 format!("${:.2}", self.cost),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(token(ctx.theme, "session_detail.cost.fg")),
             ),
             if self.fs_unsafe {
                 Span::styled(
                     "  unsafe-fs",
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Yellow)
+                        .fg(token(ctx.theme, "session_detail.unsafe_fs.fg"))
+                        .bg(token(ctx.theme, "session_detail.unsafe_fs.bg"))
                         .add_modifier(Modifier::BOLD),
                 )
             } else {
@@ -2442,7 +2453,9 @@ impl SessionDetailView {
         if self.fs_unsafe {
             let banner = Line::from(Span::styled(
                 " unsafe-fs: flock unsupported on this volume - multi-window protection OFF ",
-                Style::default().fg(Color::Black).bg(Color::Yellow),
+                Style::default()
+                    .fg(token(ctx.theme, "session_detail.unsafe_fs.fg"))
+                    .bg(token(ctx.theme, "session_detail.unsafe_fs.bg")),
             ));
             frame.render_widget(Paragraph::new(banner), chunks[3]);
         }
@@ -2491,6 +2504,7 @@ impl SessionDetailView {
             chunks[5],
             StatusBarProps {
                 view: &ViewId::SessionDetail(self.session_id.clone()),
+                theme: ctx.theme,
                 tombstone: ctx.tombstone,
                 running,
                 pending_review,
@@ -2530,7 +2544,7 @@ impl SessionDetailView {
 
         // ── Cancel-confirm modal (drawn last so it sits on top) ─────────
         if self.cancel_confirm_open {
-            render_cancel_confirm_modal(frame, area);
+            render_cancel_confirm_modal(frame, area, ctx.theme);
         }
     }
 
@@ -2608,8 +2622,8 @@ fn render_load_label(frame: &mut Frame, area: Rect, label: &str) {
 }
 
 /// Render a red error panel for `LoadState::Failed`.
-fn render_error_label(frame: &mut Frame, area: Rect, message: &str) {
-    let para = build_session_error_widget(message);
+fn render_error_label(frame: &mut Frame, area: Rect, message: &str, theme: &Theme) {
+    let para = build_session_error_widget(message, theme);
     let [_, mid, _] = ratatui::layout::Layout::vertical([
         ratatui::layout::Constraint::Percentage(40),
         ratatui::layout::Constraint::Min(3),
@@ -2712,7 +2726,7 @@ mod banner_tests {
     use ratatui::{backend::TestBackend, buffer::Buffer, layout::Rect, Terminal};
 
     fn render_auth_banner(message: &str, area: Rect) -> Buffer {
-        let banner = super::build_auth_banner_widget(message);
+        let banner = super::build_auth_banner_widget(message, crate::theme::fallback_theme());
         let backend = TestBackend::new(area.width, area.height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| f.render_widget(banner, area)).unwrap();
@@ -2720,7 +2734,7 @@ mod banner_tests {
     }
 
     fn render_session_error(message: &str, area: Rect) -> Buffer {
-        let banner = super::build_session_error_widget(message);
+        let banner = super::build_session_error_widget(message, crate::theme::fallback_theme());
         let backend = TestBackend::new(area.width, area.height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| f.render_widget(banner, area)).unwrap();
@@ -2763,12 +2777,12 @@ mod banner_tests {
                 let cell = buf.cell((x, y)).expect("cell should exist in banner area");
                 assert_eq!(
                     cell.bg,
-                    Color::Red,
+                    Color::Rgb(0xff, 0, 0),
                     "cell ({x}, {y}) should have red background"
                 );
                 assert_eq!(
                     cell.fg,
-                    Color::White,
+                    Color::Rgb(0xff, 0xff, 0xff),
                     "cell ({x}, {y}) should have white foreground"
                 );
                 assert!(
@@ -2811,12 +2825,12 @@ mod banner_tests {
                     .expect("cell should exist in session error area");
                 assert_eq!(
                     cell.bg,
-                    Color::Red,
+                    Color::Rgb(0xff, 0, 0),
                     "cell ({x}, {y}) should have red background"
                 );
                 assert_eq!(
                     cell.fg,
-                    Color::White,
+                    Color::Rgb(0xff, 0xff, 0xff),
                     "cell ({x}, {y}) should have white foreground"
                 );
                 assert!(
