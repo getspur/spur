@@ -4034,15 +4034,42 @@ impl Orchestrator {
 
                     // ── GetIssueDetail ────────────────────────────────────
                     InteractiveInput::GetIssueDetail { id } => {
+                        // PROBE: issue_detail_latency
+                        let handler_started = std::time::Instant::now();
+                        tracing::info!(
+                            target: "issue_probe",
+                            site = "orch_handler_entry",
+                            id = %id,
+                            "GetIssueDetail entered run_interactive handler (idle path)",
+                        );
                         if let Some(pm) = &self.pm_service {
+                            let pm_call_started = std::time::Instant::now();
                             match pm.get_issue(&id).await {
                                 Ok(issue) => {
+                                    let pm_get_issue_ms =
+                                        pm_call_started.elapsed().as_millis() as u64;
+                                    tracing::info!(
+                                        target: "issue_probe",
+                                        site = "orch_pm_get_issue_ok",
+                                        id = %id,
+                                        pm_get_issue_ms = pm_get_issue_ms,
+                                        total_handler_ms = handler_started.elapsed().as_millis() as u64,
+                                        "pm.get_issue resolved",
+                                    );
                                     self.funnel.emit(SpurEventBody::IssueDetailFetched {
                                         requested_id: id,
                                         issue: issue_to_detail_event(&issue),
                                     });
                                 }
                                 Err(e) => {
+                                    tracing::warn!(
+                                        target: "issue_probe",
+                                        site = "orch_pm_get_issue_err",
+                                        id = %id,
+                                        pm_get_issue_ms = pm_call_started.elapsed().as_millis() as u64,
+                                        error = %e,
+                                        "pm.get_issue failed",
+                                    );
                                     self.funnel.emit(SpurEventBody::IssueCommandError {
                                         operation: "GetIssueDetail".into(),
                                         error: e.to_string(),
@@ -4121,7 +4148,10 @@ impl Orchestrator {
                             }
                         }
                         Some(other) => {
+                            // PROBE: issue_detail_latency
                             tracing::warn!(
+                                target: "issue_probe",
+                                site = "orch_scheduler_drop",
                                 ?other,
                                 "unexpected non-Message variant dequeued from scheduler; skipping turn"
                             );
@@ -4453,8 +4483,32 @@ impl Orchestrator {
                                     scheduler.push_continuation(continuation);
                                 }
                                 other => {
+                                    // PROBE: issue_detail_latency
                                     // Non-prompt, non-cancel variants arriving mid-stream:
                                     // push to scheduler as user input so they run after the turn.
+                                    // NOTE: when the scheduler later pops these as ScheduledAction::UserPrompt,
+                                    // the non-Message arm (orchestrator.rs `unexpected non-Message variant
+                                    // dequeued from scheduler; skipping turn`) silently drops them.
+                                    let probe_label = match &other {
+                                        InteractiveInput::GetIssueDetail { id } => {
+                                            Some(format!("GetIssueDetail({id})"))
+                                        }
+                                        InteractiveInput::GetIssueGraph { id } => {
+                                            Some(format!("GetIssueGraph({id})"))
+                                        }
+                                        InteractiveInput::RefreshIssues => {
+                                            Some("RefreshIssues".to_string())
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(label) = probe_label {
+                                        tracing::warn!(
+                                            target: "issue_probe",
+                                            site = "orch_queued_during_stream",
+                                            input = %label,
+                                            "non-Message InteractiveInput queued mid-stream — will likely be dropped at scheduler dequeue",
+                                        );
+                                    }
                                     scheduler.push_user(other);
                                 }
                             }
