@@ -176,7 +176,12 @@ async fn split_task_happy_path_rewires_downstream_and_commits() {
             AuditSentinelKind::MutationCommit {
                 mutation_id,
                 children_created,
-            } if mutation_id == &batch.mutation_id.to_string() && children_created == &child_ids
+                op_tags,
+                affected_task_ids,
+            } if mutation_id == &batch.mutation_id.to_string()
+                && children_created == &child_ids
+                && op_tags.as_slice() == ["split_task"]
+                && affected_task_ids.first().map(String::as_str) == Some(parent.as_str())
         )
     });
 

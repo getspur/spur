@@ -78,6 +78,7 @@ pub async fn apply_mutation(
     .context("mutation-plan audit write-ahead")?;
 
     let mut children_created: Vec<String> = Vec::new();
+    let mut affected_task_ids: Vec<String> = Vec::new();
     let mut executed_ops: Vec<ExecutedOp> = Vec::new();
 
     for op in &batch.ops {
@@ -158,6 +159,8 @@ pub async fn apply_mutation(
                     child_ids.push(id);
                 }
                 children_created.extend(child_ids.iter().cloned());
+                affected_task_ids.push(parent.clone());
+                affected_task_ids.extend(child_ids.iter().cloned());
                 for child_id in &child_ids {
                     pm.add_dependency(child_id, parent)
                         .await
@@ -274,6 +277,8 @@ pub async fn apply_mutation(
         &audit_encode(&AuditSentinelKind::MutationCommit {
             mutation_id: batch.mutation_id.to_string(),
             children_created: children_created.clone(),
+            op_tags: batch.op_tags().into_iter().map(String::from).collect(),
+            affected_task_ids: affected_task_ids.clone(),
         }),
     )
     .await
