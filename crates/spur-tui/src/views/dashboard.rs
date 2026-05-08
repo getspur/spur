@@ -23,6 +23,7 @@ use crate::components::status_bar::{HintOverride, StatusBar, StatusBarProps};
 use crate::components::tombstone::Tombstone;
 use crate::components::{LogEntry, LogEntryKind};
 use crate::input_history::InputHistoryEntry;
+use crate::theme::Theme;
 
 use super::View;
 
@@ -658,6 +659,7 @@ impl DashboardView {
                 self.render_setup_nudge(
                     frame,
                     area,
+                    ctx.theme,
                     license_badge,
                     flag_summary,
                     tombstone,
@@ -750,6 +752,7 @@ impl DashboardView {
             chunks[status_chunk],
             StatusBarProps {
                 view: &ViewId::Dashboard,
+                theme: ctx.theme,
                 tombstone,
                 running,
                 pending_review,
@@ -862,6 +865,7 @@ impl DashboardView {
             chunks[2],
             StatusBarProps {
                 view: &ViewId::Dashboard,
+                theme: ctx.theme,
                 tombstone,
                 running: 0,
                 pending_review: 0,
@@ -888,6 +892,7 @@ impl DashboardView {
         &mut self,
         frame: &mut Frame,
         area: Rect,
+        theme: &Theme,
         license_badge: Option<&crate::components::status_bar::LicenseBadge>,
         flag_summary: Option<(usize, usize)>,
         tombstone: Option<&Tombstone>,
@@ -1010,6 +1015,7 @@ impl DashboardView {
             chunks[2],
             StatusBarProps {
                 view: &ViewId::Dashboard,
+                theme,
                 tombstone,
                 running: 0,
                 pending_review: 0,

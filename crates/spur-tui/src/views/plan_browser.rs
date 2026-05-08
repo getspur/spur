@@ -14,8 +14,13 @@ use spur_acp::{
 
 use crate::action::{Action, ViewId};
 use crate::components::status_bar::{HintOverride, StatusBar, StatusBarProps};
+use crate::theme::{resolve_token, ColorDepth, Theme};
 
 use super::{View, ViewContext};
+
+fn token(theme: &Theme, name: &str) -> Color {
+    resolve_token(theme, name, ColorDepth::Truecolor)
+}
 
 const STATUS_HINT: &str =
     " [j/k]navigate [p]plan peek/open [o]work item peek/open [c]claim [s]start/resume [r]refresh [Esc]summary/back";
@@ -384,22 +389,22 @@ impl PlanBrowserView {
         let block = Block::default()
             .title(" Sprints ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray));
+            .border_style(Style::default().fg(token(ctx.theme, "plan_browser.border.fg")));
         frame.render_widget(Paragraph::new(lines).block(block), area);
     }
 
-    fn render_plan_list(&self, frame: &mut Frame, area: Rect) {
+    fn render_plan_list(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let block = Block::default()
             .title(" Plans ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray));
+            .border_style(Style::default().fg(token(theme, "plan_browser.border.fg")));
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
         if self.plans.is_empty() {
             let msg =
                 Paragraph::new("No plans found.\nPress b to open Backlog and execute an epic.")
-                    .style(Style::default().fg(Color::DarkGray))
+                    .style(Style::default().fg(token(theme, "plan_browser.empty.fg")))
                     .alignment(Alignment::Center);
             frame.render_widget(msg, inner);
             return;
@@ -440,7 +445,7 @@ impl PlanBrowserView {
         for (idx, plan) in self.plans.iter().enumerate().skip(start).take(end - start) {
             let marker = if idx == self.selected { ">" } else { " " };
             let style = if idx == self.selected {
-                Style::default().fg(Color::Yellow)
+                Style::default().fg(token(theme, "plan_browser.row.selected.fg"))
             } else {
                 Style::default()
             };
@@ -468,7 +473,7 @@ impl PlanBrowserView {
         frame.render_widget(Paragraph::new(lines), inner);
     }
 
-    fn render_detail(&self, frame: &mut Frame, area: Rect) {
+    fn render_detail(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let title = match self.detail_peek {
             DetailPeek::Summary => " Plan / Work Item Summary ",
             DetailPeek::Plan => " Implementation Plan ",
@@ -477,26 +482,26 @@ impl PlanBrowserView {
         let block = Block::default()
             .title(title)
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray));
+            .border_style(Style::default().fg(token(theme, "plan_browser.border.fg")));
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
         let lines = if let Some(plan) = self.selected_plan() {
             let mut lines = match self.detail_peek {
-                DetailPeek::Summary => self.render_summary_lines(plan),
-                DetailPeek::Plan => self.render_plan_lines(plan),
-                DetailPeek::WorkItem => self.render_work_item_lines(plan),
+                DetailPeek::Summary => self.render_summary_lines(plan, theme),
+                DetailPeek::Plan => self.render_plan_lines(plan, theme),
+                DetailPeek::WorkItem => self.render_work_item_lines(plan, theme),
             };
             let notice = if let Some(hint) = self.hint.as_ref() {
                 Some(Line::from(Span::styled(
                     hint.clone(),
-                    Style::default().fg(Color::Red),
+                    Style::default().fg(token(theme, "plan_browser.notice.error.fg")),
                 )))
             } else {
                 self.warnings.first().map(|warning| {
                     Line::from(Span::styled(
                         format!("Warning: {}", warning.message),
-                        Style::default().fg(Color::Yellow),
+                        Style::default().fg(token(theme, "plan_browser.notice.warning.fg")),
                     ))
                 })
             };
@@ -508,7 +513,7 @@ impl PlanBrowserView {
         } else if let Some(hint) = self.hint.as_ref() {
             vec![Line::from(Span::styled(
                 hint.clone(),
-                Style::default().fg(Color::Red),
+                Style::default().fg(token(theme, "plan_browser.notice.error.fg")),
             ))]
         } else {
             vec![Line::from("No plan selected")]
@@ -517,65 +522,72 @@ impl PlanBrowserView {
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
     }
 
-    fn field_line(label: &'static str, value: impl Into<String>) -> Line<'static> {
+    fn field_line(label: &'static str, value: impl Into<String>, theme: &Theme) -> Line<'static> {
         Line::from(vec![
             Span::styled(
                 format!("{label}: "),
                 Style::default()
-                    .fg(Color::DarkGray)
+                    .fg(token(theme, "plan_browser.field.label.fg"))
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(value.into()),
         ])
     }
 
-    fn action_line(value: impl Into<String>) -> Line<'static> {
-        Line::from(Span::styled(value.into(), Style::default().fg(Color::Cyan)))
+    fn action_line(value: impl Into<String>, theme: &Theme) -> Line<'static> {
+        Line::from(Span::styled(
+            value.into(),
+            Style::default().fg(token(theme, "plan_browser.action_line.fg")),
+        ))
     }
 
-    fn render_summary_lines(&self, plan: &PlanSummaryEvent) -> Vec<Line<'static>> {
+    fn render_summary_lines(&self, plan: &PlanSummaryEvent, theme: &Theme) -> Vec<Line<'static>> {
         vec![
-            Self::field_line("Plan", plan.plan_id.clone()),
-            Self::field_line("Work item", plan.epic_id.clone()),
-            Self::field_line("Title", plan.title.clone()),
-            Self::field_line("Description", Self::body_preview_text(plan)),
-            Self::field_line("Owner", Self::owner_detail(&plan.owner_state)),
-            Self::field_line("Lifecycle", Self::lifecycle_label(plan.lifecycle)),
-            Self::field_line("Progress", Self::progress_text(plan.counts.as_ref())),
-            Self::field_line("Tasks", Self::task_counts_text(plan.counts.as_ref())),
-            Self::field_line("Updated", Self::updated_text(plan)),
-            Self::field_line("Next", Self::next_action_text(plan)),
-            Self::action_line("p: implementation plan   o: work item   c: claim   s: start/resume"),
+            Self::field_line("Plan", plan.plan_id.clone(), theme),
+            Self::field_line("Work item", plan.epic_id.clone(), theme),
+            Self::field_line("Title", plan.title.clone(), theme),
+            Self::field_line("Description", Self::body_preview_text(plan), theme),
+            Self::field_line("Owner", Self::owner_detail(&plan.owner_state), theme),
+            Self::field_line("Lifecycle", Self::lifecycle_label(plan.lifecycle), theme),
+            Self::field_line("Progress", Self::progress_text(plan.counts.as_ref()), theme),
+            Self::field_line("Tasks", Self::task_counts_text(plan.counts.as_ref()), theme),
+            Self::field_line("Updated", Self::updated_text(plan), theme),
+            Self::field_line("Next", Self::next_action_text(plan), theme),
+            Self::action_line(
+                "p: implementation plan   o: work item   c: claim   s: start/resume",
+                theme,
+            ),
         ]
     }
 
-    fn render_plan_lines(&self, plan: &PlanSummaryEvent) -> Vec<Line<'static>> {
+    fn render_plan_lines(&self, plan: &PlanSummaryEvent, theme: &Theme) -> Vec<Line<'static>> {
         vec![
-            Self::field_line("Plan", plan.plan_id.clone()),
-            Self::field_line("Work item", plan.epic_id.clone()),
-            Self::field_line("Title", plan.title.clone()),
-            Self::field_line("Owner", Self::owner_detail(&plan.owner_state)),
-            Self::field_line("Lifecycle", Self::lifecycle_label(plan.lifecycle)),
-            Self::field_line("Progress", Self::progress_text(plan.counts.as_ref())),
-            Self::field_line("Tasks", Self::task_counts_text(plan.counts.as_ref())),
-            Self::field_line("Updated", Self::updated_text(plan)),
-            Self::field_line("Description", Self::body_preview_text(plan)),
-            Self::action_line("Press p again to open the implementation plan board"),
+            Self::field_line("Plan", plan.plan_id.clone(), theme),
+            Self::field_line("Work item", plan.epic_id.clone(), theme),
+            Self::field_line("Title", plan.title.clone(), theme),
+            Self::field_line("Owner", Self::owner_detail(&plan.owner_state), theme),
+            Self::field_line("Lifecycle", Self::lifecycle_label(plan.lifecycle), theme),
+            Self::field_line("Progress", Self::progress_text(plan.counts.as_ref()), theme),
+            Self::field_line("Tasks", Self::task_counts_text(plan.counts.as_ref()), theme),
+            Self::field_line("Updated", Self::updated_text(plan), theme),
+            Self::field_line("Description", Self::body_preview_text(plan), theme),
+            Self::action_line("Press p again to open the implementation plan board", theme),
         ]
     }
 
-    fn render_work_item_lines(&self, plan: &PlanSummaryEvent) -> Vec<Line<'static>> {
+    fn render_work_item_lines(&self, plan: &PlanSummaryEvent, theme: &Theme) -> Vec<Line<'static>> {
         vec![
-            Self::field_line("Work item", plan.epic_id.clone()),
-            Self::field_line("Title", plan.title.clone()),
-            Self::field_line("Plan", plan.plan_id.clone()),
+            Self::field_line("Work item", plan.epic_id.clone(), theme),
+            Self::field_line("Title", plan.title.clone(), theme),
+            Self::field_line("Plan", plan.plan_id.clone(), theme),
             Self::field_line(
                 "Issue graph scope",
                 format!("spur:plan-id:{}", plan.plan_id),
+                theme,
             ),
-            Self::field_line("Lifecycle", Self::lifecycle_label(plan.lifecycle)),
-            Self::field_line("Description", Self::body_preview_text(plan)),
-            Self::action_line("Press o again to open the source work item"),
+            Self::field_line("Lifecycle", Self::lifecycle_label(plan.lifecycle), theme),
+            Self::field_line("Description", Self::body_preview_text(plan), theme),
+            Self::action_line("Press o again to open the source work item", theme),
         ]
     }
 
@@ -629,12 +641,13 @@ impl PlanBrowserView {
             .unwrap_or_else(|| "--".into())
     }
 
-    fn render_status(&self, frame: &mut Frame, area: Rect) {
+    fn render_status(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         StatusBar::render(
             frame,
             area,
             StatusBarProps {
                 view: &ViewId::PlanBrowser,
+                theme,
                 tombstone: None,
                 running: 0,
                 pending_review: 0,
@@ -661,7 +674,7 @@ impl PlanBrowserView {
         );
     }
 
-    fn render_confirm(&self, frame: &mut Frame, area: Rect) {
+    fn render_confirm(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let Some(confirm) = self.confirm.as_ref() else {
             return;
         };
@@ -695,19 +708,26 @@ impl PlanBrowserView {
 
         let mut lines = body;
         lines.push(Line::from(""));
-        lines.push(action_line("[Enter]", verb, "[Esc]", "Cancel", popup.width));
+        lines.push(action_line(
+            "[Enter]",
+            verb,
+            "[Esc]",
+            "Cancel",
+            popup.width,
+            theme,
+        ));
 
         let block = Block::default()
             .title(Span::styled(
                 title,
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(token(theme, "plan_browser.confirm.title.fg"))
                     .add_modifier(Modifier::BOLD),
             ))
             .title_alignment(Alignment::Left)
             .borders(Borders::ALL)
             .border_set(border::ROUNDED)
-            .border_style(Style::default().fg(Color::Yellow));
+            .border_style(Style::default().fg(token(theme, "plan_browser.confirm.border.fg")));
 
         frame.render_widget(Paragraph::new(lines).block(block), popup);
     }
@@ -835,10 +855,10 @@ impl View for PlanBrowserView {
         .split(area);
 
         self.render_header(frame, chunks[0], ctx);
-        self.render_plan_list(frame, chunks[1]);
-        self.render_detail(frame, chunks[2]);
-        self.render_status(frame, chunks[3]);
-        self.render_confirm(frame, area);
+        self.render_plan_list(frame, chunks[1], ctx.theme);
+        self.render_detail(frame, chunks[2], ctx.theme);
+        self.render_status(frame, chunks[3], ctx.theme);
+        self.render_confirm(frame, area, ctx.theme);
     }
 
     fn tick(&mut self) {}
@@ -873,6 +893,7 @@ fn action_line(
     right_key: &'static str,
     right_label: &'static str,
     popup_width: u16,
+    theme: &Theme,
 ) -> Line<'static> {
     let left_width = 1 + left_key.len() + 1 + left_label.len();
     let right_width = right_key.len() + 1 + right_label.len();
@@ -886,13 +907,15 @@ fn action_line(
         Span::styled(
             left_key,
             Style::default()
-                .fg(Color::Green)
+                .fg(token(theme, "plan_browser.confirm.primary_key.fg"))
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!(" {left_label}{}", " ".repeat(gap))),
         Span::styled(
             right_key,
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(token(theme, "plan_browser.confirm.cancel_key.fg"))
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!(" {right_label}")),
     ])

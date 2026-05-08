@@ -839,6 +839,7 @@ impl IssueBrowserView {
         &mut self,
         frame: &mut Frame,
         area: Rect,
+        theme: &crate::theme::Theme,
         tombstone: Option<&Tombstone>,
         view_hint_override: Option<HintOverride<'_>>,
     ) {
@@ -1009,6 +1010,7 @@ impl IssueBrowserView {
             chunks[2],
             StatusBarProps {
                 view: &ViewId::IssueBrowser,
+                theme,
                 tombstone,
                 running: 0,
                 pending_review: 0,
@@ -1223,7 +1225,13 @@ impl View for IssueBrowserView {
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &super::ViewContext) {
-        self.render_inner(frame, area, ctx.tombstone, ctx.transient_hint_override);
+        self.render_inner(
+            frame,
+            area,
+            ctx.theme,
+            ctx.tombstone,
+            ctx.transient_hint_override,
+        );
     }
 
     fn tick(&mut self) {
