@@ -81,6 +81,65 @@ fn typing_inside_atom_deletes_atom_then_inserts() {
 }
 
 #[test]
+fn typing_over_selection_containing_atom_removes_atom_and_rebases_later_atom() {
+    let mut b = InputBar::new();
+    type_str(&mut b, "x ");
+    b.insert_atom("@a.rs", "file:///a".into(), "a.rs".into());
+    type_str(&mut b, " y ");
+    b.insert_atom("@b.rs", "file:///b".into(), "b.rs".into());
+
+    b.set_mode(EditMode::Vim(VimMode::Normal));
+    b.set_text_cursor_for_test(0);
+    press(&mut b, KeyCode::Char('v'));
+    press(&mut b, KeyCode::Char('l'));
+    press(&mut b, KeyCode::Char('l'));
+    press(&mut b, KeyCode::Char('l'));
+    b.set_mode_for_test(EditMode::Emacs);
+
+    press(&mut b, KeyCode::Char('z'));
+
+    assert_eq!(b.text(), "z y @b.rs");
+    let ranges = b.protected_ranges();
+    assert_eq!(ranges.len(), 1);
+    assert_eq!(&b.text()[ranges[0].start..ranges[0].end], "@b.rs");
+    assert_eq!(ranges[0].start, "z y ".len());
+}
+
+#[test]
+fn paste_over_selection_containing_atom_removes_atom() {
+    let mut b = InputBar::new();
+    type_str(&mut b, "x ");
+    b.insert_atom("@a.rs", "file:///a".into(), "a.rs".into());
+    type_str(&mut b, " y");
+
+    b.set_mode(EditMode::Vim(VimMode::Normal));
+    b.set_text_cursor_for_test(0);
+    press(&mut b, KeyCode::Char('v'));
+    press(&mut b, KeyCode::Char('l'));
+    press(&mut b, KeyCode::Char('l'));
+    press(&mut b, KeyCode::Char('l'));
+    b.set_mode_for_test(EditMode::Emacs);
+
+    b.insert_paste("paste");
+
+    assert_eq!(b.text(), "paste y");
+    assert!(b.protected_ranges().is_empty());
+}
+
+#[test]
+fn word_forward_into_atom_snaps_to_atom_boundary() {
+    let mut b = InputBar::new();
+    type_str(&mut b, "x ");
+    b.insert_atom("@a.rs", "file:///a".into(), "a.rs".into());
+    type_str(&mut b, " y");
+
+    b.set_text_cursor_for_test(2);
+    let _ = b.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT));
+
+    assert_eq!(b.cursor(), 7);
+}
+
+#[test]
 fn range_shifts_when_text_inserted_before_it() {
     let mut b = InputBar::new();
     b.insert_atom("@a.rs", "file:///a".into(), "a.rs".into());
