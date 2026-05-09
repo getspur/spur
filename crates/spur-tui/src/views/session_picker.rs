@@ -2136,7 +2136,7 @@ mod preview_render_tests {
             .expect("placeholder cell should be in bounds");
         assert_eq!(
             placeholder_cell.style().fg,
-            Some(Color::Rgb(0x60, 0x60, 0x60))
+            Some(Color::Rgb(0x73, 0x73, 0x73))
         );
         assert!(placeholder_cell
             .style()
