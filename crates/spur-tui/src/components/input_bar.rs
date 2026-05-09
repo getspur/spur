@@ -1470,6 +1470,39 @@ impl InputBar {
         self.goal_vcol = None;
     }
 
+    /// Store an image attachment and insert its protected placeholder label.
+    #[allow(dead_code)]
+    fn insert_image_atom(&mut self, mut attachment: ImageAttachment) {
+        if self.history_cursor.is_some() {
+            self.restore_draft();
+        }
+        if let Some(idx) = self.range_at_cursor() {
+            self.delete_range(idx);
+        }
+        let cursor = self.cursor_to_byte();
+        let id = self.next_image_id;
+        self.next_image_id += 1;
+        attachment.id = id;
+        let (w, h) = attachment.dimensions;
+        let label = format!("[Image #{} · {}×{}]", id + 1, w, h);
+        self.images.insert(id, attachment);
+
+        self.textarea.insert_str(&label);
+        self.rebuild_line_cache();
+        let end = cursor + label.len();
+        self.shift_ranges(cursor, label.len() as isize);
+        self.protected_ranges.push(ProtectedRange {
+            start: cursor,
+            end,
+            kind: RangeKind::ImageRef(id),
+            uri: String::new(),
+            name: label,
+        });
+        self.protected_ranges.sort_by_key(|r| r.start);
+        self.history_cursor = None;
+        self.goal_vcol = None;
+    }
+
     /// The current text content.
     pub fn text(&self) -> String {
         self.textarea.lines().join("\n")
@@ -2141,6 +2174,33 @@ mod image_tests {
         bar.clear();
 
         assert_eq!(bar.next_image_id, 3);
+    }
+
+    #[test]
+    fn insert_image_atom_stores_attachment_and_shifts_existing_ranges() {
+        let mut bar = InputBar::new();
+        bar.insert_atom("@foo", "file:///foo".to_string(), "foo".to_string());
+        bar.move_cursor_to_byte(0);
+
+        bar.insert_image_atom(test_image(99));
+
+        let label = "[Image #1 · 800×600]";
+        assert_eq!(bar.text(), format!("{label}@foo"));
+        assert_eq!(bar.next_image_id, 1);
+        assert_eq!(bar.images.len(), 1);
+        assert_eq!(bar.images[&0].id, 0);
+
+        let ranges = bar.protected_ranges();
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0].kind, RangeKind::ImageRef(0));
+        assert_eq!((ranges[0].start, ranges[0].end), (0, label.len()));
+        assert_eq!(ranges[0].uri, "");
+        assert_eq!(ranges[0].name, label);
+        assert_eq!(ranges[1].kind, RangeKind::Atom);
+        assert_eq!(
+            (ranges[1].start, ranges[1].end),
+            (label.len(), label.len() + 4)
+        );
     }
 }
 
