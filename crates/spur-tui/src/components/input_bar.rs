@@ -390,10 +390,14 @@ impl InputBar {
     pub fn handle_key(&mut self, key: KeyEvent) -> HandleOutcome {
         let input = self.keyevent_to_input(key);
 
-        match self.mode {
+        let outcome = match self.mode {
             EditMode::Emacs => self.handle_emacs_input(key, input),
             EditMode::Vim(mode) => self.handle_vim_input(key, input, mode),
+        };
+        if matches!(&outcome, HandleOutcome::Key(IntentEvent::MovedCursor)) {
+            self.snap_cursor_out_of_atoms();
         }
+        outcome
     }
 
     fn capture_paste_burst_char(&mut self, c: char, key: KeyEvent) -> Option<IntentEvent> {
@@ -490,10 +494,12 @@ impl InputBar {
                 return HandleOutcome::Key(IntentEvent::MovedCursor);
             }
             KeyCode::Left => {
+                self.prepare_selection_for_cursor_move(key.modifiers.contains(KeyModifiers::SHIFT));
                 self.move_cursor_back();
                 return HandleOutcome::Key(IntentEvent::MovedCursor);
             }
             KeyCode::Right => {
+                self.prepare_selection_for_cursor_move(key.modifiers.contains(KeyModifiers::SHIFT));
                 self.move_cursor_forward();
                 return HandleOutcome::Key(IntentEvent::MovedCursor);
             }
@@ -579,31 +585,38 @@ impl InputBar {
                 return HandleOutcome::Key(IntentEvent::DeletedChar);
             }
             KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                let cursor = self.cursor_to_byte();
-                if cursor > 0 {
-                    let text = self.text();
-                    let mut start = cursor;
-                    let mut seen_non_whitespace = false;
-                    for (idx, ch) in text[..cursor].char_indices().rev() {
-                        if !seen_non_whitespace {
-                            start = idx;
-                            if ch.is_whitespace() {
+                if !self.delete_selection_protected(true) {
+                    let cursor = self.cursor_to_byte();
+                    if cursor > 0 {
+                        let text = self.text();
+                        let mut start = cursor;
+                        let mut seen_non_whitespace = false;
+                        for (idx, ch) in text[..cursor].char_indices().rev() {
+                            if !seen_non_whitespace {
+                                start = idx;
+                                if ch.is_whitespace() {
+                                    continue;
+                                }
+                                seen_non_whitespace = true;
                                 continue;
                             }
-                            seen_non_whitespace = true;
-                            continue;
+                            if ch.is_whitespace() {
+                                break;
+                            }
+                            start = idx;
                         }
-                        if ch.is_whitespace() {
-                            break;
-                        }
-                        start = idx;
+                        self.textarea.set_yank_text(text[start..cursor].to_string());
+                        self.delete_span(start, cursor);
                     }
-                    self.delete_span(start, cursor);
                 }
                 return HandleOutcome::Key(IntentEvent::DeletedChar);
             }
             KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 return self.handle_clipboard_image_paste();
+            }
+            KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.paste_yank_protected();
+                return HandleOutcome::Key(IntentEvent::Pasted);
             }
             KeyCode::Char(c)
                 if !key
@@ -639,7 +652,9 @@ impl InputBar {
         // Delegate to textarea for other keys. Treat as NoOp for the detector
         // — tui_textarea handled something we don't model, but no composition
         // intent is claimed.
-        self.input_textarea_non_mutating(input);
+        if let Some(intent) = self.input_textarea_non_mutating(input) {
+            return HandleOutcome::Key(intent);
+        }
         HandleOutcome::Key(IntentEvent::NoOp)
     }
 
@@ -811,16 +826,7 @@ impl InputBar {
                 key: Key::Char('p'),
                 ..
             } if mode == VimMode::Normal => {
-                let before = self.cursor_to_byte();
-                self.textarea.paste();
-                self.rebuild_line_cache();
-                let after = self.cursor_to_byte();
-                let delta = after as isize - before as isize;
-                if delta != 0 {
-                    self.shift_ranges(before, delta);
-                }
-                self.history_cursor = None;
-                self.goal_vcol = None;
+                self.paste_yank_protected();
                 return HandleOutcome::Key(IntentEvent::Pasted);
             }
 
@@ -1022,6 +1028,15 @@ impl InputBar {
                 self.visual_line_down(self.last_inner_width());
                 return HandleOutcome::Key(IntentEvent::MovedCursor);
             }
+            Input {
+                key: Key::PageUp | Key::PageDown,
+                ..
+            } => {
+                let intent = self
+                    .input_textarea_non_mutating(input)
+                    .unwrap_or(IntentEvent::NoOp);
+                return HandleOutcome::Key(intent);
+            }
 
             // ── Esc / Enter ─────────────────────────────────────────
             Input { key: Key::Esc, .. } => {
@@ -1112,10 +1127,12 @@ impl InputBar {
                 return HandleOutcome::Key(IntentEvent::MovedCursor);
             }
             KeyCode::Left => {
+                self.prepare_selection_for_cursor_move(key.modifiers.contains(KeyModifiers::SHIFT));
                 self.move_cursor_back();
                 return HandleOutcome::Key(IntentEvent::MovedCursor);
             }
             KeyCode::Right => {
+                self.prepare_selection_for_cursor_move(key.modifiers.contains(KeyModifiers::SHIFT));
                 self.move_cursor_forward();
                 return HandleOutcome::Key(IntentEvent::MovedCursor);
             }
@@ -1165,7 +1182,9 @@ impl InputBar {
             _ => {}
         }
 
-        self.input_textarea_non_mutating(input);
+        if let Some(intent) = self.input_textarea_non_mutating(input) {
+            return HandleOutcome::Key(intent);
+        }
         HandleOutcome::Key(IntentEvent::NoOp)
     }
 
@@ -1225,22 +1244,47 @@ impl InputBar {
         (start, end)
     }
 
-    fn input_textarea_non_mutating(&mut self, input: Input) -> bool {
-        if matches!(
-            input.key,
-            Key::F(_) | Key::PageUp | Key::PageDown | Key::Null
-        ) {
-            self.textarea.input(input);
-            self.rebuild_line_cache();
-            return true;
-        }
-        false
+    fn input_textarea_non_mutating(&mut self, input: Input) -> Option<IntentEvent> {
+        let intent = match input.key {
+            Key::PageUp | Key::PageDown => IntentEvent::MovedCursor,
+            Key::F(_) | Key::Null => IntentEvent::NoOp,
+            _ => return None,
+        };
+        self.textarea.input(input);
+        self.rebuild_line_cache();
+        Some(intent)
     }
 
-    fn finish_textarea_insert_at(&mut self, at: usize, old_len: usize) {
+    fn prepare_selection_for_cursor_move(&mut self, select: bool) {
+        if select {
+            if !self.textarea.is_selecting() {
+                self.textarea.start_selection();
+            }
+        } else {
+            self.textarea.cancel_selection();
+        }
+    }
+
+    fn paste_yank_protected(&mut self) {
+        if !self.delete_selection_protected(false) {
+            if let Some(idx) = self.range_at_cursor() {
+                self.delete_range(idx);
+            }
+        }
+        let before = self.cursor_to_byte();
+        self.textarea.paste();
         self.rebuild_line_cache();
-        let new_len = self.text().len();
-        let delta = new_len as isize - old_len as isize;
+        let after = self.cursor_to_byte();
+        let delta = after as isize - before as isize;
+        if delta != 0 {
+            self.shift_ranges(before, delta);
+        }
+        self.history_cursor = None;
+        self.goal_vcol = None;
+    }
+
+    fn finish_textarea_insert_at(&mut self, at: usize, delta: isize) {
+        self.rebuild_line_cache();
         if delta != 0 {
             self.shift_ranges(at, delta);
         }
@@ -1255,9 +1299,8 @@ impl InputBar {
             }
         }
         let cursor = self.cursor_to_byte();
-        let old_len = self.text().len();
         self.textarea.insert_newline();
-        self.finish_textarea_insert_at(cursor, old_len);
+        self.finish_textarea_insert_at(cursor, 1);
     }
 
     fn insert_tab_protected(&mut self) {
@@ -1267,9 +1310,9 @@ impl InputBar {
             }
         }
         let cursor = self.cursor_to_byte();
-        let old_len = self.text().len();
         self.textarea.insert_tab();
-        self.finish_textarea_insert_at(cursor, old_len);
+        let delta = self.cursor_to_byte() as isize - cursor as isize;
+        self.finish_textarea_insert_at(cursor, delta);
     }
 
     /// Rebuild the line cache after text modification.
@@ -1292,6 +1335,13 @@ impl InputBar {
         self.protected_ranges
             .iter()
             .position(|r| pos > r.start && pos < r.end)
+    }
+
+    fn snap_cursor_out_of_atoms(&mut self) {
+        if let Some(idx) = self.range_at_cursor() {
+            let end = self.protected_ranges[idx].end;
+            self.move_cursor_to_byte(end);
+        }
     }
 
     /// Index of the protected range that starts at cursor.
@@ -1339,11 +1389,15 @@ impl InputBar {
         if start >= end {
             return false;
         }
+        let preserved_yank = (!yank).then(|| self.textarea.yank_text());
         if yank {
             let text = self.text();
             self.textarea.set_yank_text(text[start..end].to_string());
         }
         self.delete_span(start, end);
+        if let Some(yank_text) = preserved_yank {
+            self.textarea.set_yank_text(yank_text);
+        }
         true
     }
 
@@ -1513,9 +1567,11 @@ impl InputBar {
 
     /// Insert a character, replacing protected range if inside one.
     fn insert_char_with_protected_check(&mut self, c: char) {
-        // Delete range if cursor is strictly inside it
-        if let Some(idx) = self.range_at_cursor() {
-            self.delete_range(idx);
+        if !self.delete_selection_protected(false) {
+            // Delete range if cursor is strictly inside it
+            if let Some(idx) = self.range_at_cursor() {
+                self.delete_range(idx);
+            }
         }
         let cursor = self.cursor_to_byte();
         self.textarea.insert_char(c);
@@ -1603,21 +1659,6 @@ impl InputBar {
         if text.is_empty() {
             return;
         }
-        if let Some((img_path, dims)) = try_as_image_path(text) {
-            let byte_size = std::fs::metadata(&img_path)
-                .map(|metadata| metadata.len() as usize)
-                .unwrap_or(0);
-            let attachment = ImageAttachment {
-                id: 0,
-                source_path: img_path,
-                mime_type: "image/png".into(),
-                dimensions: dims,
-                byte_size,
-                owned_temp: None,
-            };
-            self.insert_image_atom(attachment);
-            return;
-        }
         // Normalize line endings before the multi-line gate. Clipboards from
         // Mac legacy apps deliver bare `\r`; Windows sources deliver `\r\n`.
         // Rust's `str::lines()` only splits on `\n` and `\r\n`, so a bare `\r`
@@ -1633,8 +1674,25 @@ impl InputBar {
         if self.history_cursor.is_some() {
             self.restore_draft();
         }
-        if let Some(idx) = self.range_at_cursor() {
-            self.delete_range(idx);
+        if !self.delete_selection_protected(false) {
+            if let Some(idx) = self.range_at_cursor() {
+                self.delete_range(idx);
+            }
+        }
+        if let Some((img_path, dims)) = try_as_image_path(text) {
+            let byte_size = std::fs::metadata(&img_path)
+                .map(|metadata| metadata.len() as usize)
+                .unwrap_or(0);
+            let attachment = ImageAttachment {
+                id: 0,
+                source_path: img_path,
+                mime_type: "image/png".into(),
+                dimensions: dims,
+                byte_size,
+                owned_temp: None,
+            };
+            self.insert_image_atom(attachment);
+            return;
         }
         let cursor = self.cursor_to_byte();
         if text.lines().count() <= 1 {
