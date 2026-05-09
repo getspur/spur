@@ -74,7 +74,7 @@ fn standardize_tool_call_update(update: &mut ToolCallUpdate) {
     let Some(agent) = delegate_agent_name(title).map(str::to_string) else {
         return;
     };
-    if matches!(update.fields.kind, Some(ToolKind::Other)) {
+    if matches!(update.fields.kind, None | Some(ToolKind::Other)) {
         update.fields.kind = Some(ToolKind::Think);
     }
     fill_delegate_fields(
