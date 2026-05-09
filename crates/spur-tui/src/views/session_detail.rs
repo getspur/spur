@@ -857,6 +857,10 @@ impl SessionDetailView {
         self.completion.is_active()
     }
 
+    pub(crate) fn open_theme_picker(&mut self, active_theme_name: &str) {
+        self.completion.open_theme_picker(active_theme_name);
+    }
+
     pub fn handle_paste(&mut self, text: &str) {
         self.input_bar.insert_paste(text);
         self.dispatch_intent(crate::components::completion_trigger::IntentEvent::Pasted);
@@ -1445,10 +1449,10 @@ impl SessionDetailView {
         };
 
         match owner {
-            KeyOwner::Picker => {
-                let _ = self.completion.handle_picker_key(key, &mut self.input_bar);
-                None
-            }
+            KeyOwner::Picker => self
+                .completion
+                .handle_picker_key(key, &mut self.input_bar)
+                .and_then(|accept| self.action_from_picker_accept(accept)),
 
             KeyOwner::Composer => {
                 use crate::components::completion_trigger::IntentEvent;
@@ -1659,6 +1663,27 @@ impl SessionDetailView {
 
                 None
             }
+        }
+    }
+
+    fn action_from_picker_accept(
+        &self,
+        accept: crate::components::query_source::RetrievalAccept,
+    ) -> Option<Action> {
+        let crate::components::query_source::RetrievalAccept::SubmitText { text } = accept else {
+            return None;
+        };
+
+        use crate::commands::submit_router::{route_with_caps, SubmitDecision};
+        match route_with_caps(
+            &text,
+            &[],
+            &self.command_registry,
+            false,
+            self.spur_agent_caps.as_deref(),
+        ) {
+            SubmitDecision::Local { action } => Some(action),
+            _ => None,
         }
     }
 }
@@ -2469,7 +2494,7 @@ impl SessionDetailView {
         }
 
         // ── PickerShell overlay ─────────────────────────────────────────
-        self.completion.render(frame, chunks[4], area);
+        self.completion.render(frame, chunks[4], area, ctx.theme);
 
         // ── Status bar (with live worker counts) ────────────────────────
         let (running, pending_review) = lineage

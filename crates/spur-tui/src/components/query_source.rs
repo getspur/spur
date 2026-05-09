@@ -75,6 +75,9 @@ pub enum RetrievalAccept {
         prefix_start: usize,
         replacement: String,
     },
+    /// Submit slash text through the view's normal submit router. Used by
+    /// picker rows that execute local commands instead of editing the draft.
+    SubmitText { text: String },
 }
 
 /// A retrieval source: given a query, produces ranked rows; on accept,

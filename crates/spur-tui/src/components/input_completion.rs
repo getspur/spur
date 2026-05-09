@@ -195,9 +195,15 @@ impl InputCompletionPort {
         }
     }
 
-    pub fn render(&mut self, frame: &mut Frame, input_rect: Rect, area: Rect) {
+    pub fn render(
+        &mut self,
+        frame: &mut Frame,
+        input_rect: Rect,
+        area: Rect,
+        theme: &crate::theme::Theme,
+    ) {
         if let Some(shell) = self.picker_shell.as_mut() {
-            shell.render(frame, input_rect, area);
+            shell.render(frame, input_rect, area, theme);
         }
     }
 
@@ -222,6 +228,15 @@ impl InputCompletionPort {
         self.picker_shell = Some(PickerShell::open(Box::new(HistoryQuerySource::new(
             history,
         ))));
+        self.trigger_detector.reset();
+    }
+
+    pub fn open_theme_picker(&mut self, active_theme_name: &str) {
+        let source = crate::components::theme_query_source::ThemeQuerySource::new(
+            crate::theme::list_available_themes(),
+            active_theme_name,
+        );
+        self.picker_shell = Some(PickerShell::open(Box::new(source)));
         self.trigger_detector.reset();
     }
 
@@ -287,6 +302,9 @@ impl InputCompletionPort {
                     .current_prefix_start()
                     .unwrap_or(prefix_start);
                 replace_trigger_token(input_bar, anchor, &replacement);
+            }
+            RetrievalAccept::SubmitText { .. } => {
+                input_bar.clear();
             }
         }
     }
