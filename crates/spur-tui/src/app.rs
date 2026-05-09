@@ -1119,7 +1119,7 @@ impl App {
         // built-in cascade).
         let mark = |name: &str| {
             if name == active {
-                format!("*{name}")
+                format!("* {name}")
             } else {
                 name.to_string()
             }
