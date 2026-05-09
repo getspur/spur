@@ -163,7 +163,7 @@ name = "kimi"
 command = "kimi"
 args = ["-y", "--afk", "acp"]
 transport = "acp"
-kind = "generic"
+kind = "kimi"
 role = "both"
 cost_tier = "medium"
 

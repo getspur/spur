@@ -171,6 +171,8 @@ pub enum AgentKind {
     CodexAcp,
     /// Kiro CLI via `kiro-cli acp`.
     Kiro,
+    /// Kimi Code CLI via `kimi acp`.
+    Kimi,
     /// Any ACP-speaking agent not otherwise recognized.
     #[default]
     Generic,
@@ -192,6 +194,7 @@ impl AgentKind {
             }
             "codex-acp" | "codex" => AgentKind::CodexAcp,
             "kiro" => AgentKind::Kiro,
+            "kimi" | "kimi-code" | "kimi code" => AgentKind::Kimi,
             _ => AgentKind::Generic,
         }
     }
@@ -263,6 +266,7 @@ mod agent_kind_tests {
         );
         assert_eq!(AgentKind::from_name("codex-acp"), AgentKind::CodexAcp);
         assert_eq!(AgentKind::from_name("kiro"), AgentKind::Kiro);
+        assert_eq!(AgentKind::from_name("kimi"), AgentKind::Kimi);
         assert_eq!(AgentKind::from_name("generic"), AgentKind::Generic);
     }
 
