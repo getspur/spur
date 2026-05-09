@@ -1261,8 +1261,19 @@ impl InputBar {
             return;
         }
         let deleted = end - start;
-        self.protected_ranges
-            .retain(|r| r.end <= start || r.start >= end);
+        let mut removed_image_ids = Vec::new();
+        self.protected_ranges.retain(|r| {
+            let keep = r.end <= start || r.start >= end;
+            if !keep {
+                if let RangeKind::ImageRef(id) = &r.kind {
+                    removed_image_ids.push(*id);
+                }
+            }
+            keep
+        });
+        for id in removed_image_ids {
+            self.images.remove(&id);
+        }
         for r in &mut self.protected_ranges {
             if r.start >= end {
                 r.start -= deleted;
@@ -2304,6 +2315,19 @@ mod image_tests {
             (ranges[1].start, ranges[1].end),
             (label.len(), label.len() + 4)
         );
+    }
+
+    #[test]
+    fn deleting_image_atom_removes_attachment_from_store() {
+        let mut bar = InputBar::new();
+
+        bar.insert_image_atom(test_image(99));
+        bar.set_text_cursor_for_test(0);
+        bar.delete_char_after_cursor();
+
+        assert_eq!(bar.text(), "");
+        assert!(bar.protected_ranges.is_empty());
+        assert!(bar.images.is_empty());
     }
 
     #[test]
