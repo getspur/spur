@@ -1,0 +1,81 @@
+[package]
+name = "fsqlite-core"
+version = "0.1.2"
+description = "Core engine: connection, prepare, schema, DDL/DML codegen"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["native", "linux-asupersync-uring"]
+native = [
+    "fsqlite-types/native",
+    "fsqlite-vfs/native",
+    "fsqlite-pager/native",
+    "fsqlite-wal/native",
+    "fsqlite-mvcc/native",
+    "fsqlite-btree/native",
+    "fsqlite-planner/native",
+    "fsqlite-vdbe/native",
+]
+wasm = [
+    "fsqlite-types/wasm",
+    "fsqlite-vfs/wasm",
+    "fsqlite-pager/wasm",
+    "fsqlite-wal/wasm",
+    "fsqlite-mvcc/wasm",
+    "fsqlite-btree/wasm",
+    "fsqlite-planner/wasm",
+    "fsqlite-vdbe/wasm",
+]
+linux-asupersync-uring = ["native", "fsqlite-vfs/linux-asupersync-uring"]
+
+[dependencies]
+fsqlite-types = { path = "../fsqlite-types", version = "0.1", default-features = false }
+fsqlite-error = { workspace = true }
+fsqlite-vfs = { version = "0.1.3", path = "../fsqlite-vfs", default-features = false }
+fsqlite-pager = { version = "0.1.2", path = "../fsqlite-pager", default-features = false }
+fsqlite-wal = { version = "0.1.2", path = "../fsqlite-wal", default-features = false }
+fsqlite-mvcc = { version = "0.1.2", path = "../fsqlite-mvcc", default-features = false }
+fsqlite-observability = { workspace = true }
+fsqlite-btree = { version = "0.1.2", path = "../fsqlite-btree", default-features = false }
+fsqlite-ast = { workspace = true }
+fsqlite-parser = { workspace = true }
+fsqlite-planner = { version = "0.1.2", path = "../fsqlite-planner", default-features = false }
+fsqlite-vdbe = { version = "0.1.2", path = "../fsqlite-vdbe", default-features = false }
+fsqlite-func = { workspace = true }
+fsqlite-ext-json = { workspace = true }
+fsqlite-ext-fts5 = { workspace = true }
+fsqlite-ext-icu = { workspace = true }
+fsqlite-ext-misc = { workspace = true }
+fsqlite-ext-rtree = { workspace = true }
+tracing = { workspace = true }
+xxhash-rust = { workspace = true }
+blake3 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hashbrown = { workspace = true }
+lru = { workspace = true }
+smallvec = { workspace = true }
+tracing-subscriber = "0.3.22"
+regex = "1.11"
+lazy_static = "1.5"
+foldhash = "0.1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+asupersync = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+rusqlite = { workspace = true }
+tracing = { workspace = true }
+tempfile = { workspace = true }
+proptest = { workspace = true }
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "symbol_ops"
+harness = false
