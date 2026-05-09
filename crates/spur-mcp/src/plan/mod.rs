@@ -2223,6 +2223,7 @@ fn apply_worker_output_invariant(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CompletionPersistenceAction {
     Completed(crate::plan::audit_sentinel::CompletionState),
+    AlreadyCompleted,
     AutoRetried {
         error: String,
         worker_branch: Option<String>,
@@ -2438,6 +2439,24 @@ async fn persist_completion_result_with_retry_for_task(
     let escalation_worker_branch = escalate.then(|| fields.worker_branch.clone()).flatten();
 
     if !already_emitted && completion_state != CompletionState::Superseded {
+        if completion_state == CompletionState::AwaitingReview {
+            if crate::server::require_feature(
+                spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+                feature_gate,
+            )
+            .is_ok()
+            {
+                if let Some(adv) = pm.advanced() {
+                    let current_audits = crate::plan::projector::collect_sorted_audits_for_issue(
+                        issue_id,
+                        adv.list_comments(issue_id).await?,
+                    );
+                    if completion_audit_already_emitted(delegation_id, &current_audits) {
+                        return Ok(CompletionPersistenceAction::AlreadyCompleted);
+                    }
+                }
+            }
+        }
         emit_completion_audit(
             Some(pm),
             &Some(issue_id.to_string()),
@@ -2841,6 +2860,7 @@ async fn persist_completion_inner(
             }));
         }
         CompletionPersistenceAction::Completed(completion_state) => completion_state,
+        CompletionPersistenceAction::AlreadyCompleted => return Ok(None),
     };
 
     // Cancelled completions persist audit but emit no event/continuation.
@@ -7635,7 +7655,19 @@ mod tests {
         }
 
         async fn list_comments(&self, _issue_id: &str) -> anyhow::Result<Vec<spur_pm::Comment>> {
-            Ok(vec![])
+            Ok(self
+                .comments
+                .lock()
+                .expect("comments lock")
+                .iter()
+                .enumerate()
+                .map(|(index, body)| spur_pm::Comment {
+                    id: format!("c{}", index + 1),
+                    body: body.clone(),
+                    actor: "test".to_string(),
+                    created_at: chrono::Utc::now(),
+                })
+                .collect())
         }
 
         async fn add_comment(&self, _issue_id: &str, body: &str) -> anyhow::Result<String> {
@@ -7835,6 +7867,60 @@ mod tests {
         }
 
         (dir, base)
+    }
+
+    #[tokio::test]
+    async fn awaiting_review_completion_rechecks_audits_before_writing_duplicate() {
+        let delegation_label = crate::plan::labels::delegation_id("del-A");
+        let pm = CompletionWritebackPm::new(vec![delegation_label]);
+        pm.advanced.comments.lock().expect("comments lock").push(
+            crate::plan::audit_sentinel::encode_comment(
+                &crate::plan::audit_sentinel::AuditSentinelKind::Completion {
+                    delegation_id: "del-A".into(),
+                    completion_state: crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+                    superseded: false,
+                    worker_branch: Some("spur/worker-test".into()),
+                    result_summary: Some("already completed".into()),
+                    artifact_uri: None,
+                    dispatched_base_oid: None,
+                },
+            ),
+        );
+        let seeded_comments = spur_pm::BeadsAdvanced::list_comments(&pm.advanced, "bd-1")
+            .await
+            .expect("list seeded comments");
+        let seeded_audits =
+            crate::plan::projector::collect_sorted_audits_for_issue("bd-1", seeded_comments);
+        assert!(
+            super::completion_audit_already_emitted("del-A", &seeded_audits),
+            "test precondition must expose the seeded completion audit"
+        );
+
+        let action = super::persist_completion_result_with_retry_for_task(
+            &pm,
+            "bd-1",
+            pro_feature_gate().as_ref(),
+            "plan-1",
+            "del-A",
+            crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+            completion_audit_fields(),
+            false,
+            Some(1),
+            Some("t1"),
+        )
+        .await
+        .expect("idempotent completion recheck");
+
+        assert_eq!(action, super::CompletionPersistenceAction::AlreadyCompleted);
+        assert_eq!(
+            pm.completion_comment_count(),
+            1,
+            "guard must not append a duplicate completion audit"
+        );
+        assert!(
+            pm.updates.lock().expect("updates lock").is_empty(),
+            "guard must return before applying label/status updates"
+        );
     }
 
     #[tokio::test]
