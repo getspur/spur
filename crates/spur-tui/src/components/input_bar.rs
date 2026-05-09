@@ -564,6 +564,12 @@ impl InputBar {
                 }
                 return HandleOutcome::Key(IntentEvent::DeletedChar);
             }
+            KeyCode::Char('v')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                return self.handle_clipboard_image_paste();
+            }
             KeyCode::Char(c) => {
                 if let Some(intent) = self.capture_paste_burst_char(c, key) {
                     return HandleOutcome::Key(intent);
@@ -1111,6 +1117,12 @@ impl InputBar {
                 self.textarea.move_cursor(CursorMove::End);
                 return HandleOutcome::Key(IntentEvent::MovedCursor);
             }
+            KeyCode::Char('v')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                return self.handle_clipboard_image_paste();
+            }
             KeyCode::Char(c) => {
                 if let Some(intent) = self.capture_paste_burst_char(c, key) {
                     return HandleOutcome::Key(intent);
@@ -1133,6 +1145,23 @@ impl InputBar {
         self.textarea.input(input);
         self.rebuild_line_cache();
         HandleOutcome::Key(IntentEvent::NoOp)
+    }
+
+    fn handle_clipboard_image_paste(&mut self) -> HandleOutcome {
+        match try_paste_clipboard_image() {
+            Ok(attachment) => {
+                self.insert_image_atom(attachment);
+                HandleOutcome::Key(IntentEvent::Pasted)
+            }
+            Err(e) => {
+                tracing::warn!("clipboard image paste failed: {e}");
+                self.set_status(
+                    Some(format!("Clipboard image paste failed: {e}")),
+                    ActivityKind::Idle,
+                );
+                HandleOutcome::Key(IntentEvent::NoOp)
+            }
+        }
     }
 
     // ── Protected Range Helpers ─────────────────────────────────────────────
@@ -2252,6 +2281,45 @@ mod image_tests {
             (ranges[1].start, ranges[1].end),
             (label.len(), label.len() + 4)
         );
+    }
+
+    #[test]
+    fn ctrl_alt_v_does_not_type_literal_v_in_emacs_mode() {
+        let mut bar = InputBar::new();
+        let key = KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        );
+
+        let outcome = bar.handle_key(key);
+
+        assert_eq!(outcome, HandleOutcome::Key(IntentEvent::NoOp));
+        assert_ne!(bar.text(), "v");
+        assert!(bar
+            .status
+            .as_deref()
+            .is_some_and(|status| status.starts_with("Clipboard image paste failed: ")));
+        assert_eq!(bar.activity, ActivityKind::Idle);
+    }
+
+    #[test]
+    fn ctrl_alt_v_does_not_type_literal_v_in_vim_insert_mode() {
+        let mut bar = InputBar::new();
+        bar.set_mode(EditMode::Vim(VimMode::Insert));
+        let key = KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        );
+
+        let outcome = bar.handle_key(key);
+
+        assert_eq!(outcome, HandleOutcome::Key(IntentEvent::NoOp));
+        assert_ne!(bar.text(), "v");
+        assert!(bar
+            .status
+            .as_deref()
+            .is_some_and(|status| status.starts_with("Clipboard image paste failed: ")));
+        assert_eq!(bar.activity, ActivityKind::Idle);
     }
 
     #[test]
