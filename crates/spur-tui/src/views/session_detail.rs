@@ -1452,7 +1452,13 @@ impl SessionDetailView {
             KeyOwner::Picker => self
                 .completion
                 .handle_picker_key(key, &mut self.input_bar)
-                .and_then(|accept| self.action_from_picker_accept(accept)),
+                .and_then(|accept| {
+                    crate::commands::submit_router::local_action_from_picker_accept(
+                        accept,
+                        &self.command_registry,
+                        self.spur_agent_caps.as_deref(),
+                    )
+                }),
 
             KeyOwner::Composer => {
                 use crate::components::completion_trigger::IntentEvent;
@@ -1663,27 +1669,6 @@ impl SessionDetailView {
 
                 None
             }
-        }
-    }
-
-    fn action_from_picker_accept(
-        &self,
-        accept: crate::components::query_source::RetrievalAccept,
-    ) -> Option<Action> {
-        let crate::components::query_source::RetrievalAccept::SubmitText { text } = accept else {
-            return None;
-        };
-
-        use crate::commands::submit_router::{route_with_caps, SubmitDecision};
-        match route_with_caps(
-            &text,
-            &[],
-            &self.command_registry,
-            false,
-            self.spur_agent_caps.as_deref(),
-        ) {
-            SubmitDecision::Local { action } => Some(action),
-            _ => None,
         }
     }
 }
