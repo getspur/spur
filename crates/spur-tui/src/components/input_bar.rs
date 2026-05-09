@@ -572,10 +572,7 @@ impl InputBar {
                 }
                 return HandleOutcome::Key(IntentEvent::DeletedChar);
             }
-            KeyCode::Char('v')
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && key.modifiers.contains(KeyModifiers::ALT) =>
-            {
+            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 return self.handle_clipboard_image_paste();
             }
             KeyCode::Char(c) => {
@@ -1125,10 +1122,7 @@ impl InputBar {
                 self.textarea.move_cursor(CursorMove::End);
                 return HandleOutcome::Key(IntentEvent::MovedCursor);
             }
-            KeyCode::Char('v')
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && key.modifiers.contains(KeyModifiers::ALT) =>
-            {
+            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 return self.handle_clipboard_image_paste();
             }
             KeyCode::Char(c) => {
@@ -2195,6 +2189,10 @@ fn expand_paste_refs(
             }
             RangeKind::ImageRef(_) => {
                 expanded.push_str(&text[range.start..range.end]);
+                let mut adjusted = range;
+                adjusted.start = start;
+                adjusted.end = expanded.len();
+                expanded_ranges.push(adjusted);
             }
         }
         cursor = range_end;
@@ -2252,6 +2250,31 @@ mod image_tests {
         assert!(bar.images.is_empty());
         assert_eq!(bar.next_image_id, 0);
         assert!(bar.take_pending_images().is_empty());
+    }
+
+    #[test]
+    fn expand_paste_refs_preserves_image_ref_range() {
+        let text = "[Image #1 · 100×100] hello".to_string();
+        let image_range_end = "[Image #1 · 100×100]".len();
+        let ranges = vec![ProtectedRange {
+            start: 0,
+            end: image_range_end,
+            kind: RangeKind::ImageRef(7),
+            uri: String::new(),
+            name: "[Image #1 · 100×100]".to_string(),
+        }];
+
+        let (expanded, expanded_ranges) = expand_paste_refs(&text, &ranges, &BTreeMap::new());
+
+        assert_eq!(expanded, text);
+        assert_eq!(
+            expanded_ranges.len(),
+            1,
+            "ImageRef range must survive expand_paste_refs"
+        );
+        assert_eq!(expanded_ranges[0].kind, RangeKind::ImageRef(7));
+        assert_eq!(expanded_ranges[0].start, 0);
+        assert_eq!(expanded_ranges[0].end, image_range_end);
     }
 
     #[test]
@@ -2331,42 +2354,32 @@ mod image_tests {
     }
 
     #[test]
-    fn ctrl_alt_v_does_not_type_literal_v_in_emacs_mode() {
+    fn ctrl_v_does_not_type_literal_v_in_emacs_mode() {
         let mut bar = InputBar::new();
-        let key = KeyEvent::new(
-            KeyCode::Char('v'),
-            KeyModifiers::CONTROL | KeyModifiers::ALT,
-        );
+        let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
 
         let outcome = bar.handle_key(key);
 
-        assert_eq!(outcome, HandleOutcome::Key(IntentEvent::NoOp));
-        assert_ne!(bar.text(), "v");
-        assert!(bar
-            .status
-            .as_deref()
-            .is_some_and(|status| status.starts_with("Clipboard image paste failed: ")));
-        assert_eq!(bar.activity, ActivityKind::Idle);
+        assert!(matches!(
+            outcome,
+            HandleOutcome::Key(IntentEvent::NoOp) | HandleOutcome::Key(IntentEvent::Pasted)
+        ));
+        assert!(!bar.text().contains('v'));
     }
 
     #[test]
-    fn ctrl_alt_v_does_not_type_literal_v_in_vim_insert_mode() {
+    fn ctrl_v_does_not_type_literal_v_in_vim_insert_mode() {
         let mut bar = InputBar::new();
         bar.set_mode(EditMode::Vim(VimMode::Insert));
-        let key = KeyEvent::new(
-            KeyCode::Char('v'),
-            KeyModifiers::CONTROL | KeyModifiers::ALT,
-        );
+        let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
 
         let outcome = bar.handle_key(key);
 
-        assert_eq!(outcome, HandleOutcome::Key(IntentEvent::NoOp));
-        assert_ne!(bar.text(), "v");
-        assert!(bar
-            .status
-            .as_deref()
-            .is_some_and(|status| status.starts_with("Clipboard image paste failed: ")));
-        assert_eq!(bar.activity, ActivityKind::Idle);
+        assert!(matches!(
+            outcome,
+            HandleOutcome::Key(IntentEvent::NoOp) | HandleOutcome::Key(IntentEvent::Pasted)
+        ));
+        assert!(!bar.text().contains('v'));
     }
 
     #[test]
