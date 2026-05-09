@@ -1,0 +1,286 @@
+// Peer credentials and ancillary fd passing now use the `nix` crate (stable Rust)
+// instead of nightly #![feature(peer_credentials_unix_socket)] and
+// #![feature(unix_socket_ancillary_data)].
+
+//! MVCC page-level versioning for concurrent writers.
+//!
+//! This crate is intentionally small in early phases: it defines the core MVCC
+//! primitives and the cross-process witness/lock-table coordination types.
+
+pub mod begin_concurrent;
+pub mod bocpd;
+pub mod cache_aligned;
+pub mod cell_delta_wal;
+pub mod cell_mvcc_boundary;
+pub mod cell_routing;
+pub mod cell_visibility;
+pub mod commit_combiner;
+pub mod compat;
+pub mod conflict_model;
+pub mod conformal_martingale;
+pub mod coordinator_ipc;
+pub mod core_types;
+pub mod deterministic_rebase;
+pub mod differential_privacy;
+pub mod ebr;
+pub mod flat_combining;
+pub mod gc;
+pub mod history_compression;
+pub mod hot_witness_index;
+pub mod index_regen;
+pub mod invariants;
+pub mod left_right;
+pub mod lifecycle;
+pub mod materialize;
+pub mod observability;
+pub mod physical_merge;
+pub mod provenance;
+pub mod rcu;
+pub mod regime_monitor;
+pub mod retry_policy;
+pub mod rowid_alloc;
+pub mod seqlock;
+pub mod shared_lock_table;
+pub mod sheaf_conformal;
+pub mod shm;
+pub mod sketch_telemetry;
+pub mod ssi_abort_policy;
+pub mod ssi_validation;
+pub mod time_travel;
+pub mod two_phase_commit;
+pub mod witness_hierarchy;
+pub mod witness_objects;
+pub mod witness_plane;
+pub mod witness_publication;
+pub mod witness_refinement;
+pub mod write_coordinator;
+pub mod xor_delta;
+
+#[cfg(test)]
+mod ssi_anomaly_tests;
+
+pub use begin_concurrent::{
+    ConcurrentHandle, ConcurrentPageState, ConcurrentRegistry, ConcurrentSavepoint, FcwResult,
+    MAX_CONCURRENT_WRITERS, PreparedConcurrentCommit, SharedConcurrentHandle, SsiResult,
+    concurrent_abort, concurrent_clear_page_state, concurrent_commit, concurrent_commit_with_ssi,
+    concurrent_free_page, concurrent_is_metadata_exempt, concurrent_mark_metadata_exempt,
+    concurrent_page_is_freed, concurrent_page_state, concurrent_prepare_write_page,
+    concurrent_read_page, concurrent_record_metadata_read, concurrent_restore_page_state,
+    concurrent_rollback_to_savepoint, concurrent_savepoint, concurrent_stage_prepared_write_page,
+    concurrent_track_write_conflict_page, concurrent_write_metadata_page, concurrent_write_page,
+    finalize_prepared_concurrent_commit_with_ssi, is_concurrent_mode,
+    prepare_concurrent_commit_with_ssi, validate_first_committer_wins,
+};
+pub use bocpd::{BocpdConfig, BocpdMonitor, ConjugateModel, HazardFunction, RegimeStats};
+pub use cache_aligned::{
+    CACHE_LINE_BYTES, CLAIMING_TIMEOUT_NO_PID_SECS, CLAIMING_TIMEOUT_SECS, CacheAligned, RcriEntry,
+    RcriOverflowError, RecentlyCommittedReadersIndex, SLOT_PAYLOAD_MASK, SLOT_TAG_MASK,
+    SLOT_TAG_SHIFT, SharedTxnSlot, SlotAcquireError, TAG_CLAIMING, TAG_CLEANING, TxnSlotArray,
+    decode_payload, decode_tag, encode_claiming, encode_cleaning, is_sentinel, rcri_bloom,
+    slot_mode, slot_state,
+};
+pub use cell_delta_wal::{
+    CELL_DELTA_CHECKSUM_SIZE, CELL_DELTA_FRAME_TYPE, CELL_DELTA_HEADER_SIZE,
+    CELL_DELTA_MAX_DATA_LEN, CELL_DELTA_MIN_FRAME_SIZE, CellDeltaOp, CellDeltaRecoverySummary,
+    CellDeltaWalFrame, deserialize_cell_delta_batch, serialize_cell_delta_batch,
+};
+pub use cell_routing::{
+    CellMvccMode, EscalationResult, PageTrackingState, RoutingContext, RoutingDecision,
+    RoutingReason, TxnEscalationTracker, escalate_to_page_level, get_cell_mvcc_mode,
+    set_cell_mvcc_mode, should_use_cell_path,
+};
+pub use cell_visibility::{
+    CellConflict, CellDelta, CellDeltaArena, CellDeltaIdx, CellDeltaKind, CellGcStats, CellKey,
+    CellVisibilityLog, MutationOutcome, can_be_logical_insert, will_be_logical_delete,
+};
+pub use compat::{
+    CompatMode, CoordinatorProbeResult, HybridShmState, ReadLockOutcome, RecoveryPlan,
+    UpdatedLegacyShm, begin_concurrent_check, choose_reader_slot,
+};
+pub use conflict_model::{
+    AMS_SKETCH_VERSION, AmsEvidenceLedger, AmsSketch, AmsSketchConfig, AmsWindowCollector,
+    AmsWindowCollectorConfig, AmsWindowEstimate, DEFAULT_AMS_R, DEFAULT_HEAVY_HITTER_K,
+    DEFAULT_NITRO_PRECISION, DEFAULT_ZIPF_MAX_ITERS, HeadTailDecomposition, HeavyHitterLedgerEntry,
+    InstrumentationCounters, MAX_AMS_R, MAX_HEAVY_HITTER_K, MAX_NITRO_PRECISION, MIN_AMS_R,
+    MIN_HEAVY_HITTER_K, MIN_NITRO_PRECISION, NITRO_SKETCH_VERSION, NitroSketch, NitroSketchConfig,
+    SpaceSavingEntry, SpaceSavingSummary, WindowCloseReason, ZIPF_S_MAX, ZIPF_S_MIN, ZipfMleResult,
+    ams_sign, birthday_conflict_probability_m2, birthday_conflict_probability_uniform,
+    compute_head_tail_decomposition, dedup_write_set, effective_collision_pool,
+    effective_w_index_multiplier, effective_w_leaf_split, effective_w_root_split, exact_m2, mix64,
+    p_abort_attempt, p_drift, pairwise_conflict_probability, policy_collision_mass_input,
+    tps_estimate, validate_ams_r, validate_heavy_hitter_k, validate_nitro_precision,
+    zipf_mle_from_ranked_counts,
+};
+pub use conformal_martingale::{ConformalMartingaleConfig, ConformalMartingaleMonitor};
+pub use core_types::{
+    CommitIndex, CommitLog, CommitRecord, DrainProgress, DrainResult, GcHorizonResult,
+    InProcessPageLockTable, LOCK_TABLE_SHARDS, OrphanedSlotCleanupStats, RebuildError,
+    RebuildResult, SlotCleanupResult, Transaction, TransactionMode, TransactionState, VersionArena,
+    VersionIdx, cleanup_and_raise_gc_horizon, cleanup_orphaned_slots, raise_gc_horizon,
+    try_cleanup_orphaned_slot, try_cleanup_sentinel_slot,
+};
+pub use deterministic_rebase::{
+    BaseRowReader, RebaseEligibility, RebaseError, RebaseResult, RebaseSchemaLookup, ReplayResult,
+    TableConstraints, UpdateExpressionCandidate, can_emit_update_expression,
+    check_rebase_eligibility, check_schema_epoch, deterministic_rebase, replay_update_expression,
+};
+pub use differential_privacy::{
+    DpEngine, DpError, DpMetrics, DpQueryResult, NoiseMechanism, PrivacyBudget, dp_metrics,
+    reset_dp_metrics, sensitivity,
+};
+pub use ebr::{
+    EbrMetrics, EbrMetricsSnapshot, EbrRetireQueue, GLOBAL_EBR_METRICS, ReaderPinSnapshot,
+    StaleReaderConfig, VersionGuard, VersionGuardRegistry, VersionGuardTicket,
+};
+pub use flat_combining::{
+    FcHandle, FlatCombiner, FlatCombiningMetrics, MAX_FC_SHARDS, MAX_FC_THREADS, OP_ADD, OP_READ,
+    ShardedFcHandle, ShardedFlatCombiner, flat_combining_metrics, reset_flat_combining_metrics,
+};
+pub use gc::{
+    GC_F_MAX_HZ, GC_F_MIN_HZ, GC_PAGES_BUDGET, GC_TARGET_CHAIN_LENGTH, GC_VERSIONS_BUDGET,
+    GcScheduler, GcTickResult, GcTodo, PruneResult, gc_tick, prune_page_chain,
+};
+pub use history_compression::{
+    CertificateVerificationError, CircuitBreakerEvent, CompressedPageHistory,
+    CompressedPageVersion, CompressedVersionData, HistoryCompressionError, MergeCertificate,
+    MergeCertificatePostState, MergeKind, VERIFIER_VERSION, are_intent_ops_independent,
+    circuit_breaker_check, collapse_join_max_updates, compress_page_history,
+    compute_footprint_digest, compute_op_digest, extract_join_max_constant, foata_normal_form,
+    generate_merge_certificate, is_join_max_int_update, is_mergeable_intent,
+    verify_merge_certificate,
+};
+pub use hot_witness_index::{
+    ColdPlaneMode, ColdWitnessStore, HotWitnessBucketEntry, HotWitnessIndex, bitset_to_slot_ids,
+};
+pub use index_regen::{
+    Collation, IndexDef, IndexKeyPart, IndexRegenError, IndexRegenOps, NoOpUniqueChecker,
+    UniqueChecker, apply_column_updates, compute_index_key, discard_stale_index_ops,
+    eval_rebase_expr, regenerate_index_ops,
+};
+pub use invariants::{
+    CHAIN_HEAD_EMPTY, CHAIN_HEAD_SHARDS, CasInstallResult, ChainHeadTable, SerializedWriteMutex,
+    SnapshotResolveTrace, TxnManager, VersionStore, VersionVisibilityRange, idx_to_version_pointer,
+    visible,
+};
+pub use left_right::{
+    LeftRight, LeftRightMetrics, LeftRightPair, LeftRightTriple, leftright_metrics,
+    reset_leftright_metrics,
+};
+pub use lifecycle::{BeginKind, CommitResponse, MvccError, Savepoint, TransactionManager};
+pub use materialize::{
+    DEFAULT_MATERIALIZATION_THRESHOLD, MaterializationError, MaterializationResult,
+    MaterializationTrigger, materialize_page, should_materialize_eagerly,
+};
+pub use observability::{
+    CasMetricsSnapshot, CasRetriesHistogram, SharedObserver, SnapshotReadMetricsSnapshot,
+    SsiMetricsSnapshot, VersionsTraversedHistogram, cas_metrics_snapshot, emit_conflict_resolved,
+    emit_fcw_base_drift, emit_page_lock_contention, emit_ssi_abort, mvcc_snapshot_established,
+    mvcc_snapshot_metrics_snapshot, mvcc_snapshot_released, record_cas_attempt,
+    record_snapshot_read_versions_traversed, record_ssi_abort, record_ssi_commit,
+    reset_cas_metrics, reset_mvcc_snapshot_metrics, reset_ssi_metrics, ssi_metrics_snapshot,
+};
+pub use physical_merge::{
+    CellOp, CellOpKind, FreeSpaceOp, HeaderOp, MergeError, MergeLadderResult, ParsedCell,
+    ParsedPage, RangeXorPatch, StructuredPagePatch, apply_patch, diff_parsed_pages,
+    evaluate_merge_ladder, merge_structured_patches, parse_btree_page, repack_btree_page,
+};
+pub use provenance::{
+    ProvenanceAnnotation, ProvenanceMetrics, ProvenanceMode, ProvenanceReport, ProvenanceToken,
+    ProvenanceTracker, TupleId, WhyNotResult, provenance_metrics, reset_provenance_metrics,
+    why_not,
+};
+pub use rcu::{
+    MAX_RCU_THREADS, QsbrHandle, QsbrRegistry, RcuCell, RcuMetrics, RcuPair, RcuTriple,
+    rcu_metrics, record_rcu_reclaimed, reset_rcu_metrics,
+};
+pub use regime_monitor::{RegimeMonitor, RegimeMonitorConfig};
+pub use retry_policy::{
+    BetaPosterior, ContentionBucketKey, DEFAULT_CANDIDATE_WAITS_MS, DEFAULT_STARVATION_THRESHOLD,
+    HazardModelParams, MAX_CONTENTION_BUCKETS, RetryAction, RetryController, RetryCostParams,
+    RetryEvidenceEntry, expected_loss_failnow, expected_loss_retry, gittins_index_approx,
+    gittins_threshold,
+};
+pub use rowid_alloc::{
+    AllocatorKey, ConcurrentRowIdAllocator, DEFAULT_RANGE_SIZE, LocalRowIdCache, RangeReservation,
+    RowIdAllocError, SQLITE_FULL, SQLITE_SCHEMA,
+};
+pub use seqlock::{
+    SeqLock, SeqLockPair, SeqLockTriple, SeqlockMetrics, reset_seqlock_metrics, seqlock_metrics,
+};
+pub use shared_lock_table::{
+    AcquireResult, DEFAULT_TABLE_CAPACITY, DrainStatus, RebuildLeaseError,
+    RebuildResult as SharedRebuildResult, SharedPageLockTable,
+};
+pub use sheaf_conformal::{
+    ConformalCalibratorConfig, ConformalOracleCalibrator, ConformalPrediction, InvariantScore,
+    OpportunityScore, OracleReport, PredictionSetEntry, Section, SheafObstruction, SheafResult,
+    check_sheaf_consistency, check_sheaf_consistency_with_chains,
+};
+pub use shm::{SharedMemoryLayout, ShmSnapshot};
+pub use sketch_telemetry::{
+    CMS_VERSION, CountMinSketch, CountMinSketchConfig, DEFAULT_ALLOC_SIZE_BUCKETS,
+    DEFAULT_CMS_DEPTH, DEFAULT_CMS_WIDTH, DEFAULT_LATENCY_BUCKETS_US, HISTOGRAM_VERSION,
+    HistogramSnapshot, MemoryAllocationTracker, MemoryTrackerSnapshot,
+    NITROSKETCH_STREAMING_VERSION, SketchTelemetryMetrics, SlidingWindowCms, SlidingWindowConfig,
+    SlidingWindowHistogram, SlidingWindowHistogramSnapshot, StreamingHistogram,
+    reset_sketch_telemetry_metrics, sketch_telemetry_metrics,
+};
+pub use ssi_abort_policy::{
+    AbortDecision, AbortDecisionEnvelope, ConformalCalibrator, ConformalConfig, CycleStatus,
+    DroHotPathDecision, DroLossMatrix, DroObservedRateKind, DroRadiusCertificate, DroRiskTolerance,
+    DroVolatilityTracker, DroVolatilityTrackerConfig, DroVolatilityTrackerError,
+    DroWindowObservation, LossMatrix, SsiDecisionCard, SsiDecisionCardDraft, SsiDecisionQuery,
+    SsiDecisionType, SsiEvidenceLedger, SsiFpMonitor, SsiFpMonitorConfig, SsiReadSetSummary,
+    TxnCost, Victim, VictimDecision, dro_wasserstein_radius, select_victim,
+};
+pub use ssi_validation::{
+    ActiveTxnView, CommittedReaderInfo, CommittedWriterInfo, DiscoveredEdge,
+    EvidenceRecordMetricsSnapshot, SsiAbortReason, SsiBusySnapshot, SsiEvidenceBudgetConfig,
+    SsiEvidenceRecordingMode, SsiState, SsiValidationOk, discover_incoming_edges,
+    discover_outgoing_edges, reset_ssi_evidence_metrics, set_ssi_evidence_budget_config,
+    set_ssi_evidence_recording_mode, ssi_evidence_budget_config, ssi_evidence_metrics_snapshot,
+    ssi_evidence_query, ssi_evidence_recording_mode, ssi_evidence_snapshot,
+    ssi_validate_and_publish,
+};
+pub use time_travel::{
+    TimeTravelError, TimeTravelSnapshot, TimeTravelTarget, create_time_travel_snapshot,
+    resolve_page_at_commit, resolve_timestamp_via_commit_log, resolve_timestamp_via_markers,
+};
+pub use two_phase_commit::{
+    COMMIT_MARKER_MAGIC, COMMIT_MARKER_MIN_SIZE, DatabaseId, GlobalCommitMarker, MAIN_DB_ID,
+    MAX_TOTAL_DATABASES, ParticipantState, PrepareResult, RecoveryAction, SQLITE_MAX_ATTACHED,
+    TEMP_DB_ID, TwoPhaseCoordinator, TwoPhaseError, TwoPhaseState,
+};
+pub use witness_hierarchy::{
+    HotWitnessIndexDerivationV1, HotWitnessIndexSizingV1, WitnessHierarchyConfigV1,
+    WitnessHotIndexManifestV1, WitnessSizingError, derive_range_keys, extract_prefix,
+    range_key_bucket_index, witness_key_canonical_bytes, witness_key_hash,
+};
+pub use witness_objects::{
+    AbortPolicy, AbortReason, AbortWitness, ColdPlaneRefinementResult, DependencyEdgeKind,
+    EcsCommitProof, EcsDependencyEdge, EcsReadWitness, EcsWriteWitness, EdgeKeyBasis,
+    HotPlaneCandidates, KeySummary, KeySummaryChunk, LogicalTime, WitnessDelta, WitnessDeltaKind,
+    WitnessParticipation, WriteKind, cold_plane_refine, hot_plane_discover,
+};
+pub use witness_plane::{WitnessSet, validate_txn_token, witness_keys_overlap};
+pub use witness_publication::{
+    ActiveSlotSnapshot, CommitMarkerStore, CommittedPublication, DefaultProofValidator,
+    GcEligibility, ProofCarryingCommit, ProofCarryingValidator, PublicationError, PublicationPhase,
+    ReservationId, ReservationToken, ValidationVerdict, WitnessGcCoordinator, WitnessPublisher,
+};
+pub use witness_refinement::{
+    RefinementBudget, RefinementDecision, RefinementPriority, RefinementResult, VoiMetrics,
+    refine_edges,
+};
+pub use write_coordinator::{
+    CommitWriteSet, CompatCommitRequest, CompatCommitResponse, CoordinatorLease, CoordinatorMode,
+    DEFAULT_MAX_BATCH_SIZE, DEFAULT_SPILL_THRESHOLD, NativePublishRequest, NativePublishResponse,
+    SpillHandle, SpillLoc, SpilledWriteSet, WriteCoordinator,
+};
+pub use xor_delta::{
+    DEFAULT_DELTA_THRESHOLD_PCT, DELTA_FIXED_OVERHEAD_BYTES, DELTA_HEADER_BYTES, DELTA_MAGIC,
+    DELTA_RUN_HEADER_BYTES, DELTA_SPARSE_OVERHEAD_PCT, DELTA_VERSION, DeltaEncoding, DeltaError,
+    DeltaThresholdConfig, SparseXorDeltaObject, count_nonzero_xor, decode_sparse_xor_delta,
+    encode_page_delta, encode_sparse_xor_delta, estimate_sparse_delta_size, max_delta_bytes,
+    reconstruct_chain_from_newest, use_delta,
+};
