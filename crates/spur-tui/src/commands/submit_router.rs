@@ -12,11 +12,12 @@
 //! Non-slash text routes to `Send`, assembling blocks by interleaving
 //! `Text` with `ResourceLink` blocks from `ranges`.
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::Value;
 use spur_acp::{ContentBlock, ResourceLink, SpurAgentCaps, TextContent};
 
 use crate::action::Action;
-use crate::components::input_bar::ProtectedRange;
+use crate::components::input_bar::{ImageAttachment, ProtectedRange, RangeKind};
 use crate::components::query_source::RetrievalAccept;
 
 use super::entry::Dispatch;
@@ -184,7 +185,7 @@ pub fn route_with_caps(
         // verbatim as prompts).
     }
 
-    let blocks = assemble_blocks(text, ranges);
+    let blocks = assemble_blocks(text, ranges, &[]);
     SubmitDecision::Send { blocks, interrupt }
 }
 
@@ -211,8 +212,12 @@ fn rest_after_first_token(text: &str) -> String {
     }
 }
 
-/// Walk `text` + sorted `ranges` interleaved → `[Text, ResourceLink, Text, …]`.
-pub fn assemble_blocks(text: &str, ranges: &[ProtectedRange]) -> Vec<ContentBlock> {
+/// Walk `text` + sorted `ranges` interleaved → `[Text, ResourceLink/Image, Text, …]`.
+pub fn assemble_blocks(
+    text: &str,
+    ranges: &[ProtectedRange],
+    images: &[ImageAttachment],
+) -> Vec<ContentBlock> {
     let mut out: Vec<ContentBlock> = Vec::new();
     let mut cursor = 0usize;
     for r in ranges {
@@ -221,10 +226,28 @@ pub fn assemble_blocks(text: &str, ranges: &[ProtectedRange]) -> Vec<ContentBloc
                 text[cursor..r.start].to_string(),
             )));
         }
-        out.push(ContentBlock::ResourceLink(ResourceLink::new(
-            r.name.clone(),
-            r.uri.clone(),
-        )));
+        match &r.kind {
+            RangeKind::ImageRef(id) => match images.iter().find(|att| att.id == *id) {
+                Some(att) => match encode_image_attachment(att) {
+                    Ok(block) => out.push(block),
+                    Err(err) => {
+                        tracing::error!("image encode failed for id={}: {err}", id);
+                        out.push(ContentBlock::Text(TextContent::new(format!(
+                            "[image encode error: {err}]"
+                        ))));
+                    }
+                },
+                None => {
+                    tracing::warn!("ImageRef(id={}) not found in images list", id);
+                }
+            },
+            _ => {
+                out.push(ContentBlock::ResourceLink(ResourceLink::new(
+                    r.name.clone(),
+                    r.uri.clone(),
+                )));
+            }
+        }
         cursor = r.end;
     }
     if cursor < text.len() {
@@ -232,10 +255,38 @@ pub fn assemble_blocks(text: &str, ranges: &[ProtectedRange]) -> Vec<ContentBloc
             text[cursor..].to_string(),
         )));
     }
-    if out.is_empty() {
+    if out.is_empty() && ranges.is_empty() {
         out.push(ContentBlock::Text(TextContent::new(text.to_string())));
     }
     out
+}
+
+fn encode_image_attachment(att: &ImageAttachment) -> anyhow::Result<ContentBlock> {
+    use image::imageops::FilterType;
+
+    let bytes = std::fs::read(&att.source_path)?;
+    let mut image = image::load_from_memory(&bytes)?;
+
+    const MAX_DIM: u32 = 2048;
+    if image.width() > MAX_DIM || image.height() > MAX_DIM {
+        image = image.resize(MAX_DIM, MAX_DIM, FilterType::Lanczos3);
+    }
+
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut cursor, image::ImageFormat::Png)?;
+    let png_bytes = cursor.into_inner();
+
+    const MAX_B64_BYTES: usize = 10 * 1024 * 1024;
+    let encoded_len = base64::encoded_len(png_bytes.len(), true)
+        .ok_or_else(|| anyhow::anyhow!("image too large to base64-encode"))?;
+    if encoded_len > MAX_B64_BYTES {
+        anyhow::bail!("image too large ({encoded_len} bytes base64); max 10 MB");
+    }
+
+    let data = STANDARD.encode(&png_bytes);
+    Ok(ContentBlock::Image(
+        agent_client_protocol::schema::ImageContent::new(data, "image/png"),
+    ))
 }
 
 /// Flatten blocks into a human-readable string for the local trace echo.
@@ -262,6 +313,80 @@ pub fn blocks_preview(blocks: &[ContentBlock]) -> String {
 /// so future divergence (e.g. CLI-specific serialization) is cheap.
 pub fn blocks_to_text(blocks: &[ContentBlock]) -> String {
     blocks_preview(blocks)
+}
+
+#[cfg(test)]
+mod image_block_tests {
+    use super::*;
+    use crate::components::input_bar::{ImageAttachment, ProtectedRange, RangeKind};
+
+    fn make_png_file() -> (tempfile::NamedTempFile, (u32, u32)) {
+        let tmp = tempfile::NamedTempFile::with_suffix(".png").unwrap();
+        let img = image::RgbaImage::from_raw(2, 2, vec![128u8; 16]).unwrap();
+        let dyn_img = image::DynamicImage::ImageRgba8(img);
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        dyn_img
+            .write_to(&mut cursor, image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(tmp.path(), cursor.into_inner()).unwrap();
+        (tmp, (2, 2))
+    }
+
+    #[test]
+    fn assemble_blocks_emits_image_block_for_image_ref() {
+        let (tmp, dims) = make_png_file();
+        let label = "[Image #1 - 2x2]";
+        let attachment = ImageAttachment {
+            id: 0,
+            source_path: tmp.path().to_path_buf(),
+            mime_type: "image/png".to_string(),
+            dimensions: dims,
+            byte_size: 0,
+            owned_temp: None,
+        };
+        let images = vec![attachment];
+        let text = format!("before {} after", label);
+        let ranges = vec![ProtectedRange {
+            start: "before ".len(),
+            end: "before ".len() + label.len(),
+            kind: RangeKind::ImageRef(0),
+            uri: String::new(),
+            name: label.to_string(),
+        }];
+
+        let blocks = assemble_blocks(&text, &ranges, &images);
+
+        assert_eq!(blocks.len(), 3, "expected Text + Image + Text");
+        assert!(matches!(&blocks[0], ContentBlock::Text(_)));
+        match &blocks[1] {
+            ContentBlock::Image(image) => {
+                assert_eq!(image.mime_type, "image/png");
+                assert!(!image.data.is_empty());
+            }
+            other => panic!("expected Image block, got {other:?}"),
+        }
+        assert!(matches!(&blocks[2], ContentBlock::Text(_)));
+    }
+
+    #[test]
+    fn assemble_blocks_missing_image_id_no_panic() {
+        let label = "[Image #99 - 2x2]";
+        let text = format!("before {} after", label);
+        let ranges = vec![ProtectedRange {
+            start: "before ".len(),
+            end: "before ".len() + label.len(),
+            kind: RangeKind::ImageRef(99),
+            uri: String::new(),
+            name: label.to_string(),
+        }];
+        let images = vec![];
+
+        let blocks = assemble_blocks(&text, &ranges, &images);
+
+        assert!(blocks
+            .iter()
+            .all(|block| !matches!(block, ContentBlock::Image(_))));
+    }
 }
 
 #[cfg(test)]
