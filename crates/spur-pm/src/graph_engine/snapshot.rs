@@ -5,6 +5,8 @@ use petgraph::{Directed, Direction};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
+use crate::beads_crate::dependency_compat::get_dependencies_full_for_issues;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DependencyKind {
     Blocks,
@@ -163,7 +165,7 @@ pub fn load_graph_snapshot(
     let mut issues = storage.list_issues(&filters)?;
     let ids: Vec<String> = issues.iter().map(|issue| issue.id.clone()).collect();
     let mut labels_by_id = storage.get_labels_for_issues(&ids)?;
-    let mut deps_by_id = storage.get_dependencies_full_for_issues(&ids)?;
+    let mut deps_by_id = get_dependencies_full_for_issues(storage, &ids)?;
 
     let mut snap = GraphSnapshot::new(label_filter.map(|s| s.to_string()));
     for issue in &mut issues {
