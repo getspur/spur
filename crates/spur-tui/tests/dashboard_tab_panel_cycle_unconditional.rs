@@ -70,7 +70,7 @@ fn ctrl_e_cycles_examples_when_input_empty() {
 }
 
 #[test]
-fn ctrl_e_passes_through_when_input_non_empty() {
+fn ctrl_e_in_non_empty_input_does_not_cycle_or_type_literal() {
     let mut dashboard = DashboardView::new();
     dashboard.handle_key(key(KeyCode::Char('x'), KeyModifiers::NONE), &test_ctx());
     dashboard
@@ -83,7 +83,7 @@ fn ctrl_e_passes_through_when_input_non_empty() {
     assert_eq!(dashboard.current_example_prompt_for_test(), example_before);
     assert_eq!(
         dashboard.input_bar_text_for_test(),
-        "drafte",
-        "Ctrl+E with non-empty input must stay composer-owned"
+        "draft",
+        "Ctrl+E with non-empty input must stay composer-owned without typing"
     );
 }
