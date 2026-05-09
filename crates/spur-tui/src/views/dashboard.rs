@@ -1661,6 +1661,7 @@ impl DashboardView {
                             &mut self.input_bar,
                             &env,
                         );
+                        let pending_images = self.input_bar.take_pending_images();
                         let (captured, ranges, captured_interrupt) = self
                             .input_bar
                             .take_submit_capture()
@@ -1669,6 +1670,7 @@ impl DashboardView {
                         match route(
                             &captured,
                             &ranges,
+                            &pending_images,
                             &self.command_registry,
                             captured_interrupt,
                         ) {
