@@ -969,6 +969,13 @@ async fn run() -> Result<()> {
                 }
             }
 
+            // Resolve the config path that seeded `config` so the TUI can
+            // persist runtime changes (e.g., `/theme <name>`) back to disk.
+            let config_path = std::env::current_dir()
+                .ok()
+                .map(|cwd| cwd.join(".spur").join("config.toml"))
+                .filter(|p| p.exists());
+
             // Run TUI (blocks). Capture the result so we can run structured
             // shutdown before propagating any error — otherwise `?` would
             // leak the orchestrator/dispatcher/translator tasks.
@@ -980,6 +987,7 @@ async fn run() -> Result<()> {
                 config_arc,
                 initial_license_state,
                 landing.clone(),
+                config_path,
             )
             .await;
 

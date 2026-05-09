@@ -102,6 +102,7 @@ fn pro_seeded_app_grants_pro_key_at_startup() {
         Arc::new(spur_acp::SpurConfig::default()),
         pro_license_state_event(),
         spur_tui::landing::LandingDecision::ShowDashboard,
+        None,
     );
 
     assert!(
