@@ -121,6 +121,12 @@ pub fn try_format_input(raw: &Value) -> Option<ToolInputDisplay> {
             return Some(ToolInputDisplay::Path(path.to_string()));
         }
     }
+    if let Some(description) = obj.get("description").and_then(Value::as_str) {
+        return Some(ToolInputDisplay::Text(description.to_string()));
+    }
+    if let Some(prompt) = obj.get("prompt").and_then(Value::as_str) {
+        return Some(ToolInputDisplay::Text(prompt.to_string()));
+    }
     None
 }
 
