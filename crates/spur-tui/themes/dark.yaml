@@ -3,16 +3,16 @@ name: dark
 
 palette:
   bg:
-    rgb: "#000000"
+    rgb: "#0a0a0a"
     ansi: black
   bg_panel:
-    rgb: "#0c0c0c"
+    rgb: "#141414"
     ansi: black
   bg_selection:
     rgb: "#005f87"
     ansi: blue
   bg_overlay:
-    rgb: "#181818"
+    rgb: "#1c1c1c"
     ansi: black
   fg:
     rgb: "#ffffff"
@@ -21,7 +21,7 @@ palette:
     rgb: "#808080"
     ansi: gray
   fg_subtle:
-    rgb: "#606060"
+    rgb: "#737373"
     ansi: dark-gray
   fg_on_accent:
     rgb: "#000000"
@@ -33,7 +33,7 @@ palette:
     rgb: "#000000"
     ansi: black
   fg_on_danger:
-    rgb: "#ffffff"
+    rgb: "#000000"
     ansi: white
   fg_on_info:
     rgb: "#ffffff"
@@ -42,37 +42,37 @@ palette:
     rgb: "#ffffff"
     ansi: white
   border:
-    rgb: "#606060"
+    rgb: "#525252"
     ansi: dark-gray
   border_focused:
     rgb: "#00ffff"
     ansi: cyan
   accent:
-    rgb: "#00ffff"
+    rgb: "#38bdf8"
     ansi: cyan
   accent_alt:
-    rgb: "#ff00ff"
+    rgb: "#c084fc"
     ansi: magenta
   success:
-    rgb: "#00ff00"
+    rgb: "#4ade80"
     ansi: green
   warning:
-    rgb: "#ffff00"
+    rgb: "#fbbf24"
     ansi: yellow
   danger:
-    rgb: "#ff0000"
+    rgb: "#f87171"
     ansi: red
   info:
-    rgb: "#0000ff"
+    rgb: "#60a5fa"
     ansi: blue
   highlight:
-    rgb: "#ffff80"
+    rgb: "#fde047"
     ansi: light-yellow
   diff_add:
-    rgb: "#00ff00"
+    rgb: "#34d399"
     ansi: green
   diff_del:
-    rgb: "#ff0000"
+    rgb: "#fb7185"
     ansi: red
 
 tokens:

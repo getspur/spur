@@ -33,7 +33,7 @@ palette:
     rgb: "#000000"
     ansi: black
   fg_on_danger:
-    rgb: "#ffffff"
+    rgb: "#000000"
     ansi: white
   fg_on_info:
     rgb: "#ffffff"
