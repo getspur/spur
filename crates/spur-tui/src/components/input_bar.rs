@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -207,6 +208,56 @@ pub struct InputBar {
 const BORDER_OVERHEAD_ROWS: u16 = 2; // Borders::TOP | Borders::BOTTOM
 const BORDER_OVERHEAD_COLS: u16 = 0; // no left/right side borders
 const PASTE_STORE_CAP: usize = 50;
+
+/// Read the current clipboard image and write it to a temp PNG file.
+///
+/// `owned_temp` keeps the file path alive until the attachment is dropped.
+#[allow(dead_code)]
+fn try_paste_clipboard_image() -> anyhow::Result<ImageAttachment> {
+    let mut clipboard = arboard::Clipboard::new()?;
+    let image_data = clipboard.get_image()?;
+    let width = image_data.width as u32;
+    let height = image_data.height as u32;
+
+    let rgba = image::RgbaImage::from_raw(width, height, image_data.bytes.into_owned())
+        .ok_or_else(|| anyhow::anyhow!("clipboard image has invalid dimensions"))?;
+    let mut image = image::DynamicImage::ImageRgba8(rgba);
+
+    const MAX_DIM: u32 = 2048;
+    if image.width() > MAX_DIM || image.height() > MAX_DIM {
+        image = image.resize(MAX_DIM, MAX_DIM, image::imageops::FilterType::Lanczos3);
+    }
+
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut cursor, image::ImageFormat::Png)?;
+    let png_bytes = cursor.into_inner();
+
+    const MAX_B64_BYTES: usize = 10 * 1024 * 1024;
+    let encoded_len = base64::encoded_len(png_bytes.len(), true)
+        .ok_or_else(|| anyhow::anyhow!("image too large to base64-encode"))?;
+    if encoded_len > MAX_B64_BYTES {
+        anyhow::bail!("image too large ({encoded_len} bytes base64); max 10 MB");
+    }
+
+    let mut temp_file = tempfile::Builder::new()
+        .prefix("spur-img-")
+        .suffix(".png")
+        .tempfile()?;
+    temp_file.write_all(&png_bytes)?;
+    let (_file, temp_path) = temp_file.into_parts();
+    let source_path = temp_path.to_path_buf();
+    let byte_size = png_bytes.len();
+    let dimensions = (image.width(), image.height());
+
+    Ok(ImageAttachment {
+        id: 0,
+        source_path,
+        mime_type: "image/png".into(),
+        dimensions,
+        byte_size,
+        owned_temp: Some(temp_path),
+    })
+}
 
 #[cfg(test)]
 fn default_paste_burst_enabled() -> bool {
@@ -2201,6 +2252,16 @@ mod image_tests {
             (ranges[1].start, ranges[1].end),
             (label.len(), label.len() + 4)
         );
+    }
+
+    #[test]
+    fn image_attachment_from_rgba_bytes_dimensions() {
+        let rgba_bytes = vec![0u8; 4 * 4 * 4];
+        let img = image::RgbaImage::from_raw(4, 4, rgba_bytes).unwrap();
+        let dyn_img = image::DynamicImage::ImageRgba8(img);
+
+        assert_eq!(dyn_img.width(), 4);
+        assert_eq!(dyn_img.height(), 4);
     }
 }
 
