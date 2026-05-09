@@ -7857,10 +7857,11 @@ fn build_connection_from_transport(
     permission_tx: Option<tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>>,
 ) -> Box<dyn AgentConnection> {
     match config.transport {
-        TransportKind::Acp => Box::new(NativeAcpConnection::new(
+        TransportKind::Acp => Box::new(NativeAcpConnection::new_with_kind(
             config.name.clone(),
             config.command.clone(),
             spawn_args,
+            config.kind,
             permission_tx,
         )),
         TransportKind::Stdio => Box::new(StdioAdapter::new(
