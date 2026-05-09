@@ -26,4 +26,5 @@ semver = "1"
 tempfile = "3"
 
 [dev-dependencies]
+fsqlite = "0.1.2"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
