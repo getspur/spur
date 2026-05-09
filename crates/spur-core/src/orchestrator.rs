@@ -3266,6 +3266,7 @@ impl Orchestrator {
                 self.funnel.clone(),
                 self.review_sink.clone(),
                 self.pm_service.clone(),
+                self.mcp_feature_gate(),
                 self.cancellation_control.clone(),
                 self.peer_mailbox.clone(),
                 self.fault_injection_hooks.clone(),
@@ -5186,6 +5187,7 @@ impl Orchestrator {
             self.funnel.clone(),
             self.review_sink.clone(),
             self.pm_service.clone(),
+            self.mcp_feature_gate(),
             self.cancellation_control.clone(),
             self.peer_mailbox.clone(),
             self.fault_injection_hooks.clone(),
@@ -5536,6 +5538,7 @@ impl Orchestrator {
             self.funnel.clone(),
             self.review_sink.clone(),
             self.pm_service.clone(),
+            self.mcp_feature_gate(),
             self.cancellation_control.clone(),
             self.peer_mailbox.clone(),
             self.fault_injection_hooks.clone(),
@@ -6317,6 +6320,7 @@ impl Orchestrator {
         funnel: crate::event_funnel::FunnelHandle,
         review_sink: ReviewSink,
         pm_service: Option<Arc<PmService>>,
+        feature_gate: Arc<spur_license::FeatureGate>,
         cancellation_control: CancellationControl,
         peer_mailbox: Option<crate::peer_mailbox::PeerMailboxBundle>,
         fault_injection_hooks: FaultInjectionHooks,
@@ -6369,6 +6373,7 @@ impl Orchestrator {
             let funnel = funnel.clone();
             let review_sink = review_sink.clone();
             let pm_service = pm_service.clone();
+            let feature_gate = Arc::clone(&feature_gate);
             let last_refresh_at = Arc::clone(&last_refresh_at);
             let peer_mailbox = peer_mailbox.clone();
             let fault_injection_hooks = fault_injection_hooks.clone();
@@ -6566,6 +6571,7 @@ impl Orchestrator {
                         enable_worker_mcp,
                         worker_mcp_fetcher,
                         pm_service.clone(),
+                        feature_gate,
                     ) => r,
                 };
                 drop(dispatch_lease_heartbeat_handle);
@@ -6691,6 +6697,7 @@ impl Orchestrator {
         enable_worker_mcp: Option<bool>,
         worker_mcp_fetcher: WorkerMcpFetcher,
         pm_service: Option<Arc<PmService>>,
+        feature_gate: Arc<spur_license::FeatureGate>,
     ) -> (DelegationResult, Option<ExecutorId>) {
         // Bind cache for the flush helpers (`finalize` + abort path)
         // which look up cached servers by brain_session_id without
@@ -6832,6 +6839,8 @@ impl Orchestrator {
                     dispatched_base_oid_tx: dispatched_base_oid_tx.clone(),
                     fault_injection_hooks: &fault_injection_hooks,
                     worker_mcp_servers: &worker_mcp_dispatch_vec,
+                    pm_service: pm_service.as_deref(),
+                    feature_gate: feature_gate.as_ref(),
                 },
                 &mut worktrees,
                 &funnel,
@@ -8032,6 +8041,8 @@ struct WorkerAttemptCtx<'a> {
     /// delegation request set `enable_worker_mcp = Some(true)`. Resolved
     /// once in `execute_delegation` so retries reuse the same token URL.
     worker_mcp_servers: &'a [McpServer],
+    pm_service: Option<&'a PmService>,
+    feature_gate: &'a spur_license::FeatureGate,
 }
 
 /// Returns `Ok(WorkerAttemptOutcome)` for any flow that produced a
@@ -8150,6 +8161,16 @@ async fn run_one_worker_attempt(
         &dispatched_base_oid,
         &overlays,
     );
+    spur_mcp::plan::emit_worker_started_audit(
+        ctx.pm_service.map(|pm| pm as &dyn spur_mcp::plan::PmLike),
+        &ctx.issue_id,
+        ctx.feature_gate,
+        ctx.request_id,
+        &worktree_info.branch,
+        &worker_session.0,
+        &dispatched_base_oid,
+    )
+    .await;
 
     // 2. Spawn worker agent in worktree via AgentConnection.
     // Workers never receive a permission_tx, so L2 auto-approve is
