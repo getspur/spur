@@ -147,7 +147,12 @@ pub fn dispatch_session_update<F: Fn() -> String>(
                     "ToolCallUpdate before ToolCall; synthesizing Act"
                 );
                 let tool = tcu.fields.title.clone().unwrap_or_else(|| "unknown".into());
-                let family = adapter::ToolFamily::Unknown;
+                let family = match (tcu.fields.title.as_deref(), tcu.fields.kind) {
+                    (Some(title), Some(kind)) => {
+                        adapter::classify_tool_parts(title, kind, ctx.agent_kind)
+                    }
+                    _ => adapter::ToolFamily::Unknown,
+                };
                 let input = tcu
                     .fields
                     .raw_input
@@ -345,20 +350,30 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::{Content, ToolCall, ToolCallUpdate, ToolCallUpdateFields};
+    use agent_client_protocol::schema::{
+        Content, ToolCall, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+    };
     use spur_acp::{
-        ContentBlock, SessionUpdate, TextContent, ToolCallContent, ToolCallId, ToolCallStatus,
+        ContentBlock, SessionNotification, SessionUpdate, TextContent, ToolCallContent, ToolCallId,
+        ToolCallStatus,
     };
     use std::collections::HashMap;
 
-    fn ctx<'a>(tool_depth: &'a mut HashMap<String, u8>) -> DispatchCtx<'a, impl Fn() -> String> {
+    fn ctx_for<'a>(
+        tool_depth: &'a mut HashMap<String, u8>,
+        agent_kind: AgentKind,
+    ) -> DispatchCtx<'a, impl Fn() -> String> {
         DispatchCtx {
             agent_name: "kimi",
-            agent_kind: AgentKind::Generic,
+            agent_kind,
             now_stamp: || "10:00".to_string(),
             tool_depth,
             skip_plan_trace: false,
         }
+    }
+
+    fn ctx<'a>(tool_depth: &'a mut HashMap<String, u8>) -> DispatchCtx<'a, impl Fn() -> String> {
+        ctx_for(tool_depth, AgentKind::Generic)
     }
 
     fn text_tool_content(text: &str) -> ToolCallContent {
@@ -428,6 +443,80 @@ mod tests {
             entries[0].text.contains("Cargo.toml"),
             "expected synthesized Act to keep ToolCallUpdate content, got {:?}",
             entries[0].text
+        );
+    }
+
+    #[test]
+    fn tool_call_update_before_tool_call_uses_update_kind_for_family() {
+        let id = ToolCallId::new("call-before-kind");
+        let mut trace = ReactTrace::new();
+        let mut tool_depth = HashMap::new();
+        let mut ctx = ctx(&mut tool_depth);
+
+        let update = ToolCallUpdate::new(
+            id,
+            ToolCallUpdateFields::new()
+                .title("Delegating to agent 'generalist'")
+                .kind(ToolKind::Think)
+                .status(ToolCallStatus::InProgress)
+                .content(vec![text_tool_content("agent: generalist")]),
+        );
+        dispatch_session_update(&mut trace, &SessionUpdate::ToolCallUpdate(update), &mut ctx);
+
+        let entries = trace.entries_for_test();
+        assert_eq!(entries.len(), 1);
+        assert!(
+            matches!(
+                &entries[0].kind,
+                TraceKind::Act {
+                    family: adapter::ToolFamily::Think,
+                    ..
+                }
+            ),
+            "expected synthesized Act to preserve ToolCallUpdate kind"
+        );
+    }
+
+    #[test]
+    fn gemini_delegate_act_keeps_compact_display_text_after_standardization() {
+        let mut standardizer = adapter::SessionEventStandardizer::for_agent(AgentKind::Gemini);
+        let standardized = standardizer.standardize(SessionNotification::new(
+            "session",
+            SessionUpdate::ToolCall(
+                ToolCall::new("invoke-agent", "Delegating to agent 'generalist'")
+                    .kind(ToolKind::Think)
+                    .status(ToolCallStatus::InProgress),
+            ),
+        ));
+
+        let mut trace = ReactTrace::new();
+        let mut tool_depth = HashMap::new();
+        let mut ctx = ctx_for(&mut tool_depth, AgentKind::Gemini);
+        dispatch_session_update(&mut trace, &standardized.update, &mut ctx);
+
+        let entries = trace.entries_for_test();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].text, "agent: generalist",
+            "compact/activity trace uses TraceEntry.text for Act rows"
+        );
+        assert!(
+            matches!(&entries[0].kind, TraceKind::Act { input: adapter::ToolInputDisplay::Text(text), .. } if text == "agent: generalist"),
+            "expected Gemini adapter input to carry the delegated agent name"
+        );
+
+        let rendered: String = trace
+            .build_compact_lines_for_tests(80)
+            .iter()
+            .flat_map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref().to_string())
+            })
+            .collect();
+        assert!(
+            rendered.contains("agent: generalist"),
+            "compact/activity row should not be blank: {rendered:?}"
         );
     }
 }
