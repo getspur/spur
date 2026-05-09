@@ -150,10 +150,26 @@ args = []
 session_mode = "bypassPermissions"
 
 [agents.entries.delegation]
-good_for = []
-avoid_for = []
-strengths = []
-limitations = []
+good_for = [
+    "architecture",
+    "code-review",
+    "synthesis",
+    "big-picture-planning",
+    "multi-file-design",
+    "spec-writing",
+    "complex-refactor",
+    "cross-cutting-investigation",
+]
+avoid_for = [
+    "mechanical-single-file-edits",
+    "small-implementation-tasks",
+]
+strengths = [
+    "long-context",
+    "thorough-review",
+    "synthesis-across-files",
+]
+limitations = ["higher-cost-per-token"]
 inherit_defaults = true
 
 [[agents.entries]]
@@ -225,10 +241,28 @@ args = []
 session_mode = "full-auto"
 
 [agents.entries.delegation]
-good_for = []
-avoid_for = []
-strengths = []
-limitations = []
+good_for = [
+    "implementation",
+    "single-file-edits",
+    "mechanical-refactor",
+    "test-writing",
+    "bug-fix",
+    "small-features",
+    "boilerplate",
+    "spec-driven-execution",
+]
+avoid_for = [
+    "architecture-design",
+    "cross-cutting-refactor",
+    "synthesis",
+    "code-review-of-large-changesets",
+]
+strengths = [
+    "fast",
+    "low-cost",
+    "focused-edits",
+]
+limitations = ["shorter-effective-context"]
 inherit_defaults = true
 
 [[agents.entries]]
@@ -327,7 +361,11 @@ inherit_defaults = true
 [[agents.entries]]
 name = "kimi"
 command = "kimi"
-args = ["-y", "--afk", "acp"]
+args = [
+    "-y",
+    "--afk",
+    "acp",
+]
 transport = "acp"
 kind = "generic"
 role = "both"
@@ -392,3 +430,21 @@ inline_wait_ms = 0
 
 [spur]
 auto_merge_approved_plans = false
+plan_pending_grace_secs = 3600
+dispatch_lease_secs = 600
+dispatch_lease_heartbeat_secs = 200
+
+[tui]
+edit_mode = "vim"
+
+[log]
+level = "warn,spur_core::orchestrator=info"
+max_file_bytes = 8388608
+max_files = 3
+buffered_lines_limit = 8192
+child_stderr_buffered_lines_limit = 256
+child_stderr_max_bytes = 2621440
+child_stderr_max_files = 3
+events_max_total_bytes = 67108864
+event_replay_horizon_secs = 604800
+child_stderr_pipe = true
