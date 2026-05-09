@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -11,6 +12,7 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 use spur_acp::config::EditorMode;
+use tempfile::TempPath;
 use tui_textarea::{CursorMove, Input, Key, TextArea};
 
 use crate::components::completion_trigger::IntentEvent;
@@ -26,11 +28,18 @@ pub enum RangeKind {
     Atom,
     /// Pasted block; on submit, replace placeholder with `pastes[id]`.
     PasteRef(usize),
+    /// Inline image attachment; on submit, replaced with ContentBlock::Image.
+    #[serde(skip)]
+    ImageRef(usize),
 }
 
 impl RangeKind {
     fn is_atom(&self) -> bool {
         matches!(self, Self::Atom)
+    }
+
+    fn skip_kind_field(&self) -> bool {
+        self.is_atom() || matches!(self, Self::ImageRef(_))
     }
 }
 
@@ -41,10 +50,20 @@ impl RangeKind {
 pub struct ProtectedRange {
     pub start: usize,
     pub end: usize,
-    #[serde(default, skip_serializing_if = "RangeKind::is_atom")]
+    #[serde(default, skip_serializing_if = "RangeKind::skip_kind_field")]
     pub kind: RangeKind,
     pub uri: String,
     pub name: String,
+}
+
+#[derive(Debug)]
+pub struct ImageAttachment {
+    pub id: usize,
+    pub source_path: PathBuf,
+    pub mime_type: String,
+    pub dimensions: (u32, u32),
+    pub byte_size: usize,
+    pub owned_temp: Option<TempPath>,
 }
 
 /// Editing mode for the input bar.
@@ -2009,6 +2028,9 @@ fn expand_paste_refs(
                     expanded.push_str(&text[range.start..range.end]);
                 }
             }
+            RangeKind::ImageRef(_) => {
+                expanded.push_str(&text[range.start..range.end]);
+            }
         }
         cursor = range_end;
     }
@@ -2023,6 +2045,35 @@ fn expand_paste_refs(
 impl Default for InputBar {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn image_attachment_fields_accessible() {
+        let a = ImageAttachment {
+            id: 0,
+            source_path: PathBuf::from("/tmp/test.png"),
+            mime_type: "image/png".to_string(),
+            dimensions: (800, 600),
+            byte_size: 1024,
+            owned_temp: None,
+        };
+
+        assert_eq!(a.id, 0);
+        assert_eq!(a.mime_type, "image/png");
+        assert_eq!(a.dimensions, (800, 600));
+    }
+
+    #[test]
+    fn range_kind_image_ref_is_not_atom() {
+        let k = RangeKind::ImageRef(3);
+
+        assert!(!k.is_atom());
     }
 }
 
