@@ -12,8 +12,8 @@ spur-acp dispatch table to flag UNHANDLED variants that would silently
 drop in the TUI today.
 
 Sources of truth for the mapping (do not drift):
-  - crates/spur-acp/src/connection/native.rs::session_update_variant_name (line 1903)
-  - crates/spur-tui/src/components/react_trace/dispatch.rs::dispatch_session_update (line 45)
+  - crates/spur-acp/src/connection/native.rs::session_update_variant_name
+  - crates/spur-tui/src/components/react_trace/dispatch.rs::dispatch_session_update
 
 Usage:
   python3 scripts/simulate_kimi_acp.py [--yolo] [--prompt TEXT]
@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -98,14 +99,22 @@ DEFAULT_PROMPT = (
 
 # ── JSON-RPC plumbing ──────────────────────────────────────────────────────
 
-def make_request(id_: int, method: str, params: Optional[dict] = None) -> dict:
+JsonRpcId = str | int
+
+
+def new_request_id() -> str:
+    """Match the Rust ACP SDK, which uses UUID string JSON-RPC ids."""
+    return str(uuid.uuid4())
+
+
+def make_request(id_: JsonRpcId, method: str, params: Optional[dict] = None) -> dict:
     msg: dict[str, Any] = {"jsonrpc": "2.0", "id": id_, "method": method}
     if params is not None:
         msg["params"] = params
     return msg
 
 
-def make_response(id_: int, result: Optional[dict] = None,
+def make_response(id_: JsonRpcId, result: Optional[dict] = None,
                   error: Optional[dict] = None) -> dict:
     msg: dict[str, Any] = {"jsonrpc": "2.0", "id": id_}
     if error is not None:
@@ -113,6 +122,223 @@ def make_response(id_: int, result: Optional[dict] = None,
     else:
         msg["result"] = result if result is not None else {}
     return msg
+
+
+def slice_text(text: str, line: Optional[int], limit: Optional[int]) -> str:
+    """Mirror NativeAcpConnection's fs/read_text_file line slicing."""
+    lines = text.splitlines()
+    start = max((line or 1) - 1, 0)
+    selected = lines[start:]
+    if limit is not None:
+        selected = selected[:max(limit, 0)]
+    return "\n".join(selected)
+
+
+class ProbeRequestError(Exception):
+    def __init__(self, code: int, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def _optional_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+class TerminalState:
+    def __init__(self, proc: subprocess.Popen, output_byte_limit: Optional[int]):
+        assert proc.stdout is not None and proc.stderr is not None
+        self.proc = proc
+        self.output_byte_limit = output_byte_limit
+        self.output = ""
+        self.truncated = False
+        self._lock = threading.Lock()
+        self._stdout = threading.Thread(
+            target=self._read_stream, args=(proc.stdout,), daemon=True)
+        self._stderr = threading.Thread(
+            target=self._read_stream, args=(proc.stderr,), daemon=True)
+        self._stdout.start()
+        self._stderr.start()
+
+    def _read_stream(self, stream: Any) -> None:
+        while True:
+            chunk = stream.read(4096)
+            if not chunk:
+                return
+            self.append(chunk)
+
+    def append(self, text: str) -> None:
+        with self._lock:
+            self.output += text
+            if self.output_byte_limit is not None and len(self.output) > self.output_byte_limit:
+                self.output = self.output[-self.output_byte_limit:]
+                self.truncated = True
+
+    def exit_status(self) -> Optional[dict]:
+        code = self.proc.poll()
+        if code is None:
+            return None
+        if code < 0:
+            try:
+                sig = signal.Signals(-code).name
+            except ValueError:
+                sig = str(-code)
+            return {"signal": sig}
+        return {"exitCode": code}
+
+    def output_response(self) -> dict:
+        with self._lock:
+            result = {"output": self.output, "truncated": self.truncated}
+        status = self.exit_status()
+        if status is not None:
+            result["exitStatus"] = status
+        return result
+
+    def wait_response(self) -> dict:
+        self.proc.wait()
+        return self.exit_status() or {}
+
+    def kill(self) -> None:
+        if self.proc.poll() is None:
+            self.proc.kill()
+
+
+class ProbeContext:
+    """Client-side handlers for requests that `kimi acp` sends to SPUR."""
+
+    def __init__(self, cwd: Path, allow_writes: bool = False):
+        self.cwd = cwd
+        self.allow_writes = allow_writes
+        self.terminals: dict[str, TerminalState] = {}
+
+    def handle_client_request(self, req: dict) -> dict:
+        method = req.get("method", "")
+        params = req.get("params", {}) or {}
+        if method == "fs/read_text_file":
+            return self.read_text_file(params)
+        if method == "fs/write_text_file":
+            return self.write_text_file(params)
+        if method == "terminal/create":
+            return self.terminal_create(params)
+        if method == "terminal/output":
+            return self.terminal_output(params)
+        if method == "terminal/wait_for_exit":
+            return self.terminal_wait_for_exit(params)
+        if method == "terminal/kill":
+            return self.terminal_kill(params)
+        if method == "terminal/release":
+            return self.terminal_release(params)
+        raise ProbeRequestError(-32601, f"probe does not implement {method}")
+
+    def resolve_path(self, raw_path: str) -> Path:
+        path = Path(raw_path).expanduser()
+        if path.is_absolute():
+            return path
+        return self.cwd.joinpath(path)
+
+    def read_text_file(self, params: dict) -> dict:
+        raw_path = params.get("path")
+        if not isinstance(raw_path, str) or not raw_path:
+            raise ProbeRequestError(-32602, "fs/read_text_file requires path")
+        path = self.resolve_path(raw_path)
+        try:
+            content = path.read_text()
+        except Exception as exc:
+            raise ProbeRequestError(
+                -32603, f"Failed to read {path}: {exc}") from exc
+        return {
+            "content": slice_text(
+                content,
+                _optional_int(params.get("line")),
+                _optional_int(params.get("limit")),
+            )
+        }
+
+    def write_text_file(self, params: dict) -> dict:
+        if not self.allow_writes:
+            raise ProbeRequestError(
+                -32603,
+                "fs/write_text_file denied by probe (pass --allow-writes to enable)",
+            )
+        raw_path = params.get("path")
+        content = params.get("content")
+        if not isinstance(raw_path, str) or not isinstance(content, str):
+            raise ProbeRequestError(
+                -32602, "fs/write_text_file requires string path and content")
+        path = self.resolve_path(raw_path)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        except Exception as exc:
+            raise ProbeRequestError(
+                -32603, f"Failed to write {path}: {exc}") from exc
+        return {}
+
+    def terminal_create(self, params: dict) -> dict:
+        command = params.get("command")
+        if not isinstance(command, str) or not command:
+            raise ProbeRequestError(-32602, "terminal/create requires command")
+        args = params.get("args") or []
+        if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+            raise ProbeRequestError(-32602, "terminal/create args must be strings")
+        cwd = self.resolve_path(params["cwd"]) if isinstance(params.get("cwd"), str) else self.cwd
+        env = os.environ.copy()
+        for item in params.get("env") or []:
+            if isinstance(item, dict) and isinstance(item.get("name"), str):
+                env[item["name"]] = str(item.get("value", ""))
+        limit = _optional_int(
+            params.get("outputByteLimit", params.get("output_byte_limit")))
+        if limit is None:
+            limit = 10 * 1024 * 1024
+        try:
+            proc = subprocess.Popen(
+                [command, *args],
+                cwd=str(cwd),
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                errors="replace",
+                bufsize=1,
+            )
+        except Exception as exc:
+            raise ProbeRequestError(
+                -32603, f"Failed to spawn {command!r}: {exc}") from exc
+        terminal_id = str(uuid.uuid4())
+        self.terminals[terminal_id] = TerminalState(proc, limit)
+        return {"terminalId": terminal_id}
+
+    def get_terminal(self, params: dict) -> TerminalState:
+        terminal_id = params.get("terminalId", params.get("terminal_id"))
+        if not isinstance(terminal_id, str) or terminal_id not in self.terminals:
+            raise ProbeRequestError(-32602, f"Terminal {terminal_id!r} not found")
+        return self.terminals[terminal_id]
+
+    def terminal_output(self, params: dict) -> dict:
+        return self.get_terminal(params).output_response()
+
+    def terminal_wait_for_exit(self, params: dict) -> dict:
+        return self.get_terminal(params).wait_response()
+
+    def terminal_kill(self, params: dict) -> dict:
+        self.get_terminal(params).kill()
+        return {}
+
+    def terminal_release(self, params: dict) -> dict:
+        terminal_id = params.get("terminalId", params.get("terminal_id"))
+        term = self.get_terminal(params)
+        term.kill()
+        self.terminals.pop(terminal_id, None)
+        return {}
+
+    def close(self) -> None:
+        for term in self.terminals.values():
+            term.kill()
 
 
 class AcpClient:
@@ -127,7 +353,7 @@ class AcpClient:
         self.stdin = proc.stdin
         self.stdout = proc.stdout
         self.stderr = proc.stderr
-        self.responses: dict[int, dict] = {}
+        self.responses: dict[JsonRpcId, dict] = {}
         self.notifications: list[dict] = []
         self.server_requests: list[dict] = []  # JSON-RPC requests FROM server TO us
         self.raw_log = open(raw_log_path, "w") if raw_log_path else None
@@ -185,7 +411,7 @@ class AcpClient:
         if not self.quiet:
             print(f"[send] {line[:200]}")
 
-    def wait_response(self, id_: int, timeout: float) -> Optional[dict]:
+    def wait_response(self, id_: JsonRpcId, timeout: float) -> Optional[dict]:
         deadline = time.time() + timeout
         while time.time() < deadline:
             with self._lock:
@@ -210,7 +436,8 @@ class AcpClient:
 # ── Probe driver ───────────────────────────────────────────────────────────
 
 def run_probe(yolo: bool, afk: bool, prompt: str, timeout: float,
-              raw_log_path: Optional[Path], quiet: bool) -> int:
+              raw_log_path: Optional[Path], quiet: bool,
+              allow_writes: bool = False) -> int:
     cmd = ["kimi"]
     if yolo:
         cmd.append("-y")
@@ -234,6 +461,7 @@ def run_probe(yolo: bool, afk: bool, prompt: str, timeout: float,
         cwd=os.getcwd(),
     )
     client = AcpClient(proc, raw_log_path, quiet)
+    ctx = ProbeContext(Path(os.getcwd()), allow_writes=allow_writes)
 
     permission_requests = 0
     other_server_requests: list[str] = []
@@ -244,7 +472,8 @@ def run_probe(yolo: bool, afk: bool, prompt: str, timeout: float,
 
     try:
         # 1. initialize ----------------------------------------------------
-        client.send(make_request(0, "initialize", {
+        init_id = new_request_id()
+        client.send(make_request(init_id, "initialize", {
             "protocolVersion": 1,
             "clientInfo": {"name": "spur-probe", "version": "0.1.0"},
             "clientCapabilities": {
@@ -254,7 +483,7 @@ def run_probe(yolo: bool, afk: bool, prompt: str, timeout: float,
                 "terminal": True,
             },
         }))
-        init_resp = client.wait_response(0, 15)
+        init_resp = client.wait_response(init_id, 15)
         if init_resp is None:
             print("[FAIL] initialize timed out", file=sys.stderr)
             return 1
@@ -263,12 +492,13 @@ def run_probe(yolo: bool, afk: bool, prompt: str, timeout: float,
 
         # 2. session/new ---------------------------------------------------
         session_id_req = str(uuid.uuid4())
-        client.send(make_request(1, "session/new", {
+        new_session_id = new_request_id()
+        client.send(make_request(new_session_id, "session/new", {
             "sessionId": session_id_req,
             "cwd": os.getcwd(),
             "mcpServers": [],
         }))
-        sess_resp = client.wait_response(1, 30)
+        sess_resp = client.wait_response(new_session_id, 30)
         if sess_resp is None:
             print("[FAIL] session/new timed out", file=sys.stderr)
             return 1
@@ -293,7 +523,8 @@ def run_probe(yolo: bool, afk: bool, prompt: str, timeout: float,
                 unknown_notif_methods[method] += 1
 
         # 4. session/prompt ------------------------------------------------
-        client.send(make_request(2, "session/prompt", {
+        prompt_id = new_request_id()
+        client.send(make_request(prompt_id, "session/prompt", {
             "sessionId": session_id,
             "prompt": [{"type": "text", "text": prompt}],
         }))
@@ -309,9 +540,9 @@ def run_probe(yolo: bool, afk: bool, prompt: str, timeout: float,
             for req in inbound_requests:
                 method = req.get("method", "")
                 rid = req.get("id")
-                if not isinstance(rid, int):
+                if rid is None:
                     if not quiet:
-                        print(f"[warn] server request without integer id: "
+                        print(f"[warn] server request without id: "
                               f"{json.dumps(req)[:200]}", file=sys.stderr)
                     continue
                 if method == "session/request_permission":
@@ -344,13 +575,19 @@ def run_probe(yolo: bool, afk: bool, prompt: str, timeout: float,
                     }))
                 else:
                     other_server_requests.append(method)
-                    if not quiet:
-                        print(f"[req#{rid}] {method} (unhandled by probe — "
-                              f"replying with error)")
-                    client.send(make_response(rid, error={
-                        "code": -32601,
-                        "message": f"probe does not implement {method}",
-                    }))
+                    try:
+                        result = ctx.handle_client_request(req)
+                    except ProbeRequestError as exc:
+                        if not quiet:
+                            print(f"[req#{rid}] {method} -> error {exc.message}")
+                        client.send(make_response(rid, error={
+                            "code": exc.code,
+                            "message": exc.message,
+                        }))
+                    else:
+                        if not quiet:
+                            print(f"[req#{rid}] {method} -> ok")
+                        client.send(make_response(rid, result))
 
             # Drain notifications.
             with client._lock:
@@ -383,8 +620,8 @@ def run_probe(yolo: bool, afk: bool, prompt: str, timeout: float,
 
             # Check prompt response.
             with client._lock:
-                if 2 in client.responses:
-                    prompt_resp = client.responses.pop(2)
+                if prompt_id in client.responses:
+                    prompt_resp = client.responses.pop(prompt_id)
                     break
             time.sleep(0.05)
 
@@ -396,6 +633,7 @@ def run_probe(yolo: bool, afk: bool, prompt: str, timeout: float,
                   f"{json.dumps(prompt_resp.get('result', {}))[:300]}")
 
     finally:
+        ctx.close()
         client.close()
 
     # ── Report ────────────────────────────────────────────────────────────
@@ -475,6 +713,8 @@ def main() -> int:
                         help="Seconds to wait for the prompt to complete.")
     parser.add_argument("--out", type=Path, default=None,
                         help="Path to write raw JSONL of every JSON-RPC frame.")
+    parser.add_argument("--allow-writes", action="store_true",
+                        help="Allow fs/write_text_file requests to modify files.")
     parser.add_argument("--quiet", action="store_true",
                         help="Suppress per-message logging; only show report.")
     args = parser.parse_args()
@@ -493,6 +733,7 @@ def main() -> int:
         timeout=args.timeout,
         raw_log_path=raw_log_path,
         quiet=args.quiet,
+        allow_writes=args.allow_writes,
     )
 
 
