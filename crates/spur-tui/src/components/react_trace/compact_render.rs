@@ -228,9 +228,10 @@ fn compact_prefix_style(theme: &Theme, k: &TraceKind) -> (&'static str, Style) {
                 .add_modifier(Modifier::BOLD),
         ),
         TraceKind::UserMessage => (
-            "  > ",
+            "  ▎ ",
             Style::default()
-                .fg(token(theme, "react_trace.message.body.fg"))
+                .fg(token(theme, "react_trace.user_message.accent.fg"))
+                .bg(token(theme, "react_trace.user_message.bg"))
                 .add_modifier(Modifier::BOLD),
         ),
         TraceKind::Permission { .. } => (
@@ -360,11 +361,27 @@ fn build_compact_lines_from(
         let pad = w.saturating_sub(prefix_cols + display_cols + ts_cols);
         let padding: String = " ".repeat(pad);
 
+        // User messages are rendered as a vivid full-row bubble: every span
+        // (prefix, body, padding, timestamp) carries the bubble bg so the
+        // user's input pops against neighbouring agent/tool lines.
+        let (body_style, pad_style, ts_style) = if matches!(entry.kind, TraceKind::UserMessage) {
+            let bg = token(theme, "react_trace.user_message.bg");
+            let body = Style::default()
+                .fg(token(theme, "react_trace.user_message.fg"))
+                .bg(bg)
+                .add_modifier(Modifier::BOLD);
+            let pad_s = Style::default().bg(bg);
+            let ts_s = Style::default().fg(subtle).bg(bg);
+            (body, pad_s, ts_s)
+        } else {
+            (style, Style::default(), Style::default().fg(subtle))
+        };
+
         lines.push(Line::from(vec![
             Span::styled(prefix.to_string(), style),
-            Span::styled(display_text, style),
-            Span::raw(padding),
-            Span::styled(ts_display, Style::default().fg(subtle)),
+            Span::styled(display_text, body_style),
+            Span::styled(padding, pad_style),
+            Span::styled(ts_display, ts_style),
         ]));
         row += 1;
     }
@@ -467,7 +484,7 @@ mod tests {
                     timestamp: "00:00".into(),
                     markdown: None,
                 },
-                "  > ",
+                "  ▎ ",
             ),
             (
                 TraceEntry {

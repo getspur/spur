@@ -525,6 +525,9 @@ impl ReactTrace {
                 let built: Vec<Line<'static>> = lines
                     .into_iter()
                     .flat_map(|l| wrap_line_to_width(&l, effective_width))
+                    .map(|l| {
+                        crate::components::react_trace::builder::pad_bubble_line(l, effective_width)
+                    })
                     .collect();
                 self.line_cache = Some(LineCacheEntry {
                     lines: built,
@@ -543,6 +546,9 @@ impl ReactTrace {
             lines
                 .into_iter()
                 .flat_map(|l| wrap_line_to_width(&l, effective_width))
+                .map(|l| {
+                    crate::components::react_trace::builder::pad_bubble_line(l, effective_width)
+                })
                 .collect()
         };
 
