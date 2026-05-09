@@ -69,6 +69,8 @@ pub struct PaletteState {
     /// Scratch buffer reused by `Utf32Str::new` inside rerank's inner loop.
     /// Grows on demand to fit the longest label seen; never shrunk.
     scratch: Vec<char>,
+    /// Reused score/index buffer for non-empty query ranking.
+    rank_scratch: Vec<(u32, u32)>,
 }
 
 impl PaletteState {
@@ -80,6 +82,7 @@ impl PaletteState {
             cursor: 0,
             matcher: nucleo_matcher::Matcher::new(nucleo_matcher::Config::DEFAULT),
             scratch: Vec::new(),
+            rank_scratch: Vec::new(),
         }
     }
 
@@ -135,7 +138,8 @@ impl PaletteState {
             self.order.extend(0..self.raw.len() as u32);
         } else {
             let pattern = Pattern::parse(&self.query, CaseMatching::Ignore, Normalization::Smart);
-            let mut tmp: Vec<(u32, u32)> = Vec::with_capacity(self.raw.len());
+            self.rank_scratch.clear();
+            self.rank_scratch.reserve(self.raw.len());
             for (i, entry) in self.raw.iter().enumerate() {
                 self.scratch.clear();
                 let label_utf = Utf32Str::new(&entry.label, &mut self.scratch);
@@ -155,12 +159,12 @@ impl PaletteState {
                     (None, None) => None,
                 };
                 if let Some(score) = weighted {
-                    tmp.push((score, i as u32));
+                    self.rank_scratch.push((score, i as u32));
                 }
             }
             // Stable sort by descending score; ties preserve insertion order.
-            tmp.sort_by(|a, b| b.0.cmp(&a.0));
-            self.order.extend(tmp.into_iter().map(|(_, i)| i));
+            self.rank_scratch.sort_by(|a, b| b.0.cmp(&a.0));
+            self.order.extend(self.rank_scratch.iter().map(|&(_, i)| i));
         }
         tracing::debug!(
             target: "palette",
@@ -234,6 +238,7 @@ impl PaletteState {
         self.cursor = 0;
         // `matcher` and `scratch` retain their capacity — intentional:
         // reuse eliminates per-rerank heap allocation across opens.
+        self.rank_scratch.clear();
     }
 }
 
