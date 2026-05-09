@@ -9829,6 +9829,7 @@ mod merge_plan_tests {
                 attempt: 1,
                 error: "worker crashed".into(),
                 worker_branch: Some("spur/worker-failed".into()),
+                amended_prompt_summary: None,
             },
             AuditSentinelKind::Dispatch {
                 delegation_id: "del-2".into(),
