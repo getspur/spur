@@ -111,6 +111,17 @@ pub struct StagingConflict {
     pub files: Vec<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RecoverOrphanedDispatchInput {
+    /// Beads issue ID of the stuck dispatched task.
+    pub issue_id: String,
+    /// Worker branch that contains the completed work.
+    pub worker_branch: String,
+    /// Git OID that the dispatch started from.
+    pub dispatched_base_oid: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

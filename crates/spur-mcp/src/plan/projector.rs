@@ -966,6 +966,27 @@ mod tests {
     }
 
     #[test]
+    fn worker_started_does_not_advance_attempt_projection() {
+        let audits = vec![
+            AuditSentinelKind::Dispatch {
+                delegation_id: "del-1".into(),
+                worker: "codex".into(),
+                attempt: 1,
+            },
+            AuditSentinelKind::WorkerStarted {
+                delegation_id: "del-1".into(),
+                worker_branch: "spur/worker/v2/codex/brain/worker".into(),
+                worker_session_id: "worker".into(),
+                dispatched_base_oid: "base-oid".into(),
+            },
+        ];
+
+        let (attempt, last_delegation_id) = super::project_attempt_facts(&audits);
+        assert_eq!(attempt, 1);
+        assert_eq!(last_delegation_id.as_deref(), Some("del-1"));
+    }
+
+    #[test]
     fn project_attempt_facts_returns_one_for_no_dispatch() {
         let audits: Vec<AuditSentinelKind> = vec![];
         let (attempt, last_delegation_id) = super::project_attempt_facts(&audits);
