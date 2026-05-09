@@ -106,6 +106,12 @@ pub enum AuditSentinelKind {
         worker: String,
         attempt: u32,
     },
+    WorkerStarted {
+        delegation_id: String,
+        worker_branch: String,
+        worker_session_id: String,
+        dispatched_base_oid: String,
+    },
     DispatchOrphanCleared {
         delegation_id: String,
         reason: String,
@@ -311,6 +317,7 @@ impl AuditSentinelKind {
             Self::PlanSubmit { .. } => "plan-submit",
             Self::TaskSpec { .. } => "task-spec",
             Self::Dispatch { .. } => "dispatch",
+            Self::WorkerStarted { .. } => "worker-started",
             Self::DispatchOrphanCleared { .. } => "dispatch-orphan-cleared",
             Self::Completion { .. } => "completion",
             Self::EpicCompletion { .. } => "epic-completion",
@@ -443,6 +450,12 @@ mod tests {
                 delegation_id: "del-A".into(),
                 worker: "codex".into(),
                 attempt: 1,
+            },
+            AuditSentinelKind::WorkerStarted {
+                delegation_id: "del-A".into(),
+                worker_branch: "spur/worker/v2/codex/brain/worker".into(),
+                worker_session_id: "worker".into(),
+                dispatched_base_oid: "base-oid".into(),
             },
             AuditSentinelKind::DispatchOrphanCleared {
                 delegation_id: "del-A".into(),
@@ -608,6 +621,12 @@ mod tests {
                 delegation_id: "x".into(),
                 worker: "y".into(),
                 attempt: 0,
+            },
+            AuditSentinelKind::WorkerStarted {
+                delegation_id: "x".into(),
+                worker_branch: "spur/worker/v2/codex/brain/worker".into(),
+                worker_session_id: "worker".into(),
+                dispatched_base_oid: "base-oid".into(),
             },
             AuditSentinelKind::DispatchOrphanCleared {
                 delegation_id: "x".into(),

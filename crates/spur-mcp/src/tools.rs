@@ -970,6 +970,14 @@ fn plan_truncate_and_restart_def() -> ToolDefinition {
     }
 }
 
+fn recover_orphaned_dispatch_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "recover_orphaned_dispatch".into(),
+        description: "Brain-side recovery tool. Promote a stuck Dispatched beads task to AwaitingReview when the worker branch and dispatch base OID are known. Validates the task is still dispatched, the worker branch exists, and the branch contains exactly one commit over the dispatched base.".into(),
+        input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::RecoverOrphanedDispatchInput>(),
+    }
+}
+
 pub fn review_task_def() -> ToolDefinition {
     ToolDefinition {
         name: "review_task".to_string(),
@@ -1159,6 +1167,7 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         get_task_diff_def(),
         preview_task_base_def(),
         plan_truncate_and_restart_def(),
+        recover_orphaned_dispatch_def(),
         review_task_def(),
         submit_plan_mutation_def(),
         report_signal_def(),
@@ -1237,6 +1246,16 @@ mod schema_truthfulness_tests {
         assert!(
             names.contains(&"plan_truncate_and_restart"),
             "plan_truncate_and_restart must appear in tools/list, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn recover_orphaned_dispatch_appears_in_tools_list() {
+        let tools = tools_list();
+        let names: Vec<_> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            names.contains(&"recover_orphaned_dispatch"),
+            "recover_orphaned_dispatch must appear in tools/list, got: {names:?}"
         );
     }
 
@@ -1320,6 +1339,7 @@ mod worker_tools_subset_tests {
             "get_reconciler_status",
             "preview_task_base",
             "plan_truncate_and_restart",
+            "recover_orphaned_dispatch",
             "review_task",
             "graph_triage",
             "graph_plan",
