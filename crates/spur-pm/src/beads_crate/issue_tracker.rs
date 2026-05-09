@@ -259,6 +259,13 @@ impl IssueTracker for BeadsCrateAdapter {
             }
 
             let mut issues = s.list_issues(&br_filters)?;
+            let allow_tombstones = br_filters
+                .statuses
+                .as_ref()
+                .is_some_and(|statuses| statuses.contains(&beads_rust::model::Status::Tombstone));
+            if !allow_tombstones {
+                issues.retain(|issue| issue.status != beads_rust::model::Status::Tombstone);
+            }
             let ids: Vec<String> = issues.iter().map(|issue| issue.id.clone()).collect();
             let mut labels_by_id = s.get_labels_for_issues(&ids)?;
             for issue in &mut issues {
@@ -817,6 +824,74 @@ mod tests {
         assert!(ids.contains(&"bd-list-0"));
         assert!(ids.contains(&"bd-list-1"));
         assert!(ids.contains(&"bd-list-2"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_issues_include_closed_excludes_tombstones() {
+        use crate::types::IssueFilter;
+
+        let dir = TempDir::new().unwrap();
+        let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
+            .await
+            .unwrap();
+
+        let open_id = adapter
+            .create_issue(IssueCreate {
+                title: "Open issue".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let closed_id = adapter
+            .create_issue(IssueCreate {
+                title: "Closed issue".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let deleted_id = adapter
+            .create_issue(IssueCreate {
+                title: "Deleted issue".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        adapter
+            .update_issue(
+                &closed_id,
+                IssueUpdate {
+                    status: Some("closed".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let deleted_id_for_write = deleted_id.clone();
+        adapter
+            .write(move |s| {
+                s.delete_issue(&deleted_id_for_write, "test", "deleted", None)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let summaries = adapter
+            .list_issues(IssueFilter {
+                include_closed: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let ids: HashSet<&str> = summaries.iter().map(|s| s.id.as_str()).collect();
+        assert!(ids.contains(open_id.as_str()));
+        assert!(ids.contains(closed_id.as_str()));
+        assert!(
+            !ids.contains(deleted_id.as_str()),
+            "include_closed should not return tombstones"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

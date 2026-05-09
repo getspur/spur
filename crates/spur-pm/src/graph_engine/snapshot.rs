@@ -163,6 +163,7 @@ pub fn load_graph_snapshot(
     }
 
     let mut issues = storage.list_issues(&filters)?;
+    issues.retain(|issue| issue.status != beads_rust::model::Status::Tombstone);
     let ids: Vec<String> = issues.iter().map(|issue| issue.id.clone()).collect();
     let mut labels_by_id = storage.get_labels_for_issues(&ids)?;
     let mut deps_by_id = get_dependencies_full_for_issues(storage, &ids)?;
@@ -308,6 +309,7 @@ mod tests {
 #[cfg(test)]
 mod loader_tests {
     use super::*;
+    use beads_rust::model::{Issue as BrIssue, IssueType, Priority, Status};
     use petgraph::visit::EdgeRef;
     use petgraph::Direction;
 
@@ -374,6 +376,74 @@ mod loader_tests {
             due_at: None,
             content_hash: format!("hash-{id}"),
         }
+    }
+
+    fn br_issue(id: &str, title: &str) -> BrIssue {
+        let now = Utc::now();
+        BrIssue {
+            id: id.into(),
+            title: title.into(),
+            description: None,
+            status: Status::Open,
+            priority: Priority::MEDIUM,
+            issue_type: IssueType::Task,
+            created_at: now,
+            updated_at: now,
+            assignee: None,
+            owner: None,
+            estimated_minutes: None,
+            due_at: None,
+            defer_until: None,
+            external_ref: None,
+            ephemeral: false,
+            content_hash: None,
+            design: None,
+            acceptance_criteria: None,
+            notes: None,
+            created_by: None,
+            closed_at: None,
+            close_reason: None,
+            closed_by_session: None,
+            source_system: None,
+            source_repo: None,
+            deleted_at: None,
+            deleted_by: None,
+            delete_reason: None,
+            original_type: None,
+            compaction_level: None,
+            compacted_at: None,
+            compacted_at_commit: None,
+            original_size: None,
+            sender: None,
+            pinned: false,
+            is_template: false,
+            labels: Vec::new(),
+            dependencies: Vec::new(),
+            comments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn load_graph_snapshot_excludes_tombstones() {
+        let mut storage = beads_rust::storage::sqlite::SqliteStorage::open_memory().unwrap();
+
+        storage
+            .create_issue(&br_issue("bd-open", "Open issue"), "test")
+            .unwrap();
+        storage
+            .create_issue(&br_issue("bd-deleted", "Deleted issue"), "test")
+            .unwrap();
+        storage
+            .delete_issue("bd-deleted", "test", "deleted", None)
+            .unwrap();
+
+        let snap = load_graph_snapshot(&storage, None).unwrap();
+
+        assert!(snap.by_id.contains_key("bd-open"));
+        assert!(
+            !snap.by_id.contains_key("bd-deleted"),
+            "graph snapshots should not include tombstones"
+        );
     }
 
     #[test]
