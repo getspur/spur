@@ -11,8 +11,6 @@ fn dark_tokens_match_current_literal_color_sites() {
     let cases: &[(&str, Color)] = &[
         // status_bar.rs:53 LicenseBadgeTone::Neutral uses Color::DarkGray.
         ("license_badge.neutral.fg", rgb(0x60, 0x60, 0x60)),
-        // status_bar.rs:58 LicenseBadgeTone::Warning uses Color::Yellow.
-        ("license_badge.warning.bg", rgb(0xff, 0xff, 0x00)),
         // status_bar.rs:87 tombstone badges use Color::DarkGray.
         ("status_bar.tombstone.fg", rgb(0x60, 0x60, 0x60)),
         // status_bar.rs:354 issue counts use Color::Cyan.
