@@ -53,6 +53,16 @@ use crate::lineage::ExecutorId;
 use crate::review_sink::ReviewSink;
 use crate::scheduler::TurnGuard;
 
+pub mod input;
+pub mod types;
+
+use input::strip_bang_prefix;
+pub use input::InteractiveInput;
+pub use types::{
+    ActiveConnection, BrainSession, FaultInjectionHooks, LoadBrainSessionError, ReconnectError,
+    RunOpts, RunResult,
+};
+
 type McpGuarded<T> = (T, AbortOnDropHandle<()>);
 type BrainRunBootstrap = (
     Box<dyn spur_acp::AgentConnection>,
@@ -1211,155 +1221,6 @@ pub(crate) fn format_worker_task(task: &str, context_files: &[String]) -> String
     out
 }
 
-// ─── Run options ─────────────────────────────────────────────────────
-
-/// Options for `spur run`.
-pub struct RunOpts {
-    /// Override brain agent name.
-    pub brain: Option<String>,
-    /// Issue reference (e.g., "github:owner/repo#42").
-    pub issue: Option<String>,
-    /// Run in background (detached).
-    pub background: bool,
-}
-
-/// Result of a completed run.
-pub struct RunResult {
-    pub session_id: SessionId,
-    pub success: bool,
-    pub pr_url: Option<String>,
-    pub total_cost_usd: f64,
-}
-
-/// Holds the active brain transport along with metadata that must
-/// share its lifetime. Future fields (e.g. SessionAttachGuard) are
-/// added here so they cannot accidentally outlive the connection.
-pub struct ActiveConnection {
-    pub transport: Box<dyn AgentConnection>,
-    pub brain_name: String,
-    /// `None` only when no ACP session has been attached yet or when attached
-    /// under DegradedNoLock (NFS/sshfs).
-    pub(crate) attach_guard: Option<SessionAttachGuard>,
-    /// True when this attachment is unprotected (multi-window unsafe).
-    pub(crate) fs_unsafe: bool,
-    /// Captured at `initialize`. Held alongside the transport so the
-    /// orchestrator can build `SpurAgentCaps` once `session/new` (or
-    /// `session/load`) returns the per-session state. Spec §6.1.
-    pub(crate) init_response: agent_client_protocol::schema::InitializeResponse,
-}
-
-/// Holds the state of an active brain session.
-pub struct BrainSession {
-    pub connection: Box<dyn AgentConnection>,
-    pub acp_session_id: String,
-    pub spur_session_id: SessionId,
-    pub brain_name: String,
-    pub delegation_handle: JoinHandle<()>,
-    /// Phase 5: hold the server itself so retirement can invoke
-    /// `mark_retiring` / `cancel_in_flight_workers` / `shutdown`.
-    pub mcp_server: Option<Arc<McpCallbackServer>>,
-    /// Abort-on-drop guard returned by `McpCallbackServer::start`.
-    /// Awaited during retirement after the server has been shut down or
-    /// force-aborted so the background watcher task does not linger.
-    pub mcp_guard: Option<AbortOnDropHandle<()>>,
-    /// Task that drains the connection's session-notification broadcast
-    /// and republishes each item onto the `SpurEvent` bus. `None` for
-    /// transports that return `None` from `subscribe_session_notifications`
-    /// (stdio, cli_wrap, stream_json). Must be aborted whenever the
-    /// session is retired — otherwise a pump subscribed against the
-    /// reused connection keeps emitting events tagged with this
-    /// (now-stale) `spur_session_id`.
-    pub notification_pump_handle: Option<JoinHandle<()>>,
-    /// Holds the attach lock while the transport lives on this active session.
-    /// Moves back to `ActiveConnection` when the transport is cached.
-    pub(crate) attach_guard: Option<SessionAttachGuard>,
-    /// Mirrors `ActiveConnection.fs_unsafe` for the active transport.
-    pub(crate) fs_unsafe: bool,
-    /// Wall-clock instant this session was created. Used by
-    /// `retire_active_brain` to record session duration in the cost
-    /// ledger on close-out.
-    pub started_at: std::time::Instant,
-    /// Latest `config_options` advertised by the agent. Populated from
-    /// `NewSessionResponse.config_options` on session creation; refreshed
-    /// by `SetSessionConfigOption` responses (Task 2.14) and by
-    /// `session/update.ConfigOptionUpdate` notifications (v2 plan).
-    pub config_options: Vec<agent_client_protocol::schema::SessionConfigOption>,
-    /// Frozen-per-session capability cache (M8.A). Populated AFTER both
-    /// `initialize` and `session/new` complete, since the `set_*` gates
-    /// derive from `NewSessionResponse` payload state. Wrapped in `Arc`
-    /// so UI consumers can clone cheaply.
-    pub spur_agent_caps: Option<Arc<spur_acp::SpurAgentCaps>>,
-    /// Last-known `SessionInfoUpdate` payload (M9 hoist, F-3-1). Lives
-    /// on the orchestrator entry — not the transient
-    /// `SessionDetailView` — so the cached `title` and `updated_at`
-    /// survive the view's destruction on navigation away from the
-    /// session detail screen. `None` until the agent emits its first
-    /// `SessionInfoUpdate` notification.
-    pub session_info: Option<spur_acp::SessionInfoCache>,
-    /// Captured `InitializeResponse` retained on the session entry so
-    /// it can flow back to `ActiveConnection` when the brain is
-    /// retired (and reused later for a fresh `new_session` without
-    /// re-running `initialize`).
-    pub(crate) init_response: agent_client_protocol::schema::InitializeResponse,
-}
-
-impl BrainSession {
-    /// Test-only constructor that fills the private `attach_guard`,
-    /// `fs_unsafe`, and `init_response` fields with sensible defaults so
-    /// integration tests in sibling crates can construct a
-    /// `BrainSession` without re-implementing the full session-create
-    /// pipeline. Hidden from rustdoc; not part of the stable API.
-    #[doc(hidden)]
-    pub fn for_test(
-        connection: Box<dyn AgentConnection>,
-        acp_session_id: impl Into<String>,
-        spur_session_id: SessionId,
-        brain_name: impl Into<String>,
-    ) -> Self {
-        Self {
-            connection,
-            acp_session_id: acp_session_id.into(),
-            spur_session_id,
-            brain_name: brain_name.into(),
-            delegation_handle: tokio::spawn(async {}),
-            mcp_server: None,
-            mcp_guard: None,
-            notification_pump_handle: None,
-            attach_guard: None,
-            fs_unsafe: false,
-            started_at: std::time::Instant::now(),
-            config_options: Vec::new(),
-            spur_agent_caps: None,
-            session_info: None,
-            init_response: agent_client_protocol::schema::InitializeResponse::new(
-                agent_client_protocol::schema::ProtocolVersion::LATEST,
-            ),
-        }
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum LoadBrainSessionError {
-    #[error("session {acp_id} is already attached")]
-    AlreadyAttached {
-        acp_id: String,
-        holder: spur_acp::session_lock::HolderInfo,
-    },
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ReconnectError {
-    #[error("session already attached")]
-    AlreadyAttached {
-        acp_id: String,
-        holder: spur_acp::session_lock::HolderInfo,
-    },
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
-}
-
 async fn abort_mcp_handle(handle: AbortOnDropHandle<()>) {
     handle.abort();
     let _ = handle.await;
@@ -1579,117 +1440,6 @@ fn reconnect_failure_event(
             reason: format_error_chain(&e),
         },
     }
-}
-
-/// A user input message from the TUI.
-#[derive(Debug)]
-#[non_exhaustive]
-#[allow(clippy::large_enum_variant)]
-pub enum InteractiveInput {
-    /// Initialize and warm the brain transport without creating an ACP
-    /// session yet. Used by dashboard startup to reduce first-prompt latency.
-    WarmConnect,
-    Message {
-        blocks: Vec<ContentBlock>,
-        interrupt: bool,
-    },
-    /// Spawn a fresh brain session and send these blocks as the first prompt
-    /// atomically. If a brain is already attached, it is shut down first.
-    /// Empty `blocks` means spawn-only with no first prompt.
-    NewSessionWithMessage {
-        blocks: Vec<ContentBlock>,
-        interrupt: bool,
-    },
-    ListSessions,
-    ResumeSession {
-        session_id: String,
-    },
-    /// Request `set_session_mode` on the active brain session. No-op if
-    /// there is no active brain session.
-    SetSessionMode {
-        mode_id: String,
-    },
-    /// Request `set_session_config_option` on the active brain session for
-    /// the v1 codex `/model` and `/effort` slash pickers. No-op if there is
-    /// no active brain session. On success, refreshes the orchestrator's
-    /// cached `config_options` from the response.
-    SetSessionConfigOption {
-        config_id: String,
-        value: String,
-    },
-    /// Dedicated `session/set_model` dispatch (M9 F-C). Fired when the
-    /// caps-aware submit-router routes `/model <value>` for an agent that
-    /// advertises `supports_set_model()` (e.g. claude-code-acp). The
-    /// orchestrator delegates to `AgentConnection::set_session_model`,
-    /// which carries its own state-gated fallback to
-    /// `session/set_config_option` for agents that lack the dedicated
-    /// method. No-op when there is no active brain session.
-    SetSessionModel {
-        value: String,
-    },
-    /// Invoke an agent vendor-extension RPC on the active brain session.
-    /// No-op if there is no active brain session. The method name and params
-    /// are chosen by the TUI's config-driven dispatch path — the
-    /// orchestrator is agnostic to specific extensions. `sessionId` is
-    /// injected into `params` here (the TUI doesn't know ACP session IDs).
-    VendorExec {
-        session: SessionId,
-        method: String,
-        params: serde_json::Value,
-    },
-    /// Submit a human review decision. Routed to the ReviewSink by the
-    /// dispatcher task, not handled inline in `run_interactive`.
-    SubmitReview {
-        executor_id: String,
-        attempt_n: u32,
-        decision: spur_acp::ReviewDecision,
-    },
-    /// Halt the currently streaming prompt (if any) via `AgentConnection::cancel`.
-    /// When received inside the streaming `select!`, calls `cancel()` and arms
-    /// the 5s force-timeout. When received outside the streaming loop (no
-    /// active turn), dropped with a debug log (the view guards against emitting
-    /// this unless a stream is in-flight, but a TurnComplete-vs-Esc race can
-    /// still produce a stray one).
-    CancelStream {
-        session: SessionId,
-    },
-    /// Refresh the issue list and re-emit IssuesLoaded.
-    RefreshIssues,
-    /// Refresh persisted plan summaries and emit PlansLoaded.
-    RefreshPlans,
-    /// Claim a persisted plan for this brain without starting execution.
-    ClaimPlan {
-        plan_id: String,
-    },
-    /// Resume a persisted plan.
-    ResumePlan {
-        plan_id: String,
-    },
-    /// Load/project a persisted implementation plan and emit PlanSnapshotUpdated.
-    /// This is read-only and must not claim plan ownership.
-    InspectPlan {
-        plan_id: String,
-    },
-    /// Fetch full issue detail and emit IssueDetailFetched.
-    GetIssueDetail {
-        id: String,
-    },
-    /// Fetch an issue dependency subgraph and emit IssueSubgraphLoaded.
-    GetIssueGraph {
-        id: String,
-    },
-    /// Update an issue and emit IssueUpdated.
-    UpdateIssue {
-        id: String,
-        update: spur_pm::IssueUpdate,
-    },
-    /// Detached delegation completion returned to the orchestrator for
-    /// scheduled brain re-entry. Never constructed by the TUI. See
-    /// `docs/superpowers/specs/2026-04-19-brain-async-continuation-design.md`.
-    SystemContinuation {
-        session: SessionId,
-        continuation: spur_acp::domain::BrainContinuation,
-    },
 }
 
 /// Convert spur_pm::IssueSummary to the spur_acp mirror type for event bus transmission.
@@ -2489,28 +2239,6 @@ pub struct Orchestrator {
     /// insertion order. The task itself is still tracked in
     /// `background_tasks` for `Drop` to abort.
     pub(crate) peer_mailbox_reconciler_abort: Option<tokio::task::AbortHandle>,
-}
-
-#[cfg(any(test, feature = "fault-injection"))]
-#[derive(Default, Debug, Clone)]
-pub struct FaultInjectionHooks {
-    pub panic_after_overlay_apply: Option<String>,
-}
-
-#[cfg(not(any(test, feature = "fault-injection")))]
-#[derive(Default, Debug, Clone)]
-pub struct FaultInjectionHooks {
-    _private: (),
-}
-
-impl FaultInjectionHooks {
-    #[inline]
-    fn maybe_panic_after_overlay_apply(&self) {
-        #[cfg(any(test, feature = "fault-injection"))]
-        if let Some(message) = &self.panic_after_overlay_apply {
-            panic!("fault injection: {message}");
-        }
-    }
 }
 
 /// Detect whether an error from an `AgentConnection` RPC indicates the
@@ -9982,20 +9710,6 @@ mod issue_graph_handler_tests {
             other => panic!("expected IssueCommandError, got {other:?}"),
         }
     }
-}
-
-/// Strip a leading `!` from the first text block in `blocks`, if any.
-///
-/// The TUI forwards interrupt commands (`!stop`) as a text block with a
-/// leading bang. We strip it once here before forwarding to the agent so
-/// the agent sees clean prompt text.
-fn strip_bang_prefix(mut blocks: Vec<ContentBlock>) -> Vec<ContentBlock> {
-    if let Some(ContentBlock::Text(tc)) = blocks.first_mut() {
-        if tc.text.starts_with('!') {
-            tc.text = tc.text.strip_prefix('!').unwrap_or(&tc.text).to_string();
-        }
-    }
-    blocks
 }
 
 // ─── Review dispatcher ────────────────────────────────────────────────
