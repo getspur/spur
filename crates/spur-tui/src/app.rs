@@ -1371,7 +1371,7 @@ impl App {
                         &owned_fallback
                     }
                 };
-                match route(&format!("/{name}"), &[], registry, false) {
+                match route(&format!("/{name}"), &[], &[], registry, false) {
                     SubmitDecision::Local { action } => Some(action),
                     SubmitDecision::Send { blocks, interrupt } => {
                         let session = self.current_acp_session_id()?;

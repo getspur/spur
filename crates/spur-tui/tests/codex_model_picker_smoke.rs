@@ -90,7 +90,7 @@ fn codex_model_picker_end_to_end() {
     );
 
     // 4. Submit "/model gpt-5-codex" — typed wire dispatch.
-    match route("/model gpt-5-codex", &[], &registry, false) {
+    match route("/model gpt-5-codex", &[], &[], &registry, false) {
         SubmitDecision::SetSessionConfigOption { config_id, value } => {
             assert_eq!(config_id, "model");
             assert_eq!(value, "gpt-5-codex");
@@ -101,7 +101,7 @@ fn codex_model_picker_end_to_end() {
     // 5. Submit "/effort high" — note slash name "effort" but
     //    config_id "reasoning_effort" (the renaming happens in the
     //    synthesizer's allow-list).
-    match route("/effort high", &[], &registry, false) {
+    match route("/effort high", &[], &[], &registry, false) {
         SubmitDecision::SetSessionConfigOption { config_id, value } => {
             assert_eq!(
                 config_id, "reasoning_effort",
@@ -149,7 +149,7 @@ fn codex_model_picker_end_to_end() {
         "refreshed snapshot must surface the new current value as hint"
     );
 
-    match route("/model o3", &[], &registry, false) {
+    match route("/model o3", &[], &[], &registry, false) {
         SubmitDecision::SetSessionConfigOption { config_id, value } => {
             assert_eq!(config_id, "model");
             assert_eq!(value, "o3");
