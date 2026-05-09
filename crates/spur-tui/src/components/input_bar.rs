@@ -259,6 +259,14 @@ fn try_paste_clipboard_image() -> anyhow::Result<ImageAttachment> {
     })
 }
 
+fn try_as_image_path(text: &str) -> Option<(PathBuf, (u32, u32))> {
+    let path = PathBuf::from(text.trim());
+    if !path.exists() {
+        return None;
+    }
+    image::image_dimensions(&path).ok().map(|dims| (path, dims))
+}
+
 #[cfg(test)]
 fn default_paste_burst_enabled() -> bool {
     false
@@ -1485,6 +1493,21 @@ impl InputBar {
         if text.is_empty() {
             return;
         }
+        if let Some((img_path, dims)) = try_as_image_path(text) {
+            let byte_size = std::fs::metadata(&img_path)
+                .map(|metadata| metadata.len() as usize)
+                .unwrap_or(0);
+            let attachment = ImageAttachment {
+                id: 0,
+                source_path: img_path,
+                mime_type: "image/png".into(),
+                dimensions: dims,
+                byte_size,
+                owned_temp: None,
+            };
+            self.insert_image_atom(attachment);
+            return;
+        }
         // Normalize line endings before the multi-line gate. Clipboards from
         // Mac legacy apps deliver bare `\r`; Windows sources deliver `\r\n`.
         // Rust's `str::lines()` only splits on `\n` and `\r\n`, so a bare `\r`
@@ -2330,6 +2353,68 @@ mod image_tests {
 
         assert_eq!(dyn_img.width(), 4);
         assert_eq!(dyn_img.height(), 4);
+    }
+
+    #[test]
+    fn try_as_image_path_returns_none_for_non_path() {
+        let result = try_as_image_path("hello world this is not a path");
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn try_as_image_path_returns_none_for_text_file() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), b"hello").unwrap();
+        let path_str = tmp.path().to_str().unwrap().to_string();
+
+        let result = try_as_image_path(&path_str);
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn try_as_image_path_returns_path_and_dims_for_png() {
+        let tmp = tempfile::Builder::new().suffix(".png").tempfile().unwrap();
+        let img = image::RgbaImage::from_raw(1, 1, vec![0u8; 4]).unwrap();
+        let dyn_img = image::DynamicImage::ImageRgba8(img);
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        dyn_img
+            .write_to(&mut cursor, image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(tmp.path(), cursor.into_inner()).unwrap();
+        let path_str = tmp.path().to_str().unwrap().to_string();
+
+        let result = try_as_image_path(&path_str);
+
+        assert!(result.is_some());
+        let (path, dims) = result.unwrap();
+        assert_eq!(path, tmp.path());
+        assert_eq!(dims, (1, 1));
+    }
+
+    #[test]
+    fn insert_paste_converts_image_path_to_image_atom() {
+        let tmp = tempfile::Builder::new().suffix(".png").tempfile().unwrap();
+        let img = image::RgbaImage::from_raw(1, 1, vec![0u8; 4]).unwrap();
+        let dyn_img = image::DynamicImage::ImageRgba8(img);
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        dyn_img
+            .write_to(&mut cursor, image::ImageFormat::Png)
+            .unwrap();
+        let png_bytes = cursor.into_inner();
+        std::fs::write(tmp.path(), &png_bytes).unwrap();
+
+        let mut bar = InputBar::new();
+        bar.insert_paste(&format!("  {}  ", tmp.path().display()));
+
+        assert_eq!(bar.text(), "[Image #1 · 1×1]");
+        assert!(bar.pastes.is_empty());
+        assert_eq!(bar.images.len(), 1);
+        assert_eq!(bar.images[&0].source_path, tmp.path());
+        assert_eq!(bar.images[&0].dimensions, (1, 1));
+        assert_eq!(bar.images[&0].byte_size, png_bytes.len());
+        assert_eq!(bar.protected_ranges[0].kind, RangeKind::ImageRef(0));
     }
 }
 
