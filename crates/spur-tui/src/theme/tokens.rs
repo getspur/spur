@@ -48,7 +48,9 @@ const DARK_DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("react_trace.think.fg", "fg_subtle"),
     ("react_trace.message.title.fg", "accent"),
     ("react_trace.message.body.fg", "fg"),
-    ("react_trace.user_message.fg", "warning"),
+    ("react_trace.user_message.fg", "fg"),
+    ("react_trace.user_message.bg", "bg_selection"),
+    ("react_trace.user_message.accent.fg", "accent_alt"),
     ("react_trace.permission.fg", "warning"),
     ("react_trace.spinner.fg", "warning"),
     ("react_trace.outcome.success.fg", "success"),
@@ -200,7 +202,7 @@ mod tests {
 
     #[test]
     fn dark_default_contains_all_spec_sample_bindings() {
-        assert_eq!(TokenMap::dark_default().0.len(), 123);
+        assert_eq!(TokenMap::dark_default().0.len(), 125);
     }
 
     #[test]
