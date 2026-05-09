@@ -53,14 +53,23 @@ use crate::lineage::ExecutorId;
 use crate::review_sink::ReviewSink;
 use crate::scheduler::TurnGuard;
 
+mod codex_discovery;
 pub mod input;
 pub mod types;
+mod util;
 
+use codex_discovery::{filter_sessions_for_repo, list_codex_sessions_from_disk_root};
 use input::strip_bang_prefix;
 pub use input::InteractiveInput;
 pub use types::{
     ActiveConnection, BrainSession, FaultInjectionHooks, LoadBrainSessionError, ReconnectError,
     RunOpts, RunResult,
+};
+pub use util::normalize_agent_name;
+use util::{
+    arm_cancel_deadline, binary_on_path, cancel_mode_for, enforce_log_cap, format_error_chain,
+    is_connection_death, reconnect_failure_event, render_beads_startup_warning, shellexpand_tilde,
+    startup_beads_warning,
 };
 
 type McpGuarded<T> = (T, AbortOnDropHandle<()>);
@@ -91,163 +100,6 @@ type LoadedBrainSessionBootstrap = (
 
 const MAX_SESSION_LIST_PAGES: usize = 1000;
 const MAX_SESSION_LIST_SESSIONS: usize = 100_000;
-const CODEX_DISK_ROLLOUT_SCAN_LIMIT: usize = 500;
-
-fn filter_sessions_for_repo(sessions: Vec<SessionInfo>, repo_root: &Path) -> Vec<SessionInfo> {
-    sessions
-        .into_iter()
-        .filter(|session| session.cwd.starts_with(repo_root))
-        .collect()
-}
-
-fn list_codex_sessions_from_disk_root(sessions_root: &Path) -> Result<Vec<SessionInfo>> {
-    if !sessions_root.exists() {
-        return Ok(Vec::new());
-    }
-
-    let mut sessions = Vec::new();
-    for path in codex_rollout_paths(sessions_root)? {
-        if let Some(session) = parse_codex_rollout_header(&path) {
-            sessions.push(session);
-        }
-    }
-
-    sessions.sort_by(|a, b| {
-        let a_time = a.updated_at.as_deref().unwrap_or("");
-        let b_time = b.updated_at.as_deref().unwrap_or("");
-        b_time.cmp(a_time)
-    });
-
-    Ok(sessions)
-}
-
-fn codex_rollout_paths(sessions_root: &Path) -> Result<Vec<PathBuf>> {
-    let mut paths = Vec::new();
-    'outer: for year_dir in sorted_child_dirs(sessions_root)? {
-        for month_dir in sorted_child_dirs(&year_dir)? {
-            for day_dir in sorted_child_dirs(&month_dir)? {
-                for path in sorted_rollout_files(&day_dir)? {
-                    paths.push(path);
-                    if paths.len() >= CODEX_DISK_ROLLOUT_SCAN_LIMIT {
-                        break 'outer;
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(paths)
-}
-
-fn sorted_child_dirs(path: &Path) -> Result<Vec<PathBuf>> {
-    let mut dirs = Vec::new();
-    for entry in std::fs::read_dir(path)? {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(_) => continue,
-        };
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
-            Err(_) => continue,
-        };
-        if file_type.is_dir() {
-            dirs.push(entry.path());
-        }
-    }
-    dirs.sort_by(|a, b| b.cmp(a));
-    Ok(dirs)
-}
-
-fn sorted_rollout_files(day_dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut paths = Vec::new();
-    for entry in std::fs::read_dir(day_dir)? {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(_) => continue,
-        };
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
-            Err(_) => continue,
-        };
-        if !file_type.is_file() {
-            continue;
-        }
-
-        let path = entry.path();
-        let is_rollout = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("rollout-"));
-        let is_jsonl = path.extension().and_then(|ext| ext.to_str()) == Some("jsonl");
-        if is_rollout && is_jsonl {
-            paths.push(path);
-        }
-    }
-    paths.sort_by(|a, b| b.cmp(a));
-    Ok(paths)
-}
-
-fn parse_codex_rollout_header(path: &Path) -> Option<SessionInfo> {
-    use std::io::{BufRead, Read};
-
-    const MAX_HEADER_BYTES: u64 = 1 << 20; // 1 MiB
-
-    let file = std::fs::File::open(path).ok()?;
-    let mut reader = std::io::BufReader::new(file.take(MAX_HEADER_BYTES));
-    let mut line = String::new();
-    if reader.read_line(&mut line).ok()? == 0 {
-        return None;
-    }
-
-    parse_codex_session_header(&line)
-}
-
-fn parse_codex_session_header(line: &str) -> Option<SessionInfo> {
-    let json: serde_json::Value = serde_json::from_str(line).ok()?;
-    let payload = json.get("payload").unwrap_or(&json);
-
-    let session_id = json_string_field(payload, "id")
-        .or_else(|| json_string_field(payload, "session_id"))
-        .or_else(|| json_string_field(&json, "id"))
-        .or_else(|| json_string_field(&json, "session_id"))?;
-    let cwd = json_string_field(payload, "cwd").or_else(|| json_string_field(&json, "cwd"))?;
-    let updated_at = json_string_field(payload, "timestamp")
-        .or_else(|| json_string_field(&json, "timestamp"))
-        .map(str::to_string);
-    let title = json_string_field(payload, "title")
-        .or_else(|| json_string_field(&json, "title"))
-        .or_else(|| json_string_field(payload, "instructions"))
-        .map(str::to_string);
-
-    let mut info = SessionInfo::new(session_id.to_string(), PathBuf::from(cwd));
-    info = info.updated_at(updated_at);
-    info = info.title(title);
-    Some(info)
-}
-
-fn json_string_field<'a>(json: &'a serde_json::Value, field: &str) -> Option<&'a str> {
-    json.get(field).and_then(|value| value.as_str())
-}
-
-// ─── Agent name normalization ─────────────────────────────────────────
-
-/// Normalize an agent name for equality comparison.
-/// - Lowercases
-/// - Trims surrounding whitespace
-/// - Strips `-acp`, `_acp`, `-cli`, `_cli` suffixes
-///
-/// Used to compare `DelegationPlan.chosen` (possibly a short name
-/// the brain chose) against the dispatched `agent` (possibly a
-/// fully-qualified registered name like `claude-code-acp`).
-pub fn normalize_agent_name(name: &str) -> String {
-    let lower = name.trim().to_lowercase();
-    for suffix in ["-acp", "_acp", "-cli", "_cli"].iter() {
-        if let Some(stripped) = lower.strip_suffix(suffix) {
-            return stripped.to_string();
-        }
-    }
-    lower
-}
 
 /// Resolve a BaseSpec into the concrete ref passed to create_worktree.
 fn resolve_base_branch(spec: &BaseSpec, snapshot_branch: &str) -> String {
@@ -1417,31 +1269,6 @@ fn commit_rendered_batch(
     );
 }
 
-fn format_error_chain(error: &anyhow::Error) -> String {
-    format!("{error:#}")
-}
-
-fn reconnect_failure_event(
-    session: SessionId,
-    brain_name: String,
-    error: ReconnectError,
-) -> SpurEventBody {
-    match error {
-        ReconnectError::AlreadyAttached { acp_id, holder } => {
-            SpurEventBody::SessionAttachRejected {
-                acp_session_id: acp_id,
-                holder,
-                fs_unsafe: false,
-            }
-        }
-        ReconnectError::Other(e) => SpurEventBody::BrainReconnectFailed {
-            session,
-            brain_name,
-            reason: format_error_chain(&e),
-        },
-    }
-}
-
 /// Convert spur_pm::IssueSummary to the spur_acp mirror type for event bus transmission.
 fn to_summary_event(
     issue: &spur_pm::IssueSummary,
@@ -2241,126 +2068,11 @@ pub struct Orchestrator {
     pub(crate) peer_mailbox_reconciler_abort: Option<tokio::task::AbortHandle>,
 }
 
-/// Detect whether an error from an `AgentConnection` RPC indicates the
-/// underlying subprocess has died (pipe closed, ACP thread exited, etc.),
-/// versus a normal request-level error (auth needed, invalid session, etc.).
-///
-/// Pragmatic string-match against the two known "subprocess is gone"
-/// patterns emitted by `NativeAcpConnection` and the ACP SDK. A more
-/// structured signal would require a new trait method on `AgentConnection`;
-/// revisit if the set of transports grows.
-pub(crate) fn is_connection_death(err: &anyhow::Error) -> bool {
-    let msg = err.to_string();
-    msg.contains("ACP thread died") || msg.contains("server shut down unexpectedly")
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BeadsStartupWarning {
-    BrNotInstalled,
-    BackendUnavailable,
-}
-
-fn startup_beads_warning(
-    config: &SpurConfig,
-    feature_gate: Option<&spur_license::FeatureGate>,
-    has_beads_dir: bool,
-    pm_service_available: bool,
-    br_binary_available: bool,
-) -> Option<BeadsStartupWarning> {
-    if !(has_beads_dir
-        && !pm_service_available
-        && config.pm.beads.as_ref().is_none_or(|beads| beads.enabled)
-        && feature_gate.is_some_and(|gate| gate.has(spur_license::FeatureKey::PM_CORE_BEADS_BASIC)))
-    {
-        return None;
-    }
-
-    Some(if br_binary_available {
-        BeadsStartupWarning::BackendUnavailable
-    } else {
-        BeadsStartupWarning::BrNotInstalled
-    })
-}
-
-fn render_beads_startup_warning(warning: BeadsStartupWarning) -> &'static str {
-    match warning {
-        BeadsStartupWarning::BrNotInstalled => {
-            "br (beads) not installed — issue tracking disabled. Install: cargo install --git https://github.com/Dicklesworthstone/beads_rust.git"
-        }
-        BeadsStartupWarning::BackendUnavailable => {
-            "beads PM backend failed to initialize — issue tracking disabled. `br` appears installed; check logs for the underlying startup error."
-        }
-    }
-}
-
-fn binary_on_path(binary: &str) -> bool {
-    let Some(path_var) = std::env::var_os("PATH") else {
-        return false;
-    };
-
-    #[cfg(windows)]
-    let path_exts: Vec<String> = std::env::var_os("PATHEXT")
-        .map(|exts| {
-            exts.to_string_lossy()
-                .split(';')
-                .filter(|ext| !ext.is_empty())
-                .map(|ext| ext.to_string())
-                .collect()
-        })
-        .unwrap_or_else(|| vec![".EXE".into(), ".CMD".into(), ".BAT".into(), ".COM".into()]);
-
-    std::env::split_paths(&path_var).any(|dir| {
-        if dir.join(binary).is_file() {
-            return true;
-        }
-
-        #[cfg(windows)]
-        {
-            path_exts
-                .iter()
-                .any(|ext| dir.join(format!("{binary}{ext}")).is_file())
-        }
-
-        #[cfg(not(windows))]
-        {
-            false
-        }
-    })
-}
-
 impl Drop for Orchestrator {
     fn drop(&mut self) {
         for handle in self.background_tasks.drain(..) {
             handle.abort();
         }
-    }
-}
-
-// ─── Free function: log-cap enforcer ──────────────────────────────────────────
-
-fn enforce_log_cap(dir: &std::path::Path, cap: u64) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut files: Vec<(std::path::PathBuf, std::time::SystemTime, u64)> = entries
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let m = e.metadata().ok()?;
-            Some((e.path(), m.modified().ok()?, m.len()))
-        })
-        .collect();
-    let total: u64 = files.iter().map(|(_, _, s)| s).sum();
-    if total <= cap {
-        return;
-    }
-    files.sort_by_key(|(_, mtime, _)| *mtime); // oldest first
-    let mut to_free = total - cap;
-    for (path, _, size) in files {
-        if to_free == 0 {
-            break;
-        }
-        let _ = std::fs::remove_file(&path);
-        to_free = to_free.saturating_sub(size);
     }
 }
 
@@ -7746,27 +7458,6 @@ struct WorkerAttemptOutcome {
     artifact: Option<spur_acp::WorkerArtifact>,
 }
 
-/// Map a transport kind to its `CancelMode`. Single source of truth used
-/// by `AgentSessionReady` emitters so the TUI can render transport-aware
-/// cancel feedback without re-inspecting `AgentConfig`.
-pub(crate) fn cancel_mode_for(transport: spur_acp::types::TransportKind) -> spur_acp::CancelMode {
-    use spur_acp::types::TransportKind;
-    match transport {
-        TransportKind::Acp => spur_acp::CancelMode::AcpSoft,
-        TransportKind::Stdio | TransportKind::CliWrap | TransportKind::StreamJson => {
-            spur_acp::CancelMode::ProcessKill
-        }
-    }
-}
-
-/// Arm the 5-second force-end deadline used by the streaming `select!`.
-/// Factored out so both the `Message { interrupt: true }` arm and the
-/// new `CancelStream` arm set the deadline identically and so it is
-/// directly unit-testable without a full mock orchestrator.
-pub(crate) fn arm_cancel_deadline(deadline: &mut Option<tokio::time::Instant>) {
-    *deadline = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(5));
-}
-
 /// Build a boxed `AgentConnection` from the transport declared in `config`.
 ///
 /// Single source of truth for the `match transport { Acp/Stdio/CliWrap/StreamJson }`
@@ -9014,20 +8705,6 @@ fn apply_bloat_cap(history: &mut Vec<RetryAttempt>, max_bytes: usize) {
     }
 }
 
-/// Expand ~ to home directory.
-fn shellexpand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs_home() {
-            return format!("{}/{}", home, rest);
-        }
-    }
-    path.to_string()
-}
-
-fn dirs_home() -> Option<String> {
-    directories::BaseDirs::new().map(|d| d.home_dir().to_string_lossy().to_string())
-}
-
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod test_support {
@@ -9292,16 +8969,6 @@ mod list_sessions_tests {
     use futures::Stream;
     use std::pin::Pin;
 
-    fn write_codex_rollout(path: &Path, id: &str, timestamp: &str) {
-        std::fs::write(
-            path,
-            format!(
-                r#"{{"timestamp":"{timestamp}","type":"session_meta","payload":{{"id":"{id}","timestamp":"{timestamp}","cwd":"/repo/spur"}}}}"#
-            ),
-        )
-        .expect("write rollout");
-    }
-
     struct NonProgressingCursorConnection {
         calls: usize,
     }
@@ -9365,131 +9032,6 @@ mod list_sessions_tests {
         }
     }
 
-    #[test]
-    fn filters_sessions_to_repo_root_prefix() {
-        let repo_root = Path::new("/repo/spur");
-        let sessions = vec![
-            SessionInfo::new("root", "/repo/spur"),
-            SessionInfo::new("worker", "/repo/spur/.spur/worktrees/worker-1"),
-            SessionInfo::new("sibling-prefix", "/repo/spur-other"),
-            SessionInfo::new("other", "/repo/other"),
-        ];
-
-        let filtered = filter_sessions_for_repo(sessions, repo_root);
-        let ids: Vec<_> = filtered
-            .iter()
-            .map(|session| session.session_id.0.as_ref())
-            .collect();
-
-        assert_eq!(ids, vec!["root", "worker"]);
-    }
-
-    #[test]
-    fn parses_codex_rollout_headers_from_newest_day_dirs() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let sessions_root = temp.path().join(".codex/sessions");
-        let newest = sessions_root.join("2026/05/09");
-        let older = sessions_root.join("2026/05/08");
-        std::fs::create_dir_all(&newest).expect("newest dir");
-        std::fs::create_dir_all(&older).expect("older dir");
-
-        std::fs::write(
-            newest.join("rollout-2026-05-09T09-00-00-new.jsonl"),
-            r#"{"timestamp":"2026-05-09T02:00:00.000Z","type":"session_meta","payload":{"id":"new","timestamp":"2026-05-09T01:59:00.000Z","cwd":"/repo/spur/.spur/worktrees/worker","title":"Worker task"}}"#,
-        )
-        .expect("new rollout");
-        std::fs::write(
-            older.join("rollout-2026-05-08T09-00-00-old.jsonl"),
-            r#"{"timestamp":"2026-05-08T02:00:00.000Z","type":"session_meta","payload":{"session_id":"old","cwd":"/repo/spur"}}"#,
-        )
-        .expect("old rollout");
-        std::fs::write(
-            newest.join("not-a-rollout.jsonl"),
-            r#"{"timestamp":"2026-05-09T03:00:00.000Z","payload":{"id":"ignored","cwd":"/repo/spur"}}"#,
-        )
-        .expect("ignored file");
-        std::fs::write(newest.join("rollout-invalid.jsonl"), "not json").expect("invalid rollout");
-
-        let sessions =
-            list_codex_sessions_from_disk_root(&sessions_root).expect("codex sessions from disk");
-
-        assert_eq!(sessions.len(), 2);
-        assert_eq!(sessions[0].session_id.0.as_ref(), "new");
-        assert_eq!(
-            sessions[0].cwd,
-            PathBuf::from("/repo/spur/.spur/worktrees/worker")
-        );
-        assert_eq!(
-            sessions[0].updated_at.as_deref(),
-            Some("2026-05-09T01:59:00.000Z")
-        );
-        assert_eq!(sessions[0].title.as_deref(), Some("Worker task"));
-        assert_eq!(sessions[1].session_id.0.as_ref(), "old");
-        assert_eq!(
-            sessions[1].updated_at.as_deref(),
-            Some("2026-05-08T02:00:00.000Z")
-        );
-    }
-
-    #[test]
-    fn codex_disk_walk_respects_scan_limit() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let sessions_root = temp.path().join(".codex/sessions");
-        let newest = sessions_root.join("2026/05/09");
-        let next_newest = sessions_root.join("2026/05/08");
-        let oldest = sessions_root.join("2026/05/07");
-        std::fs::create_dir_all(&newest).expect("newest dir");
-        std::fs::create_dir_all(&next_newest).expect("next newest dir");
-        std::fs::create_dir_all(&oldest).expect("oldest dir");
-
-        let newest_count = CODEX_DISK_ROLLOUT_SCAN_LIMIT / 2;
-        let next_newest_count = CODEX_DISK_ROLLOUT_SCAN_LIMIT - newest_count;
-        for i in 0..newest_count {
-            write_codex_rollout(
-                &newest.join(format!("rollout-2026-05-09T00-{:03}.jsonl", i)),
-                &format!("newest-{i}"),
-                &format!("2026-05-09T00:{i:03}:00.000Z"),
-            );
-        }
-        for i in 0..next_newest_count {
-            write_codex_rollout(
-                &next_newest.join(format!("rollout-2026-05-08T00-{:03}.jsonl", i)),
-                &format!("next-newest-{i}"),
-                &format!("2026-05-08T00:{i:03}:00.000Z"),
-            );
-        }
-        for i in 0..5 {
-            write_codex_rollout(
-                &oldest.join(format!("rollout-2026-05-07T00-{:03}.jsonl", i)),
-                &format!("oldest-{i}"),
-                &format!("2026-05-07T00:{i:03}:00.000Z"),
-            );
-        }
-
-        let sessions =
-            list_codex_sessions_from_disk_root(&sessions_root).expect("codex sessions from disk");
-        let ids: Vec<_> = sessions
-            .iter()
-            .map(|session| session.session_id.0.as_ref())
-            .collect();
-
-        assert_eq!(ids.len(), CODEX_DISK_ROLLOUT_SCAN_LIMIT);
-        assert_eq!(
-            ids.iter().filter(|id| id.starts_with("newest-")).count(),
-            newest_count
-        );
-        assert_eq!(
-            ids.iter()
-                .filter(|id| id.starts_with("next-newest-"))
-                .count(),
-            next_newest_count
-        );
-        assert!(
-            ids.iter().all(|id| !id.starts_with("oldest-")),
-            "oldest rollout should be outside scan cap"
-        );
-    }
-
     #[tokio::test]
     async fn pagination_breaks_on_non_progressing_cursor() {
         let mut conn = NonProgressingCursorConnection { calls: 0 };
@@ -9501,14 +9043,6 @@ mod list_sessions_tests {
         assert_eq!(conn.calls, 2);
         assert!(conn.calls <= 3);
         assert_eq!(sessions.len(), 2);
-    }
-
-    #[test]
-    fn parse_codex_session_header_rejects_missing_required_fields() {
-        assert!(parse_codex_session_header(r#"{"payload":{"cwd":"/repo/spur"}}"#).is_none());
-        assert!(
-            parse_codex_session_header(r#"{"payload":{"id":"session-without-cwd"}}"#).is_none()
-        );
     }
 }
 
@@ -10575,33 +10109,6 @@ mod peer_mailbox_drain_tests {
 }
 
 #[cfg(test)]
-mod cancel_mode_helper_tests {
-    use super::cancel_mode_for;
-    use spur_acp::{types::TransportKind, CancelMode};
-
-    #[test]
-    fn acp_transport_is_acp_soft() {
-        assert_eq!(cancel_mode_for(TransportKind::Acp), CancelMode::AcpSoft);
-    }
-
-    #[test]
-    fn subprocess_transports_are_process_kill() {
-        assert_eq!(
-            cancel_mode_for(TransportKind::Stdio),
-            CancelMode::ProcessKill
-        );
-        assert_eq!(
-            cancel_mode_for(TransportKind::CliWrap),
-            CancelMode::ProcessKill
-        );
-        assert_eq!(
-            cancel_mode_for(TransportKind::StreamJson),
-            CancelMode::ProcessKill
-        );
-    }
-}
-
-#[cfg(test)]
 mod cancel_stream_variant_tests {
     use super::InteractiveInput;
     use spur_acp::SessionId;
@@ -10611,33 +10118,6 @@ mod cancel_stream_variant_tests {
         let _ = InteractiveInput::CancelStream {
             session: SessionId("s".to_string()),
         };
-    }
-}
-
-#[cfg(test)]
-mod cancel_deadline_arm_tests {
-    use super::arm_cancel_deadline;
-
-    #[tokio::test]
-    async fn arm_cancel_deadline_sets_5s_from_now() {
-        let mut deadline = None;
-        let before = tokio::time::Instant::now();
-        arm_cancel_deadline(&mut deadline);
-        let set = deadline.expect("arm_cancel_deadline must populate Some(deadline)");
-        let delta = set.saturating_duration_since(before);
-        assert!(
-            delta >= std::time::Duration::from_millis(4_900)
-                && delta <= std::time::Duration::from_millis(5_100),
-            "expected ~5s deadline, got {delta:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn arm_cancel_deadline_overwrites_existing() {
-        let old = tokio::time::Instant::now() - std::time::Duration::from_secs(60);
-        let mut deadline = Some(old);
-        arm_cancel_deadline(&mut deadline);
-        assert!(deadline.unwrap() > old + std::time::Duration::from_secs(1));
     }
 }
 
@@ -11078,87 +10558,6 @@ mod retry_context_tests {
         let mut history = vec![att(1, "s", "f")];
         apply_bloat_cap(&mut history, 10_000);
         assert_eq!(history.len(), 1);
-    }
-}
-
-#[cfg(test)]
-mod is_connection_death_tests {
-    use super::*;
-
-    #[test]
-    fn is_connection_death_detects_known_patterns() {
-        let e1 = anyhow::anyhow!("NativeAcpConnection 'kiro': ACP thread died during ext_method");
-        assert!(is_connection_death(&e1));
-
-        let e2 = anyhow::anyhow!("NativeAcpConnection 'kiro': ACP thread died");
-        assert!(is_connection_death(&e2));
-
-        let e3 = anyhow::anyhow!("Internal error: \"server shut down unexpectedly\"");
-        assert!(is_connection_death(&e3));
-
-        let e4 = anyhow::anyhow!("prompt rejected: invalid session id");
-        assert!(!is_connection_death(&e4));
-    }
-}
-
-#[cfg(test)]
-mod normalize_tests {
-    use super::normalize_agent_name;
-
-    #[test]
-    fn strips_acp_suffix() {
-        assert_eq!(normalize_agent_name("claude-code-acp"), "claude-code");
-        assert_eq!(normalize_agent_name("kiro-acp"), "kiro");
-    }
-
-    #[test]
-    fn strips_cli_suffix() {
-        assert_eq!(normalize_agent_name("gemini-cli"), "gemini");
-    }
-
-    #[test]
-    fn lowercases() {
-        assert_eq!(normalize_agent_name("CLAUDE"), "claude");
-    }
-
-    #[test]
-    fn trims_whitespace() {
-        assert_eq!(normalize_agent_name("  kiro  "), "kiro");
-    }
-
-    #[test]
-    fn same_agent_matches_across_variants() {
-        assert_eq!(
-            normalize_agent_name("Claude-Code-ACP"),
-            normalize_agent_name("claude-code")
-        );
-    }
-
-    #[test]
-    fn distinct_agents_do_not_collide() {
-        assert_ne!(
-            normalize_agent_name("our-claude"),
-            normalize_agent_name("claude"),
-        );
-    }
-
-    #[test]
-    fn mismatch_detection_chosen_vs_dispatched_strings() {
-        let dispatched = "kiro";
-        let chosen = "claude";
-        let matched = normalize_agent_name(chosen) == normalize_agent_name(dispatched);
-        assert!(!matched);
-
-        let dispatched = "claude-code-acp";
-        let chosen = "claude";
-        let matched = normalize_agent_name(chosen) == normalize_agent_name(dispatched);
-        // claude-code-acp normalizes to "claude-code", so "claude" != "claude-code"
-        assert!(!matched);
-
-        let dispatched = "claude-code-acp";
-        let chosen = "claude-code-acp";
-        let matched = normalize_agent_name(chosen) == normalize_agent_name(dispatched);
-        assert!(matched);
     }
 }
 
@@ -12036,129 +11435,6 @@ mod artifact_decision_tests {
         // call -> no annotation -> no escalation. This is asserted by
         // the absence of the call site at the appropriate branch.
         // See `run_one_worker_attempt` for the guard.
-    }
-}
-
-#[cfg(test)]
-mod beads_startup_warning_tests {
-    use super::{render_beads_startup_warning, startup_beads_warning, BeadsStartupWarning};
-    use std::collections::BTreeSet;
-    use std::sync::Arc;
-
-    use spur_acp::config::{BeadsPmConfig, SpurConfig};
-    use spur_license::policy::PolicyResolver;
-    use spur_license::{EntitlementSnapshot, FeatureGate, LicenseState, Plan};
-
-    fn community_gate() -> Arc<FeatureGate> {
-        Arc::new(FeatureGate::new(PolicyResolver::embedded()))
-    }
-
-    fn gate_without_beads_basic() -> Arc<FeatureGate> {
-        // Pro/Team/Enterprise inherit Community via the policy's
-        // `@inherit:community` directive, so feeding an empty JWT no
-        // longer strips pm_core_beads_basic. Inject a hand-crafted
-        // empty snapshot to genuinely simulate the missing entitlement.
-        let gate = Arc::new(FeatureGate::new(PolicyResolver::embedded()));
-        gate.set_snapshot_for_test(EntitlementSnapshot::default());
-        gate
-    }
-
-    fn beads_basic_gate() -> Arc<FeatureGate> {
-        let gate = Arc::new(FeatureGate::new(PolicyResolver::embedded()));
-        let mut features = BTreeSet::new();
-        features.insert("pm_core_beads_basic".to_string());
-        gate.update_state(&LicenseState::active_validated(Plan::Pro, features));
-        gate
-    }
-
-    #[test]
-    fn beads_startup_warning_free_tier_with_missing_br_emits_install_hint() {
-        let config = SpurConfig::default();
-        let gate = community_gate();
-
-        assert_eq!(
-            startup_beads_warning(&config, Some(gate.as_ref()), true, false, false),
-            Some(BeadsStartupWarning::BrNotInstalled)
-        );
-    }
-
-    #[test]
-    fn beads_startup_warning_missing_beads_basic_entitlement_suppresses_warning() {
-        let config = SpurConfig::default();
-        let gate = gate_without_beads_basic();
-
-        assert_eq!(
-            startup_beads_warning(&config, Some(gate.as_ref()), true, false, false),
-            None
-        );
-    }
-
-    #[test]
-    fn beads_startup_warning_entitled_tier_with_missing_br_emits_install_hint() {
-        let config = SpurConfig::default();
-        let gate = beads_basic_gate();
-
-        assert_eq!(
-            startup_beads_warning(&config, Some(gate.as_ref()), true, false, false),
-            Some(BeadsStartupWarning::BrNotInstalled)
-        );
-        assert!(
-            render_beads_startup_warning(BeadsStartupWarning::BrNotInstalled)
-                .contains("br (beads) not installed"),
-        );
-    }
-
-    #[test]
-    fn beads_startup_warning_entitled_tier_with_present_br_uses_generic_backend_copy() {
-        let config = SpurConfig::default();
-        let gate = beads_basic_gate();
-
-        assert_eq!(
-            startup_beads_warning(&config, Some(gate.as_ref()), true, false, true),
-            Some(BeadsStartupWarning::BackendUnavailable)
-        );
-        let warning = render_beads_startup_warning(BeadsStartupWarning::BackendUnavailable);
-        assert!(
-            !warning.contains("not installed"),
-            "generic warning must not claim br is missing: {warning}",
-        );
-        assert!(warning.contains("failed to initialize"), "got: {warning}");
-    }
-
-    #[test]
-    fn beads_startup_warning_disabled_beads_config_suppresses_warning() {
-        let mut config = SpurConfig::default();
-        config.pm.beads = Some(BeadsPmConfig {
-            enabled: false,
-            auto_sync: false,
-        });
-        let gate = beads_basic_gate();
-
-        assert_eq!(
-            startup_beads_warning(&config, Some(gate.as_ref()), true, false, false),
-            None
-        );
-    }
-
-    #[test]
-    fn beads_startup_warning_missing_feature_gate_suppresses_warning() {
-        let config = SpurConfig::default();
-
-        assert_eq!(
-            startup_beads_warning(&config, None, true, false, false),
-            None
-        );
-    }
-
-    #[test]
-    fn beads_startup_warning_existing_pm_service_suppresses_warning() {
-        let config = SpurConfig::default();
-        let gate = beads_basic_gate();
-
-        assert_eq!(
-            startup_beads_warning(&config, Some(gate.as_ref()), true, true, false),
-            None
-        );
     }
 }
 
