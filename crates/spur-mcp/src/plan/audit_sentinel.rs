@@ -164,6 +164,8 @@ pub enum AuditSentinelKind {
         error: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         worker_branch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        amended_prompt_summary: Option<String>,
     },
     /// bd-2m2u Phase 2d — emitted on a beads task issue when its
     /// `AUTO_RETRY_BUDGET` is exhausted and the task is promoted to
@@ -489,6 +491,7 @@ mod tests {
                 attempt: 1,
                 error: "worker crashed".into(),
                 worker_branch: Some("spur/worker-x".into()),
+                amended_prompt_summary: Some("summary".into()),
             },
             AuditSentinelKind::Signal {
                 signal_id: "sig-1".into(),
@@ -660,6 +663,7 @@ mod tests {
                 attempt: 2,
                 error: "dispatch lease expired".into(),
                 worker_branch: None,
+                amended_prompt_summary: None,
             },
             AuditSentinelKind::Signal {
                 signal_id: "sig-1".into(),
@@ -979,6 +983,7 @@ mod tests {
             attempt: 1,
             error: "worker exited before producing output".into(),
             worker_branch: Some("spur/worker-x".into()),
+            amended_prompt_summary: Some("summary".to_string()),
         };
         let encoded = encode_comment(&kind);
         let parsed = parse_comment(&encoded).unwrap().unwrap();
