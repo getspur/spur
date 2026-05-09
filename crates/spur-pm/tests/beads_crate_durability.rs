@@ -1,11 +1,11 @@
 //! Durability regression: writes that complete before a hard process exit
 //! must survive across re-open. Targets claude-code review concern B1.1
-//! (whether fsqlite's TRUNCATE checkpoint actually fsync's main DB pages
-//! before the SPUR Drop unlinks the WAL sidecar).
+//! (whether the SPUR TRUNCATE checkpoint actually fsync's main DB pages
+//! before the process exits).
 //!
 //! The subprocess test simulates a process crash via `SIGKILL` after Drop
-//! has run. If unlink-after-checkpoint loses data because the main DB
-//! wasn't fsync'd, the parent re-open will see no issue rows.
+//! has run. If checkpointing loses data because the main DB wasn't fsync'd,
+//! the parent re-open will see no issue rows.
 
 use beads_rust::model::{Issue, IssueType, Priority, Status};
 use chrono::Utc;
@@ -78,9 +78,8 @@ async fn run_writer_subprocess() {
             .expect("write succeeds");
     }
     // SIGKILL self — no Drop on Tokio runtime, no async unwind.
-    // Per-write Drop on SqliteStorage already ran inside spawn_blocking
-    // and (per fsqlite-wal sync_db semantics) the main DB pages are on
-    // stable storage. Anything the OS hasn't accepted is lost.
+    // Per-write checkpointing already ran inside spawn_blocking. Anything
+    // the OS hasn't accepted is lost.
     unsafe {
         libc::kill(libc::getpid(), libc::SIGKILL);
     }

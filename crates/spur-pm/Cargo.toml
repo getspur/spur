@@ -20,11 +20,10 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4", "serde"] }
-beads_rust = { git = "https://github.com/getspur/beads_rust", rev = "543495d5c52c9996acfea8c534708b6009bbe22e", default-features = false }
+beads_rust = { git = "https://github.com/getspur/beads_rust", rev = "beff256b491e20508eab0319b23547ff145cfd04", default-features = false }
 petgraph = { workspace = true }
 semver = "1"
 tempfile = "3"
 
 [dev-dependencies]
-fsqlite = "0.1.2"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

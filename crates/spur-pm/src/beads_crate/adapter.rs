@@ -1,22 +1,21 @@
 //! `BeadsCrateAdapter` — direct-linkage adapter to `beads_rust` 0.2.1.
 //!
-//! Open-fresh-per-call shape: `SqliteStorage` is `!Send` (fsqlite uses
-//! `Rc<RefCell<…>>`), so we mirror beads_rust's own MCP module —
-//! store only paths and config in the adapter, open a new `SqliteStorage`
-//! inside each `spawn_blocking` invocation, and drop it when the closure
-//! returns. The closure result must be `Send`, but the storage itself
-//! never crosses thread boundaries.
+//! Open-fresh-per-call shape: the `SqliteStorage` handle is never shared
+//! across async boundaries. We mirror beads_rust's own MCP module — store only
+//! paths and config in the adapter, open a new `SqliteStorage` inside each
+//! `spawn_blocking` invocation, and drop it when the closure returns. The
+//! closure result must be `Send`, but the storage itself never crosses thread
+//! boundaries.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use beads_rust::sync;
-
 use crate::beads_crate::backoff::BackoffPolicy;
 use crate::beads_crate::init;
 use crate::beads_crate::metrics::ContentionMetrics;
 use crate::beads_crate::snapshot::{Conflict, Snapshot};
+use crate::beads_crate::{wal_checkpoint, write_lock};
 use crate::poll_cursor::PollCursor;
 
 /// Coarse data_version proxy. beads_rust 0.2.1 does not expose
@@ -42,7 +41,7 @@ fn acquire_write_lock_with_backoff(
     let mut attempt: u32 = 0;
     loop {
         let attempt_start = Instant::now();
-        match sync::blocking_write_lock_with_timeout(beads_dir, Some(lock_timeout_ms)) {
+        match write_lock::blocking_write_lock_with_timeout(beads_dir, Some(lock_timeout_ms)) {
             Ok(file) => {
                 metrics.record_lock_wait(attempt_start.elapsed());
                 return Ok(file);
@@ -122,7 +121,6 @@ impl BeadsCrateAdapter {
         let jsonl_path = beads_dir.join("issues.jsonl");
 
         let dir_for_init = beads_dir.clone();
-        let jsonl_for_init = jsonl_path.clone();
         let cfg_for_init = config.clone();
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             if !cfg_for_init.allow_non_local_fs {
@@ -130,7 +128,6 @@ impl BeadsCrateAdapter {
             }
             init::init_writer_with_flush(
                 &dir_for_init,
-                &jsonl_for_init,
                 cfg_for_init.lock_timeout_ms,
                 cfg_for_init.stale_tmp_min_age,
             )?;
@@ -181,13 +178,15 @@ impl BeadsCrateAdapter {
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             let _flock =
                 acquire_write_lock_with_backoff(&beads_dir, &backoff, lock_timeout_ms, &metrics)?;
+            let db_path = beads_dir.join("beads.db");
             let mut storage = beads_rust::storage::sqlite::SqliteStorage::open_with_timeout(
-                &beads_dir.join("beads.db"),
+                &db_path,
                 Some(lock_timeout_ms),
             )?;
-            storage.checkpoint_wal_on_drop();
-            let jsonl = beads_dir.join("issues.jsonl");
-            let outcome = beads_rust::sync::auto_flush(&mut storage, &beads_dir, &jsonl, false)?;
+            let outcome = beads_rust::sync::auto_flush(&mut storage, &beads_dir);
+            drop(storage);
+            wal_checkpoint::checkpoint_wal_truncate_best_effort(&db_path);
+            let outcome = outcome?;
             if outcome.flushed {
                 metrics.incr_auto_flush_dirty();
                 metrics.incr_auto_flush_success();
@@ -302,11 +301,11 @@ impl BeadsCrateAdapter {
         tokio::task::spawn_blocking(move || -> anyhow::Result<T> {
             let _flock =
                 acquire_write_lock_with_backoff(&beads_dir, &backoff, lock_timeout_ms, &metrics)?;
+            let db_path = beads_dir.join("beads.db");
             let mut storage = beads_rust::storage::sqlite::SqliteStorage::open_with_timeout(
-                &beads_dir.join("beads.db"),
+                &db_path,
                 Some(lock_timeout_ms),
             )?;
-            storage.checkpoint_wal_on_drop();
             let current = read_data_version(&storage)?;
             if current != snapshot.data_version {
                 metrics.incr_conflict();
@@ -317,6 +316,8 @@ impl BeadsCrateAdapter {
             if result.is_err() {
                 metrics.incr_write_error();
             }
+            drop(storage);
+            wal_checkpoint::checkpoint_wal_truncate_best_effort(&db_path);
             result
         })
         .await?
@@ -355,16 +356,18 @@ impl BeadsCrateAdapter {
         tokio::task::spawn_blocking(move || -> anyhow::Result<T> {
             let _flock =
                 acquire_write_lock_with_backoff(&beads_dir, &backoff, lock_timeout_ms, &metrics)?;
+            let db_path = beads_dir.join("beads.db");
             let mut storage = beads_rust::storage::sqlite::SqliteStorage::open_with_timeout(
-                &beads_dir.join("beads.db"),
+                &db_path,
                 Some(lock_timeout_ms),
             )?;
-            storage.checkpoint_wal_on_drop();
             metrics.incr_write();
             let result = f(&mut storage);
             if result.is_err() {
                 metrics.incr_write_error();
             }
+            drop(storage);
+            wal_checkpoint::checkpoint_wal_truncate_best_effort(&db_path);
             result
         })
         .await?
