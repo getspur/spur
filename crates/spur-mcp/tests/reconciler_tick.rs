@@ -79,20 +79,6 @@ fn run_git(repo: &Path, args: &[&str]) {
     }
 }
 
-fn git_rev_parse(repo: &Path, spec: &str) -> String {
-    let out = Command::new("git")
-        .args(["rev-parse", spec])
-        .current_dir(repo)
-        .output()
-        .expect("git rev-parse");
-    assert!(
-        out.status.success(),
-        "git rev-parse {spec} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
-
 fn init_git_repo(repo: &Path) {
     run_git(repo, &["init"]);
     run_git(repo, &["config", "user.email", "test@example.com"]);
@@ -478,12 +464,11 @@ async fn tick_once_does_not_reclaim_expired_lease_owned_by_another_brain() {
 }
 
 #[tokio::test]
-async fn tick_once_dispatches_ready_task_with_approved_dep_overlay() {
+async fn tick_once_dispatches_ready_task_with_single_approved_dep_branch_base() {
     let dir = TempDir::new().expect("tempdir");
     init_git_repo(dir.path());
     let worker_branch = "spur-test-t1-worker";
     run_git(dir.path(), &["branch", worker_branch]);
-    let worker_oid = git_rev_parse(dir.path(), worker_branch);
     run_br(dir.path(), &["init"]);
 
     let pm = Arc::new(
@@ -606,17 +591,10 @@ async fn tick_once_dispatches_ready_task_with_approved_dep_overlay() {
         .expect("retry base oid send");
     let base = request.base.expect("plan dispatch must pass BaseSpec");
     match base {
-        BaseSpec::WithOverlay { base, overlays } => {
-            assert!(matches!(
-                base,
-                spur_mcp::tools::BaseTarget::Branch { name } if name == "spur/plan-base-overlay"
-            ));
-            assert_eq!(overlays.len(), 1);
-            assert_eq!(overlays[0].source_task_id, "T1");
-            assert_eq!(overlays[0].base_oid, "t1-dispatched-base");
-            assert_eq!(overlays[0].tip_oid, worker_oid);
+        BaseSpec::Branch { name } => {
+            assert_eq!(name, worker_branch);
         }
-        other => panic!("expected WithOverlay BaseSpec, got {other:?}"),
+        other => panic!("expected single-parent branch BaseSpec, got {other:?}"),
     }
 
     request
