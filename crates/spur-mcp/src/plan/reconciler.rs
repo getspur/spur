@@ -1500,6 +1500,7 @@ impl Reconciler {
                 attempt,
                 &dispatch.materializer,
                 None,
+                None,
                 Some(&task_id),
             )
             .await?;

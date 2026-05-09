@@ -1933,6 +1933,62 @@ pub(crate) async fn run_git_capture(
     }
 }
 
+async fn resolve_worker_branch_tip_oid(
+    repo_root: &std::path::Path,
+    worker_branch: &str,
+) -> Result<String, String> {
+    let local_ref = format!("refs/heads/{worker_branch}");
+    let remote_origin_ref = format!("refs/remotes/origin/{worker_branch}");
+    let mut candidates = vec![local_ref, remote_origin_ref];
+    if worker_branch.starts_with("refs/remotes/") || worker_branch.starts_with("origin/") {
+        candidates.push(worker_branch.to_string());
+    }
+
+    let mut errors = Vec::new();
+    for candidate in candidates {
+        match run_git_capture(repo_root, None, &["rev-parse", "--verify", &candidate]).await {
+            Ok(oid) => return Ok(oid),
+            Err(error) => errors.push(format!("{candidate}: {error}")),
+        }
+    }
+
+    Err(format!(
+        "worker branch '{worker_branch}' not found locally or under refs/remotes/origin ({})",
+        errors.join("; ")
+    ))
+}
+
+async fn count_commits_between(
+    repo_root: &std::path::Path,
+    base_oid: &str,
+    tip_oid: &str,
+) -> Result<usize, String> {
+    if run_git_capture(
+        repo_root,
+        None,
+        &["merge-base", "--is-ancestor", base_oid, tip_oid],
+    )
+    .await
+    .is_err()
+    {
+        return Err(
+            "base_oid is not an ancestor of the worker branch tip — branch may have diverged or been rebased"
+                .to_string(),
+        );
+    }
+
+    let range = format!("{base_oid}..{tip_oid}");
+    let count = run_git_capture(
+        repo_root,
+        None,
+        &["rev-list", "--count", "--no-merges", &range],
+    )
+    .await?;
+    count.parse::<usize>().map_err(|error| {
+        format!("git rev-list --count --no-merges returned non-integer '{count}': {error}")
+    })
+}
+
 pub(crate) async fn diff_text_from_branches(
     repo_root: &std::path::Path,
     base_ref: &str,
@@ -3161,6 +3217,9 @@ impl McpCallbackServer {
             "plan_truncate_and_restart" => {
                 self.handle_plan_truncate_and_restart(id, arguments).await
             }
+            "recover_orphaned_dispatch" => {
+                self.handle_recover_orphaned_dispatch(id, arguments).await
+            }
             "review_task" => {
                 if let Some(plan_id) = arguments.get("plan_id").and_then(|v| v.as_str()) {
                     if let Err((code, message)) =
@@ -3184,6 +3243,190 @@ impl McpCallbackServer {
     }
 
     // ─── Tool handlers ────────────────────────────────────────────────
+
+    async fn handle_recover_orphaned_dispatch(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let parsed: crate::tool_schemas::RecoverOrphanedDispatchInput =
+            match serde_json::from_value(args) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    return JsonRpcResponse::invalid_params(
+                        id,
+                        format!("recover_orphaned_dispatch: invalid arguments: {error}"),
+                    )
+                }
+            };
+
+        match self
+            .recover_orphaned_dispatch_with_branch(
+                &parsed.issue_id,
+                &parsed.worker_branch,
+                &parsed.dispatched_base_oid,
+            )
+            .await
+        {
+            Ok(message) => JsonRpcResponse::success(
+                id,
+                json!({ "content": [{ "type": "text", "text": message }] }),
+            ),
+            Err(error) => JsonRpcResponse::internal_error(id, error),
+        }
+    }
+
+    pub(crate) async fn recover_orphaned_dispatch_with_branch(
+        &self,
+        issue_id: &str,
+        worker_branch: &str,
+        dispatched_base_oid: &str,
+    ) -> Result<String, String> {
+        let pm = self
+            .pm_service
+            .clone()
+            .ok_or_else(|| "recover_orphaned_dispatch: no PM service configured".to_string())?;
+        let repo_root = self
+            .repo_root
+            .as_deref()
+            .ok_or_else(|| "recover_orphaned_dispatch: repo_root is not configured".to_string())?;
+
+        let issue = pm.get_issue(issue_id).await.map_err(|error| {
+            format!("recover_orphaned_dispatch: get_issue({issue_id}) failed: {error}")
+        })?;
+        if issue.status != "open" {
+            return Err(format!(
+                "recover_orphaned_dispatch: issue {issue_id} status is '{}', expected 'open'",
+                issue.status
+            ));
+        }
+
+        let delegation_id = issue
+            .labels
+            .iter()
+            .find_map(|label| crate::plan::labels::parse_delegation_id(label))
+            .map(str::to_string)
+            .ok_or_else(|| {
+                format!(
+                    "recover_orphaned_dispatch: issue {issue_id} is missing spur:delegation-id:<id> label"
+                )
+            })?;
+
+        if crate::plan::projector::has_ready_for_review_label_compat(&issue.labels) {
+            return Err(format!(
+                "recover_orphaned_dispatch: issue {issue_id} already has ready-for-review label"
+            ));
+        }
+
+        require_feature(
+            FeatureKey::PM_PRO_BEADS_ADVANCED,
+            self.feature_gate.as_ref(),
+        )
+        .map_err(feature_error_message)?;
+        let adv = pm.advanced().ok_or_else(|| {
+            "recover_orphaned_dispatch: dispatch recovery requires beads backend".to_string()
+        })?;
+        let audits = crate::plan::projector::collect_sorted_audits_for_issue(
+            issue_id,
+            adv.list_comments(issue_id).await.map_err(|error| {
+                format!("recover_orphaned_dispatch: list_comments({issue_id}) failed: {error}")
+            })?,
+        );
+        if audits.iter().any(|audit| {
+            matches!(
+                audit,
+                crate::plan::audit_sentinel::AuditSentinelKind::Completion {
+                    delegation_id: completed,
+                    ..
+                } if completed == &delegation_id
+            )
+        }) {
+            return Err(format!(
+                "recover_orphaned_dispatch: delegation {delegation_id} already has a completion audit"
+            ));
+        }
+
+        let tip_oid = resolve_worker_branch_tip_oid(repo_root, worker_branch).await?;
+        let commit_count = count_commits_between(repo_root, dispatched_base_oid, &tip_oid)
+            .await
+            .map_err(|e| {
+                format!(
+                    "recover_orphaned_dispatch: G-Strict validation failed (base={dispatched_base_oid}): {e}"
+                )
+            })?;
+        if commit_count != 1 {
+            return Err(format!(
+                "recover_orphaned_dispatch: worker branch {worker_branch} has {commit_count} commits in {dispatched_base_oid}..{tip_oid}; expected exactly 1"
+            ));
+        }
+
+        let plan_id = issue
+            .labels
+            .iter()
+            .find_map(|label| crate::plan::labels::parse_plan_id(label))
+            .map(str::to_string)
+            .ok_or_else(|| {
+                format!(
+                    "recover_orphaned_dispatch: issue {issue_id} is missing spur:plan-id:<id> label (orphan recovery is only supported for tasks dispatched via submit_plan/execute_epic; ad-hoc delegate_to_worker tasks are not supported)"
+                )
+            })?;
+        let task_id = issue
+            .labels
+            .iter()
+            .find_map(|label| crate::plan::labels::parse_plan_task_id(label))
+            .unwrap_or_else(|| issue_id.to_string());
+        let (attempt, _) = crate::plan::projector::project_attempt_facts(&audits);
+
+        let result = DelegationResult {
+            status: DelegationStatus::Success,
+            diff: None,
+            diff_summary: None,
+            summary: None,
+            estimated_cost_usd: 0.0,
+            worker_branch: Some(worker_branch.to_string()),
+            artifact: None,
+        };
+
+        let deferred = crate::plan::persist_system_completion_and_notify(
+            pm.as_ref(),
+            issue_id,
+            self.feature_gate.as_ref(),
+            &plan_id,
+            &delegation_id,
+            crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+            &self.reconciler_fast_forward,
+            &result,
+            self.brain_session_id(),
+            attempt,
+            &self.materializer,
+            Some(dispatched_base_oid.to_string()),
+            Some(repo_root.to_path_buf()),
+            Some(&task_id),
+        )
+        .await
+        .map_err(|error| {
+            format!("recover_orphaned_dispatch: failed to persist completion: {error}")
+        })?;
+
+        match crate::plan::projector::project_plan_from_beads(
+            pm.as_ref(),
+            &plan_id,
+            self.feature_gate.as_ref(),
+        )
+        .await
+        {
+            Ok(projected) => self.install_projected_plan(projected, true).await,
+            Err(error) => tracing::warn!(
+                plan_id = %plan_id,
+                issue_id = %issue_id,
+                "recover_orphaned_dispatch: failed to refresh projected plan after recovery: {error}"
+            ),
+        }
+
+        if let Some(deferred) = deferred {
+            deferred
+                .deliver(self.event_sink.as_deref(), self.continuation_ctx.as_ref())
+                .await;
+        }
+
+        Ok("Task promoted to AwaitingReview. Call review_task to approve or reject.".to_string())
+    }
 
     async fn handle_delegate_to_worker(&self, id: Value, args: Value) -> JsonRpcResponse {
         if let Err(error) = self.ensure_accepting_delegations() {
@@ -8625,6 +8868,491 @@ async fn init_beads_pm(
             .expect("expected Some(PmService)"),
     );
     (w, pm)
+}
+
+#[cfg(test)]
+mod recover_orphaned_dispatch_tests {
+    use super::{run_git_capture, DetachedContinuationCtx, McpCallbackServer};
+    use crate::plan::audit_sentinel::{AuditSentinelKind, CompletionState};
+    use crate::plan::PlanTask;
+    use serde_json::{json, Value};
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    async fn init_repo() -> TempDir {
+        let dir = TempDir::new().expect("tempdir");
+        run_git_capture(dir.path(), None, &["init", "-q", "-b", "main"])
+            .await
+            .expect("git init");
+        run_git_capture(dir.path(), None, &["config", "user.email", "test@spur"])
+            .await
+            .expect("git config user.email");
+        run_git_capture(dir.path(), None, &["config", "user.name", "spur-test"])
+            .await
+            .expect("git config user.name");
+        dir
+    }
+
+    async fn commit_file(repo: &std::path::Path, path: &str, body: &str, message: &str) {
+        std::fs::write(repo.join(path), body).expect("write file");
+        run_git_capture(repo, None, &["add", path])
+            .await
+            .expect("git add");
+        run_git_capture(repo, None, &["commit", "-q", "-m", message])
+            .await
+            .expect("git commit");
+    }
+
+    fn no_op_continuation_ctx() -> DetachedContinuationCtx {
+        DetachedContinuationCtx {
+            on_complete: Arc::new(|_cont, _worker_session| Box::pin(async {})),
+        }
+    }
+
+    fn response_text(response: &super::JsonRpcResponse) -> &str {
+        response.result.as_ref().expect("success result")["content"][0]["text"]
+            .as_str()
+            .expect("text content")
+    }
+
+    struct RecoveryFixture {
+        _beads: spur_pm::test_workspace::TestBeadsWorkspace,
+        pm: Arc<spur_pm::PmService>,
+        feature_gate: Arc<spur_license::FeatureGate>,
+        task_issue_id: String,
+    }
+
+    async fn setup_recovery_task(
+        repo: &std::path::Path,
+        plan_id: &str,
+        delegation_id: &str,
+    ) -> RecoveryFixture {
+        let (beads, pm) = super::init_beads_pm(repo).await;
+        let feature_gate = super::pro_feature_gate();
+        let subgraph = crate::build_epic_subgraph(
+            pm.as_ref(),
+            feature_gate.as_ref(),
+            plan_id,
+            "Recover orphan",
+            None,
+            &[PlanTask {
+                task_id: "task-a".into(),
+                agent: "codex".into(),
+                task: "Recover this orphan".into(),
+                depends_on: Vec::new(),
+                issue_id: None,
+                context_files: Vec::new(),
+            }],
+        )
+        .await
+        .expect("build epic subgraph");
+        let task_issue_id = subgraph
+            .task_map
+            .get("task-a")
+            .cloned()
+            .expect("task issue id");
+        crate::plan::persist_dispatch_intent(
+            pm.as_ref(),
+            &task_issue_id,
+            feature_gate.as_ref(),
+            plan_id,
+            delegation_id,
+            "codex",
+            1,
+            std::time::Duration::from_secs(600),
+        )
+        .await
+        .expect("persist dispatch intent");
+
+        RecoveryFixture {
+            _beads: beads,
+            pm,
+            feature_gate,
+            task_issue_id,
+        }
+    }
+
+    fn recovery_server(
+        repo: &std::path::Path,
+        pm: Arc<spur_pm::PmService>,
+        feature_gate: Arc<spur_license::FeatureGate>,
+    ) -> McpCallbackServer {
+        let brain_session = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-test".into()));
+        let (mut server, _channel) = McpCallbackServer::new(
+            Some(&brain_session),
+            Some(pm),
+            None,
+            no_op_continuation_ctx(),
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            feature_gate,
+        );
+        server.set_repo_root(repo.to_path_buf());
+        server
+    }
+
+    #[tokio::test]
+    async fn recover_orphaned_dispatch_promotes_dispatched_task_to_awaiting_review() {
+        let dir = init_repo().await;
+        commit_file(dir.path(), "base.txt", "base\n", "seed").await;
+        let base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
+            .await
+            .expect("base oid");
+        let worker_branch = "spur/worker/v2/codex/brain/worker";
+        run_git_capture(
+            dir.path(),
+            None,
+            &["checkout", "-q", "-b", worker_branch, &base_oid],
+        )
+        .await
+        .expect("checkout worker branch");
+        commit_file(dir.path(), "worker.txt", "worker\n", "worker change").await;
+        run_git_capture(dir.path(), None, &["checkout", "-q", "main"])
+            .await
+            .expect("checkout main");
+
+        let (_beads, pm) = super::init_beads_pm(dir.path()).await;
+        let feature_gate = super::pro_feature_gate();
+        let plan_id = "recover-orphan";
+        let subgraph = crate::build_epic_subgraph(
+            pm.as_ref(),
+            feature_gate.as_ref(),
+            plan_id,
+            "Recover orphan",
+            None,
+            &[PlanTask {
+                task_id: "task-a".into(),
+                agent: "codex".into(),
+                task: "Recover this orphan".into(),
+                depends_on: Vec::new(),
+                issue_id: None,
+                context_files: Vec::new(),
+            }],
+        )
+        .await
+        .expect("build epic subgraph");
+        let task_issue_id = subgraph
+            .task_map
+            .get("task-a")
+            .cloned()
+            .expect("task issue id");
+        crate::plan::persist_dispatch_intent(
+            pm.as_ref(),
+            &task_issue_id,
+            feature_gate.as_ref(),
+            plan_id,
+            "del-A",
+            "codex",
+            1,
+            std::time::Duration::from_secs(600),
+        )
+        .await
+        .expect("persist dispatch intent");
+
+        let brain_session = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-test".into()));
+        let (mut server, _channel) = McpCallbackServer::new(
+            Some(&brain_session),
+            Some(Arc::clone(&pm)),
+            None,
+            no_op_continuation_ctx(),
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            Arc::clone(&feature_gate),
+        );
+        server.set_repo_root(dir.path().to_path_buf());
+
+        let response = server
+            .handle_tool_call(
+                Value::Null,
+                json!({
+                    "name": "recover_orphaned_dispatch",
+                    "arguments": {
+                        "issue_id": task_issue_id.clone(),
+                        "worker_branch": worker_branch,
+                        "dispatched_base_oid": base_oid.clone(),
+                    }
+                }),
+            )
+            .await;
+
+        assert!(
+            response.error.is_none(),
+            "unexpected error: {:?}",
+            response.error
+        );
+        assert!(
+            response_text(&response).contains("Task promoted to AwaitingReview"),
+            "unexpected response: {}",
+            response_text(&response)
+        );
+
+        let issue = pm.get_issue(&task_issue_id).await.expect("get issue");
+        assert!(
+            crate::plan::projector::has_ready_for_review_label_compat(&issue.labels),
+            "recovered task must have ready-for-review label: {:?}",
+            issue.labels
+        );
+        assert!(
+            !issue
+                .labels
+                .contains(&crate::plan::labels::delegation_id("del-A")),
+            "recovered task must clear dispatch label: {:?}",
+            issue.labels
+        );
+
+        let adv = pm.advanced().expect("advanced beads backend");
+        let audits = crate::plan::projector::collect_sorted_audits_for_issue(
+            &task_issue_id,
+            adv.list_comments(&task_issue_id)
+                .await
+                .expect("list comments"),
+        );
+        let completion = audits.iter().find_map(|audit| match audit {
+            AuditSentinelKind::Completion {
+                delegation_id,
+                completion_state,
+                worker_branch: found_branch,
+                dispatched_base_oid,
+                ..
+            } if delegation_id == "del-A" => Some((
+                *completion_state,
+                found_branch.as_deref(),
+                dispatched_base_oid.as_deref(),
+            )),
+            _ => None,
+        });
+        assert_eq!(
+            completion,
+            Some((
+                CompletionState::AwaitingReview,
+                Some(worker_branch),
+                Some(base_oid.as_str())
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_orphaned_dispatch_rejects_more_than_one_commit() {
+        let dir = init_repo().await;
+        commit_file(dir.path(), "base.txt", "base\n", "seed").await;
+        let base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
+            .await
+            .expect("base oid");
+        let worker_branch = "spur/worker/two-commits";
+        run_git_capture(
+            dir.path(),
+            None,
+            &["checkout", "-q", "-b", worker_branch, &base_oid],
+        )
+        .await
+        .expect("checkout worker branch");
+        commit_file(dir.path(), "worker-a.txt", "a\n", "worker change a").await;
+        commit_file(dir.path(), "worker-b.txt", "b\n", "worker change b").await;
+
+        let fixture = setup_recovery_task(dir.path(), "recover-orphan", "del-A").await;
+        let server = recovery_server(
+            dir.path(),
+            Arc::clone(&fixture.pm),
+            Arc::clone(&fixture.feature_gate),
+        );
+
+        let err = server
+            .recover_orphaned_dispatch_with_branch(&fixture.task_issue_id, worker_branch, &base_oid)
+            .await
+            .expect_err("two worker commits must be rejected");
+        assert!(
+            err.contains("2 commits") || err.contains("expected exactly 1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_orphaned_dispatch_rejects_zero_commits() {
+        let dir = init_repo().await;
+        commit_file(dir.path(), "base.txt", "base\n", "seed").await;
+        let base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
+            .await
+            .expect("base oid");
+        let worker_branch = "spur/worker/zero-commits";
+        run_git_capture(dir.path(), None, &["branch", worker_branch, &base_oid])
+            .await
+            .expect("create worker branch");
+
+        let fixture = setup_recovery_task(dir.path(), "recover-orphan", "del-A").await;
+        let server = recovery_server(
+            dir.path(),
+            Arc::clone(&fixture.pm),
+            Arc::clone(&fixture.feature_gate),
+        );
+
+        let err = server
+            .recover_orphaned_dispatch_with_branch(&fixture.task_issue_id, worker_branch, &base_oid)
+            .await
+            .expect_err("zero worker commits must be rejected");
+        assert!(err.contains("0 commits"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn recover_orphaned_dispatch_rejects_already_completed_delegation() {
+        let dir = init_repo().await;
+        commit_file(dir.path(), "base.txt", "base\n", "seed").await;
+        let base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
+            .await
+            .expect("base oid");
+        let worker_branch = "spur/worker/already-completed";
+        run_git_capture(
+            dir.path(),
+            None,
+            &["checkout", "-q", "-b", worker_branch, &base_oid],
+        )
+        .await
+        .expect("checkout worker branch");
+        commit_file(dir.path(), "worker.txt", "worker\n", "worker change").await;
+
+        let fixture = setup_recovery_task(dir.path(), "recover-orphan", "del-A").await;
+        let adv = fixture.pm.advanced().expect("advanced beads backend");
+        adv.add_comment(
+            &fixture.task_issue_id,
+            &crate::plan::audit_sentinel::encode_comment(&AuditSentinelKind::Completion {
+                delegation_id: "del-A".into(),
+                completion_state: CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some(worker_branch.into()),
+                result_summary: Some("already done".into()),
+                artifact_uri: None,
+                dispatched_base_oid: Some(base_oid.clone()),
+            }),
+        )
+        .await
+        .expect("completion audit");
+        let server = recovery_server(
+            dir.path(),
+            Arc::clone(&fixture.pm),
+            Arc::clone(&fixture.feature_gate),
+        );
+
+        let err = server
+            .recover_orphaned_dispatch_with_branch(&fixture.task_issue_id, worker_branch, &base_oid)
+            .await
+            .expect_err("already completed delegation must be rejected");
+        assert!(
+            err.contains("already has a completion audit"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_orphaned_dispatch_rejects_missing_branch() {
+        let dir = init_repo().await;
+        commit_file(dir.path(), "base.txt", "base\n", "seed").await;
+        let base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
+            .await
+            .expect("base oid");
+        let fixture = setup_recovery_task(dir.path(), "recover-orphan", "del-A").await;
+        let server = recovery_server(
+            dir.path(),
+            Arc::clone(&fixture.pm),
+            Arc::clone(&fixture.feature_gate),
+        );
+
+        let err = server
+            .recover_orphaned_dispatch_with_branch(
+                &fixture.task_issue_id,
+                "spur/worker/does-not-exist",
+                &base_oid,
+            )
+            .await
+            .expect_err("missing worker branch must be rejected");
+        assert!(err.contains("not found"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn recover_orphaned_dispatch_rejects_missing_plan_id() {
+        let dir = init_repo().await;
+        commit_file(dir.path(), "base.txt", "base\n", "seed").await;
+        let base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
+            .await
+            .expect("base oid");
+        let worker_branch = "spur/worker/missing-plan-id";
+        run_git_capture(
+            dir.path(),
+            None,
+            &["checkout", "-q", "-b", worker_branch, &base_oid],
+        )
+        .await
+        .expect("checkout worker branch");
+        commit_file(dir.path(), "worker.txt", "worker\n", "worker change").await;
+
+        let fixture = setup_recovery_task(dir.path(), "recover-orphan", "del-A").await;
+        fixture
+            .pm
+            .update_issue(
+                &fixture.task_issue_id,
+                spur_pm::IssueUpdate {
+                    remove_labels: vec![crate::plan::labels::plan_id("recover-orphan")],
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("remove plan id label");
+        let server = recovery_server(
+            dir.path(),
+            Arc::clone(&fixture.pm),
+            Arc::clone(&fixture.feature_gate),
+        );
+
+        let err = server
+            .recover_orphaned_dispatch_with_branch(&fixture.task_issue_id, worker_branch, &base_oid)
+            .await
+            .expect_err("missing plan-id label must be rejected");
+        assert!(
+            err.contains("missing spur:plan-id"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_orphaned_dispatch_rejects_non_ancestor_base() {
+        let dir = init_repo().await;
+        commit_file(dir.path(), "base.txt", "base\n", "seed").await;
+        let original_base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
+            .await
+            .expect("base oid");
+        let worker_branch = "spur/worker/diverged-base";
+        run_git_capture(
+            dir.path(),
+            None,
+            &["checkout", "-q", "-b", worker_branch, &original_base_oid],
+        )
+        .await
+        .expect("checkout worker branch");
+        commit_file(dir.path(), "worker.txt", "worker\n", "worker change").await;
+        run_git_capture(dir.path(), None, &["checkout", "-q", "main"])
+            .await
+            .expect("checkout main");
+        commit_file(dir.path(), "main.txt", "main\n", "main moved").await;
+        let non_ancestor_base = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
+            .await
+            .expect("non-ancestor base oid");
+
+        let fixture = setup_recovery_task(dir.path(), "recover-orphan", "del-A").await;
+        let server = recovery_server(
+            dir.path(),
+            Arc::clone(&fixture.pm),
+            Arc::clone(&fixture.feature_gate),
+        );
+
+        let err = server
+            .recover_orphaned_dispatch_with_branch(
+                &fixture.task_issue_id,
+                worker_branch,
+                &non_ancestor_base,
+            )
+            .await
+            .expect_err("non-ancestor base must be rejected");
+        assert!(
+            err.contains("not an ancestor") || err.contains("G-Strict validation failed"),
+            "unexpected error: {err}"
+        );
+    }
 }
 
 #[cfg(test)]
