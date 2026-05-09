@@ -394,6 +394,11 @@ pub struct App {
     /// at session-creation time (see `resolve_agent_config`). Defaults to
     /// `SpurConfig::default()` when no config is supplied.
     config: std::sync::Arc<spur_acp::SpurConfig>,
+    /// Path to the project-local `.spur/config.toml` that seeded `config`.
+    /// When `Some`, `/theme <name>` persists the theme choice back to this
+    /// file via `update_config`. `None` in test fixtures and when the TUI
+    /// is launched without a discoverable repo-local config.
+    config_path: Option<std::path::PathBuf>,
     /// Active theme resolved at startup from `config.tui.theme` via the
     /// project → user → built-in cascade. Surfaces read tokens off this
     /// reference; the dark built-in is a pixel-perfect reproduction of
@@ -546,6 +551,7 @@ impl App {
         config: std::sync::Arc<spur_acp::SpurConfig>,
         license_state: LicenseStateEvent,
         landing: crate::landing::LandingDecision,
+        config_path: Option<std::path::PathBuf>,
     ) -> Self {
         Self::build_with_license_state(
             user_input_tx,
@@ -553,6 +559,7 @@ impl App {
             config,
             license_state,
             landing,
+            config_path,
         )
     }
 
@@ -568,6 +575,7 @@ impl App {
             config,
             Self::default_license_state(PLACEHOLDER_STATUS_TEXT),
             landing,
+            None,
         )
     }
 
@@ -577,6 +585,7 @@ impl App {
         config: std::sync::Arc<spur_acp::SpurConfig>,
         license_state: LicenseStateEvent,
         landing: crate::landing::LandingDecision,
+        config_path: Option<std::path::PathBuf>,
     ) -> Self {
         let metadata_path = std::path::PathBuf::from(".spur").join("session_metadata.json");
         Self::build_with_license_state_from_metadata_path(
@@ -586,6 +595,7 @@ impl App {
             license_state,
             landing,
             metadata_path,
+            config_path,
         )
     }
 
@@ -596,6 +606,7 @@ impl App {
         license_state: LicenseStateEvent,
         landing: crate::landing::LandingDecision,
         metadata_path: std::path::PathBuf,
+        config_path: Option<std::path::PathBuf>,
     ) -> Self {
         let metadata_store = SessionMetadataStore::load(&metadata_path);
         let start_in_picker = start_in_picker_with_preselect.is_some();
@@ -695,6 +706,7 @@ impl App {
             tombstones: crate::components::tombstone::TombstoneSlots::new(),
             tombstone_undo_replay: false,
             config,
+            config_path,
             theme,
             active_theme_name,
             palette_visible: false,
@@ -784,6 +796,7 @@ impl App {
             Self::default_license_state(PLACEHOLDER_STATUS_TEXT),
             crate::landing::LandingDecision::ShowDashboard,
             metadata_path,
+            None,
         )
     }
 
@@ -797,6 +810,7 @@ impl App {
             Self::default_license_state(PLACEHOLDER_STATUS_TEXT),
             crate::landing::LandingDecision::ShowDashboard,
             metadata_path,
+            None,
         )
     }
 
@@ -842,10 +856,11 @@ impl App {
         self.flash_hint(msg, Duration::from_secs(2));
     }
 
-    /// Service `/theme` slash command: list / switch / reload. Runtime-only;
-    /// never mutates `config.tui.theme`. On a successful switch or reload
-    /// the `Arc<Theme>` on `self` is replaced atomically — every render
-    /// surface reads the new theme on its next frame.
+    /// Service `/theme` slash command: list / switch / reload. On a successful
+    /// switch or reload the `Arc<Theme>` on `self` is replaced atomically —
+    /// every render surface reads the new theme on its next frame. If the app
+    /// was booted from a discoverable project config, the chosen theme is also
+    /// persisted back to `.spur/config.toml` so it survives the next TUI start.
     fn handle_theme_command(&mut self, arg: String) {
         let arg = arg.trim();
         if arg.is_empty() {
@@ -876,10 +891,36 @@ impl App {
         self.theme = std::sync::Arc::new(theme);
         self.active_theme_name = target.clone();
         self.dirty = true;
+
+        let mut persisted = false;
+        if arg != "reload" {
+            if let Some(ref path) = self.config_path {
+                if path.exists() {
+                    if let Err(e) = spur_acp::config::update_config(path, |c| {
+                        c.tui.theme = target.clone();
+                    }) {
+                        tracing::warn!(target: "spur_tui::theme", error = %e, "failed to persist theme to config");
+                        self.flash_hint_short(format!(
+                            "theme: {target} (config write failed: {})",
+                            e
+                        ));
+                        return;
+                    }
+                    persisted = true;
+                }
+            }
+        }
+
         if arg == "reload" {
             self.flash_hint_short(format!("theme reloaded: {target}"));
+        } else if persisted {
+            self.flash_hint_short(format!(
+                "theme: {target} (saved to .spur/config.toml). Global: spur config set tui.theme {target} --global"
+            ));
         } else {
-            self.flash_hint_short(format!("theme: {target}"));
+            self.flash_hint_short(format!(
+                "theme: {target}. Persist with `spur config set tui.theme {target} --global`"
+            ));
         }
     }
 
@@ -4548,6 +4589,7 @@ pub async fn run_tui(
         std::sync::Arc::new(spur_acp::SpurConfig::default()),
         App::default_license_state(PLACEHOLDER_STATUS_TEXT),
         crate::landing::LandingDecision::ShowDashboard,
+        None,
     )
     .await
 }
@@ -4560,6 +4602,7 @@ pub async fn run_tui_with_license(
     config: std::sync::Arc<spur_acp::SpurConfig>,
     license_state: LicenseStateEvent,
     landing: crate::landing::LandingDecision,
+    config_path: Option<std::path::PathBuf>,
 ) -> anyhow::Result<()> {
     let mut terminal = tui::setup()?;
     let mut app = App::build_with_license_state(
@@ -4568,6 +4611,7 @@ pub async fn run_tui_with_license(
         config.clone(),
         license_state,
         landing,
+        config_path,
     );
     let mut tick_interval = tokio::time::interval(Duration::from_millis(33));
     let mut event_stream = crossterm::event::EventStream::new();
@@ -4793,6 +4837,7 @@ pub async fn run_tui_with_config(
     perm_rx: Option<tokio::sync::mpsc::UnboundedReceiver<spur_acp::types::PermissionRequest>>,
     start_in_picker: bool,
     config: std::sync::Arc<spur_acp::SpurConfig>,
+    config_path: Option<std::path::PathBuf>,
 ) -> anyhow::Result<()> {
     run_tui_with_license(
         event_rx,
@@ -4802,6 +4847,7 @@ pub async fn run_tui_with_config(
         config,
         App::default_license_state(PLACEHOLDER_STATUS_TEXT),
         crate::landing::LandingDecision::ShowDashboard,
+        config_path,
     )
     .await
 }
@@ -5481,6 +5527,7 @@ mod license_gate_refresh_tests {
             std::sync::Arc::new(spur_acp::SpurConfig::default()),
             pro_license_state_event(),
             crate::landing::LandingDecision::ShowDashboard,
+            None,
         );
 
         assert_pro_cost_tracking_enabled(&app);

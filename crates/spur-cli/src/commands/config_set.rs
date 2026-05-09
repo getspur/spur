@@ -34,7 +34,16 @@ pub fn run(repo_root: &Path, key: &str, value: &str, global: bool) -> Result<()>
             println!("Takes effect on next `spur tui` invocation.");
             Ok(())
         }
-        _ => bail!("unknown key '{key}'. Supported keys: tui.edit_mode, tui.disable_paste_burst"),
+        "tui.theme" => {
+            update_config(&target, |c| {
+                c.tui.theme = value.to_string();
+            })
+            .with_context(|| format!("update {}", target.display()))?;
+            println!("Set tui.theme = {value} in {}", target.display());
+            println!("Takes effect on next `spur tui` invocation.");
+            Ok(())
+        }
+        _ => bail!("unknown key '{key}'. Supported keys: tui.edit_mode, tui.disable_paste_burst, tui.theme"),
     }
 }
 
