@@ -22,9 +22,13 @@ _meta.<vendor>.<key>
 | `ClaudeStreamJson`   | `claudeCode`        |
 | `CodexAcp`           | `codex`             |
 | `Kiro`               | `kiro`              |
-| `Generic` (gemini)   | (no standard prefix)|
+| `Kimi`               | `kimi`              |
+| `Gemini`             | `gemini`            |
+| `Generic`            | (no standard prefix)|
 
-Gemini currently falls under `Generic`. If a dedicated `AgentKind::Gemini` is introduced later, its prefix will be `gemini`.
+Gemini's native `invoke_agent` ACP frames do not currently expose child
+tool/output metadata through `_meta`; the Gemini adapter only derives ordinary
+ACP input/content from the frame title so renderers have display text.
 
 ## 3. Known Normalized Keys
 
@@ -55,7 +59,7 @@ To add a new agent:
    - `pub fn mode_badge(id: &str) -> Option<ModeBadge>`
    - `pub fn refine(title: &str, base: ToolFamily) -> ToolFamily`
 3. Wire each function into the `match kind` dispatcher in `adapter/mod.rs`.
-4. Add a TOML descriptor entry in `crates/spur-acp/src/agents/defaults.toml`.
+4. Add a seed entry in `crates/spur-acp/src/seed_agents.toml`, and a delegation descriptor in `crates/spur-acp/src/agents/defaults.toml` if the agent is worker-capable.
 5. Capture a live-session fixture to `crates/spur-acp/tests/fixtures/notifications/<agent>/`.
 6. If the agent is non-ACP, add a translator module emitting `_meta.<vendor>.*` and test its ACP output.
 7. If the vendor introduces a cross-vendor concept not yet in `SpurToolMeta`, propose a new field via a design doc and update Section 3 of this file.

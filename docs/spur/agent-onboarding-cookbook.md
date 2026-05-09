@@ -36,6 +36,7 @@ kind = "claude-code-acp"   # or one of the values below
 | Claude Code via `@agentclientprotocol/claude-agent-acp` | `"claude-code-acp"` |
 | Codex via `codex-acp` (binary) or `@zed-industries/codex-acp` (npx) | `"codex-acp"` |
 | Kiro CLI (`kiro-cli acp`) | `"kiro"` |
+| Gemini CLI (`gemini --acp`) | `"gemini"` |
 | Anything else | `"generic"` (this is also the default when the field is omitted) |
 
 `"generic"` applies heuristic fallbacks (case-insensitive title matching, ACP `ToolKind` passthrough). Your agent will work fine — you'll just get generic glyphs and no mode-badge translation. File an issue if your agent's tool vocabulary is widely used and deserves a dedicated `AgentKind` variant.

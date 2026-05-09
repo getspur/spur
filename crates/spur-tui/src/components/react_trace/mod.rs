@@ -351,6 +351,14 @@ impl ReactTrace {
                     ColorDepth::Truecolor,
                 ),
             ),
+            AgentKind::Gemini => (
+                " Session · gemini ",
+                resolve_token(
+                    &self.theme,
+                    "react_trace.title.generic.fg",
+                    ColorDepth::Truecolor,
+                ),
+            ),
             AgentKind::Generic => (
                 " Session ",
                 resolve_token(

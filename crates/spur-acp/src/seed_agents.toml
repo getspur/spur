@@ -129,7 +129,7 @@ name = "gemini"
 command = "gemini"
 args = ["--acp", "-y", "-m", "deep-thinker"]
 transport = "acp"
-kind = "generic"
+kind = "gemini"
 role = "both"
 cost_tier = "low"
 

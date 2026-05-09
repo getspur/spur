@@ -1036,6 +1036,17 @@ mod tests {
     }
 
     #[test]
+    fn seed_template_gemini_uses_gemini_kind() {
+        let seeds = load_seed_template();
+        let gemini = seeds
+            .entries
+            .iter()
+            .find(|a| a.name == "gemini")
+            .expect("gemini should be in seed template");
+        assert_eq!(gemini.kind, crate::types::AgentKind::Gemini);
+    }
+
+    #[test]
     fn brain_delegation_framework_defaults_per_build() {
         // Empty [brain.delegation] block → build-aware default.
         let toml = r#"
