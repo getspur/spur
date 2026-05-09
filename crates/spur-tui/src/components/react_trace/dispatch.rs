@@ -11,8 +11,9 @@
 //! - `AgentMessageChunk` → `TraceKind::AgentMessage`
 //! - `UserMessageChunk` → `TraceKind::UserMessage`
 //! - `ToolCall` → `TraceKind::Act` (new)
-//! - `ToolCallUpdate` → mutates existing `Act`'s status, or synthesizes
-//!   an `Act` if the update arrives before the creation
+//! - `ToolCallUpdate` → mutates existing `Act`'s replacement fields
+//!   (title/content/raw input/status), or synthesizes an `Act` if the
+//!   update arrives before the creation
 //! - `Plan` → `TraceKind::Think` (summary)
 //!
 //! ## Deliberate no-ops
@@ -105,6 +106,12 @@ pub fn dispatch_session_update<F: Fn() -> String>(
         }
         SessionUpdate::ToolCallUpdate(tcu) => {
             if let Some((idx, act_entry)) = trace.find_act_by_id_mut(&tcu.tool_call_id) {
+                let update_text = tcu
+                    .fields
+                    .content
+                    .as_ref()
+                    .and_then(|content| extract_tool_call_text(content))
+                    .or_else(|| tcu.fields.raw_input.as_ref().map(format_tool_args));
                 let new_status = if let TraceKind::Act { status, .. } = &act_entry.kind {
                     merge_status(
                         status,
@@ -115,8 +122,23 @@ pub fn dispatch_session_update<F: Fn() -> String>(
                 } else {
                     return;
                 };
-                if let TraceKind::Act { status, .. } = &mut act_entry.kind {
+                if let TraceKind::Act {
+                    tool,
+                    input,
+                    status,
+                    ..
+                } = &mut act_entry.kind
+                {
+                    if let Some(title) = tcu.fields.title.as_deref() {
+                        *tool = replace_tool_title_preserving_indent(tool, title);
+                    }
+                    if let Some(raw_input) = tcu.fields.raw_input.as_ref() {
+                        *input = adapter::format_input(raw_input, ctx.agent_kind);
+                    }
                     *status = new_status;
+                }
+                if let Some(text) = update_text {
+                    act_entry.text = text;
                 }
                 trace.mark_dirty_from_for_update(idx);
             } else if tcu.fields.title.is_some() || tcu.fields.kind.is_some() {
@@ -126,12 +148,24 @@ pub fn dispatch_session_update<F: Fn() -> String>(
                 );
                 let tool = tcu.fields.title.clone().unwrap_or_else(|| "unknown".into());
                 let family = adapter::ToolFamily::Unknown;
-                let input = adapter::ToolInputDisplay::Empty;
+                let input = tcu
+                    .fields
+                    .raw_input
+                    .as_ref()
+                    .map(|raw_input| adapter::format_input(raw_input, ctx.agent_kind))
+                    .unwrap_or(adapter::ToolInputDisplay::Empty);
                 let status = map_initial_status(
                     tcu.fields.status.unwrap_or(ToolCallStatus::Pending),
                     tcu.fields.raw_output.as_ref(),
                     ctx.agent_kind,
                 );
+                let text = tcu
+                    .fields
+                    .content
+                    .as_ref()
+                    .and_then(|content| extract_tool_call_text(content))
+                    .or_else(|| tcu.fields.raw_input.as_ref().map(format_tool_args))
+                    .unwrap_or_default();
                 trace.push(TraceEntry {
                     kind: TraceKind::Act {
                         tool,
@@ -140,7 +174,7 @@ pub fn dispatch_session_update<F: Fn() -> String>(
                         tool_call_id: Some(tcu.tool_call_id.clone()),
                         status,
                     },
-                    text: String::new(),
+                    text,
                     timestamp: (ctx.now_stamp)(),
                     #[cfg(feature = "markdown")]
                     markdown: None,
@@ -179,6 +213,11 @@ pub fn dispatch_session_update<F: Fn() -> String>(
         }
         _ => {}
     }
+}
+
+fn replace_tool_title_preserving_indent(existing: &str, title: &str) -> String {
+    let indent_len = existing.len() - existing.trim_start().len();
+    format!("{}{}", &existing[..indent_len], title)
 }
 
 fn extract_text(chunk: &ContentChunk) -> Option<&str> {
@@ -301,4 +340,94 @@ fn truncate_str(s: &str, max_len: usize) -> String {
         end -= 1;
     }
     format!("{}...", &s[..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_client_protocol::schema::{Content, ToolCall, ToolCallUpdate, ToolCallUpdateFields};
+    use spur_acp::{
+        ContentBlock, SessionUpdate, TextContent, ToolCallContent, ToolCallId, ToolCallStatus,
+    };
+    use std::collections::HashMap;
+
+    fn ctx<'a>(tool_depth: &'a mut HashMap<String, u8>) -> DispatchCtx<'a, impl Fn() -> String> {
+        DispatchCtx {
+            agent_name: "kimi",
+            agent_kind: AgentKind::Generic,
+            now_stamp: || "10:00".to_string(),
+            tool_depth,
+            skip_plan_trace: false,
+        }
+    }
+
+    fn text_tool_content(text: &str) -> ToolCallContent {
+        ToolCallContent::Content(Content::new(ContentBlock::Text(TextContent::new(text))))
+    }
+
+    #[test]
+    fn tool_call_update_replaces_existing_act_title_and_content() {
+        let id = ToolCallId::new("call-kimi");
+        let mut trace = ReactTrace::new();
+        let mut tool_depth = HashMap::new();
+        let mut ctx = ctx(&mut tool_depth);
+
+        let mut call = ToolCall::new(id.clone(), "ReadFile");
+        call.status = ToolCallStatus::InProgress;
+        dispatch_session_update(&mut trace, &SessionUpdate::ToolCall(call), &mut ctx);
+
+        let update = ToolCallUpdate::new(
+            id,
+            ToolCallUpdateFields::new()
+                .title("ReadFile: Cargo.toml")
+                .status(ToolCallStatus::InProgress)
+                .content(vec![text_tool_content(
+                    r#"{"path": "/Volumes/Projects/spur/Cargo.toml"}"#,
+                )]),
+        );
+        dispatch_session_update(&mut trace, &SessionUpdate::ToolCallUpdate(update), &mut ctx);
+
+        let entries = trace.entries_for_test();
+        assert_eq!(entries.len(), 1);
+        assert!(
+            matches!(&entries[0].kind, TraceKind::Act { tool, .. } if tool == "ReadFile: Cargo.toml"),
+            "expected Kimi's later ToolCallUpdate title to replace the initial tool title"
+        );
+        assert!(
+            entries[0].text.contains("Cargo.toml"),
+            "expected Kimi's later ToolCallUpdate content to be displayed, got {:?}",
+            entries[0].text
+        );
+    }
+
+    #[test]
+    fn tool_call_update_before_tool_call_synthesizes_act_with_content() {
+        let id = ToolCallId::new("call-kimi-before");
+        let mut trace = ReactTrace::new();
+        let mut tool_depth = HashMap::new();
+        let mut ctx = ctx(&mut tool_depth);
+
+        let update = ToolCallUpdate::new(
+            id,
+            ToolCallUpdateFields::new()
+                .title("ReadFile: Cargo.toml")
+                .status(ToolCallStatus::InProgress)
+                .content(vec![text_tool_content(
+                    r#"{"path": "/Volumes/Projects/spur/Cargo.toml"}"#,
+                )]),
+        );
+        dispatch_session_update(&mut trace, &SessionUpdate::ToolCallUpdate(update), &mut ctx);
+
+        let entries = trace.entries_for_test();
+        assert_eq!(entries.len(), 1);
+        assert!(
+            matches!(&entries[0].kind, TraceKind::Act { tool, .. } if tool == "ReadFile: Cargo.toml"),
+            "expected synthesized Act to use ToolCallUpdate title"
+        );
+        assert!(
+            entries[0].text.contains("Cargo.toml"),
+            "expected synthesized Act to keep ToolCallUpdate content, got {:?}",
+            entries[0].text
+        );
+    }
 }
