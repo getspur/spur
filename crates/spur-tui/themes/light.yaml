@@ -82,6 +82,7 @@ palette:
 tokens:
   status_bar.fg: fg
   spinner.fg: accent
+  picker.row.fg: fg
   picker.match.fg: highlight
   status_bar.tombstone.fg: fg_subtle
   status_bar.issue_count.fg: accent
