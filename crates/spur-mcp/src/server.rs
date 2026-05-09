@@ -9098,6 +9098,11 @@ mod recover_orphaned_dispatch_tests {
             issue.labels
         );
 
+        super::require_feature(
+            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+            feature_gate.as_ref(),
+        )
+        .expect("test feature gate should allow beads advanced");
         let adv = pm.advanced().expect("advanced beads backend");
         let audits = crate::plan::projector::collect_sorted_audits_for_issue(
             &task_issue_id,
@@ -9208,6 +9213,11 @@ mod recover_orphaned_dispatch_tests {
         commit_file(dir.path(), "worker.txt", "worker\n", "worker change").await;
 
         let fixture = setup_recovery_task(dir.path(), "recover-orphan", "del-A").await;
+        super::require_feature(
+            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+            fixture.feature_gate.as_ref(),
+        )
+        .expect("test feature gate should allow beads advanced");
         let adv = fixture.pm.advanced().expect("advanced beads backend");
         adv.add_comment(
             &fixture.task_issue_id,

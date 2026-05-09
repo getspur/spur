@@ -209,6 +209,7 @@ async fn reconciler_pushes_plan_completed_continuation_after_worker_completion_c
             attempt: 1,
             error: "first attempt failed".into(),
             worker_branch: None,
+            amended_prompt_summary: None,
         },
     ] {
         adv.add_comment(&task_id, &audit_sentinel::encode_comment(&audit))
@@ -244,12 +245,12 @@ async fn reconciler_pushes_plan_completed_continuation_after_worker_completion_c
     request
         .respond_to
         .send(spur_acp::DelegationResult {
-            status: spur_acp::DelegationStatus::Failed {
-                error: "worker failed".into(),
+            status: spur_acp::DelegationStatus::Cancelled {
+                reason: "worker cancelled".into(),
             },
             diff: None,
             diff_summary: None,
-            summary: Some("worker failed".into()),
+            summary: Some("worker cancelled".into()),
             estimated_cost_usd: 0.0,
             worker_branch: None,
             artifact: None,
