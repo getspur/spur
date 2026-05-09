@@ -612,17 +612,17 @@ fn build_auto_pr_params(
 }
 
 pub struct Reconciler {
-    config: ReconcilerConfig,
-    pm: Arc<PmService>,
-    fast_forward: Arc<Notify>,
-    dispatch: Option<ReconcilerDispatchCtx>,
-    plan_id: Option<String>,
-    auto_merge_approved_plans: bool,
-    automation: Option<Arc<dyn ReconcilerAutomation>>,
-    journal_wake: Option<Arc<Notify>>,
-    feature_gate: Arc<spur_license::FeatureGate>,
-    outcomes: Arc<tokio::sync::Mutex<OutcomeStore>>,
-    clock: Arc<dyn Clock>,
+    pub(super) config: ReconcilerConfig,
+    pub(super) pm: Arc<PmService>,
+    pub(super) fast_forward: Arc<Notify>,
+    pub(super) dispatch: Option<ReconcilerDispatchCtx>,
+    pub(super) plan_id: Option<String>,
+    pub(super) auto_merge_approved_plans: bool,
+    pub(super) automation: Option<Arc<dyn ReconcilerAutomation>>,
+    pub(super) journal_wake: Option<Arc<Notify>>,
+    pub(super) feature_gate: Arc<spur_license::FeatureGate>,
+    pub(super) outcomes: Arc<tokio::sync::Mutex<OutcomeStore>>,
+    pub(super) clock: Arc<dyn Clock>,
 }
 
 impl Reconciler {
