@@ -103,7 +103,7 @@ fn codex_review_branch_picker_end_to_end() {
     // 3. Submit "/review-branch main" → assembles canonical text and routes
     //    as PromptText. This is the wire shape codex's parser already
     //    understands (verified at codex-acp/src/thread.rs:2735-2767).
-    match route("/review-branch main", &[], &registry, false) {
+    match route("/review-branch main", &[], &[], &registry, false) {
         SubmitDecision::Send { blocks, interrupt } => {
             assert!(!interrupt);
             use agent_client_protocol::schema::ContentBlock;
@@ -120,7 +120,7 @@ fn codex_review_branch_picker_end_to_end() {
     // 4. Empty arg ("/review-branch ") still routes as Send (PromptText)
     //    so the agent gets a chance to respond — codex itself decides
     //    whether to require an arg.
-    match route("/review-branch", &[], &registry, false) {
+    match route("/review-branch", &[], &[], &registry, false) {
         SubmitDecision::Send { blocks, .. } => {
             use agent_client_protocol::schema::ContentBlock;
             let text = match &blocks[0] {

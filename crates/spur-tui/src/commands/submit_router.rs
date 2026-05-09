@@ -1,7 +1,8 @@
 //! SubmitRouter — decide what to do with an Enter-submitted InputBar.
 //!
 //! On Enter, the `InputBar` captures `(text, ranges, interrupt)`. The
-//! router takes that triple plus the `CommandRegistry` and returns a
+//! router takes that triple, pending image attachments, plus the
+//! `CommandRegistry` and returns a
 //! `SubmitDecision`:
 //!
 //! * `Empty`         — nothing to do.
@@ -10,13 +11,14 @@
 //! * `VendorExec`    — invoke an agent-specific vendor extension RPC.
 //!
 //! Non-slash text routes to `Send`, assembling blocks by interleaving
-//! `Text` with `ResourceLink` blocks from `ranges`.
+//! `Text` with `ResourceLink`/`Image` blocks from `ranges`.
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::Value;
 use spur_acp::{ContentBlock, ResourceLink, SpurAgentCaps, TextContent};
 
 use crate::action::Action;
-use crate::components::input_bar::ProtectedRange;
+use crate::components::input_bar::{ImageAttachment, ProtectedRange, RangeKind};
 use crate::components::query_source::RetrievalAccept;
 
 use super::entry::Dispatch;
@@ -62,10 +64,11 @@ pub enum SubmitDecision {
 pub fn route(
     text: &str,
     ranges: &[ProtectedRange],
+    images: &[ImageAttachment],
     registry: &CommandRegistry,
     interrupt: bool,
 ) -> SubmitDecision {
-    route_with_caps(text, ranges, registry, interrupt, None)
+    route_with_caps(text, ranges, images, registry, interrupt, None)
 }
 
 /// Caps-aware route. When `caps` advertise the dedicated
@@ -76,6 +79,7 @@ pub fn route(
 pub fn route_with_caps(
     text: &str,
     ranges: &[ProtectedRange],
+    images: &[ImageAttachment],
     registry: &CommandRegistry,
     interrupt: bool,
     caps: Option<&SpurAgentCaps>,
@@ -184,7 +188,7 @@ pub fn route_with_caps(
         // verbatim as prompts).
     }
 
-    let blocks = assemble_blocks(text, ranges);
+    let blocks = assemble_blocks(text, ranges, images);
     SubmitDecision::Send { blocks, interrupt }
 }
 
@@ -197,7 +201,7 @@ pub(crate) fn local_action_from_picker_accept(
         return None;
     };
 
-    match route_with_caps(&text, &[], registry, false, caps) {
+    match route_with_caps(&text, &[], &[], registry, false, caps) {
         SubmitDecision::Local { action } => Some(action),
         _ => None,
     }
@@ -211,8 +215,12 @@ fn rest_after_first_token(text: &str) -> String {
     }
 }
 
-/// Walk `text` + sorted `ranges` interleaved → `[Text, ResourceLink, Text, …]`.
-pub fn assemble_blocks(text: &str, ranges: &[ProtectedRange]) -> Vec<ContentBlock> {
+/// Walk `text` + sorted `ranges` interleaved → `[Text, ResourceLink/Image, Text, …]`.
+pub fn assemble_blocks(
+    text: &str,
+    ranges: &[ProtectedRange],
+    images: &[ImageAttachment],
+) -> Vec<ContentBlock> {
     let mut out: Vec<ContentBlock> = Vec::new();
     let mut cursor = 0usize;
     for r in ranges {
@@ -221,10 +229,28 @@ pub fn assemble_blocks(text: &str, ranges: &[ProtectedRange]) -> Vec<ContentBloc
                 text[cursor..r.start].to_string(),
             )));
         }
-        out.push(ContentBlock::ResourceLink(ResourceLink::new(
-            r.name.clone(),
-            r.uri.clone(),
-        )));
+        match &r.kind {
+            RangeKind::ImageRef(id) => match images.iter().find(|att| att.id == *id) {
+                Some(att) => match encode_image_attachment(att) {
+                    Ok(block) => out.push(block),
+                    Err(err) => {
+                        tracing::error!("image encode failed for id={}: {err}", id);
+                        out.push(ContentBlock::Text(TextContent::new(format!(
+                            "[image encode error: {err}]"
+                        ))));
+                    }
+                },
+                None => {
+                    tracing::warn!("ImageRef(id={}) not found in images list", id);
+                }
+            },
+            _ => {
+                out.push(ContentBlock::ResourceLink(ResourceLink::new(
+                    r.name.clone(),
+                    r.uri.clone(),
+                )));
+            }
+        }
         cursor = r.end;
     }
     if cursor < text.len() {
@@ -232,10 +258,38 @@ pub fn assemble_blocks(text: &str, ranges: &[ProtectedRange]) -> Vec<ContentBloc
             text[cursor..].to_string(),
         )));
     }
-    if out.is_empty() {
+    if out.is_empty() && ranges.is_empty() {
         out.push(ContentBlock::Text(TextContent::new(text.to_string())));
     }
     out
+}
+
+fn encode_image_attachment(att: &ImageAttachment) -> anyhow::Result<ContentBlock> {
+    use image::imageops::FilterType;
+
+    let bytes = std::fs::read(&att.source_path)?;
+    let mut image = image::load_from_memory(&bytes)?;
+
+    const MAX_DIM: u32 = 2048;
+    if image.width() > MAX_DIM || image.height() > MAX_DIM {
+        image = image.resize(MAX_DIM, MAX_DIM, FilterType::Lanczos3);
+    }
+
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut cursor, image::ImageFormat::Png)?;
+    let png_bytes = cursor.into_inner();
+
+    const MAX_B64_BYTES: usize = 10 * 1024 * 1024;
+    let encoded_len = base64::encoded_len(png_bytes.len(), true)
+        .ok_or_else(|| anyhow::anyhow!("image too large to base64-encode"))?;
+    if encoded_len > MAX_B64_BYTES {
+        anyhow::bail!("image too large ({encoded_len} bytes base64); max 10 MB");
+    }
+
+    let data = STANDARD.encode(&png_bytes);
+    Ok(ContentBlock::Image(
+        agent_client_protocol::schema::ImageContent::new(data, "image/png"),
+    ))
 }
 
 /// Flatten blocks into a human-readable string for the local trace echo.
@@ -265,6 +319,117 @@ pub fn blocks_to_text(blocks: &[ContentBlock]) -> String {
 }
 
 #[cfg(test)]
+mod image_block_tests {
+    use super::*;
+    use crate::components::input_bar::{ImageAttachment, ProtectedRange, RangeKind};
+
+    fn make_png_file() -> (tempfile::NamedTempFile, (u32, u32)) {
+        let tmp = tempfile::NamedTempFile::with_suffix(".png").unwrap();
+        let img = image::RgbaImage::from_raw(2, 2, vec![128u8; 16]).unwrap();
+        let dyn_img = image::DynamicImage::ImageRgba8(img);
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        dyn_img
+            .write_to(&mut cursor, image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(tmp.path(), cursor.into_inner()).unwrap();
+        (tmp, (2, 2))
+    }
+
+    #[test]
+    fn assemble_blocks_emits_image_block_for_image_ref() {
+        let (tmp, dims) = make_png_file();
+        let label = "[Image #1 - 2x2]";
+        let attachment = ImageAttachment {
+            id: 0,
+            source_path: tmp.path().to_path_buf(),
+            mime_type: "image/png".to_string(),
+            dimensions: dims,
+            byte_size: 0,
+            owned_temp: None,
+        };
+        let images = vec![attachment];
+        let text = format!("before {} after", label);
+        let ranges = vec![ProtectedRange {
+            start: "before ".len(),
+            end: "before ".len() + label.len(),
+            kind: RangeKind::ImageRef(0),
+            uri: String::new(),
+            name: label.to_string(),
+        }];
+
+        let blocks = assemble_blocks(&text, &ranges, &images);
+
+        assert_eq!(blocks.len(), 3, "expected Text + Image + Text");
+        assert!(matches!(&blocks[0], ContentBlock::Text(_)));
+        match &blocks[1] {
+            ContentBlock::Image(image) => {
+                assert_eq!(image.mime_type, "image/png");
+                assert!(!image.data.is_empty());
+            }
+            other => panic!("expected Image block, got {other:?}"),
+        }
+        assert!(matches!(&blocks[2], ContentBlock::Text(_)));
+    }
+
+    #[test]
+    fn route_with_caps_emits_image_block_for_image_ref() {
+        let (tmp, dims) = make_png_file();
+        let label = "[Image #1 - 2x2]";
+        let attachment = ImageAttachment {
+            id: 0,
+            source_path: tmp.path().to_path_buf(),
+            mime_type: "image/png".to_string(),
+            dimensions: dims,
+            byte_size: 0,
+            owned_temp: None,
+        };
+        let images = vec![attachment];
+        let text = format!("before {} after", label);
+        let ranges = vec![ProtectedRange {
+            start: "before ".len(),
+            end: "before ".len() + label.len(),
+            kind: RangeKind::ImageRef(0),
+            uri: String::new(),
+            name: label.to_string(),
+        }];
+        let registry = CommandRegistry::new();
+
+        let decision = route_with_caps(&text, &ranges, &images, &registry, false, None);
+
+        match decision {
+            SubmitDecision::Send { blocks, interrupt } => {
+                assert!(!interrupt);
+                assert_eq!(blocks.len(), 3, "expected Text + Image + Text");
+                assert!(matches!(&blocks[0], ContentBlock::Text(_)));
+                assert!(matches!(&blocks[1], ContentBlock::Image(_)));
+                assert!(matches!(&blocks[2], ContentBlock::Text(_)));
+            }
+            other => panic!("expected Send, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assemble_blocks_missing_image_id_no_panic() {
+        let label = "[Image #99 - 2x2]";
+        let text = format!("before {} after", label);
+        let ranges = vec![ProtectedRange {
+            start: "before ".len(),
+            end: "before ".len() + label.len(),
+            kind: RangeKind::ImageRef(99),
+            uri: String::new(),
+            name: label.to_string(),
+        }];
+        let images = vec![];
+
+        let blocks = assemble_blocks(&text, &ranges, &images);
+
+        assert!(blocks
+            .iter()
+            .all(|block| !matches!(block, ContentBlock::Image(_))));
+    }
+}
+
+#[cfg(test)]
 mod sessions_slash_tests {
     use super::*;
     use crate::commands::registry::CommandRegistry;
@@ -277,7 +442,7 @@ mod sessions_slash_tests {
     fn slash_sessions_routes_to_request_sessions() {
         let registry = build_registry_for_test();
 
-        let decision = route("/sessions", &[], &registry, false);
+        let decision = route("/sessions", &[], &[], &registry, false);
         match decision {
             SubmitDecision::Local {
                 action: Action::RequestSessions,
@@ -307,7 +472,7 @@ mod sessions_slash_tests {
         );
         registry.set_agent_commands("kiro", vec![entry]);
 
-        let decision = route("/context some rest", &[], &registry, false);
+        let decision = route("/context some rest", &[], &[], &registry, false);
         match decision {
             SubmitDecision::VendorExec { method, params } => {
                 assert_eq!(method, "_kiro.dev/commands/execute");
@@ -341,7 +506,7 @@ mod sessions_slash_tests {
         );
         registry.set_agent_commands("kiro", vec![entry]);
 
-        let decision = route("/kiro:compact", &[], &registry, false);
+        let decision = route("/kiro:compact", &[], &[], &registry, false);
         match decision {
             SubmitDecision::VendorExec { params, .. } => {
                 assert_eq!(params, serde_json::json!({ "command": "compact" }));
@@ -371,7 +536,7 @@ mod sessions_slash_tests {
         };
         registry.set_advertised_commands("codex", vec![entry]);
 
-        let decision = route("/model gpt-5-codex", &[], &registry, false);
+        let decision = route("/model gpt-5-codex", &[], &[], &registry, false);
         match decision {
             SubmitDecision::SetSessionConfigOption { config_id, value } => {
                 assert_eq!(config_id, "model");
@@ -404,7 +569,7 @@ mod sessions_slash_tests {
         assert!(entry.arg_picker_spec.is_some());
         registry.set_agent_commands("codex", vec![entry]);
 
-        let decision = route("/review-branch main", &[], &registry, false);
+        let decision = route("/review-branch main", &[], &[], &registry, false);
         match decision {
             SubmitDecision::Send { blocks, interrupt } => {
                 assert!(!interrupt);
@@ -441,7 +606,7 @@ mod sessions_slash_tests {
         };
         registry.set_advertised_commands("codex", vec![entry]);
 
-        let decision = route("/model ", &[], &registry, false);
+        let decision = route("/model ", &[], &[], &registry, false);
         assert!(matches!(decision, SubmitDecision::Empty));
     }
 
@@ -482,7 +647,14 @@ mod sessions_slash_tests {
         ));
         let caps = spur_acp::SpurAgentCaps::new(&init, &new, spur_acp::AgentKind::CodexAcp);
 
-        let decision = route_with_caps("/model gpt-5-codex", &[], &registry, false, Some(&caps));
+        let decision = route_with_caps(
+            "/model gpt-5-codex",
+            &[],
+            &[],
+            &registry,
+            false,
+            Some(&caps),
+        );
         match decision {
             SubmitDecision::SetSessionModel { value } => assert_eq!(value, "gpt-5-codex"),
             other => panic!("expected SetSessionModel, got {other:?}"),
@@ -531,7 +703,7 @@ mod sessions_slash_tests {
         assert!(!caps.supports_set_model());
         assert!(caps.supports_set_config_option());
 
-        let decision = route_with_caps("/model gpt-4o", &[], &registry, false, Some(&caps));
+        let decision = route_with_caps("/model gpt-4o", &[], &[], &registry, false, Some(&caps));
         match decision {
             SubmitDecision::SetSessionConfigOption { config_id, value } => {
                 assert_eq!(config_id, "model");
@@ -546,7 +718,7 @@ mod sessions_slash_tests {
     #[test]
     fn slash_theme_bare_routes_to_theme_command_with_empty_arg() {
         let registry = build_registry_for_test();
-        let decision = route("/theme", &[], &registry, false);
+        let decision = route("/theme", &[], &[], &registry, false);
         match decision {
             SubmitDecision::Local {
                 action: Action::ThemeCommand { arg },
@@ -559,7 +731,7 @@ mod sessions_slash_tests {
     #[test]
     fn slash_theme_with_name_routes_to_theme_command_with_arg() {
         let registry = build_registry_for_test();
-        let decision = route("/theme light", &[], &registry, false);
+        let decision = route("/theme light", &[], &[], &registry, false);
         match decision {
             SubmitDecision::Local {
                 action: Action::ThemeCommand { arg },
@@ -576,7 +748,7 @@ mod sessions_slash_tests {
     #[test]
     fn slash_theme_reload_carries_reload_arg() {
         let registry = build_registry_for_test();
-        let decision = route("/theme reload", &[], &registry, false);
+        let decision = route("/theme reload", &[], &[], &registry, false);
         match decision {
             SubmitDecision::Local {
                 action: Action::ThemeCommand { arg },
@@ -594,7 +766,7 @@ mod sessions_slash_tests {
     #[test]
     fn slash_theme_double_space_trims_to_single_arg() {
         let registry = build_registry_for_test();
-        let decision = route("/theme  reload", &[], &registry, false);
+        let decision = route("/theme  reload", &[], &[], &registry, false);
         match decision {
             SubmitDecision::Local {
                 action: Action::ThemeCommand { arg },
@@ -615,7 +787,7 @@ mod sessions_slash_tests {
     #[test]
     fn slash_theme_reload_with_extra_arg_keeps_full_tail() {
         let registry = build_registry_for_test();
-        let decision = route("/theme reload extra-arg", &[], &registry, false);
+        let decision = route("/theme reload extra-arg", &[], &[], &registry, false);
         match decision {
             SubmitDecision::Local {
                 action: Action::ThemeCommand { arg },
@@ -650,7 +822,7 @@ mod sessions_slash_tests {
             }],
         );
 
-        let decision = route_with_caps("/model gpt-4o", &[], &registry, false, None);
+        let decision = route_with_caps("/model gpt-4o", &[], &[], &registry, false, None);
         match decision {
             SubmitDecision::SetSessionConfigOption { config_id, value } => {
                 assert_eq!(config_id, "model");
