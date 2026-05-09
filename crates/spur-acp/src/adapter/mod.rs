@@ -5,10 +5,13 @@ pub mod config_options;
 pub mod generic;
 pub mod kiro;
 pub mod mcp;
+pub mod session_update_normalizer;
 
 use crate::types::AgentKind;
 use agent_client_protocol::schema::{ToolCall, ToolKind};
 use serde_json::Value;
+
+pub use session_update_normalizer::SessionUpdateNormalizer;
 
 /// Mirrors ACP `ToolKind` 1:1 with TUI-specific refinements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

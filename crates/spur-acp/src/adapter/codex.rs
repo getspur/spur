@@ -39,6 +39,22 @@ pub fn try_format_input(raw: &Value) -> Option<ToolInputDisplay> {
         });
     }
 
+    // Current Codex ACP harmony/unified-exec shape:
+    // {command: ["/bin/zsh", "-lc", "<script>"], cwd?, ...}
+    if let Some(command) = obj.get("command") {
+        let cmd = command
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| command_array_to_display(command));
+        if let Some(cmd) = cmd {
+            let cwd = obj
+                .get("cwd")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            return Some(ToolInputDisplay::Command { cmd, cwd });
+        }
+    }
+
     // Patch shape: {patch}
     if let Some(patch) = obj.get("patch").and_then(|v| v.as_str()) {
         return Some(ToolInputDisplay::Diff {
@@ -48,6 +64,18 @@ pub fn try_format_input(raw: &Value) -> Option<ToolInputDisplay> {
     }
 
     None
+}
+
+fn command_array_to_display(command: &Value) -> Option<String> {
+    let args = command.as_array()?;
+    let strings: Vec<&str> = args.iter().filter_map(Value::as_str).collect();
+    if strings.is_empty() {
+        return None;
+    }
+    if strings.len() >= 3 && matches!(strings[1], "-lc" | "-c") {
+        return Some(strings[2].to_string());
+    }
+    Some(strings.join(" "))
 }
 
 /// Try to parse Codex's tool output into an `ObservePayload`.
