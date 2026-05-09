@@ -11,5 +11,7 @@ pub mod issue_tracker;
 pub mod metrics;
 pub mod reader_pool;
 pub mod snapshot;
+pub(crate) mod wal_checkpoint;
+pub(crate) mod write_lock;
 
 pub use adapter::{AdapterConfig, BeadsCrateAdapter};

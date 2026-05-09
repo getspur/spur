@@ -1,17 +1,26 @@
 //! Lock coverage for boot-time init uses a same-process held lock
-//! intentionally: beads_rust's own `blocking_write_lock_with_timeout` tests
-//! show that a held `std::fs::File` lock blocks a second acquisition in the
-//! same process, so no cross-process helper is needed for this regression.
+//! intentionally: `fs2` file locks block a second acquisition in the same
+//! process, so no cross-process helper is needed for this regression.
 
+use std::fs::OpenOptions;
 use std::time::{Duration, Instant};
 
+use fs2::FileExt;
 use spur_pm::beads_crate::{AdapterConfig, BeadsCrateAdapter};
 use tempfile::TempDir;
 
 #[tokio::test]
 async fn adapter_open_times_out_when_boot_init_lock_is_held() {
     let dir = TempDir::new().unwrap();
-    let held_lock = beads_rust::sync::blocking_write_lock_with_timeout(dir.path(), Some(60_000))
+    let held_lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.path().join(".write.lock"))
+        .expect("open write lock");
+    held_lock
+        .lock_exclusive()
         .expect("test should acquire write lock");
 
     let path = dir.path().to_path_buf();
