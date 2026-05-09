@@ -2,15 +2,9 @@ use super::palette::{Palette, PaletteEntry};
 use std::collections::HashMap;
 
 const DARK_DEFAULT_BINDINGS: &[(&str, &str)] = &[
-    ("status_bar.bg", "bg_panel"),
     ("status_bar.fg", "fg"),
-    ("border.normal", "border"),
-    ("border.focused", "border_focused"),
     ("spinner.fg", "accent"),
-    ("picker.selected.bg", "bg_selection"),
-    ("picker.selected.fg", "fg"),
     ("picker.match.fg", "highlight"),
-    ("picker.hint.fg", "fg_subtle"),
     ("status_bar.tombstone.fg", "fg_subtle"),
     ("status_bar.issue_count.fg", "accent"),
     ("status_bar.separator.fg", "fg_subtle"),
@@ -26,31 +20,10 @@ const DARK_DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("tool.family.task", "accent"),
     ("tool.family.mcp", "fg_subtle"),
     ("tool.family.unknown", "warning"),
-    ("license_badge.neutral.bg", "bg_panel"),
     ("license_badge.neutral.fg", "fg_subtle"),
-    ("license_badge.success.bg", "success"),
-    ("license_badge.success.fg", "fg_on_success"),
-    ("license_badge.warning.bg", "warning"),
-    ("license_badge.warning.fg", "fg_on_warning"),
-    ("license_badge.danger.bg", "danger"),
-    ("license_badge.danger.fg", "fg_on_danger"),
-    ("plan.stage.queued", "fg_muted"),
-    ("plan.stage.running", "info"),
-    ("plan.stage.done", "success"),
-    ("plan.stage.failed", "danger"),
-    ("plan.stage.blocked", "warning"),
     ("diff.add.fg", "diff_add"),
     ("diff.del.fg", "diff_del"),
     ("diff.context.fg", "fg_muted"),
-    ("activity.think", "fg_muted"),
-    ("activity.act", "accent_alt"),
-    ("activity.observe", "success"),
-    ("activity.delegate", "accent"),
-    ("activity.complete", "success"),
-    ("activity.error", "danger"),
-    ("activity.user_message", "accent"),
-    ("activity.permission", "warning"),
-    ("activity.info", "fg"),
     // status_bar metric & badge tokens (PR3 wave-1 migration).
     ("status_bar.review_pending.fg", "warning"),
     ("status_bar.cost.fg", "warning"),
@@ -224,7 +197,7 @@ mod tests {
 
     #[test]
     fn dark_default_contains_all_spec_sample_bindings() {
-        assert_eq!(TokenMap::dark_default().0.len(), 147);
+        assert_eq!(TokenMap::dark_default().0.len(), 120);
     }
 
     #[test]
