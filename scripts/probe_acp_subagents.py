@@ -16,14 +16,17 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import signal
+import struct
 import subprocess
 import sys
 import threading
 import time
 import uuid
+import zlib
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,6 +54,11 @@ SUBAGENT_CLUE_WORDS = (
     "task",
     "parenttooluseid",
     "parent_tool_use_id",
+)
+
+IMAGE_PROBE_PROMPT = (
+    "I am attaching an image. Please describe the visual content in one sentence. "
+    "If you do not see any image, say exactly: NO_IMAGE_RECEIVED."
 )
 
 
@@ -82,6 +90,57 @@ def make_response(
     else:
         msg["result"] = result if result is not None else {}
     return msg
+
+
+def png_chunk(kind: bytes, data: bytes) -> bytes:
+    return (
+        struct.pack(">I", len(data))
+        + kind
+        + data
+        + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+    )
+
+
+def synthesize_probe_png() -> bytes:
+    width = 64
+    height = 64
+    rows = []
+    for y in range(height):
+        row = bytearray()
+        for x in range(width):
+            border = x in (0, width - 1) or y in (0, height - 1)
+            cross = 28 <= x <= 35 or 28 <= y <= 35
+            if border:
+                row.extend((0, 0, 0))
+            elif cross:
+                row.extend((255, 255, 255))
+            else:
+                row.extend((255, 0, 0))
+        rows.append(b"\x00" + bytes(row))
+
+    signature = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    idat = zlib.compress(b"".join(rows), level=9)
+    return (
+        signature
+        + png_chunk(b"IHDR", ihdr)
+        + png_chunk(b"IDAT", idat)
+        + png_chunk(b"IEND", b"")
+    )
+
+
+def prompt_blocks(prompt: str, with_image: bool) -> list[dict]:
+    blocks = [{"type": "text", "text": prompt}]
+    if with_image:
+        png = synthesize_probe_png()
+        blocks.append(
+            {
+                "type": "image",
+                "data": base64.b64encode(png).decode("ascii"),
+                "mimeType": "image/png",
+            }
+        )
+    return blocks
 
 
 def probe_client_capabilities() -> dict:
@@ -420,6 +479,36 @@ def extract_tool_snapshot(notification: dict) -> Optional[dict]:
     }
 
 
+def extract_text_content(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "".join(extract_text_content(item) for item in value)
+    if not isinstance(value, dict):
+        return ""
+
+    text = value.get("text")
+    if isinstance(text, str):
+        return text
+
+    content = value.get("content")
+    if content is not None:
+        return extract_text_content(content)
+
+    return ""
+
+
+def extract_agent_message_text(notification: dict) -> str:
+    update = notification.get("params", {}).get("update", {})
+    if update.get("sessionUpdate") != "agent_message_chunk":
+        return ""
+    return extract_text_content(update.get("content"))
+
+
+def verdict_excerpt(text: str) -> str:
+    return " ".join(text.split())[:200]
+
+
 def has_subagent_clue(value: Any) -> bool:
     text = json.dumps(value, sort_keys=True).lower()
     return any(word in text for word in SUBAGENT_CLUE_WORDS)
@@ -446,6 +535,9 @@ def agent_command(args: argparse.Namespace) -> list[str]:
             cmd.extend(["-m", args.gemini_model])
         return cmd
 
+    if args.agent == "claude-code":
+        return ["npx", "--yes", args.claude_code_package]
+
     cmd = ["npx", "--yes", args.codex_package]
     for override in args.codex_config:
         cmd.extend(["-c", override])
@@ -466,6 +558,18 @@ def record_notification(
         tool_snapshots.append(snap)
     if has_subagent_clue(update):
         subagent_clues.append(update)
+
+
+def record_prompt_notification(
+    notif: dict,
+    notification_counts: Counter[str],
+    tool_snapshots: list[dict],
+    subagent_clues: list[dict],
+    agent_text_chunks: list[str],
+) -> None:
+    record_notification(notif, notification_counts, tool_snapshots, subagent_clues)
+    if text := extract_agent_message_text(notif):
+        agent_text_chunks.append(text)
 
 
 def run_probe(args: argparse.Namespace) -> int:
@@ -495,9 +599,21 @@ def run_probe(args: argparse.Namespace) -> int:
     notification_counts: Counter[str] = Counter()
     tool_snapshots: list[dict] = []
     subagent_clues: list[dict] = []
+    agent_text_chunks: list[str] = []
     server_request_counts: Counter[str] = Counter()
     prompt_resp: Optional[dict] = None
     exit_code = 0
+    effective_prompt = (
+        IMAGE_PROBE_PROMPT if args.with_image and args.prompt == DEFAULT_PROMPT else args.prompt
+    )
+    prompt_payload = prompt_blocks(effective_prompt, args.with_image)
+    if args.with_image:
+        image_block = prompt_payload[-1]
+        print(
+            "image_probe="
+            f"png_bytes={len(synthesize_probe_png())} "
+            f"base64_chars={len(image_block['data'])}"
+        )
 
     try:
         init_id = new_request_id()
@@ -568,7 +684,7 @@ def run_probe(args: argparse.Namespace) -> int:
                 "session/prompt",
                 {
                     "sessionId": session_id,
-                    "prompt": [{"type": "text", "text": args.prompt}],
+                    "prompt": prompt_payload,
                 },
             )
         )
@@ -605,7 +721,13 @@ def run_probe(args: argparse.Namespace) -> int:
                     client.send(make_response(rid, result=result))
 
             for notif in client.drain_notifications():
-                record_notification(notif, notification_counts, tool_snapshots, subagent_clues)
+                record_prompt_notification(
+                    notif,
+                    notification_counts,
+                    tool_snapshots,
+                    subagent_clues,
+                    agent_text_chunks,
+                )
                 snap = extract_tool_snapshot(notif)
                 if snap and not args.quiet:
                     print(
@@ -619,6 +741,22 @@ def run_probe(args: argparse.Namespace) -> int:
             if prompt_resp is not None:
                 break
             time.sleep(0.05)
+
+        if prompt_resp is not None:
+            drain_deadline = time.time() + TERMINAL_DRAIN_TIMEOUT
+            while time.time() < drain_deadline:
+                drained = client.drain_notifications()
+                if not drained:
+                    time.sleep(0.05)
+                    continue
+                for notif in drained:
+                    record_prompt_notification(
+                        notif,
+                        notification_counts,
+                        tool_snapshots,
+                        subagent_clues,
+                        agent_text_chunks,
+                    )
 
         if prompt_resp is None:
             print(f"[WARN] session/prompt did not complete within {args.timeout}s", file=sys.stderr)
@@ -665,6 +803,23 @@ def run_probe(args: argparse.Namespace) -> int:
         print(f"  - {compact[:600]}")
     if len(subagent_clues) > 12:
         print(f"  ... {len(subagent_clues) - 12} more in raw log")
+    if args.with_image:
+        prompt_err = response_error_message(prompt_resp)
+        if prompt_resp is None:
+            prompt_status = f"timeout after {args.timeout}s"
+        elif prompt_err:
+            prompt_status = prompt_err
+        else:
+            prompt_status = "ok"
+        agent_text = "".join(agent_text_chunks)
+        said_no_image = "NO_IMAGE_RECEIVED" in agent_text
+        print(
+            "IMAGE_VERDICT: "
+            f"agent={args.agent} "
+            f"session_prompt={prompt_status} "
+            f"agent_said_NO_IMAGE_RECEIVED={str(said_no_image).lower()} "
+            f"excerpt={verdict_excerpt(agent_text)!r}"
+        )
     print(f"raw_log={out_path}")
     return exit_code
 
@@ -674,8 +829,17 @@ def main() -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--agent", choices=["codex", "kimi", "gemini"], default="kimi")
+    parser.add_argument(
+        "--agent",
+        choices=["codex", "kimi", "gemini", "claude-code"],
+        default="kimi",
+    )
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
+    parser.add_argument(
+        "--with-image",
+        action="store_true",
+        help="Send a small synthesized PNG image block after the prompt text.",
+    )
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--init-timeout", type=float, default=30.0)
     parser.add_argument("--session-timeout", type=float, default=45.0)
@@ -692,6 +856,11 @@ def main() -> int:
         "--codex-package",
         default="@zed-industries/codex-acp@0.12.0",
         help="Codex ACP npm package passed to npx.",
+    )
+    parser.add_argument(
+        "--claude-code-package",
+        default="@agentclientprotocol/claude-agent-acp@0.30.0",
+        help="claude-code ACP npm package passed to npx.",
     )
     parser.add_argument(
         "--codex-config",
