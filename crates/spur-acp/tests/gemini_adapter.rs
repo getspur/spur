@@ -89,6 +89,35 @@ fn gemini_standardizer_populates_empty_delegate_update() {
 }
 
 #[test]
+fn tool_call_update_without_kind_normalizes_to_think_with_delegate_fields() {
+    let mut standardizer = adapter::SessionEventStandardizer::for_agent(AgentKind::Gemini);
+
+    let out = standardizer.standardize(SessionNotification::new(
+        "session",
+        SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+            "invoke-agent",
+            ToolCallUpdateFields::new().title("Delegating to agent 'researcher'"),
+        )),
+    ));
+
+    let SessionUpdate::ToolCallUpdate(update) = out.update else {
+        panic!("expected ToolCallUpdate");
+    };
+    assert_eq!(update.fields.kind, Some(ToolKind::Think));
+    assert_eq!(
+        update.fields.raw_input,
+        Some(json!({
+            "agent": "researcher",
+            "description": "Delegating to agent 'researcher'"
+        }))
+    );
+    assert_eq!(
+        tool_content_text(update.fields.content.as_deref().unwrap_or_default()),
+        "agent: researcher"
+    );
+}
+
+#[test]
 fn gemini_delegate_input_formats_agent_name() {
     let input = json!({
         "agent": "generalist",
