@@ -24,6 +24,7 @@ mod tests {
             (AgentKind::CodexAcp, true),
             (AgentKind::Kiro, true),
             (AgentKind::Kimi, true),
+            (AgentKind::Gemini, true),
             (AgentKind::Generic, true),
         ];
 
