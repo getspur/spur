@@ -1178,6 +1178,8 @@ fn acp_thread_main(
         let cwd: Arc<Mutex<PathBuf>> = Arc::new(Mutex::new(PathBuf::from(".")));
         let terminals: Arc<Mutex<HashMap<String, TerminalState>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let session_update_normalizer: Arc<Mutex<crate::adapter::SessionUpdateNormalizer>> =
+            Arc::new(Mutex::new(crate::adapter::SessionUpdateNormalizer::default()));
 
         // !Send slots used to ferry oneshot replies between the connect_with
         // closure (which is allowed to be !Send) and the post-connection
@@ -1199,6 +1201,7 @@ fn acp_thread_main(
             let perm_tx_h = permission_tx.clone();
             let session_notif_tx_h = session_notif_tx.clone();
             let ext_notification_tx_h = ext_notification_tx.clone();
+            let session_update_normalizer_h = session_update_normalizer.clone();
 
             let cwd_read = cwd.clone();
             let cwd_write = cwd.clone();
@@ -1526,6 +1529,10 @@ fn acp_thread_main(
                     async move |notif: agent_client_protocol::AgentNotification, _cx| {
                         match notif {
                             agent_client_protocol::AgentNotification::SessionNotification(args) => {
+                                let args = session_update_normalizer_h
+                                    .lock()
+                                    .unwrap()
+                                    .normalize(args);
                                 let variant = session_update_variant_name(&args.update);
                                 let text_len = match &args.update {
                                     SessionUpdate::AgentMessageChunk(c)
