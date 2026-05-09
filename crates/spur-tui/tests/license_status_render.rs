@@ -62,6 +62,7 @@ fn app_starts_with_active_plan_badge_when_seeded() {
         cfg,
         state,
         spur_tui::landing::LandingDecision::ShowDashboard,
+        None,
     );
 
     let badge = app
@@ -96,6 +97,7 @@ fn active_to_invalid_transition_flips_badge_to_danger_tone() {
         cfg,
         active,
         spur_tui::landing::LandingDecision::ShowDashboard,
+        None,
     );
 
     let invalid = LicenseStateEvent {
