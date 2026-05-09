@@ -450,7 +450,8 @@ impl PickerShell {
         ));
         let body_rows = area.height.saturating_sub(1) as usize;
         let body_width = area.width.saturating_sub(1) as usize;
-        let lines = truncate_preview_lines_to_fit(preview.lines.clone(), body_rows, body_width);
+        let lines =
+            truncate_preview_lines_to_fit(preview.lines.clone(), body_rows, body_width, theme);
         let paragraph = Paragraph::new(lines)
             .block(block)
             .wrap(Wrap { trim: false });
@@ -458,7 +459,11 @@ impl PickerShell {
     }
 }
 
-fn truncate_preview_lines(lines: Vec<Line<'static>>, max_rows: usize) -> Vec<Line<'static>> {
+fn truncate_preview_lines(
+    lines: Vec<Line<'static>>,
+    max_rows: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     if lines.len() <= max_rows {
         return lines;
     }
@@ -472,7 +477,7 @@ fn truncate_preview_lines(lines: Vec<Line<'static>>, max_rows: usize) -> Vec<Lin
     out.push(Line::from(Span::styled(
         format!("  +{dropped} more …"),
         Style::default()
-            .fg(Color::DarkGray)
+            .fg(token(theme, "picker.hint.fg"))
             .add_modifier(Modifier::ITALIC),
     )));
     out
@@ -482,6 +487,7 @@ fn truncate_preview_lines_to_fit(
     lines: Vec<Line<'static>>,
     max_rows: usize,
     max_width: usize,
+    theme: &Theme,
 ) -> Vec<Line<'static>> {
     if max_rows == 0 {
         return Vec::new();
@@ -502,7 +508,7 @@ fn truncate_preview_lines_to_fit(
         keep_count += 1;
     }
 
-    truncate_preview_lines(lines, keep_count.saturating_add(1))
+    truncate_preview_lines(lines, keep_count.saturating_add(1), theme)
 }
 
 fn preview_visual_rows(lines: &[Line<'static>], max_width: usize) -> usize {
