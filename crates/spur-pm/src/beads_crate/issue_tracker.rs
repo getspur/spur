@@ -252,8 +252,8 @@ impl IssueTracker for BeadsCrateAdapter {
             }
             br_filters.title_contains = filter.text_search.clone();
             br_filters.include_closed = filter.include_closed || filter.status.is_some();
-            br_filters.limit = filter.limit;
-            br_filters.offset = filter.offset;
+            let offset = filter.offset.unwrap_or(0);
+            br_filters.limit = filter.limit.map(|limit| limit.saturating_add(offset));
             if let Some(since) = filter.since {
                 br_filters.updated_after = Some(since);
             }
@@ -264,7 +264,11 @@ impl IssueTracker for BeadsCrateAdapter {
             for issue in &mut issues {
                 issue.labels = labels_by_id.remove(&issue.id).unwrap_or_default();
             }
-            Ok(issues.into_iter().map(br_to_pm_summary).collect())
+            let summaries = issues.into_iter().skip(offset).map(br_to_pm_summary);
+            Ok(match filter.limit {
+                Some(limit) => summaries.take(limit).collect(),
+                None => summaries.collect(),
+            })
         })
         .await
     }
@@ -813,5 +817,40 @@ mod tests {
         assert!(ids.contains(&"bd-list-0"));
         assert!(ids.contains(&"bd-list-1"));
         assert!(ids.contains(&"bd-list-2"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_issues_applies_offset_after_fetching_limit_window() {
+        use crate::types::IssueFilter;
+
+        let dir = TempDir::new().unwrap();
+        let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
+            .await
+            .unwrap();
+
+        adapter
+            .batch(|s| {
+                for i in 0..5 {
+                    let mut issue = minimal_issue(&format!("bd-offset-{i}"), &format!("issue {i}"));
+                    issue.priority = Priority(i);
+                    s.create_issue(&issue, "test")?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let summaries = adapter
+            .list_issues(IssueFilter {
+                limit: Some(2),
+                offset: Some(2),
+                include_closed: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let ids: Vec<&str> = summaries.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["bd-offset-2", "bd-offset-3"]);
     }
 }

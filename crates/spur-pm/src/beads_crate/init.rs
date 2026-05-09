@@ -7,6 +7,8 @@ use beads_rust::storage::sqlite::SqliteStorage;
 use beads_rust::sync;
 use std::path::Path;
 
+use crate::beads_crate::{wal_checkpoint, write_lock};
+
 const SKIP_PROBE_ENV: &str = "SPUR_BEADS_SKIP_PROBE";
 
 #[derive(Debug, thiserror::Error)]
@@ -283,17 +285,18 @@ mod sweep_tests {
 /// JSONL while holding `.write.lock` for the full boot-time sequence.
 pub(crate) fn init_writer_with_flush(
     beads_dir: &Path,
-    jsonl_path: &Path,
     lock_timeout_ms: u64,
     stale_tmp_min_age: Duration,
 ) -> anyhow::Result<()> {
-    let _guard = sync::blocking_write_lock_with_timeout(beads_dir, Some(lock_timeout_ms))?;
+    let _guard = write_lock::blocking_write_lock_with_timeout(beads_dir, Some(lock_timeout_ms))?;
     let db_path = beads_dir.join("beads.db");
     pre_open_quick_check(&db_path)?;
     let mut storage = SqliteStorage::open_with_timeout(&db_path, Some(lock_timeout_ms))?;
-    storage.checkpoint_wal_on_drop();
     let _ = sweep_stale_jsonl_temps(beads_dir, stale_tmp_min_age);
-    sync::auto_flush(&mut storage, beads_dir, jsonl_path, false)?;
+    let result = sync::auto_flush(&mut storage, beads_dir);
+    drop(storage);
+    wal_checkpoint::checkpoint_wal_truncate_best_effort(&db_path);
+    result?;
     Ok(())
 }
 
@@ -305,9 +308,7 @@ mod migration_tests {
     #[test]
     fn init_writer_with_flush_runs_clean_on_fresh_dir() {
         let dir = TempDir::new().unwrap();
-        let jsonl = dir.path().join("issues.jsonl");
-
-        init_writer_with_flush(dir.path(), &jsonl, 5_000, Duration::ZERO)
+        init_writer_with_flush(dir.path(), 5_000, Duration::ZERO)
             .expect("fresh dir init should succeed");
     }
 }

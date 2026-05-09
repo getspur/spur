@@ -10,8 +10,8 @@
 //!
 //! ## Threading note
 //!
-//! `beads_rust 0.2.1`'s underlying SQLite engine (fsqlite) is `!Send` — it
-//! holds `Rc<RefCell<…>>` internally. Consequences:
+//! `ReaderGuard` and its storage handle are kept on the thread that checked
+//! them out. Consequences:
 //!   - A `ReaderGuard` (and the `SqliteStorage` it wraps) cannot move across
 //!     thread boundaries.
 //!   - `ReaderPool` itself is `!Send`, so it cannot be cloned into a
