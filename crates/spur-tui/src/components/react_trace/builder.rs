@@ -1,5 +1,5 @@
 use ratatui::{
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
 };
 
@@ -12,6 +12,29 @@ use crate::theme::{resolve_token, ColorDepth};
 use super::types::{ActStatus, TraceKind};
 use super::ReactTrace;
 use crate::components::spinner;
+
+/// Pad a wrapped line out to `width` cells with a single trailing
+/// background-coloured space span, but only when the line is part of a
+/// "bubble" — i.e. its first span carries a `bg`. Used to fill the user
+/// message bubble across the full viewport width so the highlight does not
+/// stop at the end of the text.
+pub(super) fn pad_bubble_line(line: Line<'static>, width: u16) -> Line<'static> {
+    let bg: Option<Color> = line.spans.first().and_then(|s| s.style.bg);
+    let Some(bg) = bg else {
+        return line;
+    };
+    let cur = line.width() as u16;
+    if cur >= width {
+        return line;
+    }
+    let pad = " ".repeat((width - cur) as usize);
+    let mut spans: Vec<Span<'static>> = line.spans;
+    spans.push(Span::styled(pad, Style::default().bg(bg)));
+    let mut out = Line::from(spans);
+    out.style = line.style;
+    out.alignment = line.alignment;
+    out
+}
 
 impl ReactTrace {
     /// Build the flat sequence of display lines produced by the trace,
@@ -30,6 +53,8 @@ impl ReactTrace {
         let message_title_color = tok("react_trace.message.title.fg");
         let message_body_color = tok("react_trace.message.body.fg");
         let user_color = tok("react_trace.user_message.fg");
+        let user_bg = tok("react_trace.user_message.bg");
+        let user_accent_color = tok("react_trace.user_message.accent.fg");
         let permission_color = tok("react_trace.permission.fg");
         let spinner_color = tok("react_trace.spinner.fg");
         let success_color = tok("react_trace.outcome.success.fg");
@@ -353,20 +378,29 @@ impl ReactTrace {
                 }
 
                 TraceKind::UserMessage => {
+                    let bar_style = Style::default()
+                        .fg(user_accent_color)
+                        .bg(user_bg)
+                        .add_modifier(Modifier::BOLD);
+                    let ts_bubble_style = Style::default().fg(timestamp_color).bg(user_bg);
+                    let label_style = Style::default()
+                        .fg(user_accent_color)
+                        .bg(user_bg)
+                        .add_modifier(Modifier::BOLD);
+                    let body_style = Style::default()
+                        .fg(user_color)
+                        .bg(user_bg)
+                        .add_modifier(Modifier::BOLD);
                     lines.push(Line::from(vec![
-                        ts_span.clone(),
-                        Span::styled(
-                            "💬 YOU",
-                            Style::default().fg(user_color).add_modifier(Modifier::BOLD),
-                        ),
+                        Span::styled("▎ ", bar_style),
+                        Span::styled(format!("{} ", entry.timestamp), ts_bubble_style),
+                        Span::styled("💬 YOU", label_style),
                     ]));
                     for text_line in entry.text.lines() {
                         lines.push(Line::from(vec![
-                            Span::raw("   "),
-                            Span::styled(
-                                terminal_safe_text(text_line),
-                                Style::default().fg(user_color),
-                            ),
+                            Span::styled("▎ ", bar_style),
+                            Span::styled("   ", body_style),
+                            Span::styled(terminal_safe_text(text_line), body_style),
                         ]));
                     }
                 }
@@ -541,6 +575,8 @@ impl ReactTrace {
         let message_title_color = tok("react_trace.message.title.fg");
         let message_body_color = tok("react_trace.message.body.fg");
         let user_color = tok("react_trace.user_message.fg");
+        let user_bg = tok("react_trace.user_message.bg");
+        let user_accent_color = tok("react_trace.user_message.accent.fg");
         let permission_color = tok("react_trace.permission.fg");
         let spinner_color = tok("react_trace.spinner.fg");
         let success_color = tok("react_trace.outcome.success.fg");
@@ -569,6 +605,7 @@ impl ReactTrace {
                 let mut out = Line::from(spans);
                 out.style = w.style;
                 out.alignment = w.alignment;
+                let out = pad_bubble_line(out, effective_width);
                 rows.push(VirtualRow::Text(out));
                 byte_ranges.push(range.clone());
             }
@@ -1001,16 +1038,27 @@ impl ReactTrace {
                 }
 
                 TraceKind::UserMessage => {
+                    let bar_style = Style::default()
+                        .fg(user_accent_color)
+                        .bg(user_bg)
+                        .add_modifier(Modifier::BOLD);
+                    let ts_bubble_style = Style::default().fg(timestamp_color).bg(user_bg);
+                    let label_style = Style::default()
+                        .fg(user_accent_color)
+                        .bg(user_bg)
+                        .add_modifier(Modifier::BOLD);
+                    let body_style = Style::default()
+                        .fg(user_color)
+                        .bg(user_bg)
+                        .add_modifier(Modifier::BOLD);
                     push_wrapped(
                         &mut rows,
                         &mut byte_ranges,
                         content_range.clone(),
                         Line::from(vec![
-                            ts_span.clone(),
-                            Span::styled(
-                                "💬 YOU",
-                                Style::default().fg(user_color).add_modifier(Modifier::BOLD),
-                            ),
+                            Span::styled("▎ ", bar_style),
+                            Span::styled(format!("{} ", entry.timestamp), ts_bubble_style),
+                            Span::styled("💬 YOU", label_style),
                         ]),
                     );
                     for text_line in entry.text.lines() {
@@ -1019,11 +1067,9 @@ impl ReactTrace {
                             &mut byte_ranges,
                             content_range.clone(),
                             Line::from(vec![
-                                Span::raw("   "),
-                                Span::styled(
-                                    terminal_safe_text(text_line),
-                                    Style::default().fg(user_color),
-                                ),
+                                Span::styled("▎ ", bar_style),
+                                Span::styled("   ", body_style),
+                                Span::styled(terminal_safe_text(text_line), body_style),
                             ]),
                         );
                     }
