@@ -4078,16 +4078,16 @@ mod composer_routing_tests {
     }
 
     #[test]
-    fn alt_v_without_render_picker_reaches_composer() {
+    fn alt_v_without_render_picker_does_not_type_literal_v() {
         let mut v = make_view();
         v.input_bar_mut_for_test().set_text("x".into(), 1);
         let act = press_mod(&mut v, KeyCode::Char('v'), KeyModifiers::ALT);
         assert_eq!(
             v.input_bar_text_for_test(),
-            "xv",
-            "Alt+V must reach composer when render_picker is None"
+            "x",
+            "Alt+V must not insert a literal when render_picker is None"
         );
-        assert!(act.is_none(), "composer typing must not emit action");
+        assert!(act.is_none(), "composer no-op must not emit action");
     }
 
     #[test]

@@ -73,8 +73,7 @@ fn left_arrow_skips_atom_atomically() {
 fn typing_inside_atom_deletes_atom_then_inserts() {
     let mut b = InputBar::new();
     b.insert_atom("@a.rs", "file:///a".into(), "a.rs".into());
-    press(&mut b, KeyCode::Left);
-    press(&mut b, KeyCode::Left);
+    b.set_text_cursor_for_test(1);
     press(&mut b, KeyCode::Char('z'));
     assert_eq!(b.text(), "z");
     assert!(b.protected_ranges().is_empty());

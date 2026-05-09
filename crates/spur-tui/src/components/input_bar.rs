@@ -436,8 +436,7 @@ impl InputBar {
                 Some(HandleOutcome::Key(IntentEvent::Pasted))
             }
             EnterDecision::InsertNewline => {
-                self.textarea.insert_newline();
-                self.rebuild_line_cache();
+                self.insert_newline_protected();
                 Some(HandleOutcome::Key(IntentEvent::TypedChar('\n')))
             }
         }
@@ -514,9 +513,40 @@ impl InputBar {
                 self.textarea.move_cursor(CursorMove::End);
                 return HandleOutcome::Key(IntentEvent::MovedCursor);
             }
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.textarea.move_cursor(CursorMove::Head);
+                return HandleOutcome::Key(IntentEvent::MovedCursor);
+            }
+            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.textarea.move_cursor(CursorMove::End);
+                return HandleOutcome::Key(IntentEvent::MovedCursor);
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.delete_char_after_cursor();
+                return HandleOutcome::Key(IntentEvent::DeletedChar);
+            }
+            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_cursor_forward();
+                return HandleOutcome::Key(IntentEvent::MovedCursor);
+            }
+            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_cursor_back();
+                return HandleOutcome::Key(IntentEvent::MovedCursor);
+            }
+            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.textarea.move_cursor(CursorMove::WordBack);
+                return HandleOutcome::Key(IntentEvent::MovedCursor);
+            }
+            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.textarea.move_cursor(CursorMove::WordForward);
+                return HandleOutcome::Key(IntentEvent::MovedCursor);
+            }
+            KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.delete_char_before_cursor();
+                return HandleOutcome::Key(IntentEvent::DeletedChar);
+            }
             KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.textarea.insert_newline();
-                self.rebuild_line_cache();
+                self.insert_newline_protected();
                 return HandleOutcome::Key(IntentEvent::TypedChar('\n'));
             }
             KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -575,7 +605,11 @@ impl InputBar {
             KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 return self.handle_clipboard_image_paste();
             }
-            KeyCode::Char(c) => {
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
                 if let Some(intent) = self.capture_paste_burst_char(c, key) {
                     return HandleOutcome::Key(intent);
                 }
@@ -583,9 +617,12 @@ impl InputBar {
                 return HandleOutcome::Key(IntentEvent::TypedChar(c));
             }
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
-                self.textarea.insert_newline();
-                self.rebuild_line_cache();
+                self.insert_newline_protected();
                 return HandleOutcome::Key(IntentEvent::TypedChar('\n'));
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.insert_tab_protected();
+                return HandleOutcome::Key(IntentEvent::NoOp);
             }
             KeyCode::Enter => {
                 if let Some(outcome) = self.capture_paste_burst_enter(key) {
@@ -602,8 +639,7 @@ impl InputBar {
         // Delegate to textarea for other keys. Treat as NoOp for the detector
         // — tui_textarea handled something we don't model, but no composition
         // intent is claimed.
-        self.textarea.input(input);
-        self.rebuild_line_cache();
+        self.input_textarea_non_mutating(input);
         HandleOutcome::Key(IntentEvent::NoOp)
     }
 
@@ -783,6 +819,8 @@ impl InputBar {
                 if delta != 0 {
                     self.shift_ranges(before, delta);
                 }
+                self.history_cursor = None;
+                self.goal_vcol = None;
                 return HandleOutcome::Key(IntentEvent::Pasted);
             }
 
@@ -839,8 +877,7 @@ impl InputBar {
                 ..
             } if mode == VimMode::Normal => {
                 self.textarea.move_cursor(CursorMove::End);
-                self.textarea.insert_newline();
-                self.rebuild_line_cache();
+                self.insert_newline_protected();
                 self.set_mode(EditMode::Vim(VimMode::Insert));
                 return HandleOutcome::Key(IntentEvent::TypedChar('\n'));
             }
@@ -849,9 +886,8 @@ impl InputBar {
                 ..
             } if mode == VimMode::Normal => {
                 self.textarea.move_cursor(CursorMove::Head);
-                self.textarea.insert_newline();
+                self.insert_newline_protected();
                 self.textarea.move_cursor(CursorMove::Up);
-                self.rebuild_line_cache();
                 self.set_mode(EditMode::Vim(VimMode::Insert));
                 return HandleOutcome::Key(IntentEvent::TypedChar('\n'));
             }
@@ -906,12 +942,7 @@ impl InputBar {
                 ..
             } if mode == VimMode::Visual => {
                 self.textarea.move_cursor(CursorMove::Forward);
-                if let Some(sel) = self.textarea.selection_range() {
-                    let (start, end) = self.selection_to_byte_span(sel);
-                    self.textarea.cut();
-                    self.rebuild_line_cache();
-                    self.apply_deleted_span(start, end);
-                } else {
+                if !self.cut_selection_protected() {
                     self.textarea.cut();
                     self.rebuild_line_cache();
                 }
@@ -924,12 +955,7 @@ impl InputBar {
                 ..
             } if mode == VimMode::Visual => {
                 self.textarea.move_cursor(CursorMove::Forward);
-                if let Some(sel) = self.textarea.selection_range() {
-                    let (start, end) = self.selection_to_byte_span(sel);
-                    self.textarea.cut();
-                    self.rebuild_line_cache();
-                    self.apply_deleted_span(start, end);
-                } else {
+                if !self.cut_selection_protected() {
                     self.textarea.cut();
                     self.rebuild_line_cache();
                 }
@@ -1008,8 +1034,7 @@ impl InputBar {
                 alt: true,
                 ..
             } => {
-                self.textarea.insert_newline();
-                self.rebuild_line_cache();
+                self.insert_newline_protected();
                 return HandleOutcome::Key(IntentEvent::TypedChar('\n'));
             }
             Input {
@@ -1043,24 +1068,14 @@ impl InputBar {
                 self.set_mode(EditMode::Vim(VimMode::Normal));
             }
             VimMode::Operator('d') => {
-                if let Some(sel) = self.textarea.selection_range() {
-                    let (start, end) = self.selection_to_byte_span(sel);
-                    self.textarea.cut();
-                    self.rebuild_line_cache();
-                    self.apply_deleted_span(start, end);
-                } else {
+                if !self.cut_selection_protected() {
                     self.textarea.cut();
                     self.rebuild_line_cache();
                 }
                 self.set_mode(EditMode::Vim(VimMode::Normal));
             }
             VimMode::Operator('c') => {
-                if let Some(sel) = self.textarea.selection_range() {
-                    let (start, end) = self.selection_to_byte_span(sel);
-                    self.textarea.cut();
-                    self.rebuild_line_cache();
-                    self.apply_deleted_span(start, end);
-                } else {
+                if !self.cut_selection_protected() {
                     self.textarea.cut();
                     self.rebuild_line_cache();
                 }
@@ -1081,13 +1096,11 @@ impl InputBar {
                 if key.modifiers.contains(KeyModifiers::CONTROL)
                     || key.modifiers.contains(KeyModifiers::ALT) =>
             {
-                self.textarea.insert_newline();
-                self.rebuild_line_cache();
+                self.insert_newline_protected();
                 return HandleOutcome::Key(IntentEvent::TypedChar('\n'));
             }
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
-                self.textarea.insert_newline();
-                self.rebuild_line_cache();
+                self.insert_newline_protected();
                 return HandleOutcome::Key(IntentEvent::TypedChar('\n'));
             }
             KeyCode::Up => {
@@ -1125,12 +1138,20 @@ impl InputBar {
             KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 return self.handle_clipboard_image_paste();
             }
-            KeyCode::Char(c) => {
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
                 if let Some(intent) = self.capture_paste_burst_char(c, key) {
                     return HandleOutcome::Key(intent);
                 }
                 self.insert_char_with_protected_check(c);
                 return HandleOutcome::Key(IntentEvent::TypedChar(c));
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.insert_tab_protected();
+                return HandleOutcome::Key(IntentEvent::NoOp);
             }
             KeyCode::Enter => {
                 if let Some(outcome) = self.capture_paste_burst_enter(key) {
@@ -1144,8 +1165,7 @@ impl InputBar {
             _ => {}
         }
 
-        self.textarea.input(input);
-        self.rebuild_line_cache();
+        self.input_textarea_non_mutating(input);
         HandleOutcome::Key(IntentEvent::NoOp)
     }
 
@@ -1205,6 +1225,53 @@ impl InputBar {
         (start, end)
     }
 
+    fn input_textarea_non_mutating(&mut self, input: Input) -> bool {
+        if matches!(
+            input.key,
+            Key::F(_) | Key::PageUp | Key::PageDown | Key::Null
+        ) {
+            self.textarea.input(input);
+            self.rebuild_line_cache();
+            return true;
+        }
+        false
+    }
+
+    fn finish_textarea_insert_at(&mut self, at: usize, old_len: usize) {
+        self.rebuild_line_cache();
+        let new_len = self.text().len();
+        let delta = new_len as isize - old_len as isize;
+        if delta != 0 {
+            self.shift_ranges(at, delta);
+        }
+        self.history_cursor = None;
+        self.goal_vcol = None;
+    }
+
+    fn insert_newline_protected(&mut self) {
+        if !self.delete_selection_protected(false) {
+            if let Some(idx) = self.range_at_cursor() {
+                self.delete_range(idx);
+            }
+        }
+        let cursor = self.cursor_to_byte();
+        let old_len = self.text().len();
+        self.textarea.insert_newline();
+        self.finish_textarea_insert_at(cursor, old_len);
+    }
+
+    fn insert_tab_protected(&mut self) {
+        if !self.delete_selection_protected(false) {
+            if let Some(idx) = self.range_at_cursor() {
+                self.delete_range(idx);
+            }
+        }
+        let cursor = self.cursor_to_byte();
+        let old_len = self.text().len();
+        self.textarea.insert_tab();
+        self.finish_textarea_insert_at(cursor, old_len);
+    }
+
     /// Rebuild the line cache after text modification.
     fn rebuild_line_cache(&mut self) {
         self.line_cache.clear();
@@ -1249,6 +1316,49 @@ impl InputBar {
         }
     }
 
+    fn expand_to_protected_boundaries(&self, start: usize, end: usize) -> (usize, usize) {
+        let mut expanded_start = start;
+        let mut expanded_end = end;
+        for r in &self.protected_ranges {
+            let overlaps = if expanded_start == expanded_end {
+                expanded_start > r.start && expanded_start < r.end
+            } else {
+                r.start < expanded_end && r.end > expanded_start
+            };
+            if overlaps {
+                expanded_start = expanded_start.min(r.start);
+                expanded_end = expanded_end.max(r.end);
+            }
+        }
+        (expanded_start, expanded_end)
+    }
+
+    fn delete_span_with_yank(&mut self, start: usize, end: usize, yank: bool) -> bool {
+        let (start, end) = self.expand_to_protected_boundaries(start, end);
+        self.textarea.cancel_selection();
+        if start >= end {
+            return false;
+        }
+        if yank {
+            let text = self.text();
+            self.textarea.set_yank_text(text[start..end].to_string());
+        }
+        self.delete_span(start, end);
+        true
+    }
+
+    fn delete_selection_protected(&mut self, yank: bool) -> bool {
+        if let Some(sel) = self.textarea.selection_range() {
+            let (start, end) = self.selection_to_byte_span(sel);
+            return self.delete_span_with_yank(start, end, yank);
+        }
+        false
+    }
+
+    fn cut_selection_protected(&mut self) -> bool {
+        self.delete_selection_protected(true)
+    }
+
     /// Apply deletion bookkeeping for a flat byte span `[start, end)`.
     fn apply_deleted_span(&mut self, start: usize, end: usize) {
         if start >= end {
@@ -1278,6 +1388,7 @@ impl InputBar {
 
     /// Delete a flat byte span `[start, end)` and keep range metadata aligned.
     fn delete_span(&mut self, start: usize, end: usize) {
+        let (start, end) = self.expand_to_protected_boundaries(start, end);
         if start >= end {
             return;
         }
@@ -1340,12 +1451,6 @@ impl InputBar {
             self.move_cursor_to_byte(r.start);
         } else if cursor > 0 {
             self.textarea.move_cursor(CursorMove::Back);
-        } else if let Some(idx) = self.range_starting_at_cursor() {
-            // Cursor is at byte 0 with an atom starting there — re-enter the atom
-            let r = &self.protected_ranges[idx];
-            if r.end > r.start + 1 {
-                self.move_cursor_to_byte(r.start + 1);
-            }
         }
         self.goal_vcol = None;
     }
@@ -2459,6 +2564,16 @@ mod image_tests {
 mod paste_atom_tests {
     use super::*;
 
+    fn test_atom_range(start: usize, end: usize) -> ProtectedRange {
+        ProtectedRange {
+            start,
+            end,
+            kind: RangeKind::Atom,
+            uri: "file:///foo".into(),
+            name: "foo".into(),
+        }
+    }
+
     #[test]
     fn set_state_preserves_non_empty_protected_ranges() {
         // Defends the InputBar contract independently of the completion logic.
@@ -2715,6 +2830,98 @@ mod paste_atom_tests {
 
         assert_eq!(bar.text(), "");
         assert!(bar.protected_ranges.is_empty());
+    }
+
+    #[test]
+    fn tab_before_atom_shifts_protected_range() {
+        let mut bar = InputBar::new();
+        bar.insert_atom("@foo", "file:///foo".to_string(), "foo".to_string());
+        bar.set_text_cursor_for_test(0);
+
+        let outcome = bar.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        assert_eq!(outcome, HandleOutcome::Key(IntentEvent::NoOp));
+        assert_eq!(bar.text(), "    @foo");
+        assert_eq!(
+            (bar.protected_ranges[0].start, bar.protected_ranges[0].end),
+            (4, 8)
+        );
+    }
+
+    #[test]
+    fn ctrl_a_in_emacs_moves_to_line_start_without_typing() {
+        let mut bar = InputBar::new();
+        bar.set_text("hello\nworld".to_string(), "hello\nworld".len());
+
+        let outcome = bar.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+
+        assert_eq!(outcome, HandleOutcome::Key(IntentEvent::MovedCursor));
+        assert_eq!(bar.text(), "hello\nworld");
+        assert_eq!(bar.cursor(), "hello\n".len());
+    }
+
+    #[test]
+    fn delete_span_partial_atom_overlap_deletes_whole_atom() {
+        let mut bar = InputBar::new();
+        bar.set_state(
+            InputStateSnapshot::new("x @foo y".to_string(), vec![test_atom_range(2, 6)]),
+            0,
+        );
+
+        bar.delete_span(1, 3);
+
+        assert_eq!(bar.text(), "x y");
+        assert!(bar.protected_ranges.is_empty());
+    }
+
+    #[test]
+    fn left_at_byte_zero_before_atom_stays_at_zero() {
+        let mut bar = InputBar::new();
+        bar.insert_atom("@foo", "file:///foo".to_string(), "foo".to_string());
+        bar.set_text_cursor_for_test(0);
+
+        let outcome = bar.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+
+        assert_eq!(outcome, HandleOutcome::Key(IntentEvent::MovedCursor));
+        assert_eq!(bar.cursor(), 0);
+    }
+
+    #[test]
+    fn vim_o_with_atom_on_subsequent_line_shifts_range() {
+        let mut bar = InputBar::new();
+        bar.set_state(
+            InputStateSnapshot::new("first\n@foo".to_string(), vec![test_atom_range(6, 10)]),
+            0,
+        );
+        bar.set_mode(EditMode::Vim(VimMode::Normal));
+
+        let outcome = bar.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+
+        assert_eq!(outcome, HandleOutcome::Key(IntentEvent::TypedChar('\n')));
+        assert_eq!(bar.text(), "first\n\n@foo");
+        assert_eq!(
+            (bar.protected_ranges[0].start, bar.protected_ranges[0].end),
+            (7, 11)
+        );
+    }
+
+    #[test]
+    fn vim_o_above_atom_line_shifts_range() {
+        let mut bar = InputBar::new();
+        bar.set_state(
+            InputStateSnapshot::new("first\n@foo".to_string(), vec![test_atom_range(6, 10)]),
+            "first\n".len(),
+        );
+        bar.set_mode(EditMode::Vim(VimMode::Normal));
+
+        let outcome = bar.handle_key(KeyEvent::new(KeyCode::Char('O'), KeyModifiers::NONE));
+
+        assert_eq!(outcome, HandleOutcome::Key(IntentEvent::TypedChar('\n')));
+        assert_eq!(bar.text(), "first\n\n@foo");
+        assert_eq!(
+            (bar.protected_ranges[0].start, bar.protected_ranges[0].end),
+            (7, 11)
+        );
     }
 
     #[test]
