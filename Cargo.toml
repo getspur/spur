@@ -16,6 +16,9 @@ members = [
     "crates/spur-cli",
     "crates/spur-context",
 ]
+# vendor/ holds the fsqlite-* crates patched in via [patch.crates-io] below.
+# Excluded from this workspace; vendor/Cargo.toml is its own workspace root.
+exclude = ["vendor"]
 
 [workspace.package]
 version = "1.1.2"
@@ -112,3 +115,35 @@ debug = true
 strip = false
 codegen-units = 1
 lto = "thin"
+
+# Override fsqlite-* crates with a snapshot of upstream master
+# (https://github.com/Dicklesworthstone/frankensqlite @ f45d94e2, May 8 2026).
+# Upstream master has Bug A fixed (reserved-bytes usable_size; engine.rs:419
+# uses page_size.usable(reserved_per_page)) plus 200+ post-0.1.2 commits.
+# Bug B (allocator page-ownership aliasing causing "2nd reference to page"
+# corruption on writes) is NOT yet fixed upstream — tracked separately.
+#
+# Master declares version 0.1.3; we rewrite to 0.1.2 in vendor/*/Cargo.toml so
+# cargo's patch mechanism accepts the override against beads_rust's 0.1.2 deps.
+# Remove these entries when fsqlite 0.1.3 publishes to crates.io.
+[patch.crates-io]
+fsqlite               = { path = "vendor/fsqlite" }
+fsqlite-ast           = { path = "vendor/fsqlite-ast" }
+fsqlite-btree         = { path = "vendor/fsqlite-btree" }
+fsqlite-core          = { path = "vendor/fsqlite-core" }
+fsqlite-error         = { path = "vendor/fsqlite-error" }
+fsqlite-ext-fts5      = { path = "vendor/fsqlite-ext-fts5" }
+fsqlite-ext-icu       = { path = "vendor/fsqlite-ext-icu" }
+fsqlite-ext-json      = { path = "vendor/fsqlite-ext-json" }
+fsqlite-ext-misc      = { path = "vendor/fsqlite-ext-misc" }
+fsqlite-ext-rtree     = { path = "vendor/fsqlite-ext-rtree" }
+fsqlite-func          = { path = "vendor/fsqlite-func" }
+fsqlite-mvcc          = { path = "vendor/fsqlite-mvcc" }
+fsqlite-observability = { path = "vendor/fsqlite-observability" }
+fsqlite-pager         = { path = "vendor/fsqlite-pager" }
+fsqlite-parser        = { path = "vendor/fsqlite-parser" }
+fsqlite-planner       = { path = "vendor/fsqlite-planner" }
+fsqlite-types         = { path = "vendor/fsqlite-types" }
+fsqlite-vdbe          = { path = "vendor/fsqlite-vdbe" }
+fsqlite-vfs           = { path = "vendor/fsqlite-vfs" }
+fsqlite-wal           = { path = "vendor/fsqlite-wal" }
