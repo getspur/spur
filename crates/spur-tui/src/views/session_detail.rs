@@ -2789,7 +2789,7 @@ mod banner_tests {
                 let cell = buf.cell((x, y)).expect("cell should exist in banner area");
                 assert_eq!(
                     cell.bg,
-                    Color::Rgb(0xff, 0, 0),
+                    Color::Rgb(0xf8, 0x71, 0x71),
                     "cell ({x}, {y}) should have red background"
                 );
                 assert_eq!(
@@ -2837,7 +2837,7 @@ mod banner_tests {
                     .expect("cell should exist in session error area");
                 assert_eq!(
                     cell.bg,
-                    Color::Rgb(0xff, 0, 0),
+                    Color::Rgb(0xf8, 0x71, 0x71),
                     "cell ({x}, {y}) should have red background"
                 );
                 assert_eq!(

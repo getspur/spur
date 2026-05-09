@@ -6,13 +6,13 @@ palette:
     rgb: "#ffffff"
     ansi: white
   bg_panel:
-    rgb: "#f3f4f6"
+    rgb: "#e5e7eb"
     ansi: white
   bg_selection:
     rgb: "#bfdbfe"
     ansi: light-cyan
   bg_overlay:
-    rgb: "#ffffff"
+    rgb: "#f9fafb"
     ansi: white
   fg:
     rgb: "#111827"
@@ -66,7 +66,7 @@ palette:
     rgb: "#0284c7"
     ansi: blue
   highlight:
-    rgb: "#92400e"
+    rgb: "#d97706"
     ansi: yellow
   diff_add:
     rgb: "#166534"
