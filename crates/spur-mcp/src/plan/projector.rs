@@ -114,6 +114,7 @@ pub fn project_attempt_history(audits: &[AuditSentinelKind]) -> Vec<super::Attem
                 attempt,
                 error,
                 worker_branch,
+                ..
             } => Some(super::AttemptRecord {
                 attempt: *attempt,
                 worker_branch: worker_branch.clone(),
@@ -159,23 +160,6 @@ pub fn latest_completion_facts(audits: &[AuditSentinelKind]) -> Option<Completio
     }
 
     latest
-}
-
-/// Latest `MutationCommit.op_tags` from the audit stream. Legacy comments
-/// (pre bd-2m2u Phase 2b) carry no `op_tags` field; serde defaults them to
-/// `[]`, and we project that as `["split_task"]` since SplitTask was the
-/// only op variant before the extension.
-pub fn latest_mutation_commit_op_tags(audits: &[AuditSentinelKind]) -> Option<Vec<String>> {
-    audits.iter().rev().find_map(|audit| match audit {
-        AuditSentinelKind::MutationCommit { op_tags, .. } => {
-            if op_tags.is_empty() {
-                Some(vec!["split_task".to_string()])
-            } else {
-                Some(op_tags.clone())
-            }
-        }
-        _ => None,
-    })
 }
 
 pub fn latest_task_spec(audits: &[AuditSentinelKind]) -> Option<(String, Vec<String>)> {
@@ -1264,6 +1248,7 @@ mod tests {
                 attempt: 1,
                 error: "worker crashed".into(),
                 worker_branch: Some("spur/worker-a".into()),
+                amended_prompt_summary: None,
             },
         ];
 
@@ -1280,6 +1265,7 @@ mod tests {
                 attempt: 1,
                 error: "worker crashed".into(),
                 worker_branch: Some("spur/worker-a".into()),
+                amended_prompt_summary: None,
             },
             AuditSentinelKind::Completion {
                 delegation_id: "del-B".into(),
@@ -1455,32 +1441,6 @@ mod tests {
         assert_eq!(
             super::epic_completion_outcome_summary(&audits, "P1", "bd-epic-1"),
             None
-        );
-    }
-
-    #[test]
-    fn legacy_mutation_commit_without_op_tags_projects_as_split_task() {
-        let legacy_json = r#"{"kind":"mutation-commit","mutation_id":"mut-V","children_created":["bd-201","bd-202"]}"#;
-        let parsed: AuditSentinelKind =
-            serde_json::from_str(legacy_json).expect("legacy mutation-commit must parse");
-        let tags = super::latest_mutation_commit_op_tags(&[parsed])
-            .expect("Some when MutationCommit present");
-        assert_eq!(tags, vec!["split_task".to_string()]);
-    }
-
-    #[test]
-    fn projector_reads_op_tags_from_mutation_commit() {
-        let audit = AuditSentinelKind::MutationCommit {
-            mutation_id: "mut-V".into(),
-            children_created: Vec::new(),
-            op_tags: vec!["retry_task".into(), "modify_task_spec".into()],
-            affected_task_ids: vec!["bd-100".into()],
-        };
-        let tags = super::latest_mutation_commit_op_tags(&[audit])
-            .expect("Some when MutationCommit present");
-        assert_eq!(
-            tags,
-            vec!["retry_task".to_string(), "modify_task_spec".to_string()]
         );
     }
 

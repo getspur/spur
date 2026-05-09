@@ -1281,6 +1281,7 @@ async fn apply_retry_task(
             attempt,
             error: "brain-directed retry via submit_plan_mutation".to_string(),
             worker_branch: None,
+            amended_prompt_summary: None,
         }),
     )
     .await
@@ -1613,6 +1614,7 @@ async fn apply_insert_task_before(
             attempt: 0,
             error: format!("brain-directed insert_task_before: prerequisite {new_id} created"),
             worker_branch: None,
+            amended_prompt_summary: None,
         }),
     )
     .await
