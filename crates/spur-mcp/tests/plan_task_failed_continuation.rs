@@ -35,7 +35,9 @@ impl McpEventSink for InspectingSink {
     fn emit(&self, body: SpurEventBody) {
         let is_terminal = matches!(
             body,
-            SpurEventBody::PlanTaskFailed { .. } | SpurEventBody::PlanTaskAwaitingReview { .. }
+            SpurEventBody::PlanTaskFailed { .. }
+                | SpurEventBody::PlanTaskAwaitingReview { .. }
+                | SpurEventBody::PlanTaskEscalated { .. }
         );
         self.captured.lock().unwrap().push(body);
         if is_terminal {
@@ -199,7 +201,7 @@ async fn run_plan_pushes_continuation_and_event_for_failed_task() {
         .await
         .expect("failed task continuation should fire")
         .expect("continuation channel open");
-    assert_eq!(cont.source, ContinuationSource::PlanTaskFailed);
+    assert_eq!(cont.source, ContinuationSource::PlanTaskEscalated);
     assert_eq!(cont.delegation_id.as_str(), delegation_id);
 
     let status = decode_tool_response(
@@ -208,8 +210,8 @@ async fn run_plan_pushes_continuation_and_event_for_failed_task() {
             .await,
     );
     assert_eq!(
-        status["tasks"][0]["status"], "failed",
-        "continuation must fire only after in-memory task status is terminal: {status}"
+        status["tasks"][0]["status"], "escalated_to_brain",
+        "continuation must fire only after in-memory task status is escalated: {status}"
     );
     release_continuation.notify_waiters();
 
@@ -217,32 +219,33 @@ async fn run_plan_pushes_continuation_and_event_for_failed_task() {
     assert!(
         events.iter().any(|event| matches!(
             event,
-            SpurEventBody::PlanTaskFailed {
+            SpurEventBody::PlanTaskEscalated {
                 plan_id: found_plan_id,
                 task_id,
                 attempt: 2,
                 max_attempts: 3,
-                error,
+                last_error,
                 delegation_id: found_delegation_id,
+                worker_branch: None,
             } if found_plan_id == &plan_id
                 && task_id == "t1"
-                && error == "worker failed again"
+                && last_error == "worker failed again"
                 && found_delegation_id == &delegation_id
         )),
-        "PlanTaskFailed event missing from {events:?}"
+        "PlanTaskEscalated event missing from {events:?}"
     );
 }
 
-/// Race-detection test: when a worker observes the `PlanTaskFailed` event,
-/// the in-memory plan state MUST already report the task as `failed`.
+/// Race-detection test: when a worker observes the `PlanTaskEscalated` event,
+/// the in-memory plan state MUST already report the task as escalated.
 ///
 /// In v2 (cherry-pick `72fcec1d`) the persisted-completion path emits the
 /// event from inside `persist_completion_inner` BEFORE `run_plan` acquires
 /// the plan lock and writes the terminal status. This test holds emit() at a
 /// rendezvous, queries `get_plan_status` while emit() is blocked, and asserts
-/// the task is already `failed` at that moment. v2 fails this assertion (sees
-/// `dispatched`); v3 — after moving the event emit into the deferred-push
-/// `deliver()` step — passes.
+/// the task is already `escalated_to_brain` at that moment. v2 fails this
+/// assertion (sees `dispatched`); v3 — after moving the event emit into the
+/// deferred-push `deliver()` step — passes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn event_emission_does_not_race_with_state_update_for_failed_task() {
     let dir = TempDir::new().expect("tempdir");
@@ -330,13 +333,13 @@ async fn event_emission_does_not_race_with_state_update_for_failed_task() {
     tokio::task::spawn_blocking(move || {
         observed_rx
             .recv()
-            .expect("PlanTaskFailed event should be observed");
+            .expect("PlanTaskEscalated event should be observed");
     })
     .await
     .expect("observation task");
 
     // emit() is now blocked. Snapshot the plan status — if the v2 race is
-    // present, it will read `dispatched`/`in_progress`. v3 must read `failed`.
+    // present, it will read `dispatched`/`in_progress`. v3 must read `escalated_to_brain`.
     let status = decode_tool_response(
         &server
             .__test_call_tool("get_plan_status", json!({ "plan_id": plan_id }))
@@ -357,7 +360,7 @@ async fn event_emission_does_not_race_with_state_update_for_failed_task() {
     release_continuation.notify_waiters();
 
     assert_eq!(
-        observed_status, "failed",
-        "PlanTaskFailed event must fire only after in-memory task status is terminal — observed: {observed_status}"
+        observed_status, "escalated_to_brain",
+        "PlanTaskEscalated event must fire only after in-memory task status is escalated — observed: {observed_status}"
     );
 }

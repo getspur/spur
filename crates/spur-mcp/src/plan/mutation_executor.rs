@@ -919,31 +919,15 @@ impl ReversibleOp for InsertTaskBeforeExecution {
     /// audit as terminal-but-unreviewed; the rollback report's "successfully
     /// rolled back" classification rests on the dep-edge removal + target
     /// restore, not on the child's terminal state.
-    async fn rollback(
-        &self,
-        pm: &PmService,
-        _adv: &dyn BeadsAdvanced,
-        report: &mut RollbackReport,
-    ) {
+    async fn rollback(&self, pm: &PmService, adv: &dyn BeadsAdvanced, report: &mut RollbackReport) {
         if self.dep_added {
             if let Some(new_id) = self.new_issue_id.as_deref() {
-                match pm
-                    .advanced()
-                    .ok_or_else(|| anyhow!("rollback requires beads"))
-                {
-                    Ok(adv) => match adv.remove_dependency(&self.target_issue_id, new_id).await {
-                        Ok(()) => report.record_success(
-                            "insert_remove_dep",
-                            &self.target_issue_id,
-                            Some(new_id),
-                        ),
-                        Err(error) => report.record_failure(
-                            "insert_remove_dep",
-                            &self.target_issue_id,
-                            Some(new_id),
-                            format!("{error:#}"),
-                        ),
-                    },
+                match adv.remove_dependency(&self.target_issue_id, new_id).await {
+                    Ok(()) => report.record_success(
+                        "insert_remove_dep",
+                        &self.target_issue_id,
+                        Some(new_id),
+                    ),
                     Err(error) => report.record_failure(
                         "insert_remove_dep",
                         &self.target_issue_id,
@@ -1828,10 +1812,30 @@ mod tests {
         (pm, dir)
     }
 
+    fn test_advanced(pm: &PmService) -> &dyn BeadsAdvanced {
+        let gate = Arc::new(spur_license::FeatureGate::new(
+            spur_license::policy::PolicyResolver::embedded(),
+        ));
+        let features =
+            std::collections::BTreeSet::from([spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED
+                .as_str()
+                .to_string()]);
+        gate.update_state(&spur_license::LicenseState::active_validated(
+            spur_license::Plan::Pro,
+            features,
+        ));
+        crate::server::require_feature(
+            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+            gate.as_ref(),
+        )
+        .expect("test feature gate should allow beads advanced");
+        pm.advanced().expect("beads adv")
+    }
+
     #[tokio::test]
     async fn executor_iterates_executed_ops_in_reverse_for_rollback() {
         let (pm, _dir) = test_pm().await;
-        let adv = pm.advanced().expect("beads adv");
+        let adv = test_advanced(pm.as_ref());
         let executed: Vec<ExecutedOp> = vec![
             ExecutedOp::NoOp(NoOpExecution {
                 label: "first".into(),
@@ -1879,7 +1883,7 @@ mod tests {
     #[tokio::test]
     async fn synthetic_noop_in_test_only_completes_via_reversible_trait() {
         let (pm, _dir) = test_pm().await;
-        let adv = pm.advanced().expect("beads adv");
+        let adv = test_advanced(pm.as_ref());
         let op = NoOpExecution {
             label: "noop-target".into(),
         };
