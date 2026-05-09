@@ -1634,7 +1634,13 @@ impl DashboardView {
             KeyOwner::Picker => self
                 .completion
                 .handle_picker_key(key, &mut self.input_bar)
-                .and_then(|accept| self.action_from_picker_accept(accept)),
+                .and_then(|accept| {
+                    crate::commands::submit_router::local_action_from_picker_accept(
+                        accept,
+                        &self.command_registry,
+                        None,
+                    )
+                }),
             KeyOwner::Composer => {
                 // Enter Compose mode when typing in Navigate mode.
                 if self.mode == DashboardMode::Navigate {
@@ -1738,21 +1744,6 @@ impl DashboardView {
                 }
                 self.handle_view_key(key, lineage, worker_streams)
             }
-        }
-    }
-
-    fn action_from_picker_accept(
-        &self,
-        accept: crate::components::query_source::RetrievalAccept,
-    ) -> Option<Action> {
-        let crate::components::query_source::RetrievalAccept::SubmitText { text } = accept else {
-            return None;
-        };
-
-        use crate::commands::submit_router::{route, SubmitDecision};
-        match route(&text, &[], &self.command_registry, false) {
-            SubmitDecision::Local { action } => Some(action),
-            _ => None,
         }
     }
 }

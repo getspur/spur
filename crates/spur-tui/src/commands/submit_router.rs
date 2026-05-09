@@ -17,6 +17,7 @@ use spur_acp::{ContentBlock, ResourceLink, SpurAgentCaps, TextContent};
 
 use crate::action::Action;
 use crate::components::input_bar::ProtectedRange;
+use crate::components::query_source::RetrievalAccept;
 
 use super::entry::Dispatch;
 use super::registry::CommandRegistry;
@@ -185,6 +186,21 @@ pub fn route_with_caps(
 
     let blocks = assemble_blocks(text, ranges);
     SubmitDecision::Send { blocks, interrupt }
+}
+
+pub(crate) fn local_action_from_picker_accept(
+    accept: RetrievalAccept,
+    registry: &CommandRegistry,
+    caps: Option<&SpurAgentCaps>,
+) -> Option<Action> {
+    let RetrievalAccept::SubmitText { text } = accept else {
+        return None;
+    };
+
+    match route_with_caps(&text, &[], registry, false, caps) {
+        SubmitDecision::Local { action } => Some(action),
+        _ => None,
+    }
 }
 
 /// Everything after the first whitespace-delimited token of `text`.
