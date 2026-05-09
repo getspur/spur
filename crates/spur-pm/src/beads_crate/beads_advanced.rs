@@ -135,6 +135,7 @@ mod tests {
     use crate::adapter::IssueTracker;
     use crate::advanced::{BeadsAdvanced, ReadyFilter};
     use crate::beads_crate::adapter::{AdapterConfig, BeadsCrateAdapter};
+    use crate::beads_crate::dependency_compat::add_dependency_with_metadata;
     use crate::types::IssueCreate;
 
     async fn setup_adapter() -> (TempDir, BeadsCrateAdapter) {
@@ -412,8 +413,8 @@ mod tests {
         let b_for_seed = b.clone();
         adapter
             .write(move |s| {
-                s.add_dependency_with_metadata(&a_for_seed, &b_for_seed, "related", "test", None)?;
-                s.add_dependency_with_metadata(&b_for_seed, &a_for_seed, "related", "test", None)?;
+                add_dependency_with_metadata(s, &a_for_seed, &b_for_seed, "related", "test", None)?;
+                add_dependency_with_metadata(s, &b_for_seed, &a_for_seed, "related", "test", None)?;
                 Ok(())
             })
             .await
