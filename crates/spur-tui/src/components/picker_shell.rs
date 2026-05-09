@@ -380,7 +380,7 @@ impl PickerShell {
                     spans.push(Span::styled(
                         r.primary.clone(),
                         Style::default()
-                            .fg(token(theme, "picker.selected.fg"))
+                            .fg(token(theme, "picker.row.fg"))
                             .add_modifier(Modifier::BOLD),
                     ));
                 } else {
@@ -390,7 +390,7 @@ impl PickerShell {
                             spans.push(Span::styled(
                                 r.primary[cursor..a].to_string(),
                                 Style::default()
-                                    .fg(token(theme, "picker.selected.fg"))
+                                    .fg(token(theme, "picker.row.fg"))
                                     .add_modifier(Modifier::BOLD),
                             ));
                         }
@@ -409,7 +409,7 @@ impl PickerShell {
                         spans.push(Span::styled(
                             r.primary[cursor..].to_string(),
                             Style::default()
-                                .fg(token(theme, "picker.selected.fg"))
+                                .fg(token(theme, "picker.row.fg"))
                                 .add_modifier(Modifier::BOLD),
                         ));
                     }
@@ -418,7 +418,7 @@ impl PickerShell {
                     spans.push(Span::raw("  "));
                     spans.push(Span::styled(
                         r.secondary.clone(),
-                        Style::default().fg(token(theme, "picker.selected.fg")),
+                        Style::default().fg(token(theme, "picker.row.fg")),
                     ));
                 }
                 if !r.tag.is_empty() {

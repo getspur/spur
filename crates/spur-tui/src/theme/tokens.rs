@@ -5,7 +5,7 @@ const DARK_DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("status_bar.fg", "fg"),
     ("spinner.fg", "accent"),
     ("picker.selected.bg", "bg_selection"),
-    ("picker.selected.fg", "fg"),
+    ("picker.row.fg", "fg"),
     ("picker.hint.fg", "fg_subtle"),
     ("picker.match.fg", "highlight"),
     ("status_bar.tombstone.fg", "fg_subtle"),
@@ -258,7 +258,7 @@ mod tests {
             tokens.0.get("picker.selected.bg"),
             Some(&"bg_selection".to_string())
         );
-        assert_eq!(tokens.0.get("picker.selected.fg"), Some(&"fg".to_string()));
+        assert_eq!(tokens.0.get("picker.row.fg"), Some(&"fg".to_string()));
         assert_eq!(
             tokens.0.get("picker.hint.fg"),
             Some(&"fg_subtle".to_string())
