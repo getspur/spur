@@ -23,7 +23,7 @@ tokio = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true, features = ["event-stream"] }
 anyhow = { workspace = true }
-arboard = { version = "2", default-features = false, features = ["image"] }
+arboard = { version = "2", default-features = false, features = ["image-data"] }
 base64 = "0.22"
 chrono = { workspace = true }
 futures = { workspace = true }
