@@ -1,0 +1,189 @@
+[workspace]
+resolver = "2"
+# Pinned at upstream commit dd9b457a (March 31, 2026): the latest commit with
+# Bug A fix (6501e2aa "correct reserved-bytes page-size handling across B-tree
+# operations") AND no #![feature(...)] directives requiring nightly Rust.
+# Subsequent commits added core_intrinsics (9abedc20) and portable_simd
+# (1c58156e) which spur cannot use on stable rustc 1.94.
+#
+# Only members SPUR transitively depends on are listed; upstream's siblings
+# (fsqlite-cli, fsqlite-c-api, fsqlite-wasm, fsqlite-e2e, fsqlite-harness,
+# fsqlite-ext-fts3, fsqlite-ext-session) are not vendored.
+members = [
+    "fsqlite",
+    "fsqlite-ast",
+    "fsqlite-btree",
+    "fsqlite-core",
+    "fsqlite-error",
+    "fsqlite-ext-fts5",
+    "fsqlite-ext-icu",
+    "fsqlite-ext-json",
+    "fsqlite-ext-misc",
+    "fsqlite-ext-rtree",
+    "fsqlite-func",
+    "fsqlite-mvcc",
+    "fsqlite-observability",
+    "fsqlite-pager",
+    "fsqlite-parser",
+    "fsqlite-planner",
+    "fsqlite-types",
+    "fsqlite-vdbe",
+    "fsqlite-vfs",
+    "fsqlite-wal",
+]
+
+[workspace.package]
+edition = "2024"
+license-file = "LICENSE"
+repository = "https://github.com/Dicklesworthstone/frankensqlite"
+rust-version = "1.85"
+readme = "README.md"
+keywords = ["sqlite", "database", "embedded", "sql", "pure-rust"]
+categories = ["database-implementations", "parser-implementations"]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cast_lossless = { level = "allow", priority = 1 }
+cast_possible_truncation = { level = "allow", priority = 1 }
+cast_possible_wrap = { level = "allow", priority = 1 }
+cast_precision_loss = { level = "allow", priority = 1 }
+cast_sign_loss = { level = "allow", priority = 1 }
+doc_markdown = { level = "allow", priority = 1 }
+missing_const_for_fn = { level = "allow", priority = 1 }
+missing_errors_doc = { level = "allow", priority = 1 }
+missing_panics_doc = { level = "allow", priority = 1 }
+module_name_repetitions = { level = "allow", priority = 1 }
+must_use_candidate = { level = "allow", priority = 1 }
+option_if_let_else = { level = "allow", priority = 1 }
+significant_drop_tightening = { level = "allow", priority = 1 }
+similar_names = { level = "allow", priority = 1 }
+too_many_lines = { level = "allow", priority = 1 }
+unreadable_literal = { level = "allow", priority = 1 }
+uninlined_format_args = { level = "allow", priority = 1 }
+# Test-heavy patterns: these pedantic/nursery lints fire pervasively in the
+# 200+ harness test files and add noise without catching real bugs.
+assertions_on_constants = { level = "allow", priority = 1 }
+bool_to_int_with_if = { level = "allow", priority = 1 }
+case_sensitive_file_extension_comparisons = { level = "allow", priority = 1 }
+collection_is_never_read = { level = "allow", priority = 1 }
+explicit_iter_loop = { level = "allow", priority = 1 }
+float_cmp = { level = "allow", priority = 1 }
+format_push_string = { level = "allow", priority = 1 }
+if_then_some_else_none = { level = "allow", priority = 1 }
+let_and_return = { level = "allow", priority = 1 }
+many_single_char_names = { level = "allow", priority = 1 }
+manual_range_contains = { level = "allow", priority = 1 }
+needless_collect = { level = "allow", priority = 1 }
+needless_pass_by_value = { level = "allow", priority = 1 }
+no_effect_underscore_binding = { level = "allow", priority = 1 }
+redundant_clone = { level = "allow", priority = 1 }
+redundant_closure_for_method_calls = { level = "allow", priority = 1 }
+return_self_not_must_use = { level = "allow", priority = 1 }
+single_char_pattern = { level = "allow", priority = 1 }
+single_match = { level = "allow", priority = 1 }
+stable_sort_primitive = { level = "allow", priority = 1 }
+used_underscore_binding = { level = "allow", priority = 1 }
+useless_format = { level = "allow", priority = 1 }
+useless_vec = { level = "allow", priority = 1 }
+wildcard_enum_match_arm = { level = "allow", priority = 1 }
+# Additional pedantic lints that generate noise in test code
+approx_constant = { level = "allow", priority = 1 }
+cloned_ref_to_slice_refs = { level = "allow", priority = 1 }
+default_trait_access = { level = "allow", priority = 1 }
+expect_fun_call = { level = "allow", priority = 1 }
+format_collect = { level = "allow", priority = 1 }
+if_not_else = { level = "allow", priority = 1 }
+items_after_statements = { level = "allow", priority = 1 }
+manual_assert = { level = "allow", priority = 1 }
+manual_checked_ops = { level = "allow", priority = 1 }
+manual_let_else = { level = "allow", priority = 1 }
+manual_string_new = { level = "allow", priority = 1 }
+map_unwrap_or = { level = "allow", priority = 1 }
+match_wildcard_for_single_variants = { level = "allow", priority = 1 }
+single_match_else = { level = "allow", priority = 1 }
+unnecessary_cast = { level = "allow", priority = 1 }
+unnecessary_literal_bound = { level = "allow", priority = 1 }
+
+[workspace.dependencies]
+# Internal crates
+fsqlite-types = { version = "0.1.2", path = "fsqlite-types", default-features = false }
+fsqlite-error = { version = "0.1.2", path = "fsqlite-error" }
+fsqlite-vfs = { version = "0.1.3", path = "fsqlite-vfs" }
+fsqlite-pager = { version = "0.1.2", path = "fsqlite-pager" }
+fsqlite-wal = { version = "0.1.2", path = "fsqlite-wal" }
+fsqlite-mvcc = { version = "0.1.2", path = "fsqlite-mvcc" }
+fsqlite-btree = { version = "0.1.2", path = "fsqlite-btree" }
+fsqlite-ast = { version = "0.1.2", path = "fsqlite-ast" }
+fsqlite-parser = { version = "0.1.2", path = "fsqlite-parser" }
+fsqlite-planner = { version = "0.1.2", path = "fsqlite-planner" }
+fsqlite-vdbe = { version = "0.1.2", path = "fsqlite-vdbe" }
+fsqlite-func = { version = "0.1.2", path = "fsqlite-func" }
+fsqlite-ext-fts3 = { version = "0.1.2", path = "fsqlite-ext-fts3" }
+fsqlite-ext-fts5 = { version = "0.1.2", path = "fsqlite-ext-fts5" }
+fsqlite-ext-rtree = { version = "0.1.2", path = "fsqlite-ext-rtree" }
+fsqlite-ext-json = { version = "0.1.2", path = "fsqlite-ext-json" }
+fsqlite-ext-session = { version = "0.1.2", path = "fsqlite-ext-session" }
+fsqlite-ext-icu = { version = "0.1.2", path = "fsqlite-ext-icu" }
+fsqlite-ext-misc = { version = "0.1.2", path = "fsqlite-ext-misc" }
+fsqlite-core = { version = "0.1.2", path = "fsqlite-core" }
+fsqlite = { version = "0.1.2", path = "fsqlite" }
+fsqlite-cli = { version = "0.1.2", path = "fsqlite-cli" }
+fsqlite-harness = { version = "0.1.0", path = "fsqlite-harness" }
+fsqlite-e2e = { version = "0.1.0", path = "fsqlite-e2e" }
+fsqlite-observability = { version = "0.1.2", path = "fsqlite-observability" }
+fsqlite-c-api = { version = "0.1.2", path = "fsqlite-c-api" }
+fsqlite-wasm = { version = "0.1.0", path = "fsqlite-wasm" }
+
+# External dependencies
+ftui = { version = "0.2.1", default-features = false }
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+tracing = "0.1"
+tracing-subscriber = "0.3.22"
+bitflags = { version = "2.9", features = ["serde"] }
+smallvec = "1.13"
+memchr = "2.7"
+parking_lot = "0.12"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+crc32c = "0.6"
+blake3 = "1.5"
+crossbeam-epoch = "0.9"
+crossbeam-deque = "0.8"
+sha2 = "0.10"
+nix = { version = "0.29", default-features = false, features = ["fs", "process", "signal", "socket", "uio", "user"] }
+libc = "0.2"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+chacha20poly1305 = "0.10"
+argon2 = "0.5"
+rand = "0.8"
+hashbrown = { version = "0.14", features = ["serde"] }
+lru = "0.16"
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+asupersync = "0.2.9"
+
+# Dev dependencies
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1.6"
+insta = { version = "1.42", features = ["json", "yaml"] }
+tempfile = "3.17"
+toml = "0.8"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = false
+debug = true
+
+[profile.release-perf]
+inherits = "release"
+opt-level = 3
+
+[profile.dev]
+opt-level = 1

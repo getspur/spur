@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 3d3ee57bbc556ea51b1d4809280dc19a848c6e73f8ba05d1be424b38d381428e # shrinks to sql = "SELECT ((NOT 0) + 0)"
+cc 14ad2522ff2633f02896677d23b5bd62d14c1032d754c38f656f036d4f6c3b30 # shrinks to sql = "SELECT (-(-0))"

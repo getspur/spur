@@ -1,0 +1,62 @@
+[package]
+name = "fsqlite-vdbe"
+version = "0.1.2"
+description = "Virtual database engine bytecode interpreter"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["native"]
+native = [
+    "fsqlite-pager/native",
+    "fsqlite-btree/native",
+    "fsqlite-mvcc/native",
+    "fsqlite-wal/native",
+]
+wasm = [
+    "fsqlite-pager/wasm",
+    "fsqlite-btree/wasm",
+    "fsqlite-mvcc/wasm",
+    "fsqlite-wal/wasm",
+]
+
+[dependencies]
+fsqlite-types = { workspace = true }
+fsqlite-error = { workspace = true }
+fsqlite-pager = { version = "0.1.2", path = "../fsqlite-pager", default-features = false }
+fsqlite-btree = { version = "0.1.2", path = "../fsqlite-btree", default-features = false }
+fsqlite-ast = { workspace = true }
+fsqlite-mvcc = { version = "0.1.2", path = "../fsqlite-mvcc", default-features = false }
+fsqlite-wal = { version = "0.1.2", path = "../fsqlite-wal", default-features = false }
+fsqlite-func = { workspace = true }
+fsqlite-parser = { workspace = true }
+tracing = { workspace = true }
+smallvec = { workspace = true }
+hashbrown = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+asupersync = { workspace = true }
+crossbeam-deque = { workspace = true }
+tempfile = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
+fsqlite-vfs = { workspace = true }
+
+[[bench]]
+name = "vectorized_batch"
+harness = false
+
+[[bench]]
+name = "vectorized_scan"
+harness = false
+
+[[bench]]
+name = "vectorized_dispatch"
+harness = false
+
+[lints]
+workspace = true

@@ -1,0 +1,25814 @@
+//! AST-to-VDBE bytecode compilation (§10.6).
+//!
+//! Translates parsed SQL statements into VDBE register-based instructions
+//! using `ProgramBuilder`. Handles SELECT, INSERT,
+//! UPDATE, and DELETE with correct opcode patterns matching C SQLite behavior.
+
+use std::cell::RefCell;
+use std::env;
+use std::sync::Arc;
+
+use crate::{Label, ProgramBuilder};
+use fsqlite_ast::{
+    AssignmentTarget, BinaryOp, ColumnRef, ConflictAction, DeleteStatement, Distinctness, Expr,
+    FromClause, FunctionArgs, InSet, InsertSource, InsertStatement, JsonArrow, LimitClause,
+    Literal, NullsOrder, OrderingTerm, QualifiedTableRef, ResultColumn, SelectCore,
+    SelectStatement, SortDirection, Span, TableOrSubquery, TimeTravelClause, TimeTravelTarget,
+    UpdateStatement, UpsertAction, UpsertClause, UpsertTarget,
+};
+use fsqlite_parser::expr::parse_expr as parse_sql_expr;
+use fsqlite_types::opcode::{IndexCursorMeta, Opcode, P4};
+use fsqlite_types::value::classify_sql_like_fast_path;
+use fsqlite_types::{SmallText, SqliteValue, StrictColumnType, TypeAffinity};
+
+// ---------------------------------------------------------------------------
+// Thread-local extra aggregate function names for UDF support (bd-2wt.3)
+// ---------------------------------------------------------------------------
+// Custom aggregate UDFs registered via Connection::register_aggregate_function
+// need to be recognized by the codegen so they emit AggStep/AggFinal opcodes
+// instead of PureFunc. A thread-local avoids threading the names through
+// dozens of internal codegen helpers. Connection is !Send/!Sync so all codegen
+// runs on a single thread.
+
+thread_local! {
+    static EXTRA_AGG_NAMES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Set extra aggregate function names for the current codegen invocation.
+///
+/// Called by Connection before codegen to make custom aggregates visible.
+/// Names should be lowercase.
+pub fn set_extra_aggregate_names(names: Vec<String>) {
+    EXTRA_AGG_NAMES.with(|n| *n.borrow_mut() = names);
+}
+
+/// Clear extra aggregate function names after codegen completes.
+pub fn clear_extra_aggregate_names() {
+    EXTRA_AGG_NAMES.with(|n| n.borrow_mut().clear());
+}
+
+// ---------------------------------------------------------------------------
+// Conflict resolution flags for Insert opcode p5 field
+// ---------------------------------------------------------------------------
+// These match SQLite's OE_* constants for on-error conflict handling.
+// The low 4 bits of p5 encode the conflict action.
+
+/// No conflict clause (default behavior: abort on constraint violation).
+const OE_ABORT: u16 = 2;
+/// ROLLBACK on conflict.
+const OE_ROLLBACK: u16 = 1;
+/// FAIL on conflict (abort statement but don't rollback transaction).
+const OE_FAIL: u16 = 3;
+/// IGNORE conflicting row (skip insert without error).
+const OE_IGNORE: u16 = 4;
+/// REPLACE conflicting row (delete old, insert new).
+const OE_REPLACE: u16 = 5;
+/// FrankenSQLite-specific p5 flag for `Insert`/`Delete` opcodes that are part
+/// of an UPDATE rewrite.
+///
+/// This intentionally lives above the low 4 OE_* bits because this engine
+/// encodes conflict handling directly in `p5`, unlike SQLite's native layout.
+const OPFLAG_ISUPDATE: u16 = 0x10;
+
+/// Convert AST `ConflictAction` to p5 OE_* flag value.
+fn conflict_action_to_oe(action: Option<&ConflictAction>) -> u16 {
+    match action {
+        Some(ConflictAction::Rollback) => OE_ROLLBACK,
+        None | Some(ConflictAction::Abort) => OE_ABORT,
+        Some(ConflictAction::Fail) => OE_FAIL,
+        Some(ConflictAction::Ignore) => OE_IGNORE,
+        Some(ConflictAction::Replace) => OE_REPLACE,
+    }
+}
+
+fn json_access_func_name(arrow: JsonArrow) -> &'static str {
+    match arrow {
+        JsonArrow::Arrow => "JSON_ARROW",
+        JsonArrow::DoubleArrow => "JSON_DOUBLE_ARROW",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Schema metadata (minimal info needed for codegen)
+// ---------------------------------------------------------------------------
+
+/// Column metadata needed by the code generator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnInfo {
+    /// Column name.
+    pub name: String,
+    /// Type affinity character: 'D'/'d' (integer), 'E'/'e' (real), 'B' (text),
+    /// 'C' (numeric), 'A' or other (blob/none).
+    pub affinity: char,
+    /// True if this column is the INTEGER PRIMARY KEY (rowid alias).
+    /// Column reads for IPK columns must emit `Rowid` instead of `Column`
+    /// because the value is stored as the B-tree key, not in the data record.
+    pub is_ipk: bool,
+    /// Type name as written in the CREATE TABLE statement (e.g. "TEXT", "INTEGER").
+    pub type_name: Option<String>,
+    /// True if the column has a NOT NULL constraint.
+    pub notnull: bool,
+    /// True if the column has a UNIQUE constraint.
+    pub unique: bool,
+    /// Default value expression as SQL text (e.g. "'open'", "0", "CURRENT_TIMESTAMP").
+    pub default_value: Option<String>,
+    /// Strict type for STRICT tables; `None` for non-STRICT tables.
+    pub strict_type: Option<StrictColumnType>,
+    /// Generated column expression as SQL text, if this is a generated column.
+    pub generated_expr: Option<String>,
+    /// Whether the generated column is STORED (`true`) or VIRTUAL (`false`).
+    /// `None` for non-generated columns.
+    pub generated_stored: Option<bool>,
+    /// Column collation sequence name (e.g. "NOCASE", "BINARY", "RTRIM").
+    /// `None` means the default (BINARY).
+    pub collation: Option<String>,
+}
+
+impl ColumnInfo {
+    /// Create a basic `ColumnInfo` without type/notnull/default metadata.
+    #[must_use]
+    pub fn basic(name: impl Into<String>, affinity: char, is_ipk: bool) -> Self {
+        Self {
+            name: name.into(),
+            affinity,
+            is_ipk,
+            type_name: None,
+            notnull: false,
+            unique: false,
+            default_value: None,
+            strict_type: None,
+            generated_expr: None,
+            generated_stored: None,
+            collation: None,
+        }
+    }
+}
+
+/// Index metadata needed for codegen (index-scan SELECT).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexSchema {
+    /// Index name.
+    pub name: String,
+    /// Root page number.
+    pub root_page: i32,
+    /// Indexed column names (leftmost first).
+    ///
+    /// This is populated only when every key term is a plain column
+    /// reference. Expression indexes keep their executable term SQL in
+    /// `key_expressions` and leave `columns` empty so planner fast paths do
+    /// not accidentally treat them as simple column-lookup indexes.
+    pub columns: Vec<String>,
+    /// Executable SQL for each key term in storage order.
+    pub key_expressions: Vec<String>,
+    /// Sort direction for each logical key term.
+    ///
+    /// Empty means "all ASC" for legacy callers/tests that do not yet
+    /// populate per-term ordering metadata.
+    pub key_sort_directions: Vec<SortDirection>,
+    /// Optional partial-index predicate as SQL text.
+    pub where_clause: Option<String>,
+    /// Whether this index enforces a UNIQUE constraint.
+    pub is_unique: bool,
+    /// Per-key-term collation sequences (e.g. `NOCASE`, `RTRIM`).
+    ///
+    /// `None` means "use the default (BINARY) collation" for that position.
+    /// Empty vec means "all BINARY" for legacy callers/tests.
+    pub key_collations: Vec<Option<String>>,
+}
+
+impl IndexSchema {
+    /// Number of logical key terms before the trailing rowid suffix.
+    #[must_use]
+    pub fn key_term_count(&self) -> usize {
+        if self.key_expressions.is_empty() {
+            self.columns.len()
+        } else {
+            self.key_expressions.len()
+        }
+    }
+
+    /// Return the SQL fragment for the `key_pos`th key term.
+    #[must_use]
+    pub fn key_term_sql(&self, key_pos: usize) -> Option<&str> {
+        if self.key_expressions.is_empty() {
+            self.columns.get(key_pos).map(String::as_str)
+        } else {
+            self.key_expressions.get(key_pos).map(String::as_str)
+        }
+    }
+
+    /// Whether the `key_pos`th logical key term sorts descending.
+    #[must_use]
+    pub fn key_term_descending(&self, key_pos: usize) -> bool {
+        matches!(
+            self.key_sort_directions.get(key_pos),
+            Some(SortDirection::Desc)
+        )
+    }
+
+    /// Return the collation sequence for the `key_pos`th key term, if any.
+    #[must_use]
+    pub fn key_term_collation(&self, key_pos: usize) -> Option<&str> {
+        self.key_collations.get(key_pos).and_then(|c| c.as_deref())
+    }
+
+    /// Whether planner / lookup fast paths may safely treat this as a simple
+    /// non-partial column index.
+    #[must_use]
+    pub fn supports_direct_column_lookup(&self) -> bool {
+        self.where_clause.is_none()
+            && !self.columns.is_empty()
+            && self.columns.len() == self.key_term_count()
+    }
+
+    /// Whether REPLACE cleanup metadata can reconstruct the key from raw row
+    /// payload columns alone.
+    #[must_use]
+    pub fn supports_replace_cleanup_meta(&self) -> bool {
+        self.supports_direct_column_lookup()
+    }
+
+    /// Human-readable key label for diagnostics / constraint errors.
+    #[must_use]
+    pub fn key_label(&self) -> String {
+        if self.key_expressions.is_empty() {
+            self.columns.join(", ")
+        } else {
+            self.key_expressions.join(", ")
+        }
+    }
+}
+
+/// Planner-selected single-table access-path family that lowering may honor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlannerSelectAccessKind {
+    /// Lower as a plain table scan.
+    FullTableScan,
+    /// Lower as a direct rowid lookup.
+    RowidLookup,
+    /// Lower as an equality probe on a named index.
+    IndexEquality,
+    /// Lower as a bounded range scan on a named index.
+    IndexRange,
+}
+
+impl PlannerSelectAccessKind {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::FullTableScan => "full_table_scan",
+            Self::RowidLookup => "rowid_lookup",
+            Self::IndexEquality => "index_equality",
+            Self::IndexRange => "index_range",
+        }
+    }
+}
+
+/// Planner-produced directive for a single-table SELECT lowering path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectPlannerDirective {
+    /// Deterministic planner artifact identity.
+    pub plan_id: String,
+    /// Planner artifact generation/version.
+    pub plan_generation: u64,
+    /// Human-readable planner surface name.
+    pub planner_surface: String,
+    /// Table the directive applies to.
+    pub table_name: String,
+    /// Index to use when the access path is index-backed.
+    pub index_name: Option<String>,
+    /// Leading index column the planner expects to drive the probe.
+    pub index_column: Option<String>,
+    /// Whether the planner expects a covering-index lowering.
+    pub covering: bool,
+    /// Access-path family lowering should consume.
+    pub access_kind: PlannerSelectAccessKind,
+}
+
+/// A foreign key constraint definition stored on the child table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FkDef {
+    /// Column indices in the child table that form the FK.
+    pub child_columns: Vec<usize>,
+    /// Referenced (parent) table name.
+    pub parent_table: String,
+    /// Referenced column names in the parent table.
+    /// Empty means the parent's implicit rowid.
+    pub parent_columns: Vec<String>,
+    /// Action on parent row deletion.
+    pub on_delete: FkActionType,
+    /// Action on parent row update.
+    pub on_update: FkActionType,
+}
+
+/// Foreign key action type (mirrors `fsqlite_ast::ForeignKeyActionType`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum FkActionType {
+    /// No action (default) — raise error if children exist.
+    #[default]
+    NoAction,
+    /// Propagate delete/update to children.
+    Cascade,
+    /// Set child FK columns to NULL.
+    SetNull,
+    /// Set child FK columns to their default value.
+    SetDefault,
+    /// Like `NoAction` but checked immediately (not deferred).
+    Restrict,
+}
+
+/// Minimal table schema needed by the code generator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableSchema {
+    /// Table name.
+    pub name: String,
+    /// Root page of the table's B-tree.
+    pub root_page: i32,
+    /// Column definitions in storage order.
+    pub columns: Vec<ColumnInfo>,
+    /// Available indexes.
+    pub indexes: Vec<IndexSchema>,
+    /// Whether this table uses SQLite STRICT typing rules.
+    pub strict: bool,
+    /// Whether this table is declared WITHOUT ROWID.
+    pub without_rowid: bool,
+    /// PRIMARY KEY constraints expressed as ordered column-name groups.
+    ///
+    /// INTEGER PRIMARY KEY rowid aliases continue to use `ColumnInfo::is_ipk`;
+    /// this field preserves non-rowid and composite PRIMARY KEY shape for SQL
+    /// re-rendering during ALTER TABLE / persistence round-trips.
+    pub primary_key_constraints: Vec<Vec<String>>,
+    /// Foreign key constraints declared on this table (child side).
+    pub foreign_keys: Vec<FkDef>,
+    /// CHECK constraint expressions as SQL text, collected from both
+    /// column-level and table-level constraints.
+    pub check_constraints: Vec<String>,
+}
+
+impl TableSchema {
+    /// Build an affinity string for `MakeRecord` (one char per column).
+    /// IPK columns are marked with 'X' so `MakeRecord` writes a NULL placeholder
+    /// while the real key continues to come from the rowid.
+    #[must_use]
+    pub fn affinity_string(&self) -> String {
+        self.columns
+            .iter()
+            .map(|c| if c.is_ipk { 'X' } else { c.affinity })
+            .collect()
+    }
+
+    /// Find a column's 0-based index by name (case-insensitive).
+    #[must_use]
+    pub fn column_index(&self, name: &str) -> Option<usize> {
+        self.columns
+            .iter()
+            .position(|c| c.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Find an index by a column name (returns first index whose leftmost
+    /// column matches).
+    #[must_use]
+    pub fn index_for_column(&self, col_name: &str) -> Option<&IndexSchema> {
+        self.indexes.iter().find(|idx| {
+            idx.supports_direct_column_lookup()
+                && idx
+                    .columns
+                    .first()
+                    .is_some_and(|c| c.eq_ignore_ascii_case(col_name))
+        })
+    }
+
+    /// STRICT type-check pattern for `Opcode::TypeCheck` (`I`,`R`,`T`,`L`,`A`).
+    #[must_use]
+    pub fn strict_type_pattern(&self) -> Option<String> {
+        if !self.strict {
+            return None;
+        }
+        Some(
+            self.columns
+                .iter()
+                .map(|col| strict_type_code(col.strict_type))
+                .collect(),
+        )
+    }
+
+    fn resolves_to_hidden_rowid(&self, name: &str) -> bool {
+        self.column_index(name).is_none() && is_hidden_rowid_alias_name(name)
+    }
+}
+
+fn strict_type_code(strict_type: Option<StrictColumnType>) -> char {
+    match strict_type.unwrap_or(StrictColumnType::Any) {
+        StrictColumnType::Integer => 'I',
+        StrictColumnType::Real => 'R',
+        StrictColumnType::Text => 'T',
+        StrictColumnType::Blob => 'L',
+        StrictColumnType::Any => 'A',
+    }
+}
+
+fn emit_strict_type_check(b: &mut ProgramBuilder, table: &TableSchema, first_reg: i32) {
+    if let Some(pattern) = table.strict_type_pattern() {
+        #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+        let n_cols = table.columns.len() as i32;
+        // Encode "pattern\ttable_name\tcol1\tcol2\t..." for error messages.
+        let mut encoded = pattern;
+        encoded.push('\t');
+        encoded.push_str(&table.name);
+        for col in &table.columns {
+            encoded.push('\t');
+            encoded.push_str(&col.name);
+        }
+        b.emit_op(Opcode::TypeCheck, first_reg, n_cols, 0, P4::Str(encoded), 0);
+    }
+}
+
+/// Find the UNIQUE index matching the UPSERT target columns, if any.
+///
+/// Returns `(index_offset, &IndexSchema)` when the target columns match a
+/// UNIQUE index on the table.  Returns `None` when the target is absent,
+/// refers to the PRIMARY KEY, or does not match any UNIQUE index.
+fn find_upsert_target_index<'a>(
+    table: &'a TableSchema,
+    target: Option<&UpsertTarget>,
+) -> Option<(usize, &'a IndexSchema)> {
+    let target = target?;
+    // Extract column names from target expressions.
+    let target_cols: Vec<&str> = target
+        .columns
+        .iter()
+        .filter_map(|ic| match &ic.expr {
+            Expr::Column(col_ref, _) => Some(col_ref.column.as_str()),
+            _ => None,
+        })
+        .collect();
+    if target_cols.is_empty() {
+        return None;
+    }
+    // Check if the target matches a UNIQUE index (not the PK).
+    for (idx_offset, index) in table.indexes.iter().enumerate() {
+        if !index.is_unique
+            || !index.supports_direct_column_lookup()
+            || index.columns.len() != target_cols.len()
+        {
+            continue;
+        }
+        let all_match = target_cols
+            .iter()
+            .all(|tc| index.columns.iter().any(|ic| ic.eq_ignore_ascii_case(tc)));
+        if all_match {
+            return Some((idx_offset, index));
+        }
+    }
+    None
+}
+
+/// Emit UPSERT DO UPDATE assignments into `target_regs`.
+///
+/// For each assignment, evaluates the RHS expression using two contexts:
+/// - `existing_ctx`: resolves unqualified column refs to existing row values
+/// - `excluded_ctx`: resolves `excluded.col` refs to the attempted insert values
+///
+/// The result is written into the appropriate slot of `target_regs`.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::too_many_arguments
+)]
+fn emit_upsert_assignments(
+    b: &mut ProgramBuilder,
+    assignments: &[fsqlite_ast::Assignment],
+    table: &TableSchema,
+    target_regs: i32,
+    existing_ctx: &ScanCtx<'_>,
+    excluded_ctx: &ScanCtx<'_>,
+    existing_hidden_rowid_reg: Option<i32>,
+    excluded_hidden_rowid_reg: i32,
+) -> Result<(), CodegenError> {
+    for assign in assignments {
+        let col_name = match &assign.target {
+            AssignmentTarget::Column(name) => name.as_str(),
+            AssignmentTarget::ColumnList(_) => {
+                return Err(CodegenError::Unsupported(
+                    "multi-column SET (a, b) = (...) assignment is not yet supported".to_owned(),
+                ));
+            }
+        };
+        if let Some(col_idx) = table.column_index(col_name) {
+            let dest_reg = target_regs + col_idx as i32;
+            emit_upsert_expr(
+                b,
+                &assign.value,
+                dest_reg,
+                existing_ctx,
+                excluded_ctx,
+                table,
+                existing_hidden_rowid_reg,
+                excluded_hidden_rowid_reg,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Emit an expression that may reference both `excluded.*` and existing row columns.
+///
+/// Recursively walks the expression tree, dispatching `excluded.col` references
+/// to `excluded_ctx` and all other column references to `existing_ctx`.  This
+/// ensures that expressions like `CASE WHEN excluded.val > val THEN excluded.val
+/// ELSE val END` or `coalesce(excluded.val, val)` resolve correctly in UPSERT
+/// DO UPDATE SET clauses.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn emit_upsert_expr(
+    b: &mut ProgramBuilder,
+    expr: &Expr,
+    reg: i32,
+    existing_ctx: &ScanCtx<'_>,
+    excluded_ctx: &ScanCtx<'_>,
+    _table: &TableSchema,
+    existing_hidden_rowid_reg: Option<i32>,
+    excluded_hidden_rowid_reg: i32,
+) {
+    match expr {
+        // ── Leaf: column reference — dispatch to correct context ────────
+        Expr::Column(col_ref, _) => {
+            if _table.resolves_to_hidden_rowid(&col_ref.column)
+                && col_ref
+                    .table
+                    .as_deref()
+                    .is_some_and(|t| t.eq_ignore_ascii_case("excluded"))
+            {
+                b.emit_op(Opcode::Copy, excluded_hidden_rowid_reg, reg, 0, P4::None, 0);
+            } else if _table.resolves_to_hidden_rowid(&col_ref.column) {
+                if let Some(existing_hidden_rowid_reg) = existing_hidden_rowid_reg {
+                    b.emit_op(Opcode::Copy, existing_hidden_rowid_reg, reg, 0, P4::None, 0);
+                } else {
+                    b.emit_op(Opcode::Rowid, existing_ctx.cursor, reg, 0, P4::None, 0);
+                }
+            } else if col_ref
+                .table
+                .as_deref()
+                .is_some_and(|t| t.eq_ignore_ascii_case("excluded"))
+            {
+                emit_expr(b, expr, reg, Some(excluded_ctx));
+            } else {
+                emit_expr(b, expr, reg, Some(existing_ctx));
+            }
+        }
+
+        // ── Leaf: literals & placeholders — no column refs ─────────────
+        // (Handled by the wildcard arm)
+
+        // ── Binary operations ──────────────────────────────────────────
+        Expr::BinaryOp {
+            left, op, right, ..
+        } => {
+            use fsqlite_ast::BinaryOp;
+
+            // Pre-emit both operands with dual-context resolution.
+            let left_reg = b.alloc_reg();
+            let right_reg = b.alloc_reg();
+            emit_upsert_expr(
+                b,
+                left,
+                left_reg,
+                existing_ctx,
+                excluded_ctx,
+                _table,
+                existing_hidden_rowid_reg,
+                excluded_hidden_rowid_reg,
+            );
+            emit_upsert_expr(
+                b,
+                right,
+                right_reg,
+                existing_ctx,
+                excluded_ctx,
+                _table,
+                existing_hidden_rowid_reg,
+                excluded_hidden_rowid_reg,
+            );
+
+            match op {
+                // Value-producing ops: arithmetic, concat, bitwise, AND, OR.
+                BinaryOp::Add
+                | BinaryOp::Subtract
+                | BinaryOp::Multiply
+                | BinaryOp::Divide
+                | BinaryOp::Modulo
+                | BinaryOp::Concat
+                | BinaryOp::BitAnd
+                | BinaryOp::BitOr
+                | BinaryOp::ShiftLeft
+                | BinaryOp::ShiftRight
+                | BinaryOp::And
+                | BinaryOp::Or => {
+                    let opcode = binary_op_to_opcode(*op);
+                    // VDBE: P3 = P2 op P1 → dest=reg, lhs=left, rhs=right.
+                    b.emit_op(opcode, right_reg, left_reg, reg, P4::None, 0);
+                }
+
+                // Comparison ops: jump-based boolean (1/0/NULL).
+                BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge => {
+                    let cmp_opcode = match op {
+                        BinaryOp::Eq => Opcode::Eq,
+                        BinaryOp::Ne => Opcode::Ne,
+                        BinaryOp::Lt => Opcode::Lt,
+                        BinaryOp::Le => Opcode::Le,
+                        BinaryOp::Gt => Opcode::Gt,
+                        BinaryOp::Ge => Opcode::Ge,
+                        _ => unreachable!(),
+                    };
+                    let p4 = extract_collation(left)
+                        .or_else(|| extract_collation(right))
+                        .map_or(P4::None, |c| P4::Collation(c.to_owned()));
+
+                    let null_label = b.emit_label();
+                    let true_label = b.emit_label();
+                    let done_label = b.emit_label();
+                    b.emit_jump_to_label(Opcode::IsNull, left_reg, 0, null_label, P4::None, 0);
+                    b.emit_jump_to_label(Opcode::IsNull, right_reg, 0, null_label, P4::None, 0);
+                    b.emit_jump_to_label(cmp_opcode, right_reg, left_reg, true_label, p4, 0);
+                    b.emit_op(Opcode::Integer, 0, reg, 0, P4::None, 0);
+                    b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+                    b.resolve_label(true_label);
+                    b.emit_op(Opcode::Integer, 1, reg, 0, P4::None, 0);
+                    b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+                    b.resolve_label(null_label);
+                    b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+                    b.resolve_label(done_label);
+                }
+
+                // IS / IS NOT: check for IS TRUE/FALSE/NOT TRUE/NOT FALSE.
+                BinaryOp::Is | BinaryOp::IsNot => {
+                    if let Some((p3, p4)) = is_true_false_params(*op, right) {
+                        // Emit IsTrue opcode for IS TRUE/FALSE/NOT TRUE/NOT FALSE.
+                        b.emit_op(Opcode::IsTrue, left_reg, reg, p3, p4, 0);
+                    } else {
+                        // General IS / IS NOT: NULLEQ semantics.
+                        let true_label = b.emit_label();
+                        let done_label = b.emit_label();
+                        let cmp = if matches!(op, BinaryOp::Is) {
+                            Opcode::Eq
+                        } else {
+                            Opcode::Ne
+                        };
+                        b.emit_jump_to_label(cmp, right_reg, left_reg, true_label, P4::None, 0x80);
+                        b.emit_op(Opcode::Integer, 0, reg, 0, P4::None, 0);
+                        b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+                        b.resolve_label(true_label);
+                        b.emit_op(Opcode::Integer, 1, reg, 0, P4::None, 0);
+                        b.resolve_label(done_label);
+                    }
+                }
+            }
+        }
+
+        // ── Unary operations ───────────────────────────────────────────
+        Expr::UnaryOp {
+            op, expr: inner, ..
+        } => {
+            emit_upsert_expr(
+                b,
+                inner,
+                reg,
+                existing_ctx,
+                excluded_ctx,
+                _table,
+                existing_hidden_rowid_reg,
+                excluded_hidden_rowid_reg,
+            );
+            match op {
+                fsqlite_ast::UnaryOp::Negate => {
+                    let tmp = b.alloc_temp();
+                    b.emit_op(Opcode::Integer, -1, tmp, 0, P4::None, 0);
+                    b.emit_op(Opcode::Multiply, tmp, reg, reg, P4::None, 0);
+                    b.free_temp(tmp);
+                }
+                fsqlite_ast::UnaryOp::Plus => {}
+                fsqlite_ast::UnaryOp::BitNot => {
+                    b.emit_op(Opcode::BitNot, reg, reg, 0, P4::None, 0);
+                }
+                fsqlite_ast::UnaryOp::Not => {
+                    b.emit_op(Opcode::Not, reg, reg, 0, P4::None, 0);
+                }
+            }
+        }
+
+        // ── CAST ───────────────────────────────────────────────────────
+        Expr::Cast {
+            expr: inner,
+            type_name,
+            ..
+        } => {
+            emit_upsert_expr(
+                b,
+                inner,
+                reg,
+                existing_ctx,
+                excluded_ctx,
+                _table,
+                existing_hidden_rowid_reg,
+                excluded_hidden_rowid_reg,
+            );
+            let affinity = type_name_to_affinity(type_name);
+            b.emit_op(Opcode::Cast, reg, i32::from(affinity), 0, P4::None, 0);
+        }
+
+        // ── IS [NOT] NULL ──────────────────────────────────────────────
+        Expr::IsNull {
+            expr: inner, not, ..
+        } => {
+            emit_upsert_expr(
+                b,
+                inner,
+                reg,
+                existing_ctx,
+                excluded_ctx,
+                _table,
+                existing_hidden_rowid_reg,
+                excluded_hidden_rowid_reg,
+            );
+            let lbl_null = b.emit_label();
+            let lbl_done = b.emit_label();
+            b.emit_jump_to_label(Opcode::IsNull, reg, 0, lbl_null, P4::None, 0);
+            b.emit_op(Opcode::Integer, i32::from(*not), reg, 0, P4::None, 0);
+            b.emit_jump_to_label(Opcode::Goto, 0, 0, lbl_done, P4::None, 0);
+            b.resolve_label(lbl_null);
+            b.emit_op(Opcode::Integer, i32::from(!*not), reg, 0, P4::None, 0);
+            b.resolve_label(lbl_done);
+        }
+
+        // ── COLLATE ────────────────────────────────────────────────────
+        Expr::Collate { expr: inner, .. } => {
+            emit_upsert_expr(
+                b,
+                inner,
+                reg,
+                existing_ctx,
+                excluded_ctx,
+                _table,
+                existing_hidden_rowid_reg,
+                excluded_hidden_rowid_reg,
+            );
+        }
+
+        // ── Scalar function calls ──────────────────────────────────────
+        // (includes multi-arg max/min which are scalar, not aggregate)
+        Expr::FunctionCall { name, args, .. }
+            if !is_aggregate_function(name) || {
+                let lower = name.to_ascii_lowercase();
+                (lower == "max" || lower == "min")
+                    && matches!(args, fsqlite_ast::FunctionArgs::List(a) if a.len() >= 2)
+            } =>
+        {
+            let canon = name.to_ascii_uppercase();
+            match args {
+                fsqlite_ast::FunctionArgs::Star => {
+                    b.emit_op(Opcode::PureFunc, 0, 0, reg, P4::FuncName(canon), 0);
+                }
+                fsqlite_ast::FunctionArgs::List(arg_list) => {
+                    let Ok(nargs) = u16::try_from(arg_list.len()) else {
+                        b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+                        return;
+                    };
+                    let arg_base = b.alloc_regs(i32::from(nargs));
+                    for (i, arg_expr) in arg_list.iter().enumerate() {
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                        emit_upsert_expr(
+                            b,
+                            arg_expr,
+                            arg_base + i as i32,
+                            existing_ctx,
+                            excluded_ctx,
+                            _table,
+                            existing_hidden_rowid_reg,
+                            excluded_hidden_rowid_reg,
+                        );
+                    }
+                    b.emit_op(
+                        Opcode::PureFunc,
+                        0,
+                        arg_base,
+                        reg,
+                        P4::FuncName(canon),
+                        nargs,
+                    );
+                }
+            }
+        }
+
+        // ── CASE expression ────────────────────────────────────────────
+        Expr::Case {
+            operand,
+            whens,
+            else_expr,
+            ..
+        } => {
+            let done_label = b.emit_label();
+            let r_operand = operand.as_deref().map(|op_expr| {
+                let r = b.alloc_temp();
+                emit_upsert_expr(
+                    b,
+                    op_expr,
+                    r,
+                    existing_ctx,
+                    excluded_ctx,
+                    _table,
+                    existing_hidden_rowid_reg,
+                    excluded_hidden_rowid_reg,
+                );
+                r
+            });
+
+            for (when_expr, then_expr) in whens {
+                let next_when = b.emit_label();
+                if let Some(r_op) = r_operand {
+                    let r_when = b.alloc_temp();
+                    emit_upsert_expr(
+                        b,
+                        when_expr,
+                        r_when,
+                        existing_ctx,
+                        excluded_ctx,
+                        _table,
+                        existing_hidden_rowid_reg,
+                        excluded_hidden_rowid_reg,
+                    );
+                    b.emit_jump_to_label(Opcode::IsNull, r_op, 0, next_when, P4::None, 0);
+                    b.emit_jump_to_label(Opcode::IsNull, r_when, 0, next_when, P4::None, 0);
+                    b.emit_jump_to_label(Opcode::Ne, r_when, r_op, next_when, P4::None, 0);
+                    b.free_temp(r_when);
+                } else {
+                    emit_upsert_expr(
+                        b,
+                        when_expr,
+                        reg,
+                        existing_ctx,
+                        excluded_ctx,
+                        _table,
+                        existing_hidden_rowid_reg,
+                        excluded_hidden_rowid_reg,
+                    );
+                    b.emit_jump_to_label(Opcode::IfNot, reg, 1, next_when, P4::None, 0);
+                }
+                emit_upsert_expr(
+                    b,
+                    then_expr,
+                    reg,
+                    existing_ctx,
+                    excluded_ctx,
+                    _table,
+                    existing_hidden_rowid_reg,
+                    excluded_hidden_rowid_reg,
+                );
+                b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+                b.resolve_label(next_when);
+            }
+
+            if let Some(el) = else_expr.as_deref() {
+                emit_upsert_expr(
+                    b,
+                    el,
+                    reg,
+                    existing_ctx,
+                    excluded_ctx,
+                    _table,
+                    existing_hidden_rowid_reg,
+                    excluded_hidden_rowid_reg,
+                );
+            } else {
+                b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+            }
+            b.resolve_label(done_label);
+            if let Some(r_op) = r_operand {
+                b.free_temp(r_op);
+            }
+        }
+
+        // ── LIKE / GLOB / MATCH / REGEXP ───────────────────────────────
+        Expr::Like {
+            expr: operand,
+            pattern,
+            escape,
+            op: like_op,
+            not,
+            ..
+        } => {
+            if matches!(like_op, fsqlite_ast::LikeOp::Like)
+                && escape.is_none()
+                && let Expr::Literal(Literal::String(pattern_text), _) = pattern.as_ref()
+                && let Some((kind, literal)) = classify_sql_like_fast_path(pattern_text, None)
+            {
+                emit_upsert_expr(
+                    b,
+                    operand,
+                    reg,
+                    existing_ctx,
+                    excluded_ctx,
+                    _table,
+                    existing_hidden_rowid_reg,
+                    excluded_hidden_rowid_reg,
+                );
+                b.emit_op(
+                    Opcode::LikeConstFast,
+                    reg,
+                    reg,
+                    kind.opcode_tag(),
+                    P4::Str(literal.to_owned()),
+                    u16::from(*not),
+                );
+                return;
+            }
+
+            let func_name = match like_op {
+                fsqlite_ast::LikeOp::Like => "LIKE",
+                fsqlite_ast::LikeOp::Glob => "GLOB",
+                fsqlite_ast::LikeOp::Match => "MATCH",
+                fsqlite_ast::LikeOp::Regexp => "REGEXP",
+            };
+            let nargs: u16 = if escape.is_some() { 3 } else { 2 };
+            let arg_base = b.alloc_regs(i32::from(nargs));
+            emit_upsert_expr(
+                b,
+                pattern,
+                arg_base,
+                existing_ctx,
+                excluded_ctx,
+                _table,
+                existing_hidden_rowid_reg,
+                excluded_hidden_rowid_reg,
+            );
+            emit_upsert_expr(
+                b,
+                operand,
+                arg_base + 1,
+                existing_ctx,
+                excluded_ctx,
+                _table,
+                existing_hidden_rowid_reg,
+                excluded_hidden_rowid_reg,
+            );
+            if let Some(esc) = escape {
+                emit_upsert_expr(
+                    b,
+                    esc,
+                    arg_base + 2,
+                    existing_ctx,
+                    excluded_ctx,
+                    _table,
+                    existing_hidden_rowid_reg,
+                    excluded_hidden_rowid_reg,
+                );
+            }
+            b.emit_op(
+                Opcode::PureFunc,
+                0,
+                arg_base,
+                reg,
+                P4::FuncName(func_name.to_owned()),
+                nargs,
+            );
+            if *not {
+                b.emit_op(Opcode::Not, reg, reg, 0, P4::None, 0);
+            }
+        }
+
+        // ── BETWEEN ────────────────────────────────────────────────────
+        Expr::Between {
+            expr: operand,
+            low,
+            high,
+            not,
+            ..
+        } => {
+            let r_operand = b.alloc_temp();
+            let r_low = b.alloc_temp();
+            let r_high = b.alloc_temp();
+            emit_upsert_expr(
+                b,
+                operand,
+                r_operand,
+                existing_ctx,
+                excluded_ctx,
+                _table,
+                existing_hidden_rowid_reg,
+                excluded_hidden_rowid_reg,
+            );
+            emit_upsert_expr(
+                b,
+                low,
+                r_low,
+                existing_ctx,
+                excluded_ctx,
+                _table,
+                existing_hidden_rowid_reg,
+                excluded_hidden_rowid_reg,
+            );
+            emit_upsert_expr(
+                b,
+                high,
+                r_high,
+                existing_ctx,
+                excluded_ctx,
+                _table,
+                existing_hidden_rowid_reg,
+                excluded_hidden_rowid_reg,
+            );
+            let false_label = b.emit_label();
+            let null_label = b.emit_label();
+            let done_label = b.emit_label();
+            b.emit_jump_to_label(Opcode::IsNull, r_operand, 0, null_label, P4::None, 0);
+            b.emit_jump_to_label(Opcode::Lt, r_low, r_operand, false_label, P4::None, 0);
+            b.emit_jump_to_label(Opcode::Gt, r_high, r_operand, false_label, P4::None, 0);
+            b.emit_jump_to_label(Opcode::IsNull, r_low, 0, null_label, P4::None, 0);
+            b.emit_jump_to_label(Opcode::IsNull, r_high, 0, null_label, P4::None, 0);
+            b.emit_op(Opcode::Integer, i32::from(!*not), reg, 0, P4::None, 0);
+            b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+            b.resolve_label(false_label);
+            b.emit_op(Opcode::Integer, i32::from(*not), reg, 0, P4::None, 0);
+            b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+            b.resolve_label(null_label);
+            b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+            b.resolve_label(done_label);
+            b.free_temp(r_high);
+            b.free_temp(r_low);
+            b.free_temp(r_operand);
+        }
+
+        // ── IN (list) ──────────────────────────────────────────────────
+        Expr::In {
+            expr: operand,
+            set,
+            not,
+            ..
+        } => {
+            if let fsqlite_ast::InSet::List(values) = set {
+                if values.is_empty() {
+                    b.emit_op(Opcode::Integer, i32::from(*not), reg, 0, P4::None, 0);
+                    return;
+                }
+                let r_operand = b.alloc_temp();
+                emit_upsert_expr(
+                    b,
+                    operand,
+                    r_operand,
+                    existing_ctx,
+                    excluded_ctx,
+                    _table,
+                    existing_hidden_rowid_reg,
+                    excluded_hidden_rowid_reg,
+                );
+                let null_label = b.emit_label();
+                let true_label = b.emit_label();
+                let done_label = b.emit_label();
+                b.emit_jump_to_label(Opcode::IsNull, r_operand, 0, null_label, P4::None, 0);
+                let r_saw_null = b.alloc_temp();
+                b.emit_op(Opcode::Integer, 0, r_saw_null, 0, P4::None, 0);
+                let r_val = b.alloc_temp();
+                for val_expr in values {
+                    emit_upsert_expr(
+                        b,
+                        val_expr,
+                        r_val,
+                        existing_ctx,
+                        excluded_ctx,
+                        _table,
+                        existing_hidden_rowid_reg,
+                        excluded_hidden_rowid_reg,
+                    );
+                    b.emit_jump_to_label(Opcode::Eq, r_val, r_operand, true_label, P4::None, 0);
+                    let next_val = b.emit_label();
+                    let set_flag = b.emit_label();
+                    b.emit_jump_to_label(Opcode::IsNull, r_val, 0, set_flag, P4::None, 0);
+                    b.emit_jump_to_label(Opcode::Goto, 0, 0, next_val, P4::None, 0);
+                    b.resolve_label(set_flag);
+                    b.emit_op(Opcode::Integer, 1, r_saw_null, 0, P4::None, 0);
+                    b.resolve_label(next_val);
+                }
+                b.free_temp(r_val);
+                b.emit_jump_to_label(Opcode::If, r_saw_null, 0, null_label, P4::None, 0);
+                b.free_temp(r_saw_null);
+                b.emit_op(Opcode::Integer, i32::from(*not), reg, 0, P4::None, 0);
+                b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+                b.resolve_label(null_label);
+                b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+                b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+                b.resolve_label(true_label);
+                b.emit_op(Opcode::Integer, i32::from(!*not), reg, 0, P4::None, 0);
+                b.resolve_label(done_label);
+                b.free_temp(r_operand);
+            } else {
+                // Subquery IN — unlikely in UPSERT SET, fall back to existing_ctx.
+                emit_expr(b, expr, reg, Some(existing_ctx));
+            }
+        }
+
+        // ── JSON access ────────────────────────────────────────────────
+        Expr::JsonAccess {
+            expr: inner,
+            path,
+            arrow,
+            ..
+        } => {
+            let arg_base = b.alloc_regs(2);
+            emit_upsert_expr(
+                b,
+                inner,
+                arg_base,
+                existing_ctx,
+                excluded_ctx,
+                _table,
+                existing_hidden_rowid_reg,
+                excluded_hidden_rowid_reg,
+            );
+            emit_upsert_expr(
+                b,
+                path,
+                arg_base + 1,
+                existing_ctx,
+                excluded_ctx,
+                _table,
+                existing_hidden_rowid_reg,
+                excluded_hidden_rowid_reg,
+            );
+            b.emit_op(
+                Opcode::PureFunc,
+                0,
+                arg_base,
+                reg,
+                P4::FuncName(json_access_func_name(*arrow).to_owned()),
+                2,
+            );
+        }
+
+        // ── Fallback: subqueries, EXISTS, aggregates, etc. ─────────────
+        _ => {
+            emit_expr(b, expr, reg, Some(existing_ctx));
+        }
+    }
+}
+
+/// Configuration for the code generator.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CodegenContext {
+    /// Whether we're in `BEGIN CONCURRENT` mode.
+    /// When true, `OP_NewRowid` uses the snapshot-independent allocator.
+    pub concurrent_mode: bool,
+    /// Optional column index for an `INTEGER PRIMARY KEY` rowid alias on the
+    /// target table. Used by INSERT DEFAULT VALUES to keep the aliased column
+    /// in sync with the generated rowid.
+    pub rowid_alias_col_idx: Option<usize>,
+    /// Whether index-ordered scans produce correctly sorted output.
+    /// When false, the codegen falls back to the sorter for ORDER BY
+    /// instead of attempting index-assisted optimization.
+    /// Set to false for MemDatabase backends where indexes don't maintain
+    /// key-sorted iteration order.
+    pub index_ordered_scan_reliable: bool,
+    /// Optional planner-produced lowering directive for simple single-table
+    /// SELECT access paths. When present, lowering either honors it or emits
+    /// an explicit bypass reason before falling back to heuristic selection.
+    pub planner_select_directive: Option<SelectPlannerDirective>,
+}
+
+/// Errors during code generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodegenError {
+    /// Table not found in schema.
+    TableNotFound(String),
+    /// Column not found in table.
+    ColumnNotFound { table: String, column: String },
+    /// Unsupported AST construct for this codegen pass.
+    Unsupported(String),
+}
+
+impl std::fmt::Display for CodegenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TableNotFound(name) => write!(f, "table not found: {name}"),
+            Self::ColumnNotFound { table, column } => {
+                write!(f, "column {column} not found in table {table}")
+            }
+            Self::Unsupported(msg) => write!(f, "unsupported: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for CodegenError {}
+
+// ---------------------------------------------------------------------------
+// Schema lookup helper
+// ---------------------------------------------------------------------------
+
+fn find_table<'a>(schema: &'a [TableSchema], name: &str) -> Result<&'a TableSchema, CodegenError> {
+    schema
+        .iter()
+        .find(|t| t.name.eq_ignore_ascii_case(name))
+        .ok_or_else(|| CodegenError::TableNotFound(name.to_owned()))
+}
+
+fn find_index_named<'a>(table: &'a TableSchema, index_name: &str) -> Option<&'a IndexSchema> {
+    table
+        .indexes
+        .iter()
+        .find(|index| index.name.eq_ignore_ascii_case(index_name))
+}
+
+fn directive_index_contract_bypass_reason(
+    directive: &SelectPlannerDirective,
+    idx_schema: &IndexSchema,
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    columns: &[ResultColumn],
+    actual_index_column: &str,
+) -> Option<&'static str> {
+    let Some(expected_index_column) = directive.index_column.as_deref() else {
+        return Some("missing_index_column");
+    };
+    let Some(leading_column) = idx_schema.columns.first() else {
+        return Some("index_has_no_leading_column");
+    };
+    if !leading_column.eq_ignore_ascii_case(actual_index_column)
+        || !leading_column.eq_ignore_ascii_case(expected_index_column)
+    {
+        return Some("index_column_mismatch");
+    }
+    if directive.covering
+        && resolve_covering_output_sources(columns, table, table_alias, idx_schema).is_none()
+    {
+        return Some("covering_contract_mismatch");
+    }
+    None
+}
+
+fn log_planner_select_directive_outcome(
+    directive: &SelectPlannerDirective,
+    honor_mode: &str,
+    bypass_reason: &str,
+    lowered_ops: &str,
+) {
+    if !tracing::enabled!(target: "fsqlite.planner_runtime", tracing::Level::INFO) {
+        return;
+    }
+
+    let run_id = env::var("RUN_ID").unwrap_or_else(|_| "(none)".to_owned());
+    let trace_id = env::var("TRACE_ID").unwrap_or_else(|_| "(none)".to_owned());
+    let scenario_id = env::var("SCENARIO_ID").unwrap_or_else(|_| "(none)".to_owned());
+    let index_name = directive.index_name.as_deref().unwrap_or("(none)");
+    let index_column = directive.index_column.as_deref().unwrap_or("(none)");
+
+    tracing::info!(
+        target: "fsqlite.planner_runtime",
+        run_id = %run_id,
+        trace_id,
+        scenario_id = %scenario_id,
+        plan_id = %directive.plan_id,
+        plan_generation = directive.plan_generation,
+        planner_surface = %directive.planner_surface,
+        table = %directive.table_name,
+        index = %index_name,
+        index_column = %index_column,
+        access_kind = %directive.access_kind.label(),
+        covering = directive.covering,
+        honor_mode = %honor_mode,
+        bypass_reason = %bypass_reason,
+        lowered_ops = %lowered_ops,
+        "vdbe.planner_select_directive"
+    );
+}
+
+fn table_name_from_qualified(qtr: &QualifiedTableRef) -> &str {
+    &qtr.name.name
+}
+
+/// Emit a `SetSnapshot` opcode for cursor `cursor` if a time-travel clause
+/// is present. Must be called immediately after the corresponding `OpenRead`.
+fn emit_set_snapshot(b: &mut ProgramBuilder, cursor: i32, tt: Option<&TimeTravelClause>) {
+    if let Some(clause) = tt {
+        let p4 = match &clause.target {
+            TimeTravelTarget::CommitSequence(seq) => P4::TimeTravelCommitSeq(*seq),
+            TimeTravelTarget::Timestamp(ts) => P4::TimeTravelTimestamp(ts.clone()),
+        };
+        b.emit_op(Opcode::SetSnapshot, cursor, 0, 0, p4, 0);
+    }
+}
+
+/// Count anonymous placeholders in an expression tree.
+///
+/// Used by `codegen_update` to correctly number placeholders when bytecode
+/// emission order differs from SQL textual order (WHERE is emitted before SET,
+/// but SET placeholders appear first in the SQL text).
+fn count_anon_placeholders(expr: &Expr) -> u32 {
+    match expr {
+        Expr::Placeholder(fsqlite_ast::PlaceholderType::Anonymous, _) => 1,
+        Expr::Placeholder(_, _) | Expr::Literal(_, _) | Expr::Column(_, _) | Expr::Raise { .. } => {
+            0
+        }
+        Expr::Subquery(subquery, _) | Expr::Exists { subquery, .. } => {
+            count_anon_placeholders_in_select(subquery)
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            count_anon_placeholders(left) + count_anon_placeholders(right)
+        }
+        Expr::UnaryOp { expr: inner, .. }
+        | Expr::IsNull { expr: inner, .. }
+        | Expr::Cast { expr: inner, .. }
+        | Expr::Collate { expr: inner, .. } => count_anon_placeholders(inner),
+        Expr::Between {
+            expr: inner,
+            low,
+            high,
+            ..
+        } => {
+            count_anon_placeholders(inner)
+                + count_anon_placeholders(low)
+                + count_anon_placeholders(high)
+        }
+        Expr::In {
+            expr: inner, set, ..
+        } => {
+            count_anon_placeholders(inner)
+                + match set {
+                    fsqlite_ast::InSet::List(items) => {
+                        items.iter().map(count_anon_placeholders).sum()
+                    }
+                    fsqlite_ast::InSet::Subquery(subquery) => {
+                        count_anon_placeholders_in_select(subquery)
+                    }
+                    fsqlite_ast::InSet::Table(_) => 0,
+                }
+        }
+        Expr::Like {
+            expr: inner,
+            pattern,
+            escape,
+            ..
+        } => {
+            count_anon_placeholders(inner)
+                + count_anon_placeholders(pattern)
+                + escape.as_deref().map_or(0, count_anon_placeholders)
+        }
+        Expr::Case {
+            operand,
+            whens,
+            else_expr,
+            ..
+        } => {
+            operand.as_deref().map_or(0, count_anon_placeholders)
+                + whens
+                    .iter()
+                    .map(|(cond, then_expr)| {
+                        count_anon_placeholders(cond) + count_anon_placeholders(then_expr)
+                    })
+                    .sum::<u32>()
+                + else_expr.as_deref().map_or(0, count_anon_placeholders)
+        }
+        Expr::FunctionCall {
+            args, filter, over, ..
+        } => {
+            let args_count = match args {
+                FunctionArgs::List(exprs) => exprs.iter().map(count_anon_placeholders).sum(),
+                FunctionArgs::Star => 0,
+            };
+            args_count
+                + filter.as_deref().map_or(0, count_anon_placeholders)
+                + over
+                    .as_ref()
+                    .map_or(0, count_anon_placeholders_in_window_spec)
+        }
+        Expr::JsonAccess { expr, path, .. } => {
+            count_anon_placeholders(expr) + count_anon_placeholders(path)
+        }
+        Expr::RowValue(items, _) => items.iter().map(count_anon_placeholders).sum(),
+    }
+}
+
+fn count_anon_placeholders_in_select(select: &SelectStatement) -> u32 {
+    let mut count = 0;
+    if let Some(with_clause) = &select.with {
+        for cte in &with_clause.ctes {
+            count += count_anon_placeholders_in_select(&cte.query);
+        }
+    }
+    count += count_anon_placeholders_in_select_core(&select.body.select);
+    for (_, core) in &select.body.compounds {
+        count += count_anon_placeholders_in_select_core(core);
+    }
+    for order_term in &select.order_by {
+        count += count_anon_placeholders(&order_term.expr);
+    }
+    if let Some(limit_clause) = &select.limit {
+        count += count_anon_placeholders(&limit_clause.limit);
+        if let Some(offset) = &limit_clause.offset {
+            count += count_anon_placeholders(offset);
+        }
+    }
+    count
+}
+
+fn count_anon_placeholders_in_select_core(core: &SelectCore) -> u32 {
+    match core {
+        SelectCore::Select {
+            columns,
+            from,
+            where_clause,
+            group_by,
+            having,
+            windows,
+            ..
+        } => {
+            let mut count = columns
+                .iter()
+                .filter_map(|col| match col {
+                    ResultColumn::Expr { expr, .. } => Some(count_anon_placeholders(expr)),
+                    ResultColumn::Star | ResultColumn::TableStar(_) => None,
+                })
+                .sum::<u32>();
+
+            if let Some(from_clause) = from {
+                count += count_anon_placeholders_in_from_clause(from_clause);
+            }
+            if let Some(predicate) = where_clause {
+                count += count_anon_placeholders(predicate);
+            }
+            for expr in group_by {
+                count += count_anon_placeholders(expr);
+            }
+            if let Some(predicate) = having {
+                count += count_anon_placeholders(predicate);
+            }
+            for window in windows {
+                count += count_anon_placeholders_in_window_spec(&window.spec);
+            }
+            count
+        }
+        SelectCore::Values(rows) => rows
+            .iter()
+            .map(|row| row.iter().map(count_anon_placeholders).sum::<u32>())
+            .sum(),
+    }
+}
+
+fn count_anon_placeholders_in_from_clause(from: &fsqlite_ast::FromClause) -> u32 {
+    let mut count = count_anon_placeholders_in_table_or_subquery(&from.source);
+    for join in &from.joins {
+        count += count_anon_placeholders_in_table_or_subquery(&join.table);
+        if let Some(fsqlite_ast::JoinConstraint::On(expr)) = &join.constraint {
+            count += count_anon_placeholders(expr);
+        }
+    }
+    count
+}
+
+fn count_anon_placeholders_in_table_or_subquery(source: &TableOrSubquery) -> u32 {
+    match source {
+        TableOrSubquery::Table { .. } => 0,
+        TableOrSubquery::Subquery { query, .. } => count_anon_placeholders_in_select(query),
+        TableOrSubquery::TableFunction { args, .. } => {
+            args.iter().map(count_anon_placeholders).sum()
+        }
+        TableOrSubquery::ParenJoin(from_clause) => {
+            count_anon_placeholders_in_from_clause(from_clause)
+        }
+    }
+}
+
+fn count_anon_placeholders_in_window_spec(spec: &fsqlite_ast::WindowSpec) -> u32 {
+    let mut count: u32 = spec.partition_by.iter().map(count_anon_placeholders).sum();
+    count += spec
+        .order_by
+        .iter()
+        .map(|term| count_anon_placeholders(&term.expr))
+        .sum::<u32>();
+    if let Some(frame) = &spec.frame {
+        count += count_anon_placeholders_in_frame_bound(&frame.start);
+        if let Some(end) = &frame.end {
+            count += count_anon_placeholders_in_frame_bound(end);
+        }
+    }
+    count
+}
+
+fn count_anon_placeholders_in_frame_bound(bound: &fsqlite_ast::FrameBound) -> u32 {
+    match bound {
+        fsqlite_ast::FrameBound::Preceding(expr) | fsqlite_ast::FrameBound::Following(expr) => {
+            count_anon_placeholders(expr)
+        }
+        fsqlite_ast::FrameBound::UnboundedPreceding
+        | fsqlite_ast::FrameBound::CurrentRow
+        | fsqlite_ast::FrameBound::UnboundedFollowing => 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SELECT codegen
+// ---------------------------------------------------------------------------
+
+/// Generate VDBE bytecode for a SELECT statement.
+///
+/// Handles two patterns:
+/// 1. **Rowid lookup**: `SELECT cols FROM t WHERE rowid = ?`
+/// 2. **Full table scan**: `SELECT cols FROM t`
+///
+/// Returns the cursor number used (for composability).
+#[allow(clippy::too_many_lines)]
+pub fn codegen_select(
+    b: &mut ProgramBuilder,
+    stmt: &SelectStatement,
+    schema: &[TableSchema],
+    ctx: &CodegenContext,
+) -> Result<(), CodegenError> {
+    let (columns, from, where_clause, group_by, having, distinct) = match &stmt.body.select {
+        SelectCore::Select {
+            columns,
+            from,
+            where_clause,
+            group_by,
+            having,
+            distinct,
+            ..
+        } => (columns, from, where_clause, group_by, having, *distinct),
+        SelectCore::Values(rows) => {
+            return codegen_values_select(b, rows);
+        }
+    };
+
+    // Handle SELECT without FROM (e.g. SELECT 1, SELECT 1+1, SELECT abs(-5)).
+    if from.is_none() {
+        codegen_select_without_from(b, columns, where_clause.as_deref());
+        return Ok(());
+    }
+
+    // Determine the table from the FROM clause.
+    // SAFETY: `from.is_none()` is handled above; `.expect` cannot panic.
+    let from_clause = from.as_ref().expect("from already checked above");
+
+    if !from_clause.joins.is_empty()
+        && let Some(plan) = grouped_inner_join_count_sum_plan(stmt, from_clause, schema)?
+    {
+        return codegen_grouped_inner_join_count_sum_select(b, &plan, ctx);
+    }
+
+    let (table_name, table_alias, time_travel) = match &from_clause.source {
+        fsqlite_ast::TableOrSubquery::Table {
+            name,
+            alias,
+            time_travel,
+            ..
+        } => (&name.name, alias.as_deref(), time_travel.as_ref()),
+        _ => {
+            return Err(CodegenError::Unsupported(
+                "non-table FROM source".to_owned(),
+            ));
+        }
+    };
+
+    // Route simple 2-table INNER JOINs through dedicated codegen when there
+    // are no aggregates, GROUP BY, window functions, or DISTINCT — this is
+    // the common "SELECT ... FROM a JOIN b ON ..." shape that the benchmark
+    // exercises and that currently falls back to the connection interpreter.
+    if !from_clause.joins.is_empty()
+        && !has_aggregate_columns(columns)
+        && group_by.is_empty()
+        && having.is_none()
+        && !has_window_columns(columns)
+        && distinct == Distinctness::All
+        && time_travel.is_none()
+    {
+        return self::codegen_join_select(
+            b,
+            stmt,
+            from_clause,
+            columns,
+            where_clause.as_deref(),
+            schema,
+            ctx,
+        );
+    }
+
+    let table = find_table(schema, table_name)?;
+    let cursor = 0_i32;
+
+    // Labels for control flow.
+    let end_label = b.emit_label();
+    let done_label = b.emit_label();
+
+    // Init: jump to end (standard SQLite pattern).
+    b.emit_jump_to_label(Opcode::Init, 0, 0, end_label, P4::None, 0);
+
+    // Transaction (read-only, p2=0).
+    b.emit_op(Opcode::Transaction, 0, 0, 0, P4::None, 0);
+
+    // Determine output columns and allocate registers.
+    let out_col_count = result_column_count(columns, table);
+    let out_regs = b.alloc_regs(out_col_count);
+
+    let simple_count_star = is_simple_count_star(columns)
+        && stmt.limit.is_none()
+        && stmt.order_by.is_empty()
+        && distinct == Distinctness::All
+        && group_by.is_empty()
+        && having.is_none()
+        && !has_window_columns(columns)
+        && from_clause.joins.is_empty()
+        && time_travel.is_none();
+
+    // Check for aggregate columns FIRST, before rowid/index seek optimizations.
+    // Most aggregates still require a full scan + AggStep/AggFinal path. Plain
+    // COUNT(*) is handled separately below so it can keep a specialized fast path.
+    let is_aggregate = has_aggregate_columns(columns);
+
+    // Check for rowid-equality WHERE clause (only for non-aggregate queries).
+    let rowid_target = if is_aggregate {
+        None
+    } else {
+        extract_rowid_target_expr(where_clause.as_deref(), Some(table), table_alias)
+    };
+    let rowid_order = (!stmt.order_by.is_empty())
+        .then(|| resolve_order_by_rowid_direction(table, table_alias, columns, &stmt.order_by))
+        .flatten();
+    let rowid_range = if (is_aggregate && !simple_count_star)
+        || distinct != Distinctness::All
+        || !group_by.is_empty()
+        || having.is_some()
+        || (!stmt.order_by.is_empty() && rowid_order.is_none())
+    {
+        None
+    } else {
+        extract_rowid_range_target(where_clause.as_deref(), Some(table), table_alias)
+            .and_then(|range| rowid_range_fast_path_is_safe(range).then_some(range))
+    };
+    let index_range = if is_aggregate
+        || time_travel.is_some()
+        || !stmt.order_by.is_empty()
+        || distinct != Distinctness::All
+        || !group_by.is_empty()
+        || having.is_some()
+    {
+        None
+    } else {
+        extract_column_range_target(where_clause.as_deref(), table, table_alias).and_then(
+            |(col_name, range)| {
+                if !index_range_fast_path_is_safe(table, table_alias, schema, &col_name, range) {
+                    return None;
+                }
+                table
+                    .index_for_column(&col_name)
+                    .filter(|idx| idx.key_term_count() == 1 && !idx.key_term_descending(0))
+                    .map(|idx| (col_name, idx, range))
+            },
+        )
+    };
+    // Check for a simple indexed equality probe (only for non-aggregate queries).
+    // We probe with [bound_value, i64::MIN] so SeekGE anchors on the first
+    // duplicate entry in non-unique indexes and the loop can walk the full
+    // duplicate run via Next + IdxRowid.
+    let index_eq = if is_aggregate {
+        None
+    } else {
+        extract_column_eq_target(where_clause.as_deref(), table, table_alias)
+    };
+
+    if let Some(directive) = ctx.planner_select_directive.as_ref() {
+        let bypass_reason = if !directive.table_name.eq_ignore_ascii_case(&table.name) {
+            Some("table_mismatch")
+        } else {
+            match directive.access_kind {
+                PlannerSelectAccessKind::FullTableScan => {
+                    log_planner_select_directive_outcome(
+                        directive,
+                        "honored",
+                        "none",
+                        "full_table_scan",
+                    );
+                    return codegen_select_full_scan(
+                        b,
+                        cursor,
+                        table,
+                        table_alias,
+                        time_travel,
+                        schema,
+                        columns,
+                        where_clause.as_deref(),
+                        stmt.limit.as_ref(),
+                        out_regs,
+                        out_col_count,
+                        done_label,
+                        end_label,
+                    );
+                }
+                PlannerSelectAccessKind::RowidLookup => match rowid_target {
+                    Some(target_expr) => {
+                        log_planner_select_directive_outcome(
+                            directive,
+                            "honored",
+                            "none",
+                            "seek_rowid",
+                        );
+                        return codegen_select_rowid_lookup(
+                            b,
+                            cursor,
+                            table,
+                            table_alias,
+                            time_travel,
+                            schema,
+                            columns,
+                            out_regs,
+                            out_col_count,
+                            done_label,
+                            end_label,
+                            stmt.limit.as_ref(),
+                            target_expr,
+                        );
+                    }
+                    None => Some("rowid_lookup_target_missing"),
+                },
+                PlannerSelectAccessKind::IndexEquality => {
+                    if let Some(index_name) = directive.index_name.as_deref() {
+                        if let Some((index_column_name, target_expr)) = index_eq.as_ref() {
+                            if let Some(idx_schema) = find_index_named(table, index_name) {
+                                if let Some(reason) = directive_index_contract_bypass_reason(
+                                    directive,
+                                    idx_schema,
+                                    table,
+                                    table_alias,
+                                    columns,
+                                    index_column_name,
+                                ) {
+                                    Some(reason)
+                                } else {
+                                    log_planner_select_directive_outcome(
+                                        directive,
+                                        "honored",
+                                        "none",
+                                        "index_equality_probe",
+                                    );
+                                    return codegen_select_index_equality_scan(
+                                        b,
+                                        cursor,
+                                        table,
+                                        table_alias,
+                                        schema,
+                                        columns,
+                                        where_clause.as_deref(),
+                                        stmt.limit.as_ref(),
+                                        out_regs,
+                                        out_col_count,
+                                        done_label,
+                                        end_label,
+                                        idx_schema,
+                                        target_expr,
+                                    );
+                                }
+                            } else {
+                                Some("index_not_found")
+                            }
+                        } else {
+                            Some("index_equality_target_missing")
+                        }
+                    } else {
+                        Some("missing_index_name")
+                    }
+                }
+                PlannerSelectAccessKind::IndexRange => {
+                    if let Some(index_name) = directive.index_name.as_deref() {
+                        if let Some((index_column_name, _candidate_idx, range_target)) =
+                            index_range.as_ref()
+                        {
+                            if let Some(idx_schema) = find_index_named(table, index_name) {
+                                if idx_schema.key_term_count() != 1
+                                    || idx_schema.key_term_descending(0)
+                                {
+                                    Some("index_shape_unsupported")
+                                } else if let Some(reason) = directive_index_contract_bypass_reason(
+                                    directive,
+                                    idx_schema,
+                                    table,
+                                    table_alias,
+                                    columns,
+                                    index_column_name,
+                                ) {
+                                    Some(reason)
+                                } else {
+                                    log_planner_select_directive_outcome(
+                                        directive,
+                                        "honored",
+                                        "none",
+                                        "index_range_scan",
+                                    );
+                                    return codegen_select_index_range_scan(
+                                        b,
+                                        cursor,
+                                        table,
+                                        table_alias,
+                                        schema,
+                                        columns,
+                                        stmt.limit.as_ref(),
+                                        out_regs,
+                                        out_col_count,
+                                        done_label,
+                                        end_label,
+                                        idx_schema,
+                                        *range_target,
+                                    );
+                                }
+                            } else {
+                                Some("index_not_found")
+                            }
+                        } else {
+                            Some("index_range_target_missing")
+                        }
+                    } else {
+                        Some("missing_index_name")
+                    }
+                }
+            }
+        };
+
+        if let Some(reason) = bypass_reason {
+            log_planner_select_directive_outcome(
+                directive,
+                "bypassed",
+                reason,
+                "heuristic_fallback",
+            );
+        }
+    }
+
+    if simple_count_star {
+        codegen_select_count_star(
+            b,
+            cursor,
+            table,
+            table_alias,
+            schema,
+            where_clause.as_deref(),
+            out_regs,
+            done_label,
+            end_label,
+            rowid_range,
+        )
+    } else if let Some(target_expr) = rowid_target {
+        codegen_select_rowid_lookup(
+            b,
+            cursor,
+            table,
+            table_alias,
+            time_travel,
+            schema,
+            columns,
+            out_regs,
+            out_col_count,
+            done_label,
+            end_label,
+            stmt.limit.as_ref(),
+            target_expr,
+        )
+    } else if let Some(rowid_range) = rowid_range {
+        codegen_select_rowid_range_scan(
+            b,
+            cursor,
+            table,
+            table_alias,
+            time_travel,
+            schema,
+            columns,
+            stmt.limit.as_ref(),
+            out_regs,
+            out_col_count,
+            done_label,
+            end_label,
+            rowid_range,
+            matches!(rowid_order, Some(SortDirection::Desc)),
+        )
+    } else if let Some((_index_column_name, idx_schema, index_range)) = index_range {
+        codegen_select_index_range_scan(
+            b,
+            cursor,
+            table,
+            table_alias,
+            schema,
+            columns,
+            stmt.limit.as_ref(),
+            out_regs,
+            out_col_count,
+            done_label,
+            end_label,
+            idx_schema,
+            index_range,
+        )
+    } else if let Some((col_name, target_expr)) = index_eq.filter(|_| stmt.order_by.is_empty()) {
+        // --- Index-seek SELECT (only when no ORDER BY, since the index
+        //     seek returns rows in index insertion order, not sort order) ---
+        if let Some(idx_schema) = table.index_for_column(&col_name) {
+            codegen_select_index_equality_scan(
+                b,
+                cursor,
+                table,
+                table_alias,
+                schema,
+                columns,
+                where_clause.as_deref(),
+                stmt.limit.as_ref(),
+                out_regs,
+                out_col_count,
+                done_label,
+                end_label,
+                idx_schema,
+                target_expr,
+            )
+        } else {
+            // Fallback to full scan.
+            codegen_select_full_scan(
+                b,
+                cursor,
+                table,
+                table_alias,
+                time_travel,
+                schema,
+                columns,
+                where_clause.as_deref(),
+                stmt.limit.as_ref(),
+                out_regs,
+                out_col_count,
+                done_label,
+                end_label,
+            )
+        }
+    } else if has_aggregate_columns(columns) && !group_by.is_empty() {
+        // --- Aggregate query WITH GROUP BY ---
+        codegen_select_group_by_aggregate(
+            b,
+            cursor,
+            table,
+            table_alias,
+            schema,
+            columns,
+            where_clause.as_deref(),
+            group_by,
+            having.as_deref(),
+            stmt.limit.as_ref(),
+            out_regs,
+            out_col_count,
+            done_label,
+            end_label,
+        )
+    } else if has_aggregate_columns(columns) {
+        // --- Aggregate query (single-group, no GROUP BY) ---
+        codegen_select_aggregate(
+            b,
+            cursor,
+            table,
+            table_alias,
+            schema,
+            columns,
+            where_clause.as_deref(),
+            having.as_deref(),
+            out_regs,
+            out_col_count,
+            done_label,
+            end_label,
+        )
+    } else if !stmt.order_by.is_empty() {
+        if let Some(index_plan) = ctx
+            .index_ordered_scan_reliable
+            .then(|| {
+                resolve_order_by_index_plan(
+                    table,
+                    table_alias,
+                    columns,
+                    where_clause.as_deref(),
+                    &stmt.order_by,
+                    distinct,
+                )
+            })
+            .flatten()
+        {
+            tracing::info!(
+                table = %table.name,
+                index = %index_plan.index.name,
+                covering = index_plan.covering_output.is_some(),
+                descending = index_plan.descending,
+                "vdbe.order_by.index_bypass"
+            );
+            return codegen_select_index_ordered_scan(
+                b,
+                cursor,
+                table,
+                table_alias,
+                schema,
+                columns,
+                where_clause.as_deref(),
+                stmt.limit.as_ref(),
+                out_regs,
+                out_col_count,
+                done_label,
+                end_label,
+                &index_plan,
+            );
+        }
+
+        // --- Full table scan with ORDER BY (sorter path) ---
+        codegen_select_ordered_scan(
+            b,
+            cursor,
+            table,
+            table_alias,
+            schema,
+            columns,
+            where_clause.as_deref(),
+            &stmt.order_by,
+            stmt.limit.as_ref(),
+            distinct,
+            out_regs,
+            out_col_count,
+            done_label,
+            end_label,
+        )
+    } else if distinct == Distinctness::Distinct {
+        // --- Full table scan with DISTINCT ---
+        codegen_select_distinct_scan(
+            b,
+            cursor,
+            table,
+            table_alias,
+            schema,
+            columns,
+            where_clause.as_deref(),
+            stmt.limit.as_ref(),
+            out_regs,
+            out_col_count,
+            done_label,
+            end_label,
+        )
+    } else {
+        // --- Full table scan ---
+        codegen_select_full_scan(
+            b,
+            cursor,
+            table,
+            table_alias,
+            time_travel,
+            schema,
+            columns,
+            where_clause.as_deref(),
+            stmt.limit.as_ref(),
+            out_regs,
+            out_col_count,
+            done_label,
+            end_label,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn codegen_select_rowid_lookup(
+    b: &mut ProgramBuilder,
+    cursor: i32,
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    time_travel: Option<&TimeTravelClause>,
+    schema: &[TableSchema],
+    columns: &[ResultColumn],
+    out_regs: i32,
+    out_col_count: i32,
+    done_label: crate::Label,
+    end_label: crate::Label,
+    limit_clause: Option<&LimitClause>,
+    target_expr: &Expr,
+) -> Result<(), CodegenError> {
+    let limit_reg = limit_clause.map(|lc| {
+        let r = b.alloc_reg();
+        emit_limit_expr(b, &lc.limit, r);
+        r
+    });
+    let offset_reg = limit_clause.and_then(|lc| {
+        lc.offset.as_ref().map(|off_expr| {
+            let r = b.alloc_reg();
+            emit_limit_expr(b, off_expr, r);
+            r
+        })
+    });
+
+    if let Some(lim_r) = limit_reg {
+        emit_limit_zero_guard(b, lim_r, done_label);
+    }
+
+    let rowid_reg = b.alloc_reg();
+    emit_expr(b, target_expr, rowid_reg, None);
+    b.emit_op(
+        Opcode::OpenRead,
+        cursor,
+        table.root_page,
+        0,
+        P4::Table(table.name.clone()),
+        0,
+    );
+    emit_set_snapshot(b, cursor, time_travel);
+    b.emit_jump_to_label(
+        Opcode::SeekRowid,
+        cursor,
+        rowid_reg,
+        done_label,
+        P4::None,
+        0,
+    );
+    let skip_label = b.emit_label();
+    if let Some(off_r) = offset_reg {
+        b.emit_jump_to_label(Opcode::IfPos, off_r, 1, skip_label, P4::None, 0);
+    }
+    emit_column_reads(b, cursor, columns, table, table_alias, schema, out_regs)?;
+    b.emit_op(Opcode::ResultRow, out_regs, out_col_count, 0, P4::None, 0);
+    if let Some(lim_r) = limit_reg {
+        b.emit_jump_to_label(Opcode::DecrJumpZero, lim_r, 0, done_label, P4::None, 0);
+    }
+    b.resolve_label(skip_label);
+    b.resolve_label(done_label);
+    b.emit_op(Opcode::Close, cursor, 0, 0, P4::None, 0);
+    b.emit_op(Opcode::Halt, 0, 0, 0, P4::None, 0);
+    b.resolve_label(end_label);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn codegen_select_index_equality_scan(
+    b: &mut ProgramBuilder,
+    cursor: i32,
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    schema: &[TableSchema],
+    columns: &[ResultColumn],
+    where_clause: Option<&Expr>,
+    limit_clause: Option<&LimitClause>,
+    out_regs: i32,
+    out_col_count: i32,
+    done_label: crate::Label,
+    end_label: crate::Label,
+    idx_schema: &IndexSchema,
+    target_expr: &Expr,
+) -> Result<(), CodegenError> {
+    let idx_cursor = 1_i32;
+    let full_scan_fallback = b.emit_label();
+    let duplicate_run_done = b.emit_label();
+    let where_placeholder_base = b.current_anon_placeholder();
+    let limit_reg = limit_clause.map(|lc| {
+        let r = b.alloc_reg();
+        emit_limit_expr(b, &lc.limit, r);
+        r
+    });
+    let offset_reg = limit_clause.and_then(|lc| {
+        lc.offset.as_ref().map(|off_expr| {
+            let r = b.alloc_reg();
+            emit_limit_expr(b, off_expr, r);
+            r
+        })
+    });
+    let covering_output = resolve_covering_output_sources(columns, table, table_alias, idx_schema);
+    let needs_table_lookup = covering_output.is_none();
+    let fast_path_done_label = if needs_table_lookup {
+        done_label
+    } else {
+        b.emit_label()
+    };
+
+    if let Some(lim_r) = limit_reg {
+        emit_limit_zero_guard(b, lim_r, fast_path_done_label);
+    }
+
+    let probe_key_regs = b.alloc_regs((idx_schema.key_term_count() + 1) as i32);
+    let min_rowid_reg = probe_key_regs + idx_schema.key_term_count() as i32;
+    emit_expr(b, target_expr, probe_key_regs, None);
+    b.emit_jump_to_label(
+        Opcode::IsNull,
+        probe_key_regs,
+        0,
+        fast_path_done_label,
+        P4::None,
+        0,
+    );
+    for offset in 1..idx_schema.key_term_count() {
+        b.emit_op(
+            Opcode::Null,
+            0,
+            probe_key_regs + offset as i32,
+            0,
+            P4::None,
+            0,
+        );
+    }
+
+    let saw_index_match_reg = b.alloc_reg();
+    b.emit_op(Opcode::Integer, 0, saw_index_match_reg, 0, P4::None, 0);
+
+    b.emit_op(Opcode::Int64, 0, min_rowid_reg, 0, P4::Int64(i64::MIN), 0);
+    let probe_record_reg = b.alloc_reg();
+    b.emit_op(
+        Opcode::MakeRecord,
+        probe_key_regs,
+        (idx_schema.key_term_count() + 1) as i32,
+        probe_record_reg,
+        P4::None,
+        0,
+    );
+
+    if needs_table_lookup {
+        b.emit_op(
+            Opcode::OpenRead,
+            cursor,
+            table.root_page,
+            0,
+            P4::Table(table.name.clone()),
+            0,
+        );
+    }
+    b.emit_op(
+        Opcode::OpenRead,
+        idx_cursor,
+        idx_schema.root_page,
+        0,
+        P4::Index(idx_schema.name.clone()),
+        0,
+    );
+    b.emit_jump_to_label(
+        Opcode::SeekGE,
+        idx_cursor,
+        probe_record_reg,
+        full_scan_fallback,
+        P4::None,
+        0,
+    );
+
+    let idx_loop_top = b.current_addr();
+    b.emit_jump_to_label(
+        Opcode::IdxGT,
+        idx_cursor,
+        probe_record_reg,
+        duplicate_run_done,
+        P4::None,
+        1,
+    );
+
+    let rowid_reg = b.alloc_reg();
+    b.emit_op(Opcode::IdxRowid, idx_cursor, rowid_reg, 0, P4::None, 0);
+    let idx_skip_label = b.emit_label();
+    b.emit_op(Opcode::Integer, 1, saw_index_match_reg, 0, P4::None, 0);
+    if needs_table_lookup {
+        b.emit_jump_to_label(
+            Opcode::SeekRowid,
+            cursor,
+            rowid_reg,
+            idx_skip_label,
+            P4::None,
+            0,
+        );
+    }
+    if let Some(off_r) = offset_reg {
+        b.emit_jump_to_label(Opcode::IfPos, off_r, 1, idx_skip_label, P4::None, 0);
+    }
+    if let Some(covering_output) = covering_output.as_ref() {
+        emit_covering_output_reads(b, idx_cursor, rowid_reg, covering_output, out_regs);
+    } else {
+        emit_column_reads(b, cursor, columns, table, table_alias, schema, out_regs)?;
+    }
+    b.emit_op(Opcode::ResultRow, out_regs, out_col_count, 0, P4::None, 0);
+    if let Some(lim_r) = limit_reg {
+        b.emit_jump_to_label(
+            Opcode::DecrJumpZero,
+            lim_r,
+            0,
+            fast_path_done_label,
+            P4::None,
+            0,
+        );
+    }
+
+    b.resolve_label(idx_skip_label);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let idx_loop_body = idx_loop_top as i32;
+    b.emit_op(Opcode::Next, idx_cursor, idx_loop_body, 0, P4::None, 0);
+    b.emit_jump_to_label(Opcode::Goto, 0, 0, fast_path_done_label, P4::None, 0);
+
+    b.resolve_label(duplicate_run_done);
+    b.emit_jump_to_label(
+        Opcode::If,
+        saw_index_match_reg,
+        0,
+        fast_path_done_label,
+        P4::None,
+        0,
+    );
+    b.emit_jump_to_label(Opcode::Goto, 0, 0, full_scan_fallback, P4::None, 0);
+
+    b.resolve_label(full_scan_fallback);
+    if !needs_table_lookup {
+        b.emit_op(
+            Opcode::OpenRead,
+            cursor,
+            table.root_page,
+            0,
+            P4::Table(table.name.clone()),
+            0,
+        );
+    }
+    let loop_start = b.current_addr();
+    b.emit_jump_to_label(Opcode::Rewind, cursor, 0, done_label, P4::None, 0);
+    let skip_label = b.emit_label();
+    if let Some(where_expr) = where_clause {
+        b.set_next_anon_placeholder(where_placeholder_base);
+        emit_where_filter(
+            b,
+            where_expr,
+            cursor,
+            table,
+            table_alias,
+            schema,
+            skip_label,
+        );
+    }
+    if let Some(off_r) = offset_reg {
+        b.emit_jump_to_label(Opcode::IfPos, off_r, 1, skip_label, P4::None, 0);
+    }
+    emit_column_reads(b, cursor, columns, table, table_alias, schema, out_regs)?;
+    b.emit_op(Opcode::ResultRow, out_regs, out_col_count, 0, P4::None, 0);
+    if let Some(lim_r) = limit_reg {
+        b.emit_jump_to_label(Opcode::DecrJumpZero, lim_r, 0, done_label, P4::None, 0);
+    }
+    b.resolve_label(skip_label);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let loop_body = (loop_start + 1) as i32;
+    b.emit_op(Opcode::Next, cursor, loop_body, 0, P4::None, 0);
+
+    b.resolve_label(done_label);
+    b.emit_op(Opcode::Close, idx_cursor, 0, 0, P4::None, 0);
+    b.emit_op(Opcode::Close, cursor, 0, 0, P4::None, 0);
+    b.emit_op(Opcode::Halt, 0, 0, 0, P4::None, 0);
+    if !needs_table_lookup {
+        b.resolve_label(fast_path_done_label);
+        b.emit_op(Opcode::Close, idx_cursor, 0, 0, P4::None, 0);
+        b.emit_op(Opcode::Halt, 0, 0, 0, P4::None, 0);
+    }
+    b.resolve_label(end_label);
+    Ok(())
+}
+
+/// Codegen for a full table scan SELECT with optional WHERE filtering and LIMIT/OFFSET.
+#[allow(clippy::too_many_arguments)]
+fn codegen_select_full_scan(
+    b: &mut ProgramBuilder,
+    cursor: i32,
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    time_travel: Option<&TimeTravelClause>,
+    schema: &[TableSchema],
+    columns: &[ResultColumn],
+    where_clause: Option<&Expr>,
+    limit_clause: Option<&LimitClause>,
+    out_regs: i32,
+    out_col_count: i32,
+    done_label: crate::Label,
+    end_label: crate::Label,
+) -> Result<(), CodegenError> {
+    // Allocate LIMIT/OFFSET counter registers (if present).
+    let limit_reg = limit_clause.map(|lc| {
+        let r = b.alloc_reg();
+        emit_limit_expr(b, &lc.limit, r);
+        r
+    });
+    let offset_reg = limit_clause.and_then(|lc| {
+        lc.offset.as_ref().map(|off_expr| {
+            let r = b.alloc_reg();
+            emit_limit_expr(b, off_expr, r);
+            r
+        })
+    });
+
+    // LIMIT 0 guard: skip entire scan if limit is zero.
+    if let Some(lim_r) = limit_reg {
+        emit_limit_zero_guard(b, lim_r, done_label);
+    }
+
+    b.emit_op(
+        Opcode::OpenRead,
+        cursor,
+        table.root_page,
+        0,
+        P4::Table(table.name.clone()),
+        0,
+    );
+    emit_set_snapshot(b, cursor, time_travel);
+
+    // Rewind to first row; jump to done if table is empty.
+    let loop_start = b.current_addr();
+    b.emit_jump_to_label(Opcode::Rewind, cursor, 0, done_label, P4::None, 0);
+
+    // Evaluate WHERE condition (if any) and skip non-matching rows.
+    let skip_label = b.emit_label();
+    if let Some(where_expr) = where_clause {
+        emit_where_filter(
+            b,
+            where_expr,
+            cursor,
+            table,
+            table_alias,
+            schema,
+            skip_label,
+        );
+    }
+
+    // OFFSET: if offset counter > 0, decrement by 1 and skip this row.
+    if let Some(off_r) = offset_reg {
+        b.emit_jump_to_label(Opcode::IfPos, off_r, 1, skip_label, P4::None, 0);
+    }
+
+    // Read columns.
+    emit_column_reads(b, cursor, columns, table, table_alias, schema, out_regs)?;
+
+    // ResultRow.
+    b.emit_op(Opcode::ResultRow, out_regs, out_col_count, 0, P4::None, 0);
+
+    // LIMIT: decrement limit counter; jump to done when zero.
+    if let Some(lim_r) = limit_reg {
+        b.emit_jump_to_label(Opcode::DecrJumpZero, lim_r, 0, done_label, P4::None, 0);
+    }
+
+    // Skip label for WHERE-filtered rows.
+    b.resolve_label(skip_label);
+
+    // Next: jump back to start of loop body (the instruction after Rewind).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let loop_body = (loop_start + 1) as i32;
+    b.emit_op(Opcode::Next, cursor, loop_body, 0, P4::None, 0);
+
+    // Done: Close + Halt.
+    b.resolve_label(done_label);
+    b.emit_op(Opcode::Close, cursor, 0, 0, P4::None, 0);
+    b.emit_op(Opcode::Halt, 0, 0, 0, P4::None, 0);
+
+    // End target for Init jump.
+    b.resolve_label(end_label);
+
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct RowidRangeBound<'a> {
+    rowid_expr: &'a Expr,
+    expr: &'a Expr,
+    inclusive: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct RowidRangeTarget<'a> {
+    lower: Option<RowidRangeBound<'a>>,
+    upper: Option<RowidRangeBound<'a>>,
+}
+
+#[derive(Clone, Copy)]
+struct ColumnRangeBound<'a> {
+    expr: &'a Expr,
+    inclusive: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ColumnRangeTarget<'a> {
+    lower: Option<ColumnRangeBound<'a>>,
+    upper: Option<ColumnRangeBound<'a>>,
+}
+
+/// Generate VDBE bytecode for a bounded rowid/IPK scan.
+///
+/// This specializes the common `rowid >= low AND rowid < high` shape into a
+/// SeekGE/SeekGT + Next loop so range scans do not fall back to a full table
+/// scan. The optimization is intentionally conservative: it only fires when
+/// the entire WHERE clause is a pure conjunction of rowid bounds.
+#[allow(clippy::too_many_arguments)]
+fn codegen_select_rowid_range_scan(
+    b: &mut ProgramBuilder,
+    cursor: i32,
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    time_travel: Option<&TimeTravelClause>,
+    schema: &[TableSchema],
+    columns: &[ResultColumn],
+    limit_clause: Option<&LimitClause>,
+    out_regs: i32,
+    out_col_count: i32,
+    done_label: crate::Label,
+    end_label: crate::Label,
+    rowid_range: RowidRangeTarget<'_>,
+    descending: bool,
+) -> Result<(), CodegenError> {
+    let limit_reg = limit_clause.map(|lc| {
+        let r = b.alloc_reg();
+        emit_limit_expr(b, &lc.limit, r);
+        r
+    });
+    let offset_reg = limit_clause.and_then(|lc| {
+        lc.offset.as_ref().map(|off_expr| {
+            let r = b.alloc_reg();
+            emit_limit_expr(b, off_expr, r);
+            r
+        })
+    });
+
+    if let Some(lim_r) = limit_reg {
+        emit_limit_zero_guard(b, lim_r, done_label);
+    }
+
+    let lower_reg = rowid_range.lower.map(|bound| {
+        let reg = b.alloc_reg();
+        emit_expr(b, bound.expr, reg, None);
+        b.emit_jump_to_label(Opcode::IsNull, reg, 0, done_label, P4::None, 0);
+        reg
+    });
+    let upper_reg = rowid_range.upper.map(|bound| {
+        let reg = b.alloc_reg();
+        emit_expr(b, bound.expr, reg, None);
+        b.emit_jump_to_label(Opcode::IsNull, reg, 0, done_label, P4::None, 0);
+        reg
+    });
+    let lower_comparison = rowid_range
+        .lower
+        .map(|bound| resolved_rowid_range_comparison(table, table_alias, schema, bound));
+    let upper_comparison = rowid_range
+        .upper
+        .map(|bound| resolved_rowid_range_comparison(table, table_alias, schema, bound));
+
+    b.emit_op(
+        Opcode::OpenRead,
+        cursor,
+        table.root_page,
+        0,
+        P4::Table(table.name.clone()),
+        0,
+    );
+    emit_set_snapshot(b, cursor, time_travel);
+
+    if descending {
+        if let Some(bound) = rowid_range.upper {
+            let seek_opcode = if bound.inclusive {
+                Opcode::SeekLE
+            } else {
+                Opcode::SeekLT
+            };
+            b.emit_jump_to_label(
+                seek_opcode,
+                cursor,
+                upper_reg.expect("upper bound register should exist"),
+                done_label,
+                P4::None,
+                0,
+            );
+        } else {
+            b.emit_jump_to_label(Opcode::Last, cursor, 0, done_label, P4::None, 0);
+        }
+    } else if let Some(bound) = rowid_range.lower {
+        let seek_opcode = if bound.inclusive {
+            Opcode::SeekGE
+        } else {
+            Opcode::SeekGT
+        };
+        b.emit_jump_to_label(
+            seek_opcode,
+            cursor,
+            lower_reg.expect("lower bound register should exist"),
+            done_label,
+            P4::None,
+            0,
+        );
+    } else {
+        b.emit_jump_to_label(Opcode::Rewind, cursor, 0, done_label, P4::None, 0);
+    }
+
+    let loop_top = b.current_addr();
+    let skip_label = b.emit_label();
+
+    if descending {
+        if let Some(bound) = rowid_range.lower {
+            let current_rowid_reg = b.alloc_reg();
+            let stop_opcode = if bound.inclusive {
+                Opcode::Lt
+            } else {
+                Opcode::Le
+            };
+            b.emit_op(Opcode::Rowid, cursor, current_rowid_reg, 0, P4::None, 0);
+            b.emit_jump_to_label(
+                stop_opcode,
+                lower_reg.expect("lower bound register should exist"),
+                current_rowid_reg,
+                done_label,
+                lower_comparison
+                    .as_ref()
+                    .map_or(P4::None, |comparison| comparison.collation_p4.clone()),
+                lower_comparison
+                    .as_ref()
+                    .map_or(0, |comparison| comparison.cmp_p5),
+            );
+        }
+    } else if let Some(bound) = rowid_range.upper {
+        let current_rowid_reg = b.alloc_reg();
+        let stop_opcode = if bound.inclusive {
+            Opcode::Gt
+        } else {
+            Opcode::Ge
+        };
+        b.emit_op(Opcode::Rowid, cursor, current_rowid_reg, 0, P4::None, 0);
+        b.emit_jump_to_label(
+            stop_opcode,
+            upper_reg.expect("upper bound register should exist"),
+            current_rowid_reg,
+            done_label,
+            upper_comparison
+                .as_ref()
+                .map_or(P4::None, |comparison| comparison.collation_p4.clone()),
+            upper_comparison
+                .as_ref()
+                .map_or(0, |comparison| comparison.cmp_p5),
+        );
+    }
+
+    if let Some(off_r) = offset_reg {
+        b.emit_jump_to_label(Opcode::IfPos, off_r, 1, skip_label, P4::None, 0);
+    }
+
+    emit_column_reads(b, cursor, columns, table, table_alias, schema, out_regs)?;
+    b.emit_op(Opcode::ResultRow, out_regs, out_col_count, 0, P4::None, 0);
+
+    if let Some(lim_r) = limit_reg {
+        b.emit_jump_to_label(Opcode::DecrJumpZero, lim_r, 0, done_label, P4::None, 0);
+    }
+
+    b.resolve_label(skip_label);
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let loop_body = loop_top as i32;
+    b.emit_op(
+        if descending {
+            Opcode::Prev
+        } else {
+            Opcode::Next
+        },
+        cursor,
+        loop_body,
+        0,
+        P4::None,
+        0,
+    );
+
+    b.resolve_label(done_label);
+    b.emit_op(Opcode::Close, cursor, 0, 0, P4::None, 0);
+    b.emit_op(Opcode::Halt, 0, 0, 0, P4::None, 0);
+    b.resolve_label(end_label);
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn codegen_select_index_range_scan(
+    b: &mut ProgramBuilder,
+    cursor: i32,
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    schema: &[TableSchema],
+    columns: &[ResultColumn],
+    limit_clause: Option<&LimitClause>,
+    out_regs: i32,
+    out_col_count: i32,
+    done_label: crate::Label,
+    end_label: crate::Label,
+    idx_schema: &IndexSchema,
+    index_range: ColumnRangeTarget<'_>,
+) -> Result<(), CodegenError> {
+    let idx_cursor = cursor + 1;
+    let limit_reg = limit_clause.map(|lc| {
+        let r = b.alloc_reg();
+        emit_limit_expr(b, &lc.limit, r);
+        r
+    });
+    let offset_reg = limit_clause.and_then(|lc| {
+        lc.offset.as_ref().map(|off_expr| {
+            let r = b.alloc_reg();
+            emit_limit_expr(b, off_expr, r);
+            r
+        })
+    });
+
+    if let Some(lim_r) = limit_reg {
+        emit_limit_zero_guard(b, lim_r, done_label);
+    }
+
+    let lower_probe = index_range.lower.map(|bound| {
+        let base = b.alloc_regs(2);
+        emit_expr(b, bound.expr, base, None);
+        b.emit_jump_to_label(Opcode::IsNull, base, 0, done_label, P4::None, 0);
+        b.emit_op(Opcode::Int64, 0, base + 1, 0, P4::Int64(i64::MIN), 0);
+        (base, bound)
+    });
+    let upper_reg = index_range.upper.map(|bound| {
+        let reg = b.alloc_reg();
+        emit_expr(b, bound.expr, reg, None);
+        b.emit_jump_to_label(Opcode::IsNull, reg, 0, done_label, P4::None, 0);
+        reg
+    });
+    let current_key_reg = (upper_reg.is_some()
+        || lower_probe.is_some_and(|(_, bound)| !bound.inclusive))
+    .then(|| b.alloc_reg());
+    let covering_output = resolve_covering_output_sources(columns, table, table_alias, idx_schema);
+    let needs_table_lookup = covering_output.is_none();
+
+    if needs_table_lookup {
+        b.emit_op(
+            Opcode::OpenRead,
+            cursor,
+            table.root_page,
+            0,
+            P4::Table(table.name.clone()),
+            0,
+        );
+    }
+    b.emit_op(
+        Opcode::OpenRead,
+        idx_cursor,
+        idx_schema.root_page,
+        0,
+        P4::Index(idx_schema.name.clone()),
+        0,
+    );
+
+    if let Some((lower_reg, _)) = lower_probe {
+        let probe_record_reg = b.alloc_reg();
+        b.emit_op(
+            Opcode::MakeRecord,
+            lower_reg,
+            2,
+            probe_record_reg,
+            P4::None,
+            0,
+        );
+        b.emit_jump_to_label(
+            Opcode::SeekGE,
+            idx_cursor,
+            probe_record_reg,
+            done_label,
+            P4::None,
+            0,
+        );
+    } else {
+        b.emit_jump_to_label(Opcode::Rewind, idx_cursor, 0, done_label, P4::None, 0);
+    }
+
+    let loop_top = b.current_addr();
+    let skip_label = b.emit_label();
+
+    if let Some(key_reg) = current_key_reg {
+        b.emit_op(Opcode::Column, idx_cursor, 0, key_reg, P4::None, 0);
+        if lower_probe.is_none() {
+            b.emit_jump_to_label(Opcode::IsNull, key_reg, 0, skip_label, P4::None, 0);
+        }
+    }
+
+    if let Some((lower_reg, bound)) = lower_probe
+        && !bound.inclusive
+    {
+        b.emit_jump_to_label(
+            Opcode::Le,
+            lower_reg,
+            current_key_reg.expect("exclusive lower bound should read current key"),
+            skip_label,
+            P4::None,
+            0,
+        );
+    }
+
+    if let Some(bound) = index_range.upper {
+        let stop_opcode = if bound.inclusive {
+            Opcode::Gt
+        } else {
+            Opcode::Ge
+        };
+        b.emit_jump_to_label(
+            stop_opcode,
+            upper_reg.expect("upper bound register should exist"),
+            current_key_reg.expect("upper bound should read current key"),
+            done_label,
+            P4::None,
+            0,
+        );
+    }
+
+    let rowid_reg = b.alloc_reg();
+    b.emit_op(Opcode::IdxRowid, idx_cursor, rowid_reg, 0, P4::None, 0);
+
+    if needs_table_lookup {
+        b.emit_jump_to_label(
+            Opcode::SeekRowid,
+            cursor,
+            rowid_reg,
+            skip_label,
+            P4::None,
+            0,
+        );
+    }
+
+    if let Some(off_r) = offset_reg {
+        b.emit_jump_to_label(Opcode::IfPos, off_r, 1, skip_label, P4::None, 0);
+    }
+
+    if let Some(covering_output) = &covering_output {
+        emit_covering_output_reads(b, idx_cursor, rowid_reg, covering_output, out_regs);
+    } else {
+        emit_column_reads(b, cursor, columns, table, table_alias, schema, out_regs)?;
+    }
+
+    b.emit_op(Opcode::ResultRow, out_regs, out_col_count, 0, P4::None, 0);
+    if let Some(lim_r) = limit_reg {
+        b.emit_jump_to_label(Opcode::DecrJumpZero, lim_r, 0, done_label, P4::None, 0);
+    }
+
+    b.resolve_label(skip_label);
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let loop_body = loop_top as i32;
+    b.emit_op(Opcode::Next, idx_cursor, loop_body, 0, P4::None, 0);
+
+    b.resolve_label(done_label);
+    b.emit_op(Opcode::Close, idx_cursor, 0, 0, P4::None, 0);
+    if needs_table_lookup {
+        b.emit_op(Opcode::Close, cursor, 0, 0, P4::None, 0);
+    }
+    b.emit_op(Opcode::Halt, 0, 0, 0, P4::None, 0);
+    b.resolve_label(end_label);
+
+    Ok(())
+}
+
+fn index_range_fast_path_is_safe(
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    schema: &[TableSchema],
+    column_name: &str,
+    range: ColumnRangeTarget<'_>,
+) -> bool {
+    [range.lower, range.upper]
+        .into_iter()
+        .flatten()
+        .all(|bound| {
+            let comparison = resolved_index_range_comparison(
+                table,
+                table_alias,
+                schema,
+                column_name,
+                bound.expr,
+            );
+            (comparison.cmp_p5 & !0x80) == 0 && matches!(comparison.collation_p4, P4::None)
+        })
+}
+
+fn rowid_range_fast_path_is_safe(range: RowidRangeTarget<'_>) -> bool {
+    [range.lower, range.upper]
+        .into_iter()
+        .flatten()
+        .all(|bound| rowid_range_bound_is_seek_safe(bound.expr))
+}
+
+fn rowid_range_bound_is_seek_safe(expr: &Expr) -> bool {
+    match expr {
+        Expr::Literal(Literal::Integer(_), _)
+        | Expr::Placeholder(
+            fsqlite_ast::PlaceholderType::Numbered(_)
+            | fsqlite_ast::PlaceholderType::ColonNamed(_)
+            | fsqlite_ast::PlaceholderType::AtNamed(_)
+            | fsqlite_ast::PlaceholderType::DollarNamed(_),
+            _,
+        ) => true,
+        Expr::UnaryOp {
+            op: fsqlite_ast::UnaryOp::Negate,
+            expr,
+            ..
+        } => matches!(expr.as_ref(), Expr::Literal(Literal::Integer(_), _)),
+        _ => false,
+    }
+}
+
+fn is_simple_count_star(columns: &[ResultColumn]) -> bool {
+    matches!(
+        columns,
+        [ResultColumn::Expr {
+            expr:
+                Expr::FunctionCall {
+                    name,
+                    args: FunctionArgs::Star,
+                    distinct: false,
+                    order_by,
+                    filter: None,
+                    over: None,
+                    ..
+                },
+            ..
+        }] if name.eq_ignore_ascii_case("count") && order_by.is_empty()
+    )
+}
+
+struct CountStarPlusSumPlan {
+    count_out_idx: usize,
+    sum_out_idx: usize,
+    sum_col_idx: Option<usize>,
+    sum_is_rowid: bool,
+}
+
+struct GroupByRowidBucketSumPlan {
+    group_divisor: i64,
+    group_out_idx: usize,
+    sum_out_idx: usize,
+    sum_col_idx: usize,
+}
+
+fn rowid_bucket_divisor(
+    expr: &Expr,
+    table: &TableSchema,
+    table_alias: Option<&str>,
+) -> Option<i64> {
+    let Expr::BinaryOp {
+        left,
+        op: BinaryOp::Divide,
+        right,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+
+    if !matches!(
+        resolve_column_ref(left, table, table_alias),
+        Some(SortKeySource::Rowid)
+    ) {
+        return None;
+    }
+
+    match right.as_ref() {
+        Expr::Literal(Literal::Integer(divisor), _) if *divisor > 0 => Some(*divisor),
+        _ => None,
+    }
+}
+
+fn simple_group_by_rowid_bucket_sum_plan(
+    columns: &[ResultColumn],
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    group_by: &[Expr],
+) -> Option<GroupByRowidBucketSumPlan> {
+    if columns.len() != 2 || group_by.len() != 1 {
+        return None;
+    }
+
+    let group_expr = &group_by[0];
+    let group_divisor = rowid_bucket_divisor(group_expr, table, table_alias)?;
+    let mut group_out_idx = None;
+    let mut sum_out_idx = None;
+    let mut sum_col_idx = None;
+
+    for (out_idx, column) in columns.iter().enumerate() {
+        match column {
+            ResultColumn::Expr { expr, .. } if expr == group_expr => {
+                if group_out_idx.replace(out_idx).is_some() {
+                    return None;
+                }
+            }
+            ResultColumn::Expr {
+                expr:
+                    Expr::FunctionCall {
+                        name,
+                        args,
+                        distinct: false,
+                        order_by,
+                        filter: None,
+                        over: None,
+                        ..
+                    },
+                ..
+            } if name.eq_ignore_ascii_case("sum") && order_by.is_empty() => {
+                let FunctionArgs::List(exprs) = args else {
+                    return None;
+                };
+                let [arg_expr] = exprs.as_slice() else {
+                    return None;
+                };
+                let Some(SortKeySource::Column(idx)) =
+                    resolve_column_ref(arg_expr, table, table_alias)
+                else {
+                    return None;
+                };
+                if sum_out_idx.replace(out_idx).is_some() {
+                    return None;
+                }
+                sum_col_idx = Some(idx);
+            }
+            _ => return None,
+        }
+    }
+
+    Some(GroupByRowidBucketSumPlan {
+        group_divisor,
+        group_out_idx: group_out_idx?,
+        sum_out_idx: sum_out_idx?,
+        sum_col_idx: sum_col_idx?,
+    })
+}
+
+fn simple_count_star_plus_sum_plan(
+    columns: &[ResultColumn],
+    table: &TableSchema,
+    table_alias: Option<&str>,
+) -> Option<CountStarPlusSumPlan> {
+    if columns.len() != 2 {
+        return None;
+    }
+
+    let mut count_out_idx = None;
+    let mut sum_out_idx = None;
+    let mut sum_col_idx = None;
+    let mut sum_is_rowid = false;
+
+    for (out_idx, column) in columns.iter().enumerate() {
+        let ResultColumn::Expr { expr, .. } = column else {
+            return None;
+        };
+        let Expr::FunctionCall {
+            name,
+            args,
+            distinct: false,
+            order_by,
+            filter: None,
+            over: None,
+            ..
+        } = expr
+        else {
+            return None;
+        };
+        if !order_by.is_empty() {
+            return None;
+        }
+
+        if name.eq_ignore_ascii_case("count") && matches!(args, FunctionArgs::Star) {
+            if count_out_idx.replace(out_idx).is_some() {
+                return None;
+            }
+            continue;
+        }
+
+        if name.eq_ignore_ascii_case("sum")
+            && let FunctionArgs::List(exprs) = args
+            && let [arg_expr] = exprs.as_slice()
+        {
+            match resolve_column_ref(arg_expr, table, table_alias) {
+                Some(SortKeySource::Column(idx)) => {
+                    if sum_out_idx.replace(out_idx).is_some() {
+                        return None;
+                    }
+                    sum_col_idx = Some(idx);
+                    sum_is_rowid = false;
+                    continue;
+                }
+                Some(SortKeySource::Rowid) => {
+                    if sum_out_idx.replace(out_idx).is_some() {
+                        return None;
+                    }
+                    sum_col_idx = None;
+                    sum_is_rowid = true;
+                    continue;
+                }
+                Some(SortKeySource::Expression(_)) | None => return None,
+            }
+        }
+
+        return None;
+    }
+
+    Some(CountStarPlusSumPlan {
+        count_out_idx: count_out_idx?,
+        sum_out_idx: sum_out_idx?,
+        sum_col_idx,
+        sum_is_rowid,
+    })
+}
+
+#[allow(clippy::too_many_arguments, clippy::unnecessary_wraps)]
+fn codegen_select_count_star(
+    b: &mut ProgramBuilder,
+    cursor: i32,
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    schema: &[TableSchema],
+    where_clause: Option<&Expr>,
+    out_regs: i32,
+    done_label: crate::Label,
+    end_label: crate::Label,
+    rowid_range: Option<RowidRangeTarget<'_>>,
+) -> Result<(), CodegenError> {
+    let scan_ctx = ScanCtx {
+        cursor,
+        table,
+        table_alias,
+        schema: Some(schema),
+        register_base: None,
+        secondary: None,
+    };
+    if let Some((idx_schema, probe_target)) =
+        extract_count_indexed_exists_target(where_clause, table, table_alias, schema)
+    {
+        return codegen_select_count_star_indexed_in_scan(
+            b,
+            cursor,
+            table,
+            table_alias,
+            schema,
+            out_regs,
+            done_label,
+            end_label,
+            idx_schema,
+            probe_target,
+        );
+    }
+    if let Some((idx_schema, in_target)) =
+        extract_count_indexed_in_target(where_clause, table, table_alias, schema, &scan_ctx)
+    {
+        return codegen_select_count_star_indexed_in_scan(
+            b,
+            cursor,
+            table,
+            table_alias,
+            schema,
+            out_regs,
+            done_label,
+            end_label,
+            idx_schema,
+            in_target,
+        );
+    }
+
+    b.emit_jump_to_label(Opcode::Init, 0, 0, end_label, P4::None, 0);
+    b.emit_op(Opcode::Transaction, 0, 0, 0, P4::None, 0);
+
+    if where_clause.is_none() {
+        // bd-wwqen.1: cheapest-index optimization for COUNT(*).
+        // Open the smallest non-partial index instead of the table when
+        // available — index B-trees have smaller rows and fewer pages.
+        // Uses the SAME cursor ID as the table would, so the rest of the
+        // program shape (Count, Close, Halt) is identical.
+        let cheapest_index = table
+            .indexes
+            .iter()
+            .filter(|idx| idx.where_clause.is_none())
+            .filter(|idx| !idx.columns.is_empty())
+            .min_by_key(|idx| idx.columns.len());
+
+        if let Some(idx) = cheapest_index {
+            b.emit_op(
+                Opcode::OpenRead,
+                cursor,
+                idx.root_page,
+                0,
+                P4::Index(idx.name.clone()),
+                0,
+            );
+        } else {
+            b.emit_op(
+                Opcode::OpenRead,
+                cursor,
+                table.root_page,
+                0,
+                P4::Table(table.name.clone()),
+                0,
+            );
+        }
+
+        b.emit_op(Opcode::Count, cursor, out_regs, 0, P4::None, 0);
+        b.resolve_label(done_label);
+        b.emit_op(Opcode::ResultRow, out_regs, 1, 0, P4::None, 0);
+        b.emit_op(Opcode::Close, cursor, 0, 0, P4::None, 0);
+        b.emit_op(Opcode::Halt, 0, 0, 0, P4::None, 0);
+        b.resolve_label(end_label);
+        return Ok(());
+    }
+
+    // Non-COUNT path: open table cursor as before.
+    b.emit_op(
+        Opcode::OpenRead,
+        cursor,
+        table.root_page,
+        0,
+        P4::Table(table.name.clone()),
+        0,
+    );
+
+    b.emit_op(Opcode::Integer, 0, out_regs, 0, P4::None, 0);
+
+    let upper_reg = rowid_range.and_then(|range| {
+        range.upper.map(|bound| {
+            let reg = b.alloc_reg();
+            emit_expr(b, bound.expr, reg, None);
+            b.emit_jump_to_label(Opcode::IsNull, reg, 0, done_label, P4::None, 0);
+            reg
+        })
+    });
+    let upper_comparison = rowid_range.and_then(|range| {
+        range
+            .upper
+            .map(|bound| resolved_rowid_range_comparison(table, table_alias, schema, bound))
+    });
+
+    if let Some(range) = rowid_range {
+        if let Some(bound) = range.lower {
+            let lower_reg = b.alloc_reg();
+            emit_expr(b, bound.expr, lower_reg, None);
+            b.emit_jump_to_label(Opcode::IsNull, lower_reg, 0, done_label, P4::None, 0);
+            let seek_opcode = if bound.inclusive {
+                Opcode::SeekGE
+            } else {
+                Opcode::SeekGT
+            };
+            b.emit_jump_to_label(seek_opcode, cursor, lower_reg, done_label, P4::None, 0);
+        } else {
+            b.emit_jump_to_label(Opcode::Rewind, cursor, 0, done_label, P4::None, 0);
+        }
+    } else {
+        b.emit_jump_to_label(Opcode::Rewind, cursor, 0, done_label, P4::None, 0);
+    }
+
+    let loop_top = b.current_addr();
+    let skip_label = b.emit_label();
+
+    if let Some(range) = rowid_range
+        && let Some(bound) = range.upper
+    {
+        let current_rowid_reg = b.alloc_reg();
+        let stop_opcode = if bound.inclusive {
+            Opcode::Gt
+        } else {
+            Opcode::Ge
+        };
+        b.emit_op(Opcode::Rowid, cursor, current_rowid_reg, 0, P4::None, 0);
+        b.emit_jump_to_label(
+            stop_opcode,
+            upper_reg.expect("upper bound register should exist"),
+            current_rowid_reg,
+            done_label,
+            upper_comparison
+                .as_ref()
+                .map_or(P4::None, |comparison| comparison.collation_p4.clone()),
+            upper_comparison
+                .as_ref()
+                .map_or(0, |comparison| comparison.cmp_p5),
+        );
+    }
+
+    if let Some(where_expr) = where_clause {
+        emit_where_filter(
+            b,
+            where_expr,
+            cursor,
+            table,
+            table_alias,
+            schema,
+            skip_label,
+        );
+    }
+    b.emit_op(Opcode::AddImm, out_regs, 1, 0, P4::None, 0);
+    b.resolve_label(skip_label);
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let loop_body = loop_top as i32;
+    b.emit_op(Opcode::Next, cursor, loop_body, 0, P4::None, 0);
+
+    b.resolve_label(done_label);
+    b.emit_op(Opcode::ResultRow, out_regs, 1, 0, P4::None, 0);
+    b.emit_op(Opcode::Close, cursor, 0, 0, P4::None, 0);
+    b.emit_op(Opcode::Halt, 0, 0, 0, P4::None, 0);
+    b.resolve_label(end_label);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments, clippy::unnecessary_wraps)]
+fn codegen_select_count_star_plus_sum(
+    b: &mut ProgramBuilder,
+    cursor: i32,
+    table: &TableSchema,
+    plan: &CountStarPlusSumPlan,
+    out_regs: i32,
+    done_label: crate::Label,
+    end_label: crate::Label,
+) -> Result<(), CodegenError> {
+    let count_reg = out_regs + i32::try_from(plan.count_out_idx).unwrap_or_default();
+    let sum_reg = out_regs + i32::try_from(plan.sum_out_idx).unwrap_or_default();
+
+    b.emit_jump_to_label(Opcode::Init, 0, 0, end_label, P4::None, 0);
+    b.emit_op(Opcode::Transaction, 0, 0, 0, P4::None, 0);
+    b.emit_op(
+        Opcode::OpenRead,
+        cursor,
+        table.root_page,
+        0,
+        P4::Table(table.name.clone()),
+        0,
+    );
+    b.emit_op(Opcode::Count, cursor, count_reg, 0, P4::None, 0);
+    b.emit_op(Opcode::Null, 0, sum_reg, 0, P4::None, 0);
+
+    let finalize_label = b.emit_label();
+    let loop_start = b.current_addr();
+    b.emit_jump_to_label(Opcode::Rewind, cursor, 0, finalize_label, P4::None, 0);
+
+    let arg_reg = b.alloc_reg();
+    if plan.sum_is_rowid {
+        b.emit_op(Opcode::Rowid, cursor, arg_reg, 0, P4::None, 0);
+    } else {
+        b.emit_op(
+            Opcode::Column,
+            cursor,
+            i32::try_from(plan.sum_col_idx.unwrap_or_default()).unwrap_or_default(),
+            arg_reg,
+            P4::None,
+            0,
+        );
+    }
+    b.emit_op(
+        Opcode::AggStep,
+        0,
+        arg_reg,
+        sum_reg,
+        P4::FuncName("SUM".to_owned()),
+        1,
+    );
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let loop_body = (loop_start + 1) as i32;
+    b.emit_op(Opcode::Next, cursor, loop_body, 0, P4::None, 0);
+
+    b.resolve_label(finalize_label);
+    b.emit_op(
+        Opcode::AggFinal,
+        sum_reg,
+        1,
+        0,
+        P4::FuncName("SUM".to_owned()),
+        0,
+    );
+    b.resolve_label(done_label);
+    b.emit_op(Opcode::ResultRow, out_regs, 2, 0, P4::None, 0);
+    b.emit_op(Opcode::Close, cursor, 0, 0, P4::None, 0);
+    b.emit_op(Opcode::Halt, 0, 0, 0, P4::None, 0);
+    b.resolve_label(end_label);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments, clippy::unnecessary_wraps)]
+fn codegen_select_group_by_rowid_bucket_sum(
+    b: &mut ProgramBuilder,
+    cursor: i32,
+    table: &TableSchema,
+    plan: &GroupByRowidBucketSumPlan,
+    out_regs: i32,
+    done_label: crate::Label,
+    end_label: crate::Label,
+) -> Result<(), CodegenError> {
+    let group_reg = out_regs + i32::try_from(plan.group_out_idx).unwrap_or_default();
+    let sum_out_reg = out_regs + i32::try_from(plan.sum_out_idx).unwrap_or_default();
+    let divisor_reg = b.alloc_reg();
+    let rowid_reg = b.alloc_reg();
+    let cur_key_reg = b.alloc_reg();
+    let prev_key_reg = b.alloc_reg();
+    let sum_accum_reg = b.alloc_reg();
+    let sum_arg_reg = b.alloc_reg();
+    let have_group_reg = b.alloc_reg();
+
+    b.emit_op(
+        Opcode::OpenRead,
+        cursor,
+        table.root_page,
+        0,
+        P4::Table(table.name.clone()),
+        0,
+    );
+    b.emit_op(
+        Opcode::Int64,
+        0,
+        divisor_reg,
+        0,
+        P4::Int64(plan.group_divisor),
+        0,
+    );
+    b.emit_op(Opcode::Null, 0, prev_key_reg, 0, P4::None, 0);
+    b.emit_op(Opcode::Null, 0, sum_accum_reg, 0, P4::None, 0);
+    b.emit_op(Opcode::Integer, 0, have_group_reg, 0, P4::None, 0);
+
+    let finalize_label = b.emit_label();
+    let compare_keys_label = b.emit_label();
+    let new_group_label = b.emit_label();
+    let first_row_label = b.emit_label();
+    let same_group_label = b.emit_label();
+    let scan_start = b.current_addr();
+    b.emit_jump_to_label(Opcode::Rewind, cursor, 0, finalize_label, P4::None, 0);
+    b.emit_op(Opcode::Rowid, cursor, rowid_reg, 0, P4::None, 0);
+    b.emit_op(
+        Opcode::Divide,
+        divisor_reg,
+        rowid_reg,
+        cur_key_reg,
+        P4::None,
+        0,
+    );
+
+    b.emit_jump_to_label(
+        Opcode::IfPos,
+        have_group_reg,
+        0,
+        compare_keys_label,
+        P4::None,
+        0,
+    );
+    b.emit_jump_to_label(Opcode::Goto, 0, 0, first_row_label, P4::None, 0);
+
+    b.resolve_label(compare_keys_label);
+    b.emit_jump_to_label(
+        Opcode::Ne,
+        cur_key_reg,
+        prev_key_reg,
+        new_group_label,
+        P4::None,
+        0x80,
+    );
+    b.emit_jump_to_label(Opcode::Goto, 0, 0, same_group_label, P4::None, 0);
+
+    b.resolve_label(new_group_label);
+    b.emit_op(
+        Opcode::AggFinal,
+        sum_accum_reg,
+        1,
+        0,
+        P4::FuncName("SUM".to_owned()),
+        0,
+    );
+    b.emit_op(Opcode::Copy, prev_key_reg, group_reg, 0, P4::None, 0);
+    b.emit_op(Opcode::Copy, sum_accum_reg, sum_out_reg, 0, P4::None, 0);
+    b.emit_op(Opcode::ResultRow, out_regs, 2, 0, P4::None, 0);
+    b.emit_op(Opcode::Null, 0, sum_accum_reg, 0, P4::None, 0);
+
+    b.resolve_label(first_row_label);
+    b.emit_op(Opcode::Integer, 1, have_group_reg, 0, P4::None, 0);
+
+    b.resolve_label(same_group_label);
+    b.emit_op(Opcode::Copy, cur_key_reg, prev_key_reg, 0, P4::None, 0);
+    b.emit_op(
+        Opcode::Column,
+        cursor,
+        i32::try_from(plan.sum_col_idx).unwrap_or_default(),
+        sum_arg_reg,
+        P4::None,
+        0,
+    );
+    b.emit_op(
+        Opcode::AggStep,
+        0,
+        sum_arg_reg,
+        sum_accum_reg,
+        P4::FuncName("SUM".to_owned()),
+        1,
+    );
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let scan_body = (scan_start + 1) as i32;
+    b.emit_op(Opcode::Next, cursor, scan_body, 0, P4::None, 0);
+
+    let output_final_label = b.emit_label();
+    b.resolve_label(finalize_label);
+    b.emit_jump_to_label(
+        Opcode::IfPos,
+        have_group_reg,
+        0,
+        output_final_label,
+        P4::None,
+        0,
+    );
+    b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+
+    b.resolve_label(output_final_label);
+    b.emit_op(
+        Opcode::AggFinal,
+        sum_accum_reg,
+        1,
+        0,
+        P4::FuncName("SUM".to_owned()),
+        0,
+    );
+    b.emit_op(Opcode::Copy, prev_key_reg, group_reg, 0, P4::None, 0);
+    b.emit_op(Opcode::Copy, sum_accum_reg, sum_out_reg, 0, P4::None, 0);
+    b.emit_op(Opcode::ResultRow, out_regs, 2, 0, P4::None, 0);
+
+    b.resolve_label(done_label);
+    b.emit_op(Opcode::Close, cursor, 0, 0, P4::None, 0);
+    b.emit_op(Opcode::Halt, 0, 0, 0, P4::None, 0);
+    b.resolve_label(end_label);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments, clippy::unnecessary_wraps)]
+fn codegen_select_count_star_indexed_in_scan(
+    b: &mut ProgramBuilder,
+    cursor: i32,
+    table: &TableSchema,
+    _table_alias: Option<&str>,
+    schema: &[TableSchema],
+    out_regs: i32,
+    done_label: crate::Label,
+    end_label: crate::Label,
+    idx_schema: &IndexSchema,
+    in_target: CountIndexedInTarget<'_>,
+) -> Result<(), CodegenError> {
+    let idx_cursor = cursor + 1;
+    let probe_cursor = cursor + 2;
+    let source_cursor = cursor + 3;
+
+    if let CountIndexedInTarget::ProbeSource(probe_source) = &in_target
+        && count_probe_source_can_skip_materialization(probe_source)
+    {
+        let use_exists_semijoin_merge =
+            count_exists_semijoin_merge_is_safe(table, idx_schema, probe_source);
+        let source_rowid_range = extract_safe_probe_source_rowid_range(probe_source);
+
+        b.emit_jump_to_label(Opcode::Init, 0, 0, end_label, P4::None, 0);
+        b.emit_op(Opcode::Transaction, 0, 0, 0, P4::None, 0);
+        b.emit_op(Opcode::Integer, 0, out_regs, 0, P4::None, 0);
+        b.emit_op(
+            Opcode::OpenRead,
+            idx_cursor,
+            idx_schema.root_page,
+            0,
+            P4::Index(idx_schema.name.clone()),
+            0,
+        );
+        b.emit_op(
+            Opcode::OpenRead,
+            source_cursor,
+            probe_source.table.root_page,
+            0,
+            P4::Table(probe_source.table.name.clone()),
+            0,
+        );
+
+        let r_probe_value = b.alloc_reg();
+        let r_min_rowid = b.alloc_reg();
+        let r_probe_record = b.alloc_reg();
+        let r_current_key = b.alloc_reg();
+        let probe_done = b.emit_label();
+        if use_exists_semijoin_merge {
+            b.emit_jump_to_label(Opcode::Rewind, idx_cursor, 0, probe_done, P4::None, 0);
+        }
+        let source_upper_reg = source_rowid_range.and_then(|range| {
+            range.upper.map(|bound| {
+                let reg = b.alloc_reg();
+                emit_expr(b, bound.expr, reg, None);
+                b.emit_jump_to_label(Opcode::IsNull, reg, 0, probe_done, P4::None, 0);
+                reg
+            })
+        });
+        let source_upper_comparison = source_rowid_range.and_then(|range| {
+            range.upper.map(|bound| {
+                resolved_rowid_range_comparison(
+                    probe_source.table,
+                    probe_source.table_alias,
+                    schema,
+                    bound,
+                )
+            })
+        });
+
+        let source_rowid_reg = (source_rowid_range.is_some()
+            && matches!(probe_source.value, InProbeValue::Rowid))
+        .then(|| b.alloc_reg());
+
+        let probe_start = b.current_addr();
+        if let Some(range) = source_rowid_range {
+            if let Some(bound) = range.lower {
+                let lower_reg = b.alloc_reg();
+                emit_expr(b, bound.expr, lower_reg, None);
+                b.emit_jump_to_label(Opcode::IsNull, lower_reg, 0, probe_done, P4::None, 0);
+                let seek_opcode = if bound.inclusive {
+                    Opcode::SeekGE
+                } else {
+                    Opcode::SeekGT
+                };
+                b.emit_jump_to_label(
+                    seek_opcode,
+                    source_cursor,
+                    lower_reg,
+                    probe_done,
+                    P4::None,
+                    0,
+                );
+            } else {
+                b.emit_jump_to_label(Opcode::Rewind, source_cursor, 0, probe_done, P4::None, 0);
+            }
+        } else {
+            b.emit_jump_to_label(Opcode::Rewind, source_cursor, 0, probe_done, P4::None, 0);
+        }
+        let probe_loop_body = if let Some(rowid_reg) = source_rowid_reg {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let loop_addr = b.current_addr() as i32;
+            b.emit_op(Opcode::Rowid, source_cursor, rowid_reg, 0, P4::None, 0);
+            loop_addr
+        } else {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let loop_addr = (probe_start + 1) as i32;
+            loop_addr
+        };
+        let skip_row = (probe_source.where_clause.is_some() && source_rowid_range.is_none())
+            .then(|| b.emit_label());
+        if let Some(range) = source_rowid_range
+            && let Some(bound) = range.upper
+        {
+            let current_rowid_reg = source_rowid_reg.unwrap_or_else(|| b.alloc_reg());
+            let stop_opcode = if bound.inclusive {
+                Opcode::Gt
+            } else {
+                Opcode::Ge
+            };
+            b.emit_jump_to_label(
+                stop_opcode,
+                source_upper_reg.expect("upper bound register should exist"),
+                current_rowid_reg,
+                probe_done,
+                source_upper_comparison
+                    .as_ref()
+                    .map_or(P4::None, |comparison| comparison.collation_p4.clone()),
+                source_upper_comparison
+                    .as_ref()
+                    .map_or(0, |comparison| comparison.cmp_p5),
+            );
+        }
+        if let (Some(where_expr), Some(skip_label)) = (probe_source.where_clause, skip_row) {
+            emit_where_filter(
+                b,
+                where_expr,
+                source_cursor,
+                probe_source.table,
+                probe_source.table_alias,
+                schema,
+                skip_label,
+            );
+        }
+
+        let probe_scan = ScanCtx {
+            cursor: source_cursor,
+            table: probe_source.table,
+            table_alias: probe_source.table_alias,
+            schema: Some(schema),
+            register_base: None,
+            secondary: None,
+        };
+        if let Some(rowid_reg) = source_rowid_reg {
+            b.emit_op(Opcode::Copy, rowid_reg, r_probe_value, 0, P4::None, 0);
+        } else {
+            emit_in_probe_value(b, source_cursor, probe_source, r_probe_value, &probe_scan);
+        }
+
+        let next_probe = b.emit_label();
+        b.emit_jump_to_label(Opcode::IsNull, r_probe_value, 0, next_probe, P4::None, 0);
+        if use_exists_semijoin_merge {
+            let advance_outer = b.emit_label();
+            let align_outer = b.emit_label();
+
+            b.resolve_label(align_outer);
+            b.emit_op(Opcode::Column, idx_cursor, 0, r_current_key, P4::None, 0);
+            b.emit_jump_to_label(
+                Opcode::Lt,
+                r_current_key,
+                r_probe_value,
+                advance_outer,
+                P4::None,
+                0,
+            );
+            b.emit_jump_to_label(
+                Opcode::Gt,
+                r_current_key,
+                r_probe_value,
+                next_probe,
+                P4::None,
+                0,
+            );
+
+            b.emit_op(
+                Opcode::CountIndexEqRun,
+                idx_cursor,
+                out_regs,
+                r_probe_value,
+                P4::None,
+                0,
+            );
+            b.emit_jump_to_label(Opcode::IfNullRow, idx_cursor, 0, probe_done, P4::None, 0);
+            b.emit_jump_to_label(Opcode::Goto, 0, 0, next_probe, P4::None, 0);
+
+            b.resolve_label(advance_outer);
+            b.emit_jump_to_label(Opcode::Next, idx_cursor, 0, align_outer, P4::None, 0);
+            b.emit_jump_to_label(Opcode::Goto, 0, 0, probe_done, P4::None, 0);
+        } else {
+            b.emit_op(Opcode::Int64, 0, r_min_rowid, 0, P4::Int64(i64::MIN), 0);
+            b.emit_op(
+                Opcode::MakeRecord,
+                r_probe_value,
+                2,
+                r_probe_record,
+                P4::None,
+                0,
+            );
+            b.emit_jump_to_label(
+                Opcode::SeekGE,
+                idx_cursor,
+                r_probe_record,
+                next_probe,
+                P4::None,
+                0,
+            );
+
+            let idx_loop_top = b.current_addr();
+            b.emit_op(Opcode::Column, idx_cursor, 0, r_current_key, P4::None, 0);
+            b.emit_jump_to_label(
+                Opcode::Ne,
+                r_probe_value,
+                r_current_key,
+                next_probe,
+                P4::None,
+                0,
+            );
+            b.emit_op(Opcode::AddImm, out_regs, 1, 0, P4::None, 0);
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let idx_loop_body = idx_loop_top as i32;
+            b.emit_op(Opcode::Next, idx_cursor, idx_loop_body, 0, P4::None, 0);
+        }
+
+        if let Some(skip_label) = skip_row {
+            b.resolve_label(skip_label);
+        }
+        b.resolve_label(next_probe);
+        b.emit_op(Opcode::Next, source_cursor, probe_loop_body, 0, P4::None, 0);
+
+        b.resolve_label(probe_done);
+        b.emit_op(Opcode::ResultRow, out_regs, 1, 0, P4::None, 0);
+        b.emit_op(Opcode::Close, source_cursor, 0, 0, P4::None, 0);
+        b.emit_op(Opcode::Close, idx_cursor, 0, 0, P4::None, 0);
+        b.emit_op(Opcode::Halt, 0, 0, 0, P4::None, 0);
+        b.resolve_label(end_label);
+        return Ok(());
+    }
+
+    b.emit_jump_to_label(Opcode::Init, 0, 0, end_label, P4::None, 0);
+    b.emit_op(Opcode::Transaction, 0, 0, 0, P4::None, 0);
+    b.emit_op(Opcode::Integer, 0, out_regs, 0, P4::None, 0);
+    b.emit_op(
+        Opcode::OpenRead,
+        idx_cursor,
+        idx_schema.root_page,
+        0,
+        P4::Index(idx_schema.name.clone()),
+        0,
+    );
+    b.emit_op(Opcode::OpenAutoindex, probe_cursor, 1, 0, P4::None, 0);
+
+    let use_materialized_semijoin_merge = matches!(
+        &in_target,
+        CountIndexedInTarget::MaterializedProbeSource(probe_source)
+            if count_exists_semijoin_merge_is_safe(table, idx_schema, probe_source)
+    );
+
+    let r_value = b.alloc_temp();
+    let r_key = b.alloc_temp();
+    match in_target {
+        CountIndexedInTarget::List(values) => {
+            for value_expr in values {
+                emit_expr(b, value_expr, r_value, None);
+                let next_value = b.emit_label();
+                let skip_insert = b.emit_label();
+                b.emit_jump_to_label(Opcode::IsNull, r_value, 0, next_value, P4::None, 0);
+                b.emit_op(Opcode::MakeRecord, r_value, 1, r_key, P4::None, 0);
+                b.emit_jump_to_label(Opcode::Found, probe_cursor, r_key, skip_insert, P4::None, 0);
+                b.emit_op(Opcode::IdxInsert, probe_cursor, r_key, 0, P4::None, 0);
+                b.resolve_label(skip_insert);
+                b.resolve_label(next_value);
+            }
+        }
+        CountIndexedInTarget::ProbeSource(probe_source)
+        | CountIndexedInTarget::MaterializedProbeSource(probe_source) => {
+            b.emit_op(
+                Opcode::OpenRead,
+                source_cursor,
+                probe_source.table.root_page,
+                0,
+                P4::Table(probe_source.table.name.clone()),
+                0,
+            );
+
+            let build_done = b.emit_label();
+            let source_rowid_range = extract_safe_probe_source_rowid_range(&probe_source);
+            let source_upper_reg = source_rowid_range.and_then(|range| {
+                range.upper.map(|bound| {
+                    let reg = b.alloc_reg();
+                    emit_expr(b, bound.expr, reg, None);
+                    b.emit_jump_to_label(Opcode::IsNull, reg, 0, build_done, P4::None, 0);
+                    reg
+                })
+            });
+            let source_upper_comparison = source_rowid_range.and_then(|range| {
+                range.upper.map(|bound| {
+                    resolved_rowid_range_comparison(
+                        probe_source.table,
+                        probe_source.table_alias,
+                        schema,
+                        bound,
+                    )
+                })
+            });
+            let build_start = b.current_addr();
+            if let Some(range) = source_rowid_range {
+                if let Some(bound) = range.lower {
+                    let lower_reg = b.alloc_reg();
+                    emit_expr(b, bound.expr, lower_reg, None);
+                    b.emit_jump_to_label(Opcode::IsNull, lower_reg, 0, build_done, P4::None, 0);
+                    let seek_opcode = if bound.inclusive {
+                        Opcode::SeekGE
+                    } else {
+                        Opcode::SeekGT
+                    };
+                    b.emit_jump_to_label(
+                        seek_opcode,
+                        source_cursor,
+                        lower_reg,
+                        build_done,
+                        P4::None,
+                        0,
+                    );
+                } else {
+                    b.emit_jump_to_label(Opcode::Rewind, source_cursor, 0, build_done, P4::None, 0);
+                }
+            } else {
+                b.emit_jump_to_label(Opcode::Rewind, source_cursor, 0, build_done, P4::None, 0);
+            }
+            let skip_row = probe_source.where_clause.map(|_| b.emit_label());
+            if let Some(range) = source_rowid_range
+                && let Some(bound) = range.upper
+            {
+                let current_rowid_reg = b.alloc_reg();
+                let stop_opcode = if bound.inclusive {
+                    Opcode::Gt
+                } else {
+                    Opcode::Ge
+                };
+                b.emit_op(
+                    Opcode::Rowid,
+                    source_cursor,
+                    current_rowid_reg,
+                    0,
+                    P4::None,
+                    0,
+                );
+                b.emit_jump_to_label(
+                    stop_opcode,
+                    source_upper_reg.expect("upper bound register should exist"),
+                    current_rowid_reg,
+                    build_done,
+                    source_upper_comparison
+                        .as_ref()
+                        .map_or(P4::None, |comparison| comparison.collation_p4.clone()),
+                    source_upper_comparison
+                        .as_ref()
+                        .map_or(0, |comparison| comparison.cmp_p5),
+                );
+            }
+            if let (Some(where_expr), Some(skip_label)) = (probe_source.where_clause, skip_row) {
+                emit_where_filter(
+                    b,
+                    where_expr,
+                    source_cursor,
+                    probe_source.table,
+                    probe_source.table_alias,
+                    schema,
+                    skip_label,
+                );
+            }
+
+            let probe_scan = ScanCtx {
+                cursor: source_cursor,
+                table: probe_source.table,
+                table_alias: probe_source.table_alias,
+                schema: Some(schema),
+                register_base: None,
+                secondary: None,
+            };
+            emit_in_probe_value(b, source_cursor, &probe_source, r_value, &probe_scan);
+
+            let skip_insert = b.emit_label();
+            let next_value = b.emit_label();
+            b.emit_jump_to_label(Opcode::IsNull, r_value, 0, next_value, P4::None, 0);
+            b.emit_op(Opcode::MakeRecord, r_value, 1, r_key, P4::None, 0);
+            b.emit_jump_to_label(Opcode::Found, probe_cursor, r_key, skip_insert, P4::None, 0);
+            b.emit_op(Opcode::IdxInsert, probe_cursor, r_key, 0, P4::None, 0);
+            b.resolve_label(skip_insert);
+            b.resolve_label(next_value);
+
+            if let Some(skip_label) = skip_row {
+                b.resolve_label(skip_label);
+            }
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let build_loop_body = (build_start + 1) as i32;
+            b.emit_op(Opcode::Next, source_cursor, build_loop_body, 0, P4::None, 0);
+            b.resolve_label(build_done);
+            b.emit_op(Opcode::Close, source_cursor, 0, 0, P4::None, 0);
+        }
+    }
+    b.free_temp(r_key);
+    b.free_temp(r_value);
+
+    if use_materialized_semijoin_merge {
+        b.emit_jump_to_label(Opcode::Rewind, probe_cursor, 0, done_label, P4::None, 0);
+        b.emit_jump_to_label(Opcode::Rewind, idx_cursor, 0, done_label, P4::None, 0);
+
+        let r_probe_value = b.alloc_reg();
+        let r_current_key = b.alloc_reg();
+        let probe_loop_top = b.current_addr();
+        b.emit_op(Opcode::Column, probe_cursor, 0, r_probe_value, P4::None, 0);
+
+        let next_probe = b.emit_label();
+        let advance_outer = b.emit_label();
+        let align_outer = b.emit_label();
+
+        b.resolve_label(align_outer);
+        b.emit_op(Opcode::Column, idx_cursor, 0, r_current_key, P4::None, 0);
+        b.emit_jump_to_label(
+            Opcode::Lt,
+            r_current_key,
+            r_probe_value,
+            advance_outer,
+            P4::None,
+            0,
+        );
+        b.emit_jump_to_label(
+            Opcode::Gt,
+            r_current_key,
+            r_probe_value,
+            next_probe,
+            P4::None,
+            0,
+        );
+
+        b.emit_op(
+            Opcode::CountIndexEqRun,
+            idx_cursor,
+            out_regs,
+            r_probe_value,
+            P4::None,
+            0,
+        );
+        b.emit_jump_to_label(Opcode::IfNullRow, idx_cursor, 0, done_label, P4::None, 0);
+        b.emit_jump_to_label(Opcode::Goto, 0, 0, next_probe, P4::None, 0);
+
+        b.resolve_label(advance_outer);
+        b.emit_jump_to_label(Opcode::Next, idx_cursor, 0, align_outer, P4::None, 0);
+        b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+
+        b.resolve_label(next_probe);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let probe_loop_body = probe_loop_top as i32;
+        b.emit_op(Opcode::Next, probe_cursor, probe_loop_body, 0, P4::None, 0);
+    } else {
+        b.emit_jump_to_label(Opcode::Rewind, probe_cursor, 0, done_label, P4::None, 0);
+
+        let r_probe_value = b.alloc_reg();
+        let r_min_rowid = b.alloc_reg();
+        let r_probe_record = b.alloc_reg();
+        let r_current_key = b.alloc_reg();
+
+        let probe_loop_top = b.current_addr();
+        b.emit_op(Opcode::Column, probe_cursor, 0, r_probe_value, P4::None, 0);
+        b.emit_op(Opcode::Int64, 0, r_min_rowid, 0, P4::Int64(i64::MIN), 0);
+        b.emit_op(
+            Opcode::MakeRecord,
+            r_probe_value,
+            2,
+            r_probe_record,
+            P4::None,
+            0,
+        );
+        let next_probe = b.emit_label();
+        b.emit_jump_to_label(
+            Opcode::SeekGE,
+            idx_cursor,
+            r_probe_record,
+            next_probe,
+            P4::None,
+            0,
+        );
+
+        let idx_loop_top = b.current_addr();
+        b.emit_op(Opcode::Column, idx_cursor, 0, r_current_key, P4::None, 0);
+        b.emit_jump_to_label(
+            Opcode::Ne,
+            r_probe_value,
+            r_current_key,
+            next_probe,
+            P4::None,
+            0,
+        );
+        b.emit_op(Opcode::AddImm, out_regs, 1, 0, P4::None, 0);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let idx_loop_body = idx_loop_top as i32;
+        b.emit_op(Opcode::Next, idx_cursor, idx_loop_body, 0, P4::None, 0);
+
+        b.resolve_label(next_probe);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let probe_loop_body = probe_loop_top as i32;
+        b.emit_op(Opcode::Next, probe_cursor, probe_loop_body, 0, P4::None, 0);
+    }
+
+    b.resolve_label(done_label);
+    b.emit_op(Opcode::ResultRow, out_regs, 1, 0, P4::None, 0);
+    b.emit_op(Opcode::Close, probe_cursor, 0, 0, P4::None, 0);
+    b.emit_op(Opcode::Close, idx_cursor, 0, 0, P4::None, 0);
+    b.emit_op(Opcode::Halt, 0, 0, 0, P4::None, 0);
+    b.resolve_label(end_label);
+    Ok(())
+}
+
+fn extract_safe_probe_source_rowid_range<'a>(
+    probe_source: &InProbeSource<'a>,
+) -> Option<RowidRangeTarget<'a>> {
+    let range = extract_rowid_range_target(
+        probe_source.where_clause,
+        Some(probe_source.table),
+        probe_source.table_alias,
+    )?;
+    rowid_range_fast_path_is_safe(range).then_some(range)
+}
+
+fn count_exists_semijoin_merge_is_safe(
+    table: &TableSchema,
+    idx_schema: &IndexSchema,
+    probe_source: &InProbeSource<'_>,
+) -> bool {
+    if !matches!(probe_source.value, InProbeValue::Rowid) {
+        return false;
+    }
+    idx_schema
+        .columns
+        .first()
+        .and_then(|column_name| table.column_index(column_name))
+        .and_then(|column_idx| table.columns.get(column_idx))
+        .is_some_and(|column| column.is_ipk || matches!(column.affinity, 'D' | 'd' | 'C'))
+}
+
+fn resolved_rowid_range_comparison(
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    schema: &[TableSchema],
+    bound: RowidRangeBound<'_>,
+) -> ResolvedComparisonInfo {
+    let scan = ScanCtx {
+        cursor: 0,
+        table,
+        table_alias,
+        schema: Some(schema),
+        register_base: None,
+        secondary: None,
+    };
+    ResolvedComparisonInfo::new(bound.rowid_expr, bound.expr, &scan)
+}
+
+fn resolved_index_range_comparison(
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    schema: &[TableSchema],
+    column_name: &str,
+    bound_expr: &Expr,
+) -> ResolvedComparisonInfo {
+    let column_expr = Expr::Column(ColumnRef::bare(column_name), Span::ZERO);
+    let scan = ScanCtx {
+        cursor: 0,
+        table,
+        table_alias,
+        schema: Some(schema),
+        register_base: None,
+        secondary: None,
+    };
+    ResolvedComparisonInfo::new(&column_expr, bound_expr, &scan)
+}
+
+fn emit_covering_output_reads(
+    b: &mut ProgramBuilder,
+    index_cursor: i32,
+    rowid_reg: i32,
+    sources: &[CoveringOutputSource],
+    out_regs: i32,
+) {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    for (offset, source) in sources.iter().enumerate() {
+        let target_reg = out_regs + offset as i32;
+        match source {
+            CoveringOutputSource::IndexColumn(index_col) => {
+                b.emit_op(
+                    Opcode::Column,
+                    index_cursor,
+                    *index_col,
+                    target_reg,
+                    P4::None,
+                    0,
+                );
+            }
+            CoveringOutputSource::Rowid => {
+                b.emit_op(Opcode::Copy, rowid_reg, target_reg, 0, P4::None, 0);
+            }
+        }
+    }
+}
+
+/// Generate VDBE bytecode for an ORDER BY scan that can stream rows directly
+/// from an index in sorted order (no sorter temp B-tree).
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn codegen_select_index_ordered_scan(
+    b: &mut ProgramBuilder,
+    cursor: i32,
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    schema: &[TableSchema],
+    columns: &[ResultColumn],
+    where_clause: Option<&Expr>,
+    limit_clause: Option<&LimitClause>,
+    out_regs: i32,
+    out_col_count: i32,
+    done_label: crate::Label,
+    end_label: crate::Label,
+    index_plan: &OrderByIndexPlan,
+) -> Result<(), CodegenError> {
+    let index_cursor = cursor + 1;
+    let needs_table_lookup = index_plan.covering_output.is_none() || where_clause.is_some();
+    let where_placeholder_base = b.current_anon_placeholder();
+    let equality_prefix_exprs = if index_plan.equality_prefix_len == 0 {
+        Vec::new()
+    } else {
+        extract_index_equality_prefix_exprs(&index_plan.index, table, table_alias, where_clause)
+    };
+    let use_bounded_prefix_scan = !index_plan.descending
+        && index_plan.equality_prefix_len > 0
+        && equality_prefix_exprs.len() >= index_plan.equality_prefix_len;
+
+    // Allocate LIMIT/OFFSET counter registers (if present).
+    let limit_reg = limit_clause.map(|lc| {
+        let r = b.alloc_reg();
+        emit_limit_expr(b, &lc.limit, r);
+        r
+    });
+    let offset_reg = limit_clause.and_then(|lc| {
+        lc.offset.as_ref().map(|off_expr| {
+            let r = b.alloc_reg();
+            emit_limit_expr(b, off_expr, r);
+            r
+        })
+    });
+
+    // LIMIT 0 guard: skip entire scan if limit is zero.
+    if let Some(lim_r) = limit_reg {
+        emit_limit_zero_guard(b, lim_r, done_label);
+    }
+
+    if needs_table_lookup {
+        b.emit_op(
+            Opcode::OpenRead,
+            cursor,
+            table.root_page,
+            0,
+            P4::Table(table.name.clone()),
+            0,
+        );
+    }
+
+    b.emit_op(
+        Opcode::OpenRead,
+        index_cursor,
+        index_plan.index.root_page,
+        0,
+        P4::Index(index_plan.index.name.clone()),
+        0,
+    );
+
+    let loop_start = if use_bounded_prefix_scan {
+        let probe_key_regs = b.alloc_regs((index_plan.index.key_term_count() + 1) as i32);
+        for (offset, expr) in equality_prefix_exprs
+            .iter()
+            .take(index_plan.equality_prefix_len)
+            .enumerate()
+        {
+            let reg = probe_key_regs + offset as i32;
+            emit_expr(b, expr, reg, None);
+            b.emit_jump_to_label(Opcode::IsNull, reg, 0, done_label, P4::None, 0);
+        }
+        for offset in index_plan.equality_prefix_len..index_plan.index.key_term_count() {
+            b.emit_op(
+                Opcode::Null,
+                0,
+                probe_key_regs + offset as i32,
+                0,
+                P4::None,
+                0,
+            );
+        }
+        b.emit_op(
+            Opcode::Int64,
+            0,
+            probe_key_regs + index_plan.index.key_term_count() as i32,
+            0,
+            P4::Int64(i64::MIN),
+            0,
+        );
+        let probe_record_reg = b.alloc_reg();
+        b.emit_op(
+            Opcode::MakeRecord,
+            probe_key_regs,
+            (index_plan.index.key_term_count() + 1) as i32,
+            probe_record_reg,
+            P4::None,
+            0,
+        );
+        b.emit_jump_to_label(
+            Opcode::SeekGE,
+            index_cursor,
+            probe_record_reg,
+            done_label,
+            P4::None,
+            0,
+        );
+        let loop_start = b.current_addr();
+        b.emit_jump_to_label(
+            Opcode::IdxGT,
+            index_cursor,
+            probe_record_reg,
+            done_label,
+            P4::None,
+            index_plan.equality_prefix_len as u16,
+        );
+        loop_start
+    } else {
+        let loop_start = b.current_addr();
+        if index_plan.descending {
+            b.emit_jump_to_label(Opcode::Last, index_cursor, 0, done_label, P4::None, 0);
+        } else {
+            b.emit_jump_to_label(Opcode::Rewind, index_cursor, 0, done_label, P4::None, 0);
+        }
+        loop_start
+    };
+
+    let skip_row = b.emit_label();
+    let rowid_reg = b.alloc_reg();
+    b.emit_op(Opcode::IdxRowid, index_cursor, rowid_reg, 0, P4::None, 0);
+
+    if needs_table_lookup {
+        b.emit_jump_to_label(Opcode::SeekRowid, cursor, rowid_reg, skip_row, P4::None, 0);
+    }
+
+    if let Some(where_expr) = where_clause {
+        b.set_next_anon_placeholder(where_placeholder_base);
+        emit_where_filter(b, where_expr, cursor, table, table_alias, schema, skip_row);
+    }
+
+    if let Some(covering_output) = &index_plan.covering_output {
+        emit_covering_output_reads(b, index_cursor, rowid_reg, covering_output, out_regs);
+    } else {
+        emit_column_reads(b, cursor, columns, table, table_alias, schema, out_regs)?;
+    }
+
+    // OFFSET: if offset counter > 0, decrement by 1 and skip this row.
+    if let Some(off_r) = offset_reg {
+        b.emit_jump_to_label(Opcode::IfPos, off_r, 1, skip_row, P4::None, 0);
+    }
+
+    b.emit_op(Opcode::ResultRow, out_regs, out_col_count, 0, P4::None, 0);
+
+    // LIMIT: decrement limit counter; jump to done when zero.
+    if let Some(lim_r) = limit_reg {
+        b.emit_jump_to_label(Opcode::DecrJumpZero, lim_r, 0, done_label, P4::None, 0);
+    }
+
+    b.resolve_label(skip_row);
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let loop_body = if use_bounded_prefix_scan {
+        loop_start as i32
+    } else {
+        (loop_start + 1) as i32
+    };
+    if index_plan.descending {
+        b.emit_op(Opcode::Prev, index_cursor, loop_body, 0, P4::None, 0);
+    } else {
+        b.emit_op(Opcode::Next, index_cursor, loop_body, 0, P4::None, 0);
+    }
+
+    b.resolve_label(done_label);
+    b.emit_op(Opcode::Close, index_cursor, 0, 0, P4::None, 0);
+    if needs_table_lookup {
+        b.emit_op(Opcode::Close, cursor, 0, 0, P4::None, 0);
+    }
+    b.emit_op(Opcode::Halt, 0, 0, 0, P4::None, 0);
+
+    // End target for Init jump.
+    b.resolve_label(end_label);
+    Ok(())
+}
+
+/// Generate VDBE bytecode for `SELECT DISTINCT` without ORDER BY.
+///
+/// Uses a two-pass sorter approach: scan all output columns into the sorter
+/// (all columns are sort keys), sort, then iterate and skip adjacent
+/// duplicate rows using packed-record comparison.
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap
+)]
+fn codegen_select_distinct_scan(
+    b: &mut ProgramBuilder,
+    cursor: i32,
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    schema: &[TableSchema],
+    columns: &[ResultColumn],
+    where_clause: Option<&Expr>,
+    limit_clause: Option<&LimitClause>,
+    out_regs: i32,
+    out_col_count: i32,
+    done_label: crate::Label,
+    end_label: crate::Label,
+) -> Result<(), CodegenError> {
+    let num_data_cols = usize::try_from(out_col_count).map_err(|_| {
+        CodegenError::Unsupported("negative output column count in DISTINCT SELECT".to_owned())
+    })?;
+
+    // Sorter cursor is separate from the table cursor.
+    let sorter_cursor = cursor + 1;
+
+    // Open sorter with all output columns as sort keys (ascending).
+    let sort_order: String = "+".repeat(num_data_cols);
+    // Build per-column collation info for DISTINCT comparison.
+    let sort_collations: Vec<String> = columns
+        .iter()
+        .map(|col| {
+            if let ResultColumn::Expr { expr, .. } = col {
+                // Explicit COLLATE on the expression takes priority.
+                if let Some(coll) = extract_collation(expr) {
+                    return coll.to_owned();
+                }
+                // Inherit column-level collation from table schema.
+                if let Expr::Column(cr, _) = expr {
+                    if let Some(idx) = table.column_index(&cr.column) {
+                        if let Some(coll) =
+                            table.columns.get(idx).and_then(|c| c.collation.as_deref())
+                        {
+                            return coll.to_owned();
+                        }
+                    }
+                }
+            }
+            String::new()
+        })
+        .collect();
+    let has_collation = sort_collations.iter().any(|c| !c.is_empty());
+    let p4_str = if has_collation {
+        format!("{sort_order}|{}", sort_collations.join(","))
+    } else {
+        sort_order
+    };
+    b.emit_op(
+        Opcode::SorterOpen,
+        sorter_cursor,
+        out_col_count,
+        0,
+        P4::Str(p4_str),
+        0,
+    );
+
+    // Open table for reading.
+    b.emit_op(
+        Opcode::OpenRead,
+        cursor,
+        table.root_page,
+        0,
+        P4::Table(table.name.clone()),
+        0,
+    );
+
+    // === Pass 1: Scan rows into sorter ===
+    let scan_start = b.current_addr();
+    let scan_done = b.emit_label();
+    b.emit_jump_to_label(Opcode::Rewind, cursor, 0, scan_done, P4::None, 0);
+
+    // WHERE filter.
+    let skip_label = b.emit_label();
+    if let Some(where_expr) = where_clause {
+        emit_where_filter(
+            b,
+            where_expr,
+            cursor,
+            table,
+            table_alias,
+            schema,
+            skip_label,
+        );
+    }
+
+    // Read output columns into consecutive registers.
+    let sorter_base = b.alloc_regs(out_col_count);
+    emit_column_reads(b, cursor, columns, table, table_alias, schema, sorter_base)?;
+
+    // MakeRecord from all output columns, then SorterInsert.
+    let record_reg = b.alloc_reg();
+    b.emit_op(
+        Opcode::MakeRecord,
+        sorter_base,
+        out_col_count,
+        record_reg,
+        P4::None,
+        0,
+    );
+    b.emit_op(
+        Opcode::SorterInsert,
+        sorter_cursor,
+        record_reg,
+        0,
+        P4::None,
+        0,
+    );
+
+    // Skip label (for WHERE-filtered rows).
+    b.resolve_label(skip_label);
+
+    // Next row in scan.
+    let scan_body = (scan_start + 1) as i32;
+    b.emit_op(Opcode::Next, cursor, scan_body, 0, P4::None, 0);
+
+    // End of pass 1: close table cursor.
+    b.resolve_label(scan_done);
+    b.emit_op(Opcode::Close, cursor, 0, 0, P4::None, 0);
+
+    // === Pass 2: Iterate sorted rows, skipping duplicates ===
+
+    // Allocate LIMIT/OFFSET counters.
+    let limit_reg = limit_clause.map(|lc| {
+        let r = b.alloc_reg();
+        emit_limit_expr(b, &lc.limit, r);
+        r
+    });
+    let offset_reg = limit_clause.and_then(|lc| {
+        lc.offset.as_ref().map(|off_expr| {
+            let r = b.alloc_reg();
+            emit_limit_expr(b, off_expr, r);
+            r
+        })
+    });
+
+    // LIMIT 0 guard: skip entire output pass if limit is zero.
+    if let Some(lim_r) = limit_reg {
+        emit_limit_zero_guard(b, lim_r, done_label);
+    }
+
+    // DISTINCT state (record compare against previous output row).
+    let cur_rec = b.alloc_reg();
+    let prev_rec = b.alloc_reg();
+    b.emit_op(Opcode::Null, 0, prev_rec, 0, P4::None, 0);
+    let dup_skip = b.emit_label();
+
+    // SorterSort: sort and position at first row; jump to done if empty.
+    b.emit_jump_to_label(
+        Opcode::SorterSort,
+        sorter_cursor,
+        0,
+        done_label,
+        P4::None,
+        0,
+    );
+
+    let sort_loop_body = b.current_addr();
+
+    // SorterData: decode current sorted row.
+    let sorted_reg = b.alloc_reg();
+    b.emit_op(
+        Opcode::SorterData,
+        sorter_cursor,
+        sorted_reg,
+        0,
+        P4::None,
+        0,
+    );
+
+    // Extract output columns from sorted record.
+    for i in 0..num_data_cols {
+        b.emit_op(
+            Opcode::Column,
+            sorter_cursor,
+            i as i32,
+            out_regs + i as i32,
+            P4::None,
+            0,
+        );
+    }
+
+    // DISTINCT: pack output into a record for tracking previous row.
+    b.emit_op(
+        Opcode::MakeRecord,
+        out_regs,
+        out_col_count,
+        cur_rec,
+        P4::None,
+        0,
+    );
+
+    // Use SorterCompare for collation-aware dedup: compares current sorter
+    // row with prev_rec using the sorter's per-column collation info.
+    // Jumps to not_dup when keys differ (not a duplicate).
+    let not_dup = b.emit_label();
+    b.emit_jump_to_label(
+        Opcode::SorterCompare,
+        sorter_cursor,
+        prev_rec,
+        not_dup,
+        P4::None,
+        0,
+    );
+    // Fall through = keys equal = duplicate, skip to dup_skip.
+    b.emit_jump_to_label(Opcode::Goto, 0, 0, dup_skip, P4::None, 0);
+    b.resolve_label(not_dup);
+
+    // Update previous record to current for next comparison.
+    b.emit_op(Opcode::Copy, cur_rec, prev_rec, 0, P4::None, 0);
+
+    // OFFSET applies after duplicate elimination.
+    let output_skip = b.emit_label();
+    if let Some(off_r) = offset_reg {
+        b.emit_jump_to_label(Opcode::IfPos, off_r, 1, output_skip, P4::None, 0);
+    }
+
+    // ResultRow.
+    b.emit_op(Opcode::ResultRow, out_regs, out_col_count, 0, P4::None, 0);
+
+    // LIMIT: decrement limit counter; jump to done when zero.
+    if let Some(lim_r) = limit_reg {
+        b.emit_jump_to_label(Opcode::DecrJumpZero, lim_r, 0, done_label, P4::None, 0);
+    }
+
+    // Duplicate skip label.
+    b.resolve_label(dup_skip);
+
+    // Output skip label (for OFFSET-skipped rows).
+    b.resolve_label(output_skip);
+
+    // SorterNext: advance to next sorted row.
+    b.emit_op(
+        Opcode::SorterNext,
+        sorter_cursor,
+        sort_loop_body as i32,
+        0,
+        P4::None,
+        0,
+    );
+
+    // Done: Close sorter + Halt.
+    b.resolve_label(done_label);
+    b.emit_op(Opcode::Close, sorter_cursor, 0, 0, P4::None, 0);
+    b.emit_op(Opcode::Halt, 0, 0, 0, P4::None, 0);
+
+    // End target for Init jump.
+    b.resolve_label(end_label);
+
+    Ok(())
+}
+
+/// Emit a LIMIT or OFFSET expression into a register.
+///
+/// Handles integer literals and bind parameters; evaluates arbitrary
+/// expressions via `emit_expr` for computed limits (e.g. `LIMIT 5+0`).
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn emit_limit_expr(b: &mut ProgramBuilder, expr: &Expr, target_reg: i32) {
+    match expr {
+        Expr::Literal(Literal::Integer(n), _) => {
+            if let Ok(as_i32) = i32::try_from(*n) {
+                b.emit_op(Opcode::Integer, as_i32, target_reg, 0, P4::None, 0);
+            } else {
+                b.emit_op(Opcode::Int64, 0, target_reg, 0, P4::Int64(*n), 0);
+            }
+        }
+        Expr::Placeholder(pt, _) => {
+            let param_idx = match pt {
+                fsqlite_ast::PlaceholderType::Numbered(n) => *n as i32,
+                // Anonymous and named placeholders use sequential numbering.
+                _ => b.next_anon_placeholder_idx() as i32,
+            };
+            b.emit_op(Opcode::Variable, param_idx, target_reg, 0, P4::None, 0);
+        }
+        _ => {
+            // Evaluate arbitrary expression (e.g. `5+0`, `abs(-3)`).
+            // No table context needed — LIMIT expressions don't reference columns.
+            emit_expr(b, expr, target_reg, None);
+        }
+    }
+}
+
+fn constant_positive_limit_without_offset(limit_clause: &LimitClause) -> Option<usize> {
+    if limit_clause.offset.is_some() {
+        return None;
+    }
+    match &limit_clause.limit {
+        Expr::Literal(Literal::Integer(limit), _) if *limit > 0 => usize::try_from(*limit).ok(),
+        _ => None,
+    }
+}
+
+/// Emit a guard that jumps to `done_label` when the LIMIT register is zero.
+///
+/// `LIMIT 0` means "return no rows". The `DecrJumpZero` instruction after
+/// `ResultRow` doesn't fire when the register is already 0 (it only
+/// decrements positive values), so we need a pre-loop guard.
+///
+/// `LIMIT -1` means "no limit" — the register is -1 (truthy), so the
+/// `IfNot` check does not fire.
+fn emit_limit_zero_guard(b: &mut ProgramBuilder, limit_reg: i32, done_label: crate::Label) {
+    b.emit_jump_to_label(Opcode::IfNot, limit_reg, 1, done_label, P4::None, 0);
+}
+
+// ---------------------------------------------------------------------------
+// ORDER BY codegen (two-pass sorter)
+// ---------------------------------------------------------------------------
+
+/// Generate VDBE bytecode for a full-scan SELECT with ORDER BY.
+///
+/// Uses a two-pass sorter approach:
+/// 1. Scan table rows (with WHERE), pack sort-key + data columns into sorter.
+/// 2. After sorting, iterate sorted rows and emit `ResultRow`.
+///
+/// LIMIT/OFFSET are applied in pass 2 (on sorted output).
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn codegen_select_ordered_scan(
+    b: &mut ProgramBuilder,
+    cursor: i32,
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    schema: &[TableSchema],
+    columns: &[ResultColumn],
+    where_clause: Option<&Expr>,
+    order_by: &[OrderingTerm],
+    limit_clause: Option<&LimitClause>,
+    distinct: Distinctness,
+    out_regs: i32,
+    out_col_count: i32,
+    done_label: crate::Label,
+    end_label: crate::Label,
+) -> Result<(), CodegenError> {
+    let top_n_limit = if distinct == Distinctness::All {
+        limit_clause.and_then(constant_positive_limit_without_offset)
+    } else {
+        None
+    };
+
+    // Resolve ORDER BY sources (column indices, rowid, or expressions).
+    let sort_keys: Vec<SortKeySource> = order_by
+        .iter()
+        .map(|term| resolve_sort_key(&term.expr, table, table_alias, columns))
+        .collect();
+
+    let num_sort_keys = sort_keys.len();
+    let num_data_cols = usize::try_from(out_col_count).map_err(|_| {
+        CodegenError::Unsupported("negative output column count in ordered SELECT".to_owned())
+    })?;
+    let total_sorter_cols = num_sort_keys + num_data_cols;
+
+    // Sorter cursor is separate from the table cursor.
+    let sorter_cursor = cursor + 1;
+
+    // Open sorter: p2 = number of key columns, p4 = sort order + collation.
+    // Sort order chars: '+' = ASC (nulls first), '-' = DESC (nulls last),
+    // '>' = ASC NULLS LAST, '<' = DESC NULLS FIRST.
+    let sort_order: String = order_by
+        .iter()
+        .map(|term| {
+            let is_desc = term.direction == Some(SortDirection::Desc);
+            let nulls_last = match term.nulls {
+                Some(NullsOrder::Last) => true,
+                Some(NullsOrder::First) => false,
+                None => is_desc, // SQLite default: ASC→nulls first, DESC→nulls last
+            };
+            match (is_desc, nulls_last) {
+                (false, false) => '+', // ASC NULLS FIRST (default)
+                (false, true) => '>',  // ASC NULLS LAST
+                (true, true) => '-',   // DESC NULLS LAST (default)
+                (true, false) => '<',  // DESC NULLS FIRST
+            }
+        })
+        .collect();
+    // Build per-key collation info from the resolved sort keys.
+    let sort_collations: Vec<String> = sort_keys
+        .iter()
+        .zip(order_by.iter())
+        .map(|(sk, term)| {
+            // Explicit COLLATE on the ORDER BY term takes priority.
+            if let fsqlite_ast::Expr::Collate { collation, .. } = &term.expr {
+                return collation.clone();
+            }
+            // Otherwise, inherit the column's declared collation.
+            if let SortKeySource::Column(idx) = sk {
+                if let Some(coll) = table.columns.get(*idx).and_then(|c| c.collation.as_deref()) {
+                    return coll.to_owned();
+                }
+            }
+            String::new()
+        })
+        .collect();
+    let has_collation = sort_collations.iter().any(|c| !c.is_empty());
+    let p4_str = if has_collation {
+        format!("{sort_order}|{}", sort_collations.join(","))
+    } else {
+        sort_order
+    };
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    b.emit_op(
+        Opcode::SorterOpen,
+        sorter_cursor,
+        num_sort_keys as i32,
+        top_n_limit
+            .and_then(|limit| i32::try_from(limit).ok())
+            .unwrap_or(0),
+        P4::Str(p4_str),
+        0,
+    );
+
+    // Open table for reading.
+    b.emit_op(
+        Opcode::OpenRead,
+        cursor,
+        table.root_page,
+        0,
+        P4::Table(table.name.clone()),
+        0,
+    );
+
+    // === Pass 1: Scan rows into sorter ===
+    let scan_start = b.current_addr();
+    let scan_done = b.emit_label();
+    b.emit_jump_to_label(Opcode::Rewind, cursor, 0, scan_done, P4::None, 0);
+
+    // WHERE filter.
+    let skip_label = b.emit_label();
+    if let Some(where_expr) = where_clause {
+        emit_where_filter(
+            b,
+            where_expr,
+            cursor,
+            table,
+            table_alias,
+            schema,
+            skip_label,
+        );
+    }
+
+    // Read sort-key columns + data columns into consecutive registers.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let sorter_base = b.alloc_regs(total_sorter_cols as i32);
+    {
+        let mut reg = sorter_base;
+        let scan = ScanCtx {
+            cursor,
+            table,
+            table_alias,
+            schema: Some(schema),
+            register_base: None,
+            secondary: None,
+        };
+        for key in &sort_keys {
+            match key {
+                SortKeySource::Column(col_idx) => {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                    b.emit_op(Opcode::Column, cursor, *col_idx as i32, reg, P4::None, 0);
+                }
+                SortKeySource::Rowid => {
+                    b.emit_op(Opcode::Rowid, cursor, reg, 0, P4::None, 0);
+                }
+                SortKeySource::Expression(expr) => {
+                    emit_expr(b, expr, reg, Some(&scan));
+                }
+            }
+            reg += 1;
+        }
+
+        // Evaluate result columns (including expressions) and store the final
+        // output values in the sorter record.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        emit_column_reads(
+            b,
+            cursor,
+            columns,
+            table,
+            table_alias,
+            schema,
+            sorter_base + num_sort_keys as i32,
+        )?;
+    }
+
+    // MakeRecord from all sorter columns, then SorterInsert.
+    let record_reg = b.alloc_reg();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    b.emit_op(
+        Opcode::MakeRecord,
+        sorter_base,
+        total_sorter_cols as i32,
+        record_reg,
+        P4::None,
+        0,
+    );
+    b.emit_op(
+        Opcode::SorterInsert,
+        sorter_cursor,
+        record_reg,
+        0,
+        P4::None,
+        0,
+    );
+
+    // Skip label (for WHERE-filtered rows).
+    b.resolve_label(skip_label);
+
+    // Next row in scan.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let scan_body = (scan_start + 1) as i32;
+    b.emit_op(Opcode::Next, cursor, scan_body, 0, P4::None, 0);
+
+    // End of pass 1: close table cursor.
+    b.resolve_label(scan_done);
+    b.emit_op(Opcode::Close, cursor, 0, 0, P4::None, 0);
+
+    // === Pass 2: Iterate sorted rows ===
+
+    // Allocate LIMIT/OFFSET counters (before the sort loop).
+    let limit_reg = limit_clause.map(|lc| {
+        let r = b.alloc_reg();
+        emit_limit_expr(b, &lc.limit, r);
+        r
+    });
+    let offset_reg = limit_clause.and_then(|lc| {
+        lc.offset.as_ref().map(|off_expr| {
+            let r = b.alloc_reg();
+            emit_limit_expr(b, off_expr, r);
+            r
+        })
+    });
+
+    // LIMIT 0 guard: skip entire output pass if limit is zero.
+    if let Some(lim_r) = limit_reg {
+        emit_limit_zero_guard(b, lim_r, done_label);
+    }
+
+    // DISTINCT state (used only when DISTINCT is requested).
+    let distinct_state = if distinct == Distinctness::Distinct {
+        let cur_rec = b.alloc_reg();
+        let prev_rec = b.alloc_reg();
+        b.emit_op(Opcode::Null, 0, prev_rec, 0, P4::None, 0);
+        Some((cur_rec, prev_rec, b.emit_label()))
+    } else {
+        None
+    };
+
+    // SorterSort: sort and position at first row; jump to done if empty.
+    b.emit_jump_to_label(
+        Opcode::SorterSort,
+        sorter_cursor,
+        0,
+        done_label,
+        P4::None,
+        0,
+    );
+
+    // Save the address of the sort loop body (SorterData target for SorterNext).
+    let sort_loop_body = b.current_addr();
+
+    // SorterData: decode current sorted row into a register.
+    let sorted_reg = b.alloc_reg();
+    b.emit_op(
+        Opcode::SorterData,
+        sorter_cursor,
+        sorted_reg,
+        0,
+        P4::None,
+        0,
+    );
+
+    // Extract data columns from the sorted record.
+    // The sorter record has sort-key columns first, then data columns.
+    // We use Column on the sorter cursor to read individual fields.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    for i in 0..num_data_cols {
+        let src_col = (num_sort_keys + i) as i32;
+        b.emit_op(
+            Opcode::Column,
+            sorter_cursor,
+            src_col,
+            out_regs + i as i32,
+            P4::None,
+            0,
+        );
+    }
+
+    // DISTINCT: skip rows whose output columns match the previous row.
+    // Pack output into a record, compare with previous record using
+    // SorterCompare for collation-aware dedup; if equal, skip.
+    if let Some((cur_rec, prev_rec, skip)) = distinct_state {
+        // Pack current output columns into a record.
+        b.emit_op(
+            Opcode::MakeRecord,
+            out_regs,
+            out_col_count,
+            cur_rec,
+            P4::None,
+            0,
+        );
+
+        // SorterCompare: jumps to not_dup when keys differ (not a duplicate).
+        let not_dup = b.emit_label();
+        b.emit_jump_to_label(
+            Opcode::SorterCompare,
+            sorter_cursor,
+            prev_rec,
+            not_dup,
+            P4::None,
+            0,
+        );
+        // Fall through = keys equal = duplicate, skip.
+        b.emit_jump_to_label(Opcode::Goto, 0, 0, skip, P4::None, 0);
+        b.resolve_label(not_dup);
+
+        // Update previous record to current.
+        b.emit_op(Opcode::Copy, cur_rec, prev_rec, 0, P4::None, 0);
+    }
+
+    // OFFSET applies after duplicate elimination.
+    let output_skip = b.emit_label();
+    if let Some(off_r) = offset_reg {
+        b.emit_jump_to_label(Opcode::IfPos, off_r, 1, output_skip, P4::None, 0);
+    }
+
+    // ResultRow.
+    b.emit_op(Opcode::ResultRow, out_regs, out_col_count, 0, P4::None, 0);
+
+    // LIMIT: decrement limit counter; jump to done when zero.
+    if let Some(lim_r) = limit_reg {
+        b.emit_jump_to_label(Opcode::DecrJumpZero, lim_r, 0, done_label, P4::None, 0);
+    }
+
+    // Resolve DISTINCT skip label (if active).
+    if let Some((_, _, skip)) = distinct_state {
+        b.resolve_label(skip);
+    }
+
+    // Output skip label (for OFFSET-skipped rows).
+    b.resolve_label(output_skip);
+
+    // SorterNext: advance to next sorted row, jump back to sort loop body.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    b.emit_op(
+        Opcode::SorterNext,
+        sorter_cursor,
+        sort_loop_body as i32,
+        0,
+        P4::None,
+        0,
+    );
+
+    // Done: Close sorter + Halt.
+    b.resolve_label(done_label);
+    b.emit_op(Opcode::Close, sorter_cursor, 0, 0, P4::None, 0);
+    b.emit_op(Opcode::Halt, 0, 0, 0, P4::None, 0);
+
+    // End target for Init jump.
+    b.resolve_label(end_label);
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Aggregate codegen
+// ---------------------------------------------------------------------------
+
+/// Known aggregate function names (case-insensitive matching).
+const AGGREGATE_FUNCTIONS: &[&str] = &[
+    "avg",
+    "count",
+    "group_concat",
+    "string_agg",
+    "max",
+    "min",
+    "sum",
+    "total",
+    "median",
+    "percentile",
+    "percentile_cont",
+    "percentile_disc",
+];
+
+/// Check whether a function name is a known aggregate (built-in or custom UDF).
+fn is_aggregate_function(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    AGGREGATE_FUNCTIONS.iter().any(|&n| n == lower)
+        || EXTRA_AGG_NAMES.with(|extra| extra.borrow().contains(&lower))
+}
+
+/// Check whether any result column contains an aggregate function call.
+fn has_aggregate_columns(columns: &[ResultColumn]) -> bool {
+    columns.iter().any(|col| {
+        if let ResultColumn::Expr { expr, .. } = col {
+            is_aggregate_expr(expr)
+        } else {
+            false
+        }
+    })
+}
+
+/// Check whether any result column contains a window function call.
+fn has_window_columns(columns: &[ResultColumn]) -> bool {
+    columns.iter().any(|col| {
+        if let ResultColumn::Expr { expr, .. } = col {
+            expr_has_window(expr)
+        } else {
+            false
+        }
+    })
+}
+
+/// Recursive check for window function calls in an expression.
+fn expr_has_window(expr: &Expr) -> bool {
+    match expr {
+        Expr::FunctionCall { over: Some(_), .. } => true,
+        Expr::FunctionCall { args, filter, .. } => {
+            matches!(args, fsqlite_ast::FunctionArgs::List(items) if items.iter().any(expr_has_window))
+                || filter.as_deref().is_some_and(expr_has_window)
+        }
+        Expr::BinaryOp { left, right, .. } => expr_has_window(left) || expr_has_window(right),
+        Expr::UnaryOp { expr: inner, .. }
+        | Expr::IsNull { expr: inner, .. }
+        | Expr::Cast { expr: inner, .. }
+        | Expr::Collate { expr: inner, .. } => expr_has_window(inner),
+        Expr::Between {
+            expr: inner,
+            low,
+            high,
+            ..
+        } => expr_has_window(inner) || expr_has_window(low) || expr_has_window(high),
+        Expr::In {
+            expr: inner, set, ..
+        } => {
+            expr_has_window(inner)
+                || matches!(set, fsqlite_ast::InSet::List(items) if items.iter().any(expr_has_window))
+        }
+        Expr::Like {
+            expr: inner,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_has_window(inner)
+                || expr_has_window(pattern)
+                || escape.as_deref().is_some_and(expr_has_window)
+        }
+        Expr::Case {
+            operand,
+            whens,
+            else_expr,
+            ..
+        } => {
+            operand.as_deref().is_some_and(expr_has_window)
+                || whens.iter().any(|(when_expr, then_expr)| {
+                    expr_has_window(when_expr) || expr_has_window(then_expr)
+                })
+                || else_expr.as_deref().is_some_and(expr_has_window)
+        }
+        Expr::JsonAccess {
+            expr: inner, path, ..
+        } => expr_has_window(inner) || expr_has_window(path),
+        Expr::RowValue(items, _) => items.iter().any(expr_has_window),
+        _ => false,
+    }
+}
+
+/// Check whether an expression contains an aggregate function call.
+/// NOTE: `max(x,y,...)` and `min(x,y,...)` with 2+ args are scalar, not aggregate.
+fn is_aggregate_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::FunctionCall { name, args, .. } if is_aggregate_function(name) => {
+            // SQLite: max/min with 2+ arguments are scalar functions, not aggregates.
+            let lower = name.to_ascii_lowercase();
+            !((lower == "max" || lower == "min")
+                && matches!(args, fsqlite_ast::FunctionArgs::List(a) if a.len() >= 2))
+        }
+        Expr::BinaryOp { left, right, .. } => is_aggregate_expr(left) || is_aggregate_expr(right),
+        Expr::UnaryOp { expr: inner, .. }
+        | Expr::IsNull { expr: inner, .. }
+        | Expr::Cast { expr: inner, .. }
+        | Expr::Collate { expr: inner, .. } => is_aggregate_expr(inner),
+        Expr::Between {
+            expr: inner,
+            low,
+            high,
+            ..
+        } => is_aggregate_expr(inner) || is_aggregate_expr(low) || is_aggregate_expr(high),
+        Expr::In {
+            expr: inner, set, ..
+        } => {
+            if is_aggregate_expr(inner) {
+                return true;
+            }
+            match set {
+                fsqlite_ast::InSet::List(items) => items.iter().any(is_aggregate_expr),
+                _ => false,
+            }
+        }
+        Expr::Like {
+            expr: inner,
+            pattern,
+            escape,
+            ..
+        } => {
+            is_aggregate_expr(inner)
+                || is_aggregate_expr(pattern)
+                || escape.as_deref().is_some_and(is_aggregate_expr)
+        }
+        Expr::Case {
+            operand,
+            whens,
+            else_expr,
+            ..
+        } => {
+            if operand.as_deref().is_some_and(is_aggregate_expr) {
+                return true;
+            }
+            if whens
+                .iter()
+                .any(|(cond, then_expr)| is_aggregate_expr(cond) || is_aggregate_expr(then_expr))
+            {
+                return true;
+            }
+            if else_expr.as_deref().is_some_and(is_aggregate_expr) {
+                return true;
+            }
+            false
+        }
+        Expr::FunctionCall {
+            args: FunctionArgs::List(args),
+            ..
+        } => args.iter().any(is_aggregate_expr),
+        Expr::RowValue(items, _) => items.iter().any(is_aggregate_expr),
+        Expr::JsonAccess {
+            expr: inner, path, ..
+        } => is_aggregate_expr(inner) || is_aggregate_expr(path),
+        _ => false,
+    }
+}
+
+/// Description of one aggregate column for codegen.
+struct AggColumn {
+    /// Aggregate function name (lowercased).
+    name: String,
+    /// Number of arguments (0 for count(*), 1 for sum(col), etc.).
+    num_args: i32,
+    /// Column index of the argument (for single-arg aggregates), or `None` for count(*) or rowid.
+    arg_col_index: Option<usize>,
+    /// True if the argument is the INTEGER PRIMARY KEY (rowid) column.
+    arg_is_rowid: bool,
+    /// True if the aggregate uses DISTINCT (e.g. `COUNT(DISTINCT col)`).
+    distinct: bool,
+    /// Non-column expression argument (e.g. `SUM(a + b)`), evaluated via `emit_expr`.
+    /// `None` when arg is a simple column ref (use `arg_col_index` instead).
+    arg_expr: Option<Box<Expr>>,
+    /// Additional argument expressions beyond the first (e.g. separator for group_concat).
+    extra_args: Vec<Expr>,
+    /// FILTER clause expression, e.g. `COUNT(*) FILTER (WHERE x > 5)`.
+    /// When present, the AggStep is only executed if this evaluates to true.
+    filter: Option<Box<Expr>>,
+    /// Wrapper expression applied after AggFinal.  Used when a scalar
+    /// function wraps an aggregate, e.g. `COALESCE(MAX(x), 0)`.  The
+    /// placeholder `Expr::Literal(Literal::Null, _)` marks where the
+    /// aggregate result should be substituted.
+    wrapper_expr: Option<Box<Expr>>,
+    /// If true, this is a hidden aggregate that doesn't map to an output column.
+    /// Used for multi-aggregate expressions like `MAX(x) - MIN(x)`.
+    hidden: bool,
+    /// For multi-aggregate wrappers: the indices (into the agg_columns vec) of
+    /// all aggregates referenced by the wrapper expression.  Placeholder columns
+    /// `__agg_0__`, `__agg_1__`, … map to these indices.
+    multi_agg_indices: Vec<usize>,
+    /// Bare (non-aggregate) expression in an aggregate query without GROUP BY.
+    /// SQLite allows `SELECT max(x), y FROM t` — `y` takes its value from the
+    /// last row scanned.  When set, no AggStep/AggFinal is emitted; instead the
+    /// expression is evaluated on each scanned row and stored in the accumulator
+    /// register so it retains the value from the final row.
+    bare_expr: Option<Box<Expr>>,
+    /// Collation sequence for the aggregate argument column (e.g. "NOCASE").
+    /// When set and the aggregate is DISTINCT, the VDBE engine uses
+    /// collation-aware distinct key encoding.
+    collation: Option<String>,
+}
+
+/// Determine the effective collation for an aggregate argument expression.
+/// Explicit COLLATE in the expression takes priority; otherwise, if the
+/// argument resolved to a column index, inherit that column's declared
+/// collation.  Returns `None` for the default BINARY collation.
+fn expr_collation_for_agg(
+    expr: &Expr,
+    col_idx: Option<usize>,
+    table: &TableSchema,
+) -> Option<String> {
+    // Explicit COLLATE wrapper takes priority.
+    if let Expr::Collate { collation, .. } = expr {
+        if !collation.eq_ignore_ascii_case("BINARY") {
+            return Some(collation.clone());
+        }
+        return None;
+    }
+    // Column reference: inherit from schema.
+    if let Some(idx) = col_idx {
+        if let Some(ci) = table.columns.get(idx) {
+            if let Some(ref coll) = ci.collation {
+                if !coll.eq_ignore_ascii_case("BINARY") {
+                    return Some(coll.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Build the P4 payload for an AggStep opcode, including collation if present.
+fn agg_func_p4(name: &str, collation: Option<&String>) -> P4 {
+    if let Some(coll) = collation {
+        P4::FuncNameCollated(name.to_owned(), coll.clone())
+    } else {
+        P4::FuncName(name.to_owned())
+    }
+}
+
+struct GroupedInnerJoinCountSumPlan<'a> {
+    left_table: &'a TableSchema,
+    left_alias: Option<&'a str>,
+    right_table: &'a TableSchema,
+    right_alias: Option<&'a str>,
+    group_key_expr: &'a Expr,
+    sum_arg_expr: &'a Expr,
+    join_lookup: SingleJoinLookupPlan<'a>,
+}
+
+fn grouped_inner_join_count_sum_plan<'a>(
+    stmt: &'a SelectStatement,
+    from: &'a FromClause,
+    schema: &'a [TableSchema],
+) -> Result<Option<GroupedInnerJoinCountSumPlan<'a>>, CodegenError> {
+    use fsqlite_ast::{FunctionArgs, JoinConstraint, JoinKind, TableOrSubquery};
+
+    let SelectCore::Select {
+        columns,
+        where_clause,
+        group_by,
+        having,
+        distinct,
+        ..
+    } = &stmt.body.select
+    else {
+        return Ok(None);
+    };
+
+    if from.joins.len() != 1
+        || columns.len() != 3
+        || group_by.len() != 1
+        || stmt.with.is_some()
+        || !stmt.body.compounds.is_empty()
+        || where_clause.is_some()
+        || having.is_some()
+        || !stmt.order_by.is_empty()
+        || stmt.limit.is_some()
+        || *distinct != Distinctness::All
+        || has_window_columns(columns)
+    {
+        return Ok(None);
+    }
+
+    let TableOrSubquery::Table {
+        name: left_name,
+        alias: left_alias,
+        time_travel: None,
+        ..
+    } = &from.source
+    else {
+        return Ok(None);
+    };
+    let join = &from.joins[0];
+    if join.join_type.kind != JoinKind::Inner || join.join_type.natural {
+        return Ok(None);
+    }
+    let TableOrSubquery::Table {
+        name: right_name,
+        alias: right_alias,
+        time_travel: None,
+        ..
+    } = &join.table
+    else {
+        return Ok(None);
+    };
+    let Some(JoinConstraint::On(on_expr)) = join.constraint.as_ref() else {
+        return Ok(None);
+    };
+    let Expr::BinaryOp {
+        left: on_left,
+        op: BinaryOp::Eq,
+        right: on_right,
+        ..
+    } = on_expr
+    else {
+        return Ok(None);
+    };
+    let (Expr::Column(on_left_col, _), Expr::Column(on_right_col, _)) = (&**on_left, &**on_right)
+    else {
+        return Ok(None);
+    };
+    if on_left_col.table.is_none() || on_right_col.table.is_none() {
+        return Ok(None);
+    }
+
+    let ResultColumn::Expr {
+        expr: group_key_expr,
+        ..
+    } = &columns[0]
+    else {
+        return Ok(None);
+    };
+    let Expr::Column(group_key_col, _) = group_key_expr else {
+        return Ok(None);
+    };
+    let Expr::Column(group_by_col, _) = &group_by[0] else {
+        return Ok(None);
+    };
+    if group_key_col.table.is_none()
+        || group_by_col.table.is_none()
+        || !group_key_col
+            .column
+            .eq_ignore_ascii_case(&group_by_col.column)
+        || !group_key_col
+            .table
+            .as_deref()
+            .zip(group_by_col.table.as_deref())
+            .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right))
+    {
+        return Ok(None);
+    }
+
+    let ResultColumn::Expr {
+        expr: count_expr, ..
+    } = &columns[1]
+    else {
+        return Ok(None);
+    };
+    match count_expr {
+        Expr::FunctionCall {
+            name,
+            args: FunctionArgs::Star,
+            distinct: false,
+            order_by,
+            filter: None,
+            over: None,
+            ..
+        } if name.eq_ignore_ascii_case("count") && order_by.is_empty() => {}
+        _ => return Ok(None),
+    }
+
+    let ResultColumn::Expr { expr: sum_expr, .. } = &columns[2] else {
+        return Ok(None);
+    };
+    let sum_arg_expr = match sum_expr {
+        Expr::FunctionCall {
+            name,
+            args: FunctionArgs::List(args),
+            distinct: false,
+            order_by,
+            filter: None,
+            over: None,
+            ..
+        } if name.eq_ignore_ascii_case("sum") && order_by.is_empty() && args.len() == 1 => &args[0],
+        _ => return Ok(None),
+    };
+    let Expr::Column(sum_arg_col, _) = sum_arg_expr else {
+        return Ok(None);
+    };
+    if sum_arg_col.table.is_none() {
+        return Ok(None);
+    }
+
+    let left_table = find_table(schema, &left_name.name)?;
+    let right_table = find_table(schema, &right_name.name)?;
+    let tables = [
+        (left_table, left_alias.as_deref()),
+        (right_table, right_alias.as_deref()),
+    ];
+    let (group_cursor, group_col_idx) = resolve_join_column(
+        group_key_col.table.as_deref(),
+        &group_key_col.column,
+        &tables,
+    )?;
+    let group_col = &tables[group_cursor as usize].0.columns[group_col_idx];
+    if group_col
+        .collation
+        .as_deref()
+        .is_some_and(|collation| !collation.eq_ignore_ascii_case("BINARY"))
+    {
+        return Ok(None);
+    }
+
+    let _ = resolve_join_column(sum_arg_col.table.as_deref(), &sum_arg_col.column, &tables)?;
+    let Some(join_lookup) = resolve_single_join_lookup_plan(
+        left_table,
+        left_alias.as_deref(),
+        right_table,
+        right_alias.as_deref(),
+        JoinKind::Inner,
+        Some(on_expr),
+    ) else {
+        return Ok(None);
+    };
+
+    Ok(Some(GroupedInnerJoinCountSumPlan {
+        left_table,
+        left_alias: left_alias.as_deref(),
+        right_table,
+        right_alias: right_alias.as_deref(),
+        group_key_expr,
+        sum_arg_expr,
+        join_lookup,
+    }))
+}
+
+#[allow(clippy::too_many_lines)]
+fn codegen_grouped_inner_join_count_sum_select(
+    b: &mut ProgramBuilder,
+    plan: &GroupedInnerJoinCountSumPlan<'_>,
+    ctx: &CodegenContext,
+) -> Result<(), CodegenError> {
+    let end_label = b.emit_label();
+    let done_label = b.emit_label();
+
+    b.emit_jump_to_label(Opcode::Init, 0, 0, end_label, P4::None, 0);
+    b.emit_op(Opcode::Transaction, 0, 0, 0, P4::None, 0);
+
+    let out_regs = b.alloc_regs(3);
+    let left_cursor = 0_i32;
+    let right_cursor = 1_i32;
+    let index_cursor = if let SingleJoinLookupTarget::Index(index) = &plan.join_lookup.lookup_target
+    {
+        let cursor = 2_i32;
+        b.emit_op(
+            Opcode::OpenRead,
+            cursor,
+            index.root_page,
+            0,
+            P4::Index(index.name.clone()),
+            0,
+        );
+        Some(cursor)
+    } else {
+        None
+    };
+    let sorter_cursor = if index_cursor.is_some() { 3_i32 } else { 2_i32 };
+    let tables = [
+        (plan.left_table, plan.left_alias),
+        (plan.right_table, plan.right_alias),
+    ];
+
+    b.emit_op(
+        Opcode::OpenRead,
+        left_cursor,
+        plan.left_table.root_page,
+        0,
+        P4::Table(plan.left_table.name.clone()),
+        0,
+    );
+    b.emit_op(
+        Opcode::OpenRead,
+        right_cursor,
+        plan.right_table.root_page,
+        0,
+        P4::Table(plan.right_table.name.clone()),
+        0,
+    );
+    b.emit_op(
+        Opcode::SorterOpen,
+        sorter_cursor,
+        2,
+        0,
+        P4::Str("+".to_owned()),
+        0,
+    );
+
+    let next_left_label = b.emit_label();
+    let scan_done = b.emit_label();
+    b.emit_jump_to_label(Opcode::Rewind, left_cursor, 0, scan_done, P4::None, 0);
+    b.resolve_label(next_left_label);
+
+    match &plan.join_lookup.lookup_target {
+        SingleJoinLookupTarget::Rowid => {
+            let probe_reg = b.alloc_reg();
+            emit_join_probe_source(
+                b,
+                left_cursor,
+                plan.left_table,
+                plan.left_alias,
+                &plan.join_lookup.probe_source,
+                probe_reg,
+            );
+            let no_match = b.emit_label();
+            b.emit_jump_to_label(Opcode::IsNull, probe_reg, 0, no_match, P4::None, 0);
+            b.emit_jump_to_label(
+                Opcode::SeekRowid,
+                right_cursor,
+                probe_reg,
+                no_match,
+                P4::None,
+                0,
+            );
+            emit_grouped_join_sorter_insert(
+                b,
+                sorter_cursor,
+                plan.group_key_expr,
+                plan.sum_arg_expr,
+                &tables,
+                ctx,
+            )?;
+            b.resolve_label(no_match);
+        }
+        SingleJoinLookupTarget::Index(_index) => {
+            let idx_cursor =
+                index_cursor.expect("grouped index lookup join must open index cursor");
+            let probe_base = b.alloc_regs(2);
+            let probe_reg = probe_base;
+            let min_rowid_reg = probe_base + 1;
+            emit_join_probe_source(
+                b,
+                left_cursor,
+                plan.left_table,
+                plan.left_alias,
+                &plan.join_lookup.probe_source,
+                probe_reg,
+            );
+            let no_match = b.emit_label();
+            let duplicate_run_done = b.emit_label();
+            b.emit_jump_to_label(Opcode::IsNull, probe_reg, 0, no_match, P4::None, 0);
+            b.emit_op(Opcode::Int64, 0, min_rowid_reg, 0, P4::Int64(i64::MIN), 0);
+            let probe_record_reg = b.alloc_reg();
+            b.emit_op(
+                Opcode::MakeRecord,
+                probe_base,
+                2,
+                probe_record_reg,
+                P4::None,
+                0,
+            );
+            b.emit_jump_to_label(
+                Opcode::SeekGE,
+                idx_cursor,
+                probe_record_reg,
+                no_match,
+                P4::None,
+                0,
+            );
+            let idx_loop_top = b.current_addr();
+            let idx_key_reg = b.alloc_reg();
+            b.emit_op(Opcode::Column, idx_cursor, 0, idx_key_reg, P4::None, 0);
+            b.emit_jump_to_label(
+                Opcode::Ne,
+                probe_reg,
+                idx_key_reg,
+                duplicate_run_done,
+                P4::None,
+                0,
+            );
+            let rowid_reg = b.alloc_reg();
+            b.emit_op(Opcode::IdxRowid, idx_cursor, rowid_reg, 0, P4::None, 0);
+            let idx_advance = b.emit_label();
+            b.emit_jump_to_label(
+                Opcode::SeekRowid,
+                right_cursor,
+                rowid_reg,
+                idx_advance,
+                P4::None,
+                0,
+            );
+            emit_grouped_join_sorter_insert(
+                b,
+                sorter_cursor,
+                plan.group_key_expr,
+                plan.sum_arg_expr,
+                &tables,
+                ctx,
+            )?;
+            b.resolve_label(idx_advance);
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let idx_loop_body = idx_loop_top as i32;
+            b.emit_op(Opcode::Next, idx_cursor, idx_loop_body, 0, P4::None, 0);
+            b.resolve_label(duplicate_run_done);
+            b.resolve_label(no_match);
+        }
+    }
+
+    b.emit_jump_to_label(Opcode::Next, left_cursor, 0, next_left_label, P4::None, 0);
+    b.resolve_label(scan_done);
+    if let Some(idx_cursor) = index_cursor {
+        b.emit_op(Opcode::Close, idx_cursor, 0, 0, P4::None, 0);
+    }
+    b.emit_op(Opcode::Close, right_cursor, 0, 0, P4::None, 0);
+    b.emit_op(Opcode::Close, left_cursor, 0, 0, P4::None, 0);
+
+    let cur_key_reg = b.alloc_reg();
+    let prev_key_reg = b.alloc_reg();
+    let count_accum_reg = b.alloc_reg();
+    let sum_accum_reg = b.alloc_reg();
+    let first_flag_reg = b.alloc_reg();
+
+    b.emit_op(Opcode::Integer, 1, first_flag_reg, 0, P4::None, 0);
+    b.emit_op(Opcode::Null, 0, count_accum_reg, 0, P4::None, 0);
+    b.emit_op(Opcode::Null, 0, sum_accum_reg, 0, P4::None, 0);
+    b.emit_jump_to_label(
+        Opcode::SorterSort,
+        sorter_cursor,
+        0,
+        done_label,
+        P4::None,
+        0,
+    );
+
+    let sort_loop_body = b.current_addr();
+    let sorted_reg = b.alloc_reg();
+    b.emit_op(
+        Opcode::SorterData,
+        sorter_cursor,
+        sorted_reg,
+        0,
+        P4::None,
+        0,
+    );
+    b.emit_op(Opcode::Column, sorter_cursor, 0, cur_key_reg, P4::None, 0);
+
+    let first_row_label = b.emit_label();
+    b.emit_jump_to_label(
+        Opcode::IfPos,
+        first_flag_reg,
+        1,
+        first_row_label,
+        P4::None,
+        0,
+    );
+
+    let new_group_label = b.emit_label();
+    let same_group_label = b.emit_label();
+    b.emit_jump_to_label(
+        Opcode::Ne,
+        cur_key_reg,
+        prev_key_reg,
+        new_group_label,
+        P4::None,
+        0x80,
+    );
+    b.emit_jump_to_label(Opcode::Goto, 0, 0, same_group_label, P4::None, 0);
+
+    b.resolve_label(new_group_label);
+    b.emit_op(
+        Opcode::AggFinal,
+        count_accum_reg,
+        0,
+        0,
+        P4::FuncName("COUNT".to_owned()),
+        0,
+    );
+    b.emit_op(
+        Opcode::AggFinal,
+        sum_accum_reg,
+        1,
+        0,
+        P4::FuncName("SUM".to_owned()),
+        0,
+    );
+    b.emit_op(Opcode::Copy, prev_key_reg, out_regs, 0, P4::None, 0);
+    b.emit_op(Opcode::Copy, count_accum_reg, out_regs + 1, 0, P4::None, 0);
+    b.emit_op(Opcode::Copy, sum_accum_reg, out_regs + 2, 0, P4::None, 0);
+    b.emit_op(Opcode::ResultRow, out_regs, 3, 0, P4::None, 0);
+    b.emit_op(Opcode::Null, 0, count_accum_reg, 0, P4::None, 0);
+    b.emit_op(Opcode::Null, 0, sum_accum_reg, 0, P4::None, 0);
+
+    b.resolve_label(first_row_label);
+    b.resolve_label(same_group_label);
+    b.emit_op(Opcode::Copy, cur_key_reg, prev_key_reg, 0, P4::None, 0);
+    b.emit_op(
+        Opcode::AggStep,
+        0,
+        0,
+        count_accum_reg,
+        P4::FuncName("COUNT".to_owned()),
+        0,
+    );
+    let sum_arg_reg = b.alloc_reg();
+    b.emit_op(Opcode::Column, sorter_cursor, 1, sum_arg_reg, P4::None, 0);
+    b.emit_op(
+        Opcode::AggStep,
+        0,
+        sum_arg_reg,
+        sum_accum_reg,
+        P4::FuncName("SUM".to_owned()),
+        1,
+    );
+    b.emit_op(
+        Opcode::SorterNext,
+        sorter_cursor,
+        sort_loop_body as i32,
+        0,
+        P4::None,
+        0,
+    );
+
+    b.emit_jump_to_label(Opcode::IfPos, first_flag_reg, 0, done_label, P4::None, 0);
+    b.emit_op(
+        Opcode::AggFinal,
+        count_accum_reg,
+        0,
+        0,
+        P4::FuncName("COUNT".to_owned()),
+        0,
+    );
+    b.emit_op(
+        Opcode::AggFinal,
+        sum_accum_reg,
+        1,
+        0,
+        P4::FuncName("SUM".to_owned()),
+        0,
+    );
+    b.emit_op(Opcode::Copy, prev_key_reg, out_regs, 0, P4::None, 0);
+    b.emit_op(Opcode::Copy, count_accum_reg, out_regs + 1, 0, P4::None, 0);
+    b.emit_op(Opcode::Copy, sum_accum_reg, out_regs + 2, 0, P4::None, 0);
+    b.emit_op(Opcode::ResultRow, out_regs, 3, 0, P4::None, 0);
+
+    b.resolve_label(done_label);
+    b.emit_op(Opcode::Close, sorter_cursor, 0, 0, P4::None, 0);
+    b.emit_op(Opcode::Halt, 0, 0, 0, P4::None, 0);
+    b.resolve_label(end_label);
+
+    Ok(())
+}
+
+/// Generate VDBE bytecode for a standalone `VALUES` clause.
+///
+/// Pattern: `Init → Transaction → [for each row: eval exprs → ResultRow] → Halt`
+#[derive(Clone)]
+enum SingleJoinLookupTarget<'a> {
+    Rowid,
+    Index(&'a IndexSchema),
+}
+
+struct SingleJoinLookupPlan<'a> {
+    join_kind: fsqlite_ast::JoinKind,
+    probe_source: SortKeySource,
+    lookup_target: SingleJoinLookupTarget<'a>,
+}
+
+fn resolve_single_join_lookup_plan<'a>(
+    left_table: &'a TableSchema,
+    left_alias: Option<&'a str>,
+    right_table: &'a TableSchema,
+    right_alias: Option<&'a str>,
+    join_kind: fsqlite_ast::JoinKind,
+    on_expr: Option<&'a Expr>,
+) -> Option<SingleJoinLookupPlan<'a>> {
+    let on_expr = on_expr?;
+    let Expr::BinaryOp {
+        left,
+        op: fsqlite_ast::BinaryOp::Eq,
+        right,
+        ..
+    } = on_expr
+    else {
+        return None;
+    };
+
+    let (probe_source, lookup_source) = if let (Some(left_probe), Some(right_lookup)) = (
+        resolve_column_ref(left, left_table, left_alias),
+        resolve_column_ref(right, right_table, right_alias),
+    ) {
+        (left_probe, right_lookup)
+    } else if let (Some(left_lookup), Some(right_probe)) = (
+        resolve_column_ref(left, right_table, right_alias),
+        resolve_column_ref(right, left_table, left_alias),
+    ) {
+        (right_probe, left_lookup)
+    } else {
+        return None;
+    };
+
+    let lookup_target = match lookup_source {
+        SortKeySource::Rowid => SingleJoinLookupTarget::Rowid,
+        SortKeySource::Column(col_idx) => {
+            let column_name = &right_table.columns.get(col_idx)?.name;
+            SingleJoinLookupTarget::Index(right_table.index_for_column(column_name)?)
+        }
+        SortKeySource::Expression(_) => return None,
+    };
+
+    Some(SingleJoinLookupPlan {
+        join_kind,
+        probe_source,
+        lookup_target,
+    })
+}
+
+fn emit_join_probe_source(
+    b: &mut ProgramBuilder,
+    cursor: i32,
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    source: &SortKeySource,
+    target_reg: i32,
+) {
+    let scan = ScanCtx {
+        cursor,
+        table,
+        table_alias,
+        schema: None,
+        register_base: None,
+        secondary: None,
+    };
+    emit_resolved_column(b, source, cursor, target_reg, &scan);
+}
+
+fn emit_grouped_join_sorter_insert(
+    b: &mut ProgramBuilder,
+    sorter_cursor: i32,
+    group_key_expr: &Expr,
+    sum_arg_expr: &Expr,
+    tables: &[(&TableSchema, Option<&str>)],
+    ctx: &CodegenContext,
+) -> Result<(), CodegenError> {
+    let sorter_base = b.alloc_regs(2);
+    emit_join_expr(b, group_key_expr, sorter_base, tables, ctx)?;
+    emit_join_expr(b, sum_arg_expr, sorter_base + 1, tables, ctx)?;
+    let sorter_record = b.alloc_reg();
+    b.emit_op(
+        Opcode::MakeRecord,
+        sorter_base,
+        2,
+        sorter_record,
+        P4::None,
+        0,
+    );
+    b.emit_op(
+        Opcode::SorterInsert,
+        sorter_cursor,
+        sorter_record,
+        0,
+        P4::None,
+        0,
+    );
+    Ok(())
+}
+
+fn emit_join_output_or_sort(
+    b: &mut ProgramBuilder,
+    columns: &[ResultColumn],
+    out_regs: i32,
+    tables: &[(&TableSchema, Option<&str>)],
+    ctx: &CodegenContext,
+    sorter: Option<(i32, i32, usize, i32)>,
+    order_by: &[OrderingTerm],
+) -> Result<(), CodegenError> {
+    let out_col_count = resolve_join_output_count(columns, tables);
+    emit_join_result_columns(b, columns, out_regs, tables, ctx)?;
+    if let Some((sort_cursor, sort_regs, sort_key_count, sort_record_reg)) = sorter {
+        for (i, term) in order_by.iter().enumerate() {
+            let sort_reg = sort_regs + i as i32;
+            emit_join_expr(b, &term.expr, sort_reg, tables, ctx)?;
+        }
+        for i in 0..out_col_count {
+            let src = out_regs + i as i32;
+            let dst = sort_regs + (sort_key_count + i) as i32;
+            b.emit_op(Opcode::SCopy, src, dst, 0, P4::None, 0);
+        }
+        b.emit_op(
+            Opcode::MakeRecord,
+            sort_regs,
+            (sort_key_count + out_col_count) as i32,
+            sort_record_reg,
+            P4::None,
+            0,
+        );
+        b.emit_op(
+            Opcode::SorterInsert,
+            sort_cursor,
+            sort_record_reg,
+            0,
+            P4::None,
+            0,
+        );
+    } else {
+        b.emit_op(
+            Opcode::ResultRow,
+            out_regs,
+            out_col_count as i32,
+            0,
+            P4::None,
+            0,
+        );
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn codegen_single_join_lookup_select(
+    b: &mut ProgramBuilder,
+    stmt: &SelectStatement,
+    columns: &[ResultColumn],
+    where_clause: Option<&Expr>,
+    left_table: &TableSchema,
+    left_alias: Option<&str>,
+    right_table: &TableSchema,
+    right_alias: Option<&str>,
+    plan: &SingleJoinLookupPlan<'_>,
+    ctx: &CodegenContext,
+) -> Result<(), CodegenError> {
+    let end_label = b.emit_label();
+    let done_label = b.emit_label();
+    b.emit_jump_to_label(Opcode::Init, 0, 0, end_label, P4::None, 0);
+    b.emit_op(Opcode::Transaction, 0, 0, 0, P4::None, 0);
+
+    let tables = [(left_table, left_alias), (right_table, right_alias)];
+    let out_col_count = resolve_join_output_count(columns, &tables);
+    let out_regs = b.alloc_regs(out_col_count as i32);
+
+    let left_cursor = 0_i32;
+    let right_cursor = 1_i32;
+    b.emit_op(
+        Opcode::OpenRead,
+        left_cursor,
+        left_table.root_page,
+        0,
+        P4::Table(left_table.name.clone()),
+        0,
+    );
+    b.emit_op(
+        Opcode::OpenRead,
+        right_cursor,
+        right_table.root_page,
+        0,
+        P4::Table(right_table.name.clone()),
+        0,
+    );
+    let index_cursor = if let SingleJoinLookupTarget::Index(index) = &plan.lookup_target {
+        let cursor = 2_i32;
+        b.emit_op(
+            Opcode::OpenRead,
+            cursor,
+            index.root_page,
+            0,
+            P4::Index(index.name.clone()),
+            0,
+        );
+        Some(cursor)
+    } else {
+        None
+    };
+
+    let sorter = if !stmt.order_by.is_empty() {
+        let sort_cursor = if index_cursor.is_some() { 3_i32 } else { 2_i32 };
+        let sort_key_count = stmt.order_by.len();
+        let total_sort_cols = sort_key_count + out_col_count;
+        let sort_regs = b.alloc_regs(total_sort_cols as i32);
+        let sort_record_reg = b.alloc_reg();
+        let sort_order = stmt
+            .order_by
+            .iter()
+            .map(|term| {
+                if term.direction == Some(fsqlite_ast::SortDirection::Desc) {
+                    '-'
+                } else {
+                    '+'
+                }
+            })
+            .collect::<String>();
+        b.emit_op(
+            Opcode::SorterOpen,
+            sort_cursor,
+            total_sort_cols as i32,
+            0,
+            P4::Affinity(sort_order),
+            0,
+        );
+        Some((sort_cursor, sort_regs, sort_key_count, sort_record_reg))
+    } else {
+        None
+    };
+
+    let next_left_label = b.emit_label();
+    b.emit_jump_to_label(Opcode::Rewind, left_cursor, 0, done_label, P4::None, 0);
+    b.resolve_label(next_left_label);
+    let left_join_match_reg = if matches!(plan.join_kind, fsqlite_ast::JoinKind::Left) {
+        let reg = b.alloc_temp();
+        b.emit_op(Opcode::Integer, 0, reg, 0, P4::None, 0);
+        Some(reg)
+    } else {
+        None
+    };
+
+    match &plan.lookup_target {
+        SingleJoinLookupTarget::Rowid => {
+            let probe_reg = b.alloc_reg();
+            emit_join_probe_source(
+                b,
+                left_cursor,
+                left_table,
+                left_alias,
+                &plan.probe_source,
+                probe_reg,
+            );
+            let no_match = b.emit_label();
+            b.emit_jump_to_label(Opcode::IsNull, probe_reg, 0, no_match, P4::None, 0);
+            b.emit_jump_to_label(
+                Opcode::SeekRowid,
+                right_cursor,
+                probe_reg,
+                no_match,
+                P4::None,
+                0,
+            );
+            if let Some(match_reg) = left_join_match_reg {
+                b.emit_op(Opcode::Integer, 1, match_reg, 0, P4::None, 0);
+            }
+            let matched_skip = b.emit_label();
+            if let Some(where_expr) = where_clause {
+                let cond_reg = b.alloc_reg();
+                emit_join_expr(b, where_expr, cond_reg, &tables, ctx)?;
+                b.emit_jump_to_label(Opcode::IfNot, cond_reg, 1, matched_skip, P4::None, 0);
+            }
+            emit_join_output_or_sort(b, columns, out_regs, &tables, ctx, sorter, &stmt.order_by)?;
+            b.resolve_label(matched_skip);
+            b.resolve_label(no_match);
+        }
+        SingleJoinLookupTarget::Index(_index) => {
+            let idx_cursor = index_cursor.expect("index lookup join must open index cursor");
+            let probe_base = b.alloc_regs(2);
+            let probe_reg = probe_base;
+            let min_rowid_reg = probe_base + 1;
+            emit_join_probe_source(
+                b,
+                left_cursor,
+                left_table,
+                left_alias,
+                &plan.probe_source,
+                probe_reg,
+            );
+            let no_match = b.emit_label();
+            let duplicate_run_done = b.emit_label();
+            b.emit_jump_to_label(Opcode::IsNull, probe_reg, 0, no_match, P4::None, 0);
+            b.emit_op(Opcode::Int64, 0, min_rowid_reg, 0, P4::Int64(i64::MIN), 0);
+            let probe_record_reg = b.alloc_reg();
+            b.emit_op(
+                Opcode::MakeRecord,
+                probe_base,
+                2,
+                probe_record_reg,
+                P4::None,
+                0,
+            );
+            b.emit_jump_to_label(
+                Opcode::SeekGE,
+                idx_cursor,
+                probe_record_reg,
+                no_match,
+                P4::None,
+                0,
+            );
+            let idx_loop_top = b.current_addr();
+            let idx_key_reg = b.alloc_reg();
+            b.emit_op(Opcode::Column, idx_cursor, 0, idx_key_reg, P4::None, 0);
+            b.emit_jump_to_label(
+                Opcode::Ne,
+                probe_reg,
+                idx_key_reg,
+                duplicate_run_done,
+                P4::None,
+                0,
+            );
+            let rowid_reg = b.alloc_reg();
+            b.emit_op(Opcode::IdxRowid, idx_cursor, rowid_reg, 0, P4::None, 0);
+            let idx_advance = b.emit_label();
+            b.emit_jump_to_label(
+                Opcode::SeekRowid,
+                right_cursor,
+                rowid_reg,
+                idx_advance,
+                P4::None,
+                0,
+            );
+            if let Some(match_reg) = left_join_match_reg {
+                b.emit_op(Opcode::Integer, 1, match_reg, 0, P4::None, 0);
+            }
+            if let Some(where_expr) = where_clause {
+                let cond_reg = b.alloc_reg();
+                emit_join_expr(b, where_expr, cond_reg, &tables, ctx)?;
+                b.emit_jump_to_label(Opcode::IfNot, cond_reg, 1, idx_advance, P4::None, 0);
+            }
+            emit_join_output_or_sort(b, columns, out_regs, &tables, ctx, sorter, &stmt.order_by)?;
+            b.resolve_label(idx_advance);
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let idx_loop_body = idx_loop_top as i32;
+            b.emit_op(Opcode::Next, idx_cursor, idx_loop_body, 0, P4::None, 0);
+            b.resolve_label(duplicate_run_done);
+            b.resolve_label(no_match);
+        }
+    }
+
+    if let Some(match_reg) = left_join_match_reg {
+        let skip_left_join_null_row = b.emit_label();
+        b.emit_jump_to_label(
+            Opcode::IfPos,
+            match_reg,
+            0,
+            skip_left_join_null_row,
+            P4::None,
+            0,
+        );
+        b.emit_op(Opcode::NullRow, right_cursor, 0, 0, P4::None, 0);
+        if let Some(where_expr) = where_clause {
+            let cond_reg = b.alloc_reg();
+            emit_join_expr(b, where_expr, cond_reg, &tables, ctx)?;
+            b.emit_jump_to_label(
+                Opcode::IfNot,
+                cond_reg,
+                1,
+                skip_left_join_null_row,
+                P4::None,
+                0,
+            );
+        }
+        emit_join_output_or_sort(b, columns, out_regs, &tables, ctx, sorter, &stmt.order_by)?;
+        b.resolve_label(skip_left_join_null_row);
+    }
+
+    b.emit_jump_to_label(Opcode::Next, left_cursor, 0, next_left_label, P4::None, 0);
+    b.resolve_label(done_label);
+
+    if let Some((sort_cursor, sort_regs, sort_key_count, _sort_record_reg)) = sorter {
+        let sort_loop = b.emit_label();
+        let sort_done = b.emit_label();
+        b.emit_jump_to_label(Opcode::SorterSort, sort_cursor, 0, sort_done, P4::None, 0);
+        b.resolve_label(sort_loop);
+        b.emit_op(Opcode::SorterData, sort_cursor, sort_regs, 0, P4::None, 0);
+        for i in 0..out_col_count {
+            let dst = out_regs + i as i32;
+            b.emit_op(
+                Opcode::Column,
+                sort_cursor,
+                (sort_key_count + i) as i32,
+                dst,
+                P4::None,
+                0,
+            );
+        }
+        b.emit_op(
+            Opcode::ResultRow,
+            out_regs,
+            out_col_count as i32,
+            0,
+            P4::None,
+            0,
+        );
+        b.emit_jump_to_label(Opcode::SorterNext, sort_cursor, 0, sort_loop, P4::None, 0);
+        b.resolve_label(sort_done);
+        b.emit_op(Opcode::Close, sort_cursor, 0, 0, P4::None, 0);
+    }
+
+    if let Some(idx_cursor) = index_cursor {
+        b.emit_op(Opcode::Close, idx_cursor, 0, 0, P4::None, 0);
+    }
+    b.emit_op(Opcode::Close, right_cursor, 0, 0, P4::None, 0);
+    b.emit_op(Opcode::Close, left_cursor, 0, 0, P4::None, 0);
+    b.emit_op(Opcode::Halt, 0, 0, 0, P4::None, 0);
+    b.resolve_label(end_label);
+    Ok(())
+}
+
+/// Codegen for SELECT ... FROM t1 JOIN t2 ON ... [WHERE ...] [ORDER BY ...]
+///
+/// Generates a nested-loop join: scan the outer table, for each row scan the
+/// inner table, evaluate the ON condition + WHERE, emit ResultRow for matches.
+/// This enables JOINs to execute through the VDBE storage-cursor path instead
+/// of falling back to the connection-level MemDatabase interpreter.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn codegen_join_select(
+    b: &mut ProgramBuilder,
+    stmt: &SelectStatement,
+    from: &FromClause,
+    columns: &[ResultColumn],
+    where_clause: Option<&Expr>,
+    schema: &[TableSchema],
+    ctx: &CodegenContext,
+) -> Result<(), CodegenError> {
+    use fsqlite_ast::{JoinConstraint, JoinKind, TableOrSubquery};
+
+    // Extract left (driving) table.
+    let (left_name, left_alias) = match &from.source {
+        TableOrSubquery::Table { name, alias, .. } => (&name.name, alias.as_deref()),
+        _ => {
+            return Err(CodegenError::Unsupported(
+                "non-table left source in JOIN".to_owned(),
+            ));
+        }
+    };
+    let left_table = find_table(schema, left_name)?;
+
+    // Build list of join sources: (table_schema, alias, join_kind, on_expr)
+    let mut join_tables: Vec<(&TableSchema, Option<String>, JoinKind, Option<&Expr>)> = Vec::new();
+    for join in &from.joins {
+        let (right_name, right_alias) = match &join.table {
+            TableOrSubquery::Table { name, alias, .. } => (&name.name, alias.clone()),
+            _ => {
+                return Err(CodegenError::Unsupported(
+                    "non-table right source in JOIN".to_owned(),
+                ));
+            }
+        };
+        let right_table = find_table(schema, right_name)?;
+        let on_expr = match &join.constraint {
+            Some(JoinConstraint::On(expr)) => Some(expr),
+            Some(JoinConstraint::Using(_)) => {
+                return Err(CodegenError::Unsupported(
+                    "JOIN USING in codegen".to_owned(),
+                ));
+            }
+            None => None,
+        };
+        join_tables.push((right_table, right_alias, join.join_type.kind, on_expr));
+    }
+
+    if join_tables.is_empty() {
+        return Err(CodegenError::Unsupported("empty join list".to_owned()));
+    }
+
+    if let [(right_table, right_alias, join_kind, on_expr)] = join_tables.as_slice()
+        && let Some(plan) = resolve_single_join_lookup_plan(
+            left_table,
+            left_alias,
+            right_table,
+            right_alias.as_deref(),
+            *join_kind,
+            *on_expr,
+        )
+    {
+        return codegen_single_join_lookup_select(
+            b,
+            stmt,
+            columns,
+            where_clause,
+            left_table,
+            left_alias,
+            right_table,
+            right_alias.as_deref(),
+            &plan,
+            ctx,
+        );
+    }
+
+    let supports_left_join = join_tables.len() == 1;
+    for (_, _, kind, _) in &join_tables {
+        let supported = match kind {
+            JoinKind::Inner | JoinKind::Cross => true,
+            JoinKind::Left if supports_left_join => true,
+            _ => false,
+        };
+        if !supported {
+            return Err(CodegenError::Unsupported(format!(
+                "{kind:?} JOIN not yet supported in VDBE codegen"
+            )));
+        }
+    }
+
+    let end_label = b.emit_label();
+    let done_label = b.emit_label();
+
+    // Init.
+    b.emit_jump_to_label(Opcode::Init, 0, 0, end_label, P4::None, 0);
+    b.emit_op(Opcode::Transaction, 0, 0, 0, P4::None, 0);
+
+    // Allocate output registers.
+    let all_tables: Vec<(&TableSchema, Option<&str>)> = std::iter::once((left_table, left_alias))
+        .chain(join_tables.iter().map(|(t, a, _, _)| (*t, a.as_deref())))
+        .collect();
+    let out_col_count = resolve_join_output_count(columns, &all_tables);
+    let out_regs = b.alloc_regs(out_col_count as i32);
+
+    // Open cursors for all tables.
+    let left_cursor = 0_i32;
+    b.emit_op(
+        Opcode::OpenRead,
+        left_cursor,
+        left_table.root_page,
+        0,
+        P4::Table(left_table.name.clone()),
+        0,
+    );
+    let mut right_cursors: Vec<i32> = Vec::new();
+    for (i, (rt, _, _, _)) in join_tables.iter().enumerate() {
+        let cursor_id = (i + 1) as i32;
+        b.emit_op(
+            Opcode::OpenRead,
+            cursor_id,
+            rt.root_page,
+            0,
+            P4::Table(rt.name.clone()),
+            0,
+        );
+        right_cursors.push(cursor_id);
+    }
+
+    // Sorter for ORDER BY (if present).
+    let sorter = if !stmt.order_by.is_empty() {
+        let sort_cursor = (join_tables.len() + 1) as i32;
+        let sort_key_count = stmt.order_by.len();
+        let total_sort_cols = sort_key_count + out_col_count;
+        let sort_regs = b.alloc_regs(total_sort_cols as i32);
+        let sort_record_reg = b.alloc_reg();
+        let sort_order = stmt
+            .order_by
+            .iter()
+            .map(|term| {
+                if term.direction == Some(fsqlite_ast::SortDirection::Desc) {
+                    '-'
+                } else {
+                    '+'
+                }
+            })
+            .collect::<String>();
+        b.emit_op(
+            Opcode::SorterOpen,
+            sort_cursor,
+            total_sort_cols as i32,
+            0,
+            P4::Affinity(sort_order),
+            0,
+        );
+        Some((sort_cursor, sort_regs, sort_key_count, sort_record_reg))
+    } else {
+        None
+    };
+
+    // Nested loop: Rewind left, for each row rewind right, check ON + WHERE, emit.
+    let next_left_label = b.emit_label();
+    b.emit_jump_to_label(Opcode::Rewind, left_cursor, 0, done_label, P4::None, 0);
+    b.resolve_label(next_left_label);
+    let left_join_match_reg = if supports_left_join && matches!(join_tables[0].2, JoinKind::Left) {
+        let reg = b.alloc_temp();
+        b.emit_op(Opcode::Integer, 0, reg, 0, P4::None, 0);
+        Some(reg)
+    } else {
+        None
+    };
+
+    // For each right table, emit a nested Rewind+Next loop.
+    let mut next_labels: Vec<Label> = Vec::new();
+    let mut done_right_labels: Vec<Label> = Vec::new();
+    for &rc in &right_cursors {
+        let next_right_label = b.emit_label();
+        let done_right_label = b.emit_label();
+        b.emit_jump_to_label(Opcode::Rewind, rc, 0, done_right_label, P4::None, 0);
+        b.resolve_label(next_right_label);
+        next_labels.push(next_right_label);
+        done_right_labels.push(done_right_label);
+    }
+
+    // Evaluate ON conditions — skip row if condition is false.
+    // When the condition fails, jump forward to the innermost Next opcode
+    // (not the loop start — that would re-check the same row forever).
+    let skip_label = b.emit_label();
+    for (_, _, _, on_expr) in &join_tables {
+        if let Some(expr) = on_expr {
+            let cond_reg = b.alloc_regs(1);
+            emit_join_expr(b, expr, cond_reg, &all_tables, ctx)?;
+            b.emit_jump_to_label(Opcode::IfNot, cond_reg, 1, skip_label, P4::None, 0);
+        }
+    }
+    if let Some(match_reg) = left_join_match_reg {
+        b.emit_op(Opcode::Integer, 1, match_reg, 0, P4::None, 0);
+    }
+    if let Some(where_expr) = where_clause {
+        let cond_reg = b.alloc_regs(1);
+        emit_join_expr(b, where_expr, cond_reg, &all_tables, ctx)?;
+        b.emit_jump_to_label(Opcode::IfNot, cond_reg, 1, skip_label, P4::None, 0);
+    }
+
+    // Emit output columns.
+    emit_join_result_columns(b, columns, out_regs, &all_tables, ctx)?;
+
+    if let Some((sort_cursor, sort_regs, sort_key_count, sort_record_reg)) = sorter {
+        // Copy sort keys then output columns into sorter registers.
+        for (i, term) in stmt.order_by.iter().enumerate() {
+            let sort_reg = sort_regs + i as i32;
+            emit_join_expr(b, &term.expr, sort_reg, &all_tables, ctx)?;
+        }
+        for i in 0..out_col_count {
+            let src = out_regs + i as i32;
+            let dst = sort_regs + (sort_key_count + i) as i32;
+            b.emit_op(Opcode::SCopy, src, dst, 0, P4::None, 0);
+        }
+        b.emit_op(
+            Opcode::MakeRecord,
+            sort_regs,
+            (sort_key_count + out_col_count) as i32,
+            sort_record_reg,
+            P4::None,
+            0,
+        );
+        b.emit_op(
+            Opcode::SorterInsert,
+            sort_cursor,
+            sort_record_reg,
+            0,
+            P4::None,
+            0,
+        );
+    } else {
+        b.emit_op(
+            Opcode::ResultRow,
+            out_regs,
+            out_col_count as i32,
+            0,
+            P4::None,
+            0,
+        );
+    }
+
+    // Close nested loops (inner to outer).
+    // Resolve skip_label here so failed ON/WHERE conditions jump to the
+    // innermost Next (advancing the cursor) rather than the loop body start.
+    b.resolve_label(skip_label);
+    for (i, &rc) in right_cursors.iter().enumerate().rev() {
+        b.emit_jump_to_label(Opcode::Next, rc, 0, next_labels[i], P4::None, 0);
+        b.resolve_label(done_right_labels[i]);
+    }
+    if let Some(match_reg) = left_join_match_reg {
+        let skip_left_join_null_row = b.emit_label();
+        b.emit_jump_to_label(
+            Opcode::IfPos,
+            match_reg,
+            0,
+            skip_left_join_null_row,
+            P4::None,
+            0,
+        );
+        b.emit_op(Opcode::NullRow, right_cursors[0], 0, 0, P4::None, 0);
+        if let Some(where_expr) = where_clause {
+            let cond_reg = b.alloc_regs(1);
+            emit_join_expr(b, where_expr, cond_reg, &all_tables, ctx)?;
+            b.emit_jump_to_label(
+                Opcode::IfNot,
+                cond_reg,
+                1,
+                skip_left_join_null_row,
+                P4::None,
+                0,
+            );
+        }
+        emit_join_result_columns(b, columns, out_regs, &all_tables, ctx)?;
+        if let Some((sort_cursor, sort_regs, sort_key_count, sort_record_reg)) = sorter {
+            for (i, term) in stmt.order_by.iter().enumerate() {
+                let sort_reg = sort_regs + i as i32;
+                emit_join_expr(b, &term.expr, sort_reg, &all_tables, ctx)?;
+            }
+            for i in 0..out_col_count {
+                let src = out_regs + i as i32;
+                let dst = sort_regs + (sort_key_count + i) as i32;
+                b.emit_op(Opcode::SCopy, src, dst, 0, P4::None, 0);
+            }
+            b.emit_op(
+                Opcode::MakeRecord,
+                sort_regs,
+                (sort_key_count + out_col_count) as i32,
+                sort_record_reg,
+                P4::None,
+                0,
+            );
+            b.emit_op(
+                Opcode::SorterInsert,
+                sort_cursor,
+                sort_record_reg,
+                0,
+                P4::None,
+                0,
+            );
+        } else {
+            b.emit_op(
+                Opcode::ResultRow,
+                out_regs,
+                out_col_count as i32,
+                0,
+                P4::None,
+                0,
+            );
+        }
+        b.resolve_label(skip_left_join_null_row);
+    }
+    b.emit_jump_to_label(Opcode::Next, left_cursor, 0, next_left_label, P4::None, 0);
+
+    b.resolve_label(done_label);
+
+    // If sorting, emit sorter output.
+    if let Some((sort_cursor, sort_regs, sort_key_count, _sort_record_reg)) = sorter {
+        let sort_loop = b.emit_label();
+        let sort_done = b.emit_label();
+        b.emit_jump_to_label(Opcode::SorterSort, sort_cursor, 0, sort_done, P4::None, 0);
+        b.resolve_label(sort_loop);
+        b.emit_op(Opcode::SorterData, sort_cursor, sort_regs, 0, P4::None, 0);
+        // Extract output columns from sorter data.
+        for i in 0..out_col_count {
+            let dst = out_regs + i as i32;
+            b.emit_op(
+                Opcode::Column,
+                sort_cursor,
+                (sort_key_count + i) as i32,
+                dst,
+                P4::None,
+                0,
+            );
+        }
+        b.emit_op(
+            Opcode::ResultRow,
+            out_regs,
+            out_col_count as i32,
+            0,
+            P4::None,
+            0,
+        );
+        b.emit_jump_to_label(Opcode::SorterNext, sort_cursor, 0, sort_loop, P4::None, 0);
+        b.resolve_label(sort_done);
+    }
+
+    // LIMIT/OFFSET (simple version).
+    // (Full LIMIT support is handled by the caller's post-processing.)
+
+    // Close cursors.
+    for &rc in &right_cursors {
+        b.emit_op(Opcode::Close, rc, 0, 0, P4::None, 0);
+    }
+    b.emit_op(Opcode::Close, left_cursor, 0, 0, P4::None, 0);
+
+    // Halt.
+    b.emit_op(Opcode::Halt, 0, 0, 0, P4::None, 0);
+
+    // End target for Init jump — Init will see this points past the
+    // program end and fall through to Transaction (the standard pattern
+    // used by all other codegen paths).
+    b.resolve_label(end_label);
+
+    Ok(())
+}
+
+/// Count output columns for a JOIN query.
+fn resolve_join_output_count(
+    columns: &[ResultColumn],
+    tables: &[(&TableSchema, Option<&str>)],
+) -> usize {
+    columns
+        .iter()
+        .map(|col| match col {
+            ResultColumn::Star => tables.iter().map(|(t, _)| t.columns.len()).sum(),
+            ResultColumn::TableStar(name) => tables
+                .iter()
+                .find(|(t, alias)| {
+                    alias.map_or_else(
+                        || t.name.eq_ignore_ascii_case(name),
+                        |a| a.eq_ignore_ascii_case(name),
+                    )
+                })
+                .map_or(0, |(t, _)| t.columns.len()),
+            ResultColumn::Expr { .. } => 1,
+        })
+        .sum()
+}
+
+/// Emit a single expression for a JOIN context (multi-table column resolution).
+///
+/// This is a simplified expression emitter that handles the common cases:
+/// column references (qualified and unqualified), literals, and simple
+/// binary comparisons. Complex expressions fall back to unsupported error.
+#[allow(clippy::too_many_lines)]
+fn emit_join_expr(
+    b: &mut ProgramBuilder,
+    expr: &Expr,
+    target: i32,
+    tables: &[(&TableSchema, Option<&str>)],
+    _ctx: &CodegenContext,
+) -> Result<(), CodegenError> {
+    match expr {
+        Expr::Column(col_ref, _) => {
+            // Resolve which table+cursor and column index.
+            let (cursor, col_idx) =
+                resolve_join_column(col_ref.table.as_deref(), &col_ref.column, tables)?;
+            b.emit_op(Opcode::Column, cursor, col_idx as i32, target, P4::None, 0);
+            Ok(())
+        }
+        Expr::Literal(lit, _) => {
+            match lit {
+                Literal::Integer(n) => {
+                    if let Ok(small) = i32::try_from(*n) {
+                        b.emit_op(Opcode::Integer, small, target, 0, P4::None, 0);
+                    } else {
+                        b.emit_op(Opcode::Int64, 0, target, 0, P4::Int64(*n), 0);
+                    }
+                }
+                Literal::Float(f) => {
+                    b.emit_op(Opcode::Real, 0, target, 0, P4::Real(*f), 0);
+                }
+                Literal::String(s) => {
+                    b.emit_op(Opcode::String8, 0, target, 0, P4::Str(s.clone()), 0);
+                }
+                Literal::Blob(bytes) => {
+                    b.emit_op(
+                        Opcode::Blob,
+                        bytes.len() as i32,
+                        target,
+                        0,
+                        P4::Blob(bytes.clone()),
+                        0,
+                    );
+                }
+                Literal::Null => {
+                    b.emit_op(Opcode::Null, 0, target, 0, P4::None, 0);
+                }
+                Literal::True => {
+                    b.emit_op(Opcode::Integer, 1, target, 0, P4::None, 0);
+                }
+                Literal::False => {
+                    b.emit_op(Opcode::Integer, 0, target, 0, P4::None, 0);
+                }
+                Literal::CurrentTime | Literal::CurrentDate | Literal::CurrentTimestamp => {
+                    return Err(CodegenError::Unsupported(
+                        "datetime literal in JOIN codegen".to_owned(),
+                    ));
+                }
+            }
+            Ok(())
+        }
+        Expr::BinaryOp {
+            left, op, right, ..
+        } => {
+            use fsqlite_ast::BinaryOp;
+            let left_reg = b.alloc_regs(1);
+            let right_reg = b.alloc_regs(1);
+            emit_join_expr(b, left, left_reg, tables, _ctx)?;
+            emit_join_expr(b, right, right_reg, tables, _ctx)?;
+            match op {
+                BinaryOp::Eq => {
+                    // Use Eq with STOREP2 to store result in target.
+                    b.emit_op(Opcode::Eq, right_reg, target, left_reg, P4::None, 0x20);
+                }
+                BinaryOp::Ne => {
+                    b.emit_op(Opcode::Ne, right_reg, target, left_reg, P4::None, 0x20);
+                }
+                BinaryOp::Lt => {
+                    b.emit_op(Opcode::Lt, right_reg, target, left_reg, P4::None, 0x20);
+                }
+                BinaryOp::Le => {
+                    b.emit_op(Opcode::Le, right_reg, target, left_reg, P4::None, 0x20);
+                }
+                BinaryOp::Gt => {
+                    b.emit_op(Opcode::Gt, right_reg, target, left_reg, P4::None, 0x20);
+                }
+                BinaryOp::Ge => {
+                    b.emit_op(Opcode::Ge, right_reg, target, left_reg, P4::None, 0x20);
+                }
+                BinaryOp::Add => {
+                    b.emit_op(Opcode::Add, right_reg, left_reg, target, P4::None, 0);
+                }
+                BinaryOp::Subtract => {
+                    b.emit_op(Opcode::Subtract, right_reg, left_reg, target, P4::None, 0);
+                }
+                BinaryOp::Multiply => {
+                    b.emit_op(Opcode::Multiply, right_reg, left_reg, target, P4::None, 0);
+                }
+                BinaryOp::And => {
+                    b.emit_op(Opcode::And, left_reg, right_reg, target, P4::None, 0);
+                }
+                BinaryOp::Or => {
+                    b.emit_op(Opcode::Or, left_reg, right_reg, target, P4::None, 0);
+                }
+                _ => {
+                    return Err(CodegenError::Unsupported(format!(
+                        "binary op {op:?} in JOIN codegen"
+                    )));
+                }
+            }
+            Ok(())
+        }
+        Expr::IsNull {
+            expr: inner, not, ..
+        } => {
+            let inner_reg = b.alloc_regs(1);
+            emit_join_expr(b, inner, inner_reg, tables, _ctx)?;
+            let skip = b.emit_label();
+            // IS NULL: result is 1 when inner is null, 0 otherwise.
+            // IS NOT NULL: result is 0 when inner is null, 1 otherwise.
+            let (val_if_null, val_if_not_null) = if *not { (0, 1) } else { (1, 0) };
+            b.emit_op(Opcode::Integer, val_if_null, target, 0, P4::None, 0);
+            b.emit_jump_to_label(Opcode::IsNull, inner_reg, 0, skip, P4::None, 0);
+            b.emit_op(Opcode::Integer, val_if_not_null, target, 0, P4::None, 0);
+            b.resolve_label(skip);
+            Ok(())
+        }
+        _ => Err(CodegenError::Unsupported(format!(
+            "expression {expr:?} in JOIN codegen"
+        ))),
+    }
+}
+
+/// Resolve a column reference to (cursor_id, column_index) across multiple tables.
+fn resolve_join_column(
+    qualifier: Option<&str>,
+    name: &str,
+    tables: &[(&TableSchema, Option<&str>)],
+) -> Result<(i32, usize), CodegenError> {
+    let name_lower = name.to_ascii_lowercase();
+    for (cursor_idx, (table, alias)) in tables.iter().enumerate() {
+        // Check if qualifier matches table name or alias.
+        let matches_qualifier = qualifier.is_none_or(|q| {
+            let q_lower = q.to_ascii_lowercase();
+            alias.is_some_and(|a| a.eq_ignore_ascii_case(&q_lower))
+                || table.name.eq_ignore_ascii_case(&q_lower)
+        });
+        if !matches_qualifier {
+            continue;
+        }
+        for (col_idx, col) in table.columns.iter().enumerate() {
+            if col.name.eq_ignore_ascii_case(&name_lower) {
+                return Ok((cursor_idx as i32, col_idx));
+            }
+        }
+    }
+    Err(CodegenError::ColumnNotFound {
+        table: String::new(),
+        column: name.to_owned(),
+    })
+}
+
+/// Emit result columns for a JOIN query.
+fn emit_join_result_columns(
+    b: &mut ProgramBuilder,
+    columns: &[ResultColumn],
+    out_regs: i32,
+    tables: &[(&TableSchema, Option<&str>)],
+    ctx: &CodegenContext,
+) -> Result<(), CodegenError> {
+    let mut reg_offset = 0;
+    for col in columns {
+        match col {
+            ResultColumn::Star => {
+                // Emit all columns from all tables.
+                for (cursor_idx, (table, _)) in tables.iter().enumerate() {
+                    for col_idx in 0..table.columns.len() {
+                        let dst = out_regs + reg_offset;
+                        b.emit_op(
+                            Opcode::Column,
+                            cursor_idx as i32,
+                            col_idx as i32,
+                            dst,
+                            P4::None,
+                            0,
+                        );
+                        reg_offset += 1;
+                    }
+                }
+            }
+            ResultColumn::TableStar(table_name) => {
+                let name_lower = table_name.to_ascii_lowercase();
+                for (cursor_idx, (table, alias)) in tables.iter().enumerate() {
+                    let matches = alias.is_some_and(|a| a.eq_ignore_ascii_case(&name_lower))
+                        || table.name.eq_ignore_ascii_case(&name_lower);
+                    if matches {
+                        for col_idx in 0..table.columns.len() {
+                            let dst = out_regs + reg_offset;
+                            b.emit_op(
+                                Opcode::Column,
+                                cursor_idx as i32,
+                                col_idx as i32,
+                                dst,
+                                P4::None,
+                                0,
+                            );
+                            reg_offset += 1;
+                        }
+                        break;
+                    }
+                }
+            }
+            ResultColumn::Expr { expr, .. } => {
+                let dst = out_regs + reg_offset;
+                emit_join_expr(b, expr, dst, tables, ctx)?;
+                reg_offset += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+///
+/// Handles `VALUES (1, 'a'), (2, 'b')` etc.
+fn codegen_values_select(b: &mut ProgramBuilder, rows: &[Vec<Expr>]) -> Result<(), CodegenError> {
+    if rows.is_empty() {
+        return Err(CodegenError::Unsupported("empty VALUES".to_owned()));
+    }
+
+    let end_label = b.emit_label();
+
+    // Init: jump to end (standard SQLite pattern).
+    b.emit_jump_to_label(Opcode::Init, 0, 0, end_label, P4::None, 0);
+
+    // Transaction (read-only, p2=0).
+    b.emit_op(Opcode::Transaction, 0, 0, 0, P4::None, 0);
+
+    // Determine column count from the first row.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let num_cols = rows[0].len() as i32;
+    let out_regs = b.alloc_regs(num_cols);
+
+    // Emit each row: evaluate expressions, then ResultRow.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    for row in rows {
+        for (i, expr) in row.iter().enumerate() {
+            let reg = out_regs + i as i32;
+            emit_expr(b, expr, reg, None);
+        }
+        b.emit_op(Opcode::ResultRow, out_regs, num_cols, 0, P4::None, 0);
+    }
+
+    b.emit_op(Opcode::Halt, 0, 0, 0, P4::None, 0);
+
+    // End target for Init jump.
+    b.resolve_label(end_label);
+
+    Ok(())
+}
+
+/// Generate VDBE bytecode for SELECT without FROM clause.
+///
+/// Pattern: `Init → Transaction → [eval exprs] → ResultRow → Halt`
+///
+/// Handles `SELECT 1`, `SELECT 1+2, 'abc'`, `SELECT abs(-5)`, etc.
+/// If a WHERE clause is present and evaluates to false/NULL, no row is emitted.
+fn codegen_select_without_from(
+    b: &mut ProgramBuilder,
+    columns: &[ResultColumn],
+    where_clause: Option<&Expr>,
+) {
+    let end_label = b.emit_label();
+    let halt_label = b.emit_label();
+
+    // Init: jump to end (standard SQLite pattern).
+    b.emit_jump_to_label(Opcode::Init, 0, 0, end_label, P4::None, 0);
+
+    // Transaction (read-only, p2=0).
+    b.emit_op(Opcode::Transaction, 0, 0, 0, P4::None, 0);
+
+    // WHERE clause: if present and false/NULL, skip to Halt.
+    if let Some(where_expr) = where_clause {
+        let cond_reg = b.alloc_temp();
+        emit_expr(b, where_expr, cond_reg, None);
+        b.emit_jump_to_label(Opcode::IfNot, cond_reg, 1, halt_label, P4::None, 0);
+        b.free_temp(cond_reg);
+    }
+
+    // Evaluate each result column expression into consecutive output registers.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let num_cols = columns.len() as i32;
+    let out_regs = b.alloc_regs(num_cols);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    for (i, col) in columns.iter().enumerate() {
+        let reg = out_regs + i as i32;
+        match col {
+            ResultColumn::Expr { expr, .. } => {
+                emit_expr(b, expr, reg, None);
+            }
+            ResultColumn::Star | ResultColumn::TableStar(_) => {
+                // No table → Star has no meaning; emit NULL.
+                b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+            }
+        }
+    }
+
+    b.emit_op(Opcode::ResultRow, out_regs, num_cols, 0, P4::None, 0);
+    b.resolve_label(halt_label);
+    b.emit_op(Opcode::Halt, 0, 0, 0, P4::None, 0);
+
+    // End target for Init jump.
+    b.resolve_label(end_label);
+}
+
+/// Generate VDBE bytecode for an aggregate SELECT (no GROUP BY yet).
+///
+/// Pattern:
+/// ```text
+/// Init → Transaction → OpenRead → Rewind →
+///   [AggStep per aggregate per row] → Next →
+/// [AggFinal per aggregate] → ResultRow → Close → Halt
+/// ```
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn codegen_select_aggregate(
+    b: &mut ProgramBuilder,
+    cursor: i32,
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    schema: &[TableSchema],
+    columns: &[ResultColumn],
+    where_clause: Option<&Expr>,
+    having: Option<&Expr>,
+    out_regs: i32,
+    out_col_count: i32,
+    done_label: crate::Label,
+    end_label: crate::Label,
+) -> Result<(), CodegenError> {
+    if where_clause.is_none()
+        && having.is_none()
+        && let Some(plan) = simple_count_star_plus_sum_plan(columns, table, table_alias)
+    {
+        return codegen_select_count_star_plus_sum(
+            b, cursor, table, &plan, out_regs, done_label, end_label,
+        );
+    }
+
+    // Parse aggregate columns: extract function name, arg count, arg column index.
+    let mut agg_columns = parse_aggregate_columns(columns, table)?;
+
+    // Collect aggregates from the HAVING clause that are not in the SELECT list.
+    // Without this, HAVING-only aggregates (e.g. `HAVING SUM(x) > 10` when SUM(x)
+    // is not in SELECT) would never be accumulated and silently evaluate to 0.
+    let mut having_output_cols: Vec<GroupByOutputCol> = Vec::new();
+    if let Some(having_expr) = having {
+        collect_having_aggregates(
+            having_expr,
+            table,
+            &mut agg_columns,
+            &mut having_output_cols,
+        );
+    }
+
+    // Allocate one accumulator register per aggregate (SELECT + HAVING-only).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let total_agg_count = agg_columns.len() as i32;
+    let accum_base = b.alloc_regs(total_agg_count);
+
+    // Initialize accumulators to Null (required by AggStep protocol).
+    for i in 0..total_agg_count {
+        b.emit_op(Opcode::Null, 0, accum_base + i, 0, P4::None, 0);
+    }
+
+    // Open table for reading.
+    b.emit_op(
+        Opcode::OpenRead,
+        cursor,
+        table.root_page,
+        0,
+        P4::Table(table.name.clone()),
+        0,
+    );
+
+    // Rewind to first row; jump to finalize if table is empty.
+    let finalize_label = b.emit_label();
+    let loop_start = b.current_addr();
+    b.emit_jump_to_label(Opcode::Rewind, cursor, 0, finalize_label, P4::None, 0);
+
+    // WHERE filter.
+    let skip_label = b.emit_label();
+    if let Some(where_expr) = where_clause {
+        emit_where_filter(
+            b,
+            where_expr,
+            cursor,
+            table,
+            table_alias,
+            schema,
+            skip_label,
+        );
+    }
+
+    // AggStep for each aggregate column.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    for (i, agg) in agg_columns.iter().enumerate() {
+        // Skip sentinel entries used for multi-aggregate wrappers.
+        if agg.name.is_empty() && !agg.multi_agg_indices.is_empty() {
+            continue;
+        }
+        let accum_reg = accum_base + i as i32;
+
+        // Bare (non-aggregate) column: evaluate expression on each row
+        // and store in the accumulator register.  No AggStep needed.
+        if let Some(ref bare) = agg.bare_expr {
+            let scan_ctx = ScanCtx {
+                cursor,
+                table,
+                table_alias,
+                schema: Some(schema),
+                register_base: None,
+                secondary: None,
+            };
+            emit_expr(b, bare, accum_reg, Some(&scan_ctx));
+            continue;
+        }
+
+        // FILTER clause: evaluate and skip AggStep if false/NULL.
+        let filter_skip_label = if let Some(ref filter_expr) = agg.filter {
+            let skip_lbl = b.emit_label();
+            let filter_reg = b.alloc_temp();
+            let scan_ctx = ScanCtx {
+                cursor,
+                table,
+                table_alias,
+                schema: Some(schema),
+                register_base: None,
+                secondary: None,
+            };
+            emit_expr(b, filter_expr, filter_reg, Some(&scan_ctx));
+            // p3=1: treat NULL as false (skip AggStep).
+            b.emit_jump_to_label(Opcode::IfNot, filter_reg, 1, skip_lbl, P4::None, 0);
+            b.free_temp(filter_reg);
+            Some(skip_lbl)
+        } else {
+            None
+        };
+
+        let distinct_flag = i32::from(agg.distinct);
+        let agg_p4 = agg_func_p4(&agg.name, agg.collation.as_ref());
+        if agg.num_args == 0 {
+            // count(*): no arguments, p2 is unused (0), p5=0.
+            b.emit_op(
+                Opcode::AggStep,
+                distinct_flag,
+                0,
+                accum_reg,
+                agg_p4.clone(),
+                0,
+            );
+        } else {
+            // Aggregate with arguments: allocate consecutive registers
+            // for all args so the engine can read them as a contiguous block.
+            let total_args = agg.num_args.max(1);
+            // alloc_regs guarantees contiguous register block.
+            let arg_base = b.alloc_regs(total_args);
+
+            // First argument.
+            if agg.arg_is_rowid {
+                b.emit_op(Opcode::Rowid, cursor, arg_base, 0, P4::None, 0);
+            } else if let Some(ref expr) = agg.arg_expr {
+                let scan_ctx = ScanCtx {
+                    cursor,
+                    table,
+                    table_alias,
+                    schema: Some(schema),
+                    register_base: None,
+                    secondary: None,
+                };
+                emit_expr(b, expr, arg_base, Some(&scan_ctx));
+            } else {
+                let col_idx = agg.arg_col_index.unwrap_or(0);
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                b.emit_op(
+                    Opcode::Column,
+                    cursor,
+                    col_idx as i32,
+                    arg_base,
+                    P4::None,
+                    0,
+                );
+            }
+
+            // Extra arguments (e.g. separator for group_concat).
+            if !agg.extra_args.is_empty() {
+                let scan_ctx = ScanCtx {
+                    cursor,
+                    table,
+                    table_alias,
+                    schema: Some(schema),
+                    register_base: None,
+                    secondary: None,
+                };
+                for (j, extra_expr) in agg.extra_args.iter().enumerate() {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                    let extra_reg = arg_base + 1 + j as i32;
+                    emit_expr(b, extra_expr, extra_reg, Some(&scan_ctx));
+                }
+            }
+
+            let num_args = u16::try_from(agg.num_args).unwrap_or_default();
+            b.emit_op(
+                Opcode::AggStep,
+                distinct_flag,
+                arg_base,
+                accum_reg,
+                agg_p4,
+                num_args,
+            );
+        }
+
+        // Resolve FILTER skip label after AggStep.
+        if let Some(skip_lbl) = filter_skip_label {
+            b.resolve_label(skip_lbl);
+        }
+    }
+
+    // Skip label for WHERE-filtered rows.
+    b.resolve_label(skip_label);
+
+    // Next: loop back to start of loop body (instruction after Rewind).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let loop_body = (loop_start + 1) as i32;
+    b.emit_op(Opcode::Next, cursor, loop_body, 0, P4::None, 0);
+
+    // Finalize: emit AggFinal for each aggregate.
+    b.resolve_label(finalize_label);
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    for (i, agg) in agg_columns.iter().enumerate() {
+        // Skip sentinel entries (multi-aggregate wrappers have no function).
+        if agg.name.is_empty() && !agg.multi_agg_indices.is_empty() {
+            continue;
+        }
+        // Skip bare columns — they already hold the final row's value.
+        if agg.bare_expr.is_some() {
+            continue;
+        }
+        let accum_reg = accum_base + i as i32;
+        b.emit_op(
+            Opcode::AggFinal,
+            accum_reg,
+            agg.num_args,
+            0,
+            P4::FuncName(agg.name.clone()),
+            0,
+        );
+    }
+
+    // Copy accumulator results to output registers, skipping hidden columns.
+    // For simple (non-multi-agg) cases, out_col_index tracks the output.
+    {
+        let mut out_col_index = 0_i32;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        for (i, agg) in agg_columns.iter().enumerate() {
+            if agg.hidden {
+                continue;
+            }
+            // Multi-agg sentinel: output slot but no direct accumulator copy.
+            if agg.name.is_empty() && !agg.multi_agg_indices.is_empty() {
+                out_col_index += 1;
+                continue;
+            }
+            let accum_reg = accum_base + i as i32;
+            let out_reg = out_regs + out_col_index;
+            if accum_reg != out_reg {
+                b.emit_op(Opcode::Copy, accum_reg, out_reg, 0, P4::None, 0);
+            }
+            out_col_index += 1;
+        }
+    }
+
+    // Apply wrapper expressions after AggFinal.
+    {
+        let mut out_col_index = 0_i32;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        for (i, agg) in agg_columns.iter().enumerate() {
+            if agg.hidden {
+                continue;
+            }
+            if let Some(wrapper) = &agg.wrapper_expr {
+                let result_reg = out_regs + out_col_index;
+                if agg.multi_agg_indices.is_empty() {
+                    // Single-aggregate wrapper (existing path).
+                    emit_agg_wrapper(b, wrapper, result_reg);
+                } else {
+                    // Multi-aggregate wrapper: build fake table with columns
+                    // for each referenced accumulator.
+                    emit_multi_agg_wrapper(
+                        b,
+                        wrapper,
+                        result_reg,
+                        accum_base,
+                        &agg.multi_agg_indices,
+                    );
+                }
+            }
+            let _ = i; // suppress unused warning
+            out_col_index += 1;
+        }
+    }
+
+    // HAVING filter: skip ResultRow if HAVING predicate is false/NULL.
+    // For single-group aggregate (no GROUP BY), each output column maps
+    // directly to its aggregate accumulator at accum_base + i.
+    let having_skip_label = if let Some(having_expr) = having {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let output_cols: Vec<GroupByOutputCol> = (0..agg_columns.len())
+            .map(|i| GroupByOutputCol::Aggregate { agg_index: i })
+            .collect();
+        let skip = b.emit_label();
+        emit_having_filter(
+            b,
+            having_expr,
+            &output_cols,
+            &agg_columns,
+            &[],
+            table,
+            accum_base,
+            skip,
+        );
+        Some(skip)
+    } else {
+        None
+    };
+
+    // ResultRow (reached when HAVING passes or when there is no HAVING).
+    b.emit_op(Opcode::ResultRow, out_regs, out_col_count, 0, P4::None, 0);
+
+    // Resolve HAVING skip label after ResultRow so failed HAVING jumps past it.
+    if let Some(skip) = having_skip_label {
+        b.resolve_label(skip);
+    }
+
+    // Done: Close + Halt.
+    b.resolve_label(done_label);
+    b.emit_op(Opcode::Close, cursor, 0, 0, P4::None, 0);
+    b.emit_op(Opcode::Halt, 0, 0, 0, P4::None, 0);
+
+    // End target for Init jump.
+    b.resolve_label(end_label);
+
+    Ok(())
+}
+
+// Note: codegen_ordered_aggregate (for in-aggregate ORDER BY, SQLite 3.44+)
+// was removed because the AggColumn.order_by field is not yet supported.
+
+/// Parse result columns to extract aggregate function metadata.
+fn parse_aggregate_columns(
+    columns: &[ResultColumn],
+    table: &TableSchema,
+) -> Result<Vec<AggColumn>, CodegenError> {
+    let mut agg_cols = Vec::new();
+    for col in columns {
+        match col {
+            ResultColumn::Expr {
+                expr:
+                    Expr::FunctionCall {
+                        name,
+                        args,
+                        distinct,
+                        filter,
+                        ..
+                    },
+                ..
+            } if is_aggregate_function(name) => {
+                let canon_name = name.to_ascii_uppercase();
+                let filt = filter.clone();
+                match args {
+                    FunctionArgs::Star => {
+                        // count(*)
+                        agg_cols.push(AggColumn {
+                            name: canon_name,
+                            num_args: 0,
+                            arg_col_index: None,
+                            arg_is_rowid: false,
+                            distinct: *distinct,
+                            arg_expr: None,
+                            extra_args: Vec::new(),
+                            filter: filt,
+                            wrapper_expr: None,
+                            hidden: false,
+                            multi_agg_indices: Vec::new(),
+                            bare_expr: None,
+                            collation: None,
+                        });
+                    }
+                    FunctionArgs::List(exprs) => {
+                        if exprs.is_empty() {
+                            // count() with no args — treat like count(*)
+                            agg_cols.push(AggColumn {
+                                name: canon_name,
+                                num_args: 0,
+                                arg_col_index: None,
+                                arg_is_rowid: false,
+                                distinct: *distinct,
+                                arg_expr: None,
+                                extra_args: Vec::new(),
+                                filter: filt,
+                                wrapper_expr: None,
+                                hidden: false,
+                                multi_agg_indices: Vec::new(),
+                                bare_expr: None,
+                                collation: None,
+                            });
+                        } else {
+                            // First argument: try column reference first,
+                            // fall back to storing the expression for emit_expr.
+                            let (col_idx, is_rowid, expr) =
+                                match resolve_column_ref(&exprs[0], table, None) {
+                                    Some(SortKeySource::Column(idx)) => (Some(idx), false, None),
+                                    Some(SortKeySource::Rowid) => (None, true, None),
+                                    _ => (None, false, Some(Box::new(exprs[0].clone()))),
+                                };
+                            // Resolve collation for the aggregate argument column.
+                            // Explicit COLLATE in the expression takes priority,
+                            // otherwise inherit from the column's schema definition.
+                            let agg_coll = if *distinct {
+                                expr_collation_for_agg(&exprs[0], col_idx, table)
+                            } else {
+                                None
+                            };
+                            // Extra arguments (e.g. separator for group_concat).
+                            let extra: Vec<Expr> = exprs[1..].to_vec();
+                            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                            agg_cols.push(AggColumn {
+                                name: canon_name,
+                                num_args: exprs.len() as i32,
+                                arg_col_index: col_idx,
+                                arg_is_rowid: is_rowid,
+                                distinct: *distinct,
+                                arg_expr: expr,
+                                extra_args: extra,
+                                filter: filt,
+                                wrapper_expr: None,
+                                hidden: false,
+                                multi_agg_indices: Vec::new(),
+                                bare_expr: None,
+                                collation: agg_coll,
+                            });
+                        }
+                    }
+                }
+            }
+            ResultColumn::Expr { expr, .. } if is_aggregate_expr(expr) => {
+                // Expression wraps aggregate(s).  Try single-aggregate
+                // extraction first (fast path), then multi-aggregate.
+                let single_ok =
+                    if let Some((inner_agg, ref wrapper)) = extract_inner_aggregate(expr, table) {
+                        if is_aggregate_expr(wrapper) {
+                            // Wrapper still contains aggregates → need multi-agg path.
+                            false
+                        } else {
+                            agg_cols.push(AggColumn {
+                                wrapper_expr: Some(Box::new(wrapper.clone())),
+                                ..inner_agg
+                            });
+                            true
+                        }
+                    } else {
+                        false
+                    };
+                if !single_ok {
+                    // Multi-aggregate: e.g. MAX(x) - MIN(x).
+                    let (extracted, wrapper) = extract_all_inner_aggregates(expr, table);
+                    if extracted.is_empty() {
+                        return Err(CodegenError::Unsupported(
+                            "complex aggregate wrapper expression not supported without GROUP BY"
+                                .to_owned(),
+                        ));
+                    }
+                    // Record indices of hidden agg columns for the wrapper.
+                    let base_idx = agg_cols.len();
+                    let indices: Vec<usize> = (base_idx..base_idx + extracted.len()).collect();
+                    // Push hidden aggregates.
+                    agg_cols.extend(extracted);
+                    // Push a sentinel output entry with the multi-agg wrapper.
+                    agg_cols.push(AggColumn {
+                        name: String::new(),
+                        num_args: 0,
+                        arg_col_index: None,
+                        arg_is_rowid: false,
+                        distinct: false,
+                        arg_expr: None,
+                        extra_args: Vec::new(),
+                        filter: None,
+                        wrapper_expr: Some(Box::new(wrapper)),
+                        hidden: false,
+                        multi_agg_indices: indices,
+                        bare_expr: None,
+                        collation: None,
+                    });
+                }
+            }
+            // Bare (non-aggregate) column in an aggregate query without GROUP BY.
+            ResultColumn::Expr { expr, .. } => {
+                agg_cols.push(AggColumn {
+                    name: String::new(),
+                    num_args: 0,
+                    arg_col_index: None,
+                    arg_is_rowid: false,
+                    distinct: false,
+                    arg_expr: None,
+                    extra_args: Vec::new(),
+                    filter: None,
+                    wrapper_expr: None,
+                    hidden: false,
+                    multi_agg_indices: Vec::new(),
+                    bare_expr: Some(Box::new(expr.clone())),
+                    collation: None,
+                });
+            }
+            ResultColumn::Star | ResultColumn::TableStar(_) => {
+                return Err(CodegenError::Unsupported(
+                    "SELECT * in aggregate query without GROUP BY is not supported".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(agg_cols)
+}
+
+/// Emit bytecode for an aggregate wrapper expression.
+///
+/// Handles COALESCE/IFNULL patterns: if the aggregate result in `result_reg`
+/// is NULL, substitute the first non-NULL fallback literal.
+fn emit_agg_wrapper(b: &mut ProgramBuilder, wrapper: &Expr, result_reg: i32) {
+    let fake_table = TableSchema {
+        name: "".to_owned(),
+        root_page: 0,
+        columns: vec![ColumnInfo {
+            name: "__agg_result__".to_owned(),
+            affinity: 'A',
+            is_ipk: false,
+            type_name: Some("ANY".to_owned()),
+            notnull: false,
+            unique: false,
+            default_value: None,
+            strict_type: None,
+            generated_expr: None,
+            generated_stored: None,
+            collation: None,
+        }],
+        indexes: vec![],
+        strict: false,
+        without_rowid: false,
+        primary_key_constraints: Vec::new(),
+        foreign_keys: Vec::new(),
+        check_constraints: Vec::new(),
+    };
+    let scan = ScanCtx {
+        cursor: 0,
+        table: &fake_table,
+        table_alias: None,
+        schema: None,
+        register_base: Some(result_reg),
+        secondary: None,
+    };
+    let temp = b.alloc_temp();
+    emit_expr(b, wrapper, temp, Some(&scan));
+    b.emit_op(Opcode::Copy, temp, result_reg, 0, P4::None, 0);
+    b.free_temp(temp);
+}
+
+/// Emit bytecode for a multi-aggregate wrapper expression.
+///
+/// Evaluate a simple aggregate wrapper expression (e.g. `COUNT(*) - 1`).
+///
+/// The wrapper uses a single placeholder column `__agg_result__` that maps
+/// to the finalized aggregate value in `accum_reg`.
+fn emit_simple_agg_wrapper(
+    b: &mut ProgramBuilder,
+    wrapper: &Expr,
+    result_reg: i32,
+    accum_reg: i32,
+) {
+    let columns = vec![ColumnInfo {
+        name: "__agg_result__".to_owned(),
+        affinity: 'A',
+        is_ipk: false,
+        type_name: Some("ANY".to_owned()),
+        notnull: false,
+        unique: false,
+        default_value: None,
+        strict_type: None,
+        generated_expr: None,
+        generated_stored: None,
+        collation: None,
+    }];
+    let fake_table = TableSchema {
+        name: String::new(),
+        root_page: 0,
+        columns,
+        indexes: vec![],
+        strict: false,
+        without_rowid: false,
+        primary_key_constraints: Vec::new(),
+        foreign_keys: Vec::new(),
+        check_constraints: Vec::new(),
+    };
+    let scan = ScanCtx {
+        cursor: 0,
+        table: &fake_table,
+        table_alias: None,
+        schema: None,
+        register_base: Some(accum_reg),
+        secondary: None,
+    };
+    let temp = b.alloc_temp();
+    emit_expr(b, wrapper, temp, Some(&scan));
+    b.emit_op(Opcode::Copy, temp, result_reg, 0, P4::None, 0);
+    b.free_temp(temp);
+}
+
+/// Handles patterns like `MAX(x) - MIN(x)` where the wrapper contains
+/// placeholder columns `__agg_0__`, `__agg_1__`, … that map to accumulator
+/// registers at `accum_base + multi_agg_indices[N]`.
+fn emit_multi_agg_wrapper(
+    b: &mut ProgramBuilder,
+    wrapper: &Expr,
+    result_reg: i32,
+    accum_base: i32,
+    multi_agg_indices: &[usize],
+) {
+    // Build a fake table with N columns named `__agg_0__`, `__agg_1__`, …
+    let columns: Vec<ColumnInfo> = (0..multi_agg_indices.len())
+        .map(|i| ColumnInfo {
+            name: format!("__agg_{i}__"),
+            affinity: 'A',
+            is_ipk: false,
+            type_name: Some("ANY".to_owned()),
+            notnull: false,
+            unique: false,
+            default_value: None,
+            strict_type: None,
+            generated_expr: None,
+            generated_stored: None,
+            collation: None,
+        })
+        .collect();
+    let fake_table = TableSchema {
+        name: String::new(),
+        root_page: 0,
+        columns,
+        indexes: vec![],
+        strict: false,
+        without_rowid: false,
+        primary_key_constraints: Vec::new(),
+        foreign_keys: Vec::new(),
+        check_constraints: Vec::new(),
+    };
+
+    // Copy accumulators into a contiguous register block so the fake scan
+    // context can address them via register_base + column_index.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fake_base = b.alloc_regs(multi_agg_indices.len() as i32);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    for (j, &agg_idx) in multi_agg_indices.iter().enumerate() {
+        let src = accum_base + agg_idx as i32;
+        let dst = fake_base + j as i32;
+        b.emit_op(Opcode::Copy, src, dst, 0, P4::None, 0);
+    }
+
+    let scan = ScanCtx {
+        cursor: 0,
+        table: &fake_table,
+        table_alias: None,
+        schema: None,
+        register_base: Some(fake_base),
+        secondary: None,
+    };
+    let temp = b.alloc_temp();
+    emit_expr(b, wrapper, temp, Some(&scan));
+    b.emit_op(Opcode::Copy, temp, result_reg, 0, P4::None, 0);
+    b.free_temp(temp);
+}
+
+/// Extract the single aggregate function call from a wrapper expression.
+///
+/// Returns `(AggColumn, wrapper_expr)` where `wrapper_expr` has the aggregate
+/// call replaced with a `ColumnRef` placeholder named `__agg_result__` that
+/// the codegen emitter will substitute with the accumulator register.
+///
+/// Handles patterns like `COALESCE(MAX(x), 0)`, `ABS(SUM(x))`, etc.
+fn extract_inner_aggregate(expr: &Expr, table: &TableSchema) -> Option<(AggColumn, Expr)> {
+    if let Expr::FunctionCall {
+        name: agg_name,
+        args: agg_args,
+        distinct,
+        filter,
+        ..
+    } = expr
+    {
+        if is_aggregate_function(agg_name) {
+            let canon_name = agg_name.to_ascii_uppercase();
+            let filt = filter.clone();
+            let agg_col = match agg_args {
+                FunctionArgs::Star => AggColumn {
+                    name: canon_name,
+                    num_args: 0,
+                    arg_col_index: None,
+                    arg_is_rowid: false,
+                    distinct: *distinct,
+                    arg_expr: None,
+                    extra_args: Vec::new(),
+                    filter: filt,
+                    wrapper_expr: None,
+                    hidden: false,
+                    multi_agg_indices: Vec::new(),
+                    bare_expr: None,
+                    collation: None,
+                },
+                FunctionArgs::List(exprs) if exprs.is_empty() => AggColumn {
+                    name: canon_name,
+                    num_args: 0,
+                    arg_col_index: None,
+                    arg_is_rowid: false,
+                    distinct: *distinct,
+                    arg_expr: None,
+                    extra_args: Vec::new(),
+                    filter: filt,
+                    wrapper_expr: None,
+                    hidden: false,
+                    multi_agg_indices: Vec::new(),
+                    bare_expr: None,
+                    collation: None,
+                },
+                FunctionArgs::List(exprs) => {
+                    let (col_idx, is_rowid, a_expr) =
+                        match resolve_column_ref(&exprs[0], table, None) {
+                            Some(SortKeySource::Column(idx)) => (Some(idx), false, None),
+                            Some(SortKeySource::Rowid) => (None, true, None),
+                            _ => (None, false, Some(Box::new(exprs[0].clone()))),
+                        };
+                    let extra: Vec<Expr> = exprs[1..].to_vec();
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                    AggColumn {
+                        name: canon_name,
+                        num_args: exprs.len() as i32,
+                        arg_col_index: col_idx,
+                        arg_is_rowid: is_rowid,
+                        distinct: *distinct,
+                        arg_expr: a_expr,
+                        extra_args: extra,
+                        filter: filt,
+                        wrapper_expr: None,
+                        hidden: false,
+                        multi_agg_indices: Vec::new(),
+                        bare_expr: None,
+                        collation: None,
+                    }
+                }
+            };
+            let placeholder =
+                Expr::Column(ColumnRef::bare("__agg_result__"), fsqlite_ast::Span::ZERO);
+            return Some((agg_col, placeholder));
+        }
+    }
+
+    match expr {
+        Expr::FunctionCall {
+            name,
+            args: FunctionArgs::List(exprs),
+            distinct,
+            order_by,
+            filter,
+            over,
+            span,
+        } => {
+            for (i, arg) in exprs.iter().enumerate() {
+                if let Some((agg_col, new_arg)) = extract_inner_aggregate(arg, table) {
+                    let mut new_exprs = exprs.clone();
+                    new_exprs[i] = new_arg;
+                    return Some((
+                        agg_col,
+                        Expr::FunctionCall {
+                            name: name.clone(),
+                            args: FunctionArgs::List(new_exprs),
+                            distinct: *distinct,
+                            order_by: order_by.clone(),
+                            filter: filter.clone(),
+                            over: over.clone(),
+                            span: *span,
+                        },
+                    ));
+                }
+            }
+        }
+        Expr::BinaryOp {
+            left,
+            op,
+            right,
+            span,
+        } => {
+            if let Some((agg_col, new_left)) = extract_inner_aggregate(left, table) {
+                return Some((
+                    agg_col,
+                    Expr::BinaryOp {
+                        left: Box::new(new_left),
+                        op: *op,
+                        right: right.clone(),
+                        span: *span,
+                    },
+                ));
+            }
+            if let Some((agg_col, new_right)) = extract_inner_aggregate(right, table) {
+                return Some((
+                    agg_col,
+                    Expr::BinaryOp {
+                        left: left.clone(),
+                        op: *op,
+                        right: Box::new(new_right),
+                        span: *span,
+                    },
+                ));
+            }
+        }
+        Expr::UnaryOp {
+            op,
+            expr: inner,
+            span,
+        } => {
+            if let Some((agg_col, new_inner)) = extract_inner_aggregate(inner, table) {
+                return Some((
+                    agg_col,
+                    Expr::UnaryOp {
+                        op: *op,
+                        expr: Box::new(new_inner),
+                        span: *span,
+                    },
+                ));
+            }
+        }
+        Expr::Case {
+            operand,
+            whens,
+            else_expr,
+            span,
+        } => {
+            if let Some(b) = operand {
+                if let Some((agg_col, new_base)) = extract_inner_aggregate(b, table) {
+                    return Some((
+                        agg_col,
+                        Expr::Case {
+                            operand: Some(Box::new(new_base)),
+                            whens: whens.clone(),
+                            else_expr: else_expr.clone(),
+                            span: *span,
+                        },
+                    ));
+                }
+            }
+            for (i, (cond, val)) in whens.iter().enumerate() {
+                if let Some((agg_col, new_cond)) = extract_inner_aggregate(cond, table) {
+                    let mut new_whens = whens.clone();
+                    new_whens[i].0 = new_cond;
+                    return Some((
+                        agg_col,
+                        Expr::Case {
+                            operand: operand.clone(),
+                            whens: new_whens,
+                            else_expr: else_expr.clone(),
+                            span: *span,
+                        },
+                    ));
+                }
+                if let Some((agg_col, new_val)) = extract_inner_aggregate(val, table) {
+                    let mut new_whens = whens.clone();
+                    new_whens[i].1 = new_val;
+                    return Some((
+                        agg_col,
+                        Expr::Case {
+                            operand: operand.clone(),
+                            whens: new_whens,
+                            else_expr: else_expr.clone(),
+                            span: *span,
+                        },
+                    ));
+                }
+            }
+            if let Some(e) = else_expr {
+                if let Some((agg_col, new_else)) = extract_inner_aggregate(e, table) {
+                    return Some((
+                        agg_col,
+                        Expr::Case {
+                            operand: operand.clone(),
+                            whens: whens.clone(),
+                            else_expr: Some(Box::new(new_else)),
+                            span: *span,
+                        },
+                    ));
+                }
+            }
+        }
+        Expr::IsNull {
+            expr: inner,
+            not,
+            span,
+        } => {
+            if let Some((agg_col, new_inner)) = extract_inner_aggregate(inner, table) {
+                return Some((
+                    agg_col,
+                    Expr::IsNull {
+                        expr: Box::new(new_inner),
+                        not: *not,
+                        span: *span,
+                    },
+                ));
+            }
+        }
+        Expr::Cast {
+            expr: inner,
+            type_name,
+            span,
+        } => {
+            if let Some((agg_col, new_inner)) = extract_inner_aggregate(inner, table) {
+                return Some((
+                    agg_col,
+                    Expr::Cast {
+                        expr: Box::new(new_inner),
+                        type_name: type_name.clone(),
+                        span: *span,
+                    },
+                ));
+            }
+        }
+        Expr::Collate {
+            expr: inner,
+            collation,
+            span,
+        } => {
+            if let Some((agg_col, new_inner)) = extract_inner_aggregate(inner, table) {
+                return Some((
+                    agg_col,
+                    Expr::Collate {
+                        expr: Box::new(new_inner),
+                        collation: collation.clone(),
+                        span: *span,
+                    },
+                ));
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
+/// Extract ALL aggregate function calls from an expression, replacing each
+/// with a numbered placeholder `__agg_N__`.  Returns the list of extracted
+/// aggregates and the rewritten wrapper expression.
+///
+/// Used for expressions like `MAX(x) - MIN(x)` that contain multiple
+/// aggregate calls.
+fn extract_all_inner_aggregates(expr: &Expr, table: &TableSchema) -> (Vec<AggColumn>, Expr) {
+    let mut agg_cols = Vec::new();
+    let rewritten = rewrite_aggregates_recursive(expr, table, &mut agg_cols);
+    (agg_cols, rewritten)
+}
+
+/// Recursively rewrite an expression, replacing each aggregate function call
+/// with a `ColumnRef::bare("__agg_N__")` placeholder and collecting the
+/// corresponding `AggColumn`.
+fn rewrite_aggregates_recursive(
+    expr: &Expr,
+    table: &TableSchema,
+    agg_cols: &mut Vec<AggColumn>,
+) -> Expr {
+    // If this node IS an aggregate function call, extract it entirely.
+    if let Expr::FunctionCall {
+        name,
+        args,
+        distinct,
+        filter,
+        ..
+    } = expr
+    {
+        if is_aggregate_function(name) {
+            let idx = agg_cols.len();
+            let canon_name = name.to_ascii_uppercase();
+            let filt = filter.clone();
+            let agg_col = match args {
+                FunctionArgs::Star => AggColumn {
+                    name: canon_name,
+                    num_args: 0,
+                    arg_col_index: None,
+                    arg_is_rowid: false,
+                    distinct: *distinct,
+                    arg_expr: None,
+                    extra_args: Vec::new(),
+                    filter: filt,
+                    wrapper_expr: None,
+                    hidden: true,
+                    multi_agg_indices: Vec::new(),
+                    bare_expr: None,
+                    collation: None,
+                },
+                FunctionArgs::List(exprs) if exprs.is_empty() => AggColumn {
+                    name: canon_name,
+                    num_args: 0,
+                    arg_col_index: None,
+                    arg_is_rowid: false,
+                    distinct: *distinct,
+                    arg_expr: None,
+                    extra_args: Vec::new(),
+                    filter: filt,
+                    wrapper_expr: None,
+                    hidden: true,
+                    multi_agg_indices: Vec::new(),
+                    bare_expr: None,
+                    collation: None,
+                },
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                FunctionArgs::List(exprs) => {
+                    let (col_idx, is_rowid, a_expr) =
+                        match resolve_column_ref(&exprs[0], table, None) {
+                            Some(SortKeySource::Column(i)) => (Some(i), false, None),
+                            Some(SortKeySource::Rowid) => (None, true, None),
+                            _ => (None, false, Some(Box::new(exprs[0].clone()))),
+                        };
+                    let extra: Vec<Expr> = exprs[1..].to_vec();
+                    AggColumn {
+                        name: canon_name,
+                        num_args: exprs.len() as i32,
+                        arg_col_index: col_idx,
+                        arg_is_rowid: is_rowid,
+                        distinct: *distinct,
+                        arg_expr: a_expr,
+                        extra_args: extra,
+                        filter: filt,
+                        wrapper_expr: None,
+                        hidden: true,
+                        multi_agg_indices: Vec::new(),
+                        bare_expr: None,
+                        collation: None,
+                    }
+                }
+            };
+            agg_cols.push(agg_col);
+            let placeholder_name = format!("__agg_{idx}__");
+            return Expr::Column(ColumnRef::bare(&placeholder_name), fsqlite_ast::Span::ZERO);
+        }
+    }
+
+    // Recurse into child nodes.
+    match expr {
+        Expr::BinaryOp {
+            left,
+            op,
+            right,
+            span,
+        } => Expr::BinaryOp {
+            left: Box::new(rewrite_aggregates_recursive(left, table, agg_cols)),
+            op: *op,
+            right: Box::new(rewrite_aggregates_recursive(right, table, agg_cols)),
+            span: *span,
+        },
+        Expr::UnaryOp {
+            op,
+            expr: inner,
+            span,
+        } => Expr::UnaryOp {
+            op: *op,
+            expr: Box::new(rewrite_aggregates_recursive(inner, table, agg_cols)),
+            span: *span,
+        },
+        Expr::FunctionCall {
+            name,
+            args: FunctionArgs::List(exprs),
+            distinct,
+            order_by,
+            filter,
+            over,
+            span,
+        } => {
+            let new_exprs: Vec<Expr> = exprs
+                .iter()
+                .map(|e| rewrite_aggregates_recursive(e, table, agg_cols))
+                .collect();
+            Expr::FunctionCall {
+                name: name.clone(),
+                args: FunctionArgs::List(new_exprs),
+                distinct: *distinct,
+                order_by: order_by.clone(),
+                filter: filter.clone(),
+                over: over.clone(),
+                span: *span,
+            }
+        }
+        Expr::Cast {
+            expr: inner,
+            type_name,
+            span,
+        } => Expr::Cast {
+            expr: Box::new(rewrite_aggregates_recursive(inner, table, agg_cols)),
+            type_name: type_name.clone(),
+            span: *span,
+        },
+        // For all other expression types, return as-is (no aggregates inside).
+        other => other.clone(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GROUP BY aggregate codegen
+// ---------------------------------------------------------------------------
+
+/// A GROUP BY key that is either a simple column reference or an arbitrary
+/// expression (e.g. `length(name)`, `substr(city, 1, 1)`).
+#[derive(Debug)]
+enum GroupByKey {
+    /// Direct table column — read via `Opcode::Column`.
+    Column(usize),
+    /// Arbitrary expression — evaluated via `emit_expr` during the scan phase.
+    Expression(Expr),
+}
+
+/// Describes one output column in a GROUP BY query.
+enum GroupByOutputCol {
+    /// A GROUP BY key column. `key_index` is the position within the group key
+    /// vector, and `sorter_col` is the column index in the sorter record.
+    GroupKey {
+        #[allow(dead_code)]
+        key_index: usize,
+        sorter_col: usize,
+    },
+    /// An aggregate function column. `agg_index` is the position within the
+    /// aggregate accumulator vector.
+    Aggregate { agg_index: usize },
+    /// A non-grouped column from `SELECT *`. SQLite allows non-grouped,
+    /// non-aggregated columns in GROUP BY queries, returning an arbitrary
+    /// row's value. `table_col_index` is the column index in the table;
+    /// `sorter_col` is the column index in the sorter record; `is_ipk` is
+    /// true if this is an INTEGER PRIMARY KEY (rowid alias).
+    NonGroupedColumn {
+        table_col_index: usize,
+        sorter_col: usize,
+        is_ipk: bool,
+    },
+}
+
+/// Parse result columns for a GROUP BY query into output-column descriptors,
+/// a list of group keys (column refs or expressions), and aggregate metadata.
+///
+/// Returns `(output_cols, group_by_keys, agg_columns)`.
+#[allow(clippy::type_complexity)]
+fn parse_group_by_output(
+    columns: &[ResultColumn],
+    table: &TableSchema,
+    group_by: &[Expr],
+) -> Result<(Vec<GroupByOutputCol>, Vec<GroupByKey>, Vec<AggColumn>), CodegenError> {
+    // Resolve GROUP BY expressions: column references become Column(idx),
+    // arbitrary expressions (e.g. length(name)) become Expression(expr).
+    let group_by_keys: Vec<GroupByKey> = group_by
+        .iter()
+        .map(|expr| {
+            if let Some(col_idx) = resolve_column_index(expr, table) {
+                GroupByKey::Column(col_idx)
+            } else {
+                GroupByKey::Expression(expr.clone())
+            }
+        })
+        .collect();
+
+    let mut output_cols = Vec::new();
+    let mut agg_columns = Vec::new();
+
+    for col in columns {
+        match col {
+            ResultColumn::Expr {
+                expr:
+                    Expr::FunctionCall {
+                        name,
+                        args,
+                        distinct,
+                        filter,
+                        ..
+                    },
+                ..
+            } if is_aggregate_function(name) => {
+                let agg_index = agg_columns.len();
+                let canon_name = name.to_ascii_uppercase();
+                let filt = filter.clone();
+                match args {
+                    FunctionArgs::Star => {
+                        agg_columns.push(AggColumn {
+                            name: canon_name,
+                            num_args: 0,
+                            arg_col_index: None,
+                            arg_is_rowid: false,
+                            distinct: *distinct,
+                            arg_expr: None,
+                            extra_args: Vec::new(),
+                            filter: filt,
+                            wrapper_expr: None,
+                            hidden: false,
+                            multi_agg_indices: Vec::new(),
+                            bare_expr: None,
+                            collation: None,
+                        });
+                    }
+                    FunctionArgs::List(exprs) => {
+                        if exprs.is_empty() {
+                            agg_columns.push(AggColumn {
+                                name: canon_name,
+                                num_args: 0,
+                                arg_col_index: None,
+                                arg_is_rowid: false,
+                                distinct: *distinct,
+                                arg_expr: None,
+                                extra_args: Vec::new(),
+                                filter: filt,
+                                wrapper_expr: None,
+                                hidden: false,
+                                multi_agg_indices: Vec::new(),
+                                bare_expr: None,
+                                collation: None,
+                            });
+                        } else {
+                            // Try column reference first, fall back to expression.
+                            let (col_idx, is_rowid, expr) =
+                                match resolve_column_ref(&exprs[0], table, None) {
+                                    Some(SortKeySource::Column(idx)) => (Some(idx), false, None),
+                                    Some(SortKeySource::Rowid) => (None, true, None),
+                                    _ => (None, false, Some(Box::new(exprs[0].clone()))),
+                                };
+                            let extra: Vec<Expr> = exprs[1..].to_vec();
+                            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                            agg_columns.push(AggColumn {
+                                name: canon_name,
+                                num_args: exprs.len() as i32,
+                                arg_col_index: col_idx,
+                                arg_is_rowid: is_rowid,
+                                distinct: *distinct,
+                                arg_expr: expr,
+                                extra_args: extra,
+                                filter: filt,
+                                wrapper_expr: None,
+                                hidden: false,
+                                multi_agg_indices: Vec::new(),
+                                bare_expr: None,
+                                collation: None,
+                            });
+                        }
+                    }
+                }
+                output_cols.push(GroupByOutputCol::Aggregate { agg_index });
+            }
+            ResultColumn::Expr { expr, .. } => {
+                // Match result column to a GROUP BY key: try column index
+                // first, then structural expression equality.
+                let key_index = if let Some(col_idx) = resolve_column_index(expr, table) {
+                    group_by_keys
+                        .iter()
+                        .position(|k| matches!(k, GroupByKey::Column(c) if *c == col_idx))
+                } else {
+                    group_by_keys
+                        .iter()
+                        .position(|k| matches!(k, GroupByKey::Expression(e) if e == expr))
+                }
+                .ok_or_else(|| {
+                    CodegenError::Unsupported("result column not in GROUP BY clause".to_owned())
+                })?;
+                output_cols.push(GroupByOutputCol::GroupKey {
+                    key_index,
+                    sorter_col: key_index,
+                });
+            }
+            ResultColumn::Star | ResultColumn::TableStar(_) => {
+                // Expand * to all table columns. Each column is either a
+                // GROUP BY key or a non-grouped column (SQLite allows this,
+                // returning an arbitrary row's value for non-grouped cols).
+                for (col_idx, col_info) in table.columns.iter().enumerate() {
+                    if let Some(key_index) = group_by_keys
+                        .iter()
+                        .position(|k| matches!(k, GroupByKey::Column(c) if *c == col_idx))
+                    {
+                        output_cols.push(GroupByOutputCol::GroupKey {
+                            key_index,
+                            sorter_col: key_index,
+                        });
+                    } else {
+                        // Non-grouped column — sorter_col assigned later
+                        // in codegen_select_group_by_aggregate.
+                        output_cols.push(GroupByOutputCol::NonGroupedColumn {
+                            table_col_index: col_idx,
+                            sorter_col: usize::MAX,
+                            is_ipk: col_info.is_ipk,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    Ok((output_cols, group_by_keys, agg_columns))
+}
+
+/// Walk a HAVING expression to find aggregate function calls and add any that
+/// are not already present in `agg_columns` / `output_cols`.  This ensures that
+/// aggregates referenced only in HAVING (not in the SELECT list) still get
+/// accumulator slots and `AggStep`/`AggFinal` instructions.
+fn collect_having_aggregates(
+    expr: &Expr,
+    table: &TableSchema,
+    agg_columns: &mut Vec<AggColumn>,
+    output_cols: &mut Vec<GroupByOutputCol>,
+) {
+    match expr {
+        Expr::FunctionCall {
+            name,
+            args,
+            distinct,
+            filter,
+            ..
+        } if is_aggregate_function(name) => {
+            let upper = name.to_ascii_uppercase();
+            // Check if this aggregate already exists in agg_columns.
+            let already_exists = agg_columns.iter().any(|agg| {
+                if agg.name != upper || agg.distinct != *distinct {
+                    return false;
+                }
+                match args {
+                    FunctionArgs::Star => agg.num_args == 0,
+                    FunctionArgs::List(exprs) => {
+                        if exprs.is_empty() {
+                            return agg.num_args == 0;
+                        }
+                        if let Some(ci) = resolve_column_index(&exprs[0], table) {
+                            agg.arg_col_index == Some(ci)
+                        } else if let Some(ref arg_expr) = agg.arg_expr {
+                            exprs.len() == 1 && **arg_expr == exprs[0]
+                        } else {
+                            false
+                        }
+                    }
+                }
+            });
+            if !already_exists {
+                let agg_index = agg_columns.len();
+                let filt = filter.clone();
+                match args {
+                    FunctionArgs::Star => {
+                        agg_columns.push(AggColumn {
+                            name: upper.clone(),
+                            num_args: 0,
+                            arg_col_index: None,
+                            arg_is_rowid: false,
+                            distinct: *distinct,
+                            arg_expr: None,
+                            extra_args: Vec::new(),
+                            filter: filt,
+                            wrapper_expr: None,
+                            hidden: false,
+                            multi_agg_indices: Vec::new(),
+                            bare_expr: None,
+                            collation: None,
+                        });
+                    }
+                    FunctionArgs::List(exprs) => {
+                        if exprs.is_empty() {
+                            agg_columns.push(AggColumn {
+                                name: upper.clone(),
+                                num_args: 0,
+                                arg_col_index: None,
+                                arg_is_rowid: false,
+                                distinct: *distinct,
+                                arg_expr: None,
+                                extra_args: Vec::new(),
+                                filter: filt,
+                                wrapper_expr: None,
+                                hidden: false,
+                                multi_agg_indices: Vec::new(),
+                                bare_expr: None,
+                                collation: None,
+                            });
+                        } else {
+                            let (col_idx, is_rowid, arg_e) =
+                                match resolve_column_ref(&exprs[0], table, None) {
+                                    Some(SortKeySource::Column(idx)) => (Some(idx), false, None),
+                                    Some(SortKeySource::Rowid) => (None, true, None),
+                                    _ => (None, false, Some(Box::new(exprs[0].clone()))),
+                                };
+                            let extra: Vec<Expr> = exprs[1..].to_vec();
+                            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                            agg_columns.push(AggColumn {
+                                name: upper,
+                                num_args: exprs.len() as i32,
+                                arg_col_index: col_idx,
+                                arg_is_rowid: is_rowid,
+                                distinct: *distinct,
+                                arg_expr: arg_e,
+                                extra_args: extra,
+                                filter: filt,
+                                wrapper_expr: None,
+                                hidden: false,
+                                multi_agg_indices: Vec::new(),
+                                bare_expr: None,
+                                collation: None,
+                            });
+                        }
+                    }
+                }
+                output_cols.push(GroupByOutputCol::Aggregate { agg_index });
+            }
+        }
+        // Recurse into sub-expressions to find nested aggregates.
+        Expr::BinaryOp { left, right, .. } => {
+            collect_having_aggregates(left, table, agg_columns, output_cols);
+            collect_having_aggregates(right, table, agg_columns, output_cols);
+        }
+        Expr::UnaryOp { expr: inner, .. } | Expr::IsNull { expr: inner, .. } => {
+            collect_having_aggregates(inner, table, agg_columns, output_cols);
+        }
+        Expr::Between {
+            expr: inner,
+            low,
+            high,
+            ..
+        } => {
+            collect_having_aggregates(inner, table, agg_columns, output_cols);
+            collect_having_aggregates(low, table, agg_columns, output_cols);
+            collect_having_aggregates(high, table, agg_columns, output_cols);
+        }
+        _ => {}
+    }
+}
+
+/// Generate VDBE bytecode for an aggregate SELECT **with GROUP BY**.
+///
+/// Two-pass pattern:
+/// 1. Scan table rows (with WHERE), pack group-key + agg-arg columns into sorter.
+/// 2. After sorting, iterate sorted rows detecting group boundaries via key
+///    comparison. On each boundary, finalize accumulators and emit `ResultRow`.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn codegen_select_group_by_aggregate(
+    b: &mut ProgramBuilder,
+    cursor: i32,
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    schema: &[TableSchema],
+    columns: &[ResultColumn],
+    where_clause: Option<&Expr>,
+    group_by: &[Expr],
+    having: Option<&Expr>,
+    limit_clause: Option<&LimitClause>,
+    out_regs: i32,
+    out_col_count: i32,
+    done_label: crate::Label,
+    end_label: crate::Label,
+) -> Result<(), CodegenError> {
+    if where_clause.is_none()
+        && having.is_none()
+        && limit_clause.is_none()
+        && let Some(plan) =
+            simple_group_by_rowid_bucket_sum_plan(columns, table, table_alias, group_by)
+    {
+        return codegen_select_group_by_rowid_bucket_sum(
+            b, cursor, table, &plan, out_regs, done_label, end_label,
+        );
+    }
+
+    let (mut output_cols, group_by_keys, mut agg_columns) =
+        parse_group_by_output(columns, table, group_by)?;
+
+    // Collect aggregates from the HAVING clause that are not in the SELECT list.
+    if let Some(having_expr) = having {
+        collect_having_aggregates(having_expr, table, &mut agg_columns, &mut output_cols);
+    }
+
+    // LIMIT/OFFSET registers.
+    let limit_reg = limit_clause.map(|lc| {
+        let r = b.alloc_reg();
+        emit_limit_expr(b, &lc.limit, r);
+        r
+    });
+    let offset_reg = limit_clause.and_then(|lc| {
+        lc.offset.as_ref().map(|off_expr| {
+            let r = b.alloc_reg();
+            emit_limit_expr(b, off_expr, r);
+            r
+        })
+    });
+
+    // LIMIT 0 guard: skip entire GROUP BY scan if limit is zero.
+    if let Some(lim_r) = limit_reg {
+        emit_limit_zero_guard(b, lim_r, done_label);
+    }
+
+    let num_group_keys = group_by_keys.len();
+    let num_aggs = agg_columns.len();
+
+    // Collect unique table-column indices needed for aggregate arguments.
+    let mut agg_arg_table_cols: Vec<usize> = Vec::new();
+    for agg in &agg_columns {
+        if let Some(ci) = agg.arg_col_index {
+            if !agg_arg_table_cols.contains(&ci) {
+                agg_arg_table_cols.push(ci);
+            }
+        }
+    }
+
+    // Count expression-arg aggregates (each gets its own sorter slot).
+    let num_expr_args = agg_columns.iter().filter(|a| a.arg_expr.is_some()).count();
+
+    // Rowid-argument aggregates (e.g. SUM(rowid)) need one shared sorter slot.
+    let needs_rowid = agg_columns.iter().any(|a| a.arg_is_rowid);
+    let num_rowid_slots: usize = usize::from(needs_rowid);
+
+    // Count aggregates with FILTER clauses (each gets a boolean sorter slot).
+    let num_filter_cols = agg_columns.iter().filter(|a| a.filter.is_some()).count();
+
+    // Count non-grouped columns (from SELECT * expansion) and assign sorter slots.
+    let num_nongrouped = output_cols
+        .iter()
+        .filter(|c| matches!(c, GroupByOutputCol::NonGroupedColumn { .. }))
+        .count();
+    let nongrouped_start = num_group_keys
+        + agg_arg_table_cols.len()
+        + num_expr_args
+        + num_rowid_slots
+        + num_filter_cols;
+    let mut next_nongrouped_slot = nongrouped_start;
+    for col in &mut output_cols {
+        if let GroupByOutputCol::NonGroupedColumn { sorter_col, .. } = col {
+            *sorter_col = next_nongrouped_slot;
+            next_nongrouped_slot += 1;
+        }
+    }
+
+    // Sorter layout: [group_keys..., col_args..., expr_args..., rowid_slot?, filter_bools..., nongrouped_cols...]
+    let total_sorter_cols = num_group_keys
+        + agg_arg_table_cols.len()
+        + num_expr_args
+        + num_rowid_slots
+        + num_filter_cols
+        + num_nongrouped;
+
+    // Map each aggregate's arg to its sorter column index.
+    let mut agg_sorter_col: Vec<Option<usize>> = Vec::with_capacity(agg_columns.len());
+    let mut next_expr_slot = num_group_keys + agg_arg_table_cols.len();
+    let rowid_slot = num_group_keys + agg_arg_table_cols.len() + num_expr_args;
+    for agg in &agg_columns {
+        let sorter_col = if agg.arg_expr.is_some() {
+            let slot = next_expr_slot;
+            next_expr_slot += 1;
+            Some(slot)
+        } else if agg.arg_is_rowid {
+            Some(rowid_slot)
+        } else if let Some(ci) = agg.arg_col_index {
+            let Some(pos) = agg_arg_table_cols.iter().position(|&x| x == ci) else {
+                return Err(CodegenError::Unsupported(
+                    "internal: aggregate argument column missing from sorter layout".to_owned(),
+                ));
+            };
+            Some(num_group_keys + pos)
+        } else {
+            None
+        };
+        agg_sorter_col.push(sorter_col);
+    }
+
+    // Map each FILTER-bearing aggregate to its boolean sorter column.
+    let mut filter_sorter_col: Vec<Option<usize>> = Vec::with_capacity(agg_columns.len());
+    let mut next_filter_slot =
+        num_group_keys + agg_arg_table_cols.len() + num_expr_args + num_rowid_slots;
+    for agg in &agg_columns {
+        if agg.filter.is_some() {
+            filter_sorter_col.push(Some(next_filter_slot));
+            next_filter_slot += 1;
+        } else {
+            filter_sorter_col.push(None);
+        }
+    }
+
+    // Sorter cursor.
+    let sorter_cursor = cursor + 1;
+
+    // Open sorter: p2 = number of key columns (for sorting by group keys).
+    let sort_order: String = std::iter::repeat_n('+', num_group_keys).collect();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    b.emit_op(
+        Opcode::SorterOpen,
+        sorter_cursor,
+        num_group_keys as i32,
+        0,
+        P4::Str(sort_order),
+        0,
+    );
+
+    // Open table for reading.
+    b.emit_op(
+        Opcode::OpenRead,
+        cursor,
+        table.root_page,
+        0,
+        P4::Table(table.name.clone()),
+        0,
+    );
+
+    // === Pass 1: Scan rows into sorter ===
+    let scan_start = b.current_addr();
+    let scan_done = b.emit_label();
+    b.emit_jump_to_label(Opcode::Rewind, cursor, 0, scan_done, P4::None, 0);
+
+    // WHERE filter.
+    let skip_label = b.emit_label();
+    if let Some(where_expr) = where_clause {
+        emit_where_filter(
+            b,
+            where_expr,
+            cursor,
+            table,
+            table_alias,
+            schema,
+            skip_label,
+        );
+    }
+
+    // Read group-key values + agg-arg columns into consecutive registers.
+    // For column-based keys, use Opcode::Column; for expression-based keys,
+    // evaluate the expression via emit_expr.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let sorter_base = b.alloc_regs(total_sorter_cols as i32);
+    {
+        let scan_ctx = ScanCtx {
+            cursor,
+            table,
+            table_alias,
+            schema: Some(schema),
+            register_base: None,
+            secondary: None,
+        };
+        let mut reg = sorter_base;
+        for key in &group_by_keys {
+            match key {
+                GroupByKey::Column(col_idx) => {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                    b.emit_op(Opcode::Column, cursor, *col_idx as i32, reg, P4::None, 0);
+                }
+                GroupByKey::Expression(expr) => {
+                    emit_expr(b, expr, reg, Some(&scan_ctx));
+                }
+            }
+            reg += 1;
+        }
+        for &col_idx in &agg_arg_table_cols {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            b.emit_op(Opcode::Column, cursor, col_idx as i32, reg, P4::None, 0);
+            reg += 1;
+        }
+        // Expression-arg aggregates: evaluate each expression into its sorter slot.
+        for agg in &agg_columns {
+            if let Some(ref expr) = agg.arg_expr {
+                emit_expr(b, expr, reg, Some(&scan_ctx));
+                reg += 1;
+            }
+        }
+        // Rowid slot: store rowid if any aggregate references it (e.g. SUM(rowid)).
+        if needs_rowid {
+            b.emit_op(Opcode::Rowid, cursor, reg, 0, P4::None, 0);
+            reg += 1;
+        }
+        // FILTER clause booleans: evaluate each filter and store 0/1 in sorter.
+        for agg in &agg_columns {
+            if let Some(ref filter_expr) = agg.filter {
+                emit_expr(b, filter_expr, reg, Some(&scan_ctx));
+                reg += 1;
+            }
+        }
+
+        // Non-grouped columns (from SELECT * expansion): store in sorter.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        for col in &output_cols {
+            if let GroupByOutputCol::NonGroupedColumn {
+                table_col_index,
+                is_ipk,
+                ..
+            } = col
+            {
+                if *is_ipk {
+                    b.emit_op(Opcode::Rowid, cursor, reg, 0, P4::None, 0);
+                } else {
+                    b.emit_op(
+                        Opcode::Column,
+                        cursor,
+                        *table_col_index as i32,
+                        reg,
+                        P4::None,
+                        0,
+                    );
+                }
+                reg += 1;
+            }
+        }
+    }
+
+    // MakeRecord + SorterInsert.
+    let record_reg = b.alloc_reg();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    b.emit_op(
+        Opcode::MakeRecord,
+        sorter_base,
+        total_sorter_cols as i32,
+        record_reg,
+        P4::None,
+        0,
+    );
+    b.emit_op(
+        Opcode::SorterInsert,
+        sorter_cursor,
+        record_reg,
+        0,
+        P4::None,
+        0,
+    );
+
+    // Skip label (for WHERE-filtered rows).
+    b.resolve_label(skip_label);
+
+    // Next row in scan.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let scan_body = (scan_start + 1) as i32;
+    b.emit_op(Opcode::Next, cursor, scan_body, 0, P4::None, 0);
+
+    // End of pass 1.
+    b.resolve_label(scan_done);
+    b.emit_op(Opcode::Close, cursor, 0, 0, P4::None, 0);
+
+    // === Pass 2: Iterate sorted rows, accumulate per-group ===
+
+    // Allocate registers for current group keys, previous group keys, accumulators,
+    // and non-grouped column values.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let cur_key_base = b.alloc_regs(num_group_keys as i32);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let prev_key_base = b.alloc_regs(num_group_keys as i32);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let accum_base = b.alloc_regs(num_aggs as i32);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let prev_nongrouped_base = b.alloc_regs(num_nongrouped.max(1) as i32);
+    let first_flag = b.alloc_reg();
+
+    // Initialize: first_flag = 1, accumulators = Null.
+    b.emit_op(Opcode::Integer, 1, first_flag, 0, P4::None, 0);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    for i in 0..num_aggs as i32 {
+        b.emit_op(Opcode::Null, 0, accum_base + i, 0, P4::None, 0);
+    }
+
+    // SorterSort: sort and position at first row; jump to done if empty.
+    b.emit_jump_to_label(
+        Opcode::SorterSort,
+        sorter_cursor,
+        0,
+        done_label,
+        P4::None,
+        0,
+    );
+
+    let sort_loop_body = b.current_addr();
+
+    // SorterData: decode current sorted row.
+    let sorted_reg = b.alloc_reg();
+    b.emit_op(
+        Opcode::SorterData,
+        sorter_cursor,
+        sorted_reg,
+        0,
+        P4::None,
+        0,
+    );
+
+    // Read group-key columns from sorter into cur_key registers.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    for i in 0..num_group_keys {
+        b.emit_op(
+            Opcode::Column,
+            sorter_cursor,
+            i as i32,
+            cur_key_base + i as i32,
+            P4::None,
+            0,
+        );
+    }
+
+    // If first row, skip group-change comparison.
+    let first_row_label = b.emit_label();
+    b.emit_jump_to_label(Opcode::IfPos, first_flag, 1, first_row_label, P4::None, 0);
+
+    // Compare current keys to previous keys. If any differ, jump to new_group.
+    let new_group_label = b.emit_label();
+    let same_group_label = b.emit_label();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    for i in 0..num_group_keys {
+        // Ne p1=cur_key, p2=new_group_label, p3=prev_key, p5=0x80 (NULLEQ)
+        b.emit_jump_to_label(
+            Opcode::Ne,
+            cur_key_base + i as i32,
+            prev_key_base + i as i32,
+            new_group_label,
+            P4::None,
+            0x80,
+        );
+    }
+    // All keys match — same group.
+    b.emit_jump_to_label(Opcode::Goto, 0, 0, same_group_label, P4::None, 0);
+
+    // new_group: finalize previous group and output ResultRow.
+    b.resolve_label(new_group_label);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    for (i, agg) in agg_columns.iter().enumerate() {
+        let accum_reg = accum_base + i as i32;
+        b.emit_op(
+            Opcode::AggFinal,
+            accum_reg,
+            agg.num_args,
+            0,
+            P4::FuncName(agg.name.clone()),
+            0,
+        );
+    }
+    // Build output row from prev_key + accum + prev_nongrouped.
+    // Only iterate the SELECT output columns (first out_col_count entries);
+    // HAVING-only aggregates appended by collect_having_aggregates are
+    // accumulated and used by emit_having_filter, but NOT included in the
+    // output row.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    {
+        let mut ng_idx = 0i32;
+        for (i, out_col) in output_cols.iter().take(out_col_count as usize).enumerate() {
+            match out_col {
+                GroupByOutputCol::GroupKey { sorter_col, .. } => {
+                    b.emit_op(
+                        Opcode::Copy,
+                        prev_key_base + *sorter_col as i32,
+                        out_regs + i as i32,
+                        0,
+                        P4::None,
+                        0,
+                    );
+                }
+                GroupByOutputCol::Aggregate { agg_index } => {
+                    b.emit_op(
+                        Opcode::Copy,
+                        accum_base + *agg_index as i32,
+                        out_regs + i as i32,
+                        0,
+                        P4::None,
+                        0,
+                    );
+                }
+                GroupByOutputCol::NonGroupedColumn { .. } => {
+                    b.emit_op(
+                        Opcode::Copy,
+                        prev_nongrouped_base + ng_idx,
+                        out_regs + i as i32,
+                        0,
+                        P4::None,
+                        0,
+                    );
+                    ng_idx += 1;
+                }
+            }
+        }
+    }
+    // HAVING filter: skip this group's output if HAVING predicate is false.
+    let having_skip_label = b.emit_label();
+    if let Some(having_expr) = having {
+        emit_having_filter(
+            b,
+            having_expr,
+            &output_cols,
+            &agg_columns,
+            &group_by_keys,
+            table,
+            out_regs,
+            having_skip_label,
+        );
+    }
+    // OFFSET: if offset counter > 0, skip this group's output.
+    if let Some(off_r) = offset_reg {
+        b.emit_jump_to_label(Opcode::IfPos, off_r, 1, having_skip_label, P4::None, 0);
+    }
+    b.emit_op(Opcode::ResultRow, out_regs, out_col_count, 0, P4::None, 0);
+    // LIMIT: decrement limit counter; jump to done when exhausted.
+    if let Some(lim_r) = limit_reg {
+        b.emit_jump_to_label(Opcode::DecrJumpZero, lim_r, 0, done_label, P4::None, 0);
+    }
+    b.resolve_label(having_skip_label);
+    // Reset accumulators for next group.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    for i in 0..num_aggs as i32 {
+        b.emit_op(Opcode::Null, 0, accum_base + i, 0, P4::None, 0);
+    }
+
+    // first_row: (jumped here when first_flag was 1, skipping comparison).
+    b.resolve_label(first_row_label);
+
+    // same_group: copy current keys to previous, then AggStep.
+    b.resolve_label(same_group_label);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    for i in 0..num_group_keys {
+        b.emit_op(
+            Opcode::Copy,
+            cur_key_base + i as i32,
+            prev_key_base + i as i32,
+            0,
+            P4::None,
+            0,
+        );
+    }
+
+    // Copy non-grouped columns from sorter to prev_nongrouped registers.
+    // These hold the latest (arbitrary) value for each non-grouped column.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    {
+        let mut ng_idx = 0i32;
+        for col in &output_cols {
+            if let GroupByOutputCol::NonGroupedColumn { sorter_col, .. } = col {
+                b.emit_op(
+                    Opcode::Column,
+                    sorter_cursor,
+                    *sorter_col as i32,
+                    prev_nongrouped_base + ng_idx,
+                    P4::None,
+                    0,
+                );
+                ng_idx += 1;
+            }
+        }
+    }
+
+    // AggStep for each aggregate.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    for (i, agg) in agg_columns.iter().enumerate() {
+        let accum_reg = accum_base + i as i32;
+
+        // FILTER clause: read boolean from sorter and skip AggStep if false/NULL.
+        let filter_skip_label = if let Some(filt_col) = filter_sorter_col[i] {
+            let skip_lbl = b.emit_label();
+            let filt_reg = b.alloc_temp();
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            b.emit_op(
+                Opcode::Column,
+                sorter_cursor,
+                filt_col as i32,
+                filt_reg,
+                P4::None,
+                0,
+            );
+            // p3=1: treat NULL as false (skip AggStep).
+            b.emit_jump_to_label(Opcode::IfNot, filt_reg, 1, skip_lbl, P4::None, 0);
+            b.free_temp(filt_reg);
+            Some(skip_lbl)
+        } else {
+            None
+        };
+
+        let distinct_flag = i32::from(agg.distinct);
+        if agg.num_args == 0 {
+            // count(*): no arguments.
+            b.emit_op(
+                Opcode::AggStep,
+                distinct_flag,
+                0,
+                accum_reg,
+                P4::FuncName(agg.name.clone()),
+                0,
+            );
+        } else {
+            let total_args = agg.num_args.max(1);
+            let arg_base = b.alloc_regs(total_args);
+            let Some(sorter_col) = agg_sorter_col[i] else {
+                return Err(CodegenError::Unsupported(
+                    "internal: non-zero-arg aggregate missing sorter column".to_owned(),
+                ));
+            };
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            b.emit_op(
+                Opcode::Column,
+                sorter_cursor,
+                sorter_col as i32,
+                arg_base,
+                P4::None,
+                0,
+            );
+            // Extra arguments (e.g. separator for group_concat):
+            // re-evaluate inline since they are typically constant expressions.
+            for (j, extra_expr) in agg.extra_args.iter().enumerate() {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                let extra_reg = arg_base + 1 + j as i32;
+                emit_expr(b, extra_expr, extra_reg, None);
+            }
+            let step_p5 = u16::try_from(agg.num_args).unwrap_or_default();
+            b.emit_op(
+                Opcode::AggStep,
+                distinct_flag,
+                arg_base,
+                accum_reg,
+                P4::FuncName(agg.name.clone()),
+                step_p5,
+            );
+        }
+
+        // Resolve FILTER skip label after AggStep.
+        if let Some(skip_lbl) = filter_skip_label {
+            b.resolve_label(skip_lbl);
+        }
+    }
+
+    // SorterNext: advance to next sorted row.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    b.emit_op(
+        Opcode::SorterNext,
+        sorter_cursor,
+        sort_loop_body as i32,
+        0,
+        P4::None,
+        0,
+    );
+
+    // After loop: output final group (if any rows were processed).
+    // If first_flag is still > 0, table was empty — skip final output.
+    b.emit_jump_to_label(Opcode::IfPos, first_flag, 0, done_label, P4::None, 0);
+
+    // Finalize last group.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    for (i, agg) in agg_columns.iter().enumerate() {
+        let accum_reg = accum_base + i as i32;
+        b.emit_op(
+            Opcode::AggFinal,
+            accum_reg,
+            agg.num_args,
+            0,
+            P4::FuncName(agg.name.clone()),
+            0,
+        );
+    }
+    // Build output row from prev_key (last group's keys) + accum + prev_nongrouped.
+    // Same as above: skip HAVING-only aggregate entries beyond out_col_count.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    {
+        let mut ng_idx = 0i32;
+        for (i, out_col) in output_cols.iter().take(out_col_count as usize).enumerate() {
+            match out_col {
+                GroupByOutputCol::GroupKey { sorter_col, .. } => {
+                    b.emit_op(
+                        Opcode::Copy,
+                        prev_key_base + *sorter_col as i32,
+                        out_regs + i as i32,
+                        0,
+                        P4::None,
+                        0,
+                    );
+                }
+                GroupByOutputCol::Aggregate { agg_index } => {
+                    b.emit_op(
+                        Opcode::Copy,
+                        accum_base + *agg_index as i32,
+                        out_regs + i as i32,
+                        0,
+                        P4::None,
+                        0,
+                    );
+                }
+                GroupByOutputCol::NonGroupedColumn { .. } => {
+                    b.emit_op(
+                        Opcode::Copy,
+                        prev_nongrouped_base + ng_idx,
+                        out_regs + i as i32,
+                        0,
+                        P4::None,
+                        0,
+                    );
+                    ng_idx += 1;
+                }
+            }
+        }
+    }
+    // HAVING filter for the final group.
+    let final_skip = b.emit_label();
+    if let Some(having_expr) = having {
+        emit_having_filter(
+            b,
+            having_expr,
+            &output_cols,
+            &agg_columns,
+            &group_by_keys,
+            table,
+            out_regs,
+            final_skip,
+        );
+    }
+    // OFFSET: if offset counter > 0, skip this group's output.
+    if let Some(off_r) = offset_reg {
+        b.emit_jump_to_label(Opcode::IfPos, off_r, 1, final_skip, P4::None, 0);
+    }
+    b.emit_op(Opcode::ResultRow, out_regs, out_col_count, 0, P4::None, 0);
+    b.resolve_label(final_skip);
+
+    // Done: Close sorter + Halt.
+    b.resolve_label(done_label);
+    b.emit_op(Opcode::Close, sorter_cursor, 0, 0, P4::None, 0);
+    b.emit_op(Opcode::Halt, 0, 0, 0, P4::None, 0);
+
+    // End target for Init jump.
+    b.resolve_label(end_label);
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// INSERT codegen
+// ---------------------------------------------------------------------------
+
+/// Generate VDBE bytecode for an INSERT statement.
+///
+/// Pattern: `INSERT INTO t VALUES (?, ?, ...)`
+///
+/// Init → Transaction(write) → OpenWrite → Variable* → (IPK routing |
+/// NewRowid) → MakeRecord → Insert → Close → Halt
+#[allow(clippy::too_many_lines)]
+pub fn codegen_insert(
+    b: &mut ProgramBuilder,
+    stmt: &InsertStatement,
+    schema: &[TableSchema],
+    ctx: &CodegenContext,
+) -> Result<(), CodegenError> {
+    let table = find_table(schema, &stmt.table.name)?;
+    let table_cursor = 0_i32;
+
+    let end_label = b.emit_label();
+
+    // Init.
+    b.emit_jump_to_label(Opcode::Init, 0, 0, end_label, P4::None, 0);
+
+    // Transaction (write, p2=1).
+    b.emit_op(Opcode::Transaction, 0, 1, 0, P4::None, 0);
+
+    // OpenWrite for table.
+    b.emit_op(
+        Opcode::OpenWrite,
+        table_cursor,
+        table.root_page,
+        0,
+        P4::Table(table.name.clone()),
+        0,
+    );
+
+    // OpenWrite for each index (bd-so1h: Phase 5I.3).
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    for (idx_offset, index) in table.indexes.iter().enumerate() {
+        let idx_cursor = table_cursor + 1 + idx_offset as i32;
+        b.emit_op(
+            Opcode::OpenWrite,
+            idx_cursor,
+            index.root_page,
+            0,
+            P4::Table(index.name.clone()),
+            0,
+        );
+    }
+
+    // Register table-to-index cursor metadata for REPLACE conflict resolution.
+    // This allows the engine's native_replace_row to clean up secondary index
+    // entries when a conflicting row is deleted.
+    register_table_index_meta(b, table, table_cursor);
+
+    // Conflict behavior: ON CONFLICT clause from upsert takes precedence.
+    let (oe_flag, upsert_clause) = if !stmt.upsert.is_empty() {
+        // Use the first upsert clause (multiple ON CONFLICT clauses
+        // are parsed but we process the first one).
+        let clause = &stmt.upsert[0];
+        match &clause.action {
+            UpsertAction::Nothing => (OE_IGNORE, None),
+            UpsertAction::Update { .. } => (OE_IGNORE, Some(clause)),
+        }
+    } else {
+        (conflict_action_to_oe(stmt.or_conflict.as_ref()), None)
+    };
+
+    match &stmt.source {
+        InsertSource::Values(rows) => {
+            if rows.is_empty() {
+                return Err(CodegenError::Unsupported("empty VALUES".to_owned()));
+            }
+            let target_mapping = build_insert_target_mapping(&stmt.columns, table)?;
+            if let Some(mapping) = target_mapping.as_ref() {
+                codegen_insert_values(
+                    b,
+                    rows,
+                    Some(mapping.expected_source_cols),
+                    mapping.explicit_rowid_source_pos,
+                    Some(&mapping.col_mapping),
+                    table_cursor,
+                    table,
+                    &stmt.returning,
+                    ctx,
+                    oe_flag,
+                    upsert_clause,
+                )?;
+            } else {
+                codegen_insert_values(
+                    b,
+                    rows,
+                    None,
+                    None,
+                    None,
+                    table_cursor,
+                    table,
+                    &stmt.returning,
+                    ctx,
+                    oe_flag,
+                    upsert_clause,
+                )?;
+            }
+        }
+        InsertSource::Select(select_stmt) => {
+            let target_mapping = build_insert_target_mapping(&stmt.columns, table)?;
+
+            let expected_cols = if let Some(mapping) = target_mapping.as_ref() {
+                Some(mapping.expected_source_cols)
+            } else {
+                Some(table.columns.len())
+            };
+
+            codegen_insert_select(
+                b,
+                select_stmt,
+                table_cursor,
+                table,
+                schema,
+                &stmt.returning,
+                ctx,
+                oe_flag,
+                expected_cols,
+                target_mapping
+                    .as_ref()
+                    .and_then(|mapping| mapping.explicit_rowid_source_pos),
+                target_mapping
+                    .as_ref()
+                    .map(|mapping| mapping.col_mapping.as_slice()),
+            )?;
+        }
+        InsertSource::DefaultValues => {
+            // Insert one row using column DEFAULT values (or NULL if none).
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let n_cols = table.columns.len() as i32;
+            let concurrent_flag = i32::from(ctx.concurrent_mode);
+            let col_regs = b.alloc_regs(n_cols);
+            for (idx, col) in table.columns.iter().enumerate() {
+                #[allow(clippy::cast_possible_wrap)]
+                let reg = col_regs + idx as i32;
+                emit_default_value(b, col, reg)?;
+            }
+            let rowid_reg = b.alloc_reg();
+            if let Some(ipk_idx) = ctx.rowid_alias_col_idx {
+                // IPK column has a DEFAULT value — use it when non-NULL,
+                // otherwise auto-generate via NewRowid (matching VALUES path).
+                #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+                let ipk_reg = col_regs + ipk_idx as i32;
+                let auto_label = b.emit_label();
+                let done_label = b.emit_label();
+
+                b.emit_jump_to_label(Opcode::IsNull, ipk_reg, 0, auto_label, P4::None, 0);
+                b.emit_op(Opcode::Copy, ipk_reg, rowid_reg, 0, P4::None, 0);
+                b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+
+                b.resolve_label(auto_label);
+                b.emit_op(
+                    Opcode::NewRowid,
+                    table_cursor,
+                    rowid_reg,
+                    concurrent_flag,
+                    P4::None,
+                    0,
+                );
+                b.emit_op(Opcode::Copy, rowid_reg, ipk_reg, 0, P4::None, 0);
+
+                b.resolve_label(done_label);
+            } else {
+                // No IPK column — always auto-generate.
+                b.emit_op(
+                    Opcode::NewRowid,
+                    table_cursor,
+                    rowid_reg,
+                    concurrent_flag,
+                    P4::None,
+                    0,
+                );
+            }
+            // Evaluate STORED generated columns before packing the record.
+            emit_stored_generated_columns(b, table, col_regs);
+
+            let rec_reg = b.alloc_reg();
+            emit_strict_type_check(b, table, col_regs);
+            emit_check_constraints(b, table, col_regs, None);
+            emit_not_null_constraints(b, table, col_regs, None);
+            // Apply column type affinities before packing the record.
+            let aff_str = table.affinity_string();
+            b.emit_op(
+                Opcode::Affinity,
+                col_regs,
+                n_cols,
+                0,
+                P4::Affinity(aff_str.clone()),
+                0,
+            );
+            b.emit_op(
+                Opcode::MakeRecord,
+                col_regs,
+                n_cols,
+                rec_reg,
+                P4::Affinity(aff_str),
+                0,
+            );
+            b.emit_op(
+                Opcode::Insert,
+                table_cursor,
+                rec_reg,
+                rowid_reg,
+                P4::Table(table.name.clone()),
+                oe_flag,
+            );
+
+            // Index maintenance: insert into each index (bd-so1h).
+            emit_index_inserts(b, table, table_cursor, col_regs, rowid_reg, oe_flag);
+
+            if !stmt.returning.is_empty() {
+                emit_returning(b, table_cursor, table, &stmt.returning, rowid_reg)?;
+            }
+        }
+    }
+
+    // Close table cursor.
+    b.emit_op(Opcode::Close, table_cursor, 0, 0, P4::None, 0);
+
+    // Close index cursors (bd-so1h).
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    for idx_offset in 0..table.indexes.len() {
+        let idx_cursor = table_cursor + 1 + idx_offset as i32;
+        b.emit_op(Opcode::Close, idx_cursor, 0, 0, P4::None, 0);
+    }
+
+    b.emit_op(Opcode::Halt, 0, 0, 0, P4::None, 0);
+
+    // End label.
+    b.resolve_label(end_label);
+
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct InsertTargetMapping {
+    expected_source_cols: usize,
+    explicit_rowid_source_pos: Option<usize>,
+    col_mapping: Vec<Option<usize>>,
+}
+
+fn build_insert_target_mapping(
+    insert_columns: &[String],
+    table: &TableSchema,
+) -> Result<Option<InsertTargetMapping>, CodegenError> {
+    if insert_columns.is_empty() {
+        return Ok(None);
+    }
+
+    enum RowidTarget {
+        Hidden(usize),
+        Ipk,
+    }
+
+    let mut rowid_target = None;
+    let mut col_mapping = vec![None; table.columns.len()];
+
+    for (source_pos, col_name) in insert_columns.iter().enumerate() {
+        if table.resolves_to_hidden_rowid(col_name) {
+            rowid_target = Some(RowidTarget::Hidden(source_pos));
+            continue;
+        }
+
+        let tbl_pos = table
+            .column_index(col_name)
+            .ok_or_else(|| CodegenError::ColumnNotFound {
+                table: table.name.clone(),
+                column: col_name.clone(),
+            })?;
+        if table.columns[tbl_pos].is_ipk {
+            rowid_target = Some(RowidTarget::Ipk);
+            col_mapping[tbl_pos] = Some(source_pos);
+        } else {
+            col_mapping[tbl_pos].get_or_insert(source_pos);
+        }
+    }
+
+    Ok(Some(InsertTargetMapping {
+        expected_source_cols: insert_columns.len(),
+        explicit_rowid_source_pos: match rowid_target {
+            Some(RowidTarget::Hidden(source_pos)) => Some(source_pos),
+            Some(RowidTarget::Ipk) | None => None,
+        },
+        col_mapping,
+    }))
+}
+
+/// Emit the INSERT loop for `VALUES (row), (row), ...`.
+///
+/// # Arguments
+/// * `oe_flag` - Conflict resolution flag (OE_ABORT, OE_IGNORE, OE_REPLACE, etc.)
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::too_many_arguments
+)]
+fn codegen_insert_values(
+    b: &mut ProgramBuilder,
+    rows: &[Vec<Expr>],
+    expected_source_cols: Option<usize>,
+    explicit_rowid_source_pos: Option<usize>,
+    col_mapping: Option<&[Option<usize>]>,
+    cursor: i32,
+    table: &TableSchema,
+    returning: &[ResultColumn],
+    ctx: &CodegenContext,
+    oe_flag: u16,
+    upsert: Option<&UpsertClause>,
+) -> Result<(), CodegenError> {
+    let n_source_cols = rows
+        .first()
+        .ok_or_else(|| CodegenError::Unsupported("empty VALUES".to_owned()))?
+        .len();
+
+    let expected_source_cols = expected_source_cols.unwrap_or(table.columns.len());
+    if n_source_cols != expected_source_cols {
+        let message = if expected_source_cols == table.columns.len() && col_mapping.is_none() {
+            format!(
+                "table {} has {} columns but {} values were supplied",
+                table.name,
+                table.columns.len(),
+                n_source_cols
+            )
+        } else {
+            format!(
+                "INSERT target list has {expected_source_cols} columns but {n_source_cols} values were supplied"
+            )
+        };
+        return Err(CodegenError::Unsupported(message));
+    }
+
+    let rowid_reg = b.alloc_reg();
+    let source_regs = b.alloc_regs(n_source_cols as i32);
+    let mapped_regs = col_mapping.map(|_| b.alloc_regs(table.columns.len() as i32));
+    let rec_reg = b.alloc_reg();
+    let concurrent_flag = i32::from(ctx.concurrent_mode);
+
+    for (row_index, row_values) in rows.iter().enumerate() {
+        if row_values.len() != n_source_cols {
+            return Err(CodegenError::Unsupported(
+                "VALUES rows must have the same arity".to_owned(),
+            ));
+        }
+
+        // Emit value expressions into registers.
+        for (i, val_expr) in row_values.iter().enumerate() {
+            let reg = source_regs + i as i32;
+            emit_expr(b, val_expr, reg, None);
+        }
+
+        #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+        let (val_regs, n_cols) = if let Some(mapping) = col_mapping {
+            let table_regs = mapped_regs.expect("mapped registers allocated");
+            for (tbl_idx, src) in mapping.iter().enumerate() {
+                let dest = table_regs + tbl_idx as i32;
+                if let Some(source_pos) = src {
+                    b.emit_op(
+                        Opcode::Copy,
+                        source_regs + *source_pos as i32,
+                        dest,
+                        0,
+                        P4::None,
+                        0,
+                    );
+                } else {
+                    emit_default_value(b, &table.columns[tbl_idx], dest)?;
+                }
+            }
+            (table_regs, table.columns.len())
+        } else {
+            (source_regs, n_source_cols)
+        };
+
+        // Rowid determination precedence:
+        // 1. explicit rowid/_rowid_/oid in INSERT column list
+        // 2. INTEGER PRIMARY KEY column value
+        // 3. auto-generated rowid
+        if let Some(source_pos) = explicit_rowid_source_pos {
+            #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+            let rowid_value_reg = source_regs + source_pos as i32;
+            #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+            let ipk_reg = ctx
+                .rowid_alias_col_idx
+                .map(|ipk_idx| val_regs + ipk_idx as i32);
+            let auto_label = b.emit_label();
+            let done_label = b.emit_label();
+
+            b.emit_jump_to_label(Opcode::IsNull, rowid_value_reg, 0, auto_label, P4::None, 0);
+            b.emit_op(Opcode::Copy, rowid_value_reg, rowid_reg, 0, P4::None, 0);
+            if let Some(ipk_reg) = ipk_reg {
+                b.emit_op(Opcode::Copy, rowid_reg, ipk_reg, 0, P4::None, 0);
+            }
+            b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+
+            b.resolve_label(auto_label);
+            b.emit_op(
+                Opcode::NewRowid,
+                cursor,
+                rowid_reg,
+                concurrent_flag,
+                P4::None,
+                0,
+            );
+            if let Some(ipk_reg) = ipk_reg {
+                b.emit_op(Opcode::Copy, rowid_reg, ipk_reg, 0, P4::None, 0);
+            }
+
+            b.resolve_label(done_label);
+        } else if let Some(ipk_idx) = ctx.rowid_alias_col_idx {
+            #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+            let ipk_reg = val_regs + ipk_idx as i32;
+            let auto_label = b.emit_label();
+            let done_label = b.emit_label();
+
+            // If the user-supplied IPK value is NULL, jump to auto-generate.
+            b.emit_jump_to_label(Opcode::IsNull, ipk_reg, 0, auto_label, P4::None, 0);
+
+            // Non-NULL path: copy user value into rowid register.
+            b.emit_op(Opcode::Copy, ipk_reg, rowid_reg, 0, P4::None, 0);
+            b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+
+            // NULL path: auto-generate rowid, then sync it back into the
+            // IPK column register so MakeRecord includes the real rowid.
+            b.resolve_label(auto_label);
+            b.emit_op(
+                Opcode::NewRowid,
+                cursor,
+                rowid_reg,
+                concurrent_flag,
+                P4::None,
+                0,
+            );
+            b.emit_op(Opcode::Copy, rowid_reg, ipk_reg, 0, P4::None, 0);
+
+            b.resolve_label(done_label);
+        } else {
+            // No IPK column — always auto-generate.
+            b.emit_op(
+                Opcode::NewRowid,
+                cursor,
+                rowid_reg,
+                concurrent_flag,
+                P4::None,
+                0,
+            );
+        }
+
+        // Evaluate STORED generated columns before packing the record.
+        emit_stored_generated_columns(b, table, val_regs);
+
+        // STRICT type check BEFORE affinity (SQLite validates raw storage
+        // classes, then applies affinity for the on-disk format).
+        emit_strict_type_check(b, table, val_regs);
+
+        // CHECK constraint validation.
+        let ignore_skip = if oe_flag == OE_IGNORE {
+            Some(b.emit_label())
+        } else {
+            None
+        };
+        emit_check_constraints(b, table, val_regs, ignore_skip);
+        emit_not_null_constraints(b, table, val_regs, ignore_skip);
+
+        // Apply column type affinities before packing the record.
+        let aff_str = table.affinity_string();
+        b.emit_op(
+            Opcode::Affinity,
+            val_regs,
+            n_cols as i32,
+            0,
+            P4::Affinity(aff_str.clone()),
+            0,
+        );
+
+        // MakeRecord: pack columns into a record.
+        let n_cols_i32 = n_cols as i32;
+        let preformatted_record =
+            try_build_preformatted_insert_record(row_values, table, col_mapping);
+        if preformatted_record.is_some() {
+            tracing::debug!(
+                target: "fsqlite_vdbe::insert_preformat",
+                table = %table.name,
+                row_index,
+                explicit_column_mapping = col_mapping.is_some(),
+                column_count = n_cols,
+                "preformatted INSERT record at codegen"
+            );
+        }
+
+        // UPSERT DO UPDATE: check-before-insert pattern.
+        if let Some(upsert_clause) = upsert {
+            if let UpsertAction::Update {
+                assignments,
+                where_clause,
+            } = &upsert_clause.action
+            {
+                let insert_label = b.emit_label();
+                let done_label = b.emit_label();
+
+                // Determine conflict check method: UNIQUE index or PK.
+                let update_rowid_reg = if let Some((idx_offset, index)) =
+                    find_upsert_target_index(table, upsert_clause.target.as_ref())
+                {
+                    // UNIQUE index conflict check.
+                    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+                    let idx_cursor = cursor + 1 + idx_offset as i32;
+                    let n_key_cols = index.columns.len() as i32;
+
+                    // Build probe key from attempted insert values.
+                    let key_val_regs = b.alloc_regs(n_key_cols);
+                    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+                    for (key_pos, col_name) in index.columns.iter().enumerate() {
+                        if let Some(col_idx) = table.column_index(col_name) {
+                            b.emit_op(
+                                Opcode::Copy,
+                                val_regs + col_idx as i32,
+                                key_val_regs + key_pos as i32,
+                                0,
+                                P4::None,
+                                0,
+                            );
+                        }
+                    }
+                    let key_rec_reg = b.alloc_reg();
+                    b.emit_op(
+                        Opcode::MakeRecord,
+                        key_val_regs,
+                        n_key_cols,
+                        key_rec_reg,
+                        P4::None,
+                        0,
+                    );
+
+                    // NoConflict: jump to insert_label if no match found.
+                    b.emit_jump_to_label(
+                        Opcode::NoConflict,
+                        idx_cursor,
+                        key_rec_reg,
+                        insert_label,
+                        P4::None,
+                        0,
+                    );
+
+                    // Conflict: extract existing row's rowid from index.
+                    let existing_rowid_reg = b.alloc_reg();
+                    b.emit_op(
+                        Opcode::IdxRowid,
+                        idx_cursor,
+                        existing_rowid_reg,
+                        0,
+                        P4::None,
+                        0,
+                    );
+
+                    // Seek table cursor to the existing row.
+                    b.emit_jump_to_label(
+                        Opcode::NotExists,
+                        cursor,
+                        existing_rowid_reg,
+                        insert_label,
+                        P4::None,
+                        0,
+                    );
+
+                    existing_rowid_reg
+                } else {
+                    // PK conflict check.
+                    b.emit_jump_to_label(
+                        Opcode::NotExists,
+                        cursor,
+                        rowid_reg,
+                        insert_label,
+                        P4::None,
+                        0,
+                    );
+                    rowid_reg
+                };
+
+                // --- Conflict path: row exists, do UPDATE ---
+
+                // Allocate registers for existing row columns.
+                let existing_regs = b.alloc_regs(n_cols_i32);
+
+                // Read existing column values from cursor.
+                for col_idx in 0..n_cols {
+                    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+                    let col_i = col_idx as i32;
+                    if table.columns.get(col_idx).is_some_and(|c| c.is_ipk) {
+                        b.emit_op(Opcode::Rowid, cursor, existing_regs + col_i, 0, P4::None, 0);
+                    } else {
+                        b.emit_op(
+                            Opcode::Column,
+                            cursor,
+                            col_i,
+                            existing_regs + col_i,
+                            P4::None,
+                            0,
+                        );
+                    }
+                }
+
+                // Build ScanCtx for evaluating DO UPDATE expressions.
+                // "excluded" maps to val_regs (the attempted insert values).
+                // Unqualified column refs resolve from existing_regs (the current row).
+                let excluded_ctx = ScanCtx {
+                    cursor,
+                    table,
+                    table_alias: Some("excluded"),
+                    schema: None,
+                    register_base: Some(val_regs),
+                    secondary: None,
+                };
+                let existing_ctx = ScanCtx {
+                    cursor,
+                    table,
+                    table_alias: None,
+                    schema: None,
+                    register_base: Some(existing_regs),
+                    secondary: None,
+                };
+                let existing_hidden_rowid_reg = ctx
+                    .rowid_alias_col_idx
+                    .map(|ipk_idx| existing_regs + ipk_idx as i32);
+                let excluded_hidden_rowid_reg = rowid_reg;
+
+                // Optional WHERE clause on the DO UPDATE action.
+                if let Some(where_expr) = where_clause {
+                    let skip_update_label = b.emit_label();
+                    let where_reg = b.alloc_reg();
+                    emit_upsert_expr(
+                        b,
+                        where_expr,
+                        where_reg,
+                        &existing_ctx,
+                        &excluded_ctx,
+                        table,
+                        existing_hidden_rowid_reg,
+                        excluded_hidden_rowid_reg,
+                    );
+                    // If WHERE is false/NULL, skip the update (jump to done).
+                    b.emit_jump_to_label(
+                        Opcode::IfNot,
+                        where_reg,
+                        1, // p3=1: jump on NULL (treat NULL as false)
+                        skip_update_label,
+                        P4::None,
+                        0,
+                    );
+                    // Evaluate assignments into existing_regs.
+                    emit_upsert_assignments(
+                        b,
+                        assignments,
+                        table,
+                        existing_regs,
+                        &existing_ctx,
+                        &excluded_ctx,
+                        existing_hidden_rowid_reg,
+                        excluded_hidden_rowid_reg,
+                    )?;
+                    // Constraint checks after assignments (matches regular
+                    // UPDATE path). Previously missing — UPSERT DO UPDATE
+                    // could write data violating STRICT, CHECK, or NOT NULL.
+                    emit_strict_type_check(b, table, existing_regs);
+                    emit_check_constraints(b, table, existing_regs, None);
+                    emit_not_null_constraints(b, table, existing_regs, None);
+                    // Delete old index entries while cursor is still on
+                    // the old row (reads column values from the cursor).
+                    emit_index_deletes(b, table, cursor);
+                    // Pack updated record and insert with REPLACE.
+                    let update_rec = b.alloc_reg();
+                    b.emit_op(
+                        Opcode::MakeRecord,
+                        existing_regs,
+                        n_cols_i32,
+                        update_rec,
+                        P4::Affinity(aff_str.clone()),
+                        0,
+                    );
+                    b.emit_op(
+                        Opcode::Insert,
+                        cursor,
+                        update_rec,
+                        update_rowid_reg,
+                        P4::Table(table.name.clone()),
+                        OE_REPLACE | OPFLAG_ISUPDATE,
+                    );
+                    emit_index_inserts(
+                        b,
+                        table,
+                        cursor,
+                        existing_regs,
+                        update_rowid_reg,
+                        OE_REPLACE,
+                    );
+                    if !returning.is_empty() {
+                        emit_returning(b, cursor, table, returning, update_rowid_reg)?;
+                    }
+                    b.resolve_label(skip_update_label);
+                } else {
+                    // No WHERE clause — always update on conflict.
+                    emit_upsert_assignments(
+                        b,
+                        assignments,
+                        table,
+                        existing_regs,
+                        &existing_ctx,
+                        &excluded_ctx,
+                        existing_hidden_rowid_reg,
+                        excluded_hidden_rowid_reg,
+                    )?;
+                    // Constraint checks (same as WHERE branch above).
+                    emit_strict_type_check(b, table, existing_regs);
+                    emit_check_constraints(b, table, existing_regs, None);
+                    emit_not_null_constraints(b, table, existing_regs, None);
+                    // Delete old index entries while cursor is still on
+                    // the old row (reads column values from the cursor).
+                    emit_index_deletes(b, table, cursor);
+                    let update_rec = b.alloc_reg();
+                    b.emit_op(
+                        Opcode::MakeRecord,
+                        existing_regs,
+                        n_cols_i32,
+                        update_rec,
+                        P4::Affinity(aff_str.clone()),
+                        0,
+                    );
+                    b.emit_op(
+                        Opcode::Insert,
+                        cursor,
+                        update_rec,
+                        update_rowid_reg,
+                        P4::Table(table.name.clone()),
+                        OE_REPLACE | OPFLAG_ISUPDATE,
+                    );
+                    emit_index_inserts(
+                        b,
+                        table,
+                        cursor,
+                        existing_regs,
+                        update_rowid_reg,
+                        OE_REPLACE,
+                    );
+                    if !returning.is_empty() {
+                        emit_returning(b, cursor, table, returning, update_rowid_reg)?;
+                    }
+                }
+
+                b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+
+                // --- No conflict path: normal insert ---
+                b.resolve_label(insert_label);
+                emit_table_insert_record(
+                    b,
+                    val_regs,
+                    n_cols_i32,
+                    rec_reg,
+                    &aff_str,
+                    preformatted_record.as_deref(),
+                );
+                b.emit_op(
+                    Opcode::Insert,
+                    cursor,
+                    rec_reg,
+                    rowid_reg,
+                    P4::Table(table.name.clone()),
+                    oe_flag,
+                );
+                emit_index_inserts(b, table, cursor, val_regs, rowid_reg, oe_flag);
+
+                if !returning.is_empty() {
+                    emit_returning(b, cursor, table, returning, rowid_reg)?;
+                }
+
+                b.resolve_label(done_label);
+            } else {
+                // DO NOTHING — oe_flag is already OE_IGNORE, just do normal insert.
+                emit_table_insert_record(
+                    b,
+                    val_regs,
+                    n_cols_i32,
+                    rec_reg,
+                    &aff_str,
+                    preformatted_record.as_deref(),
+                );
+                b.emit_op(
+                    Opcode::Insert,
+                    cursor,
+                    rec_reg,
+                    rowid_reg,
+                    P4::Table(table.name.clone()),
+                    oe_flag,
+                );
+                emit_index_inserts(b, table, cursor, val_regs, rowid_reg, oe_flag);
+                if !returning.is_empty() {
+                    emit_returning(b, cursor, table, returning, rowid_reg)?;
+                }
+            }
+        } else {
+            // No upsert — normal insert path.
+            emit_table_insert_record(
+                b,
+                val_regs,
+                n_cols_i32,
+                rec_reg,
+                &aff_str,
+                preformatted_record.as_deref(),
+            );
+            b.emit_op(
+                Opcode::Insert,
+                cursor,
+                rec_reg,
+                rowid_reg,
+                P4::Table(table.name.clone()),
+                oe_flag,
+            );
+            emit_index_inserts(b, table, cursor, val_regs, rowid_reg, oe_flag);
+            if !returning.is_empty() {
+                emit_returning(b, cursor, table, returning, rowid_reg)?;
+            }
+        }
+
+        // Resolve OR IGNORE skip label after all insert logic for this row.
+        if let Some(skip) = ignore_skip {
+            b.resolve_label(skip);
+        }
+    }
+
+    Ok(())
+}
+
+fn emit_table_insert_record(
+    b: &mut ProgramBuilder,
+    source_regs: i32,
+    column_count: i32,
+    target_reg: i32,
+    affinity: &str,
+    preformatted_record: Option<&[u8]>,
+) {
+    if let Some(record) = preformatted_record {
+        #[allow(clippy::cast_possible_truncation)]
+        b.emit_op(
+            Opcode::Blob,
+            record.len() as i32,
+            target_reg,
+            0,
+            P4::Blob(record.to_vec()),
+            0,
+        );
+    } else {
+        b.emit_op(
+            Opcode::MakeRecord,
+            source_regs,
+            column_count,
+            target_reg,
+            P4::Affinity(affinity.to_owned()),
+            0,
+        );
+    }
+}
+
+/// Build a table-record blob at codegen time for rows whose stored image is
+/// fully determined before execution.
+///
+/// This intentionally stays narrow:
+/// - only literal `VALUES` expressions are admitted
+/// - omitted/default/generated columns fall back to runtime `MakeRecord`
+/// - rowid/IPK storage still uses the runtime key path; the record stores NULL
+///   placeholders for INTEGER PRIMARY KEY aliases just like `MakeRecord`
+/// - CURRENT_* literals stay on the runtime path so the value registers and
+///   record blob cannot drift from separate timestamp materializations
+fn try_build_preformatted_insert_record(
+    row_values: &[Expr],
+    table: &TableSchema,
+    col_mapping: Option<&[Option<usize>]>,
+) -> Option<Vec<u8>> {
+    if table.columns.iter().any(|col| col.generated_expr.is_some()) {
+        return None;
+    }
+
+    let mut stored_values = Vec::with_capacity(table.columns.len());
+    for (table_idx, column) in table.columns.iter().enumerate() {
+        if column.is_ipk {
+            stored_values.push(SqliteValue::Null);
+            continue;
+        }
+
+        let expr = match col_mapping {
+            Some(mapping) => {
+                let source_idx = mapping.get(table_idx)?.as_ref()?;
+                row_values.get(*source_idx)?
+            }
+            None => row_values.get(table_idx)?,
+        };
+        let value = compile_time_insert_value(expr)?;
+        let value = if let Some(strict_type) = column.strict_type {
+            value.validate_strict(strict_type).ok()?
+        } else {
+            value
+        };
+        stored_values.push(value.apply_affinity(type_affinity_for_char(column.affinity)));
+    }
+
+    Some(fsqlite_types::record::serialize_record(&stored_values))
+}
+
+fn compile_time_insert_value(expr: &Expr) -> Option<SqliteValue> {
+    let Expr::Literal(literal, _) = expr else {
+        return None;
+    };
+    Some(match literal {
+        Literal::Integer(value) => SqliteValue::Integer(*value),
+        Literal::Float(value) => SqliteValue::Float(*value),
+        Literal::String(value) => SqliteValue::Text(SmallText::new(value.as_str())),
+        Literal::Blob(value) => SqliteValue::Blob(Arc::from(value.as_slice())),
+        Literal::Null => SqliteValue::Null,
+        Literal::True => SqliteValue::Integer(1),
+        Literal::False => SqliteValue::Integer(0),
+        Literal::CurrentTimestamp | Literal::CurrentDate | Literal::CurrentTime => return None,
+    })
+}
+
+fn type_affinity_for_char(ch: char) -> TypeAffinity {
+    match ch {
+        'B' | 'b' => TypeAffinity::Text,
+        'C' | 'c' => TypeAffinity::Numeric,
+        'D' | 'd' => TypeAffinity::Integer,
+        'E' | 'e' => TypeAffinity::Real,
+        _ => TypeAffinity::Blob,
+    }
+}
+
+/// Emit the INSERT loop for `INSERT INTO target SELECT ... FROM source`.
+///
+/// Opens the source table for reading (cursor = `write_cursor + 1`), scans
+/// rows with an optional WHERE filter, reads projected columns, and inserts
+/// each row into the target table.
+///
+/// # Arguments
+/// * `oe_flag` - Conflict resolution flag (OE_ABORT, OE_IGNORE, OE_REPLACE, etc.)
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap
+)]
+fn codegen_insert_select(
+    b: &mut ProgramBuilder,
+    select_stmt: &SelectStatement,
+    write_cursor: i32,
+    target_table: &TableSchema,
+    schema: &[TableSchema],
+    returning: &[ResultColumn],
+    ctx: &CodegenContext,
+    oe_flag: u16,
+    expected_cols: Option<usize>,
+    explicit_rowid_source_pos: Option<usize>,
+    col_mapping: Option<&[Option<usize>]>,
+) -> Result<(), CodegenError> {
+    // Extract columns, FROM, and WHERE from the inner SELECT.
+    let (columns, from, where_clause) = match &select_stmt.body.select {
+        SelectCore::Select {
+            columns,
+            from,
+            where_clause,
+            ..
+        } => (columns, from, where_clause),
+        SelectCore::Values(_) => {
+            return Err(CodegenError::Unsupported(
+                "INSERT ... SELECT with VALUES body".to_owned(),
+            ));
+        }
+    };
+
+    if from.is_none() {
+        return codegen_insert_select_without_from(
+            b,
+            columns,
+            where_clause.as_deref(),
+            write_cursor,
+            target_table,
+            returning,
+            ctx,
+            oe_flag,
+            expected_cols,
+            explicit_rowid_source_pos,
+            col_mapping,
+        );
+    }
+
+    // SAFETY: `from.is_none()` is handled above; `.expect` cannot panic.
+    let from_clause = from.as_ref().expect("from already checked above");
+
+    let (src_table_name, src_table_alias) = match &from_clause.source {
+        fsqlite_ast::TableOrSubquery::Table { name, alias, .. } => (&name.name, alias.as_deref()),
+        _ => {
+            return Err(CodegenError::Unsupported(
+                "INSERT ... SELECT from non-table source".to_owned(),
+            ));
+        }
+    };
+
+    let src_table = find_table(schema, src_table_name)?;
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    let read_cursor = write_cursor + 1 + target_table.indexes.len() as i32;
+
+    // Determine the number of output columns from the SELECT.
+    let n_cols = result_column_count(columns, src_table);
+    let n_cols_usize = usize::try_from(n_cols).unwrap_or(0);
+
+    if let Some(expected) = expected_cols {
+        if n_cols_usize != expected {
+            return Err(CodegenError::Unsupported(format!(
+                "table {} has {} columns but {} values were supplied",
+                target_table.name, expected, n_cols_usize
+            )));
+        }
+    }
+
+    // Allocate registers for the scan → insert pipeline.
+    let rowid_reg = b.alloc_reg();
+    let val_regs = b.alloc_regs(n_cols);
+    let rec_reg = b.alloc_reg();
+    let concurrent_flag = i32::from(ctx.concurrent_mode);
+
+    let done_label = b.emit_label();
+
+    // OpenRead on source table.
+    b.emit_op(
+        Opcode::OpenRead,
+        read_cursor,
+        src_table.root_page,
+        0,
+        P4::Table(src_table.name.clone()),
+        0,
+    );
+
+    // Rewind to first row; jump to done if source is empty.
+    let loop_start = b.current_addr();
+    b.emit_jump_to_label(Opcode::Rewind, read_cursor, 0, done_label, P4::None, 0);
+
+    // WHERE filter on source rows (skip non-matching).
+    let skip_label = b.emit_label();
+    if let Some(where_expr) = where_clause {
+        emit_where_filter(
+            b,
+            where_expr,
+            read_cursor,
+            src_table,
+            src_table_alias,
+            schema,
+            skip_label,
+        );
+    }
+
+    // Read projected columns from source into val_regs.
+    emit_column_reads(
+        b,
+        read_cursor,
+        columns,
+        src_table,
+        src_table_alias,
+        schema,
+        val_regs,
+    )?;
+
+    // When an explicit column list is provided, reorder from SELECT output
+    // order to table-schema order, filling unmentioned columns with defaults.
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    let (final_regs, final_n_cols) = if let Some(mapping) = col_mapping {
+        let n_table_cols = target_table.columns.len() as i32;
+        let table_regs = b.alloc_regs(n_table_cols);
+        for (tbl_idx, src) in mapping.iter().enumerate() {
+            let dest = table_regs + tbl_idx as i32;
+            if let Some(sel_pos) = src {
+                b.emit_op(
+                    Opcode::Copy,
+                    val_regs + *sel_pos as i32,
+                    dest,
+                    0,
+                    P4::None,
+                    0,
+                );
+            } else {
+                emit_default_value(b, &target_table.columns[tbl_idx], dest)?;
+            }
+        }
+        (table_regs, n_table_cols)
+    } else {
+        (val_regs, n_cols)
+    };
+
+    // Rowid determination: explicit hidden rowid takes precedence over IPK.
+    if let Some(source_pos) = explicit_rowid_source_pos {
+        #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+        let rowid_value_reg = val_regs + source_pos as i32;
+        #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+        let ipk_reg = ctx
+            .rowid_alias_col_idx
+            .map(|ipk_idx| final_regs + ipk_idx as i32);
+        let auto_label = b.emit_label();
+        let done_rowid = b.emit_label();
+
+        b.emit_jump_to_label(Opcode::IsNull, rowid_value_reg, 0, auto_label, P4::None, 0);
+        b.emit_op(Opcode::Copy, rowid_value_reg, rowid_reg, 0, P4::None, 0);
+        if let Some(ipk_reg) = ipk_reg {
+            b.emit_op(Opcode::Copy, rowid_reg, ipk_reg, 0, P4::None, 0);
+        }
+        b.emit_jump_to_label(Opcode::Goto, 0, 0, done_rowid, P4::None, 0);
+
+        b.resolve_label(auto_label);
+        b.emit_op(
+            Opcode::NewRowid,
+            write_cursor,
+            rowid_reg,
+            concurrent_flag,
+            P4::None,
+            0,
+        );
+        if let Some(ipk_reg) = ipk_reg {
+            b.emit_op(Opcode::Copy, rowid_reg, ipk_reg, 0, P4::None, 0);
+        }
+
+        b.resolve_label(done_rowid);
+    } else if let Some(ipk_idx) = ctx.rowid_alias_col_idx {
+        #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+        let ipk_reg = final_regs + ipk_idx as i32;
+        let auto_label = b.emit_label();
+        let done_rowid = b.emit_label();
+
+        b.emit_jump_to_label(Opcode::IsNull, ipk_reg, 0, auto_label, P4::None, 0);
+
+        // Non-NULL: use the selected value as rowid.
+        b.emit_op(Opcode::Copy, ipk_reg, rowid_reg, 0, P4::None, 0);
+        b.emit_jump_to_label(Opcode::Goto, 0, 0, done_rowid, P4::None, 0);
+
+        // NULL: auto-generate and sync back.
+        b.resolve_label(auto_label);
+        b.emit_op(
+            Opcode::NewRowid,
+            write_cursor,
+            rowid_reg,
+            concurrent_flag,
+            P4::None,
+            0,
+        );
+        b.emit_op(Opcode::Copy, rowid_reg, ipk_reg, 0, P4::None, 0);
+
+        b.resolve_label(done_rowid);
+    } else {
+        b.emit_op(
+            Opcode::NewRowid,
+            write_cursor,
+            rowid_reg,
+            concurrent_flag,
+            P4::None,
+            0,
+        );
+    }
+
+    // Evaluate STORED generated columns before packing the record.
+    emit_stored_generated_columns(b, target_table, final_regs);
+
+    // Apply column type affinities before packing the record.
+    // STRICT type check before affinity.
+    emit_strict_type_check(b, target_table, final_regs);
+    let ignore_target = if oe_flag == OE_IGNORE {
+        Some(skip_label)
+    } else {
+        None
+    };
+    emit_check_constraints(b, target_table, final_regs, ignore_target);
+    emit_not_null_constraints(b, target_table, final_regs, ignore_target);
+
+    let aff_str = target_table.affinity_string();
+    b.emit_op(
+        Opcode::Affinity,
+        final_regs,
+        final_n_cols,
+        0,
+        P4::Affinity(aff_str.clone()),
+        0,
+    );
+
+    // MakeRecord from the read column values.
+    b.emit_op(
+        Opcode::MakeRecord,
+        final_regs,
+        final_n_cols,
+        rec_reg,
+        P4::Affinity(aff_str),
+        0,
+    );
+
+    // Insert into target table.
+    b.emit_op(
+        Opcode::Insert,
+        write_cursor,
+        rec_reg,
+        rowid_reg,
+        P4::Table(target_table.name.clone()),
+        oe_flag,
+    );
+
+    // Index maintenance: insert into each index (bd-so1h).
+    emit_index_inserts(
+        b,
+        target_table,
+        write_cursor,
+        final_regs,
+        rowid_reg,
+        oe_flag,
+    );
+
+    // RETURNING clause: position cursor on inserted row and read columns.
+    if !returning.is_empty() {
+        emit_returning(b, write_cursor, target_table, returning, rowid_reg)?;
+    }
+
+    // Skip label for WHERE-filtered rows.
+    b.resolve_label(skip_label);
+
+    // Next: advance to next source row.
+    let loop_body = (loop_start + 1) as i32;
+    b.emit_op(Opcode::Next, read_cursor, loop_body, 0, P4::None, 0);
+
+    // Done: close source cursor.
+    b.resolve_label(done_label);
+    b.emit_op(Opcode::Close, read_cursor, 0, 0, P4::None, 0);
+
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap
+)]
+fn codegen_insert_select_without_from(
+    b: &mut ProgramBuilder,
+    columns: &[ResultColumn],
+    where_clause: Option<&Expr>,
+    write_cursor: i32,
+    target_table: &TableSchema,
+    returning: &[ResultColumn],
+    ctx: &CodegenContext,
+    oe_flag: u16,
+    expected_cols: Option<usize>,
+    explicit_rowid_source_pos: Option<usize>,
+    col_mapping: Option<&[Option<usize>]>,
+) -> Result<(), CodegenError> {
+    let n_cols = result_column_count_without_from(columns)?;
+    let n_cols_usize = usize::try_from(n_cols).unwrap_or(0);
+
+    if let Some(expected) = expected_cols {
+        if n_cols_usize != expected {
+            return Err(CodegenError::Unsupported(format!(
+                "table {} has {} columns but {} values were supplied",
+                target_table.name, expected, n_cols_usize
+            )));
+        }
+    }
+
+    let rowid_reg = b.alloc_reg();
+    let val_regs = b.alloc_regs(n_cols);
+    let rec_reg = b.alloc_reg();
+    let concurrent_flag = i32::from(ctx.concurrent_mode);
+    let done_label = b.emit_label();
+
+    if let Some(where_expr) = where_clause {
+        let filter_reg = b.alloc_temp();
+        emit_expr(b, where_expr, filter_reg, None);
+        // Treat NULL WHERE results as false (skip insert).
+        b.emit_jump_to_label(Opcode::IfNot, filter_reg, 1, done_label, P4::None, 0);
+        b.free_temp(filter_reg);
+    }
+
+    emit_projection_without_from(b, columns, val_regs)?;
+
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    let (final_regs, final_n_cols) = if let Some(mapping) = col_mapping {
+        let n_table_cols = target_table.columns.len() as i32;
+        let table_regs = b.alloc_regs(n_table_cols);
+        for (tbl_idx, src) in mapping.iter().enumerate() {
+            let dest = table_regs + tbl_idx as i32;
+            if let Some(sel_pos) = src {
+                b.emit_op(
+                    Opcode::Copy,
+                    val_regs + *sel_pos as i32,
+                    dest,
+                    0,
+                    P4::None,
+                    0,
+                );
+            } else {
+                emit_default_value(b, &target_table.columns[tbl_idx], dest)?;
+            }
+        }
+        (table_regs, n_table_cols)
+    } else {
+        (val_regs, n_cols)
+    };
+
+    // Rowid determination: explicit hidden rowid takes precedence over IPK.
+    if let Some(source_pos) = explicit_rowid_source_pos {
+        let rowid_value_reg = val_regs + source_pos as i32;
+        let ipk_reg = ctx
+            .rowid_alias_col_idx
+            .map(|ipk_idx| final_regs + ipk_idx as i32);
+        let auto_label = b.emit_label();
+        let done_rowid = b.emit_label();
+
+        b.emit_jump_to_label(Opcode::IsNull, rowid_value_reg, 0, auto_label, P4::None, 0);
+        b.emit_op(Opcode::Copy, rowid_value_reg, rowid_reg, 0, P4::None, 0);
+        if let Some(ipk_reg) = ipk_reg {
+            b.emit_op(Opcode::Copy, rowid_reg, ipk_reg, 0, P4::None, 0);
+        }
+        b.emit_jump_to_label(Opcode::Goto, 0, 0, done_rowid, P4::None, 0);
+
+        b.resolve_label(auto_label);
+        b.emit_op(
+            Opcode::NewRowid,
+            write_cursor,
+            rowid_reg,
+            concurrent_flag,
+            P4::None,
+            0,
+        );
+        if let Some(ipk_reg) = ipk_reg {
+            b.emit_op(Opcode::Copy, rowid_reg, ipk_reg, 0, P4::None, 0);
+        }
+        b.resolve_label(done_rowid);
+    } else if let Some(ipk_idx) = ctx.rowid_alias_col_idx {
+        let ipk_reg = final_regs + ipk_idx as i32;
+        let auto_label = b.emit_label();
+        let done_rowid = b.emit_label();
+
+        b.emit_jump_to_label(Opcode::IsNull, ipk_reg, 0, auto_label, P4::None, 0);
+
+        // Non-NULL: use the selected value as rowid.
+        b.emit_op(Opcode::Copy, ipk_reg, rowid_reg, 0, P4::None, 0);
+        b.emit_jump_to_label(Opcode::Goto, 0, 0, done_rowid, P4::None, 0);
+
+        // NULL: auto-generate and sync back.
+        b.resolve_label(auto_label);
+        b.emit_op(
+            Opcode::NewRowid,
+            write_cursor,
+            rowid_reg,
+            concurrent_flag,
+            P4::None,
+            0,
+        );
+        b.emit_op(Opcode::Copy, rowid_reg, ipk_reg, 0, P4::None, 0);
+        b.resolve_label(done_rowid);
+    } else {
+        b.emit_op(
+            Opcode::NewRowid,
+            write_cursor,
+            rowid_reg,
+            concurrent_flag,
+            P4::None,
+            0,
+        );
+    }
+
+    // Evaluate STORED generated columns before packing the record.
+    emit_stored_generated_columns(b, target_table, final_regs);
+
+    let ignore_target = if oe_flag == OE_IGNORE {
+        Some(done_label)
+    } else {
+        None
+    };
+
+    // STRICT type check before affinity.
+    emit_strict_type_check(b, target_table, final_regs);
+    emit_check_constraints(b, target_table, final_regs, ignore_target);
+    emit_not_null_constraints(b, target_table, final_regs, ignore_target);
+
+    // Apply column type affinities before packing the record.
+    let aff_str = target_table.affinity_string();
+    b.emit_op(
+        Opcode::Affinity,
+        final_regs,
+        final_n_cols,
+        0,
+        P4::Affinity(aff_str.clone()),
+        0,
+    );
+
+    b.emit_op(
+        Opcode::MakeRecord,
+        final_regs,
+        final_n_cols,
+        rec_reg,
+        P4::Affinity(aff_str),
+        0,
+    );
+
+    b.emit_op(
+        Opcode::Insert,
+        write_cursor,
+        rec_reg,
+        rowid_reg,
+        P4::Table(target_table.name.clone()),
+        oe_flag,
+    );
+
+    emit_index_inserts(
+        b,
+        target_table,
+        write_cursor,
+        final_regs,
+        rowid_reg,
+        oe_flag,
+    );
+
+    if !returning.is_empty() {
+        emit_returning(b, write_cursor, target_table, returning, rowid_reg)?;
+    }
+
+    b.resolve_label(done_label);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// UPDATE codegen
+// ---------------------------------------------------------------------------
+
+/// Generate VDBE bytecode for an UPDATE statement.
+///
+/// Pattern: `UPDATE t SET col = ? WHERE rowid = ?`
+///
+/// Reads ALL existing columns, replaces changed ones, writes back complete
+/// record (no partial patches — this is normative per §10.6).
+#[allow(clippy::too_many_lines)]
+pub fn codegen_update(
+    b: &mut ProgramBuilder,
+    stmt: &UpdateStatement,
+    schema: &[TableSchema],
+    ctx: &CodegenContext,
+) -> Result<(), CodegenError> {
+    let table_name = table_name_from_qualified(&stmt.table);
+    let table = find_table(schema, table_name)?;
+    let cursor = 0_i32;
+    let n_cols = table.columns.len();
+
+    let end_label = b.emit_label();
+    let done_label = b.emit_label();
+
+    if let Some(from_clause) = &stmt.from {
+        return codegen_update_from(b, stmt, from_clause, schema, ctx);
+    }
+    if !stmt.order_by.is_empty() || stmt.limit.is_some() {
+        return Err(CodegenError::Unsupported(
+            "UPDATE ORDER BY/LIMIT/OFFSET must be materialized before codegen".to_owned(),
+        ));
+    }
+
+    // Init.
+    b.emit_jump_to_label(Opcode::Init, 0, 0, end_label, P4::None, 0);
+
+    // Transaction (write).
+    b.emit_op(Opcode::Transaction, 0, 1, 0, P4::None, 0);
+
+    // Resolve assignment targets to column indices.
+    let assignment_cols: Vec<usize> = stmt
+        .assignments
+        .iter()
+        .map(|assign| {
+            let col_name = match &assign.target {
+                fsqlite_ast::AssignmentTarget::Column(name) => name.as_str(),
+                fsqlite_ast::AssignmentTarget::ColumnList(_) => {
+                    return Err(CodegenError::Unsupported(
+                        "multi-column SET (a, b) = (...) assignment is not yet supported"
+                            .to_owned(),
+                    ));
+                }
+            };
+            table
+                .column_index(col_name)
+                .ok_or_else(|| CodegenError::ColumnNotFound {
+                    table: table.name.clone(),
+                    column: col_name.to_owned(),
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // OpenWrite for table.
+    let table_cursor = cursor;
+    b.emit_op(
+        Opcode::OpenWrite,
+        table_cursor,
+        table.root_page,
+        0,
+        P4::Table(table.name.clone()),
+        0,
+    );
+
+    // OpenWrite for each index (bd-2f9t: Phase 5I.5).
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    for (idx_offset, index) in table.indexes.iter().enumerate() {
+        let idx_cursor = table_cursor + 1 + idx_offset as i32;
+        b.emit_op(
+            Opcode::OpenWrite,
+            idx_cursor,
+            index.root_page,
+            0,
+            P4::Table(index.name.clone()),
+            0,
+        );
+    }
+
+    // Register table-to-index cursor metadata for REPLACE conflict resolution.
+    register_table_index_meta(b, table, table_cursor);
+
+    let rowid_target = extract_rowid_target_expr(stmt.where_clause.as_ref(), Some(table), None);
+
+    let set_placeholder_count: u32 = stmt
+        .assignments
+        .iter()
+        .map(|a| count_anon_placeholders(&a.value))
+        .sum();
+
+    let where_placeholder_count: u32 = stmt
+        .where_clause
+        .as_ref()
+        .map_or(0, count_anon_placeholders);
+
+    let rowset_reg = b.alloc_reg();
+    let matched_rowid_reg = b.alloc_reg();
+    let collect_done_label = b.emit_label();
+
+    if let Some(target_expr) = rowid_target {
+        b.set_next_anon_placeholder(set_placeholder_count + 1);
+        emit_expr(b, target_expr, matched_rowid_reg, None);
+        b.emit_jump_to_label(
+            Opcode::SeekRowid,
+            table_cursor,
+            matched_rowid_reg,
+            collect_done_label,
+            P4::None,
+            0,
+        );
+        b.emit_op(
+            Opcode::RowSetAdd,
+            rowset_reg,
+            matched_rowid_reg,
+            0,
+            P4::None,
+            0,
+        );
+    } else {
+        // Pass 1: collect matching rowids before mutating the table cursor.
+        let collect_start = b.current_addr();
+        b.emit_jump_to_label(
+            Opcode::Rewind,
+            table_cursor,
+            0,
+            collect_done_label,
+            P4::None,
+            0,
+        );
+
+        let collect_skip_label = b.emit_label();
+        if let Some(where_expr) = &stmt.where_clause {
+            b.set_next_anon_placeholder(set_placeholder_count + 1);
+            emit_where_filter(
+                b,
+                where_expr,
+                table_cursor,
+                table,
+                stmt.table.alias.as_deref(),
+                schema,
+                collect_skip_label,
+            );
+        }
+
+        b.emit_op(
+            Opcode::Rowid,
+            table_cursor,
+            matched_rowid_reg,
+            0,
+            P4::None,
+            0,
+        );
+        b.emit_op(
+            Opcode::RowSetAdd,
+            rowset_reg,
+            matched_rowid_reg,
+            0,
+            P4::None,
+            0,
+        );
+        b.resolve_label(collect_skip_label);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let collect_body = (collect_start + 1) as i32;
+        b.emit_op(Opcode::Next, table_cursor, collect_body, 0, P4::None, 0);
+    }
+    b.resolve_label(collect_done_label);
+
+    // Pass 2: revisit each matched rowid and perform the delete+insert rewrite.
+    let apply_done_label = b.emit_label();
+    let apply_loop = b.current_addr();
+    b.emit_jump_to_label(
+        Opcode::RowSetRead,
+        rowset_reg,
+        matched_rowid_reg,
+        apply_done_label,
+        P4::None,
+        0,
+    );
+    let apply_seek_miss_label = b.emit_label();
+    b.emit_jump_to_label(
+        Opcode::SeekRowid,
+        table_cursor,
+        matched_rowid_reg,
+        apply_seek_miss_label,
+        P4::None,
+        0,
+    );
+
+    // Read ALL existing columns into registers.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let col_regs = b.alloc_regs(n_cols as i32);
+    for i in 0..n_cols {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let target_reg = col_regs + i as i32;
+        if table.columns.get(i).is_some_and(|col| col.is_ipk) {
+            // INTEGER PRIMARY KEY columns alias rowid and are not stored in
+            // the record payload. Materialize from Rowid so unchanged UPDATE
+            // rewrites preserve the original key instead of generating a new
+            // rowid.
+            b.emit_op(Opcode::Rowid, table_cursor, target_reg, 0, P4::None, 0);
+        } else {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            b.emit_op(
+                Opcode::Column,
+                table_cursor,
+                i as i32,
+                target_reg,
+                P4::None,
+                0,
+            );
+        }
+    }
+
+    // Index maintenance (bd-2f9t): Delete OLD index entries BEFORE updating values.
+    // col_regs currently contains OLD column values.
+    emit_index_deletes(b, table, table_cursor);
+
+    // Evaluate new values from AST expressions and overwrite changed columns.
+    // A ScanCtx is required so that column references in SET expressions
+    // (e.g., `SET val = val + 5`) resolve to the cursor's current row.
+    let update_ctx = ScanCtx {
+        cursor: table_cursor,
+        table,
+        table_alias: stmt.table.alias.as_deref(),
+        schema: Some(schema),
+        register_base: None,
+        secondary: None,
+    };
+    // Reset placeholder counter to 1 for SET expressions (they appear first in SQL text).
+    b.set_next_anon_placeholder(1);
+    for (assign_idx, col_idx) in assignment_cols.iter().enumerate() {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let target = col_regs + *col_idx as i32;
+        emit_expr(
+            b,
+            &stmt.assignments[assign_idx].value,
+            target,
+            Some(&update_ctx),
+        );
+    }
+
+    // UPDATE is delete+insert: remove the current row first, then insert the
+    // rewritten record (possibly at a new rowid).
+    b.emit_op(
+        Opcode::Delete,
+        table_cursor,
+        0,
+        0,
+        P4::None,
+        OPFLAG_ISUPDATE,
+    );
+
+    // Determine destination rowid for re-insertion.
+    let mut rowid_reg = matched_rowid_reg;
+    let rowid_alias_col_idx = ctx
+        .rowid_alias_col_idx
+        .or_else(|| table.columns.iter().position(|col| col.is_ipk));
+    if let Some(ipk_idx) = rowid_alias_col_idx {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let ipk_reg = col_regs + ipk_idx as i32;
+        let auto_label = b.emit_label();
+        let rowid_done_label = b.emit_label();
+        let concurrent_flag = i32::from(ctx.concurrent_mode);
+
+        rowid_reg = b.alloc_reg();
+
+        // If the rewritten IPK is NULL, allocate a new rowid.
+        b.emit_jump_to_label(Opcode::IsNull, ipk_reg, 0, auto_label, P4::None, 0);
+        b.emit_op(Opcode::Copy, ipk_reg, rowid_reg, 0, P4::None, 0);
+        b.emit_jump_to_label(Opcode::Goto, 0, 0, rowid_done_label, P4::None, 0);
+
+        b.resolve_label(auto_label);
+        b.emit_op(
+            Opcode::NewRowid,
+            table_cursor,
+            rowid_reg,
+            concurrent_flag,
+            P4::None,
+            0,
+        );
+        // Keep the IPK payload column consistent with the chosen rowid.
+        b.emit_op(Opcode::Copy, rowid_reg, ipk_reg, 0, P4::None, 0);
+        b.resolve_label(rowid_done_label);
+    }
+
+    // Recompute STORED generated columns after SET assignments.
+    emit_stored_generated_columns(b, table, col_regs);
+
+    // MakeRecord with ALL columns.
+    emit_strict_type_check(b, table, col_regs);
+    emit_check_constraints(b, table, col_regs, None);
+    emit_not_null_constraints(b, table, col_regs, None);
+    // Apply column type affinities before packing the record.
+    let aff_str = table.affinity_string();
+    let rec_reg = b.alloc_reg();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let n_cols_i32 = n_cols as i32;
+    b.emit_op(
+        Opcode::Affinity,
+        col_regs,
+        n_cols_i32,
+        0,
+        P4::Affinity(aff_str.clone()),
+        0,
+    );
+    b.emit_op(
+        Opcode::MakeRecord,
+        col_regs,
+        n_cols_i32,
+        rec_reg,
+        P4::Affinity(aff_str),
+        0,
+    );
+
+    // Conflict resolution for UPDATE: use explicit OR clause if present,
+    // otherwise default to OE_ABORT (standard UPDATE raises constraint error
+    // on PK/UNIQUE conflicts rather than silently replacing).
+    let oe_flag = conflict_action_to_oe(stmt.or_conflict.as_ref());
+    b.emit_op(
+        Opcode::Insert,
+        table_cursor,
+        rec_reg,
+        rowid_reg,
+        P4::Table(table.name.clone()),
+        oe_flag | OPFLAG_ISUPDATE,
+    );
+
+    // Index maintenance (bd-2f9t): Insert NEW index entries after table insert.
+    // col_regs now contains NEW column values.
+    emit_index_inserts(b, table, table_cursor, col_regs, rowid_reg, oe_flag);
+
+    // RETURNING clause: position cursor on updated row and read columns.
+    if !stmt.returning.is_empty() {
+        // RETURNING appears after WHERE in SQL textual order; restore the
+        // post-WHERE placeholder index so RETURNING placeholders don't collide
+        // with SET placeholder numbering.
+        b.set_next_anon_placeholder(set_placeholder_count + where_placeholder_count + 1);
+        emit_returning(b, table_cursor, table, &stmt.returning, rowid_reg)?;
+    }
+
+    b.resolve_label(apply_seek_miss_label);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let apply_loop_addr = apply_loop as i32;
+    b.emit_op(Opcode::Goto, 0, apply_loop_addr, 0, P4::None, 0);
+
+    // Done: Close index cursors, then table cursor.
+    b.resolve_label(apply_done_label);
+    b.resolve_label(done_label);
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    for idx_offset in 0..table.indexes.len() {
+        let idx_cursor = table_cursor + 1 + idx_offset as i32;
+        b.emit_op(Opcode::Close, idx_cursor, 0, 0, P4::None, 0);
+    }
+    b.emit_op(Opcode::Close, table_cursor, 0, 0, P4::None, 0);
+    b.emit_op(Opcode::Halt, 0, 0, 0, P4::None, 0);
+
+    // End label.
+    b.resolve_label(end_label);
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// UPDATE ... FROM codegen
+// ---------------------------------------------------------------------------
+
+/// Emit a Column or Rowid opcode for a column reference against a specific cursor.
+fn emit_column_from_cursor(
+    b: &mut ProgramBuilder,
+    col_name: &str,
+    cursor: i32,
+    table: &TableSchema,
+    reg: i32,
+) {
+    if let Some(col_idx) = table.column_index(col_name) {
+        if table.columns[col_idx].is_ipk {
+            b.emit_op(Opcode::Rowid, cursor, reg, 0, P4::None, 0);
+        } else {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            b.emit_op(Opcode::Column, cursor, col_idx as i32, reg, P4::None, 0);
+        }
+    } else if table.resolves_to_hidden_rowid(col_name) {
+        b.emit_op(Opcode::Rowid, cursor, reg, 0, P4::None, 0);
+    } else {
+        b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+    }
+}
+
+/// Generate VDBE bytecode for `UPDATE target SET ... FROM source WHERE ...`.
+///
+/// Uses a nested-loop join: outer loop scans the FROM table, inner loop scans
+/// the target table. WHERE clause filters for the join condition.
+#[allow(clippy::too_many_lines)]
+fn codegen_update_from(
+    b: &mut ProgramBuilder,
+    stmt: &UpdateStatement,
+    from_clause: &FromClause,
+    schema: &[TableSchema],
+    ctx: &CodegenContext,
+) -> Result<(), CodegenError> {
+    // Resolve the FROM source table (only simple named tables for now).
+    let (from_table_name, from_alias) = match &from_clause.source {
+        TableOrSubquery::Table { name, alias, .. } => (name.name.as_str(), alias.as_deref()),
+        _ => {
+            return Err(CodegenError::Unsupported(
+                "UPDATE ... FROM only supports named tables (not subqueries or joins)".to_owned(),
+            ));
+        }
+    };
+    if !from_clause.joins.is_empty() {
+        return Err(CodegenError::Unsupported(
+            "UPDATE ... FROM with JOIN clauses is not yet supported".to_owned(),
+        ));
+    }
+
+    let table_name = table_name_from_qualified(&stmt.table);
+    let target = find_table(schema, table_name)?;
+    let from_table = find_table(schema, from_table_name)?;
+    let n_cols = target.columns.len();
+
+    let end_label = b.emit_label();
+    let done_label = b.emit_label();
+
+    // Init.
+    b.emit_jump_to_label(Opcode::Init, 0, 0, end_label, P4::None, 0);
+
+    // Transaction (write).
+    b.emit_op(Opcode::Transaction, 0, 1, 0, P4::None, 0);
+
+    // Resolve assignment targets to column indices.
+    let assignment_cols: Vec<usize> = stmt
+        .assignments
+        .iter()
+        .map(|assign| {
+            let col_name = match &assign.target {
+                fsqlite_ast::AssignmentTarget::Column(name) => name.as_str(),
+                fsqlite_ast::AssignmentTarget::ColumnList(_) => {
+                    return Err(CodegenError::Unsupported(
+                        "multi-column SET (a, b) = (...) assignment is not yet supported"
+                            .to_owned(),
+                    ));
+                }
+            };
+            target
+                .column_index(col_name)
+                .ok_or_else(|| CodegenError::ColumnNotFound {
+                    table: target.name.clone(),
+                    column: col_name.to_owned(),
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Cursor allocation: 0 = target (write), 1..N = indexes, N+1 = FROM (read).
+    let target_cursor = 0_i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let from_cursor = (1 + target.indexes.len()) as i32;
+
+    // OpenWrite for target table.
+    b.emit_op(
+        Opcode::OpenWrite,
+        target_cursor,
+        target.root_page,
+        0,
+        P4::Table(target.name.clone()),
+        0,
+    );
+
+    // OpenWrite for each index on target.
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    for (idx_offset, index) in target.indexes.iter().enumerate() {
+        let idx_cursor = target_cursor + 1 + idx_offset as i32;
+        b.emit_op(
+            Opcode::OpenWrite,
+            idx_cursor,
+            index.root_page,
+            0,
+            P4::Table(index.name.clone()),
+            0,
+        );
+    }
+    register_table_index_meta(b, target, target_cursor);
+
+    // OpenRead for FROM table.
+    b.emit_op(
+        Opcode::OpenRead,
+        from_cursor,
+        from_table.root_page,
+        0,
+        P4::Table(from_table.name.clone()),
+        0,
+    );
+
+    // Outer loop: scan FROM table.
+    let outer_loop_start = b.current_addr();
+    let outer_done_label = done_label;
+    b.emit_jump_to_label(
+        Opcode::Rewind,
+        from_cursor,
+        0,
+        outer_done_label,
+        P4::None,
+        0,
+    );
+
+    // Inner loop: scan target table.
+    let inner_done_label = b.emit_label();
+    let inner_loop_start = b.current_addr();
+    b.emit_jump_to_label(
+        Opcode::Rewind,
+        target_cursor,
+        0,
+        inner_done_label,
+        P4::None,
+        0,
+    );
+
+    // Build scan context with secondary for multi-table column resolution.
+    let scan = ScanCtx {
+        cursor: target_cursor,
+        table: target,
+        table_alias: stmt.table.alias.as_deref(),
+        schema: Some(schema),
+        register_base: None,
+        secondary: Some(SecondaryScan {
+            cursor: from_cursor,
+            table: from_table,
+            table_alias: from_alias,
+        }),
+    };
+
+    // Count anonymous placeholders in SET assignments so WHERE
+    // placeholders start after them (SQL textual order: SET before WHERE).
+    let set_placeholder_count: u32 = stmt
+        .assignments
+        .iter()
+        .map(|a| count_anon_placeholders(&a.value))
+        .sum();
+    let where_placeholder_count: u32 = stmt
+        .where_clause
+        .as_ref()
+        .map_or(0, count_anon_placeholders);
+
+    // WHERE filter.
+    let skip_label = b.emit_label();
+    if let Some(where_expr) = &stmt.where_clause {
+        // Set placeholder counter to start after SET placeholders.
+        b.set_next_anon_placeholder(set_placeholder_count + 1);
+        let cond_reg = b.alloc_temp();
+        emit_expr(b, where_expr, cond_reg, Some(&scan));
+        b.emit_jump_to_label(Opcode::IfNot, cond_reg, 1, skip_label, P4::None, 0);
+        b.free_temp(cond_reg);
+    }
+
+    // Read ALL existing columns from target into registers.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let col_regs = b.alloc_regs(n_cols as i32);
+    for i in 0..n_cols {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let target_reg = col_regs + i as i32;
+        if target.columns.get(i).is_some_and(|col| col.is_ipk) {
+            b.emit_op(Opcode::Rowid, target_cursor, target_reg, 0, P4::None, 0);
+        } else {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            b.emit_op(
+                Opcode::Column,
+                target_cursor,
+                i as i32,
+                target_reg,
+                P4::None,
+                0,
+            );
+        }
+    }
+
+    // Delete old index entries before updating.
+    emit_index_deletes(b, target, target_cursor);
+
+    // Evaluate SET assignments. Reset placeholder counter to 1 (SET first in SQL text).
+    b.set_next_anon_placeholder(1);
+    for (assign_idx, col_idx) in assignment_cols.iter().enumerate() {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let target_reg = col_regs + *col_idx as i32;
+        emit_expr(
+            b,
+            &stmt.assignments[assign_idx].value,
+            target_reg,
+            Some(&scan),
+        );
+    }
+
+    // Get old rowid.
+    let old_rowid_reg = b.alloc_reg();
+    b.emit_op(Opcode::Rowid, target_cursor, old_rowid_reg, 0, P4::None, 0);
+
+    // Delete old row.
+    b.emit_op(
+        Opcode::Delete,
+        target_cursor,
+        0,
+        0,
+        P4::None,
+        OPFLAG_ISUPDATE,
+    );
+
+    // Determine destination rowid.
+    let mut rowid_reg = old_rowid_reg;
+    let rowid_alias_col_idx = ctx
+        .rowid_alias_col_idx
+        .or_else(|| target.columns.iter().position(|col| col.is_ipk));
+    if let Some(ipk_idx) = rowid_alias_col_idx {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let ipk_reg = col_regs + ipk_idx as i32;
+        let auto_label = b.emit_label();
+        let rowid_done_label = b.emit_label();
+        let concurrent_flag = i32::from(ctx.concurrent_mode);
+
+        rowid_reg = b.alloc_reg();
+
+        b.emit_jump_to_label(Opcode::IsNull, ipk_reg, 0, auto_label, P4::None, 0);
+        b.emit_op(Opcode::Copy, ipk_reg, rowid_reg, 0, P4::None, 0);
+        b.emit_jump_to_label(Opcode::Goto, 0, 0, rowid_done_label, P4::None, 0);
+
+        b.resolve_label(auto_label);
+        b.emit_op(
+            Opcode::NewRowid,
+            target_cursor,
+            rowid_reg,
+            concurrent_flag,
+            P4::None,
+            0,
+        );
+        b.emit_op(Opcode::Copy, rowid_reg, ipk_reg, 0, P4::None, 0);
+        b.resolve_label(rowid_done_label);
+    }
+
+    // Recompute STORED generated columns.
+    emit_stored_generated_columns(b, target, col_regs);
+
+    // MakeRecord with ALL columns.
+    emit_strict_type_check(b, target, col_regs);
+    emit_check_constraints(b, target, col_regs, None);
+    emit_not_null_constraints(b, target, col_regs, None);
+    let aff_str = target.affinity_string();
+    let rec_reg = b.alloc_reg();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let n_cols_i32 = n_cols as i32;
+    b.emit_op(
+        Opcode::Affinity,
+        col_regs,
+        n_cols_i32,
+        0,
+        P4::Affinity(aff_str.clone()),
+        0,
+    );
+    b.emit_op(
+        Opcode::MakeRecord,
+        col_regs,
+        n_cols_i32,
+        rec_reg,
+        P4::Affinity(aff_str),
+        0,
+    );
+
+    // Insert updated row.
+    let oe_flag = conflict_action_to_oe(stmt.or_conflict.as_ref());
+    b.emit_op(
+        Opcode::Insert,
+        target_cursor,
+        rec_reg,
+        rowid_reg,
+        P4::Table(target.name.clone()),
+        oe_flag | OPFLAG_ISUPDATE,
+    );
+
+    // Insert new index entries.
+    emit_index_inserts(b, target, target_cursor, col_regs, rowid_reg, oe_flag);
+
+    // RETURNING clause.
+    if !stmt.returning.is_empty() {
+        b.set_next_anon_placeholder(set_placeholder_count + where_placeholder_count + 1);
+        emit_returning(b, target_cursor, target, &stmt.returning, rowid_reg)?;
+    }
+
+    // Skip label for WHERE-filtered rows.
+    b.resolve_label(skip_label);
+
+    // Inner Next: loop back to inner loop body.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let inner_body = (inner_loop_start + 1) as i32;
+    b.emit_op(Opcode::Next, target_cursor, inner_body, 0, P4::None, 0);
+
+    // Inner done.
+    b.resolve_label(inner_done_label);
+
+    // Outer Next: loop back to outer loop body.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let outer_body = (outer_loop_start + 1) as i32;
+    b.emit_op(Opcode::Next, from_cursor, outer_body, 0, P4::None, 0);
+
+    // Done: close cursors.
+    b.resolve_label(done_label);
+    b.emit_op(Opcode::Close, from_cursor, 0, 0, P4::None, 0);
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    for idx_offset in 0..target.indexes.len() {
+        let idx_cursor = target_cursor + 1 + idx_offset as i32;
+        b.emit_op(Opcode::Close, idx_cursor, 0, 0, P4::None, 0);
+    }
+    b.emit_op(Opcode::Close, target_cursor, 0, 0, P4::None, 0);
+    b.emit_op(Opcode::Halt, 0, 0, 0, P4::None, 0);
+
+    // End label.
+    b.resolve_label(end_label);
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// DELETE codegen
+// ---------------------------------------------------------------------------
+
+/// Generate VDBE bytecode for a DELETE statement.
+///
+/// Handles both rowid-equality WHERE and general column-based WHERE via
+/// a full table scan with filter.
+///
+/// Init → Transaction(write) → OpenWrite → Rewind → [WHERE filter] →
+/// Delete → Next → Close → Halt
+pub fn codegen_delete(
+    b: &mut ProgramBuilder,
+    stmt: &DeleteStatement,
+    schema: &[TableSchema],
+    _ctx: &CodegenContext,
+) -> Result<(), CodegenError> {
+    let table_name = table_name_from_qualified(&stmt.table);
+    let table = find_table(schema, table_name)?;
+    let table_cursor = 0_i32;
+
+    let end_label = b.emit_label();
+    let _done_label = b.emit_label();
+
+    if !stmt.order_by.is_empty() || stmt.limit.is_some() {
+        return Err(CodegenError::Unsupported(
+            "DELETE ORDER BY/LIMIT/OFFSET must be materialized before codegen".to_owned(),
+        ));
+    }
+
+    // Init.
+    b.emit_jump_to_label(Opcode::Init, 0, 0, end_label, P4::None, 0);
+
+    // Transaction (write).
+    b.emit_op(Opcode::Transaction, 0, 1, 0, P4::None, 0);
+
+    // OpenWrite for table.
+    b.emit_op(
+        Opcode::OpenWrite,
+        table_cursor,
+        table.root_page,
+        0,
+        P4::Table(table.name.clone()),
+        0,
+    );
+
+    // OpenWrite for each index (bd-34se: Phase 5I.4).
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    for (idx_offset, index) in table.indexes.iter().enumerate() {
+        let idx_cursor = table_cursor + 1 + idx_offset as i32;
+        b.emit_op(
+            Opcode::OpenWrite,
+            idx_cursor,
+            index.root_page,
+            0,
+            P4::Table(index.name.clone()),
+            0,
+        );
+    }
+
+    // Register table-to-index cursor metadata for REPLACE conflict resolution.
+    register_table_index_meta(b, table, table_cursor);
+
+    // Two-pass DELETE (matches C SQLite behavior):
+    //   Pass 1: Scan table, evaluate WHERE, collect matching rowids into a RowSet.
+    //   Pass 2: Iterate collected rowids, seek, and delete.
+    // This prevents WHERE subqueries from seeing partially-deleted state.
+    let rowset_reg = b.alloc_reg();
+    let rowid_reg = b.alloc_reg();
+
+    // Initialize rowset register to NULL.
+    b.emit_op(Opcode::Null, 0, rowset_reg, 0, P4::None, 0);
+
+    // --- Pass 1: collect matching rowids ---
+    let collect_done_label = b.emit_label();
+    let rowid_target = extract_rowid_target_expr(stmt.where_clause.as_ref(), Some(table), None);
+
+    if let Some(target_expr) = rowid_target {
+        emit_expr(b, target_expr, rowid_reg, None);
+        b.emit_jump_to_label(
+            Opcode::SeekRowid,
+            table_cursor,
+            rowid_reg,
+            collect_done_label,
+            P4::None,
+            0,
+        );
+        b.emit_op(Opcode::RowSetAdd, rowset_reg, rowid_reg, 0, P4::None, 0);
+    } else {
+        let collect_start = b.current_addr();
+        b.emit_jump_to_label(
+            Opcode::Rewind,
+            table_cursor,
+            0,
+            collect_done_label,
+            P4::None,
+            0,
+        );
+
+        let collect_skip_label = b.emit_label();
+        if let Some(where_expr) = &stmt.where_clause {
+            emit_where_filter(
+                b,
+                where_expr,
+                table_cursor,
+                table,
+                stmt.table.alias.as_deref(),
+                schema,
+                collect_skip_label,
+            );
+        }
+
+        // Get rowid of matching row and add to rowset.
+        b.emit_op(Opcode::Rowid, table_cursor, rowid_reg, 0, P4::None, 0);
+        b.emit_op(Opcode::RowSetAdd, rowset_reg, rowid_reg, 0, P4::None, 0);
+
+        b.resolve_label(collect_skip_label);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let collect_body = (collect_start + 1) as i32;
+        b.emit_op(Opcode::Next, table_cursor, collect_body, 0, P4::None, 0);
+    }
+
+    b.resolve_label(collect_done_label);
+
+    // --- Pass 2: iterate rowset, seek, and delete ---
+    let delete_done_label = b.emit_label();
+    let delete_loop = b.current_addr();
+    b.emit_jump_to_label(
+        Opcode::RowSetRead,
+        rowset_reg,
+        rowid_reg,
+        delete_done_label,
+        P4::None,
+        0,
+    );
+
+    // Seek to the rowid.
+    let seek_miss_label = b.emit_label();
+    b.emit_jump_to_label(
+        Opcode::SeekRowid,
+        table_cursor,
+        rowid_reg,
+        seek_miss_label,
+        P4::None,
+        0,
+    );
+
+    // RETURNING clause: read columns before deletion (row is still present).
+    if !stmt.returning.is_empty() {
+        let ret_count = result_column_count(&stmt.returning, table);
+        let ret_regs = b.alloc_regs(ret_count);
+        emit_column_reads(
+            b,
+            table_cursor,
+            &stmt.returning,
+            table,
+            stmt.table.alias.as_deref(),
+            schema,
+            ret_regs,
+        )?;
+        b.emit_op(Opcode::ResultRow, ret_regs, ret_count, 0, P4::None, 0);
+    }
+
+    // Index maintenance: delete from each index before deleting the row.
+    emit_index_deletes(b, table, table_cursor);
+
+    // Delete at cursor position.
+    // P5 bit 0 = OPFLAG_NCHANGE: count this deletion in changes().
+    b.emit_op(
+        Opcode::Delete,
+        table_cursor,
+        0,
+        0,
+        P4::Table(table.name.clone()),
+        1,
+    );
+
+    b.resolve_label(seek_miss_label);
+
+    // Loop back to read next rowid from the set.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let delete_loop_addr = delete_loop as i32;
+    b.emit_op(Opcode::Goto, 0, delete_loop_addr, 0, P4::None, 0);
+
+    b.resolve_label(delete_done_label);
+
+    // Close table cursor.
+    b.emit_op(Opcode::Close, table_cursor, 0, 0, P4::None, 0);
+
+    // Close index cursors (bd-34se).
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    for idx_offset in 0..table.indexes.len() {
+        let idx_cursor = table_cursor + 1 + idx_offset as i32;
+        b.emit_op(Opcode::Close, idx_cursor, 0, 0, P4::None, 0);
+    }
+
+    b.emit_op(Opcode::Halt, 0, 0, 0, P4::None, 0);
+
+    // End label.
+    b.resolve_label(end_label);
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Helper functions
+// ---------------------------------------------------------------------------
+
+/// Emit a column's DEFAULT value into a register.
+///
+/// Parses the column's `default_value` SQL text and emits the appropriate
+/// opcode. Emits `Null` when no default is specified.
+fn emit_default_value(
+    b: &mut ProgramBuilder,
+    col: &ColumnInfo,
+    reg: i32,
+) -> Result<(), CodegenError> {
+    match col.default_value.as_deref() {
+        None => {
+            b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+            Ok(())
+        }
+        Some(dv) => {
+            let expr = parse_default_expr(dv).ok_or_else(|| {
+                CodegenError::Unsupported(format!(
+                    "failed to parse DEFAULT expression `{}` for column `{}`",
+                    dv.trim(),
+                    col.name
+                ))
+            })?;
+            if !default_expr_is_self_contained(&expr) {
+                return Err(CodegenError::Unsupported(format!(
+                    "DEFAULT expression `{}` for column `{}` is not self-contained",
+                    dv.trim(),
+                    col.name
+                )));
+            }
+            emit_expr(b, &expr, reg, None);
+            Ok(())
+        }
+    }
+}
+
+/// Parse column DEFAULT SQL text into an expression AST.
+fn parse_default_expr(default_sql: &str) -> Option<Expr> {
+    let trimmed = default_sql.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    parse_sql_expr(trimmed).ok()
+}
+
+fn default_expr_is_self_contained(expr: &Expr) -> bool {
+    match expr {
+        Expr::Literal(_, _) => true,
+        Expr::Column(_, _)
+        | Expr::Exists { .. }
+        | Expr::Subquery(_, _)
+        | Expr::Raise { .. }
+        | Expr::RowValue(_, _)
+        | Expr::Placeholder(_, _) => false,
+        Expr::BinaryOp { left, right, .. } => {
+            default_expr_is_self_contained(left) && default_expr_is_self_contained(right)
+        }
+        Expr::UnaryOp { expr: inner, .. }
+        | Expr::Cast { expr: inner, .. }
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull { expr: inner, .. } => default_expr_is_self_contained(inner),
+        Expr::Between {
+            expr: inner,
+            low,
+            high,
+            ..
+        } => {
+            default_expr_is_self_contained(inner)
+                && default_expr_is_self_contained(low)
+                && default_expr_is_self_contained(high)
+        }
+        Expr::In {
+            expr: inner, set, ..
+        } => {
+            default_expr_is_self_contained(inner)
+                && match set {
+                    fsqlite_ast::InSet::List(exprs) => {
+                        exprs.iter().all(default_expr_is_self_contained)
+                    }
+                    fsqlite_ast::InSet::Subquery(_) | fsqlite_ast::InSet::Table(_) => false,
+                }
+        }
+        Expr::Like {
+            expr: inner,
+            pattern,
+            escape,
+            ..
+        } => {
+            default_expr_is_self_contained(inner)
+                && default_expr_is_self_contained(pattern)
+                && escape.as_deref().is_none_or(default_expr_is_self_contained)
+        }
+        Expr::Case {
+            operand,
+            whens,
+            else_expr,
+            ..
+        } => {
+            operand
+                .as_deref()
+                .is_none_or(default_expr_is_self_contained)
+                && whens.iter().all(|(when_expr, then_expr)| {
+                    default_expr_is_self_contained(when_expr)
+                        && default_expr_is_self_contained(then_expr)
+                })
+                && else_expr
+                    .as_deref()
+                    .is_none_or(default_expr_is_self_contained)
+        }
+        Expr::FunctionCall {
+            args,
+            distinct,
+            order_by,
+            filter,
+            over,
+            ..
+        } => {
+            !distinct
+                && order_by.is_empty()
+                && filter.is_none()
+                && over.is_none()
+                && match args {
+                    fsqlite_ast::FunctionArgs::Star => false,
+                    fsqlite_ast::FunctionArgs::List(exprs) => {
+                        exprs.iter().all(default_expr_is_self_contained)
+                    }
+                }
+        }
+        Expr::JsonAccess {
+            expr: inner, path, ..
+        } => default_expr_is_self_contained(inner) && default_expr_is_self_contained(path),
+    }
+}
+
+fn emit_index_predicate_guard(
+    b: &mut ProgramBuilder,
+    index: &IndexSchema,
+    scan_ctx: &ScanCtx<'_>,
+    skip_label: Label,
+) {
+    let Some(where_sql) = index.where_clause.as_deref() else {
+        return;
+    };
+    let Some(predicate) = parse_default_expr(where_sql) else {
+        // Invalid persisted predicate metadata should not panic compilation.
+        // Conservatively skip maintenance for this row.
+        b.emit_jump_to_label(Opcode::Goto, 0, 0, skip_label, P4::None, 0);
+        return;
+    };
+    let result_reg = b.alloc_reg();
+    emit_expr(b, &predicate, result_reg, Some(scan_ctx));
+    // Partial indexes include only rows where the predicate is true.
+    b.emit_jump_to_label(Opcode::IfNot, result_reg, 1, skip_label, P4::None, 0);
+}
+
+fn emit_index_key_term(
+    b: &mut ProgramBuilder,
+    index: &IndexSchema,
+    key_pos: usize,
+    dest_reg: i32,
+    scan_ctx: &ScanCtx<'_>,
+) {
+    let Some(term_sql) = index.key_term_sql(key_pos) else {
+        b.emit_op(Opcode::Null, 0, dest_reg, 0, P4::None, 0);
+        return;
+    };
+    if let Some(expr) = parse_default_expr(term_sql) {
+        emit_expr(b, &expr, dest_reg, Some(scan_ctx));
+    } else {
+        b.emit_op(Opcode::Null, 0, dest_reg, 0, P4::None, 0);
+    }
+}
+
+/// Evaluate STORED generated column expressions during INSERT/UPDATE.
+///
+/// For each column with `generated_stored == Some(true)`, parses the stored
+/// expression SQL, evaluates it using register-based column resolution, and
+/// writes the result into the corresponding column register.
+///
+/// VIRTUAL generated columns are set to NULL (they are computed at SELECT time).
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn emit_stored_generated_columns(b: &mut ProgramBuilder, table: &TableSchema, val_regs: i32) {
+    for (col_idx, col) in table.columns.iter().enumerate() {
+        let Some(ref expr_sql) = col.generated_expr else {
+            continue;
+        };
+        let dest_reg = val_regs + col_idx as i32;
+        if col.generated_stored == Some(true) {
+            // STORED: evaluate expression and write result to register.
+            if let Some(expr) = parse_default_expr(expr_sql) {
+                let gen_ctx = ScanCtx {
+                    cursor: 0,
+                    table,
+                    table_alias: None,
+                    schema: None,
+                    register_base: Some(val_regs),
+                    secondary: None,
+                };
+                emit_expr(b, &expr, dest_reg, Some(&gen_ctx));
+            } else {
+                // Expression parse failed — store NULL.
+                b.emit_op(Opcode::Null, 0, dest_reg, 0, P4::None, 0);
+            }
+        } else {
+            // VIRTUAL: not stored in the record; set NULL as placeholder.
+            b.emit_op(Opcode::Null, 0, dest_reg, 0, P4::None, 0);
+        }
+    }
+}
+
+/// Emit CHECK constraint validation for INSERT/UPDATE.
+///
+/// For each CHECK constraint on the table, parses the constraint expression,
+/// evaluates it using register-based column resolution, and emits a `Halt`
+/// with SQLITE_CONSTRAINT (19) if any constraint evaluates to false (0).
+/// NULL results are treated as passing (SQLite semantics: CHECK passes
+/// unless the expression is explicitly false).
+///
+/// When `ignore_label` is `Some`, CHECK failures jump there instead of
+/// halting (used for INSERT OR IGNORE to silently skip violating rows).
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn emit_check_constraints(
+    b: &mut ProgramBuilder,
+    table: &TableSchema,
+    val_regs: i32,
+    ignore_label: Option<Label>,
+) {
+    const SQLITE_CONSTRAINT: i32 = 19;
+
+    for check_sql in &table.check_constraints {
+        let Some(expr) = parse_default_expr(check_sql) else {
+            continue;
+        };
+
+        let result_reg = b.alloc_reg();
+        let ok_label = b.emit_label();
+
+        let check_ctx = ScanCtx {
+            cursor: 0,
+            table,
+            table_alias: None,
+            schema: None,
+            register_base: Some(val_regs),
+            secondary: None,
+        };
+
+        emit_expr(b, &expr, result_reg, Some(&check_ctx));
+
+        // NULL result: CHECK passes (SQLite semantics).
+        b.emit_jump_to_label(Opcode::IsNull, result_reg, 0, ok_label, P4::None, 0);
+
+        // Non-zero (truthy): CHECK passes.
+        b.emit_jump_to_label(Opcode::If, result_reg, 0, ok_label, P4::None, 0);
+
+        // False (0): CHECK fails.
+        if let Some(skip) = ignore_label {
+            // OR IGNORE: skip this row silently.
+            b.emit_jump_to_label(Opcode::Goto, 0, 0, skip, P4::None, 0);
+        } else {
+            // Default: halt with constraint error.
+            b.emit_op(
+                Opcode::Halt,
+                SQLITE_CONSTRAINT,
+                0,
+                0,
+                P4::Str(format!("CHECK constraint failed: {check_sql}")),
+                0,
+            );
+        }
+
+        b.resolve_label(ok_label);
+    }
+}
+
+/// Emit NOT NULL constraint validation for INSERT/UPDATE.
+///
+/// For each column with `not_null == true` (and not an IPK, which can't be NULL),
+/// emits `HaltIfNull` to abort with SQLITE_CONSTRAINT if the value is NULL.
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn emit_not_null_constraints(
+    b: &mut ProgramBuilder,
+    table: &TableSchema,
+    val_regs: i32,
+    ignore_label: Option<Label>,
+) {
+    const SQLITE_CONSTRAINT: i32 = 19;
+
+    for (col_idx, col) in table.columns.iter().enumerate() {
+        if col.notnull && !col.is_ipk {
+            let reg = val_regs + col_idx as i32;
+            let ok_label = b.emit_label();
+            b.emit_jump_to_label(Opcode::NotNull, reg, 0, ok_label, P4::None, 0);
+            if let Some(skip) = ignore_label {
+                b.emit_jump_to_label(Opcode::Goto, 0, 0, skip, P4::None, 0);
+            } else {
+                b.emit_op(
+                    Opcode::Halt,
+                    SQLITE_CONSTRAINT,
+                    0,
+                    0,
+                    P4::Str(format!(
+                        "NOT NULL constraint failed: {}.{}",
+                        table.name, col.name
+                    )),
+                    0,
+                );
+            }
+            b.resolve_label(ok_label);
+        }
+    }
+}
+
+/// Emit `IdxInsert` opcodes for all indexes on the table (bd-so1h: Phase 5I.3).
+///
+/// For each index, this reads the indexed column values from the provided
+/// registers, appends the rowid, builds an index key record, and inserts it.
+///
+/// # Arguments
+/// * `b` - Program builder
+/// * `table` - Table schema (includes index definitions)
+/// * `table_cursor` - Cursor ID for the table (index cursors are table_cursor + 1, +2, etc.)
+/// * `col_regs` - Starting register containing column values in table schema order
+/// * `rowid_reg` - Register containing the rowid
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn emit_index_inserts(
+    b: &mut ProgramBuilder,
+    table: &TableSchema,
+    table_cursor: i32,
+    col_regs: i32,
+    rowid_reg: i32,
+    oe_flag: u16,
+) {
+    for (idx_offset, index) in table.indexes.iter().enumerate() {
+        let idx_cursor = table_cursor + 1 + idx_offset as i32;
+        let n_idx_cols = index.key_term_count();
+        let skip_label = b.emit_label();
+        let scan_ctx = ScanCtx {
+            cursor: table_cursor,
+            table,
+            table_alias: None,
+            schema: None,
+            register_base: Some(col_regs),
+            secondary: None,
+        };
+
+        emit_index_predicate_guard(b, index, &scan_ctx, skip_label);
+
+        // Allocate registers for index key: (indexed_cols..., rowid).
+        let idx_key_regs = b.alloc_regs((n_idx_cols + 1) as i32);
+
+        // Evaluate indexed key terms into the key registers.
+        for key_pos in 0..n_idx_cols {
+            let dst_reg = idx_key_regs + key_pos as i32;
+            emit_index_key_term(b, index, key_pos, dst_reg, &scan_ctx);
+        }
+
+        // Append rowid as the final key component.
+        let rowid_key_reg = idx_key_regs + n_idx_cols as i32;
+        b.emit_op(Opcode::Copy, rowid_reg, rowid_key_reg, 0, P4::None, 0);
+
+        // Build the index key record.
+        let idx_rec_reg = b.alloc_reg();
+        b.emit_op(
+            Opcode::MakeRecord,
+            idx_key_regs,
+            (n_idx_cols + 1) as i32,
+            idx_rec_reg,
+            P4::None,
+            0,
+        );
+
+        // Insert into the index.
+        // For UNIQUE indexes, set P5=1 and P3=number of indexed columns
+        // (excluding the trailing rowid) so the engine can enforce the
+        // uniqueness constraint while allowing multiple NULLs.
+        let (p3_unique, p5_unique) = if index.is_unique {
+            (n_idx_cols as i32, 1 | (oe_flag << 1))
+        } else {
+            (0, 0)
+        };
+        let p4_name = if index.is_unique {
+            // Include table name for the error message.
+            P4::Table(format!("{}.{}", table.name, index.key_label()))
+        } else {
+            P4::Table(index.name.clone())
+        };
+        b.emit_op(
+            Opcode::IdxInsert,
+            idx_cursor,
+            idx_rec_reg,
+            p3_unique,
+            p4_name,
+            p5_unique,
+        );
+
+        b.resolve_label(skip_label);
+    }
+}
+
+/// Emit `IdxDelete` opcodes for all indexes on the table (bd-34se: Phase 5I.4).
+///
+/// For each index, this reads the indexed column values from the cursor,
+/// reads the rowid, and emits `IdxDelete` with `(p2, p3)` pointing at the key
+/// register span. The VDBE engine seeks to that key before deleting.
+/// MUST be called BEFORE the table row is deleted, while data is still accessible.
+///
+/// # Arguments
+/// * `b` - Program builder
+/// * `table` - Table schema (includes index definitions)
+/// * `table_cursor` - Cursor ID for the table (index cursors are table_cursor + 1, +2, etc.)
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn emit_index_deletes(b: &mut ProgramBuilder, table: &TableSchema, table_cursor: i32) {
+    for (idx_offset, index) in table.indexes.iter().enumerate() {
+        let idx_cursor = table_cursor + 1 + idx_offset as i32;
+        let n_idx_cols = index.key_term_count();
+        let skip_label = b.emit_label();
+        let scan_ctx = ScanCtx {
+            cursor: table_cursor,
+            table,
+            table_alias: None,
+            schema: None,
+            register_base: None,
+            secondary: None,
+        };
+
+        emit_index_predicate_guard(b, index, &scan_ctx, skip_label);
+
+        // Allocate registers for index key: (indexed_cols..., rowid).
+        let idx_key_regs = b.alloc_regs((n_idx_cols + 1) as i32);
+
+        // Re-evaluate indexed key terms from the current row.
+        for key_pos in 0..n_idx_cols {
+            let dst_reg = idx_key_regs + key_pos as i32;
+            emit_index_key_term(b, index, key_pos, dst_reg, &scan_ctx);
+        }
+
+        // Read rowid and append as the final key component.
+        let rowid_key_reg = idx_key_regs + n_idx_cols as i32;
+        b.emit_op(Opcode::Rowid, table_cursor, rowid_key_reg, 0, P4::None, 0);
+
+        // Delete from the index.
+        b.emit_op(
+            Opcode::IdxDelete,
+            idx_cursor,
+            idx_key_regs,
+            (n_idx_cols + 1) as i32,
+            P4::Table(index.name.clone()),
+            0,
+        );
+
+        b.resolve_label(skip_label);
+    }
+}
+
+/// Register metadata mapping a table cursor to its index cursors and their
+/// column indices. Used by the VDBE engine's REPLACE conflict resolution to
+/// clean up secondary index entries when a conflicting row is deleted.
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn register_table_index_meta(b: &mut ProgramBuilder, table: &TableSchema, table_cursor: i32) {
+    let metas: Vec<IndexCursorMeta> = table
+        .indexes
+        .iter()
+        .enumerate()
+        .filter(|(_, index)| index.supports_replace_cleanup_meta())
+        .map(|(idx_offset, index)| {
+            let cursor_id = table_cursor + 1 + idx_offset as i32;
+            let column_indices: Vec<usize> = index
+                .columns
+                .iter()
+                .filter_map(|col_name| table.column_index(col_name))
+                .collect();
+            IndexCursorMeta {
+                cursor_id,
+                column_indices,
+            }
+        })
+        .collect();
+    b.register_table_indexes(table_cursor, metas);
+}
+
+/// Count result columns (handling `SELECT *`).
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn result_column_count(columns: &[ResultColumn], table: &TableSchema) -> i32 {
+    let mut count = 0i32;
+    for col in columns {
+        match col {
+            ResultColumn::Star | ResultColumn::TableStar(_) => {
+                count += table.columns.len() as i32;
+            }
+            ResultColumn::Expr { .. } => count += 1,
+        }
+    }
+    count
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn result_column_count_without_from(columns: &[ResultColumn]) -> Result<i32, CodegenError> {
+    let mut count = 0i32;
+    for col in columns {
+        match col {
+            ResultColumn::Expr { .. } => count += 1,
+            ResultColumn::Star | ResultColumn::TableStar(_) => {
+                return Err(CodegenError::Unsupported(
+                    "INSERT ... SELECT without FROM does not support `*` projections".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(count)
+}
+
+/// Emit Column instructions to read result columns into registers.
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn emit_column_reads(
+    b: &mut ProgramBuilder,
+    cursor: i32,
+    columns: &[ResultColumn],
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    schema: &[TableSchema],
+    base_reg: i32,
+) -> Result<(), CodegenError> {
+    let mut reg = base_reg;
+    for col in columns {
+        match col {
+            ResultColumn::Star => {
+                for (i, ci) in table.columns.iter().enumerate() {
+                    if ci.is_ipk {
+                        b.emit_op(Opcode::Rowid, cursor, reg, 0, P4::None, 0);
+                    } else {
+                        b.emit_op(Opcode::Column, cursor, i as i32, reg, P4::None, 0);
+                    }
+                    reg += 1;
+                }
+            }
+            ResultColumn::TableStar(qualifier) => {
+                if !matches_table_or_alias(qualifier, table, table_alias) {
+                    return Err(CodegenError::TableNotFound(qualifier.clone()));
+                }
+                for (i, ci) in table.columns.iter().enumerate() {
+                    if ci.is_ipk {
+                        b.emit_op(Opcode::Rowid, cursor, reg, 0, P4::None, 0);
+                    } else {
+                        b.emit_op(Opcode::Column, cursor, i as i32, reg, P4::None, 0);
+                    }
+                    reg += 1;
+                }
+            }
+            ResultColumn::Expr { expr, .. } => {
+                if let Expr::Column(col_ref, _) = expr {
+                    if let Some(qualifier) = &col_ref.table {
+                        if !matches_table_or_alias(qualifier, table, table_alias) {
+                            return Err(CodegenError::TableNotFound(qualifier.clone()));
+                        }
+                    }
+                    if let Some(col_idx) = table.column_index(&col_ref.column) {
+                        if table.columns[col_idx].is_ipk {
+                            b.emit_op(Opcode::Rowid, cursor, reg, 0, P4::None, 0);
+                        } else {
+                            b.emit_op(Opcode::Column, cursor, col_idx as i32, reg, P4::None, 0);
+                        }
+                    } else if table.resolves_to_hidden_rowid(&col_ref.column) {
+                        b.emit_op(Opcode::Rowid, cursor, reg, 0, P4::None, 0);
+                    } else {
+                        return Err(CodegenError::ColumnNotFound {
+                            table: table.name.clone(),
+                            column: col_ref.column.clone(),
+                        });
+                    }
+                } else {
+                    // Evaluate non-column expressions (literals, arithmetic, CASE, CAST, etc.)
+                    // against the current scan row.
+                    let scan = ScanCtx {
+                        cursor,
+                        table,
+                        table_alias,
+                        schema: Some(schema),
+                        register_base: None,
+                        secondary: None,
+                    };
+                    emit_expr(b, expr, reg, Some(&scan));
+                }
+                reg += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn emit_projection_without_from(
+    b: &mut ProgramBuilder,
+    columns: &[ResultColumn],
+    base_reg: i32,
+) -> Result<(), CodegenError> {
+    let mut reg = base_reg;
+    for col in columns {
+        match col {
+            ResultColumn::Expr { expr, .. } => {
+                emit_expr(b, expr, reg, None);
+                reg += 1;
+            }
+            ResultColumn::Star | ResultColumn::TableStar(_) => {
+                return Err(CodegenError::Unsupported(
+                    "INSERT ... SELECT without FROM does not support `*` projections".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Emit RETURNING clause opcodes after an INSERT.
+///
+/// Positions the cursor on the just-inserted row via `SeekRowid`, reads the
+/// requested columns, and emits a `ResultRow`.
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn emit_returning(
+    b: &mut ProgramBuilder,
+    cursor: i32,
+    table: &TableSchema,
+    returning: &[ResultColumn],
+    rowid_reg: i32,
+) -> Result<(), CodegenError> {
+    let skip_returning = b.emit_label();
+    b.emit_jump_to_label(
+        Opcode::SeekRowid,
+        cursor,
+        rowid_reg,
+        skip_returning,
+        P4::None,
+        0,
+    );
+    let ret_count = result_column_count(returning, table);
+    let ret_regs = b.alloc_regs(ret_count);
+    emit_column_reads(b, cursor, returning, table, None, &[], ret_regs)?;
+    b.emit_op(Opcode::ResultRow, ret_regs, ret_count, 0, P4::None, 0);
+    b.resolve_label(skip_returning);
+    Ok(())
+}
+
+/// Emit a HAVING filter for GROUP BY queries.
+///
+/// Evaluates the HAVING expression against the already-built output row.
+/// Aggregate function calls and column references are resolved to the
+/// corresponding output registers. If the predicate is false, jumps to
+/// `skip_label` (skipping the `ResultRow`).
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::too_many_arguments
+)]
+fn emit_having_filter(
+    b: &mut ProgramBuilder,
+    having_expr: &Expr,
+    output_cols: &[GroupByOutputCol],
+    agg_columns: &[AggColumn],
+    group_by_keys: &[GroupByKey],
+    table: &TableSchema,
+    out_regs: i32,
+    skip_label: crate::Label,
+) {
+    let result_reg = b.alloc_temp();
+    emit_having_expr(
+        b,
+        having_expr,
+        result_reg,
+        output_cols,
+        agg_columns,
+        group_by_keys,
+        table,
+        out_regs,
+    );
+    // If result is falsy (0 or NULL), skip this group's ResultRow.
+    // p3=1: NULL HAVING → jump (skip row), matching SQLite semantics.
+    b.emit_jump_to_label(Opcode::IfNot, result_reg, 1, skip_label, P4::None, 0);
+    b.free_temp(result_reg);
+}
+
+/// Evaluate a HAVING expression into `dest_reg`.
+///
+/// Maps aggregate function calls and column references to the output
+/// registers that already hold the finalized group results.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::too_many_arguments,
+    clippy::too_many_lines
+)]
+fn emit_having_expr(
+    b: &mut ProgramBuilder,
+    expr: &Expr,
+    dest_reg: i32,
+    output_cols: &[GroupByOutputCol],
+    agg_columns: &[AggColumn],
+    group_by_keys: &[GroupByKey],
+    table: &TableSchema,
+    out_regs: i32,
+) {
+    match expr {
+        // Aggregate function call — resolve to the corresponding output register.
+        Expr::FunctionCall { name, args, .. } if is_aggregate_function(name) => {
+            let upper = name.to_ascii_uppercase();
+            // Find the matching aggregate by name + argument structure.
+            let agg_idx = agg_columns.iter().position(|agg| {
+                if agg.name != upper {
+                    return false;
+                }
+                match args {
+                    FunctionArgs::Star => agg.num_args == 0,
+                    FunctionArgs::List(exprs) => {
+                        if exprs.is_empty() {
+                            return agg.num_args == 0;
+                        }
+                        // Match by argument column index first.
+                        if let Some(ci) = resolve_column_index(&exprs[0], table) {
+                            agg.arg_col_index == Some(ci)
+                        } else if let Some(ref arg_expr) = agg.arg_expr {
+                            // Fall back to structural expression comparison
+                            // for aggregates with expression arguments.
+                            exprs.len() == 1 && **arg_expr == exprs[0]
+                        } else {
+                            false
+                        }
+                    }
+                }
+            });
+            if let Some(ai) = agg_idx {
+                // Find the output register for this aggregate.
+                for (i, oc) in output_cols.iter().enumerate() {
+                    if matches!(oc, GroupByOutputCol::Aggregate { agg_index } if *agg_index == ai) {
+                        b.emit_op(Opcode::Copy, out_regs + i as i32, dest_reg, 0, P4::None, 0);
+                        return;
+                    }
+                }
+            }
+            // Fallback: treat as zero (unknown aggregate in HAVING).
+            b.emit_op(Opcode::Integer, 0, dest_reg, 0, P4::None, 0);
+        }
+
+        // Column reference — resolve to the corresponding group-key output register.
+        Expr::Column(col_ref, _) => {
+            let col_name = &col_ref.column;
+            if let Some(col_idx) = table.columns.iter().position(|c| c.name == *col_name) {
+                // Find the output column whose group key maps to this table column.
+                for (i, oc) in output_cols.iter().enumerate() {
+                    if let GroupByOutputCol::GroupKey { key_index, .. } = oc {
+                        if matches!(group_by_keys.get(*key_index), Some(GroupByKey::Column(c)) if *c == col_idx)
+                        {
+                            b.emit_op(Opcode::Copy, out_regs + i as i32, dest_reg, 0, P4::None, 0);
+                            return;
+                        }
+                    }
+                }
+            }
+            // Fallback: emit NULL for unresolved column.
+            b.emit_op(Opcode::Null, 0, dest_reg, 0, P4::None, 0);
+        }
+
+        // Binary comparison — evaluate both sides, then compare.
+        Expr::BinaryOp {
+            left, op, right, ..
+        } => {
+            let left_reg = b.alloc_temp();
+            let right_reg = b.alloc_temp();
+            emit_having_expr(
+                b,
+                left,
+                left_reg,
+                output_cols,
+                agg_columns,
+                group_by_keys,
+                table,
+                out_regs,
+            );
+            emit_having_expr(
+                b,
+                right,
+                right_reg,
+                output_cols,
+                agg_columns,
+                group_by_keys,
+                table,
+                out_regs,
+            );
+
+            match op {
+                fsqlite_ast::BinaryOp::Gt
+                | fsqlite_ast::BinaryOp::Lt
+                | fsqlite_ast::BinaryOp::Ge
+                | fsqlite_ast::BinaryOp::Le
+                | fsqlite_ast::BinaryOp::Eq
+                | fsqlite_ast::BinaryOp::Ne => {
+                    let cmp_opcode = match op {
+                        fsqlite_ast::BinaryOp::Gt => Opcode::Gt,
+                        fsqlite_ast::BinaryOp::Lt => Opcode::Lt,
+                        fsqlite_ast::BinaryOp::Ge => Opcode::Ge,
+                        fsqlite_ast::BinaryOp::Le => Opcode::Le,
+                        fsqlite_ast::BinaryOp::Eq => Opcode::Eq,
+                        fsqlite_ast::BinaryOp::Ne => Opcode::Ne,
+                        _ => unreachable!(),
+                    };
+                    // SQL three-valued logic: if either operand is NULL, result is NULL.
+                    let null_label = b.emit_label();
+                    let true_label = b.emit_label();
+                    let done_label = b.emit_label();
+                    b.emit_jump_to_label(Opcode::IsNull, left_reg, 0, null_label, P4::None, 0);
+                    b.emit_jump_to_label(Opcode::IsNull, right_reg, 0, null_label, P4::None, 0);
+                    b.emit_jump_to_label(cmp_opcode, right_reg, left_reg, true_label, P4::None, 0);
+                    b.emit_op(Opcode::Integer, 0, dest_reg, 0, P4::None, 0);
+                    b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+                    b.resolve_label(true_label);
+                    b.emit_op(Opcode::Integer, 1, dest_reg, 0, P4::None, 0);
+                    b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+                    b.resolve_label(null_label);
+                    b.emit_op(Opcode::Null, 0, dest_reg, 0, P4::None, 0);
+                    b.resolve_label(done_label);
+                }
+                fsqlite_ast::BinaryOp::And => {
+                    b.emit_op(Opcode::And, left_reg, right_reg, dest_reg, P4::None, 0);
+                }
+                fsqlite_ast::BinaryOp::Or => {
+                    b.emit_op(Opcode::Or, left_reg, right_reg, dest_reg, P4::None, 0);
+                }
+                _ => {
+                    emit_expr(b, expr, dest_reg, None);
+                }
+            }
+            b.free_temp(right_reg);
+            b.free_temp(left_reg);
+        }
+
+        // For any other expression, delegate to the standard evaluator.
+        _ => {
+            emit_expr(b, expr, dest_reg, None);
+        }
+    }
+}
+
+/// Emit a WHERE filter for scan-based UPDATE/DELETE.
+///
+/// Evaluates the WHERE expression against the current cursor row. If the
+/// condition is false, jumps to `skip_label` (skipping the DML operation).
+///
+/// Handles `col = expr` comparisons by reading the column from the cursor
+/// and comparing with the literal/expression value.
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn emit_where_filter(
+    b: &mut ProgramBuilder,
+    where_expr: &Expr,
+    cursor: i32,
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    schema: &[TableSchema],
+    skip_label: crate::Label,
+) {
+    let scan = ScanCtx {
+        cursor,
+        table,
+        table_alias,
+        schema: Some(schema),
+        register_base: None,
+        secondary: None,
+    };
+    emit_where_filter_with_ctx(b, where_expr, &scan, skip_label);
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn emit_where_filter_with_ctx(
+    b: &mut ProgramBuilder,
+    where_expr: &Expr,
+    scan: &ScanCtx<'_>,
+    skip_label: crate::Label,
+) {
+    match where_expr {
+        Expr::BinaryOp {
+            left,
+            op: fsqlite_ast::BinaryOp::Eq,
+            right,
+            ..
+        } => {
+            let comparison = ResolvedComparisonInfo::new(left, right, scan);
+            if let Some(resolved) = comparison.left_resolved.as_ref() {
+                let col_reg = b.alloc_temp();
+                let val_reg = b.alloc_temp();
+                emit_resolved_column(b, resolved, scan.cursor, col_reg, scan);
+                emit_expr(b, right, val_reg, Some(scan));
+                // SQL semantics: `col = NULL` is UNKNOWN (false in WHERE). If the
+                // value expression evaluates to NULL, skip the row unconditionally.
+                b.emit_jump_to_label(Opcode::IsNull, val_reg, 0, skip_label, P4::None, 0);
+                // NULLEQ (0x80) | comparison affinity so the engine coerces correctly.
+                b.emit_jump_to_label(
+                    Opcode::Ne,
+                    val_reg,
+                    col_reg,
+                    skip_label,
+                    comparison.collation_p4.clone(),
+                    comparison.cmp_p5,
+                );
+                b.free_temp(val_reg);
+                b.free_temp(col_reg);
+            } else if let Some(resolved) = comparison.right_resolved.as_ref() {
+                let col_reg = b.alloc_temp();
+                let val_reg = b.alloc_temp();
+                emit_resolved_column(b, resolved, scan.cursor, col_reg, scan);
+                emit_expr(b, left, val_reg, Some(scan));
+                // SQL semantics: `NULL = col` is UNKNOWN (false in WHERE).
+                b.emit_jump_to_label(Opcode::IsNull, val_reg, 0, skip_label, P4::None, 0);
+                b.emit_jump_to_label(
+                    Opcode::Ne,
+                    val_reg,
+                    col_reg,
+                    skip_label,
+                    comparison.collation_p4.clone(),
+                    comparison.cmp_p5,
+                );
+                b.free_temp(val_reg);
+                b.free_temp(col_reg);
+            } else {
+                // Neither side is a column ref (e.g. WHERE 1 = 0, WHERE length(name) = 5).
+                // Fall through to generic boolean evaluation.
+                let cond_reg = b.alloc_temp();
+                emit_expr(b, where_expr, cond_reg, Some(scan));
+                b.emit_jump_to_label(Opcode::IfNot, cond_reg, 1, skip_label, P4::None, 0);
+                b.free_temp(cond_reg);
+            }
+        }
+        // Inequality comparisons: Ne, Lt, Le, Gt, Ge.
+        // Same structure as Eq but with the appropriate skip opcode and
+        // operand order so that column affinity p5 flags are applied.
+        Expr::BinaryOp {
+            left,
+            op:
+                op @ (fsqlite_ast::BinaryOp::Ne
+                | fsqlite_ast::BinaryOp::Lt
+                | fsqlite_ast::BinaryOp::Le
+                | fsqlite_ast::BinaryOp::Gt
+                | fsqlite_ast::BinaryOp::Ge),
+            right,
+            ..
+        } => {
+            let comparison = ResolvedComparisonInfo::new(left, right, scan);
+
+            // Determine the skip opcode — the inverse of the comparison.
+            // If `col > val` is the condition, skip when `col <= val`, i.e. Le.
+            let skip_opcode = match op {
+                fsqlite_ast::BinaryOp::Ne => Opcode::Eq,
+                fsqlite_ast::BinaryOp::Lt => Opcode::Ge,
+                fsqlite_ast::BinaryOp::Le => Opcode::Gt,
+                fsqlite_ast::BinaryOp::Gt => Opcode::Le,
+                fsqlite_ast::BinaryOp::Ge => Opcode::Lt,
+                _ => unreachable!(),
+            };
+
+            if let Some(resolved) = comparison.left_resolved.as_ref() {
+                let col_reg = b.alloc_temp();
+                let val_reg = b.alloc_temp();
+                emit_resolved_column(b, resolved, scan.cursor, col_reg, scan);
+                emit_expr(b, right, val_reg, Some(scan));
+                b.emit_jump_to_label(Opcode::IsNull, val_reg, 0, skip_label, P4::None, 0);
+                b.emit_jump_to_label(Opcode::IsNull, col_reg, 0, skip_label, P4::None, 0);
+                b.emit_jump_to_label(
+                    skip_opcode,
+                    val_reg,
+                    col_reg,
+                    skip_label,
+                    comparison.collation_p4.clone(),
+                    comparison.cmp_p5,
+                );
+                b.free_temp(val_reg);
+                b.free_temp(col_reg);
+            } else if let Some(resolved) = comparison.right_resolved.as_ref() {
+                // col is on the right: `val op col` → swap operand order.
+                // `val < col` skip when `val >= col`, i.e. Ge(val, col).
+                // The skip opcode is the inverse of `val op col`.
+                let swapped_skip = match op {
+                    fsqlite_ast::BinaryOp::Ne => Opcode::Eq,
+                    fsqlite_ast::BinaryOp::Lt => Opcode::Ge,
+                    fsqlite_ast::BinaryOp::Le => Opcode::Gt,
+                    fsqlite_ast::BinaryOp::Gt => Opcode::Le,
+                    fsqlite_ast::BinaryOp::Ge => Opcode::Lt,
+                    _ => unreachable!(),
+                };
+                let col_reg = b.alloc_temp();
+                let val_reg = b.alloc_temp();
+                emit_resolved_column(b, resolved, scan.cursor, col_reg, scan);
+                emit_expr(b, left, val_reg, Some(scan));
+                b.emit_jump_to_label(Opcode::IsNull, val_reg, 0, skip_label, P4::None, 0);
+                b.emit_jump_to_label(Opcode::IsNull, col_reg, 0, skip_label, P4::None, 0);
+                // VDBE comparison: opcode P1=rhs P2=lhs. For `val < col` skip
+                // when NOT(val < col), i.e. val >= col → Ge(val_reg, col_reg).
+                b.emit_jump_to_label(
+                    swapped_skip,
+                    col_reg,
+                    val_reg,
+                    skip_label,
+                    comparison.collation_p4.clone(),
+                    comparison.cmp_p5,
+                );
+                b.free_temp(val_reg);
+                b.free_temp(col_reg);
+            } else {
+                let cond_reg = b.alloc_temp();
+                emit_expr(b, where_expr, cond_reg, Some(scan));
+                b.emit_jump_to_label(Opcode::IfNot, cond_reg, 1, skip_label, P4::None, 0);
+                b.free_temp(cond_reg);
+            }
+        }
+        Expr::BinaryOp {
+            left,
+            op: fsqlite_ast::BinaryOp::And,
+            right,
+            ..
+        } => {
+            // AND: both conditions must pass.
+            emit_where_filter_with_ctx(b, left, scan, skip_label);
+            emit_where_filter_with_ctx(b, right, scan, skip_label);
+        }
+        Expr::BinaryOp {
+            left,
+            op: fsqlite_ast::BinaryOp::Or,
+            right,
+            ..
+        } => {
+            // OR: at least one condition must pass.
+            // If left passes → skip right, proceed to row processing.
+            // If left fails → try right; if right also fails → skip row.
+            let left_skip = b.emit_label();
+            let pass_label = b.emit_label();
+            emit_where_filter_with_ctx(b, left, scan, left_skip);
+            // Left passed — jump past right-side evaluation.
+            b.emit_jump_to_label(Opcode::Goto, 0, 0, pass_label, P4::None, 0);
+            b.resolve_label(left_skip);
+            // Left failed — try right.
+            emit_where_filter_with_ctx(b, right, scan, skip_label);
+            b.resolve_label(pass_label);
+        }
+        _ => {
+            // Generic WHERE: evaluate expression with cursor context and test truthiness.
+            let cond_reg = b.alloc_temp();
+            emit_expr(b, where_expr, cond_reg, Some(scan));
+            b.emit_jump_to_label(Opcode::IfNot, cond_reg, 1, skip_label, P4::None, 0);
+            b.free_temp(cond_reg);
+        }
+    }
+}
+
+struct ResolvedComparisonInfo {
+    left_resolved: Option<SortKeySource>,
+    right_resolved: Option<SortKeySource>,
+    collation_p4: P4,
+    cmp_p5: u16,
+}
+
+impl ResolvedComparisonInfo {
+    fn new(left: &Expr, right: &Expr, scan: &ScanCtx<'_>) -> Self {
+        let left_resolved = resolve_column_ref(left, scan.table, scan.table_alias);
+        let right_resolved = resolve_column_ref(right, scan.table, scan.table_alias);
+        let collation_p4 = extract_collation(left)
+            .or_else(|| extract_collation(right))
+            .or_else(|| resolved_primary_collation(left_resolved.as_ref(), scan.table))
+            .or_else(|| resolved_primary_collation(right_resolved.as_ref(), scan.table))
+            .map_or(P4::None, |coll| P4::Collation(coll.to_owned()));
+        let cmp_p5 = 0x80
+            | comparison_affinity_p5_resolved(
+                left,
+                left_resolved.as_ref(),
+                right,
+                right_resolved.as_ref(),
+                scan,
+            );
+        Self {
+            left_resolved,
+            right_resolved,
+            collation_p4,
+            cmp_p5,
+        }
+    }
+}
+
+fn resolved_primary_collation<'a>(
+    resolved: Option<&SortKeySource>,
+    table: &'a TableSchema,
+) -> Option<&'a str> {
+    match resolved {
+        Some(SortKeySource::Column(idx)) => table.columns.get(*idx)?.collation.as_deref(),
+        Some(SortKeySource::Rowid | SortKeySource::Expression(_)) | None => None,
+    }
+}
+
+fn resolved_expr_affinity(expr: &Expr, resolved: Option<&SortKeySource>, scan: &ScanCtx<'_>) -> u8 {
+    match resolved {
+        Some(SortKeySource::Column(idx)) => scan.table.columns[*idx]
+            .type_name
+            .as_deref()
+            .map_or(b'A', column_type_to_affinity),
+        Some(SortKeySource::Rowid) => b'D',
+        Some(SortKeySource::Expression(_)) | None => expr_affinity(expr, Some(scan)),
+    }
+}
+
+fn comparison_affinity_p5_resolved(
+    left: &Expr,
+    left_resolved: Option<&SortKeySource>,
+    right: &Expr,
+    right_resolved: Option<&SortKeySource>,
+    scan: &ScanCtx<'_>,
+) -> u16 {
+    let l_aff = resolved_expr_affinity(left, left_resolved, scan);
+    let r_aff = resolved_expr_affinity(right, right_resolved, scan);
+
+    let is_numeric = |a: u8| matches!(a, b'C' | b'D' | b'E');
+
+    if is_numeric(l_aff) && matches!(r_aff, b'A' | b'B') {
+        return u16::from(b'C');
+    }
+    if is_numeric(r_aff) && matches!(l_aff, b'A' | b'B') {
+        return u16::from(b'C');
+    }
+    if (l_aff == b'B' && r_aff == b'A') || (l_aff == b'A' && r_aff == b'B') {
+        return u16::from(b'B');
+    }
+    0
+}
+
+/// Check whether a column name is a hidden rowid alias (`rowid`, `_rowid_`, or `oid`).
+fn is_hidden_rowid_alias_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower == "rowid" || lower == "_rowid_" || lower == "oid"
+}
+
+fn matches_table_or_alias(qualifier: &str, table: &TableSchema, table_alias: Option<&str>) -> bool {
+    qualifier.eq_ignore_ascii_case(&table.name)
+        || table_alias.is_some_and(|alias| qualifier.eq_ignore_ascii_case(alias))
+}
+
+/// Source for a sort key: either a table column or the implicit rowid.
+#[derive(Clone)]
+enum SortKeySource {
+    Column(usize),
+    Rowid,
+    /// Arbitrary expression (e.g., `a + b`, `LENGTH(name)`, `CASE WHEN ...`).
+    Expression(Expr),
+}
+
+/// Emit bytecode to load a resolved column reference into a register.
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn emit_resolved_column(
+    b: &mut ProgramBuilder,
+    resolved: &SortKeySource,
+    cursor: i32,
+    reg: i32,
+    scan: &ScanCtx<'_>,
+) {
+    match resolved {
+        SortKeySource::Column(idx) => {
+            b.emit_op(Opcode::Column, cursor, *idx as i32, reg, P4::None, 0);
+        }
+        SortKeySource::Rowid => {
+            b.emit_op(Opcode::Rowid, cursor, reg, 0, P4::None, 0);
+        }
+        SortKeySource::Expression(expr) => {
+            emit_expr(b, expr, reg, Some(scan));
+        }
+    }
+}
+
+/// Output source for a covering-index ordered scan.
+enum CoveringOutputSource {
+    /// Read value from index key column at this position.
+    IndexColumn(i32),
+    /// Read value from the rowid already extracted via `IdxRowid`.
+    Rowid,
+}
+
+/// Plan for ORDER BY execution that can bypass the sorter.
+struct OrderByIndexPlan {
+    index: IndexSchema,
+    descending: bool,
+    equality_prefix_len: usize,
+    /// When present, all output columns can be read from index payload/rowid
+    /// and no table row lookup is required.
+    covering_output: Option<Vec<CoveringOutputSource>>,
+}
+
+/// Resolve an ORDER BY expression to a `SortKeySource`.
+///
+/// Returns `Column` or `Rowid` for simple column references; falls back to
+/// `Expression` for arbitrary expressions (arithmetic, function calls, etc.).
+/// Handles numeric column indices (e.g., `ORDER BY 2`) by resolving them to
+/// the corresponding result column expression.
+fn resolve_sort_key(
+    expr: &Expr,
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    columns: &[ResultColumn],
+) -> SortKeySource {
+    // Handle numeric column index (ORDER BY 1, ORDER BY 2, etc.).
+    if let Expr::Literal(Literal::Integer(n), _) = expr {
+        let idx = usize::try_from(*n).unwrap_or(0);
+        if idx >= 1 && idx <= columns.len() {
+            let result_col = &columns[idx - 1];
+            // Extract the underlying expression from the result column and
+            // recursively resolve it as a sort key.
+            if let ResultColumn::Expr { expr: col_expr, .. } = result_col {
+                return resolve_sort_key(col_expr, table, table_alias, columns);
+            }
+        }
+    }
+
+    if let Expr::Column(col_ref, _) = expr {
+        if let Some(qualifier) = &col_ref.table {
+            if !matches_table_or_alias(qualifier, table, table_alias) {
+                return SortKeySource::Expression(expr.clone());
+            }
+        }
+        if let Some(idx) = table.column_index(&col_ref.column) {
+            return SortKeySource::Column(idx);
+        }
+        if table.resolves_to_hidden_rowid(&col_ref.column) {
+            return SortKeySource::Rowid;
+        }
+        // Check if the unqualified name matches a result column alias
+        // (e.g. `ORDER BY total` where `total` is `price * qty AS total`).
+        if col_ref.table.is_none() {
+            for col in columns {
+                if let ResultColumn::Expr {
+                    alias: Some(alias),
+                    expr: col_expr,
+                } = col
+                {
+                    if alias.eq_ignore_ascii_case(&col_ref.column) {
+                        return resolve_sort_key(col_expr, table, table_alias, columns);
+                    }
+                }
+            }
+        }
+    }
+    SortKeySource::Expression(expr.clone())
+}
+
+/// Resolve a column reference expression to either a column index or rowid.
+///
+/// Validates that any table qualifier matches the table name or alias.
+/// Returns `None` if the expression is not a column reference or the
+/// qualifier does not match.
+fn resolve_column_ref(
+    expr: &Expr,
+    table: &TableSchema,
+    table_alias: Option<&str>,
+) -> Option<SortKeySource> {
+    // Unwrap COLLATE wrapper to reach the inner column reference.
+    let inner = if let Expr::Collate { expr: inner, .. } = expr {
+        inner.as_ref()
+    } else {
+        expr
+    };
+    if let Expr::Column(col_ref, _) = inner {
+        if let Some(qualifier) = &col_ref.table
+            && !matches_table_or_alias(qualifier, table, table_alias)
+        {
+            return None;
+        }
+        if let Some(idx) = table.column_index(&col_ref.column) {
+            // INTEGER PRIMARY KEY columns are stored as rowid, not in the record payload.
+            // Return Rowid so callers emit the Rowid opcode instead of Column.
+            if table.columns[idx].is_ipk {
+                return Some(SortKeySource::Rowid);
+            }
+            return Some(SortKeySource::Column(idx));
+        }
+        if table.resolves_to_hidden_rowid(&col_ref.column) {
+            return Some(SortKeySource::Rowid);
+        }
+    }
+    None
+}
+
+/// Compute comparison p5 flags for a column reference.
+///
+/// Encodes NULLEQ (0x80) and the column's type affinity so the VDBE engine
+/// applies correct text↔numeric coercion during comparison (§3.2).
+#[allow(dead_code)]
+fn column_cmp_p5(table: &TableSchema, resolved: &SortKeySource) -> u16 {
+    let affinity: u16 = match resolved {
+        SortKeySource::Column(idx) => u16::from(table.columns[*idx].affinity as u8),
+        SortKeySource::Rowid => u16::from(b'D'), // INTEGER
+        SortKeySource::Expression(_) => u16::from(b'A'), // BLOB (no coercion)
+    };
+    0x80 | affinity
+}
+
+/// Resolve a column reference to its 0-based index (ignoring rowid aliases).
+///
+/// Convenience wrapper for call sites that only care about real table columns.
+fn resolve_column_index(expr: &Expr, table: &TableSchema) -> Option<usize> {
+    match resolve_column_ref(expr, table, None) {
+        Some(SortKeySource::Column(idx)) => Some(idx),
+        _ => None,
+    }
+}
+
+fn index_column_position(index: &IndexSchema, column_name: &str) -> Option<usize> {
+    index
+        .columns
+        .iter()
+        .position(|name| name.eq_ignore_ascii_case(column_name))
+}
+
+fn collect_conjunctive_terms<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+    if let Expr::BinaryOp {
+        left,
+        op: fsqlite_ast::BinaryOp::And,
+        right,
+        ..
+    } = expr
+    {
+        collect_conjunctive_terms(left, out);
+        collect_conjunctive_terms(right, out);
+    } else {
+        out.push(expr);
+    }
+}
+
+fn expr_matches_index_column(
+    expr: &Expr,
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    expected_column: &str,
+) -> bool {
+    column_name(expr, table, table_alias)
+        .is_some_and(|column_name| column_name.eq_ignore_ascii_case(expected_column))
+}
+
+fn extract_index_column_equality_expr<'a>(
+    expr: &'a Expr,
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    expected_column: &str,
+) -> Option<&'a Expr> {
+    let Expr::BinaryOp {
+        left,
+        op: fsqlite_ast::BinaryOp::Eq,
+        right,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+
+    if expr_matches_index_column(left, table, table_alias, expected_column)
+        && is_simple_constant(right)
+    {
+        return Some(right);
+    }
+    if expr_matches_index_column(right, table, table_alias, expected_column)
+        && is_simple_constant(left)
+    {
+        return Some(left);
+    }
+    None
+}
+
+fn extract_index_equality_prefix_exprs<'a>(
+    index: &IndexSchema,
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    where_clause: Option<&'a Expr>,
+) -> Vec<&'a Expr> {
+    let Some(where_expr) = where_clause else {
+        return Vec::new();
+    };
+
+    let mut conjuncts = Vec::new();
+    collect_conjunctive_terms(where_expr, &mut conjuncts);
+
+    let mut prefix_exprs = Vec::new();
+    for index_column in &index.columns {
+        let Some(expr) = conjuncts.iter().find_map(|term| {
+            extract_index_column_equality_expr(term, table, table_alias, index_column)
+        }) else {
+            break;
+        };
+        prefix_exprs.push(expr);
+    }
+    prefix_exprs
+}
+
+fn resolve_covering_output_sources(
+    columns: &[ResultColumn],
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    index: &IndexSchema,
+) -> Option<Vec<CoveringOutputSource>> {
+    let mut output = Vec::with_capacity(columns.len());
+
+    for col in columns {
+        match col {
+            ResultColumn::Expr { expr, .. } => {
+                match resolve_column_ref(expr, table, table_alias)? {
+                    SortKeySource::Column(col_idx) => {
+                        let column_name = &table.columns.get(col_idx)?.name;
+                        let index_pos = index_column_position(index, column_name)?;
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                        output.push(CoveringOutputSource::IndexColumn(index_pos as i32));
+                    }
+                    SortKeySource::Rowid => output.push(CoveringOutputSource::Rowid),
+                    SortKeySource::Expression(_) => return None,
+                }
+            }
+            ResultColumn::Star | ResultColumn::TableStar(_) => return None,
+        }
+    }
+
+    Some(output)
+}
+
+fn resolve_order_by_rowid_direction(
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    columns: &[ResultColumn],
+    order_by: &[OrderingTerm],
+) -> Option<SortDirection> {
+    let [term] = order_by else {
+        return None;
+    };
+    if term.nulls.is_some() {
+        return None;
+    }
+
+    let resolved_expr = if let Expr::Literal(Literal::Integer(n), _) = &term.expr {
+        let idx = usize::try_from(*n).ok()?;
+        if idx == 0 || idx > columns.len() {
+            return None;
+        }
+        match &columns[idx - 1] {
+            ResultColumn::Expr { expr, .. } => expr,
+            ResultColumn::Star | ResultColumn::TableStar(_) => return None,
+        }
+    } else {
+        &term.expr
+    };
+
+    matches!(
+        resolve_column_ref(resolved_expr, table, table_alias),
+        Some(SortKeySource::Rowid)
+    )
+    .then_some(term.direction.unwrap_or(SortDirection::Asc))
+}
+
+fn resolve_order_by_index_plan(
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    columns: &[ResultColumn],
+    where_clause: Option<&Expr>,
+    order_by: &[OrderingTerm],
+    distinct: Distinctness,
+) -> Option<OrderByIndexPlan> {
+    if order_by.is_empty() || distinct == Distinctness::Distinct {
+        return None;
+    }
+
+    let mut direction: Option<SortDirection> = None;
+    let mut order_columns = Vec::with_capacity(order_by.len());
+
+    for term in order_by {
+        if term.nulls.is_some() {
+            return None;
+        }
+        let term_direction = term.direction.unwrap_or(SortDirection::Asc);
+        if let Some(existing) = direction {
+            if existing != term_direction {
+                return None;
+            }
+        } else {
+            direction = Some(term_direction);
+        }
+
+        // Resolve numeric column indices (e.g., ORDER BY 2) to the
+        // corresponding result column expression before checking for column refs.
+        let resolved_expr = if let Expr::Literal(Literal::Integer(n), _) = &term.expr {
+            let idx = usize::try_from(*n).unwrap_or(0);
+            if idx >= 1 && idx <= columns.len() {
+                if let ResultColumn::Expr { expr, .. } = &columns[idx - 1] {
+                    expr
+                } else {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+        } else {
+            &term.expr
+        };
+
+        let Expr::Column(col_ref, _) = resolved_expr else {
+            return None;
+        };
+        if let Some(qualifier) = &col_ref.table
+            && !matches_table_or_alias(qualifier, table, table_alias)
+        {
+            return None;
+        }
+        if table.resolves_to_hidden_rowid(&col_ref.column) {
+            return None;
+        }
+        order_columns.push(col_ref.column.clone());
+    }
+
+    let descending = direction == Some(SortDirection::Desc);
+    let mut best_plan: Option<OrderByIndexPlan> = None;
+
+    for index in &table.indexes {
+        if !index.supports_direct_column_lookup() {
+            continue;
+        }
+
+        let equality_prefix_len =
+            extract_index_equality_prefix_exprs(index, table, table_alias, where_clause).len();
+        if equality_prefix_len + order_columns.len() > index.key_term_count() {
+            continue;
+        }
+
+        if equality_prefix_len > 0 {
+            if descending {
+                continue;
+            }
+            if (equality_prefix_len..(equality_prefix_len + order_columns.len()))
+                .any(|key_pos| index.key_term_descending(key_pos))
+            {
+                continue;
+            }
+        }
+
+        let matches_order_columns = order_columns.iter().enumerate().all(|(offset, order_col)| {
+            index.columns[equality_prefix_len + offset].eq_ignore_ascii_case(order_col)
+        });
+        if !matches_order_columns {
+            continue;
+        }
+
+        let covering_output = if where_clause.is_none() {
+            resolve_covering_output_sources(columns, table, table_alias, index)
+        } else {
+            None
+        };
+
+        let candidate = OrderByIndexPlan {
+            index: index.clone(),
+            descending,
+            equality_prefix_len,
+            covering_output,
+        };
+        let should_replace = match best_plan.as_ref() {
+            None => true,
+            Some(existing) => {
+                candidate.equality_prefix_len > existing.equality_prefix_len
+                    || (candidate.equality_prefix_len == existing.equality_prefix_len
+                        && candidate.covering_output.is_some()
+                        && existing.covering_output.is_none())
+            }
+        };
+        if should_replace {
+            best_plan = Some(candidate);
+        }
+    }
+
+    best_plan
+}
+
+/// Resolve result columns to table column indices.
+///
+/// Returns a Vec of column indices for each output column.
+/// `Star` and `TableStar` expand to all table columns.
+///
+/// NOTE: Currently unused — `emit_column_reads` handles non-column result
+/// expressions directly. Kept for potential future index-only scan codegen.
+#[allow(
+    dead_code,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap
+)]
+fn resolve_result_column_indices(
+    columns: &[ResultColumn],
+    table: &TableSchema,
+) -> Result<Vec<usize>, CodegenError> {
+    let mut indices = Vec::new();
+    for col in columns {
+        match col {
+            ResultColumn::Star => {
+                indices.extend(0..table.columns.len());
+            }
+            ResultColumn::TableStar(qualifier) => {
+                if !qualifier.eq_ignore_ascii_case(&table.name) {
+                    return Err(CodegenError::TableNotFound(qualifier.clone()));
+                }
+                indices.extend(0..table.columns.len());
+            }
+            ResultColumn::Expr { expr, .. } => {
+                if let Expr::Column(col_ref, _) = expr {
+                    let idx = table.column_index(&col_ref.column).ok_or_else(|| {
+                        CodegenError::ColumnNotFound {
+                            table: table.name.clone(),
+                            column: col_ref.column.clone(),
+                        }
+                    })?;
+                    indices.push(idx);
+                } else {
+                    return Err(CodegenError::Unsupported(
+                        "non-column result expression in table-backed SELECT".to_owned(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(indices)
+}
+
+fn is_simple_constant(expr: &Expr) -> bool {
+    matches!(expr, Expr::Placeholder(..) | Expr::Literal(..))
+}
+
+fn is_rowid_range_constant(expr: &Expr) -> bool {
+    matches!(expr, Expr::Literal(..))
+        || matches!(
+            expr,
+            Expr::Placeholder(
+                fsqlite_ast::PlaceholderType::Numbered(_)
+                    | fsqlite_ast::PlaceholderType::ColonNamed(_)
+                    | fsqlite_ast::PlaceholderType::AtNamed(_)
+                    | fsqlite_ast::PlaceholderType::DollarNamed(_),
+                _
+            )
+        )
+}
+
+fn is_index_range_constant(expr: &Expr) -> bool {
+    is_rowid_range_constant(expr)
+}
+
+/// Check if a WHERE clause is a simple `rowid = ?` bind parameter.
+///
+/// Returns the 1-based bind parameter index if so.
+#[allow(dead_code)]
+fn extract_rowid_bind_param(
+    where_clause: Option<&Expr>,
+    table: Option<&TableSchema>,
+    table_alias: Option<&str>,
+) -> Option<i32> {
+    let expr = extract_rowid_target_expr(where_clause, table, table_alias)?;
+    bind_param_index(expr)
+}
+
+fn extract_rowid_target_expr<'a>(
+    where_clause: Option<&'a Expr>,
+    table: Option<&TableSchema>,
+    table_alias: Option<&str>,
+) -> Option<&'a Expr> {
+    let expr = where_clause?;
+    if let Expr::BinaryOp {
+        left,
+        op: fsqlite_ast::BinaryOp::Eq,
+        right,
+        ..
+    } = expr
+    {
+        if is_rowid_expr(left, table, table_alias) && is_simple_constant(right) {
+            return Some(right);
+        }
+        if is_rowid_expr(right, table, table_alias) && is_simple_constant(left) {
+            return Some(left);
+        }
+    }
+    None
+}
+
+fn extract_rowid_range_target<'a>(
+    where_clause: Option<&'a Expr>,
+    table: Option<&TableSchema>,
+    table_alias: Option<&str>,
+) -> Option<RowidRangeTarget<'a>> {
+    let expr = where_clause?;
+    let mut target = RowidRangeTarget::default();
+    if collect_rowid_range_bounds(expr, table, table_alias, &mut target)
+        && (target.lower.is_some() || target.upper.is_some())
+    {
+        Some(target)
+    } else {
+        None
+    }
+}
+
+fn collect_rowid_range_bounds<'a>(
+    expr: &'a Expr,
+    table: Option<&TableSchema>,
+    table_alias: Option<&str>,
+    target: &mut RowidRangeTarget<'a>,
+) -> bool {
+    match expr {
+        Expr::BinaryOp {
+            left,
+            op: fsqlite_ast::BinaryOp::And,
+            right,
+            ..
+        } => {
+            collect_rowid_range_bounds(left, table, table_alias, target)
+                && collect_rowid_range_bounds(right, table, table_alias, target)
+        }
+        Expr::BinaryOp {
+            left, op, right, ..
+        } => extract_rowid_range_bound(left, *op, right, table, table_alias)
+            .is_some_and(|(slot, bound)| assign_rowid_range_bound(target, slot, bound)),
+        Expr::Between {
+            expr: operand,
+            low,
+            high,
+            not: false,
+            ..
+        } if is_rowid_expr(operand, table, table_alias)
+            && is_rowid_range_constant(low)
+            && is_rowid_range_constant(high) =>
+        {
+            assign_rowid_range_bound(
+                target,
+                RowidRangeSlot::Lower,
+                RowidRangeBound {
+                    rowid_expr: operand,
+                    expr: low,
+                    inclusive: true,
+                },
+            ) && assign_rowid_range_bound(
+                target,
+                RowidRangeSlot::Upper,
+                RowidRangeBound {
+                    rowid_expr: operand,
+                    expr: high,
+                    inclusive: true,
+                },
+            )
+        }
+        _ => false,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RowidRangeSlot {
+    Lower,
+    Upper,
+}
+
+fn extract_rowid_range_bound<'a>(
+    left: &'a Expr,
+    op: fsqlite_ast::BinaryOp,
+    right: &'a Expr,
+    table: Option<&TableSchema>,
+    table_alias: Option<&str>,
+) -> Option<(RowidRangeSlot, RowidRangeBound<'a>)> {
+    if is_rowid_expr(left, table, table_alias) && is_rowid_range_constant(right) {
+        return match op {
+            fsqlite_ast::BinaryOp::Ge => Some((
+                RowidRangeSlot::Lower,
+                RowidRangeBound {
+                    rowid_expr: left,
+                    expr: right,
+                    inclusive: true,
+                },
+            )),
+            fsqlite_ast::BinaryOp::Gt => Some((
+                RowidRangeSlot::Lower,
+                RowidRangeBound {
+                    rowid_expr: left,
+                    expr: right,
+                    inclusive: false,
+                },
+            )),
+            fsqlite_ast::BinaryOp::Le => Some((
+                RowidRangeSlot::Upper,
+                RowidRangeBound {
+                    rowid_expr: left,
+                    expr: right,
+                    inclusive: true,
+                },
+            )),
+            fsqlite_ast::BinaryOp::Lt => Some((
+                RowidRangeSlot::Upper,
+                RowidRangeBound {
+                    rowid_expr: left,
+                    expr: right,
+                    inclusive: false,
+                },
+            )),
+            _ => None,
+        };
+    }
+
+    if is_rowid_expr(right, table, table_alias) && is_rowid_range_constant(left) {
+        return match op {
+            fsqlite_ast::BinaryOp::Le => Some((
+                RowidRangeSlot::Lower,
+                RowidRangeBound {
+                    rowid_expr: right,
+                    expr: left,
+                    inclusive: true,
+                },
+            )),
+            fsqlite_ast::BinaryOp::Lt => Some((
+                RowidRangeSlot::Lower,
+                RowidRangeBound {
+                    rowid_expr: right,
+                    expr: left,
+                    inclusive: false,
+                },
+            )),
+            fsqlite_ast::BinaryOp::Ge => Some((
+                RowidRangeSlot::Upper,
+                RowidRangeBound {
+                    rowid_expr: right,
+                    expr: left,
+                    inclusive: true,
+                },
+            )),
+            fsqlite_ast::BinaryOp::Gt => Some((
+                RowidRangeSlot::Upper,
+                RowidRangeBound {
+                    rowid_expr: right,
+                    expr: left,
+                    inclusive: false,
+                },
+            )),
+            _ => None,
+        };
+    }
+
+    None
+}
+
+fn assign_rowid_range_bound<'a>(
+    target: &mut RowidRangeTarget<'a>,
+    slot: RowidRangeSlot,
+    bound: RowidRangeBound<'a>,
+) -> bool {
+    let target_slot = match slot {
+        RowidRangeSlot::Lower => &mut target.lower,
+        RowidRangeSlot::Upper => &mut target.upper,
+    };
+    if target_slot.is_some() {
+        false
+    } else {
+        *target_slot = Some(bound);
+        true
+    }
+}
+
+/// Check if a WHERE clause is `col = ?` for an indexed column.
+fn extract_column_eq_target<'a>(
+    where_clause: Option<&'a Expr>,
+    table: &TableSchema,
+    table_alias: Option<&str>,
+) -> Option<(String, &'a Expr)> {
+    let expr = where_clause?;
+    if let Expr::BinaryOp {
+        left,
+        op: fsqlite_ast::BinaryOp::Eq,
+        right,
+        ..
+    } = expr
+    {
+        if let Some(col_name) = column_name(left, table, table_alias) {
+            if is_simple_constant(right) {
+                return Some((col_name, right));
+            }
+        }
+        if let Some(col_name) = column_name(right, table, table_alias) {
+            if is_simple_constant(left) {
+                return Some((col_name, left));
+            }
+        }
+    }
+    None
+}
+
+enum CountIndexedInTarget<'a> {
+    List(&'a [Expr]),
+    ProbeSource(InProbeSource<'a>),
+    MaterializedProbeSource(InProbeSource<'a>),
+}
+
+fn extract_count_indexed_in_target<'a>(
+    where_clause: Option<&'a Expr>,
+    table: &'a TableSchema,
+    table_alias: Option<&'a str>,
+    schema: &'a [TableSchema],
+    scan_ctx: &ScanCtx<'a>,
+) -> Option<(&'a IndexSchema, CountIndexedInTarget<'a>)> {
+    let expr = where_clause?;
+    let Expr::In {
+        expr: operand,
+        set,
+        not: false,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+
+    let column_name = column_name(operand, table, table_alias)?;
+    let idx_schema = table.index_for_column(&column_name)?;
+    if idx_schema.key_term_count() != 1 || idx_schema.key_term_descending(0) {
+        return None;
+    }
+
+    match set {
+        InSet::List(values)
+            if can_use_once_materialized_in_list(values, operand, Some(scan_ctx)) =>
+        {
+            Some((idx_schema, CountIndexedInTarget::List(values)))
+        }
+        InSet::Subquery(_) => {
+            let probe_source = resolve_in_probe_source(set, schema)?;
+            if can_use_direct_count_indexed_in_subquery_probe_source(
+                table,
+                idx_schema,
+                &probe_source,
+                operand,
+                scan_ctx,
+            ) {
+                Some((idx_schema, CountIndexedInTarget::ProbeSource(probe_source)))
+            } else {
+                can_use_once_materialized_in_probe_source(&probe_source, operand, scan_ctx)
+                    .then_some((
+                        idx_schema,
+                        CountIndexedInTarget::MaterializedProbeSource(probe_source),
+                    ))
+            }
+        }
+        InSet::Table(_) => {
+            let probe_source = resolve_in_probe_source(set, schema)?;
+            can_use_once_materialized_in_probe_source(&probe_source, operand, scan_ctx).then_some((
+                idx_schema,
+                CountIndexedInTarget::MaterializedProbeSource(probe_source),
+            ))
+        }
+        InSet::List(_) => None,
+    }
+}
+
+fn extract_count_indexed_exists_target<'a>(
+    where_clause: Option<&'a Expr>,
+    table: &'a TableSchema,
+    table_alias: Option<&'a str>,
+    schema: &'a [TableSchema],
+) -> Option<(&'a IndexSchema, CountIndexedInTarget<'a>)> {
+    let expr = where_clause?;
+    let Expr::Exists {
+        subquery,
+        not: false,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    if subquery.with.is_some()
+        || !subquery.body.compounds.is_empty()
+        || !subquery.order_by.is_empty()
+        || subquery.limit.is_some()
+    {
+        return None;
+    }
+
+    let SelectCore::Select {
+        from,
+        where_clause: Some(sub_where),
+        group_by,
+        having,
+        windows,
+        ..
+    } = &subquery.body.select
+    else {
+        return None;
+    };
+    if !group_by.is_empty() || having.is_some() || !windows.is_empty() {
+        return None;
+    }
+    let from_clause = from.as_ref()?;
+    if !from_clause.joins.is_empty() {
+        return None;
+    }
+    let (sub_table_name, sub_alias) = match &from_clause.source {
+        TableOrSubquery::Table { name, alias, .. } => (&name.name, alias.as_deref()),
+        _ => return None,
+    };
+    let sub_table = find_table(schema, sub_table_name).ok()?;
+    let (probe_expr, residual_terms) = extract_exists_rowid_probe(sub_where, sub_table, sub_alias)?;
+    let outer_column_name = column_name(probe_expr, table, table_alias)?;
+    let idx_schema = table.index_for_column(&outer_column_name)?;
+    if idx_schema.key_term_count() != 1 || idx_schema.key_term_descending(0) {
+        return None;
+    }
+    if residual_terms
+        .iter()
+        .any(|term| expr_references_scan(term, table, table_alias))
+    {
+        return None;
+    }
+    let residual_where = match residual_terms.as_slice() {
+        [] => None,
+        [single] => Some(*single),
+        _ => return None,
+    };
+    Some((
+        idx_schema,
+        CountIndexedInTarget::ProbeSource(InProbeSource {
+            table: sub_table,
+            table_alias: sub_alias,
+            where_clause: residual_where,
+            value: InProbeValue::Rowid,
+        }),
+    ))
+}
+
+#[derive(Clone, Copy)]
+enum ColumnRangeSlot {
+    Lower,
+    Upper,
+}
+
+fn extract_column_range_target<'a>(
+    where_clause: Option<&'a Expr>,
+    table: &TableSchema,
+    table_alias: Option<&str>,
+) -> Option<(String, ColumnRangeTarget<'a>)> {
+    let expr = where_clause?;
+    let mut column_name = None;
+    let mut target = ColumnRangeTarget::default();
+    if collect_column_range_bounds(expr, table, table_alias, &mut column_name, &mut target)
+        && (target.lower.is_some() || target.upper.is_some())
+    {
+        column_name.map(|col| (col, target))
+    } else {
+        None
+    }
+}
+
+fn collect_column_range_bounds<'a>(
+    expr: &'a Expr,
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    target_column: &mut Option<String>,
+    target: &mut ColumnRangeTarget<'a>,
+) -> bool {
+    match expr {
+        Expr::BinaryOp {
+            left,
+            op: fsqlite_ast::BinaryOp::And,
+            right,
+            ..
+        } => {
+            collect_column_range_bounds(left, table, table_alias, target_column, target)
+                && collect_column_range_bounds(right, table, table_alias, target_column, target)
+        }
+        Expr::BinaryOp {
+            left, op, right, ..
+        } => extract_column_range_bound(left, *op, right, table, table_alias).is_some_and(
+            |(column_name, slot, bound)| {
+                assign_column_range_bound(target_column, target, column_name, slot, bound)
+            },
+        ),
+        Expr::Between {
+            expr: operand,
+            low,
+            high,
+            not: false,
+            ..
+        } if is_index_range_constant(low) && is_index_range_constant(high) => {
+            column_name(operand, table, table_alias).is_some_and(|column_name| {
+                assign_column_range_bound(
+                    target_column,
+                    target,
+                    column_name.clone(),
+                    ColumnRangeSlot::Lower,
+                    ColumnRangeBound {
+                        expr: low,
+                        inclusive: true,
+                    },
+                ) && assign_column_range_bound(
+                    target_column,
+                    target,
+                    column_name,
+                    ColumnRangeSlot::Upper,
+                    ColumnRangeBound {
+                        expr: high,
+                        inclusive: true,
+                    },
+                )
+            })
+        }
+        _ => false,
+    }
+}
+
+fn extract_column_range_bound<'a>(
+    left: &'a Expr,
+    op: fsqlite_ast::BinaryOp,
+    right: &'a Expr,
+    table: &TableSchema,
+    table_alias: Option<&str>,
+) -> Option<(String, ColumnRangeSlot, ColumnRangeBound<'a>)> {
+    if let Some(column_name) = column_name(left, table, table_alias)
+        && is_index_range_constant(right)
+    {
+        return match op {
+            fsqlite_ast::BinaryOp::Ge => Some((
+                column_name,
+                ColumnRangeSlot::Lower,
+                ColumnRangeBound {
+                    expr: right,
+                    inclusive: true,
+                },
+            )),
+            fsqlite_ast::BinaryOp::Gt => Some((
+                column_name,
+                ColumnRangeSlot::Lower,
+                ColumnRangeBound {
+                    expr: right,
+                    inclusive: false,
+                },
+            )),
+            fsqlite_ast::BinaryOp::Le => Some((
+                column_name,
+                ColumnRangeSlot::Upper,
+                ColumnRangeBound {
+                    expr: right,
+                    inclusive: true,
+                },
+            )),
+            fsqlite_ast::BinaryOp::Lt => Some((
+                column_name,
+                ColumnRangeSlot::Upper,
+                ColumnRangeBound {
+                    expr: right,
+                    inclusive: false,
+                },
+            )),
+            _ => None,
+        };
+    }
+
+    if let Some(column_name) = column_name(right, table, table_alias)
+        && is_index_range_constant(left)
+    {
+        return match op {
+            fsqlite_ast::BinaryOp::Le => Some((
+                column_name,
+                ColumnRangeSlot::Lower,
+                ColumnRangeBound {
+                    expr: left,
+                    inclusive: true,
+                },
+            )),
+            fsqlite_ast::BinaryOp::Lt => Some((
+                column_name,
+                ColumnRangeSlot::Lower,
+                ColumnRangeBound {
+                    expr: left,
+                    inclusive: false,
+                },
+            )),
+            fsqlite_ast::BinaryOp::Ge => Some((
+                column_name,
+                ColumnRangeSlot::Upper,
+                ColumnRangeBound {
+                    expr: left,
+                    inclusive: true,
+                },
+            )),
+            fsqlite_ast::BinaryOp::Gt => Some((
+                column_name,
+                ColumnRangeSlot::Upper,
+                ColumnRangeBound {
+                    expr: left,
+                    inclusive: false,
+                },
+            )),
+            _ => None,
+        };
+    }
+
+    None
+}
+
+fn assign_column_range_bound<'a>(
+    target_column: &mut Option<String>,
+    target: &mut ColumnRangeTarget<'a>,
+    column_name: String,
+    slot: ColumnRangeSlot,
+    bound: ColumnRangeBound<'a>,
+) -> bool {
+    if let Some(existing) = target_column.as_deref() {
+        if !existing.eq_ignore_ascii_case(&column_name) {
+            return false;
+        }
+    } else {
+        *target_column = Some(column_name);
+    }
+
+    let target_slot = match slot {
+        ColumnRangeSlot::Lower => &mut target.lower,
+        ColumnRangeSlot::Upper => &mut target.upper,
+    };
+    if target_slot.is_some() {
+        false
+    } else {
+        *target_slot = Some(bound);
+        true
+    }
+}
+
+/// Extract a column name from an expression if it's a simple column reference.
+#[allow(dead_code)]
+fn column_name(expr: &Expr, table: &TableSchema, table_alias: Option<&str>) -> Option<String> {
+    if let Expr::Column(col_ref, _) = expr {
+        if let Some(qualifier) = &col_ref.table
+            && !matches_table_or_alias(qualifier, table, table_alias)
+        {
+            return None;
+        }
+        if !is_rowid_ref(col_ref, Some(table), table_alias) {
+            return Some(col_ref.column.clone());
+        }
+    }
+    None
+}
+
+/// Check if an expression is a rowid reference.
+fn is_rowid_expr(expr: &Expr, table: Option<&TableSchema>, table_alias: Option<&str>) -> bool {
+    if let Expr::Column(col_ref, _) = expr {
+        if is_rowid_ref(col_ref, table, table_alias) {
+            return true;
+        }
+        if let Some(t) = table {
+            if let Some(qualifier) = &col_ref.table
+                && !matches_table_or_alias(qualifier, t, table_alias)
+            {
+                return false;
+            }
+            for col in &t.columns {
+                if col.is_ipk && col.name.eq_ignore_ascii_case(&col_ref.column) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn is_rowid_ref(
+    col_ref: &ColumnRef,
+    table: Option<&TableSchema>,
+    table_alias: Option<&str>,
+) -> bool {
+    if let Some(t) = table {
+        if let Some(qualifier) = &col_ref.table
+            && !matches_table_or_alias(qualifier, t, table_alias)
+        {
+            return false;
+        }
+        if let Some(col_idx) = t.column_index(&col_ref.column) {
+            return t.columns[col_idx].is_ipk;
+        }
+        return t.resolves_to_hidden_rowid(&col_ref.column);
+    }
+    is_hidden_rowid_alias_name(&col_ref.column)
+}
+
+/// Extract a bind parameter index from a `?` or `?NNN` placeholder.
+#[allow(dead_code)]
+fn bind_param_index(expr: &Expr) -> Option<i32> {
+    if let Expr::Placeholder(pt, _) = expr {
+        match pt {
+            fsqlite_ast::PlaceholderType::Anonymous => Some(1),
+            fsqlite_ast::PlaceholderType::Numbered(n) =>
+            {
+                #[allow(clippy::cast_possible_wrap)]
+                Some(*n as i32)
+            }
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+/// Emit an expression value into a register.
+///
+/// For bind parameters, emits a Variable instruction.
+/// Emit bytecode for an expression, placing the result in `reg`.
+///
+/// Cursor context for expression emission inside table scans.
+///
+/// When present, allows `emit_expr` to resolve `Expr::Column` references
+/// by emitting `Opcode::Column` against the given cursor.
+struct ScanCtx<'a> {
+    cursor: i32,
+    table: &'a TableSchema,
+    table_alias: Option<&'a str>,
+    schema: Option<&'a [TableSchema]>,
+    /// When set, column references are resolved by copying from registers
+    /// (`register_base + col_index`) instead of reading from the B-tree cursor.
+    /// Used for generated column expression evaluation during INSERT.
+    register_base: Option<i32>,
+    /// Secondary table context for UPDATE ... FROM multi-table resolution.
+    secondary: Option<SecondaryScan<'a>>,
+}
+
+/// Secondary table scan context for UPDATE ... FROM.
+struct SecondaryScan<'a> {
+    cursor: i32,
+    table: &'a TableSchema,
+    table_alias: Option<&'a str>,
+}
+
+enum InProbeValue<'a> {
+    Expr(&'a Expr),
+    FirstColumn,
+    Rowid,
+}
+
+struct InProbeSource<'a> {
+    table: &'a TableSchema,
+    table_alias: Option<&'a str>,
+    where_clause: Option<&'a Expr>,
+    value: InProbeValue<'a>,
+}
+
+fn emit_in_probe_value(
+    b: &mut ProgramBuilder,
+    source_cursor: i32,
+    probe_source: &InProbeSource<'_>,
+    reg: i32,
+    probe_scan: &ScanCtx<'_>,
+) {
+    match probe_source.value {
+        InProbeValue::Expr(expr) => emit_expr(b, expr, reg, Some(probe_scan)),
+        InProbeValue::FirstColumn => {
+            b.emit_op(Opcode::Column, source_cursor, 0, reg, P4::None, 0);
+        }
+        InProbeValue::Rowid => {
+            b.emit_op(Opcode::Rowid, source_cursor, reg, 0, P4::None, 0);
+        }
+    }
+}
+
+fn probe_source_value_is_unique(probe_source: &InProbeSource<'_>) -> bool {
+    match probe_source.value {
+        InProbeValue::Rowid => true,
+        InProbeValue::FirstColumn => probe_source.table.columns.first().is_some_and(|column| {
+            column.is_ipk
+                || column.unique
+                || probe_source
+                    .table
+                    .index_for_column(&column.name)
+                    .is_some_and(|idx| idx.is_unique && idx.key_term_count() == 1)
+        }),
+        InProbeValue::Expr(expr) => {
+            let Expr::Column(col_ref, _) = expr else {
+                return false;
+            };
+            if is_rowid_ref(col_ref, Some(probe_source.table), probe_source.table_alias) {
+                return true;
+            }
+            probe_source
+                .table
+                .column_index(&col_ref.column)
+                .and_then(|idx| probe_source.table.columns.get(idx))
+                .is_some_and(|column| {
+                    column.is_ipk
+                        || column.unique
+                        || probe_source
+                            .table
+                            .index_for_column(&column.name)
+                            .is_some_and(|idx| idx.is_unique && idx.key_term_count() == 1)
+                })
+        }
+    }
+}
+
+fn count_probe_source_can_skip_materialization(probe_source: &InProbeSource<'_>) -> bool {
+    probe_source_value_is_unique(probe_source)
+}
+
+fn can_use_direct_count_indexed_in_subquery_probe_source(
+    table: &TableSchema,
+    idx_schema: &IndexSchema,
+    probe_source: &InProbeSource<'_>,
+    operand: &Expr,
+    scan_ctx: &ScanCtx<'_>,
+) -> bool {
+    matches!(probe_source.value, InProbeValue::Rowid)
+        && can_use_once_materialized_in_probe_source(probe_source, operand, scan_ctx)
+        && count_probe_source_can_skip_materialization(probe_source)
+        && extract_safe_probe_source_rowid_range(probe_source).is_some()
+        && count_exists_semijoin_merge_is_safe(table, idx_schema, probe_source)
+}
+
+fn resolve_in_probe_source<'a>(
+    set: &'a fsqlite_ast::InSet,
+    schema: &'a [TableSchema],
+) -> Option<InProbeSource<'a>> {
+    match set {
+        fsqlite_ast::InSet::List(_) => None,
+        fsqlite_ast::InSet::Table(name) => {
+            let table = find_table(schema, &name.name).ok()?;
+            if table.columns.is_empty() {
+                return None;
+            }
+            Some(InProbeSource {
+                table,
+                table_alias: None,
+                where_clause: None,
+                value: InProbeValue::FirstColumn,
+            })
+        }
+        fsqlite_ast::InSet::Subquery(subquery) => {
+            if subquery.with.is_some()
+                || !subquery.body.compounds.is_empty()
+                || !subquery.order_by.is_empty()
+                || subquery.limit.is_some()
+            {
+                return None;
+            }
+
+            let fsqlite_ast::SelectCore::Select {
+                columns,
+                from,
+                where_clause,
+                group_by,
+                having,
+                windows,
+                ..
+            } = &subquery.body.select
+            else {
+                return None;
+            };
+
+            if !group_by.is_empty() || having.is_some() || !windows.is_empty() {
+                return None;
+            }
+
+            let from_clause = from.as_ref()?;
+            if !from_clause.joins.is_empty() {
+                return None;
+            }
+
+            let (table_name, table_alias) = match &from_clause.source {
+                fsqlite_ast::TableOrSubquery::Table { name, alias, .. } => {
+                    (&name.name, alias.as_deref())
+                }
+                _ => return None,
+            };
+            let table = find_table(schema, table_name).ok()?;
+
+            let value = match columns.as_slice() {
+                [fsqlite_ast::ResultColumn::Expr { expr, .. }] => {
+                    if is_rowid_expr(expr, Some(table), table_alias) {
+                        InProbeValue::Rowid
+                    } else {
+                        InProbeValue::Expr(expr)
+                    }
+                }
+                [fsqlite_ast::ResultColumn::Star | fsqlite_ast::ResultColumn::TableStar(_)] => {
+                    if table.columns.is_empty() {
+                        return None;
+                    }
+                    InProbeValue::FirstColumn
+                }
+                _ => return None,
+            };
+
+            Some(InProbeSource {
+                table,
+                table_alias,
+                where_clause: where_clause.as_deref(),
+                value,
+            })
+        }
+    }
+}
+
+/// Attempt to emit bytecode for a complex IN subquery with ORDER BY and/or LIMIT.
+///
+/// Returns `true` if the subquery was handled, `false` if it cannot be handled
+/// (caller should fall back to emitting Null or other behavior).
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::too_many_lines
+)]
+fn try_emit_complex_in_subquery(
+    b: &mut ProgramBuilder,
+    operand: &Expr,
+    subquery: &SelectStatement,
+    not: bool,
+    reg: i32,
+    scan_ctx: &ScanCtx<'_>,
+) -> bool {
+    let Some(schema) = scan_ctx.schema else {
+        return false;
+    };
+
+    // Reject WITH and compound queries.
+    if subquery.with.is_some() || !subquery.body.compounds.is_empty() {
+        return false;
+    }
+
+    let fsqlite_ast::SelectCore::Select {
+        columns,
+        from,
+        where_clause,
+        group_by,
+        having,
+        windows,
+        ..
+    } = &subquery.body.select
+    else {
+        return false;
+    };
+
+    // Reject GROUP BY, HAVING, windows.
+    if !group_by.is_empty() || having.is_some() || !windows.is_empty() {
+        return false;
+    }
+
+    let Some(from_clause) = from.as_ref() else {
+        return false;
+    };
+
+    // Reject JOINs.
+    if !from_clause.joins.is_empty() {
+        return false;
+    }
+
+    let (table_name, table_alias) = match &from_clause.source {
+        fsqlite_ast::TableOrSubquery::Table { name, alias, .. } => (&name.name, alias.as_deref()),
+        _ => return false,
+    };
+
+    let Ok(table) = find_table(schema, table_name) else {
+        return false;
+    };
+
+    // Determine the value expression to compare.
+    let value_expr: Option<&Expr> = match columns.as_slice() {
+        [fsqlite_ast::ResultColumn::Expr { expr, .. }] => Some(expr),
+        [fsqlite_ast::ResultColumn::Star | fsqlite_ast::ResultColumn::TableStar(_)] => {
+            if table.columns.is_empty() {
+                return false;
+            }
+            None // Use first column
+        }
+        _ => return false,
+    };
+
+    // --- Begin bytecode emission ---
+
+    // Use cursors well above the main scan cursor to avoid collisions.
+    let subq_cursor = scan_ctx.cursor + 128;
+    let sorter_cursor = scan_ctx.cursor + 129;
+
+    // Evaluate the operand (value we're checking for membership).
+    let r_operand = b.alloc_temp();
+    emit_expr(b, operand, r_operand, Some(scan_ctx));
+
+    // Labels for control flow.
+    let no_match_label = b.emit_label();
+    let matched_label = b.emit_label();
+    let null_result_label = b.emit_label();
+    let done_label = b.emit_label();
+
+    // If the operand is NULL, the result is NULL per SQL semantics.
+    b.emit_jump_to_label(Opcode::IsNull, r_operand, 0, null_result_label, P4::None, 0);
+
+    // Check if we have ORDER BY and/or LIMIT.
+    let has_order_by = !subquery.order_by.is_empty();
+    let has_limit = subquery.limit.is_some();
+
+    if has_order_by || has_limit {
+        // Materialize subquery results into a sorter, then probe.
+
+        // Build sort order string.
+        let sort_order: String = subquery
+            .order_by
+            .iter()
+            .map(|term| {
+                if term.direction == Some(SortDirection::Desc) {
+                    '-'
+                } else {
+                    '+'
+                }
+            })
+            .collect();
+
+        // Number of sort key columns. If no ORDER BY, still need 1 column for the value.
+        let num_sort_keys = if has_order_by {
+            subquery.order_by.len()
+        } else {
+            0
+        };
+        // Sorter holds: sort keys + value column.
+        let num_sorter_cols = num_sort_keys + 1;
+
+        // Open sorter.
+        b.emit_op(
+            Opcode::SorterOpen,
+            sorter_cursor,
+            num_sort_keys.max(1) as i32,
+            0,
+            P4::Str(if sort_order.is_empty() {
+                "+".to_owned()
+            } else {
+                sort_order
+            }),
+            0,
+        );
+
+        // Open subquery table for reading.
+        b.emit_op(
+            Opcode::OpenRead,
+            subq_cursor,
+            table.root_page,
+            0,
+            P4::Table(table.name.clone()),
+            0,
+        );
+
+        // === Pass 1: Scan subquery rows into sorter ===
+        let scan_start = b.current_addr();
+        let scan_done = b.emit_label();
+        b.emit_jump_to_label(Opcode::Rewind, subq_cursor, 0, scan_done, P4::None, 0);
+
+        // WHERE filter.
+        let skip_row = b.emit_label();
+        if let Some(where_expr) = where_clause.as_deref() {
+            emit_where_filter(
+                b,
+                where_expr,
+                subq_cursor,
+                table,
+                table_alias,
+                schema,
+                skip_row,
+            );
+        }
+
+        // Allocate registers for sorter record.
+        let sorter_base = b.alloc_regs(num_sorter_cols as i32);
+        let subq_scan = ScanCtx {
+            cursor: subq_cursor,
+            table,
+            table_alias,
+            schema: Some(schema),
+            register_base: None,
+            secondary: None,
+        };
+
+        // Emit sort key columns.
+        for (i, term) in subquery.order_by.iter().enumerate() {
+            let key_source = resolve_sort_key(&term.expr, table, table_alias, columns);
+            match key_source {
+                SortKeySource::Column(col_idx) => {
+                    b.emit_op(
+                        Opcode::Column,
+                        subq_cursor,
+                        col_idx as i32,
+                        sorter_base + i as i32,
+                        P4::None,
+                        0,
+                    );
+                }
+                SortKeySource::Rowid => {
+                    b.emit_op(
+                        Opcode::Rowid,
+                        subq_cursor,
+                        sorter_base + i as i32,
+                        0,
+                        P4::None,
+                        0,
+                    );
+                }
+                SortKeySource::Expression(expr) => {
+                    emit_expr(b, &expr, sorter_base + i as i32, Some(&subq_scan));
+                }
+            }
+        }
+
+        // Emit value column (last column in sorter record).
+        let value_reg = sorter_base + num_sort_keys as i32;
+        match value_expr {
+            Some(expr) => emit_expr(b, expr, value_reg, Some(&subq_scan)),
+            None => {
+                // First column.
+                b.emit_op(Opcode::Column, subq_cursor, 0, value_reg, P4::None, 0);
+            }
+        }
+
+        // MakeRecord + SorterInsert.
+        let record_reg = b.alloc_temp();
+        b.emit_op(
+            Opcode::MakeRecord,
+            sorter_base,
+            num_sorter_cols as i32,
+            record_reg,
+            P4::None,
+            0,
+        );
+        b.emit_op(
+            Opcode::SorterInsert,
+            sorter_cursor,
+            record_reg,
+            0,
+            P4::None,
+            0,
+        );
+        b.free_temp(record_reg);
+
+        // Skip label (for WHERE-filtered rows).
+        b.resolve_label(skip_row);
+
+        // Next row.
+        let scan_body = (scan_start + 1) as i32;
+        b.emit_op(Opcode::Next, subq_cursor, scan_body, 0, P4::None, 0);
+
+        // End of pass 1.
+        b.resolve_label(scan_done);
+        b.emit_op(Opcode::Close, subq_cursor, 0, 0, P4::None, 0);
+
+        // === Pass 2: Sort and probe ===
+
+        // Initialize LIMIT counter if needed.
+        let limit_reg = subquery.limit.as_ref().map(|lc| {
+            let r = b.alloc_reg();
+            emit_limit_expr(b, &lc.limit, r);
+            r
+        });
+
+        // SorterSort: sort and position at first row; jump to no_match if empty.
+        b.emit_jump_to_label(
+            Opcode::SorterSort,
+            sorter_cursor,
+            0,
+            no_match_label,
+            P4::None,
+            0,
+        );
+
+        // Probe loop.
+        let probe_loop = b.current_addr();
+
+        // SorterData to extract current row.
+        let sorted_reg = b.alloc_temp();
+        b.emit_op(
+            Opcode::SorterData,
+            sorter_cursor,
+            sorted_reg,
+            0,
+            P4::None,
+            0,
+        );
+
+        // Extract the value column (last column).
+        let r_probe = b.alloc_temp();
+        b.emit_op(
+            Opcode::Column,
+            sorter_cursor,
+            num_sort_keys as i32,
+            r_probe,
+            P4::None,
+            0,
+        );
+
+        // Compare with operand.
+        b.emit_jump_to_label(Opcode::Eq, r_probe, r_operand, matched_label, P4::None, 0);
+
+        b.free_temp(r_probe);
+        b.free_temp(sorted_reg);
+
+        // LIMIT: decrement counter and stop when zero.
+        let continue_label = b.emit_label();
+        if let Some(lim_r) = limit_reg {
+            // DecrJumpZero: if limit counter reaches zero, jump to no_match.
+            b.emit_jump_to_label(Opcode::DecrJumpZero, lim_r, 0, no_match_label, P4::None, 0);
+        }
+        b.resolve_label(continue_label);
+
+        // SorterNext.
+        b.emit_op(
+            Opcode::SorterNext,
+            sorter_cursor,
+            probe_loop as i32,
+            0,
+            P4::None,
+            0,
+        );
+    } else {
+        // No ORDER BY, no LIMIT: simple scan probe (should have been handled
+        // by resolve_in_probe_source, but handle here as fallback).
+        b.emit_op(
+            Opcode::OpenRead,
+            subq_cursor,
+            table.root_page,
+            0,
+            P4::Table(table.name.clone()),
+            0,
+        );
+
+        let loop_start = b.current_addr();
+        b.emit_jump_to_label(Opcode::Rewind, subq_cursor, 0, no_match_label, P4::None, 0);
+
+        // WHERE filter.
+        let skip_label = b.emit_label();
+        if let Some(where_expr) = where_clause.as_deref() {
+            emit_where_filter(
+                b,
+                where_expr,
+                subq_cursor,
+                table,
+                table_alias,
+                schema,
+                skip_label,
+            );
+        }
+
+        let subq_scan = ScanCtx {
+            cursor: subq_cursor,
+            table,
+            table_alias,
+            schema: Some(schema),
+            register_base: None,
+            secondary: None,
+        };
+
+        let r_probe = b.alloc_temp();
+        match value_expr {
+            Some(expr) => emit_expr(b, expr, r_probe, Some(&subq_scan)),
+            None => {
+                b.emit_op(Opcode::Column, subq_cursor, 0, r_probe, P4::None, 0);
+            }
+        }
+        b.emit_jump_to_label(Opcode::Eq, r_probe, r_operand, matched_label, P4::None, 0);
+
+        b.resolve_label(skip_label);
+        let loop_body = (loop_start + 1) as i32;
+        b.emit_op(Opcode::Next, subq_cursor, loop_body, 0, P4::None, 0);
+
+        b.free_temp(r_probe);
+    }
+
+    // Fall through to no_match (common to both paths).
+    b.emit_jump_to_label(Opcode::Goto, 0, 0, no_match_label, P4::None, 0);
+
+    // --- Result emission (shared by both paths) ---
+
+    b.resolve_label(no_match_label);
+    b.emit_op(Opcode::Integer, i32::from(not), reg, 0, P4::None, 0);
+    b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+
+    b.resolve_label(matched_label);
+    b.emit_op(Opcode::Integer, i32::from(!not), reg, 0, P4::None, 0);
+    b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+
+    b.resolve_label(null_result_label);
+    b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+
+    b.resolve_label(done_label);
+    // Close cursors.
+    if has_order_by || has_limit {
+        b.emit_op(Opcode::Close, sorter_cursor, 0, 0, P4::None, 0);
+    } else {
+        b.emit_op(Opcode::Close, subq_cursor, 0, 0, P4::None, 0);
+    }
+
+    b.free_temp(r_operand);
+
+    true
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn emit_in_probe_expr(
+    b: &mut ProgramBuilder,
+    operand: &Expr,
+    set: &fsqlite_ast::InSet,
+    not: bool,
+    reg: i32,
+    ctx: Option<&ScanCtx<'_>>,
+) {
+    let Some(scan_ctx) = ctx else {
+        b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+        return;
+    };
+    let Some(schema) = scan_ctx.schema else {
+        b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+        return;
+    };
+    let Some(probe_source) = resolve_in_probe_source(set, schema) else {
+        // Try to handle complex subqueries with ORDER BY/LIMIT.
+        if let fsqlite_ast::InSet::Subquery(subquery) = set {
+            if try_emit_complex_in_subquery(b, operand, subquery, not, reg, scan_ctx) {
+                return;
+            }
+        }
+        b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+        return;
+    };
+
+    if can_use_once_materialized_in_probe_source(&probe_source, operand, scan_ctx) {
+        emit_once_materialized_in_probe_source(
+            b,
+            operand,
+            &probe_source,
+            not,
+            reg,
+            scan_ctx,
+            schema,
+        );
+        return;
+    }
+
+    // Keep probe cursors far from primary scan/sorter cursors used by main paths.
+    let probe_cursor = scan_ctx.cursor + 64;
+    let r_operand = b.alloc_temp();
+    let r_probe = b.alloc_temp();
+
+    emit_expr(b, operand, r_operand, Some(scan_ctx));
+
+    let null_label = b.emit_label();
+    let no_match_label = b.emit_label();
+    let matched_label = b.emit_label();
+    let done_label = b.emit_label();
+
+    // Three-valued NULL semantics: if operand is NULL, result is NULL.
+    b.emit_jump_to_label(Opcode::IsNull, r_operand, 0, null_label, P4::None, 0);
+
+    b.emit_op(
+        Opcode::OpenRead,
+        probe_cursor,
+        probe_source.table.root_page,
+        0,
+        P4::Table(probe_source.table.name.clone()),
+        0,
+    );
+
+    // Track whether any subquery row value is NULL (for three-valued IN).
+    let r_saw_null = b.alloc_temp();
+    b.emit_op(Opcode::Integer, 0, r_saw_null, 0, P4::None, 0);
+
+    let loop_start = b.current_addr();
+    b.emit_jump_to_label(Opcode::Rewind, probe_cursor, 0, no_match_label, P4::None, 0);
+
+    let skip_label = probe_source.where_clause.map(|_| b.emit_label());
+    if let (Some(where_expr), Some(skip)) = (probe_source.where_clause, skip_label) {
+        emit_where_filter(
+            b,
+            where_expr,
+            probe_cursor,
+            probe_source.table,
+            probe_source.table_alias,
+            schema,
+            skip,
+        );
+    }
+
+    let probe_scan = ScanCtx {
+        cursor: probe_cursor,
+        table: probe_source.table,
+        table_alias: probe_source.table_alias,
+        schema: Some(schema),
+        register_base: None,
+        secondary: None,
+    };
+    emit_in_probe_value(b, probe_cursor, &probe_source, r_probe, &probe_scan);
+    b.emit_jump_to_label(Opcode::Eq, r_probe, r_operand, matched_label, P4::None, 0);
+    // If probe value was NULL, flag it (Eq never matches NULLs).
+    let after_flag = b.emit_label();
+    let set_flag = b.emit_label();
+    b.emit_jump_to_label(Opcode::IsNull, r_probe, 0, set_flag, P4::None, 0);
+    b.emit_jump_to_label(Opcode::Goto, 0, 0, after_flag, P4::None, 0);
+    b.resolve_label(set_flag);
+    b.emit_op(Opcode::Integer, 1, r_saw_null, 0, P4::None, 0);
+    b.resolve_label(after_flag);
+
+    if let Some(skip) = skip_label {
+        b.resolve_label(skip);
+    }
+    let loop_body = (loop_start + 1) as i32;
+    b.emit_op(Opcode::Next, probe_cursor, loop_body, 0, P4::None, 0);
+
+    b.resolve_label(no_match_label);
+    // No match.  If any subquery value was NULL → result is NULL.
+    b.emit_jump_to_label(Opcode::If, r_saw_null, 0, null_label, P4::None, 0);
+    b.emit_op(Opcode::Integer, i32::from(not), reg, 0, P4::None, 0);
+    b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+
+    b.resolve_label(null_label);
+    b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+    b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+
+    b.resolve_label(matched_label);
+    b.emit_op(Opcode::Integer, i32::from(!not), reg, 0, P4::None, 0);
+
+    b.resolve_label(done_label);
+    b.emit_op(Opcode::Close, probe_cursor, 0, 0, P4::None, 0);
+
+    b.free_temp(r_saw_null);
+    b.free_temp(r_probe);
+    b.free_temp(r_operand);
+}
+
+/// Handles literals, bind parameters, binary/unary operators, CASE, CAST,
+/// and (when `ctx` is provided) column references from a table scan cursor.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::too_many_lines,
+    clippy::many_single_char_names
+)]
+fn emit_expr(b: &mut ProgramBuilder, expr: &Expr, reg: i32, ctx: Option<&ScanCtx<'_>>) {
+    match expr {
+        Expr::Placeholder(pt, _) => {
+            let idx = match pt {
+                fsqlite_ast::PlaceholderType::Numbered(n) => *n as i32,
+                // Anonymous and named placeholders are assigned sequentially.
+                _ => b.next_anon_placeholder_idx() as i32,
+            };
+            b.emit_op(Opcode::Variable, idx, reg, 0, P4::None, 0);
+        }
+        Expr::Literal(lit, _) => match lit {
+            Literal::Integer(n) => {
+                if let Ok(as_i32) = i32::try_from(*n) {
+                    b.emit_op(Opcode::Integer, as_i32, reg, 0, P4::None, 0);
+                } else {
+                    b.emit_op(Opcode::Int64, 0, reg, 0, P4::Int64(*n), 0);
+                }
+            }
+            Literal::Float(f) => {
+                b.emit_op(Opcode::Real, 0, reg, 0, P4::Real(*f), 0);
+            }
+            Literal::String(s) => {
+                b.emit_op(Opcode::String8, 0, reg, 0, P4::Str(s.clone()), 0);
+            }
+            Literal::Blob(bytes) => {
+                b.emit_op(
+                    Opcode::Blob,
+                    bytes.len() as i32,
+                    reg,
+                    0,
+                    P4::Blob(bytes.clone()),
+                    0,
+                );
+            }
+            Literal::True => {
+                b.emit_op(Opcode::Integer, 1, reg, 0, P4::None, 0);
+            }
+            Literal::False => {
+                b.emit_op(Opcode::Integer, 0, reg, 0, P4::None, 0);
+            }
+            Literal::CurrentTimestamp | Literal::CurrentDate | Literal::CurrentTime => {
+                let ts = current_time_literal_text(lit)
+                    .expect("current-time literals should resolve to a string");
+                b.emit_op(Opcode::String8, 0, reg, 0, P4::Str(ts), 0);
+            }
+            Literal::Null => {
+                b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+            }
+        },
+        Expr::BinaryOp {
+            left, op, right, ..
+        } => {
+            emit_binary_op(b, left, *op, right, reg, ctx);
+        }
+        Expr::UnaryOp {
+            op, expr: operand, ..
+        } => {
+            emit_expr(b, operand, reg, ctx);
+            match op {
+                fsqlite_ast::UnaryOp::Negate => {
+                    // Multiply by -1: Integer(-1) into temp, then Multiply.
+                    let tmp = b.alloc_temp();
+                    b.emit_op(Opcode::Integer, -1, tmp, 0, P4::None, 0);
+                    b.emit_op(Opcode::Multiply, tmp, reg, reg, P4::None, 0);
+                    b.free_temp(tmp);
+                }
+                fsqlite_ast::UnaryOp::Plus => { /* no-op */ }
+                fsqlite_ast::UnaryOp::BitNot => {
+                    b.emit_op(Opcode::BitNot, reg, reg, 0, P4::None, 0);
+                }
+                fsqlite_ast::UnaryOp::Not => {
+                    b.emit_op(Opcode::Not, reg, reg, 0, P4::None, 0);
+                }
+            }
+        }
+        Expr::Cast {
+            expr: inner,
+            type_name,
+            ..
+        } => {
+            emit_expr(b, inner, reg, ctx);
+            let affinity = type_name_to_affinity(type_name);
+            b.emit_op(Opcode::Cast, reg, i32::from(affinity), 0, P4::None, 0);
+        }
+        Expr::Case {
+            operand,
+            whens,
+            else_expr,
+            ..
+        } => {
+            emit_case_expr(b, operand.as_deref(), whens, else_expr.as_deref(), reg, ctx);
+        }
+        Expr::IsNull {
+            expr: inner, not, ..
+        } => {
+            // IS NULL → result 1 if null, 0 otherwise.
+            // IS NOT NULL → result 0 if null, 1 otherwise.
+            emit_expr(b, inner, reg, ctx);
+            let lbl_null = b.emit_label();
+            let lbl_done = b.emit_label();
+            b.emit_jump_to_label(Opcode::IsNull, reg, 0, lbl_null, P4::None, 0);
+            // Not null path.
+            let val_not_null = i32::from(*not); // IS NOT NULL: 1; IS NULL: 0
+            let val_null = i32::from(!*not); // IS NOT NULL: 0; IS NULL: 1
+            b.emit_op(Opcode::Integer, val_not_null, reg, 0, P4::None, 0);
+            b.emit_jump_to_label(Opcode::Goto, 0, 0, lbl_done, P4::None, 0);
+            b.resolve_label(lbl_null);
+            b.emit_op(Opcode::Integer, val_null, reg, 0, P4::None, 0);
+            b.resolve_label(lbl_done);
+        }
+        Expr::Like {
+            expr: operand,
+            pattern,
+            escape,
+            op: like_op,
+            not,
+            ..
+        } => {
+            if matches!(like_op, fsqlite_ast::LikeOp::Like)
+                && escape.is_none()
+                && let Expr::Literal(Literal::String(pattern_text), _) = pattern.as_ref()
+                && let Some((kind, literal)) = classify_sql_like_fast_path(pattern_text, None)
+            {
+                emit_expr(b, operand, reg, ctx);
+                b.emit_op(
+                    Opcode::LikeConstFast,
+                    reg,
+                    reg,
+                    kind.opcode_tag(),
+                    P4::Str(literal.to_owned()),
+                    u16::from(*not),
+                );
+                return;
+            }
+
+            let func_name = match like_op {
+                fsqlite_ast::LikeOp::Like => "LIKE",
+                fsqlite_ast::LikeOp::Glob => "GLOB",
+                fsqlite_ast::LikeOp::Match => "MATCH",
+                fsqlite_ast::LikeOp::Regexp => "REGEXP",
+            };
+            let nargs: u16 = if escape.is_some() { 3 } else { 2 };
+            let arg_base = b.alloc_regs(i32::from(nargs));
+            // like(pattern, string [, escape])
+            emit_expr(b, pattern, arg_base, ctx);
+            emit_expr(b, operand, arg_base + 1, ctx);
+            if let Some(esc) = escape {
+                emit_expr(b, esc, arg_base + 2, ctx);
+            }
+            b.emit_op(
+                Opcode::PureFunc,
+                0,
+                arg_base,
+                reg,
+                P4::FuncName(func_name.to_owned()),
+                nargs,
+            );
+            if *not {
+                b.emit_op(Opcode::Not, reg, reg, 0, P4::None, 0);
+            }
+        }
+        Expr::Between {
+            expr: operand,
+            low,
+            high,
+            not,
+            ..
+        } => {
+            // BETWEEN low AND high → (operand >= low) AND (operand <= high)
+            // with three-valued NULL logic:
+            //   NULL BETWEEN x AND y  → NULL
+            //   v BETWEEN NULL AND y  → NULL when v <= y, FALSE when v > y
+            //   v BETWEEN x AND NULL  → NULL when v >= x, FALSE when v < x
+            let r_operand = b.alloc_temp();
+            let r_low = b.alloc_temp();
+            let r_high = b.alloc_temp();
+            emit_expr(b, operand, r_operand, ctx);
+            emit_expr(b, low, r_low, ctx);
+            emit_expr(b, high, r_high, ctx);
+            // Resolve collation from the operand (e.g. column-level NOCASE).
+            let collation_p4 = effective_collation_ctx(operand, ctx)
+                .map_or(P4::None, |coll| P4::Collation(coll.to_owned()));
+            let false_label = b.emit_label();
+            let null_label = b.emit_label();
+            let done_label = b.emit_label();
+            // If operand is NULL, short-circuit to NULL result.
+            b.emit_jump_to_label(Opcode::IsNull, r_operand, 0, null_label, P4::None, 0);
+            // Jump to false if operand < low (NULL low → no jump, handled below).
+            b.emit_jump_to_label(
+                Opcode::Lt,
+                r_low,
+                r_operand,
+                false_label,
+                collation_p4.clone(),
+                0,
+            );
+            // Jump to false if operand > high (NULL high → no jump, handled below).
+            b.emit_jump_to_label(Opcode::Gt, r_high, r_operand, false_label, collation_p4, 0);
+            // Passed both comparisons.  If either bound was NULL the comparison
+            // silently fell through instead of confirming the range, so the
+            // correct three-valued result is NULL, not TRUE.
+            b.emit_jump_to_label(Opcode::IsNull, r_low, 0, null_label, P4::None, 0);
+            b.emit_jump_to_label(Opcode::IsNull, r_high, 0, null_label, P4::None, 0);
+            // Genuinely in range with no NULLs involved.
+            b.emit_op(Opcode::Integer, i32::from(!*not), reg, 0, P4::None, 0);
+            b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+            b.resolve_label(false_label);
+            b.emit_op(Opcode::Integer, i32::from(*not), reg, 0, P4::None, 0);
+            b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+            b.resolve_label(null_label);
+            b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+            b.resolve_label(done_label);
+            b.free_temp(r_high);
+            b.free_temp(r_low);
+            b.free_temp(r_operand);
+        }
+        Expr::In {
+            expr: operand,
+            set,
+            not,
+            ..
+        } => {
+            if let fsqlite_ast::InSet::List(values) = set {
+                if values.is_empty() {
+                    // x IN () is always FALSE, x NOT IN () is always TRUE, even if x is NULL.
+                    b.emit_op(Opcode::Integer, i32::from(*not), reg, 0, P4::None, 0);
+                    return;
+                }
+                if can_use_once_materialized_in_list(values, operand, ctx) {
+                    emit_once_materialized_in_list(b, operand, values, *not, reg, ctx);
+                    return;
+                }
+                // IN (v1, v2, ...) → chain of equality checks with
+                // three-valued NULL semantics (SQL standard):
+                //   NULL IN (...)            → NULL
+                //   v IN (a, NULL, b) miss   → NULL  (NULL in list)
+                //   v IN (a, b, c) miss      → FALSE (no NULLs)
+                //   v IN (...) hit           → TRUE
+                let r_operand = b.alloc_temp();
+                emit_expr(b, operand, r_operand, ctx);
+                // Resolve collation from the operand (e.g. column-level NOCASE).
+                let collation_p4 = effective_collation_ctx(operand, ctx)
+                    .map_or(P4::None, |coll| P4::Collation(coll.to_owned()));
+                let null_label = b.emit_label();
+                let true_label = b.emit_label();
+                let done_label = b.emit_label();
+                // If operand is NULL, short-circuit to NULL result.
+                b.emit_jump_to_label(Opcode::IsNull, r_operand, 0, null_label, P4::None, 0);
+                // r_saw_null: set to 1 at runtime if any list element is NULL.
+                let r_saw_null = b.alloc_temp();
+                b.emit_op(Opcode::Integer, 0, r_saw_null, 0, P4::None, 0);
+                let r_val = b.alloc_temp();
+                for val_expr in values {
+                    emit_expr(b, val_expr, r_val, ctx);
+                    b.emit_jump_to_label(
+                        Opcode::Eq,
+                        r_val,
+                        r_operand,
+                        true_label,
+                        collation_p4.clone(),
+                        0,
+                    );
+                    // Eq with NULL never jumps.  If this value was NULL, flag it.
+                    let next_val = b.emit_label();
+                    let set_flag = b.emit_label();
+                    b.emit_jump_to_label(Opcode::IsNull, r_val, 0, set_flag, P4::None, 0);
+                    b.emit_jump_to_label(Opcode::Goto, 0, 0, next_val, P4::None, 0);
+                    b.resolve_label(set_flag);
+                    b.emit_op(Opcode::Integer, 1, r_saw_null, 0, P4::None, 0);
+                    b.resolve_label(next_val);
+                }
+                b.free_temp(r_val);
+                // No match.  If any list element was NULL → result is NULL.
+                b.emit_jump_to_label(Opcode::If, r_saw_null, 0, null_label, P4::None, 0);
+                b.free_temp(r_saw_null);
+                // Definite no-match with no NULLs → FALSE (or TRUE for NOT IN).
+                b.emit_op(Opcode::Integer, i32::from(*not), reg, 0, P4::None, 0);
+                b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+                b.resolve_label(null_label);
+                b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+                b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+                b.resolve_label(true_label);
+                b.emit_op(Opcode::Integer, i32::from(!*not), reg, 0, P4::None, 0);
+                b.resolve_label(done_label);
+                b.free_temp(r_operand);
+            } else {
+                emit_in_probe_expr(b, operand, set, *not, reg, ctx);
+            }
+        }
+        Expr::FunctionCall { name, args, .. }
+            if !is_aggregate_function(name) || {
+                let lower = name.to_ascii_lowercase();
+                (lower == "max" || lower == "min")
+                    && matches!(args, fsqlite_ast::FunctionArgs::List(a) if a.len() >= 2)
+            } =>
+        {
+            // Scalar function call: emit args, then PureFunc.
+            let canon = name.to_ascii_uppercase();
+            match args {
+                fsqlite_ast::FunctionArgs::Star => {
+                    // func(*) for non-aggregate → 0 args.
+                    b.emit_op(Opcode::PureFunc, 0, 0, reg, P4::FuncName(canon), 0);
+                }
+                fsqlite_ast::FunctionArgs::List(arg_list) => {
+                    let Ok(nargs) = u16::try_from(arg_list.len()) else {
+                        b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+                        return;
+                    };
+                    let arg_base = b.alloc_regs(i32::from(nargs));
+                    for (i, arg_expr) in arg_list.iter().enumerate() {
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                        emit_expr(b, arg_expr, arg_base + i as i32, ctx);
+                    }
+                    b.emit_op(
+                        Opcode::PureFunc,
+                        0,
+                        arg_base,
+                        reg,
+                        P4::FuncName(canon),
+                        nargs,
+                    );
+                }
+            }
+        }
+        Expr::Column(col_ref, _) => {
+            let Some(sc) = ctx else {
+                b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+                return;
+            };
+            if let Some(qualifier) = &col_ref.table {
+                if !matches_table_or_alias(qualifier, sc.table, sc.table_alias) {
+                    // Check secondary table context (UPDATE ... FROM).
+                    if let Some(sec) = &sc.secondary {
+                        if matches_table_or_alias(qualifier, sec.table, sec.table_alias) {
+                            emit_column_from_cursor(b, &col_ref.column, sec.cursor, sec.table, reg);
+                            return;
+                        }
+                    }
+                    b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+                    return;
+                }
+            }
+            // Register-based resolution for generated column expressions
+            // during INSERT: copy from the register holding that column's value.
+            if let Some(reg_base) = sc.register_base {
+                if let Some(col_idx) = sc.table.column_index(&col_ref.column) {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                    b.emit_op(Opcode::Copy, reg_base + col_idx as i32, reg, 0, P4::None, 0);
+                } else {
+                    b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+                }
+            } else if let Some(col_idx) = sc.table.column_index(&col_ref.column) {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                if sc.table.columns[col_idx].is_ipk {
+                    b.emit_op(Opcode::Rowid, sc.cursor, reg, 0, P4::None, 0);
+                } else {
+                    b.emit_op(Opcode::Column, sc.cursor, col_idx as i32, reg, P4::None, 0);
+                }
+            } else if sc.table.resolves_to_hidden_rowid(&col_ref.column) {
+                b.emit_op(Opcode::Rowid, sc.cursor, reg, 0, P4::None, 0);
+            } else if let Some(sec) = &sc.secondary {
+                // Unqualified column not found in primary — try secondary.
+                emit_column_from_cursor(b, &col_ref.column, sec.cursor, sec.table, reg);
+            } else {
+                // Unknown column — emit Null.
+                b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+            }
+        }
+        Expr::Collate { expr: inner, .. } => {
+            // Evaluate the inner expression; collation affects comparisons
+            // rather than value computation, so a pass-through is correct.
+            emit_expr(b, inner, reg, ctx);
+        }
+        Expr::Exists { subquery, not, .. } => {
+            if let Some(scan_ctx) = ctx {
+                if let Some(schema) = scan_ctx.schema {
+                    emit_exists_subquery(b, subquery, *not, reg, scan_ctx, schema);
+                    return;
+                }
+            }
+            // No schema context — emit 0 (false) for EXISTS, 1 for NOT EXISTS.
+            let val = i32::from(*not);
+            b.emit_op(Opcode::Integer, val, reg, 0, P4::None, 0);
+        }
+        Expr::Subquery(subquery, _) => {
+            if let Some(scan_ctx) = ctx {
+                if let Some(schema) = scan_ctx.schema {
+                    emit_scalar_subquery(b, subquery, reg, scan_ctx, schema);
+                    return;
+                }
+            }
+            // No schema context — emit NULL.
+            b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+        }
+        Expr::JsonAccess {
+            expr: inner,
+            path,
+            arrow,
+            ..
+        } => {
+            let arg_base = b.alloc_regs(2);
+            emit_expr(b, inner, arg_base, ctx);
+            emit_expr(b, path, arg_base + 1, ctx);
+            b.emit_op(
+                Opcode::PureFunc,
+                0,
+                arg_base,
+                reg,
+                P4::FuncName(json_access_func_name(*arrow).to_owned()),
+                2,
+            );
+        }
+        _ => {
+            // Column refs without scan context and other unhandled expressions: Null.
+            b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+        }
+    }
+}
+
+fn current_time_literal_text(literal: &Literal) -> Option<String> {
+    use std::time::SystemTime;
+
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let days = secs / 86400;
+    let day_secs = secs % 86400;
+    let h = day_secs / 3600;
+    let m = (day_secs % 3600) / 60;
+    let s = day_secs % 60;
+    let (y, mo, d) = epoch_days_to_ymd(days);
+
+    Some(match *literal {
+        Literal::CurrentTimestamp => format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02}:{s:02}"),
+        Literal::CurrentDate => format!("{y:04}-{mo:02}-{d:02}"),
+        Literal::CurrentTime => format!("{h:02}:{m:02}:{s:02}"),
+        _ => return None,
+    })
+}
+
+/// Emit bytecode for an EXISTS or NOT EXISTS subquery expression.
+///
+/// Pattern: open cursor on subquery table, scan with WHERE filter, set reg to
+/// 1 (found) or 0 (not found). For NOT EXISTS, the result is inverted.
+fn flatten_and_terms<'a>(expr: &'a Expr, terms: &mut Vec<&'a Expr>) {
+    if let Expr::BinaryOp {
+        left,
+        op: fsqlite_ast::BinaryOp::And,
+        right,
+        ..
+    } = expr
+    {
+        flatten_and_terms(left, terms);
+        flatten_and_terms(right, terms);
+    } else {
+        terms.push(expr);
+    }
+}
+
+fn expr_references_scan(expr: &Expr, table: &TableSchema, table_alias: Option<&str>) -> bool {
+    match expr {
+        Expr::Column(_, _) => resolve_column_ref(expr, table, table_alias).is_some(),
+        Expr::BinaryOp { left, right, .. } => {
+            expr_references_scan(left, table, table_alias)
+                || expr_references_scan(right, table, table_alias)
+        }
+        Expr::UnaryOp { expr, .. }
+        | Expr::Cast { expr, .. }
+        | Expr::Collate { expr, .. }
+        | Expr::IsNull { expr, .. } => expr_references_scan(expr, table, table_alias),
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            expr_references_scan(expr, table, table_alias)
+                || expr_references_scan(low, table, table_alias)
+                || expr_references_scan(high, table, table_alias)
+        }
+        Expr::In { expr, set, .. } => {
+            expr_references_scan(expr, table, table_alias)
+                || match set {
+                    fsqlite_ast::InSet::List(values) => values
+                        .iter()
+                        .any(|value| expr_references_scan(value, table, table_alias)),
+                    fsqlite_ast::InSet::Table(_) | fsqlite_ast::InSet::Subquery(_) => true,
+                }
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_references_scan(expr, table, table_alias)
+                || expr_references_scan(pattern, table, table_alias)
+                || escape
+                    .as_deref()
+                    .is_some_and(|esc| expr_references_scan(esc, table, table_alias))
+        }
+        Expr::Case {
+            operand,
+            whens,
+            else_expr,
+            ..
+        } => {
+            operand
+                .as_deref()
+                .is_some_and(|inner| expr_references_scan(inner, table, table_alias))
+                || whens.iter().any(|(when_expr, then_expr)| {
+                    expr_references_scan(when_expr, table, table_alias)
+                        || expr_references_scan(then_expr, table, table_alias)
+                })
+                || else_expr
+                    .as_deref()
+                    .is_some_and(|inner| expr_references_scan(inner, table, table_alias))
+        }
+        Expr::FunctionCall {
+            args,
+            order_by,
+            filter,
+            over,
+            ..
+        } => {
+            over.is_some()
+                || match args {
+                    FunctionArgs::Star => false,
+                    FunctionArgs::List(values) => values
+                        .iter()
+                        .any(|value| expr_references_scan(value, table, table_alias)),
+                }
+                || order_by
+                    .iter()
+                    .any(|term| expr_references_scan(&term.expr, table, table_alias))
+                || filter
+                    .as_deref()
+                    .is_some_and(|inner| expr_references_scan(inner, table, table_alias))
+        }
+        Expr::Exists { .. } | Expr::Subquery(_, _) => true,
+        _ => false,
+    }
+}
+
+const ONCE_MATERIALIZED_IN_LIST_THRESHOLD: usize = 8;
+
+fn in_list_value_supports_once_materialization(expr: &Expr) -> bool {
+    match expr {
+        Expr::Literal(_, _) | Expr::Placeholder(_, _) => true,
+        Expr::UnaryOp { expr: inner, .. }
+        | Expr::Cast { expr: inner, .. }
+        | Expr::Collate { expr: inner, .. } => in_list_value_supports_once_materialization(inner),
+        _ => false,
+    }
+}
+
+fn can_use_once_materialized_in_list(
+    values: &[Expr],
+    operand: &Expr,
+    ctx: Option<&ScanCtx<'_>>,
+) -> bool {
+    if values.len() < ONCE_MATERIALIZED_IN_LIST_THRESHOLD {
+        return false;
+    }
+    if !values
+        .iter()
+        .all(in_list_value_supports_once_materialization)
+    {
+        return false;
+    }
+    match effective_collation_ctx(operand, ctx) {
+        Some(collation) => collation.eq_ignore_ascii_case("BINARY"),
+        None => true,
+    }
+}
+
+fn probe_expr_references_outer_scan(
+    expr: &Expr,
+    probe_source: &InProbeSource<'_>,
+    scan_ctx: &ScanCtx<'_>,
+) -> bool {
+    match expr {
+        Expr::Column(_, _) => {
+            if resolve_column_ref(expr, probe_source.table, probe_source.table_alias).is_some() {
+                return false;
+            }
+            resolve_column_ref(expr, scan_ctx.table, scan_ctx.table_alias).is_some()
+                || scan_ctx.secondary.as_ref().is_some_and(|secondary| {
+                    resolve_column_ref(expr, secondary.table, secondary.table_alias).is_some()
+                })
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            probe_expr_references_outer_scan(left, probe_source, scan_ctx)
+                || probe_expr_references_outer_scan(right, probe_source, scan_ctx)
+        }
+        Expr::UnaryOp { expr: inner, .. }
+        | Expr::IsNull { expr: inner, .. }
+        | Expr::Cast { expr: inner, .. }
+        | Expr::Collate { expr: inner, .. } => {
+            probe_expr_references_outer_scan(inner, probe_source, scan_ctx)
+        }
+        Expr::Between {
+            expr: inner,
+            low,
+            high,
+            ..
+        } => {
+            probe_expr_references_outer_scan(inner, probe_source, scan_ctx)
+                || probe_expr_references_outer_scan(low, probe_source, scan_ctx)
+                || probe_expr_references_outer_scan(high, probe_source, scan_ctx)
+        }
+        Expr::In {
+            expr: inner, set, ..
+        } => {
+            probe_expr_references_outer_scan(inner, probe_source, scan_ctx)
+                || matches!(
+                    set,
+                    fsqlite_ast::InSet::List(items)
+                        if items
+                            .iter()
+                            .any(|item| probe_expr_references_outer_scan(item, probe_source, scan_ctx))
+                )
+        }
+        Expr::FunctionCall { args, .. } => {
+            matches!(
+                args,
+                FunctionArgs::List(items)
+                    if items
+                        .iter()
+                        .any(|item| probe_expr_references_outer_scan(item, probe_source, scan_ctx))
+            )
+        }
+        Expr::Case {
+            operand,
+            whens,
+            else_expr,
+            ..
+        } => {
+            operand.as_ref().is_some_and(|inner| {
+                probe_expr_references_outer_scan(inner, probe_source, scan_ctx)
+            }) || whens.iter().any(|(cond, then_expr)| {
+                probe_expr_references_outer_scan(cond, probe_source, scan_ctx)
+                    || probe_expr_references_outer_scan(then_expr, probe_source, scan_ctx)
+            }) || else_expr.as_ref().is_some_and(|inner| {
+                probe_expr_references_outer_scan(inner, probe_source, scan_ctx)
+            })
+        }
+        Expr::Like {
+            expr: inner,
+            pattern,
+            escape,
+            ..
+        } => {
+            probe_expr_references_outer_scan(inner, probe_source, scan_ctx)
+                || probe_expr_references_outer_scan(pattern, probe_source, scan_ctx)
+                || escape.as_ref().is_some_and(|inner| {
+                    probe_expr_references_outer_scan(inner, probe_source, scan_ctx)
+                })
+        }
+        Expr::Exists { .. } | Expr::Subquery(_, _) => true,
+        _ => false,
+    }
+}
+
+fn in_probe_source_references_outer_scan(
+    probe_source: &InProbeSource<'_>,
+    scan_ctx: &ScanCtx<'_>,
+) -> bool {
+    probe_source.where_clause.is_some_and(|where_expr| {
+        probe_expr_references_outer_scan(where_expr, probe_source, scan_ctx)
+    }) || matches!(
+        probe_source.value,
+        InProbeValue::Expr(expr)
+            if probe_expr_references_outer_scan(expr, probe_source, scan_ctx)
+    )
+}
+
+fn can_use_once_materialized_in_probe_source(
+    probe_source: &InProbeSource<'_>,
+    operand: &Expr,
+    scan_ctx: &ScanCtx<'_>,
+) -> bool {
+    if in_probe_source_references_outer_scan(probe_source, scan_ctx) {
+        return false;
+    }
+    match effective_collation_ctx(operand, Some(scan_ctx)) {
+        Some(collation) => collation.eq_ignore_ascii_case("BINARY"),
+        None => true,
+    }
+}
+
+fn expr_contains_nested_subquery(expr: &Expr) -> bool {
+    match expr {
+        Expr::Exists { .. } | Expr::Subquery(_, _) => true,
+        Expr::BinaryOp { left, right, .. } => {
+            expr_contains_nested_subquery(left) || expr_contains_nested_subquery(right)
+        }
+        Expr::UnaryOp { expr, .. }
+        | Expr::Cast { expr, .. }
+        | Expr::Collate { expr, .. }
+        | Expr::IsNull { expr, .. } => expr_contains_nested_subquery(expr),
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            expr_contains_nested_subquery(expr)
+                || expr_contains_nested_subquery(low)
+                || expr_contains_nested_subquery(high)
+        }
+        Expr::In { expr, set, .. } => {
+            expr_contains_nested_subquery(expr)
+                || match set {
+                    InSet::List(values) => values.iter().any(expr_contains_nested_subquery),
+                    InSet::Table(_) | InSet::Subquery(_) => true,
+                }
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_nested_subquery(expr)
+                || expr_contains_nested_subquery(pattern)
+                || escape.as_deref().is_some_and(expr_contains_nested_subquery)
+        }
+        Expr::Case {
+            operand,
+            whens,
+            else_expr,
+            ..
+        } => {
+            operand
+                .as_deref()
+                .is_some_and(expr_contains_nested_subquery)
+                || whens.iter().any(|(when_expr, then_expr)| {
+                    expr_contains_nested_subquery(when_expr)
+                        || expr_contains_nested_subquery(then_expr)
+                })
+                || else_expr
+                    .as_deref()
+                    .is_some_and(expr_contains_nested_subquery)
+        }
+        Expr::FunctionCall {
+            args,
+            order_by,
+            filter,
+            over,
+            ..
+        } => {
+            over.is_some()
+                || match args {
+                    FunctionArgs::Star => false,
+                    FunctionArgs::List(values) => values.iter().any(expr_contains_nested_subquery),
+                }
+                || order_by
+                    .iter()
+                    .any(|term| expr_contains_nested_subquery(&term.expr))
+                || filter.as_deref().is_some_and(expr_contains_nested_subquery)
+        }
+        Expr::JsonAccess {
+            expr: inner, path, ..
+        } => expr_contains_nested_subquery(inner) || expr_contains_nested_subquery(path),
+        Expr::RowValue(values, _) => values.iter().any(expr_contains_nested_subquery),
+        _ => false,
+    }
+}
+
+fn can_use_once_materialized_exists_subquery(
+    where_clause: Option<&Expr>,
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    outer_ctx: &ScanCtx<'_>,
+) -> bool {
+    let Some(where_expr) = where_clause else {
+        return true;
+    };
+    if expr_contains_nested_subquery(where_expr) {
+        return false;
+    }
+    let probe_source = InProbeSource {
+        table,
+        table_alias,
+        where_clause: Some(where_expr),
+        value: InProbeValue::FirstColumn,
+    };
+    !probe_expr_references_outer_scan(where_expr, &probe_source, outer_ctx)
+}
+
+fn emit_once_materialized_in_list(
+    b: &mut ProgramBuilder,
+    operand: &Expr,
+    values: &[Expr],
+    not: bool,
+    reg: i32,
+    ctx: Option<&ScanCtx<'_>>,
+) {
+    let r_operand = b.alloc_temp();
+    emit_expr(b, operand, r_operand, ctx);
+
+    let null_label = b.emit_label();
+    let found_label = b.emit_label();
+    let done_label = b.emit_label();
+    b.emit_jump_to_label(Opcode::IsNull, r_operand, 0, null_label, P4::None, 0);
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let autoindex_cursor = 4096 + b.current_addr() as i32;
+    let r_saw_null = b.alloc_reg();
+    let build_done = b.emit_label();
+    b.emit_jump_to_label(Opcode::Once, 0, 0, build_done, P4::None, 0);
+    b.emit_op(Opcode::Integer, 0, r_saw_null, 0, P4::None, 0);
+    b.emit_op(Opcode::OpenAutoindex, autoindex_cursor, 1, 0, P4::None, 0);
+    let r_value = b.alloc_temp();
+    let r_key = b.alloc_temp();
+    for value_expr in values {
+        emit_expr(b, value_expr, r_value, ctx);
+        let next_value = b.emit_label();
+        let saw_null_label = b.emit_label();
+        b.emit_jump_to_label(Opcode::IsNull, r_value, 0, saw_null_label, P4::None, 0);
+        b.emit_op(Opcode::MakeRecord, r_value, 1, r_key, P4::None, 0);
+        b.emit_op(Opcode::IdxInsert, autoindex_cursor, r_key, 0, P4::None, 0);
+        b.emit_jump_to_label(Opcode::Goto, 0, 0, next_value, P4::None, 0);
+        b.resolve_label(saw_null_label);
+        b.emit_op(Opcode::Integer, 1, r_saw_null, 0, P4::None, 0);
+        b.resolve_label(next_value);
+    }
+    b.free_temp(r_key);
+    b.free_temp(r_value);
+    b.resolve_label(build_done);
+
+    let r_probe_key = b.alloc_temp();
+    b.emit_op(Opcode::MakeRecord, r_operand, 1, r_probe_key, P4::None, 0);
+    b.emit_jump_to_label(
+        Opcode::Found,
+        autoindex_cursor,
+        r_probe_key,
+        found_label,
+        P4::None,
+        0,
+    );
+    b.free_temp(r_probe_key);
+
+    b.emit_jump_to_label(Opcode::If, r_saw_null, 0, null_label, P4::None, 0);
+    b.emit_op(Opcode::Integer, i32::from(not), reg, 0, P4::None, 0);
+    b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+
+    b.resolve_label(found_label);
+    b.emit_op(Opcode::Integer, i32::from(!not), reg, 0, P4::None, 0);
+    b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+
+    b.resolve_label(null_label);
+    b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+    b.resolve_label(done_label);
+    b.free_temp(r_operand);
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn emit_once_materialized_in_probe_source(
+    b: &mut ProgramBuilder,
+    operand: &Expr,
+    probe_source: &InProbeSource<'_>,
+    not: bool,
+    reg: i32,
+    scan_ctx: &ScanCtx<'_>,
+    schema: &[TableSchema],
+) {
+    let r_operand = b.alloc_temp();
+    emit_expr(b, operand, r_operand, Some(scan_ctx));
+
+    let null_label = b.emit_label();
+    let found_label = b.emit_label();
+    let done_label = b.emit_label();
+    b.emit_jump_to_label(Opcode::IsNull, r_operand, 0, null_label, P4::None, 0);
+
+    let source_cursor = 8192 + b.current_addr() as i32;
+    let autoindex_cursor = 12288 + b.current_addr() as i32;
+    let r_saw_null = b.alloc_reg();
+    let build_done = b.emit_label();
+    b.emit_jump_to_label(Opcode::Once, 0, 0, build_done, P4::None, 0);
+    b.emit_op(Opcode::Integer, 0, r_saw_null, 0, P4::None, 0);
+    b.emit_op(Opcode::OpenAutoindex, autoindex_cursor, 1, 0, P4::None, 0);
+    b.emit_op(
+        Opcode::OpenRead,
+        source_cursor,
+        probe_source.table.root_page,
+        0,
+        P4::Table(probe_source.table.name.clone()),
+        0,
+    );
+
+    let build_scan_done = b.emit_label();
+    let build_scan_start = b.current_addr();
+    b.emit_jump_to_label(
+        Opcode::Rewind,
+        source_cursor,
+        0,
+        build_scan_done,
+        P4::None,
+        0,
+    );
+
+    let skip_label = probe_source.where_clause.map(|_| b.emit_label());
+    if let (Some(where_expr), Some(skip)) = (probe_source.where_clause, skip_label) {
+        emit_where_filter(
+            b,
+            where_expr,
+            source_cursor,
+            probe_source.table,
+            probe_source.table_alias,
+            schema,
+            skip,
+        );
+    }
+
+    let probe_scan = ScanCtx {
+        cursor: source_cursor,
+        table: probe_source.table,
+        table_alias: probe_source.table_alias,
+        schema: Some(schema),
+        register_base: None,
+        secondary: None,
+    };
+    let r_value = b.alloc_temp();
+    let r_key = b.alloc_temp();
+    emit_in_probe_value(b, source_cursor, probe_source, r_value, &probe_scan);
+    let next_value = b.emit_label();
+    let saw_null_label = b.emit_label();
+    b.emit_jump_to_label(Opcode::IsNull, r_value, 0, saw_null_label, P4::None, 0);
+    b.emit_op(Opcode::MakeRecord, r_value, 1, r_key, P4::None, 0);
+    b.emit_op(Opcode::IdxInsert, autoindex_cursor, r_key, 0, P4::None, 0);
+    b.emit_jump_to_label(Opcode::Goto, 0, 0, next_value, P4::None, 0);
+    b.resolve_label(saw_null_label);
+    b.emit_op(Opcode::Integer, 1, r_saw_null, 0, P4::None, 0);
+    b.resolve_label(next_value);
+
+    if let Some(skip) = skip_label {
+        b.resolve_label(skip);
+    }
+    let loop_body = (build_scan_start + 1) as i32;
+    b.emit_op(Opcode::Next, source_cursor, loop_body, 0, P4::None, 0);
+    b.resolve_label(build_scan_done);
+    b.emit_op(Opcode::Close, source_cursor, 0, 0, P4::None, 0);
+    b.free_temp(r_key);
+    b.free_temp(r_value);
+    b.resolve_label(build_done);
+
+    let r_probe_key = b.alloc_temp();
+    b.emit_op(Opcode::MakeRecord, r_operand, 1, r_probe_key, P4::None, 0);
+    b.emit_jump_to_label(
+        Opcode::Found,
+        autoindex_cursor,
+        r_probe_key,
+        found_label,
+        P4::None,
+        0,
+    );
+    b.free_temp(r_probe_key);
+
+    b.emit_jump_to_label(Opcode::If, r_saw_null, 0, null_label, P4::None, 0);
+    b.emit_op(Opcode::Integer, i32::from(not), reg, 0, P4::None, 0);
+    b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+
+    b.resolve_label(found_label);
+    b.emit_op(Opcode::Integer, i32::from(!not), reg, 0, P4::None, 0);
+    b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+
+    b.resolve_label(null_label);
+    b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+    b.resolve_label(done_label);
+    b.free_temp(r_operand);
+}
+
+fn extract_exists_rowid_probe<'a>(
+    where_expr: &'a Expr,
+    table: &'a TableSchema,
+    table_alias: Option<&'a str>,
+) -> Option<(&'a Expr, Vec<&'a Expr>)> {
+    let mut terms = Vec::new();
+    flatten_and_terms(where_expr, &mut terms);
+
+    let mut probe_expr = None;
+    let mut residual_terms = Vec::new();
+    for term in terms {
+        if let Expr::BinaryOp {
+            left,
+            op: fsqlite_ast::BinaryOp::Eq,
+            right,
+            ..
+        } = term
+        {
+            let left_rowid = matches!(
+                resolve_column_ref(left, table, table_alias),
+                Some(SortKeySource::Rowid)
+            );
+            let right_rowid = matches!(
+                resolve_column_ref(right, table, table_alias),
+                Some(SortKeySource::Rowid)
+            );
+            if left_rowid
+                && !expr_references_scan(right, table, table_alias)
+                && probe_expr.is_none()
+            {
+                probe_expr = Some(right.as_ref());
+                continue;
+            }
+            if right_rowid
+                && !expr_references_scan(left, table, table_alias)
+                && probe_expr.is_none()
+            {
+                probe_expr = Some(left.as_ref());
+                continue;
+            }
+        }
+        residual_terms.push(term);
+    }
+
+    probe_expr.map(|probe| (probe, residual_terms))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_once_materialized_exists_subquery(
+    b: &mut ProgramBuilder,
+    table: &TableSchema,
+    table_alias: Option<&str>,
+    where_clause: Option<&Expr>,
+    not: bool,
+    reg: i32,
+    outer_ctx: &ScanCtx<'_>,
+    schema: &[TableSchema],
+) {
+    let sub_cursor = outer_ctx.cursor + 128;
+    let cached_reg = b.alloc_reg();
+    let build_done = b.emit_label();
+    b.emit_jump_to_label(Opcode::Once, 0, 0, build_done, P4::None, 0);
+
+    let default_val = i32::from(not);
+    b.emit_op(Opcode::Integer, default_val, cached_reg, 0, P4::None, 0);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    b.emit_op(
+        Opcode::OpenRead,
+        sub_cursor,
+        table.root_page as i32,
+        0,
+        P4::Int(table.columns.len() as i32),
+        0,
+    );
+
+    let sub_ctx = ScanCtx {
+        cursor: sub_cursor,
+        table,
+        table_alias,
+        schema: Some(schema),
+        register_base: None,
+        secondary: None,
+    };
+
+    let scan_done = b.emit_label();
+    let rewind_addr = b.current_addr();
+    b.emit_jump_to_label(Opcode::Rewind, sub_cursor, 0, scan_done, P4::None, 0);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let loop_body = (rewind_addr + 1) as i32;
+
+    if let Some(where_expr) = where_clause {
+        let r_cond = b.alloc_temp();
+        let next_label = b.emit_label();
+        emit_expr_with_fallback(b, where_expr, r_cond, &sub_ctx, Some(outer_ctx));
+        b.emit_jump_to_label(Opcode::IfNot, r_cond, 1, next_label, P4::None, 0);
+        b.free_temp(r_cond);
+        b.emit_op(Opcode::Integer, i32::from(!not), cached_reg, 0, P4::None, 0);
+        b.emit_jump_to_label(Opcode::Goto, 0, 0, scan_done, P4::None, 0);
+        b.resolve_label(next_label);
+    } else {
+        b.emit_op(Opcode::Integer, i32::from(!not), cached_reg, 0, P4::None, 0);
+        b.emit_jump_to_label(Opcode::Goto, 0, 0, scan_done, P4::None, 0);
+    }
+
+    b.emit_op(Opcode::Next, sub_cursor, loop_body, 0, P4::None, 0);
+    b.resolve_label(scan_done);
+    b.emit_op(Opcode::Close, sub_cursor, 0, 0, P4::None, 0);
+    b.resolve_label(build_done);
+    b.emit_op(Opcode::Copy, cached_reg, reg, 0, P4::None, 0);
+}
+
+#[allow(clippy::too_many_lines)]
+fn emit_exists_subquery(
+    b: &mut ProgramBuilder,
+    subquery: &SelectStatement,
+    not: bool,
+    reg: i32,
+    outer_ctx: &ScanCtx<'_>,
+    schema: &[TableSchema],
+) {
+    // Extract the subquery's FROM table and WHERE clause.
+    let (from, where_clause) = match &subquery.body.select {
+        SelectCore::Select {
+            from, where_clause, ..
+        } => (from, where_clause),
+        _ => {
+            let val = i32::from(not);
+            b.emit_op(Opcode::Integer, val, reg, 0, P4::None, 0);
+            return;
+        }
+    };
+
+    let from_clause = match from {
+        Some(f) => f,
+        None => {
+            // EXISTS on a no-FROM query like `EXISTS (SELECT 1)` — always true.
+            let val = i32::from(!not);
+            b.emit_op(Opcode::Integer, val, reg, 0, P4::None, 0);
+            return;
+        }
+    };
+
+    let (table_name, sub_alias) = match &from_clause.source {
+        fsqlite_ast::TableOrSubquery::Table { name, alias, .. } => (&name.name, alias.as_deref()),
+        _ => {
+            let val = i32::from(not);
+            b.emit_op(Opcode::Integer, val, reg, 0, P4::None, 0);
+            return;
+        }
+    };
+
+    let table = match find_table(schema, table_name) {
+        Ok(t) => t,
+        Err(_) => {
+            let val = i32::from(not);
+            b.emit_op(Opcode::Integer, val, reg, 0, P4::None, 0);
+            return;
+        }
+    };
+
+    // Use cursor offset far from the main scan cursors.
+    let sub_cursor = outer_ctx.cursor + 128;
+    let done_label = b.emit_label();
+
+    // Default result: 0 (not found) for EXISTS, 1 for NOT EXISTS.
+    let default_val = i32::from(not);
+    b.emit_op(Opcode::Integer, default_val, reg, 0, P4::None, 0);
+
+    // Open a read cursor on the subquery table.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    b.emit_op(
+        Opcode::OpenRead,
+        sub_cursor,
+        table.root_page as i32,
+        0,
+        P4::Int(table.columns.len() as i32),
+        0,
+    );
+
+    let sub_ctx = ScanCtx {
+        cursor: sub_cursor,
+        table,
+        table_alias: sub_alias,
+        schema: Some(schema),
+        register_base: None,
+        secondary: None,
+    };
+
+    if subquery.with.is_none()
+        && subquery.body.compounds.is_empty()
+        && subquery.order_by.is_empty()
+        && subquery.limit.is_none()
+        && from_clause.joins.is_empty()
+        && matches!(
+            &subquery.body.select,
+            SelectCore::Select {
+                group_by,
+                having,
+                windows,
+                ..
+            } if group_by.is_empty() && having.is_none() && windows.is_empty()
+        )
+        && can_use_once_materialized_exists_subquery(
+            where_clause.as_deref(),
+            table,
+            sub_alias,
+            outer_ctx,
+        )
+    {
+        emit_once_materialized_exists_subquery(
+            b,
+            table,
+            sub_alias,
+            where_clause.as_deref(),
+            not,
+            reg,
+            outer_ctx,
+            schema,
+        );
+        return;
+    }
+
+    if let Some(where_expr) = where_clause
+        && let Some((probe_expr, residual_terms)) =
+            extract_exists_rowid_probe(where_expr, table, sub_alias)
+    {
+        let probe_reg = b.alloc_temp();
+        emit_expr_with_fallback(b, probe_expr, probe_reg, &sub_ctx, Some(outer_ctx));
+        b.emit_jump_to_label(Opcode::IsNull, probe_reg, 0, done_label, P4::None, 0);
+        b.emit_jump_to_label(
+            Opcode::SeekRowid,
+            sub_cursor,
+            probe_reg,
+            done_label,
+            P4::None,
+            0,
+        );
+        b.free_temp(probe_reg);
+
+        for residual_term in residual_terms {
+            let residual_reg = b.alloc_temp();
+            emit_expr_with_fallback(b, residual_term, residual_reg, &sub_ctx, Some(outer_ctx));
+            b.emit_jump_to_label(Opcode::IfNot, residual_reg, 1, done_label, P4::None, 0);
+            b.free_temp(residual_reg);
+        }
+
+        let found_val = i32::from(!not);
+        b.emit_op(Opcode::Integer, found_val, reg, 0, P4::None, 0);
+        b.resolve_label(done_label);
+        b.emit_op(Opcode::Close, sub_cursor, 0, 0, P4::None, 0);
+        return;
+    }
+
+    let rewind_addr = b.current_addr();
+    b.emit_jump_to_label(Opcode::Rewind, sub_cursor, 0, done_label, P4::None, 0);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let loop_body = (rewind_addr + 1) as i32;
+
+    // Apply WHERE filter if present.
+    if let Some(where_expr) = where_clause {
+        let r_cond = b.alloc_temp();
+        emit_expr_with_fallback(b, where_expr, r_cond, &sub_ctx, Some(outer_ctx));
+        let next_label = b.emit_label();
+        b.emit_jump_to_label(Opcode::IfNot, r_cond, 1, next_label, P4::None, 0);
+        b.free_temp(r_cond);
+
+        // Row matches WHERE — found.
+        let found_val = i32::from(!not);
+        b.emit_op(Opcode::Integer, found_val, reg, 0, P4::None, 0);
+        b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+
+        b.resolve_label(next_label);
+    } else {
+        // No WHERE — if any row exists, result is found.
+        let found_val = i32::from(!not);
+        b.emit_op(Opcode::Integer, found_val, reg, 0, P4::None, 0);
+        b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+    }
+
+    // Next row.
+    b.emit_op(Opcode::Next, sub_cursor, loop_body, 0, P4::None, 0);
+
+    // Fall through: no row matched.
+    b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+
+    b.resolve_label(done_label);
+    b.emit_op(Opcode::Close, sub_cursor, 0, 0, P4::None, 0);
+}
+
+/// Emit bytecode for a scalar subquery expression `(SELECT expr FROM ...)`.
+///
+/// Evaluates the subquery and places the first result value into `reg`.
+/// If the subquery returns no rows, `reg` is set to NULL.
+#[allow(clippy::too_many_lines)]
+fn emit_scalar_subquery(
+    b: &mut ProgramBuilder,
+    subquery: &SelectStatement,
+    reg: i32,
+    outer_ctx: &ScanCtx<'_>,
+    schema: &[TableSchema],
+) {
+    let (columns, from, where_clause, group_by, having) = match &subquery.body.select {
+        SelectCore::Select {
+            columns,
+            from,
+            where_clause,
+            group_by,
+            having,
+            ..
+        } => (columns, from, where_clause, group_by, having),
+        _ => {
+            b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+            return;
+        }
+    };
+
+    // No-FROM scalar subquery: `(SELECT 1)`, `(SELECT 1 + 2)`.
+    if from.is_none() {
+        if let Some(ResultColumn::Expr { expr, .. }) = columns.first() {
+            emit_expr(b, expr, reg, Some(outer_ctx));
+            return;
+        }
+        b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+        return;
+    }
+
+    let from_clause = from.as_ref().expect("checked is_none() above");
+    let (table_name, sub_alias) = match &from_clause.source {
+        fsqlite_ast::TableOrSubquery::Table { name, alias, .. } => (&name.name, alias.as_deref()),
+        _ => {
+            b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+            return;
+        }
+    };
+
+    let table = match find_table(schema, table_name) {
+        Ok(t) => t,
+        Err(_) => {
+            b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+            return;
+        }
+    };
+
+    // Use a unique temp cursor id so multiple scalar subqueries in the same
+    // statement do not collide, and keep it open across outer rows.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let sub_cursor = 16_384 + b.current_addr() as i32;
+
+    let done_label = b.emit_label();
+
+    // Default: NULL (subquery returns no rows).
+    b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+
+    let open_done = b.emit_label();
+    b.emit_jump_to_label(Opcode::Once, 0, 0, open_done, P4::None, 0);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    b.emit_op(
+        Opcode::OpenRead,
+        sub_cursor,
+        table.root_page as i32,
+        0,
+        P4::Int(table.columns.len() as i32),
+        0,
+    );
+    b.resolve_label(open_done);
+
+    let sub_ctx = ScanCtx {
+        cursor: sub_cursor,
+        table,
+        table_alias: sub_alias,
+        schema: Some(schema),
+        register_base: None,
+        secondary: None,
+    };
+
+    // Check if this is an aggregate query (e.g., SELECT MAX(x) FROM t).
+    let is_agg = has_aggregate_columns(columns);
+
+    if is_agg && group_by.is_empty() {
+        if is_simple_count_star(columns) && having.is_none() {
+            emit_scalar_count_star_subquery(b, &sub_ctx, outer_ctx, where_clause.as_deref(), reg);
+        } else {
+            // Simple aggregate subquery without GROUP BY:
+            // e.g., (SELECT COUNT(*) FROM t), (SELECT MAX(x) FROM t WHERE ...)
+            emit_scalar_aggregate_subquery(
+                b,
+                columns,
+                &sub_ctx,
+                outer_ctx,
+                where_clause.as_deref(),
+                reg,
+                done_label,
+            );
+        }
+    } else {
+        if let Some(where_expr) = where_clause
+            && let Some((probe_expr, residual_terms)) =
+                extract_exists_rowid_probe(where_expr, table, sub_alias)
+        {
+            let probe_reg = b.alloc_temp();
+            emit_expr_with_fallback(b, probe_expr, probe_reg, &sub_ctx, Some(outer_ctx));
+            b.emit_jump_to_label(Opcode::IsNull, probe_reg, 0, done_label, P4::None, 0);
+            b.emit_jump_to_label(
+                Opcode::SeekRowid,
+                sub_cursor,
+                probe_reg,
+                done_label,
+                P4::None,
+                0,
+            );
+            b.free_temp(probe_reg);
+
+            for residual_term in residual_terms {
+                let residual_reg = b.alloc_temp();
+                emit_expr_with_fallback(b, residual_term, residual_reg, &sub_ctx, Some(outer_ctx));
+                b.emit_jump_to_label(Opcode::IfNot, residual_reg, 1, done_label, P4::None, 0);
+                b.free_temp(residual_reg);
+            }
+
+            if let Some(ResultColumn::Expr { expr, .. }) = columns.first() {
+                emit_expr_with_fallback(b, expr, reg, &sub_ctx, Some(outer_ctx));
+            }
+
+            b.resolve_label(done_label);
+            return;
+        }
+
+        // Non-aggregate scalar subquery: grab first row's first column value.
+        let rewind_addr = b.current_addr();
+        b.emit_jump_to_label(Opcode::Rewind, sub_cursor, 0, done_label, P4::None, 0);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let loop_body = (rewind_addr + 1) as i32;
+
+        // Apply WHERE filter.
+        let next_label = b.emit_label();
+        if let Some(where_expr) = where_clause {
+            let r_cond = b.alloc_temp();
+            emit_expr_with_fallback(b, where_expr, r_cond, &sub_ctx, Some(outer_ctx));
+            b.emit_jump_to_label(Opcode::IfNot, r_cond, 1, next_label, P4::None, 0);
+            b.free_temp(r_cond);
+        }
+
+        // Evaluate the first result column expression.
+        if let Some(ResultColumn::Expr { expr, .. }) = columns.first() {
+            emit_expr_with_fallback(b, expr, reg, &sub_ctx, Some(outer_ctx));
+        }
+
+        // Got our value — jump to done (only need one row).
+        b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+
+        b.resolve_label(next_label);
+        b.emit_op(Opcode::Next, sub_cursor, loop_body, 0, P4::None, 0);
+    }
+
+    b.resolve_label(done_label);
+}
+
+fn emit_scalar_count_star_subquery(
+    b: &mut ProgramBuilder,
+    sub_ctx: &ScanCtx<'_>,
+    outer_ctx: &ScanCtx<'_>,
+    where_clause: Option<&Expr>,
+    reg: i32,
+) {
+    if where_clause.is_none() {
+        b.emit_op(Opcode::Count, sub_ctx.cursor, reg, 0, P4::None, 0);
+        return;
+    }
+
+    b.emit_op(Opcode::Integer, 0, reg, 0, P4::None, 0);
+
+    let finalize_label = b.emit_label();
+    let rewind_addr = b.current_addr();
+    b.emit_jump_to_label(
+        Opcode::Rewind,
+        sub_ctx.cursor,
+        0,
+        finalize_label,
+        P4::None,
+        0,
+    );
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let loop_body = (rewind_addr + 1) as i32;
+
+    let skip_label = b.emit_label();
+    if let Some(where_expr) = where_clause {
+        let r_cond = b.alloc_temp();
+        emit_expr_with_fallback(b, where_expr, r_cond, sub_ctx, Some(outer_ctx));
+        b.emit_jump_to_label(Opcode::IfNot, r_cond, 1, skip_label, P4::None, 0);
+        b.free_temp(r_cond);
+    }
+
+    b.emit_op(Opcode::AddImm, reg, 1, 0, P4::None, 0);
+    b.resolve_label(skip_label);
+    b.emit_op(Opcode::Next, sub_ctx.cursor, loop_body, 0, P4::None, 0);
+    b.resolve_label(finalize_label);
+}
+
+/// Emit bytecode for a simple aggregate scalar subquery (no GROUP BY).
+///
+/// Handles `(SELECT COUNT(*) FROM t)`, `(SELECT MAX(x) FROM t WHERE ...)`, etc.
+fn emit_scalar_aggregate_subquery(
+    b: &mut ProgramBuilder,
+    columns: &[ResultColumn],
+    sub_ctx: &ScanCtx<'_>,
+    outer_ctx: &ScanCtx<'_>,
+    where_clause: Option<&Expr>,
+    reg: i32,
+    _done_label: crate::Label,
+) {
+    // Parse the aggregate columns.
+    let Ok(agg_cols) = parse_aggregate_columns(columns, sub_ctx.table) else {
+        return;
+    };
+
+    if agg_cols.is_empty() {
+        return;
+    }
+
+    let accum_reg = b.alloc_temp();
+    b.emit_op(Opcode::Null, 0, accum_reg, 0, P4::None, 0);
+
+    let finalize_label = b.emit_label();
+    let rewind_addr = b.current_addr();
+    b.emit_jump_to_label(
+        Opcode::Rewind,
+        sub_ctx.cursor,
+        0,
+        finalize_label,
+        P4::None,
+        0,
+    );
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let loop_body = (rewind_addr + 1) as i32;
+
+    // Apply WHERE filter.
+    let skip_label = b.emit_label();
+    if let Some(where_expr) = where_clause {
+        let r_cond = b.alloc_temp();
+        emit_expr_with_fallback(b, where_expr, r_cond, sub_ctx, Some(outer_ctx));
+        b.emit_jump_to_label(Opcode::IfNot, r_cond, 1, skip_label, P4::None, 0);
+        b.free_temp(r_cond);
+    }
+
+    // Separate real (hidden) aggregates from the output entry (which may
+    // have a wrapper_expr for complex expressions like COUNT(*) - 1).
+    let real_aggs: Vec<&AggColumn> = agg_cols.iter().filter(|a| !a.name.is_empty()).collect();
+    let output_entry = agg_cols.last();
+
+    // Allocate one accumulator per real aggregate.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let accum_base = if real_aggs.len() > 1 {
+        b.alloc_regs(real_aggs.len() as i32)
+    } else {
+        accum_reg
+    };
+
+    // Initialize all accumulators to NULL.
+    for i in 0..real_aggs.len() {
+        #[allow(clippy::cast_possible_wrap)]
+        b.emit_op(Opcode::Null, 0, accum_base + i as i32, 0, P4::None, 0);
+    }
+
+    // AggStep for each real aggregate in the loop body.
+    for (i, agg) in real_aggs.iter().enumerate() {
+        let total_args = agg.num_args.max(1);
+        let arg_base = b.alloc_regs(total_args);
+        if agg.num_args > 0 {
+            if agg.arg_is_rowid {
+                b.emit_op(Opcode::Rowid, sub_ctx.cursor, arg_base, 0, P4::None, 0);
+            } else if let Some(expr) = &agg.arg_expr {
+                emit_expr_with_fallback(b, expr, arg_base, sub_ctx, Some(outer_ctx));
+            } else if let Some(col_idx) = agg.arg_col_index {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                b.emit_op(
+                    Opcode::Column,
+                    sub_ctx.cursor,
+                    col_idx as i32,
+                    arg_base,
+                    P4::None,
+                    0,
+                );
+            }
+            for (j, extra_expr) in agg.extra_args.iter().enumerate() {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                let extra_reg = arg_base + 1 + j as i32;
+                emit_expr_with_fallback(b, extra_expr, extra_reg, sub_ctx, Some(outer_ctx));
+            }
+        }
+
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        {
+            let num_args = agg.num_args as u16;
+            let distinct_flag = i32::from(agg.distinct);
+            b.emit_op(
+                Opcode::AggStep,
+                distinct_flag,
+                arg_base,
+                accum_base + i as i32,
+                P4::FuncName(agg.name.clone()),
+                num_args,
+            );
+        }
+    }
+
+    b.resolve_label(skip_label);
+    b.emit_op(Opcode::Next, sub_ctx.cursor, loop_body, 0, P4::None, 0);
+
+    // Finalize all accumulators.
+    b.resolve_label(finalize_label);
+    for (i, agg) in real_aggs.iter().enumerate() {
+        #[allow(clippy::cast_possible_wrap)]
+        b.emit_op(
+            Opcode::AggFinal,
+            accum_base + i as i32,
+            agg.num_args,
+            0,
+            P4::FuncName(agg.name.clone()),
+            0,
+        );
+    }
+
+    // Evaluate wrapper expression or copy the single result.
+    if let Some(entry) = output_entry {
+        if let Some(ref wrapper) = entry.wrapper_expr {
+            if entry.multi_agg_indices.is_empty() {
+                // Simple wrapper (e.g. COUNT(*) - 1): evaluate the wrapper
+                // expression with __agg_result__ mapped to accum_reg.
+                emit_simple_agg_wrapper(b, wrapper, reg, accum_reg);
+            } else {
+                emit_multi_agg_wrapper(b, wrapper, reg, accum_base, &entry.multi_agg_indices);
+            }
+        } else {
+            b.emit_op(Opcode::Copy, accum_base, reg, 0, P4::None, 0);
+        }
+    } else {
+        b.emit_op(Opcode::Copy, accum_base, reg, 0, P4::None, 0);
+    }
+
+    if real_aggs.len() > 1 {
+        // Free the extra accumulators (accum_reg was already allocated).
+    }
+    b.free_temp(accum_reg);
+}
+
+/// Evaluate an expression with fallback context for correlated subqueries.
+///
+/// For column references, tries the inner (subquery) context first; if the
+/// column doesn't belong to the inner table, falls back to the outer context.
+/// For compound expressions, recurses so nested column refs get fallback logic.
+fn emit_expr_with_fallback(
+    b: &mut ProgramBuilder,
+    expr: &Expr,
+    reg: i32,
+    inner_ctx: &ScanCtx<'_>,
+    outer_ctx: Option<&ScanCtx<'_>>,
+) {
+    match expr {
+        Expr::Column(col_ref, _) => {
+            if resolve_column_in_ctx(col_ref, inner_ctx).is_some() {
+                emit_expr(b, expr, reg, Some(inner_ctx));
+            } else if let Some(outer) = outer_ctx {
+                emit_expr(b, expr, reg, Some(outer));
+            } else {
+                b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+            }
+        }
+        Expr::BinaryOp {
+            left, op, right, ..
+        } => {
+            // Recursively resolve column refs in children, then apply the op.
+            let r_left = b.alloc_temp();
+            let r_right = b.alloc_temp();
+            emit_expr_with_fallback(b, left, r_left, inner_ctx, outer_ctx);
+            emit_expr_with_fallback(b, right, r_right, inner_ctx, outer_ctx);
+
+            if matches!(
+                op,
+                fsqlite_ast::BinaryOp::Eq
+                    | fsqlite_ast::BinaryOp::Ne
+                    | fsqlite_ast::BinaryOp::Lt
+                    | fsqlite_ast::BinaryOp::Le
+                    | fsqlite_ast::BinaryOp::Gt
+                    | fsqlite_ast::BinaryOp::Ge
+            ) {
+                let cmp_opcode = match op {
+                    fsqlite_ast::BinaryOp::Eq => Opcode::Eq,
+                    fsqlite_ast::BinaryOp::Ne => Opcode::Ne,
+                    fsqlite_ast::BinaryOp::Lt => Opcode::Lt,
+                    fsqlite_ast::BinaryOp::Le => Opcode::Le,
+                    fsqlite_ast::BinaryOp::Gt => Opcode::Gt,
+                    fsqlite_ast::BinaryOp::Ge => Opcode::Ge,
+                    _ => unreachable!(),
+                };
+                // SQL three-valued logic: if either operand is NULL, result is NULL.
+                let null_label = b.emit_label();
+                let true_label = b.emit_label();
+                let done_label = b.emit_label();
+                b.emit_jump_to_label(Opcode::IsNull, r_left, 0, null_label, P4::None, 0);
+                b.emit_jump_to_label(Opcode::IsNull, r_right, 0, null_label, P4::None, 0);
+                b.emit_jump_to_label(cmp_opcode, r_right, r_left, true_label, P4::None, 0);
+                b.emit_op(Opcode::Integer, 0, reg, 0, P4::None, 0);
+                b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+                b.resolve_label(true_label);
+                b.emit_op(Opcode::Integer, 1, reg, 0, P4::None, 0);
+                b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+                b.resolve_label(null_label);
+                b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+                b.resolve_label(done_label);
+            } else if matches!(op, fsqlite_ast::BinaryOp::Is | fsqlite_ast::BinaryOp::IsNot) {
+                if let Some((p3, p4)) = is_true_false_params(*op, right) {
+                    b.emit_op(Opcode::IsTrue, r_left, reg, p3, p4, 0);
+                } else {
+                    let (cmp_opcode, flag) = match op {
+                        fsqlite_ast::BinaryOp::Is => (Opcode::Eq, 0x80_u16),
+                        _ => (Opcode::Ne, 0x80_u16),
+                    };
+                    let true_label = b.emit_label();
+                    let done_label = b.emit_label();
+                    b.emit_jump_to_label(cmp_opcode, r_right, r_left, true_label, P4::None, flag);
+                    b.emit_op(Opcode::Integer, 0, reg, 0, P4::None, 0);
+                    b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+                    b.resolve_label(true_label);
+                    b.emit_op(Opcode::Integer, 1, reg, 0, P4::None, 0);
+                    b.resolve_label(done_label);
+                }
+            } else {
+                // Arithmetic / logical / bitwise.
+                // VDBE convention: P3 = P2 op P1 (P1=rhs, P2=lhs).
+                let vdbe_op = binary_op_to_opcode(*op);
+                b.emit_op(vdbe_op, r_right, r_left, reg, P4::None, 0);
+            }
+            b.free_temp(r_left);
+            b.free_temp(r_right);
+        }
+        Expr::UnaryOp {
+            op, expr: inner, ..
+        } => {
+            emit_expr_with_fallback(b, inner, reg, inner_ctx, outer_ctx);
+            match op {
+                fsqlite_ast::UnaryOp::Negate => {
+                    let tmp = b.alloc_temp();
+                    b.emit_op(Opcode::Integer, -1, tmp, 0, P4::None, 0);
+                    b.emit_op(Opcode::Multiply, tmp, reg, reg, P4::None, 0);
+                    b.free_temp(tmp);
+                }
+                fsqlite_ast::UnaryOp::Plus => {}
+                fsqlite_ast::UnaryOp::BitNot => {
+                    b.emit_op(Opcode::BitNot, reg, reg, 0, P4::None, 0);
+                }
+                fsqlite_ast::UnaryOp::Not => {
+                    b.emit_op(Opcode::Not, reg, reg, 0, P4::None, 0);
+                }
+            }
+        }
+        // ── BETWEEN ─────────────────────────────────────────────────────
+        Expr::Between {
+            expr: operand,
+            low,
+            high,
+            not,
+            ..
+        } => {
+            let r_operand = b.alloc_temp();
+            let r_low = b.alloc_temp();
+            let r_high = b.alloc_temp();
+            emit_expr_with_fallback(b, operand, r_operand, inner_ctx, outer_ctx);
+            emit_expr_with_fallback(b, low, r_low, inner_ctx, outer_ctx);
+            emit_expr_with_fallback(b, high, r_high, inner_ctx, outer_ctx);
+            let false_label = b.emit_label();
+            let null_label = b.emit_label();
+            let done_label = b.emit_label();
+            b.emit_jump_to_label(Opcode::IsNull, r_operand, 0, null_label, P4::None, 0);
+            b.emit_jump_to_label(Opcode::Lt, r_low, r_operand, false_label, P4::None, 0);
+            b.emit_jump_to_label(Opcode::Gt, r_high, r_operand, false_label, P4::None, 0);
+            b.emit_jump_to_label(Opcode::IsNull, r_low, 0, null_label, P4::None, 0);
+            b.emit_jump_to_label(Opcode::IsNull, r_high, 0, null_label, P4::None, 0);
+            b.emit_op(Opcode::Integer, i32::from(!*not), reg, 0, P4::None, 0);
+            b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+            b.resolve_label(false_label);
+            b.emit_op(Opcode::Integer, i32::from(*not), reg, 0, P4::None, 0);
+            b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+            b.resolve_label(null_label);
+            b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+            b.resolve_label(done_label);
+            b.free_temp(r_high);
+            b.free_temp(r_low);
+            b.free_temp(r_operand);
+        }
+        // ── LIKE / GLOB ────────────────────────────────────────────────
+        Expr::Like {
+            expr: operand,
+            pattern,
+            not,
+            escape,
+            op: like_op,
+            ..
+        } => {
+            if matches!(like_op, fsqlite_ast::LikeOp::Like)
+                && escape.is_none()
+                && let Expr::Literal(Literal::String(pattern_text), _) = pattern.as_ref()
+                && let Some((kind, literal)) = classify_sql_like_fast_path(pattern_text, None)
+            {
+                emit_expr_with_fallback(b, operand, reg, inner_ctx, outer_ctx);
+                b.emit_op(
+                    Opcode::LikeConstFast,
+                    reg,
+                    reg,
+                    kind.opcode_tag(),
+                    P4::Str(literal.to_owned()),
+                    u16::from(*not),
+                );
+                return;
+            }
+
+            let func_name = match like_op {
+                fsqlite_ast::LikeOp::Like => "LIKE",
+                fsqlite_ast::LikeOp::Glob => "GLOB",
+                fsqlite_ast::LikeOp::Match => "MATCH",
+                fsqlite_ast::LikeOp::Regexp => "REGEXP",
+            };
+            let nargs: u16 = if escape.is_some() { 3 } else { 2 };
+            let arg_base = b.alloc_regs(i32::from(nargs));
+            // like(pattern, string [, escape])
+            emit_expr_with_fallback(b, pattern, arg_base, inner_ctx, outer_ctx);
+            emit_expr_with_fallback(b, operand, arg_base + 1, inner_ctx, outer_ctx);
+            if let Some(esc) = escape {
+                emit_expr_with_fallback(b, esc, arg_base + 2, inner_ctx, outer_ctx);
+            }
+            b.emit_op(
+                Opcode::PureFunc,
+                0,
+                arg_base,
+                reg,
+                P4::FuncName(func_name.to_owned()),
+                nargs,
+            );
+            if *not {
+                b.emit_op(Opcode::Not, reg, reg, 0, P4::None, 0);
+            }
+        }
+        // ── Function call ──────────────────────────────────────────────
+        Expr::FunctionCall { name, args, .. } => {
+            let canon = name.to_ascii_uppercase();
+            match args {
+                fsqlite_ast::FunctionArgs::Star => {
+                    b.emit_op(Opcode::PureFunc, 0, 0, reg, P4::FuncName(canon), 0);
+                }
+                fsqlite_ast::FunctionArgs::List(arg_list) => {
+                    let Ok(nargs) = u16::try_from(arg_list.len()) else {
+                        b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+                        return;
+                    };
+                    let arg_base = b.alloc_regs(i32::from(nargs));
+                    for (i, arg_expr) in arg_list.iter().enumerate() {
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                        emit_expr_with_fallback(
+                            b,
+                            arg_expr,
+                            arg_base + i as i32,
+                            inner_ctx,
+                            outer_ctx,
+                        );
+                    }
+                    b.emit_op(
+                        Opcode::PureFunc,
+                        0,
+                        arg_base,
+                        reg,
+                        P4::FuncName(canon),
+                        nargs,
+                    );
+                }
+            }
+        }
+        // ── CASE ───────────────────────────────────────────────────────
+        Expr::Case {
+            operand,
+            whens,
+            else_expr,
+            ..
+        } => {
+            let done_label = b.emit_label();
+            if let Some(op_expr) = operand {
+                let r_op = b.alloc_temp();
+                emit_expr_with_fallback(b, op_expr, r_op, inner_ctx, outer_ctx);
+                for (when_expr, then_expr) in whens {
+                    let r_when = b.alloc_temp();
+                    emit_expr_with_fallback(b, when_expr, r_when, inner_ctx, outer_ctx);
+                    let next = b.emit_label();
+                    b.emit_jump_to_label(Opcode::Ne, r_when, r_op, next, P4::None, 0);
+                    b.free_temp(r_when);
+                    emit_expr_with_fallback(b, then_expr, reg, inner_ctx, outer_ctx);
+                    b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+                    b.resolve_label(next);
+                }
+                b.free_temp(r_op);
+            } else {
+                for (when_expr, then_expr) in whens {
+                    let r_when = b.alloc_temp();
+                    emit_expr_with_fallback(b, when_expr, r_when, inner_ctx, outer_ctx);
+                    let next = b.emit_label();
+                    b.emit_jump_to_label(Opcode::IfNot, r_when, 0, next, P4::None, 0);
+                    b.free_temp(r_when);
+                    emit_expr_with_fallback(b, then_expr, reg, inner_ctx, outer_ctx);
+                    b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+                    b.resolve_label(next);
+                }
+            }
+            if let Some(el) = else_expr {
+                emit_expr_with_fallback(b, el, reg, inner_ctx, outer_ctx);
+            } else {
+                b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+            }
+            b.resolve_label(done_label);
+        }
+        // ── IN (list) ──────────────────────────────────────────────────
+        Expr::In {
+            expr: operand,
+            set,
+            not,
+            ..
+        } => {
+            if let fsqlite_ast::InSet::List(values) = set {
+                if values.is_empty() {
+                    b.emit_op(Opcode::Integer, i32::from(*not), reg, 0, P4::None, 0);
+                } else {
+                    let r_op = b.alloc_temp();
+                    emit_expr_with_fallback(b, operand, r_op, inner_ctx, outer_ctx);
+                    let found_label = b.emit_label();
+                    let done_label = b.emit_label();
+                    let null_label = b.emit_label();
+                    b.emit_jump_to_label(Opcode::IsNull, r_op, 0, null_label, P4::None, 0);
+                    for val in values {
+                        let r_val = b.alloc_temp();
+                        emit_expr_with_fallback(b, val, r_val, inner_ctx, outer_ctx);
+                        b.emit_jump_to_label(Opcode::IsNull, r_val, 0, null_label, P4::None, 0);
+                        b.emit_jump_to_label(Opcode::Eq, r_val, r_op, found_label, P4::None, 0);
+                        b.free_temp(r_val);
+                    }
+                    b.emit_op(Opcode::Integer, i32::from(*not), reg, 0, P4::None, 0);
+                    b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+                    b.resolve_label(found_label);
+                    b.emit_op(Opcode::Integer, i32::from(!*not), reg, 0, P4::None, 0);
+                    b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+                    b.resolve_label(null_label);
+                    b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+                    b.resolve_label(done_label);
+                    b.free_temp(r_op);
+                }
+            } else {
+                // Subquery / table IN — delegate to inner context.
+                emit_expr(b, expr, reg, Some(inner_ctx));
+            }
+        }
+        // ── CAST ───────────────────────────────────────────────────────
+        Expr::Cast {
+            expr: inner,
+            type_name,
+            ..
+        } => {
+            emit_expr_with_fallback(b, inner, reg, inner_ctx, outer_ctx);
+            let affinity = type_name_to_affinity(type_name);
+            if affinity != 0 {
+                b.emit_op(
+                    Opcode::Affinity,
+                    reg,
+                    1,
+                    0,
+                    P4::Str(String::from(affinity as char)),
+                    0,
+                );
+            }
+        }
+        // ── IS [NOT] NULL ──────────────────────────────────────────────
+        Expr::IsNull {
+            expr: inner, not, ..
+        } => {
+            emit_expr_with_fallback(b, inner, reg, inner_ctx, outer_ctx);
+            let lbl_null = b.emit_label();
+            let lbl_done = b.emit_label();
+            b.emit_jump_to_label(Opcode::IsNull, reg, 0, lbl_null, P4::None, 0);
+            let val_not_null = i32::from(*not);
+            let val_null = i32::from(!*not);
+            b.emit_op(Opcode::Integer, val_not_null, reg, 0, P4::None, 0);
+            b.emit_jump_to_label(Opcode::Goto, 0, 0, lbl_done, P4::None, 0);
+            b.resolve_label(lbl_null);
+            b.emit_op(Opcode::Integer, val_null, reg, 0, P4::None, 0);
+            b.resolve_label(lbl_done);
+        }
+        // ── Collate ────────────────────────────────────────────────────
+        Expr::Collate { expr: inner, .. } => {
+            emit_expr_with_fallback(b, inner, reg, inner_ctx, outer_ctx);
+        }
+        // ── Remaining types: delegate to inner context ─────────────────
+        _ => {
+            emit_expr(b, expr, reg, Some(inner_ctx));
+        }
+    }
+}
+
+/// Check if a column reference resolves in a given scan context.
+fn resolve_column_in_ctx(col_ref: &ColumnRef, ctx: &ScanCtx<'_>) -> Option<usize> {
+    // Qualified: table.column (case-insensitive per SQL standard)
+    if let Some(ref table_name) = col_ref.table {
+        // When the table has an alias, only the alias matches qualified
+        // references. This prevents `inventory.col` from resolving to
+        // `FROM inventory i2` — only `i2.col` should match.
+        let table_match = if let Some(alias) = ctx.table_alias {
+            table_name.eq_ignore_ascii_case(alias)
+        } else {
+            table_name.eq_ignore_ascii_case(&ctx.table.name)
+        };
+        if table_match {
+            return ctx
+                .table
+                .columns
+                .iter()
+                .position(|c| c.name.eq_ignore_ascii_case(&col_ref.column));
+        }
+        return None;
+    }
+    // Unqualified: just column name
+    ctx.table
+        .columns
+        .iter()
+        .position(|c| c.name.eq_ignore_ascii_case(&col_ref.column))
+}
+
+/// Map an AST `BinaryOp` to the corresponding VDBE opcode.
+fn binary_op_to_opcode(op: fsqlite_ast::BinaryOp) -> Opcode {
+    match op {
+        fsqlite_ast::BinaryOp::Add => Opcode::Add,
+        fsqlite_ast::BinaryOp::Subtract => Opcode::Subtract,
+        fsqlite_ast::BinaryOp::Multiply => Opcode::Multiply,
+        fsqlite_ast::BinaryOp::Divide => Opcode::Divide,
+        fsqlite_ast::BinaryOp::Modulo => Opcode::Remainder,
+        fsqlite_ast::BinaryOp::Concat => Opcode::Concat,
+        fsqlite_ast::BinaryOp::BitAnd => Opcode::BitAnd,
+        fsqlite_ast::BinaryOp::BitOr => Opcode::BitOr,
+        fsqlite_ast::BinaryOp::ShiftLeft => Opcode::ShiftLeft,
+        fsqlite_ast::BinaryOp::ShiftRight => Opcode::ShiftRight,
+        fsqlite_ast::BinaryOp::And => Opcode::And,
+        fsqlite_ast::BinaryOp::Or => Opcode::Or,
+        // Comparison ops use jump instructions; map to Eq as placeholder.
+        fsqlite_ast::BinaryOp::Eq
+        | fsqlite_ast::BinaryOp::Ne
+        | fsqlite_ast::BinaryOp::Lt
+        | fsqlite_ast::BinaryOp::Le
+        | fsqlite_ast::BinaryOp::Gt
+        | fsqlite_ast::BinaryOp::Ge
+        | fsqlite_ast::BinaryOp::Is
+        | fsqlite_ast::BinaryOp::IsNot => Opcode::Eq, // handled separately
+    }
+}
+
+/// Emit bytecode for a binary operation expression.
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn emit_binary_op(
+    b: &mut ProgramBuilder,
+    left: &Expr,
+    op: fsqlite_ast::BinaryOp,
+    right: &Expr,
+    reg: i32,
+    ctx: Option<&ScanCtx<'_>>,
+) {
+    // For comparison operators, emit a conditional jump pattern that
+    // produces 1 (true) or 0 (false) as an integer result.
+    if matches!(
+        op,
+        fsqlite_ast::BinaryOp::Eq
+            | fsqlite_ast::BinaryOp::Ne
+            | fsqlite_ast::BinaryOp::Lt
+            | fsqlite_ast::BinaryOp::Le
+            | fsqlite_ast::BinaryOp::Gt
+            | fsqlite_ast::BinaryOp::Ge
+    ) {
+        emit_comparison(b, left, op, right, reg, ctx);
+        return;
+    }
+
+    if matches!(op, fsqlite_ast::BinaryOp::Is | fsqlite_ast::BinaryOp::IsNot) {
+        emit_is_comparison(b, left, op, right, reg, ctx);
+        return;
+    }
+
+    // Arithmetic / logical / bitwise: evaluate left into reg, right into tmp,
+    // then apply the opcode.
+    let tmp = b.alloc_temp();
+    emit_expr(b, left, reg, ctx);
+    emit_expr(b, right, tmp, ctx);
+    let opcode = binary_op_to_opcode(op);
+    // VDBE arithmetic: OP p1=rhs, p2=lhs, p3=dest
+    b.emit_op(opcode, tmp, reg, reg, P4::None, 0);
+    b.free_temp(tmp);
+}
+
+/// Extract collation name from a `COLLATE` wrapper, if present.
+fn extract_collation(expr: &Expr) -> Option<&str> {
+    if let Expr::Collate { collation, .. } = expr {
+        Some(collation.as_str())
+    } else {
+        None
+    }
+}
+
+/// Extract explicit COLLATE from an ORDER BY term's expression.
+#[allow(dead_code)]
+fn extract_collation_from_ordering_term(term: &OrderingTerm) -> Option<&str> {
+    extract_collation(&term.expr)
+}
+
+/// Get the column-level collation for an expression from the table schema.
+/// Only checks schema-declared collation (e.g. `TEXT COLLATE NOCASE`), NOT
+/// explicit COLLATE wrappers on the expression — use `extract_collation` for that.
+/// Returns `None` for BINARY (the default) or when the expression is not a column ref.
+fn column_collation<'a>(
+    expr: &'a Expr,
+    table: &'a TableSchema,
+    table_alias: Option<&str>,
+) -> Option<&'a str> {
+    // Unwrap COLLATE to reach the underlying column ref
+    let inner = if let Expr::Collate { expr: inner, .. } = expr {
+        inner.as_ref()
+    } else {
+        expr
+    };
+    if let Expr::Column(col_ref, _) = inner {
+        if let Some(qualifier) = &col_ref.table {
+            if !matches_table_or_alias(qualifier, table, table_alias) {
+                return None;
+            }
+        }
+        if let Some(idx) = table.column_index(&col_ref.column) {
+            return table.columns[idx].collation.as_deref();
+        }
+    }
+    None
+}
+
+/// Get effective collation via `ScanCtx`: explicit COLLATE first, then column-level.
+fn effective_collation_ctx<'a>(expr: &'a Expr, ctx: Option<&'a ScanCtx<'a>>) -> Option<&'a str> {
+    if let Some(coll) = extract_collation(expr) {
+        return Some(coll);
+    }
+    let ctx = ctx?;
+    column_collation(expr, ctx.table, ctx.table_alias)
+}
+
+/// Emit a comparison expression that produces 1 (true) or 0 (false).
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn emit_comparison(
+    b: &mut ProgramBuilder,
+    left: &Expr,
+    op: fsqlite_ast::BinaryOp,
+    right: &Expr,
+    reg: i32,
+    ctx: Option<&ScanCtx<'_>>,
+) {
+    let r_left = b.alloc_temp();
+    let r_right = b.alloc_temp();
+    emit_expr(b, left, r_left, ctx);
+    emit_expr(b, right, r_right, ctx);
+
+    let cmp_opcode = match op {
+        fsqlite_ast::BinaryOp::Eq => Some(Opcode::Eq),
+        fsqlite_ast::BinaryOp::Ne => Some(Opcode::Ne),
+        fsqlite_ast::BinaryOp::Lt => Some(Opcode::Lt),
+        fsqlite_ast::BinaryOp::Le => Some(Opcode::Le),
+        fsqlite_ast::BinaryOp::Gt => Some(Opcode::Gt),
+        fsqlite_ast::BinaryOp::Ge => Some(Opcode::Ge),
+        _ => None,
+    };
+    let Some(cmp_opcode) = cmp_opcode else {
+        b.emit_op(Opcode::Integer, 0, reg, 0, P4::None, 0);
+        b.free_temp(r_right);
+        b.free_temp(r_left);
+        return;
+    };
+
+    // Check for COLLATE on either operand, then column-level collation.
+    let p4 = effective_collation_ctx(left, ctx)
+        .or_else(|| effective_collation_ctx(right, ctx))
+        .map_or(P4::None, |coll| P4::Collation(coll.to_owned()));
+
+    // SQL three-valued logic: if either operand is NULL, the result is NULL.
+    // Check for NULL before the comparison.
+    let null_label = b.emit_label();
+    let true_label = b.emit_label();
+    let done_label = b.emit_label();
+
+    b.emit_jump_to_label(Opcode::IsNull, r_left, 0, null_label, P4::None, 0);
+    b.emit_jump_to_label(Opcode::IsNull, r_right, 0, null_label, P4::None, 0);
+
+    // Compute comparison affinity for TEXT↔numeric coercion (SQLite §4.2).
+    let cmp_aff = comparison_affinity_p5(left, right, ctx);
+
+    // Comparison: p1=rhs_reg, p2=jump_target (label), p3=lhs_reg
+    b.emit_jump_to_label(cmp_opcode, r_right, r_left, true_label, p4, cmp_aff);
+    b.emit_op(Opcode::Integer, 0, reg, 0, P4::None, 0);
+    b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+    b.resolve_label(true_label);
+    b.emit_op(Opcode::Integer, 1, reg, 0, P4::None, 0);
+    b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+    b.resolve_label(null_label);
+    b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+    b.resolve_label(done_label);
+
+    b.free_temp(r_right);
+    b.free_temp(r_left);
+}
+
+/// Emit IS / IS NOT comparison (NULLEQ semantics).
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn emit_is_comparison(
+    b: &mut ProgramBuilder,
+    left: &Expr,
+    op: fsqlite_ast::BinaryOp,
+    right: &Expr,
+    reg: i32,
+    ctx: Option<&ScanCtx<'_>>,
+) {
+    // IS TRUE / IS FALSE / IS NOT TRUE / IS NOT FALSE → IsTrue opcode.
+    if let Some((p3, p4)) = is_true_false_params(op, right) {
+        let r_left = b.alloc_temp();
+        emit_expr(b, left, r_left, ctx);
+        b.emit_op(Opcode::IsTrue, r_left, reg, p3, p4, 0);
+        b.free_temp(r_left);
+        return;
+    }
+
+    let r_left = b.alloc_temp();
+    let r_right = b.alloc_temp();
+    emit_expr(b, left, r_left, ctx);
+    emit_expr(b, right, r_right, ctx);
+
+    let true_label = b.emit_label();
+    let done_label = b.emit_label();
+
+    // IS uses Eq with NULLEQ flag (p5=0x80). IS NOT uses Ne with NULLEQ.
+    let cmp_and_flag = match op {
+        fsqlite_ast::BinaryOp::Is => Some((Opcode::Eq, 0x80_u16)),
+        fsqlite_ast::BinaryOp::IsNot => Some((Opcode::Ne, 0x80_u16)),
+        _ => None,
+    };
+    let Some((cmp_opcode, nulleq_flag)) = cmp_and_flag else {
+        b.emit_op(Opcode::Integer, 0, reg, 0, P4::None, 0);
+        b.free_temp(r_right);
+        b.free_temp(r_left);
+        return;
+    };
+
+    b.emit_jump_to_label(
+        cmp_opcode,
+        r_right,
+        r_left,
+        true_label,
+        P4::None,
+        nulleq_flag,
+    );
+    b.emit_op(Opcode::Integer, 0, reg, 0, P4::None, 0);
+    b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+    b.resolve_label(true_label);
+    b.emit_op(Opcode::Integer, 1, reg, 0, P4::None, 0);
+    b.resolve_label(done_label);
+
+    b.free_temp(r_right);
+    b.free_temp(r_left);
+}
+
+/// Check if a `BinaryOp::Is/IsNot` with `Literal::True/False` should use
+/// the `IsTrue` opcode.  Returns `(p3, p4)` for the IsTrue instruction.
+///
+/// Mapping:
+///   IS TRUE      → (p3=0, P4::None)        — truthy, NULL→0
+///   IS FALSE     → (p3=1, P4::Int(1))      — !truthy, NULL→0
+///   IS NOT TRUE  → (p3=0, P4::Int(1))      — !truthy, NULL→1
+///   IS NOT FALSE → (p3=1, P4::None)        — truthy inverted, NULL→1
+fn is_true_false_params(op: fsqlite_ast::BinaryOp, rhs: &Expr) -> Option<(i32, P4)> {
+    let is_not = matches!(op, fsqlite_ast::BinaryOp::IsNot);
+    match rhs {
+        Expr::Literal(Literal::True, _) => {
+            if is_not {
+                // IS NOT TRUE: p3=0, p4=1
+                Some((0, P4::Int(1)))
+            } else {
+                // IS TRUE: p3=0, p4=0
+                Some((0, P4::None))
+            }
+        }
+        Expr::Literal(Literal::False, _) => {
+            if is_not {
+                // IS NOT FALSE: p3=1, p4=0
+                Some((1, P4::None))
+            } else {
+                // IS FALSE: p3=1, p4=1
+                Some((1, P4::Int(1)))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Emit CASE \[operand\] WHEN ... THEN ... \[ELSE ...\] END.
+fn emit_case_expr(
+    b: &mut ProgramBuilder,
+    operand: Option<&Expr>,
+    whens: &[(Expr, Expr)],
+    else_expr: Option<&Expr>,
+    reg: i32,
+    ctx: Option<&ScanCtx<'_>>,
+) {
+    let done_label = b.emit_label();
+    let r_operand = operand.map(|op_expr| {
+        let r = b.alloc_temp();
+        emit_expr(b, op_expr, r, ctx);
+        r
+    });
+
+    for (when_expr, then_expr) in whens {
+        let next_when = b.emit_label();
+
+        if let Some(r_op) = r_operand {
+            // Simple CASE: compare operand to each WHEN value.
+            let r_when = b.alloc_temp();
+            emit_expr(b, when_expr, r_when, ctx);
+            // NULL in either operand or WHEN value means no match
+            // (NULL = x is UNKNOWN in SQL, which is falsy for CASE).
+            b.emit_jump_to_label(Opcode::IsNull, r_op, 0, next_when, P4::None, 0);
+            b.emit_jump_to_label(Opcode::IsNull, r_when, 0, next_when, P4::None, 0);
+            // If operand != when_value, skip to next WHEN.
+            b.emit_jump_to_label(Opcode::Ne, r_when, r_op, next_when, P4::None, 0);
+            b.free_temp(r_when);
+        } else {
+            // Searched CASE: each WHEN is a boolean condition.
+            emit_expr(b, when_expr, reg, ctx);
+            // If condition is false/null, skip to next WHEN.
+            b.emit_jump_to_label(Opcode::IfNot, reg, 1, next_when, P4::None, 0);
+        }
+
+        // Emit THEN expression.
+        emit_expr(b, then_expr, reg, ctx);
+        b.emit_jump_to_label(Opcode::Goto, 0, 0, done_label, P4::None, 0);
+
+        b.resolve_label(next_when);
+    }
+
+    // ELSE clause (or NULL if no ELSE).
+    if let Some(el) = else_expr {
+        emit_expr(b, el, reg, ctx);
+    } else {
+        b.emit_op(Opcode::Null, 0, reg, 0, P4::None, 0);
+    }
+
+    b.resolve_label(done_label);
+
+    if let Some(r_op) = r_operand {
+        b.free_temp(r_op);
+    }
+}
+
+/// Determine the type affinity of an expression for comparison coercion.
+///
+/// Per SQLite §3.2 (comparisonAffinity): only column references and CAST
+/// expressions have affinity for comparison purposes. Literals and computed
+/// expressions have BLOB/NONE affinity (i.e., no coercion influence).
+///
+/// Returns SQLite affinity codes: A=BLOB, B=TEXT, C=NUMERIC, D=INTEGER, E=REAL.
+fn expr_affinity(expr: &Expr, ctx: Option<&ScanCtx<'_>>) -> u8 {
+    // Unwrap COLLATE to reach the underlying expression
+    let inner = if let Expr::Collate { expr: inner, .. } = expr {
+        inner.as_ref()
+    } else {
+        expr
+    };
+    match inner {
+        Expr::Column(col_ref, _) => {
+            // Look up column type in the table schema
+            if let Some(ctx) = ctx {
+                // Check primary table
+                let check_table = |table: &TableSchema, alias: Option<&str>| -> Option<u8> {
+                    if let Some(qualifier) = &col_ref.table {
+                        if !matches_table_or_alias(qualifier, table, alias) {
+                            return None;
+                        }
+                    }
+                    table.column_index(&col_ref.column).map(|idx| {
+                        table.columns[idx]
+                            .type_name
+                            .as_deref()
+                            .map_or(b'A', column_type_to_affinity)
+                    })
+                };
+                if let Some(aff) = check_table(ctx.table, ctx.table_alias) {
+                    return aff;
+                }
+                // Check secondary table (UPDATE ... FROM)
+                if let Some(sec) = &ctx.secondary {
+                    if let Some(aff) = check_table(sec.table, sec.table_alias) {
+                        return aff;
+                    }
+                }
+                // Check full schema
+                if let Some(schema) = ctx.schema {
+                    for table in schema {
+                        if let Some(qualifier) = &col_ref.table {
+                            if !table.name.eq_ignore_ascii_case(qualifier) {
+                                continue;
+                            }
+                        }
+                        if let Some(idx) = table.column_index(&col_ref.column) {
+                            return table.columns[idx]
+                                .type_name
+                                .as_deref()
+                                .map_or(b'A', column_type_to_affinity);
+                        }
+                    }
+                }
+            }
+            b'A' // BLOB/NONE affinity if not found
+        }
+        // Literals have NO column affinity for comparison purposes.
+        // Per C SQLite: only TK_COLUMN and TK_CAST produce comparison affinity.
+        Expr::Cast { type_name, .. } => type_name_to_affinity(type_name),
+        _ => b'A', // BLOB/NONE affinity for literals and computed expressions
+    }
+}
+
+/// Determine the column type affinity from a column type string.
+fn column_type_to_affinity(type_name: &str) -> u8 {
+    let name = type_name.to_uppercase();
+    if name.contains("INT") {
+        b'D'
+    } else if name.contains("CHAR") || name.contains("TEXT") || name.contains("CLOB") {
+        b'B'
+    } else if name.contains("BLOB") || name.is_empty() {
+        b'A'
+    } else if name.contains("REAL") || name.contains("FLOA") || name.contains("DOUB") {
+        b'E'
+    } else {
+        b'C'
+    }
+}
+
+/// Compute the comparison affinity P5 value for a binary comparison.
+/// Implements SQLite's Section 4.2 type conversion rules.
+fn comparison_affinity_p5(left: &Expr, right: &Expr, ctx: Option<&ScanCtx<'_>>) -> u16 {
+    let l_aff = expr_affinity(left, ctx);
+    let r_aff = expr_affinity(right, ctx);
+
+    let is_numeric = |a: u8| matches!(a, b'C' | b'D' | b'E');
+
+    // If one has numeric affinity (C/D/E) and the other has TEXT (B) or BLOB (A),
+    // apply NUMERIC affinity to coerce TEXT → number.
+    if is_numeric(l_aff) && matches!(r_aff, b'A' | b'B') {
+        return u16::from(b'C'); // NUMERIC
+    }
+    if is_numeric(r_aff) && matches!(l_aff, b'A' | b'B') {
+        return u16::from(b'C'); // NUMERIC
+    }
+    // If one has TEXT (B) and the other BLOB/NONE (A), apply TEXT affinity.
+    if (l_aff == b'B' && r_aff == b'A') || (l_aff == b'A' && r_aff == b'B') {
+        return u16::from(b'B'); // TEXT
+    }
+    0 // No affinity coercion needed
+}
+
+/// Convert a SQL type name to an affinity character code.
+fn type_name_to_affinity(type_name: &fsqlite_ast::TypeName) -> u8 {
+    // Encoding: A..E maps to BLOB, TEXT, NUMERIC, INTEGER, REAL:
+    // 'A' = BLOB, 'B' = TEXT, 'C' = NUMERIC, 'D' = INTEGER, 'E' = REAL.
+    let name = type_name.name.to_uppercase();
+    if name.contains("INT") {
+        b'D' // INTEGER affinity
+    } else if name.contains("CHAR") || name.contains("TEXT") || name.contains("CLOB") {
+        b'B' // TEXT affinity
+    } else if name.contains("BLOB") || name.is_empty() {
+        b'A' // BLOB affinity
+    } else if name.contains("REAL") || name.contains("FLOA") || name.contains("DOUB") {
+        b'E' // REAL affinity
+    } else {
+        b'C' // NUMERIC affinity
+    }
+}
+
+/// Convert days since 1970-01-01 (Unix epoch) to (year, month, day).
+fn epoch_days_to_ymd(days: u64) -> (u64, u64, u64) {
+    // Civil-date algorithm from Howard Hinnant (public domain).
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
+// ---------------------------------------------------------------------------
+// Public helpers for cross-crate partial-index support
+// ---------------------------------------------------------------------------
+
+/// Emit VDBE bytecode that evaluates `where_expr` against the current row of
+/// `cursor` (which scans `table`) and jumps to `skip_label` when the predicate
+/// is **not** satisfied.
+///
+/// Used by `backfill_index` in `fsqlite-core` to skip rows that don't match a
+/// partial index WHERE clause.
+pub fn emit_scan_filter(
+    b: &mut ProgramBuilder,
+    where_expr: &Expr,
+    cursor: i32,
+    table: &TableSchema,
+    skip_label: Label,
+) {
+    let scan = ScanCtx {
+        cursor,
+        table,
+        table_alias: None,
+        schema: None,
+        register_base: None,
+        secondary: None,
+    };
+    let filter_reg = b.alloc_temp();
+    emit_expr(b, where_expr, filter_reg, Some(&scan));
+    b.emit_jump_to_label(Opcode::IfNot, filter_reg, 1, skip_label, P4::None, 0);
+    b.free_temp(filter_reg);
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ProgramBuilder;
+    use crate::engine::{ExecOutcome, MemDatabase, VdbeEngine};
+    use fsqlite_ast::{
+        Assignment, AssignmentTarget, BinaryOp as AstBinaryOp, ColumnRef, DeleteStatement,
+        Distinctness, Expr, FromClause, InSet, InsertSource, InsertStatement, LimitClause, Literal,
+        OrderingTerm, PlaceholderType, QualifiedName, QualifiedTableRef, ResultColumn, SelectBody,
+        SelectCore, SelectStatement, SortDirection, Span, Statement, TableOrSubquery,
+        UpdateStatement,
+    };
+    use fsqlite_func::{FunctionRegistry, register_builtins};
+    use fsqlite_parser::parse_first_statement_with_tail;
+    use fsqlite_types::opcode::{Opcode, P4};
+
+    fn test_schema() -> Vec<TableSchema> {
+        vec![TableSchema {
+            name: "t".to_owned(),
+            root_page: 2,
+            columns: vec![
+                ColumnInfo::basic("a", 'd', false),
+                ColumnInfo::basic("b", 'C', false),
+            ],
+            indexes: vec![],
+            strict: false,
+            without_rowid: false,
+            primary_key_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
+            check_constraints: Vec::new(),
+        }]
+    }
+
+    fn test_schema_with_index() -> Vec<TableSchema> {
+        vec![TableSchema {
+            name: "t".to_owned(),
+            root_page: 2,
+            columns: vec![
+                ColumnInfo::basic("a", 'd', false),
+                ColumnInfo::basic("b", 'C', false),
+            ],
+            indexes: vec![IndexSchema {
+                name: "idx_t_b".to_owned(),
+                root_page: 3,
+                columns: vec!["b".to_owned()],
+                key_expressions: vec!["b".to_owned()],
+                key_sort_directions: vec![],
+                where_clause: None,
+                is_unique: false,
+                key_collations: vec![],
+            }],
+            strict: false,
+            without_rowid: false,
+            primary_key_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
+            check_constraints: Vec::new(),
+        }]
+    }
+
+    fn test_small_bench_schema() -> Vec<TableSchema> {
+        vec![TableSchema {
+            name: "bench".to_owned(),
+            root_page: 2,
+            columns: vec![
+                ColumnInfo::basic("id", 'D', true),
+                ColumnInfo::basic("name", 'B', false),
+                ColumnInfo::basic("value", 'E', false),
+            ],
+            indexes: vec![],
+            strict: false,
+            without_rowid: false,
+            primary_key_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
+            check_constraints: Vec::new(),
+        }]
+    }
+
+    fn seed_small_bench_db(row_count: usize) -> MemDatabase {
+        let mut db = MemDatabase::new();
+        db.create_table_at(2, 3);
+        let table = db.get_table_mut(2).expect("bench table should exist");
+        for id in 0..row_count {
+            let id = i64::try_from(id).expect("row ids should fit in i64");
+            table.insert_row(
+                id,
+                vec![
+                    SqliteValue::Integer(id),
+                    SqliteValue::Text(format!("name{id}").into()),
+                    SqliteValue::Float(((id * 3) + 1) as f64),
+                ],
+            );
+        }
+        db
+    }
+
+    fn execute_codegen_select_with_storage_cursor(
+        stmt: &SelectStatement,
+        schema: &[TableSchema],
+        db: MemDatabase,
+    ) -> Vec<Vec<SqliteValue>> {
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, stmt, schema, &ctx).expect("select should codegen");
+        let prog = b.finish().expect("program should build");
+        let mut engine = VdbeEngine::new(prog.register_count());
+        engine.enable_storage_read_cursors(true);
+        engine.set_database(db);
+        engine.set_reject_mem_fallback(false);
+        let mut registry = FunctionRegistry::new();
+        register_builtins(&mut registry);
+        engine.set_function_registry(std::sync::Arc::new(registry));
+        let outcome = engine.execute(&prog).expect("execution should succeed");
+        assert_eq!(outcome, ExecOutcome::Done);
+        engine
+            .take_results()
+            .into_iter()
+            .map(|row| row.into_vec())
+            .collect()
+    }
+
+    fn test_schema_with_nocase_text_column() -> Vec<TableSchema> {
+        vec![TableSchema {
+            name: "t".to_owned(),
+            root_page: 2,
+            columns: vec![
+                ColumnInfo::basic("a", 'd', false),
+                ColumnInfo {
+                    name: "name".to_owned(),
+                    affinity: 'B',
+                    is_ipk: false,
+                    type_name: Some("TEXT".to_owned()),
+                    notnull: false,
+                    unique: false,
+                    default_value: None,
+                    strict_type: None,
+                    generated_expr: None,
+                    generated_stored: None,
+                    collation: Some("NOCASE".to_owned()),
+                },
+            ],
+            indexes: vec![],
+            strict: false,
+            without_rowid: false,
+            primary_key_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
+            check_constraints: Vec::new(),
+        }]
+    }
+
+    fn test_schema_with_nocase_text_index() -> Vec<TableSchema> {
+        vec![TableSchema {
+            name: "t".to_owned(),
+            root_page: 2,
+            columns: vec![ColumnInfo {
+                name: "name".to_owned(),
+                affinity: 'B',
+                is_ipk: false,
+                type_name: Some("TEXT".to_owned()),
+                notnull: false,
+                unique: false,
+                default_value: None,
+                strict_type: None,
+                generated_expr: None,
+                generated_stored: None,
+                collation: Some("NOCASE".to_owned()),
+            }],
+            indexes: vec![IndexSchema {
+                name: "idx_t_name".to_owned(),
+                root_page: 3,
+                columns: vec!["name".to_owned()],
+                key_expressions: vec!["name".to_owned()],
+                key_sort_directions: vec![],
+                where_clause: None,
+                is_unique: false,
+                key_collations: vec![Some("NOCASE".to_owned())],
+            }],
+            strict: false,
+            without_rowid: false,
+            primary_key_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
+            check_constraints: Vec::new(),
+        }]
+    }
+
+    fn test_schema_with_typed_numeric_index() -> Vec<TableSchema> {
+        vec![TableSchema {
+            name: "t".to_owned(),
+            root_page: 2,
+            columns: vec![ColumnInfo {
+                name: "n".to_owned(),
+                affinity: 'D',
+                is_ipk: false,
+                type_name: Some("INTEGER".to_owned()),
+                notnull: false,
+                unique: false,
+                default_value: None,
+                strict_type: None,
+                generated_expr: None,
+                generated_stored: None,
+                collation: None,
+            }],
+            indexes: vec![IndexSchema {
+                name: "idx_t_n".to_owned(),
+                root_page: 3,
+                columns: vec!["n".to_owned()],
+                key_expressions: vec!["n".to_owned()],
+                key_sort_directions: vec![],
+                where_clause: None,
+                is_unique: false,
+                key_collations: vec![],
+            }],
+            strict: false,
+            without_rowid: false,
+            primary_key_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
+            check_constraints: Vec::new(),
+        }]
+    }
+
+    fn test_schema_with_subquery_source() -> Vec<TableSchema> {
+        vec![
+            TableSchema {
+                name: "t".to_owned(),
+                root_page: 2,
+                columns: vec![
+                    ColumnInfo {
+                        name: "a".to_owned(),
+                        affinity: 'd',
+                        is_ipk: false,
+                        type_name: None,
+                        notnull: false,
+                        unique: false,
+                        default_value: None,
+                        strict_type: None,
+                        generated_expr: None,
+                        generated_stored: None,
+                        collation: None,
+                    },
+                    ColumnInfo {
+                        name: "b".to_owned(),
+                        affinity: 'C',
+                        is_ipk: false,
+                        type_name: None,
+                        notnull: false,
+                        unique: false,
+                        default_value: None,
+                        strict_type: None,
+                        generated_expr: None,
+                        generated_stored: None,
+                        collation: None,
+                    },
+                ],
+                indexes: vec![],
+                strict: false,
+                without_rowid: false,
+                primary_key_constraints: Vec::new(),
+                foreign_keys: Vec::new(),
+                check_constraints: Vec::new(),
+            },
+            TableSchema {
+                name: "s".to_owned(),
+                root_page: 3,
+                columns: vec![ColumnInfo::basic("b", 'd', false)],
+                indexes: vec![],
+                strict: false,
+                without_rowid: false,
+                primary_key_constraints: Vec::new(),
+                foreign_keys: Vec::new(),
+                check_constraints: Vec::new(),
+            },
+        ]
+    }
+
+    fn test_schema_with_index_and_subquery_source() -> Vec<TableSchema> {
+        vec![
+            TableSchema {
+                name: "t".to_owned(),
+                root_page: 2,
+                columns: vec![
+                    ColumnInfo::basic("a", 'd', false),
+                    ColumnInfo::basic("b", 'd', false),
+                ],
+                indexes: vec![IndexSchema {
+                    name: "idx_t_b".to_owned(),
+                    root_page: 4,
+                    columns: vec!["b".to_owned()],
+                    key_expressions: vec!["b".to_owned()],
+                    key_sort_directions: vec![],
+                    where_clause: None,
+                    is_unique: false,
+                    key_collations: vec![],
+                }],
+                strict: false,
+                without_rowid: false,
+                primary_key_constraints: Vec::new(),
+                foreign_keys: Vec::new(),
+                check_constraints: Vec::new(),
+            },
+            TableSchema {
+                name: "s".to_owned(),
+                root_page: 3,
+                columns: vec![ColumnInfo::basic("b", 'd', false)],
+                indexes: vec![],
+                strict: false,
+                without_rowid: false,
+                primary_key_constraints: Vec::new(),
+                foreign_keys: Vec::new(),
+                check_constraints: Vec::new(),
+            },
+        ]
+    }
+
+    fn test_schema_with_join_lookup() -> Vec<TableSchema> {
+        vec![
+            TableSchema {
+                name: "customers".to_owned(),
+                root_page: 2,
+                columns: vec![
+                    ColumnInfo::basic("id", 'D', true),
+                    ColumnInfo::basic("name", 'B', false),
+                    ColumnInfo::basic("region", 'B', false),
+                ],
+                indexes: vec![],
+                strict: false,
+                without_rowid: false,
+                primary_key_constraints: Vec::new(),
+                foreign_keys: Vec::new(),
+                check_constraints: Vec::new(),
+            },
+            TableSchema {
+                name: "orders".to_owned(),
+                root_page: 3,
+                columns: vec![
+                    ColumnInfo::basic("id", 'D', true),
+                    ColumnInfo::basic("customer_id", 'D', false),
+                    ColumnInfo::basic("amount", 'E', false),
+                    ColumnInfo::basic("status", 'B', false),
+                ],
+                indexes: vec![IndexSchema {
+                    name: "idx_orders_customer_id".to_owned(),
+                    root_page: 4,
+                    columns: vec!["customer_id".to_owned()],
+                    key_expressions: vec!["customer_id".to_owned()],
+                    key_sort_directions: vec![],
+                    where_clause: None,
+                    is_unique: false,
+                    key_collations: vec![],
+                }],
+                strict: false,
+                without_rowid: false,
+                primary_key_constraints: Vec::new(),
+                foreign_keys: Vec::new(),
+                check_constraints: Vec::new(),
+            },
+        ]
+    }
+
+    fn grouped_join_count_sum_index_lookup_stmt() -> SelectStatement {
+        SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![
+                        ResultColumn::Expr {
+                            expr: Expr::Column(ColumnRef::qualified("c", "name"), Span::ZERO),
+                            alias: None,
+                        },
+                        ResultColumn::Expr {
+                            expr: Expr::FunctionCall {
+                                name: "count".to_owned(),
+                                args: FunctionArgs::Star,
+                                distinct: false,
+                                order_by: vec![],
+                                filter: None,
+                                over: None,
+                                span: Span::ZERO,
+                            },
+                            alias: None,
+                        },
+                        ResultColumn::Expr {
+                            expr: Expr::FunctionCall {
+                                name: "sum".to_owned(),
+                                args: FunctionArgs::List(vec![Expr::Column(
+                                    ColumnRef::qualified("o", "amount"),
+                                    Span::ZERO,
+                                )]),
+                                distinct: false,
+                                order_by: vec![],
+                                filter: None,
+                                over: None,
+                                span: Span::ZERO,
+                            },
+                            alias: None,
+                        },
+                    ],
+                    from: Some(FromClause {
+                        source: TableOrSubquery::Table {
+                            name: QualifiedName::bare("customers"),
+                            alias: Some("c".to_owned()),
+                            index_hint: None,
+                            time_travel: None,
+                        },
+                        joins: vec![fsqlite_ast::JoinClause {
+                            join_type: fsqlite_ast::JoinType {
+                                kind: fsqlite_ast::JoinKind::Inner,
+                                natural: false,
+                            },
+                            table: TableOrSubquery::Table {
+                                name: QualifiedName::bare("orders"),
+                                alias: Some("o".to_owned()),
+                                index_hint: None,
+                                time_travel: None,
+                            },
+                            constraint: Some(fsqlite_ast::JoinConstraint::On(Expr::BinaryOp {
+                                left: Box::new(Expr::Column(
+                                    ColumnRef::qualified("o", "customer_id"),
+                                    Span::ZERO,
+                                )),
+                                op: AstBinaryOp::Eq,
+                                right: Box::new(Expr::Column(
+                                    ColumnRef::qualified("c", "id"),
+                                    Span::ZERO,
+                                )),
+                                span: Span::ZERO,
+                            })),
+                        }],
+                    }),
+                    where_clause: None,
+                    group_by: vec![Expr::Column(ColumnRef::qualified("c", "name"), Span::ZERO)],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        }
+    }
+
+    fn grouped_join_count_sum_rowid_lookup_stmt() -> SelectStatement {
+        SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![
+                        ResultColumn::Expr {
+                            expr: Expr::Column(ColumnRef::qualified("c", "name"), Span::ZERO),
+                            alias: None,
+                        },
+                        ResultColumn::Expr {
+                            expr: Expr::FunctionCall {
+                                name: "count".to_owned(),
+                                args: FunctionArgs::Star,
+                                distinct: false,
+                                order_by: vec![],
+                                filter: None,
+                                over: None,
+                                span: Span::ZERO,
+                            },
+                            alias: None,
+                        },
+                        ResultColumn::Expr {
+                            expr: Expr::FunctionCall {
+                                name: "sum".to_owned(),
+                                args: FunctionArgs::List(vec![Expr::Column(
+                                    ColumnRef::qualified("o", "amount"),
+                                    Span::ZERO,
+                                )]),
+                                distinct: false,
+                                order_by: vec![],
+                                filter: None,
+                                over: None,
+                                span: Span::ZERO,
+                            },
+                            alias: None,
+                        },
+                    ],
+                    from: Some(FromClause {
+                        source: TableOrSubquery::Table {
+                            name: QualifiedName::bare("orders"),
+                            alias: Some("o".to_owned()),
+                            index_hint: None,
+                            time_travel: None,
+                        },
+                        joins: vec![fsqlite_ast::JoinClause {
+                            join_type: fsqlite_ast::JoinType {
+                                kind: fsqlite_ast::JoinKind::Inner,
+                                natural: false,
+                            },
+                            table: TableOrSubquery::Table {
+                                name: QualifiedName::bare("customers"),
+                                alias: Some("c".to_owned()),
+                                index_hint: None,
+                                time_travel: None,
+                            },
+                            constraint: Some(fsqlite_ast::JoinConstraint::On(Expr::BinaryOp {
+                                left: Box::new(Expr::Column(
+                                    ColumnRef::qualified("c", "id"),
+                                    Span::ZERO,
+                                )),
+                                op: AstBinaryOp::Eq,
+                                right: Box::new(Expr::Column(
+                                    ColumnRef::qualified("o", "customer_id"),
+                                    Span::ZERO,
+                                )),
+                                span: Span::ZERO,
+                            })),
+                        }],
+                    }),
+                    where_clause: None,
+                    group_by: vec![Expr::Column(ColumnRef::qualified("c", "name"), Span::ZERO)],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        }
+    }
+
+    fn from_table(name: &str) -> FromClause {
+        FromClause {
+            source: TableOrSubquery::Table {
+                name: QualifiedName::bare(name),
+                alias: None,
+                index_hint: None,
+                time_travel: None,
+            },
+            joins: vec![],
+        }
+    }
+
+    fn placeholder(n: u32) -> Expr {
+        Expr::Placeholder(PlaceholderType::Numbered(n), Span::ZERO)
+    }
+
+    fn anonymous_placeholder() -> Expr {
+        Expr::Placeholder(PlaceholderType::Anonymous, Span::ZERO)
+    }
+
+    fn rowid_eq_param() -> Box<Expr> {
+        Box::new(Expr::BinaryOp {
+            left: Box::new(Expr::Column(ColumnRef::bare("rowid"), Span::ZERO)),
+            op: AstBinaryOp::Eq,
+            right: Box::new(placeholder(1)),
+            span: Span::ZERO,
+        })
+    }
+
+    fn col_cmp_param(col: &str, op: AstBinaryOp, n: u32) -> Box<Expr> {
+        Box::new(Expr::BinaryOp {
+            left: Box::new(Expr::Column(ColumnRef::bare(col), Span::ZERO)),
+            op,
+            right: Box::new(placeholder(n)),
+            span: Span::ZERO,
+        })
+    }
+
+    fn qualified_col_cmp_param(table: &str, col: &str, op: AstBinaryOp, n: u32) -> Box<Expr> {
+        Box::new(Expr::BinaryOp {
+            left: Box::new(Expr::Column(ColumnRef::qualified(table, col), Span::ZERO)),
+            op,
+            right: Box::new(placeholder(n)),
+            span: Span::ZERO,
+        })
+    }
+
+    fn and_expr(left: Box<Expr>, right: Box<Expr>) -> Box<Expr> {
+        Box::new(Expr::BinaryOp {
+            left,
+            op: AstBinaryOp::And,
+            right,
+            span: Span::ZERO,
+        })
+    }
+
+    fn col_eq_param(col: &str, n: u32) -> Box<Expr> {
+        Box::new(Expr::BinaryOp {
+            left: Box::new(Expr::Column(ColumnRef::bare(col), Span::ZERO)),
+            op: AstBinaryOp::Eq,
+            right: Box::new(placeholder(n)),
+            span: Span::ZERO,
+        })
+    }
+
+    fn simple_select(
+        cols: &[&str],
+        table: &str,
+        where_clause: Option<Box<Expr>>,
+    ) -> SelectStatement {
+        SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: cols
+                        .iter()
+                        .map(|c| ResultColumn::Expr {
+                            expr: Expr::Column(ColumnRef::bare(*c), Span::ZERO),
+                            alias: None,
+                        })
+                        .collect(),
+                    from: Some(from_table(table)),
+                    where_clause,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        }
+    }
+
+    fn star_select(table: &str) -> SelectStatement {
+        SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Star],
+                    from: Some(from_table(table)),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        }
+    }
+
+    fn star_select_with_limit(table: &str, limit: i64) -> SelectStatement {
+        SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Star],
+                    from: Some(from_table(table)),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: Some(LimitClause {
+                limit: Expr::Literal(Literal::Integer(limit), Span::ZERO),
+                offset: None,
+            }),
+        }
+    }
+
+    fn star_select_with_limit_offset(table: &str, limit: i64, offset: i64) -> SelectStatement {
+        SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Star],
+                    from: Some(from_table(table)),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: Some(LimitClause {
+                limit: Expr::Literal(Literal::Integer(limit), Span::ZERO),
+                offset: Some(Expr::Literal(Literal::Integer(offset), Span::ZERO)),
+            }),
+        }
+    }
+
+    fn opcode_sequence(prog: &crate::VdbeProgram) -> Vec<Opcode> {
+        prog.ops().iter().map(|op| op.opcode).collect()
+    }
+
+    fn has_opcodes(prog: &crate::VdbeProgram, expected: &[Opcode]) -> bool {
+        let ops = opcode_sequence(prog);
+        // Check that expected opcodes appear in order (not necessarily adjacent).
+        let mut ops_iter = ops.iter();
+        for expected_op in expected {
+            if !ops_iter.any(|op| op == expected_op) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn schema_with_ipk_alias() -> Vec<TableSchema> {
+        vec![TableSchema {
+            name: "t".to_owned(),
+            root_page: 2,
+            columns: vec![
+                ColumnInfo::basic("a", 'd', true),
+                ColumnInfo::basic("b", 'C', false),
+            ],
+            indexes: vec![],
+            strict: false,
+            without_rowid: false,
+            primary_key_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
+            check_constraints: Vec::new(),
+        }]
+    }
+
+    fn schema_with_visible_rowid_column() -> Vec<TableSchema> {
+        vec![TableSchema {
+            name: "t".to_owned(),
+            root_page: 2,
+            columns: vec![
+                ColumnInfo::basic("rowid", 'C', false),
+                ColumnInfo::basic("b", 'C', false),
+            ],
+            indexes: vec![],
+            strict: false,
+            without_rowid: false,
+            primary_key_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
+            check_constraints: Vec::new(),
+        }]
+    }
+
+    // === Test 1: SELECT by rowid ===
+    #[test]
+    fn test_codegen_select_by_rowid() {
+        let stmt = simple_select(&["b"], "t", Some(rowid_eq_param()));
+        let schema = test_schema();
+        let ctx = CodegenContext {
+            planner_select_directive: Some(SelectPlannerDirective {
+                plan_id: "plan-messages-prefix-equality".to_owned(),
+                plan_generation: 1,
+                planner_surface: "single_table_access_path_v1".to_owned(),
+                table_name: "messages".to_owned(),
+                index_name: Some("sqlite_autoindex_messages_1".to_owned()),
+                index_column: Some("conversation_id".to_owned()),
+                covering: false,
+                access_kind: PlannerSelectAccessKind::IndexEquality,
+            }),
+            ..CodegenContext::default()
+        };
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(has_opcodes(
+            &prog,
+            &[
+                Opcode::Init,
+                Opcode::Transaction,
+                Opcode::Variable,
+                Opcode::OpenRead,
+                Opcode::SeekRowid,
+                Opcode::Column,
+                Opcode::ResultRow,
+                Opcode::Close,
+                Opcode::Halt,
+            ]
+        ));
+        // Transaction should be read-only (p2=0).
+        let txn = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::Transaction)
+            .unwrap();
+        assert_eq!(txn.p2, 0);
+    }
+
+    #[test]
+    fn test_codegen_select_ipk_range_uses_bounded_seek_scan() {
+        let stmt = simple_select(
+            &["a"],
+            "t",
+            Some(and_expr(
+                Box::new(Expr::BinaryOp {
+                    left: Box::new(Expr::Column(ColumnRef::bare("a"), Span::ZERO)),
+                    op: AstBinaryOp::Ge,
+                    right: Box::new(Expr::Literal(Literal::Integer(1), Span::ZERO)),
+                    span: Span::ZERO,
+                }),
+                Box::new(Expr::BinaryOp {
+                    left: Box::new(Expr::Column(ColumnRef::bare("a"), Span::ZERO)),
+                    op: AstBinaryOp::Lt,
+                    right: Box::new(Expr::Literal(Literal::Integer(2), Span::ZERO)),
+                    span: Span::ZERO,
+                }),
+            )),
+        );
+        let schema = schema_with_ipk_alias();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = prog.ops();
+
+        assert!(
+            ops.iter().any(|op| op.opcode == Opcode::SeekGE),
+            "range scan should position with SeekGE instead of a full-table Rewind"
+        );
+        assert!(
+            ops.iter().any(|op| op.opcode == Opcode::Ge),
+            "exclusive upper bound should stop once current rowid reaches the high key"
+        );
+        assert!(
+            !ops.iter().any(|op| op.opcode == Opcode::Rewind),
+            "bounded rowid/IPK range should not fall back to a full-table rewind"
+        );
+
+        let next = ops
+            .iter()
+            .find(|op| op.opcode == Opcode::Next)
+            .expect("bounded range scan should advance with Next");
+        assert_eq!(next.p1, 0, "Next should advance the table cursor");
+    }
+
+    #[test]
+    fn test_codegen_select_ipk_between_uses_seek_and_upper_guard() {
+        let stmt = simple_select(
+            &["a"],
+            "t",
+            Some(Box::new(Expr::Between {
+                expr: Box::new(Expr::Column(ColumnRef::bare("a"), Span::ZERO)),
+                low: Box::new(Expr::Literal(Literal::Integer(10), Span::ZERO)),
+                high: Box::new(Expr::Literal(Literal::Integer(20), Span::ZERO)),
+                not: false,
+                span: Span::ZERO,
+            })),
+        );
+        let schema = schema_with_ipk_alias();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = prog.ops();
+
+        assert!(
+            ops.iter().any(|op| op.opcode == Opcode::SeekGE),
+            "BETWEEN should reuse the rowid/IPK range seek path"
+        );
+        assert!(
+            ops.iter().any(|op| op.opcode == Opcode::Gt),
+            "inclusive upper bound should stop only after the current rowid exceeds the high key"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_ipk_range_with_anonymous_params_stays_on_full_scan() {
+        let stmt = simple_select(
+            &["a"],
+            "t",
+            Some(and_expr(
+                Box::new(Expr::BinaryOp {
+                    left: Box::new(Expr::Column(ColumnRef::bare("a"), Span::ZERO)),
+                    op: AstBinaryOp::Ge,
+                    right: Box::new(anonymous_placeholder()),
+                    span: Span::ZERO,
+                }),
+                Box::new(Expr::BinaryOp {
+                    left: Box::new(Expr::Column(ColumnRef::bare("a"), Span::ZERO)),
+                    op: AstBinaryOp::Lt,
+                    right: Box::new(anonymous_placeholder()),
+                    span: Span::ZERO,
+                }),
+            )),
+        );
+        let schema = schema_with_ipk_alias();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = prog.ops();
+
+        assert!(
+            ops.iter().any(|op| op.opcode == Opcode::Rewind),
+            "anonymous placeholder ranges must stay on the original full-scan path"
+        );
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op.opcode, Opcode::SeekGE | Opcode::SeekGT)),
+            "fast-path range seek must not reorder anonymous placeholders"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_ipk_range_with_numbered_params_uses_bounded_seek_scan() {
+        let stmt = simple_select(
+            &["a"],
+            "t",
+            Some(and_expr(
+                col_cmp_param("a", AstBinaryOp::Ge, 1),
+                col_cmp_param("a", AstBinaryOp::Lt, 2),
+            )),
+        );
+        let schema = schema_with_ipk_alias();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = prog.ops();
+
+        assert!(
+            ops.iter().any(|op| op.opcode == Opcode::SeekGE),
+            "numbered rowid/IPK ranges should reuse the bounded seek fast path"
+        );
+        assert!(
+            !ops.iter().any(|op| op.opcode == Opcode::Rewind),
+            "numbered rowid/IPK ranges should no longer fall back to a full-table rewind"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_ipk_range_with_order_by_ipk_avoids_sorter() {
+        let mut stmt = simple_select(
+            &["a", "b"],
+            "t",
+            Some(col_cmp_param("a", AstBinaryOp::Gt, 1)),
+        );
+        stmt.order_by = vec![OrderingTerm {
+            expr: Expr::Column(ColumnRef::bare("a"), Span::ZERO),
+            direction: Some(SortDirection::Asc),
+            nulls: None,
+        }];
+        stmt.limit = Some(LimitClause {
+            limit: placeholder(2),
+            offset: None,
+        });
+        let schema = schema_with_ipk_alias();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = prog.ops();
+
+        assert!(
+            has_opcodes(
+                &prog,
+                &[
+                    Opcode::Variable,
+                    Opcode::SeekGT,
+                    Opcode::Rowid,
+                    Opcode::Column,
+                    Opcode::ResultRow,
+                    Opcode::DecrJumpZero,
+                    Opcode::Next,
+                ]
+            ),
+            "ORDER BY on an IPK range should stay on the bounded rowid scan path"
+        );
+        assert!(
+            !ops.iter().any(|op| {
+                matches!(
+                    op.opcode,
+                    Opcode::SorterOpen
+                        | Opcode::SorterInsert
+                        | Opcode::SorterSort
+                        | Opcode::SorterData
+                )
+            }),
+            "ORDER BY on an IPK range must not allocate a sorter temp B-tree"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_ipk_range_with_desc_order_by_ipk_uses_reverse_scan() {
+        let mut stmt = simple_select(
+            &["a", "b"],
+            "t",
+            Some(col_cmp_param("a", AstBinaryOp::Lt, 1)),
+        );
+        stmt.order_by = vec![OrderingTerm {
+            expr: Expr::Column(ColumnRef::bare("a"), Span::ZERO),
+            direction: Some(SortDirection::Desc),
+            nulls: None,
+        }];
+        stmt.limit = Some(LimitClause {
+            limit: placeholder(2),
+            offset: None,
+        });
+        let schema = schema_with_ipk_alias();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = prog.ops();
+
+        assert!(
+            has_opcodes(
+                &prog,
+                &[
+                    Opcode::Variable,
+                    Opcode::SeekLT,
+                    Opcode::Rowid,
+                    Opcode::Column,
+                    Opcode::ResultRow,
+                    Opcode::DecrJumpZero,
+                    Opcode::Prev,
+                ]
+            ),
+            "descending ORDER BY on an IPK range should use the reverse rowid scan path"
+        );
+        assert!(
+            !ops.iter().any(|op| {
+                matches!(
+                    op.opcode,
+                    Opcode::SorterOpen
+                        | Opcode::SorterInsert
+                        | Opcode::SorterSort
+                        | Opcode::SorterData
+                )
+            }),
+            "descending ORDER BY on an IPK range must not allocate a sorter temp B-tree"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_ipk_range_with_wrong_qualifier_falls_back() {
+        let stmt = simple_select(
+            &["a"],
+            "t",
+            Some(and_expr(
+                qualified_col_cmp_param("u", "a", AstBinaryOp::Ge, 1),
+                qualified_col_cmp_param("u", "a", AstBinaryOp::Lt, 2),
+            )),
+        );
+        let schema = schema_with_ipk_alias();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = prog.ops();
+
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op.opcode, Opcode::SeekGE | Opcode::SeekGT)),
+            "mismatched qualifier must not use the rowid range fast path"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_ipk_range_with_non_numeric_text_literal_falls_back() {
+        let stmt = simple_select(
+            &["a"],
+            "t",
+            Some(Box::new(Expr::BinaryOp {
+                left: Box::new(Expr::Column(ColumnRef::bare("a"), Span::ZERO)),
+                op: AstBinaryOp::Gt,
+                right: Box::new(Expr::Literal(Literal::String("abc".to_owned()), Span::ZERO)),
+                span: Span::ZERO,
+            })),
+        );
+        let schema = schema_with_ipk_alias();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = prog.ops();
+
+        assert!(
+            ops.iter().any(|op| op.opcode == Opcode::Rewind),
+            "non-numeric text rowid/IPK bounds must stay on the generic scan path"
+        );
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op.opcode, Opcode::SeekGE | Opcode::SeekGT)),
+            "non-numeric text rowid/IPK bounds must not use the bounded seek fast path"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_ipk_range_with_quoted_numeric_bounds_falls_back() {
+        let stmt = simple_select(
+            &["a"],
+            "t",
+            Some(and_expr(
+                Box::new(Expr::BinaryOp {
+                    left: Box::new(Expr::Column(ColumnRef::bare("a"), Span::ZERO)),
+                    op: AstBinaryOp::Ge,
+                    right: Box::new(Expr::Literal(Literal::String("10".to_owned()), Span::ZERO)),
+                    span: Span::ZERO,
+                }),
+                Box::new(Expr::BinaryOp {
+                    left: Box::new(Expr::Column(ColumnRef::bare("a"), Span::ZERO)),
+                    op: AstBinaryOp::Lt,
+                    right: Box::new(Expr::Literal(Literal::String("20".to_owned()), Span::ZERO)),
+                    span: Span::ZERO,
+                }),
+            )),
+        );
+        let schema = schema_with_ipk_alias();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = prog.ops();
+
+        assert!(
+            ops.iter().any(|op| op.opcode == Opcode::Rewind),
+            "quoted numeric rowid/IPK bounds must fall back until affinity-aware seeks exist"
+        );
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op.opcode, Opcode::SeekGE | Opcode::SeekGT)),
+            "quoted numeric rowid/IPK bounds must not use the bounded seek fast path"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_ipk_column_uses_rowid_opcode() {
+        let stmt = simple_select(&["a"], "t", None);
+        let schema = schema_with_ipk_alias();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = opcode_sequence(&prog);
+
+        assert!(
+            ops.contains(&Opcode::Rowid),
+            "IPK column projection should read rowid"
+        );
+        assert!(
+            !ops.contains(&Opcode::Column),
+            "single IPK projection should not read record columns"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_shadowed_rowid_column_uses_column_opcode() {
+        let stmt = simple_select(&["rowid"], "t", None);
+        let schema = schema_with_visible_rowid_column();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = opcode_sequence(&prog);
+
+        assert!(
+            ops.contains(&Opcode::Column),
+            "shadowed rowid column should read from the record payload"
+        );
+        assert!(
+            !ops.contains(&Opcode::Rowid),
+            "shadowed rowid column must not be compiled as hidden rowid access"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_hidden_rowid_alias_when_rowid_is_shadowed() {
+        let stmt = simple_select(&["_rowid_"], "t", None);
+        let schema = schema_with_visible_rowid_column();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = opcode_sequence(&prog);
+
+        assert!(
+            ops.contains(&Opcode::Rowid),
+            "unshadowed hidden alias should still use OP_Rowid"
+        );
+        assert!(
+            !ops.contains(&Opcode::Column),
+            "hidden rowid alias should not read the visible shadowing column"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_star_uses_rowid_for_ipk_column() {
+        let stmt = star_select("t");
+        let schema = schema_with_ipk_alias();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(has_opcodes(
+            &prog,
+            &[
+                Opcode::Rewind,
+                Opcode::Rowid,
+                Opcode::Column,
+                Opcode::ResultRow
+            ]
+        ));
+    }
+
+    // === Test 2: INSERT VALUES ===
+    #[test]
+    fn test_codegen_insert_values() {
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec![],
+            source: InsertSource::Values(vec![vec![placeholder(1), placeholder(2)]]),
+            upsert: vec![],
+            returning: vec![],
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(has_opcodes(
+            &prog,
+            &[
+                Opcode::Init,
+                Opcode::Transaction,
+                Opcode::OpenWrite,
+                Opcode::Variable,
+                Opcode::Variable,
+                Opcode::NewRowid,
+                Opcode::MakeRecord,
+                Opcode::Insert,
+                Opcode::Close,
+                Opcode::Halt,
+            ]
+        ));
+        // Transaction should be write (p2=1).
+        let txn = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::Transaction)
+            .unwrap();
+        assert_eq!(txn.p2, 1);
+    }
+
+    #[test]
+    fn test_codegen_insert_values_large_integer_literal_uses_int64_opcode() {
+        let big = 4_102_444_800_000_000_i64;
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec![],
+            source: InsertSource::Values(vec![vec![
+                Expr::Literal(Literal::Integer(big), Span::ZERO),
+                Expr::Literal(Literal::String("payload".to_owned()), Span::ZERO),
+            ]]),
+            upsert: vec![],
+            returning: vec![],
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::Int64
+                && matches!(op.p4, P4::Int64(value) if value == big)),
+            "expected OP_Int64 carrying the full i64 literal in INSERT VALUES codegen"
+        );
+    }
+
+    #[test]
+    fn test_codegen_insert_literal_values_preformats_record_blob() {
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec![],
+            source: InsertSource::Values(vec![vec![
+                Expr::Literal(Literal::Integer(99), Span::ZERO),
+                Expr::Literal(Literal::String("test".to_owned()), Span::ZERO),
+            ]]),
+            upsert: vec![],
+            returning: vec![],
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = opcode_sequence(&prog);
+
+        assert!(ops.contains(&Opcode::Blob));
+        assert!(
+            !ops.contains(&Opcode::MakeRecord),
+            "literal-only INSERT VALUES should preformat the table record"
+        );
+    }
+
+    #[test]
+    fn test_emit_limit_expr_large_integer_literal_uses_int64_opcode() {
+        let big = 4_102_444_800_000_000_i64;
+        let mut b = ProgramBuilder::new();
+        let reg = b.alloc_reg();
+        let expr = Expr::Literal(Literal::Integer(big), Span::ZERO);
+
+        emit_limit_expr(&mut b, &expr, reg);
+
+        let prog = b.finish().unwrap();
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::Int64
+                && op.p2 == reg
+                && matches!(op.p4, P4::Int64(value) if value == big)),
+            "expected OP_Int64 for large LIMIT literals"
+        );
+    }
+
+    #[test]
+    fn test_codegen_insert_values_rejects_mixed_arity_rows() {
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec![],
+            source: InsertSource::Values(vec![
+                vec![placeholder(1), placeholder(2)],
+                vec![placeholder(3)],
+            ]),
+            upsert: vec![],
+            returning: vec![],
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        let err = codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap_err();
+        assert!(
+            matches!(err, CodegenError::Unsupported(ref msg) if msg.contains("same arity")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_emit_comparison_invalid_operator_emits_false() {
+        let mut b = ProgramBuilder::new();
+        let reg = b.alloc_reg();
+        let one = Expr::Literal(Literal::Integer(1), Span::ZERO);
+        let two = Expr::Literal(Literal::Integer(2), Span::ZERO);
+
+        emit_comparison(&mut b, &one, AstBinaryOp::Add, &two, reg, None);
+
+        let prog = b.finish().unwrap();
+        assert!(
+            prog.ops()
+                .iter()
+                .any(|op| op.opcode == Opcode::Integer && op.p1 == 0 && op.p2 == reg),
+            "expected fallback false assignment for invalid comparison op"
+        );
+    }
+
+    #[test]
+    fn test_emit_is_comparison_invalid_operator_emits_false() {
+        let mut b = ProgramBuilder::new();
+        let reg = b.alloc_reg();
+        let one = Expr::Literal(Literal::Integer(1), Span::ZERO);
+        let two = Expr::Literal(Literal::Integer(2), Span::ZERO);
+
+        emit_is_comparison(&mut b, &one, AstBinaryOp::Eq, &two, reg, None);
+
+        let prog = b.finish().unwrap();
+        assert!(
+            prog.ops()
+                .iter()
+                .any(|op| op.opcode == Opcode::Integer && op.p1 == 0 && op.p2 == reg),
+            "expected fallback false assignment for invalid IS/IS NOT op"
+        );
+    }
+
+    // === Test: INSERT ... SELECT ===
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn test_codegen_insert_select() {
+        // Schema with two tables: source "s" and target "t".
+        let schema = vec![
+            TableSchema {
+                name: "t".to_owned(),
+                root_page: 2,
+                columns: vec![
+                    ColumnInfo {
+                        name: "a".to_owned(),
+                        affinity: 'd',
+                        is_ipk: false,
+                        type_name: None,
+                        notnull: false,
+                        unique: false,
+                        default_value: None,
+                        strict_type: None,
+                        generated_expr: None,
+                        generated_stored: None,
+                        collation: None,
+                    },
+                    ColumnInfo {
+                        name: "b".to_owned(),
+                        affinity: 'C',
+                        is_ipk: false,
+                        type_name: None,
+                        notnull: false,
+                        unique: false,
+                        default_value: None,
+                        strict_type: None,
+                        generated_expr: None,
+                        generated_stored: None,
+                        collation: None,
+                    },
+                ],
+                indexes: vec![],
+                strict: false,
+                without_rowid: false,
+                primary_key_constraints: Vec::new(),
+                foreign_keys: Vec::new(),
+                check_constraints: Vec::new(),
+            },
+            TableSchema {
+                name: "s".to_owned(),
+                root_page: 3,
+                columns: vec![
+                    ColumnInfo {
+                        name: "x".to_owned(),
+                        affinity: 'd',
+                        is_ipk: false,
+                        type_name: None,
+                        notnull: false,
+                        unique: false,
+                        default_value: None,
+                        strict_type: None,
+                        generated_expr: None,
+                        generated_stored: None,
+                        collation: None,
+                    },
+                    ColumnInfo {
+                        name: "y".to_owned(),
+                        affinity: 'C',
+                        is_ipk: false,
+                        type_name: None,
+                        notnull: false,
+                        unique: false,
+                        default_value: None,
+                        strict_type: None,
+                        generated_expr: None,
+                        generated_stored: None,
+                        collation: None,
+                    },
+                ],
+                indexes: vec![],
+                strict: false,
+                without_rowid: false,
+                primary_key_constraints: Vec::new(),
+                foreign_keys: Vec::new(),
+                check_constraints: Vec::new(),
+            },
+        ];
+
+        // INSERT INTO t SELECT * FROM s
+        let inner_select = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Star],
+                    from: Some(FromClause {
+                        source: TableOrSubquery::Table {
+                            name: QualifiedName::bare("s"),
+                            alias: None,
+                            index_hint: None,
+                            time_travel: None,
+                        },
+                        joins: vec![],
+                    }),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec![],
+            source: InsertSource::Select(Box::new(inner_select)),
+            upsert: vec![],
+            returning: vec![],
+        };
+
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // Should contain: Init, Transaction(write), OpenWrite(target),
+        // OpenRead(source), Rewind, Column reads, NewRowid, MakeRecord,
+        // Insert, Next, Close(source), Close(target), Halt.
+        assert!(has_opcodes(
+            &prog,
+            &[
+                Opcode::Init,
+                Opcode::Transaction,
+                Opcode::OpenWrite,
+                Opcode::OpenRead,
+                Opcode::Rewind,
+                Opcode::Column,
+                Opcode::Column,
+                Opcode::NewRowid,
+                Opcode::MakeRecord,
+                Opcode::Insert,
+                Opcode::Next,
+                Opcode::Close,
+                Opcode::Close,
+                Opcode::Halt,
+            ]
+        ));
+
+        // Transaction should be write (p2=1).
+        let txn = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::Transaction)
+            .unwrap();
+        assert_eq!(txn.p2, 1);
+
+        // OpenWrite should target table "t" (root_page=2).
+        let open_write = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::OpenWrite)
+            .unwrap();
+        assert_eq!(open_write.p2, 2);
+
+        // OpenRead should target table "s" (root_page=3).
+        let open_read = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::OpenRead)
+            .unwrap();
+        assert_eq!(open_read.p2, 3);
+    }
+
+    #[test]
+    fn test_codegen_insert_select_without_from_emits_single_insert_path() {
+        let schema = vec![TableSchema {
+            name: "t".to_owned(),
+            root_page: 2,
+            columns: vec![
+                ColumnInfo::basic("a", 'd', false),
+                ColumnInfo::basic("b", 'C', false),
+            ],
+            indexes: vec![],
+            strict: false,
+            without_rowid: false,
+            primary_key_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
+            check_constraints: Vec::new(),
+        }];
+
+        let inner_select = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![
+                        ResultColumn::Expr {
+                            expr: Expr::Literal(Literal::Integer(7), Span::ZERO),
+                            alias: None,
+                        },
+                        ResultColumn::Expr {
+                            expr: Expr::Literal(Literal::String("seven".to_owned()), Span::ZERO),
+                            alias: None,
+                        },
+                    ],
+                    from: None,
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec![],
+            source: InsertSource::Select(Box::new(inner_select)),
+            upsert: vec![],
+            returning: vec![],
+        };
+
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = opcode_sequence(&prog);
+
+        assert!(ops.contains(&Opcode::Insert));
+        assert!(ops.contains(&Opcode::Integer));
+        assert!(ops.contains(&Opcode::String8));
+        assert!(!ops.contains(&Opcode::OpenRead));
+        assert!(!ops.contains(&Opcode::Rewind));
+        assert!(!ops.contains(&Opcode::Next));
+    }
+
+    #[test]
+    fn test_codegen_insert_select_without_from_where_emits_filter_jump() {
+        let schema = vec![TableSchema {
+            name: "t".to_owned(),
+            root_page: 2,
+            columns: vec![ColumnInfo::basic("a", 'd', false)],
+            indexes: vec![],
+            strict: false,
+            without_rowid: false,
+            primary_key_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
+            check_constraints: Vec::new(),
+        }];
+
+        let inner_select = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Expr {
+                        expr: Expr::Literal(Literal::Integer(1), Span::ZERO),
+                        alias: None,
+                    }],
+                    from: None,
+                    where_clause: Some(Box::new(Expr::Literal(Literal::False, Span::ZERO))),
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec![],
+            source: InsertSource::Select(Box::new(inner_select)),
+            upsert: vec![],
+            returning: vec![],
+        };
+
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &CodegenContext::default()).unwrap();
+        let prog = b.finish().unwrap();
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::IfNot),
+            "expected WHERE filter in no-FROM INSERT ... SELECT path"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn test_codegen_insert_select_propagates_or_conflict_to_insert_p5() {
+        let schema = vec![
+            TableSchema {
+                name: "t".to_owned(),
+                root_page: 2,
+                columns: vec![
+                    ColumnInfo::basic("a", 'd', false),
+                    ColumnInfo::basic("b", 'C', false),
+                ],
+                indexes: vec![],
+                strict: false,
+                without_rowid: false,
+                primary_key_constraints: Vec::new(),
+                foreign_keys: Vec::new(),
+                check_constraints: Vec::new(),
+            },
+            TableSchema {
+                name: "s".to_owned(),
+                root_page: 3,
+                columns: vec![
+                    ColumnInfo::basic("x", 'd', false),
+                    ColumnInfo::basic("y", 'C', false),
+                ],
+                indexes: vec![],
+                strict: false,
+                without_rowid: false,
+                primary_key_constraints: Vec::new(),
+                foreign_keys: Vec::new(),
+                check_constraints: Vec::new(),
+            },
+        ];
+
+        let inner_select = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Star],
+                    from: Some(FromClause {
+                        source: TableOrSubquery::Table {
+                            name: QualifiedName::bare("s"),
+                            alias: None,
+                            index_hint: None,
+                            time_travel: None,
+                        },
+                        joins: vec![],
+                    }),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: Some(fsqlite_ast::ConflictAction::Ignore),
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec![],
+            source: InsertSource::Select(Box::new(inner_select)),
+            upsert: vec![],
+            returning: vec![],
+        };
+
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        let insert = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::Insert)
+            .expect("expected Insert opcode");
+        assert_eq!(insert.p5, OE_IGNORE);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn test_codegen_insert_select_emits_index_inserts() {
+        // Target has one secondary index; source has none.
+        let schema = vec![
+            TableSchema {
+                name: "t".to_owned(),
+                root_page: 2,
+                columns: vec![
+                    ColumnInfo::basic("a", 'd', false),
+                    ColumnInfo::basic("b", 'C', false),
+                ],
+                indexes: vec![IndexSchema {
+                    name: "idx_t_a".to_owned(),
+                    root_page: 4,
+                    columns: vec!["a".to_owned()],
+                    key_expressions: vec!["a".to_owned()],
+                    key_sort_directions: vec![],
+                    where_clause: None,
+                    is_unique: false,
+                    key_collations: vec![],
+                }],
+                strict: false,
+                without_rowid: false,
+                primary_key_constraints: Vec::new(),
+                foreign_keys: Vec::new(),
+                check_constraints: Vec::new(),
+            },
+            TableSchema {
+                name: "s".to_owned(),
+                root_page: 3,
+                columns: vec![
+                    ColumnInfo::basic("x", 'd', false),
+                    ColumnInfo::basic("y", 'C', false),
+                ],
+                indexes: vec![],
+                strict: false,
+                without_rowid: false,
+                primary_key_constraints: Vec::new(),
+                foreign_keys: Vec::new(),
+                check_constraints: Vec::new(),
+            },
+        ];
+
+        let inner_select = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Star],
+                    from: Some(FromClause {
+                        source: TableOrSubquery::Table {
+                            name: QualifiedName::bare("s"),
+                            alias: None,
+                            index_hint: None,
+                            time_travel: None,
+                        },
+                        joins: vec![],
+                    }),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec![],
+            source: InsertSource::Select(Box::new(inner_select)),
+            upsert: vec![],
+            returning: vec![],
+        };
+
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(
+            prog.ops()
+                .iter()
+                .any(|op| op.opcode == Opcode::OpenWrite && op.p2 == 4),
+            "expected OpenWrite for target secondary index root page"
+        );
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::IdxInsert),
+            "INSERT ... SELECT should maintain target indexes via IdxInsert"
+        );
+    }
+
+    // === Test: INSERT ... SELECT with specific columns ===
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn test_codegen_insert_select_with_explicit_columns_reorders_projection() {
+        // Schema with source "s" having 3 columns, target "t" with 2.
+        let schema = vec![
+            TableSchema {
+                name: "t".to_owned(),
+                root_page: 2,
+                columns: vec![
+                    ColumnInfo {
+                        name: "a".to_owned(),
+                        affinity: 'd',
+                        is_ipk: false,
+                        type_name: None,
+                        notnull: false,
+                        unique: false,
+                        default_value: None,
+                        strict_type: None,
+                        generated_expr: None,
+                        generated_stored: None,
+                        collation: None,
+                    },
+                    ColumnInfo {
+                        name: "b".to_owned(),
+                        affinity: 'C',
+                        is_ipk: false,
+                        type_name: None,
+                        notnull: false,
+                        unique: false,
+                        default_value: None,
+                        strict_type: None,
+                        generated_expr: None,
+                        generated_stored: None,
+                        collation: None,
+                    },
+                ],
+                indexes: vec![],
+                strict: false,
+                without_rowid: false,
+                primary_key_constraints: Vec::new(),
+                foreign_keys: Vec::new(),
+                check_constraints: Vec::new(),
+            },
+            TableSchema {
+                name: "s".to_owned(),
+                root_page: 3,
+                columns: vec![
+                    ColumnInfo {
+                        name: "x".to_owned(),
+                        affinity: 'd',
+                        is_ipk: false,
+                        type_name: None,
+                        notnull: false,
+                        unique: false,
+                        default_value: None,
+                        strict_type: None,
+                        generated_expr: None,
+                        generated_stored: None,
+                        collation: None,
+                    },
+                    ColumnInfo {
+                        name: "y".to_owned(),
+                        affinity: 'C',
+                        is_ipk: false,
+                        type_name: None,
+                        notnull: false,
+                        unique: false,
+                        default_value: None,
+                        strict_type: None,
+                        generated_expr: None,
+                        generated_stored: None,
+                        collation: None,
+                    },
+                    ColumnInfo::basic("z", 'e', false),
+                ],
+                indexes: vec![],
+                strict: false,
+                without_rowid: false,
+                primary_key_constraints: Vec::new(),
+                foreign_keys: Vec::new(),
+                check_constraints: Vec::new(),
+            },
+        ];
+
+        // INSERT INTO t(b, a) SELECT x, y FROM s
+        let inner_select = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![
+                        ResultColumn::Expr {
+                            expr: Expr::Column(ColumnRef::bare("x"), Span::ZERO),
+                            alias: None,
+                        },
+                        ResultColumn::Expr {
+                            expr: Expr::Column(ColumnRef::bare("y"), Span::ZERO),
+                            alias: None,
+                        },
+                    ],
+                    from: Some(FromClause {
+                        source: TableOrSubquery::Table {
+                            name: QualifiedName::bare("s"),
+                            alias: None,
+                            index_hint: None,
+                            time_travel: None,
+                        },
+                        joins: vec![],
+                    }),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec!["b".to_owned(), "a".to_owned()],
+            source: InsertSource::Select(Box::new(inner_select)),
+            upsert: vec![],
+            returning: vec![],
+        };
+
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // Should have exactly 2 Column reads (x and y), not 3.
+        let column_count = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::Column)
+            .count();
+        assert_eq!(column_count, 2);
+        let copy_count = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::Copy)
+            .count();
+        assert!(
+            copy_count >= 2,
+            "explicit target-column mapping should reorder both projected values"
+        );
+    }
+
+    // === Test: SELECT DISTINCT full scan ===
+    #[test]
+    fn test_codegen_select_distinct_full_scan() {
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::Distinct,
+                    columns: vec![ResultColumn::Star],
+                    from: Some(from_table("t")),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // DISTINCT scan uses sorter: SorterOpen, Rewind/Next scan,
+        // SorterInsert, SorterSort, SorterData, MakeRecord (for dedup),
+        // SorterCompare + Goto (collation-aware dedup), Copy (update prev),
+        // ResultRow, SorterNext.
+        assert!(has_opcodes(
+            &prog,
+            &[
+                Opcode::Init,
+                Opcode::Transaction,
+                Opcode::SorterOpen,
+                Opcode::OpenRead,
+                Opcode::Rewind,
+                Opcode::Column,
+                Opcode::Column,
+                Opcode::MakeRecord,
+                Opcode::SorterInsert,
+                Opcode::Next,
+                Opcode::Close,
+                Opcode::SorterSort,
+                Opcode::SorterData,
+                Opcode::Column,
+                Opcode::Column,
+                Opcode::MakeRecord,
+                Opcode::SorterCompare,
+                Opcode::Goto,
+                Opcode::Copy,
+                Opcode::ResultRow,
+                Opcode::SorterNext,
+            ]
+        ));
+    }
+
+    #[test]
+    fn test_codegen_select_distinct_full_scan_offset_after_dedup() {
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::Distinct,
+                    columns: vec![ResultColumn::Star],
+                    from: Some(from_table("t")),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: Some(LimitClause {
+                limit: Expr::Literal(Literal::Integer(5), Span::ZERO),
+                offset: Some(Expr::Literal(Literal::Integer(1), Span::ZERO)),
+            }),
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        let cmp_pos = prog
+            .ops()
+            .iter()
+            .position(|op| op.opcode == Opcode::SorterCompare)
+            .expect("missing DISTINCT SorterCompare opcode");
+        let ifpos_pos = prog
+            .ops()
+            .iter()
+            .position(|op| op.opcode == Opcode::IfPos)
+            .expect("missing OFFSET IfPos opcode");
+        assert!(
+            cmp_pos < ifpos_pos,
+            "DISTINCT dedup must run before OFFSET filtering"
+        );
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::Null),
+            "expected DISTINCT previous-record register initialization"
+        );
+    }
+
+    // === Test: SELECT DISTINCT with ORDER BY ===
+    #[test]
+    fn test_codegen_select_distinct_with_order_by() {
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::Distinct,
+                    columns: vec![ResultColumn::Star],
+                    from: Some(from_table("t")),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![OrderingTerm {
+                expr: Expr::Column(ColumnRef::bare("a"), Span::ZERO),
+                direction: None,
+                nulls: None,
+            }],
+            limit: None,
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // ORDER BY + DISTINCT: uses ordered scan with dedup.
+        // Should include SorterOpen, Rewind scan, SorterInsert, SorterSort,
+        // then SorterData + Column reads + MakeRecord + SorterCompare + Goto
+        // + Copy + ResultRow.
+        assert!(has_opcodes(
+            &prog,
+            &[
+                Opcode::Init,
+                Opcode::SorterOpen,
+                Opcode::OpenRead,
+                Opcode::Rewind,
+                Opcode::SorterInsert,
+                Opcode::Next,
+                Opcode::SorterSort,
+                Opcode::SorterData,
+                Opcode::MakeRecord,
+                Opcode::SorterCompare,
+                Opcode::Goto,
+                Opcode::Copy,
+                Opcode::ResultRow,
+                Opcode::SorterNext,
+            ]
+        ));
+    }
+
+    #[test]
+    fn test_codegen_select_distinct_with_order_by_offset_after_dedup() {
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::Distinct,
+                    columns: vec![ResultColumn::Star],
+                    from: Some(from_table("t")),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![OrderingTerm {
+                expr: Expr::Column(ColumnRef::bare("a"), Span::ZERO),
+                direction: Some(SortDirection::Asc),
+                nulls: None,
+            }],
+            limit: Some(LimitClause {
+                limit: Expr::Literal(Literal::Integer(5), Span::ZERO),
+                offset: Some(Expr::Literal(Literal::Integer(2), Span::ZERO)),
+            }),
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        let cmp_pos = prog
+            .ops()
+            .iter()
+            .position(|op| op.opcode == Opcode::SorterCompare)
+            .expect("missing DISTINCT SorterCompare opcode");
+        let ifpos_pos = prog
+            .ops()
+            .iter()
+            .position(|op| op.opcode == Opcode::IfPos)
+            .expect("missing OFFSET IfPos opcode");
+        assert!(
+            cmp_pos < ifpos_pos,
+            "DISTINCT dedup must run before OFFSET filtering"
+        );
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::Null),
+            "expected DISTINCT previous-record register initialization"
+        );
+    }
+
+    // === Test 3: UPDATE by rowid ===
+    #[test]
+    fn test_codegen_update_by_rowid() {
+        let stmt = UpdateStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedTableRef {
+                name: QualifiedName::bare("t"),
+                alias: None,
+                index_hint: None,
+                time_travel: None,
+            },
+            assignments: vec![Assignment {
+                target: AssignmentTarget::Column("b".to_owned()),
+                value: placeholder(1),
+            }],
+            from: None,
+            where_clause: Some(Expr::BinaryOp {
+                left: Box::new(Expr::Column(ColumnRef::bare("rowid"), Span::ZERO)),
+                op: AstBinaryOp::Eq,
+                right: Box::new(placeholder(2)),
+                span: Span::ZERO,
+            }),
+            returning: vec![],
+            order_by: vec![],
+            limit: None,
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_update(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // Rowid equality should use the direct SeekRowid fast path instead of
+        // scanning the whole table.
+        let ops = prog.ops();
+        let seek_pos = ops
+            .iter()
+            .position(|op| op.opcode == Opcode::SeekRowid)
+            .expect("UPDATE by rowid must probe directly with SeekRowid");
+        let delete_pos = ops
+            .iter()
+            .position(|op| op.opcode == Opcode::Delete)
+            .expect("UPDATE must delete the old row before reinserting");
+        let delete = ops
+            .iter()
+            .find(|op| op.opcode == Opcode::Delete)
+            .expect("Delete opcode should exist");
+        let insert_pos = ops
+            .iter()
+            .position(|op| op.opcode == Opcode::Insert)
+            .expect("UPDATE must reinsert the rewritten row");
+        let insert = ops
+            .iter()
+            .find(|op| op.opcode == Opcode::Insert)
+            .expect("Insert opcode should exist");
+        assert!(
+            seek_pos < delete_pos && delete_pos < insert_pos,
+            "UPDATE by rowid should seek first, then delete, then reinsert"
+        );
+        assert!(
+            ops.iter()
+                .skip(seek_pos)
+                .any(|op| op.opcode == Opcode::Column),
+            "UPDATE should read the non-IPK column from the current row"
+        );
+        assert_eq!(
+            delete.p5 & OPFLAG_ISUPDATE,
+            OPFLAG_ISUPDATE,
+            "UPDATE delete must carry OPFLAG_ISUPDATE so conflict restore can recover the old row"
+        );
+        assert_eq!(
+            insert.p5 & OPFLAG_ISUPDATE,
+            OPFLAG_ISUPDATE,
+            "UPDATE insert must carry OPFLAG_ISUPDATE so runtime last_insert_rowid() handling stays SQLite-compatible"
+        );
+
+        // MakeRecord should have 2 columns (the full record).
+        let mr = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::MakeRecord)
+            .unwrap();
+        assert_eq!(mr.p2, 2); // ALL columns, not just the changed one.
+    }
+
+    #[test]
+    fn test_codegen_update_ipk_assignment_updates_rowid() {
+        let stmt = UpdateStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedTableRef {
+                name: QualifiedName::bare("t"),
+                alias: None,
+                index_hint: None,
+                time_travel: None,
+            },
+            assignments: vec![Assignment {
+                target: AssignmentTarget::Column("a".to_owned()),
+                value: placeholder(1),
+            }],
+            from: None,
+            where_clause: Some(Expr::BinaryOp {
+                left: Box::new(Expr::Column(ColumnRef::bare("rowid"), Span::ZERO)),
+                op: AstBinaryOp::Eq,
+                right: Box::new(placeholder(2)),
+                span: Span::ZERO,
+            }),
+            returning: vec![],
+            order_by: vec![],
+            limit: None,
+        };
+
+        let mut schema = test_schema();
+        schema[0].columns[0].is_ipk = true;
+
+        let ctx = CodegenContext {
+            concurrent_mode: true,
+            rowid_alias_col_idx: Some(0),
+            ..CodegenContext::default()
+        };
+        let mut b = ProgramBuilder::new();
+        codegen_update(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        let ops: Vec<Opcode> = prog.ops().iter().map(|op| op.opcode).collect();
+        assert!(
+            ops.contains(&Opcode::Delete),
+            "UPDATE must delete old row before reinsert"
+        );
+        assert!(
+            ops.contains(&Opcode::IsNull) && ops.contains(&Opcode::NewRowid),
+            "IPK update should handle NULL rowid by generating NewRowid"
+        );
+
+        let delete_pos = ops
+            .iter()
+            .position(|&op| op == Opcode::Delete)
+            .expect("Delete opcode should exist");
+        let delete = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::Delete)
+            .expect("Delete opcode should exist");
+        let insert = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::Insert)
+            .expect("Insert opcode should exist");
+        let insert_pos = ops
+            .iter()
+            .position(|&op| op == Opcode::Insert)
+            .expect("Insert opcode should exist");
+        assert!(
+            delete_pos < insert_pos,
+            "Delete must execute before Insert in UPDATE rewrite"
+        );
+        assert_eq!(
+            delete.p5 & OPFLAG_ISUPDATE,
+            OPFLAG_ISUPDATE,
+            "UPDATE delete must carry OPFLAG_ISUPDATE so conflict restore can recover the old row"
+        );
+        assert_eq!(
+            insert.p5 & OPFLAG_ISUPDATE,
+            OPFLAG_ISUPDATE,
+            "UPDATE insert must carry OPFLAG_ISUPDATE so runtime last_insert_rowid() handling stays SQLite-compatible"
+        );
+    }
+
+    // === Test 4: DELETE by rowid ===
+    #[test]
+    fn test_codegen_delete_by_rowid() {
+        let stmt = DeleteStatement {
+            with: None,
+            table: QualifiedTableRef {
+                name: QualifiedName::bare("t"),
+                alias: None,
+                index_hint: None,
+                time_travel: None,
+            },
+            where_clause: Some(Expr::BinaryOp {
+                left: Box::new(Expr::Column(ColumnRef::bare("rowid"), Span::ZERO)),
+                op: AstBinaryOp::Eq,
+                right: Box::new(placeholder(1)),
+                span: Span::ZERO,
+            }),
+            returning: vec![],
+            order_by: vec![],
+            limit: None,
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_delete(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // Rowid equality should use a direct probe in pass 1, then delete via
+        // the collected rowset in pass 2.
+        assert!(has_opcodes(
+            &prog,
+            &[
+                Opcode::Init,
+                Opcode::Transaction,
+                Opcode::OpenWrite,
+                Opcode::Variable,   // target rowid
+                Opcode::SeekRowid,  // direct probe
+                Opcode::RowSetAdd,  // into rowset
+                Opcode::RowSetRead, // pass 2: iterate collected rowids
+                Opcode::SeekRowid,  // seek to rowid
+                Opcode::Delete,     // delete row
+                Opcode::Close,
+                Opcode::Halt,
+            ]
+        ));
+    }
+
+    #[test]
+    fn test_codegen_update_with_index_emits_keyed_idxdelete() {
+        let stmt = UpdateStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedTableRef {
+                name: QualifiedName::bare("t"),
+                alias: None,
+                index_hint: None,
+                time_travel: None,
+            },
+            assignments: vec![Assignment {
+                target: AssignmentTarget::Column("b".to_owned()),
+                value: placeholder(1),
+            }],
+            from: None,
+            where_clause: Some(Expr::BinaryOp {
+                left: Box::new(Expr::Column(ColumnRef::bare("rowid"), Span::ZERO)),
+                op: AstBinaryOp::Eq,
+                right: Box::new(placeholder(2)),
+                span: Span::ZERO,
+            }),
+            returning: vec![],
+            order_by: vec![],
+            limit: None,
+        };
+        let schema = test_schema_with_index();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_update(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        let idx_delete = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::IdxDelete)
+            .expect("expected IdxDelete for indexed UPDATE");
+        assert!(
+            idx_delete.p3 > 0,
+            "IdxDelete must carry key register count (p3 > 0) so engine seeks by key"
+        );
+    }
+
+    #[test]
+    fn test_codegen_update_non_rowid_predicate_uses_two_pass_rowset() {
+        let stmt = UpdateStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedTableRef {
+                name: QualifiedName::bare("t"),
+                alias: None,
+                index_hint: None,
+                time_travel: None,
+            },
+            assignments: vec![Assignment {
+                target: AssignmentTarget::Column("a".to_owned()),
+                value: placeholder(1),
+            }],
+            from: None,
+            where_clause: Some(Expr::BinaryOp {
+                left: Box::new(Expr::Column(ColumnRef::bare("b"), Span::ZERO)),
+                op: AstBinaryOp::Eq,
+                right: Box::new(placeholder(2)),
+                span: Span::ZERO,
+            }),
+            returning: vec![],
+            order_by: vec![],
+            limit: None,
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_update(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(has_opcodes(
+            &prog,
+            &[
+                Opcode::Rewind,
+                Opcode::RowSetAdd,
+                Opcode::Next,
+                Opcode::RowSetRead,
+                Opcode::SeekRowid,
+                Opcode::Delete,
+                Opcode::Insert,
+            ]
+        ));
+
+        let rowset_add_pos = prog
+            .ops()
+            .iter()
+            .position(|op| op.opcode == Opcode::RowSetAdd)
+            .expect("RowSetAdd should be emitted before mutation");
+        let delete_pos = prog
+            .ops()
+            .iter()
+            .position(|op| op.opcode == Opcode::Delete)
+            .expect("Delete opcode should exist");
+        let delete = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::Delete)
+            .expect("Delete opcode should exist");
+        let insert = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::Insert)
+            .expect("Insert opcode should exist");
+        assert!(
+            rowset_add_pos < delete_pos,
+            "UPDATE must collect rowids before deleting rows from a scan cursor"
+        );
+        assert_eq!(
+            delete.p5 & OPFLAG_ISUPDATE,
+            OPFLAG_ISUPDATE,
+            "UPDATE delete must carry OPFLAG_ISUPDATE so conflict restore can recover the old row"
+        );
+        assert_eq!(
+            insert.p5 & OPFLAG_ISUPDATE,
+            OPFLAG_ISUPDATE,
+            "UPDATE insert must carry OPFLAG_ISUPDATE so runtime last_insert_rowid() handling stays SQLite-compatible"
+        );
+    }
+
+    #[test]
+    fn test_codegen_delete_with_index_emits_keyed_idxdelete() {
+        let stmt = DeleteStatement {
+            with: None,
+            table: QualifiedTableRef {
+                name: QualifiedName::bare("t"),
+                alias: None,
+                index_hint: None,
+                time_travel: None,
+            },
+            where_clause: Some(Expr::BinaryOp {
+                left: Box::new(Expr::Column(ColumnRef::bare("rowid"), Span::ZERO)),
+                op: AstBinaryOp::Eq,
+                right: Box::new(placeholder(1)),
+                span: Span::ZERO,
+            }),
+            returning: vec![],
+            order_by: vec![],
+            limit: None,
+        };
+        let schema = test_schema_with_index();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_delete(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        let idx_delete = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::IdxDelete)
+            .expect("expected IdxDelete for indexed DELETE");
+        assert!(
+            idx_delete.p3 > 0,
+            "IdxDelete must carry key register count (p3 > 0) so engine seeks by key"
+        );
+    }
+
+    // === Test 5: Label resolution ===
+    #[test]
+    fn test_codegen_label_resolution() {
+        let stmt = simple_select(&["a"], "t", Some(rowid_eq_param()));
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // All p2 fields that are jumps should have valid addresses (>= 0).
+        for op in prog.ops() {
+            if op.opcode.is_jump() {
+                assert!(
+                    op.p2 >= 0,
+                    "unresolved jump at {:?}: p2 = {}",
+                    op.opcode,
+                    op.p2
+                );
+                assert!(
+                    usize::try_from(op.p2).unwrap() <= prog.len(),
+                    "jump target out of range at {:?}: p2 = {} (prog len = {})",
+                    op.opcode,
+                    op.p2,
+                    prog.len()
+                );
+            }
+        }
+    }
+
+    // === Test 6: Register allocation ===
+    #[test]
+    fn test_codegen_register_allocation() {
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec![],
+            source: InsertSource::Values(vec![vec![placeholder(1), placeholder(2)]]),
+            upsert: vec![],
+            returning: vec![],
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // All register references (p1, p2, p3 where applicable) should be
+        // within the allocated range.
+        let max_reg = prog.register_count();
+        assert!(max_reg > 0);
+
+        // Variable instructions: p2 is the target register.
+        for op in prog.ops() {
+            if op.opcode == Opcode::Variable {
+                assert!(
+                    op.p2 >= 1 && op.p2 <= max_reg,
+                    "Variable register out of range: p2 = {}, max = {}",
+                    op.p2,
+                    max_reg
+                );
+            }
+        }
+    }
+
+    // === Test 7: Concurrent mode NewRowid ===
+    #[test]
+    fn test_codegen_concurrent_newrowid() {
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec![],
+            source: InsertSource::Values(vec![vec![placeholder(1), placeholder(2)]]),
+            upsert: vec![],
+            returning: vec![],
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext {
+            concurrent_mode: true,
+            ..CodegenContext::default()
+        };
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // In concurrent mode, NewRowid p3 should be non-zero.
+        let nr = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::NewRowid)
+            .unwrap();
+        assert_ne!(
+            nr.p3, 0,
+            "NewRowid p3 should be non-zero in concurrent mode"
+        );
+
+        // In non-concurrent mode, p3 should be 0.
+        let ctx_normal = CodegenContext::default();
+        let mut b2 = ProgramBuilder::new();
+        codegen_insert(&mut b2, &stmt, &schema, &ctx_normal).unwrap();
+        let prog2 = b2.finish().unwrap();
+        let nr2 = prog2
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::NewRowid)
+            .unwrap();
+        assert_eq!(nr2.p3, 0, "NewRowid p3 should be 0 in normal mode");
+    }
+
+    #[test]
+    fn test_codegen_concurrent_newrowid_default_values() {
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec![],
+            source: InsertSource::DefaultValues,
+            upsert: vec![],
+            returning: vec![],
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext {
+            concurrent_mode: true,
+            ..CodegenContext::default()
+        };
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        let nr = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::NewRowid)
+            .unwrap();
+        assert_ne!(
+            nr.p3, 0,
+            "NewRowid p3 should be non-zero in concurrent mode for DEFAULT VALUES"
+        );
+
+        // In non-concurrent mode, p3 should be 0 for DEFAULT VALUES as well.
+        let ctx_normal = CodegenContext::default();
+        let mut b2 = ProgramBuilder::new();
+        codegen_insert(&mut b2, &stmt, &schema, &ctx_normal).unwrap();
+        let prog2 = b2.finish().unwrap();
+        let nr2 = prog2
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::NewRowid)
+            .unwrap();
+        assert_eq!(
+            nr2.p3, 0,
+            "NewRowid p3 should be 0 in normal mode for DEFAULT VALUES"
+        );
+    }
+
+    // === Test 8: SELECT full scan ===
+    #[test]
+    fn test_codegen_select_full_scan() {
+        let stmt = star_select("t");
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(has_opcodes(
+            &prog,
+            &[
+                Opcode::Init,
+                Opcode::Transaction,
+                Opcode::OpenRead,
+                Opcode::Rewind,
+                Opcode::Column,
+                Opcode::Column,
+                Opcode::ResultRow,
+                Opcode::Next,
+                Opcode::Close,
+                Opcode::Halt,
+            ]
+        ));
+
+        // ResultRow should cover 2 columns (a and b).
+        let rr = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::ResultRow)
+            .unwrap();
+        assert_eq!(rr.p2, 2);
+    }
+
+    #[test]
+    fn test_codegen_select_honors_planner_full_scan_directive_over_index_probe() {
+        let stmt = simple_select(&["a"], "t", Some(col_cmp_param("b", AstBinaryOp::Eq, 1)));
+        let schema = test_schema_with_index();
+        let ctx = CodegenContext {
+            planner_select_directive: Some(SelectPlannerDirective {
+                plan_id: "plan-full-scan".to_owned(),
+                plan_generation: 1,
+                planner_surface: "single_table_access_path_v1".to_owned(),
+                table_name: "t".to_owned(),
+                index_name: None,
+                index_column: None,
+                covering: false,
+                access_kind: PlannerSelectAccessKind::FullTableScan,
+            }),
+            ..CodegenContext::default()
+        };
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = prog.ops();
+
+        assert!(
+            ops.iter()
+                .any(|op| op.opcode == Opcode::Rewind && op.p1 == 0),
+            "planner full-scan directive should bypass the index probe fast path"
+        );
+        assert!(
+            !ops.iter().any(|op| {
+                op.opcode == Opcode::OpenRead
+                    && matches!(&op.p4, P4::Index(name) if name == "idx_t_b")
+            }),
+            "planner full-scan directive should not open the candidate index"
+        );
+        assert!(
+            !ops.iter().any(|op| op.opcode == Opcode::SeekGE),
+            "planner full-scan directive should not emit an index seek"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_bypasses_stale_planner_rowid_directive() {
+        let stmt = simple_select(&["a"], "t", Some(col_cmp_param("b", AstBinaryOp::Eq, 1)));
+        let schema = test_schema_with_index();
+        let ctx = CodegenContext {
+            planner_select_directive: Some(SelectPlannerDirective {
+                plan_id: "plan-stale-rowid".to_owned(),
+                plan_generation: 1,
+                planner_surface: "single_table_access_path_v1".to_owned(),
+                table_name: "t".to_owned(),
+                index_name: None,
+                index_column: None,
+                covering: false,
+                access_kind: PlannerSelectAccessKind::RowidLookup,
+            }),
+            ..CodegenContext::default()
+        };
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = prog.ops();
+
+        assert!(
+            ops.iter().any(|op| {
+                op.opcode == Opcode::OpenRead
+                    && matches!(&op.p4, P4::Index(name) if name == "idx_t_b")
+            }),
+            "stale rowid directive should be bypassed so heuristic index lowering can still run"
+        );
+        assert!(
+            ops.iter().any(|op| op.opcode == Opcode::SeekGE),
+            "stale rowid directive should fall back to the ordinary index-equality fast path"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_honors_covering_planner_index_directive_without_table_lookup() {
+        let stmt = simple_select(&["b"], "t", Some(col_cmp_param("b", AstBinaryOp::Eq, 1)));
+        let schema = test_schema_with_index();
+        let ctx = CodegenContext {
+            planner_select_directive: Some(SelectPlannerDirective {
+                plan_id: "plan-covering-equality".to_owned(),
+                plan_generation: 1,
+                planner_surface: "single_table_access_path_v1".to_owned(),
+                table_name: "t".to_owned(),
+                index_name: Some("idx_t_b".to_owned()),
+                index_column: Some("b".to_owned()),
+                covering: true,
+                access_kind: PlannerSelectAccessKind::IndexEquality,
+            }),
+            ..CodegenContext::default()
+        };
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = prog.ops();
+        let seek_ge_idx = ops
+            .iter()
+            .position(|op| op.opcode == Opcode::SeekGE)
+            .expect("covering equality fast path should probe the chosen index");
+
+        assert!(
+            ops.iter().any(|op| {
+                op.opcode == Opcode::OpenRead
+                    && matches!(&op.p4, P4::Index(name) if name == "idx_t_b")
+            }),
+            "covering planner directive should still open the chosen index"
+        );
+        assert!(
+            !ops.iter().any(|op| op.opcode == Opcode::SeekRowid),
+            "covering planner directive should avoid table lookups in equality scans"
+        );
+        assert!(
+            !ops[..seek_ge_idx].iter().any(|op| {
+                op.opcode == Opcode::OpenRead && matches!(&op.p4, P4::Table(name) if name == "t")
+            }),
+            "covering equality fast path should defer opening the table cursor until fallback"
+        );
+        assert!(
+            ops[seek_ge_idx + 1..].iter().any(|op| {
+                op.opcode == Opcode::OpenRead && matches!(&op.p4, P4::Table(name) if name == "t")
+            }),
+            "covering equality fast path should retain a lazy table-open fallback"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_non_column_expr_with_from_accepted() {
+        // Non-column expressions in SELECT list with FROM are now supported
+        // via ScanCtx-aware emit_expr in emit_column_reads.
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Expr {
+                        expr: Expr::BinaryOp {
+                            left: Box::new(Expr::Literal(Literal::Integer(1), Span::ZERO)),
+                            op: AstBinaryOp::Add,
+                            right: Box::new(Expr::Literal(Literal::Integer(2), Span::ZERO)),
+                            span: Span::ZERO,
+                        },
+                        alias: None,
+                    }],
+                    from: Some(from_table("t")),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx)
+            .expect("non-column expression in SELECT list should succeed");
+        let prog = b.finish().unwrap();
+
+        // Should contain Add opcode for the 1 + 2 expression.
+        assert!(
+            has_opcodes(
+                &prog,
+                &[Opcode::Init, Opcode::OpenRead, Opcode::Rewind, Opcode::Add]
+            ),
+            "expected Add opcode for expression evaluation"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_table_star_wrong_table_rejected() {
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::TableStar("u".to_owned())],
+                    from: Some(from_table("t")),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        let err =
+            codegen_select(&mut b, &stmt, &schema, &ctx).expect_err("unknown table qualifier");
+        assert_eq!(err, CodegenError::TableNotFound("u".to_owned()));
+    }
+
+    // === Test 9: SELECT with indexed predicate ===
+    #[test]
+    fn test_codegen_select_with_index() {
+        let stmt = simple_select(&["a"], "t", Some(col_eq_param("b", 1)));
+        let schema = test_schema_with_index();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // Indexed equality should probe the index, anchor on the first
+        // duplicate using [param, i64::MIN], and iterate the duplicate run.
+        let open_reads = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::OpenRead)
+            .count();
+        assert_eq!(
+            open_reads, 2,
+            "indexed equality should open both table and index cursors"
+        );
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::OpenRead
+                && matches!(&op.p4, P4::Index(name) if name == "idx_t_b")),
+            "expected index cursor open for indexed equality probe"
+        );
+
+        let int64 = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::Int64)
+            .expect("Int64 should load i64::MIN for duplicate-range seek lower bound");
+        assert_eq!(int64.p4, P4::Int64(i64::MIN));
+
+        let make_record = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::MakeRecord)
+            .expect("MakeRecord should build the composite probe key");
+        assert_eq!(
+            make_record.p1 + 1,
+            int64.p2,
+            "MakeRecord should consume [param_reg, min_rowid_reg]"
+        );
+
+        let seek_ge = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::SeekGE)
+            .expect("SeekGE should be emitted for index probe");
+        assert_eq!(
+            seek_ge.p3, make_record.p3,
+            "SeekGE must read probe key from MakeRecord destination register"
+        );
+
+        let is_null_count = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::IsNull)
+            .count();
+        assert!(
+            is_null_count >= 1,
+            "indexed equality should guard NULL probe"
+        );
+
+        let seek_rowid = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::SeekRowid)
+            .expect("SeekRowid should follow IdxRowid");
+        assert_ne!(
+            seek_rowid.p2, 0,
+            "SeekRowid miss target must not jump to pc=0"
+        );
+
+        let next = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::Next)
+            .expect("index equality path must iterate duplicates");
+        assert_eq!(next.p1, 1, "Next should advance the index cursor");
+
+        let idx_gt = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::IdxGT)
+            .expect("duplicate-run boundary should compare the index cursor against the probe key");
+        let if_addr = prog
+            .ops()
+            .iter()
+            .position(|op| op.opcode == Opcode::If)
+            .expect("normal duplicate-run exit should branch through a match gate");
+        assert_eq!(
+            usize::try_from(idx_gt.p2).unwrap(),
+            if_addr,
+            "duplicate-run boundary must not jump directly into the full-scan fallback"
+        );
+        assert_eq!(
+            idx_gt.p5, 1,
+            "duplicate-run boundary should compare only the leading equality key"
+        );
+    }
+
+    fn test_schema_with_composite_prefix_index() -> Vec<TableSchema> {
+        vec![TableSchema {
+            name: "messages".to_owned(),
+            root_page: 2,
+            columns: vec![
+                ColumnInfo::basic("id", 'D', true),
+                ColumnInfo::basic("conversation_id", 'D', false),
+                ColumnInfo::basic("idx", 'D', false),
+                ColumnInfo::basic("content", 'B', false),
+            ],
+            indexes: vec![IndexSchema {
+                name: "sqlite_autoindex_messages_1".to_owned(),
+                root_page: 3,
+                columns: vec!["conversation_id".to_owned(), "idx".to_owned()],
+                key_expressions: vec!["conversation_id".to_owned(), "idx".to_owned()],
+                key_sort_directions: vec![],
+                where_clause: None,
+                is_unique: true,
+                key_collations: vec![],
+            }],
+            strict: false,
+            without_rowid: false,
+            primary_key_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
+            check_constraints: Vec::new(),
+        }]
+    }
+
+    #[test]
+    fn test_codegen_select_with_composite_index_prefix_equality_anchors_full_key() {
+        let schema = test_schema_with_composite_prefix_index();
+        let table = &schema[0];
+        let idx_schema = &table.indexes[0];
+        let columns = vec![
+            ResultColumn::Expr {
+                expr: Expr::Column(ColumnRef::bare("id"), Span::ZERO),
+                alias: None,
+            },
+            ResultColumn::Expr {
+                expr: Expr::Column(ColumnRef::bare("idx"), Span::ZERO),
+                alias: None,
+            },
+            ResultColumn::Expr {
+                expr: Expr::Column(ColumnRef::bare("content"), Span::ZERO),
+                alias: None,
+            },
+        ];
+        let where_clause = col_eq_param("conversation_id", 1);
+        let mut b = ProgramBuilder::new();
+        let out_regs = b.alloc_regs(columns.len() as i32);
+        let done_label = b.emit_label();
+        let end_label = b.emit_label();
+        codegen_select_index_equality_scan(
+            &mut b,
+            0,
+            table,
+            None,
+            &schema,
+            &columns,
+            Some(&where_clause),
+            None,
+            out_regs,
+            columns.len() as i32,
+            done_label,
+            end_label,
+            idx_schema,
+            &placeholder(1),
+        )
+        .unwrap();
+        b.resolve_label(done_label);
+        b.resolve_label(end_label);
+        let prog = b.finish().unwrap();
+        let ops = prog.ops();
+
+        let seek_ge = ops
+            .iter()
+            .find(|op| op.opcode == Opcode::SeekGE)
+            .expect("composite equality scan should probe the autoindex");
+        let make_record = ops
+            .iter()
+            .find(|op| op.opcode == Opcode::MakeRecord && op.p3 == seek_ge.p3)
+            .expect("SeekGE should consume a dedicated composite probe record");
+        assert_eq!(
+            seek_ge.p3, make_record.p3,
+            "SeekGE must read the composite probe key from MakeRecord"
+        );
+        assert_eq!(
+            make_record.p2, 3,
+            "probe key should include conversation_id, trailing idx filler, and rowid suffix"
+        );
+
+        let null_fill = ops
+            .iter()
+            .find(|op| op.opcode == Opcode::Null)
+            .expect("composite probe should fill trailing indexed terms with NULL");
+        assert_eq!(
+            null_fill.p2,
+            make_record.p1 + 1,
+            "the filler NULL should target the second indexed key column register"
+        );
+
+        let int64 = ops
+            .iter()
+            .find(|op| op.opcode == Opcode::Int64)
+            .expect("composite probe should still append rowid lower bound");
+        assert_eq!(int64.p4, P4::Int64(i64::MIN));
+        assert_eq!(
+            int64.p2,
+            make_record.p1 + 2,
+            "rowid lower bound should be written after all indexed key terms"
+        );
+    }
+
+    #[test]
+    fn test_codegen_ordered_scan_with_composite_equality_rechecks_prefix_boundary_each_next() {
+        let schema = test_schema_with_composite_prefix_index();
+        let table = schema
+            .iter()
+            .find(|table| table.name == "messages")
+            .expect("messages table");
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![
+                        ResultColumn::Expr {
+                            expr: Expr::Column(ColumnRef::bare("id"), Span::ZERO),
+                            alias: None,
+                        },
+                        ResultColumn::Expr {
+                            expr: Expr::Column(ColumnRef::bare("idx"), Span::ZERO),
+                            alias: None,
+                        },
+                        ResultColumn::Expr {
+                            expr: Expr::Column(ColumnRef::bare("content"), Span::ZERO),
+                            alias: None,
+                        },
+                    ],
+                    from: Some(FromClause {
+                        source: TableOrSubquery::Table {
+                            name: QualifiedName::bare("messages"),
+                            alias: None,
+                            index_hint: None,
+                            time_travel: None,
+                        },
+                        joins: vec![],
+                    }),
+                    where_clause: Some(col_eq_param("conversation_id", 1)),
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![OrderingTerm {
+                expr: Expr::Column(ColumnRef::bare("idx"), Span::ZERO),
+                direction: Some(fsqlite_ast::SortDirection::Asc),
+                nulls: None,
+            }],
+            limit: None,
+        };
+        let ctx = CodegenContext {
+            index_ordered_scan_reliable: true,
+            ..CodegenContext::default()
+        };
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).expect("codegen ordered scan");
+        let prog = b.finish().expect("finish program");
+        let ops = prog.ops();
+
+        let idx_gt_addr = ops
+            .iter()
+            .position(|op| op.opcode == Opcode::IdxGT)
+            .expect("bounded ordered scan should emit IdxGT boundary");
+        let next = ops
+            .iter()
+            .find(|op| op.opcode == Opcode::Next)
+            .expect("ordered composite scan should iterate index entries");
+
+        assert_eq!(
+            next.p2, idx_gt_addr as i32,
+            "Next must jump back to the IdxGT boundary check so each scanned row stays within the equality-prefix duplicate run"
+        );
+        assert!(
+            ops.iter().any(|op| {
+                op.opcode == Opcode::OpenRead
+                    && matches!(&op.p4, P4::Index(name) if name == "sqlite_autoindex_messages_1")
+            }),
+            "ordered scan should open the composite autoindex"
+        );
+        assert_eq!(
+            table.indexes[0].columns,
+            vec!["conversation_id".to_owned(), "idx".to_owned()],
+            "test assumes the composite ordered index is keyed by conversation_id then idx"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_with_index_wrong_qualifier_falls_back() {
+        let stmt = simple_select(
+            &["a"],
+            "t",
+            Some(Box::new(Expr::BinaryOp {
+                left: Box::new(Expr::Column(ColumnRef::qualified("u", "b"), Span::ZERO)),
+                op: AstBinaryOp::Eq,
+                right: Box::new(placeholder(1)),
+                span: Span::ZERO,
+            })),
+        );
+        let schema = test_schema_with_index();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = prog.ops();
+
+        assert!(
+            ops.iter()
+                .any(|op| op.opcode == Opcode::Rewind && op.p1 == 0),
+            "mismatched qualifier should fall back to the generic table scan"
+        );
+        assert!(
+            !ops.iter().any(|op| {
+                op.opcode == Opcode::OpenRead
+                    && matches!(&op.p4, P4::Index(name) if name == "idx_t_b")
+            }),
+            "mismatched qualifier must not open the indexed-equality fast path"
+        );
+        assert!(
+            !ops.iter().any(|op| op.opcode == Opcode::SeekRowid),
+            "mismatched qualifier must not use the indexed row lookup fast path"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_with_index_range() {
+        let stmt = simple_select(
+            &["a"],
+            "t",
+            Some(and_expr(
+                col_cmp_param("b", AstBinaryOp::Gt, 1),
+                col_cmp_param("b", AstBinaryOp::Lt, 2),
+            )),
+        );
+        let schema = test_schema_with_index();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = prog.ops();
+
+        assert!(
+            ops.iter().any(|op| op.opcode == Opcode::SeekGE),
+            "indexed range should position with SeekGE on the index cursor"
+        );
+        assert!(
+            ops.iter().any(|op| op.opcode == Opcode::Le),
+            "exclusive lower bound should skip entries equal to the low key"
+        );
+        assert!(
+            ops.iter().any(|op| op.opcode == Opcode::Ge),
+            "exclusive upper bound should stop once the current key reaches the high key"
+        );
+        assert!(
+            ops.iter().any(|op| op.opcode == Opcode::OpenRead
+                && matches!(&op.p4, P4::Index(name) if name == "idx_t_b")),
+            "range scan should open the matching index"
+        );
+        assert!(
+            !ops.iter()
+                .any(|op| op.opcode == Opcode::Rewind && op.p1 == 0),
+            "index range should not fall back to rewinding the table cursor"
+        );
+
+        let next = ops
+            .iter()
+            .find(|op| op.opcode == Opcode::Next)
+            .expect("index range should advance through index entries");
+        assert_eq!(next.p1, 1, "Next should advance the index cursor");
+    }
+
+    #[test]
+    fn test_codegen_select_upper_only_index_range_guards_null_keys() {
+        let stmt = simple_select(&["a"], "t", Some(col_cmp_param("b", AstBinaryOp::Lt, 1)));
+        let schema = test_schema_with_index();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = prog.ops();
+
+        let key_read_idx = ops
+            .iter()
+            .position(|op| op.opcode == Opcode::Column && op.p1 == 1 && op.p2 == 0)
+            .expect("upper-only range should read the current index key");
+        let key_reg = ops[key_read_idx].p3;
+        let key_null_guard_idx = ops
+            .iter()
+            .position(|op| op.opcode == Opcode::IsNull && op.p1 == key_reg)
+            .expect("upper-only range should skip NULL index keys");
+        let upper_guard_idx = ops
+            .iter()
+            .position(|op| op.opcode == Opcode::Ge)
+            .expect("exclusive upper bound should emit Ge stop guard");
+
+        assert!(
+            key_read_idx < key_null_guard_idx,
+            "NULL guard should run after reading the current index key"
+        );
+        assert!(
+            key_null_guard_idx < upper_guard_idx,
+            "NULL guard should run before the upper-bound comparison"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_with_index_between_can_be_covering() {
+        let stmt = simple_select(
+            &["b"],
+            "t",
+            Some(Box::new(Expr::Between {
+                expr: Box::new(Expr::Column(ColumnRef::bare("b"), Span::ZERO)),
+                low: Box::new(placeholder(1)),
+                high: Box::new(placeholder(2)),
+                not: false,
+                span: Span::ZERO,
+            })),
+        );
+        let schema = test_schema_with_index();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = prog.ops();
+
+        assert!(
+            ops.iter().any(|op| op.opcode == Opcode::SeekGE),
+            "BETWEEN should reuse the indexed range seek path"
+        );
+        assert!(
+            ops.iter().any(|op| op.opcode == Opcode::Gt),
+            "inclusive upper bound should stop only after the current key exceeds the high key"
+        );
+
+        let table_open_count = ops
+            .iter()
+            .filter(|op| {
+                op.opcode == Opcode::OpenRead && matches!(&op.p4, P4::Table(name) if name == "t")
+            })
+            .count();
+        assert_eq!(
+            table_open_count, 0,
+            "covering index range should not open the table cursor"
+        );
+        assert!(
+            !ops.iter().any(|op| op.opcode == Opcode::SeekRowid),
+            "covering index range should not perform table rowid lookups"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_index_range_checks_offset_before_projection() {
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Expr {
+                        expr: Expr::Column(ColumnRef::bare("a"), Span::ZERO),
+                        alias: None,
+                    }],
+                    from: Some(from_table("t")),
+                    where_clause: Some(and_expr(
+                        col_cmp_param("b", AstBinaryOp::Ge, 1),
+                        col_cmp_param("b", AstBinaryOp::Lt, 2),
+                    )),
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: Some(LimitClause {
+                limit: Expr::Literal(Literal::Integer(5), Span::ZERO),
+                offset: Some(Expr::Literal(Literal::Integer(3), Span::ZERO)),
+            }),
+        };
+        let schema = test_schema_with_index();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = prog.ops();
+
+        let ifpos_idx = ops
+            .iter()
+            .position(|op| op.opcode == Opcode::IfPos)
+            .expect("range scan with OFFSET should emit IfPos");
+        let seek_rowid_idx = ops
+            .iter()
+            .position(|op| op.opcode == Opcode::SeekRowid)
+            .expect("non-covering index range should seek into the table");
+        let projected_column_idx = ops
+            .iter()
+            .position(|op| op.opcode == Opcode::Column && op.p1 == 0 && op.p2 == 0)
+            .expect("non-covering index range should project table columns");
+
+        assert!(
+            seek_rowid_idx < ifpos_idx,
+            "OFFSET should only decrement after the row lookup succeeds"
+        );
+        assert!(
+            ifpos_idx < projected_column_idx,
+            "OFFSET skipping should happen before decoding projected columns"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_index_range_with_nocase_collation_falls_back() {
+        let stmt = simple_select(
+            &["name"],
+            "t",
+            Some(col_cmp_param("name", AstBinaryOp::Lt, 1)),
+        );
+        let schema = test_schema_with_nocase_text_index();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = prog.ops();
+
+        assert!(
+            ops.iter()
+                .any(|op| op.opcode == Opcode::Rewind && op.p1 == 0),
+            "NOCASE range should stay on the generic full-scan path"
+        );
+        assert!(
+            !ops.iter().any(|op| op.opcode == Opcode::OpenRead
+                && matches!(&op.p4, P4::Index(name) if name == "idx_t_name")),
+            "unsafe collation semantics should not use the index-range fast path"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_index_range_with_numeric_affinity_falls_back() {
+        let stmt = simple_select(
+            &["n"],
+            "t",
+            Some(and_expr(
+                col_cmp_param("n", AstBinaryOp::Ge, 1),
+                col_cmp_param("n", AstBinaryOp::Lt, 2),
+            )),
+        );
+        let schema = test_schema_with_typed_numeric_index();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = prog.ops();
+
+        assert!(
+            ops.iter()
+                .any(|op| op.opcode == Opcode::Rewind && op.p1 == 0),
+            "typed numeric range should stay on the generic full-scan path until seek semantics match WHERE coercion"
+        );
+        assert!(
+            !ops.iter().any(|op| op.opcode == Opcode::OpenRead
+                && matches!(&op.p4, P4::Index(name) if name == "idx_t_n")),
+            "unsafe affinity semantics should not use the index-range fast path"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_index_range_with_anonymous_params_stays_on_full_scan() {
+        let stmt = simple_select(
+            &["a"],
+            "t",
+            Some(and_expr(
+                Box::new(Expr::BinaryOp {
+                    left: Box::new(Expr::Column(ColumnRef::bare("b"), Span::ZERO)),
+                    op: AstBinaryOp::Ge,
+                    right: Box::new(anonymous_placeholder()),
+                    span: Span::ZERO,
+                }),
+                Box::new(Expr::BinaryOp {
+                    left: Box::new(Expr::Column(ColumnRef::bare("b"), Span::ZERO)),
+                    op: AstBinaryOp::Lt,
+                    right: Box::new(anonymous_placeholder()),
+                    span: Span::ZERO,
+                }),
+            )),
+        );
+        let schema = test_schema_with_index();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = prog.ops();
+
+        assert!(
+            ops.iter().any(|op| op.opcode == Opcode::Rewind),
+            "anonymous placeholder ranges must stay on the original full-scan path"
+        );
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op.opcode, Opcode::SeekGE | Opcode::SeekGT)),
+            "fast-path index range seek must not reorder anonymous placeholders"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_index_range_with_wrong_qualifier_falls_back() {
+        let stmt = simple_select(
+            &["a"],
+            "t",
+            Some(and_expr(
+                qualified_col_cmp_param("u", "b", AstBinaryOp::Ge, 1),
+                qualified_col_cmp_param("u", "b", AstBinaryOp::Lt, 2),
+            )),
+        );
+        let schema = test_schema_with_index();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = prog.ops();
+
+        assert!(
+            ops.iter()
+                .any(|op| op.opcode == Opcode::Rewind && op.p1 == 0),
+            "mismatched qualifier should fall back to the generic table scan"
+        );
+        assert!(
+            !ops.iter().any(|op| {
+                op.opcode == Opcode::OpenRead
+                    && matches!(&op.p4, P4::Index(name) if name == "idx_t_b")
+            }),
+            "mismatched qualifier must not open the index-range fast path"
+        );
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op.opcode, Opcode::SeekGE | Opcode::SeekGT)),
+            "mismatched qualifier must not use the index-range seek path"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_where_in_subquery_supported_without_rewrite() {
+        let subquery = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Expr {
+                        expr: Expr::Column(ColumnRef::bare("b"), Span::ZERO),
+                        alias: None,
+                    }],
+                    from: Some(from_table("s")),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+        let where_expr = Expr::In {
+            expr: Box::new(Expr::Column(ColumnRef::bare("a"), Span::ZERO)),
+            set: InSet::Subquery(Box::new(subquery)),
+            not: false,
+            span: Span::ZERO,
+        };
+        let stmt = simple_select(&["a"], "t", Some(Box::new(where_expr)));
+
+        let schema = test_schema_with_subquery_source();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let open_reads = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::OpenRead)
+            .count();
+        assert_eq!(open_reads, 2, "outer + probe OpenRead expected");
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::Eq),
+            "expected Eq comparison in probe scan"
+        );
+    }
+
+    #[test]
+    fn test_resolve_in_probe_source_subquery_supported() {
+        let subquery = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Expr {
+                        expr: Expr::Column(ColumnRef::bare("b"), Span::ZERO),
+                        alias: None,
+                    }],
+                    from: Some(from_table("s")),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+        let set = InSet::Subquery(Box::new(subquery));
+        let schema = test_schema_with_subquery_source();
+        assert!(super::resolve_in_probe_source(&set, &schema).is_some());
+    }
+
+    #[test]
+    fn test_resolve_in_probe_source_table_supported() {
+        let set = InSet::Table(QualifiedName::bare("s"));
+        let schema = test_schema_with_subquery_source();
+        assert!(super::resolve_in_probe_source(&set, &schema).is_some());
+    }
+
+    #[test]
+    fn test_codegen_select_where_in_table_supported_without_rewrite() {
+        let where_expr = Expr::In {
+            expr: Box::new(Expr::Column(ColumnRef::bare("a"), Span::ZERO)),
+            set: InSet::Table(QualifiedName::bare("s")),
+            not: false,
+            span: Span::ZERO,
+        };
+        let stmt = simple_select(&["a"], "t", Some(Box::new(where_expr)));
+
+        let schema = test_schema_with_subquery_source();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let open_reads = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::OpenRead)
+            .count();
+        assert_eq!(open_reads, 2, "outer + probe OpenRead expected");
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::Eq),
+            "expected Eq comparison in probe scan"
+        );
+    }
+
+    // === Test 10: INSERT RETURNING ===
+    #[test]
+    fn test_codegen_insert_returning() {
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec![],
+            source: InsertSource::Values(vec![vec![placeholder(1), placeholder(2)]]),
+            upsert: vec![],
+            returning: vec![ResultColumn::Expr {
+                expr: Expr::Column(ColumnRef::bare("rowid"), Span::ZERO),
+                alias: None,
+            }],
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // With RETURNING, there should be a ResultRow after Insert.
+        assert!(has_opcodes(
+            &prog,
+            &[Opcode::Insert, Opcode::ResultRow, Opcode::Close,]
+        ));
+    }
+
+    // === Test 11: SELECT with LIMIT ===
+    #[test]
+    fn test_codegen_select_with_limit() {
+        let stmt = star_select_with_limit("t", 10);
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // Should contain Integer (for limit), DecrJumpZero (for countdown).
+        assert!(has_opcodes(
+            &prog,
+            &[
+                Opcode::Integer,
+                Opcode::OpenRead,
+                Opcode::Rewind,
+                Opcode::Column,
+                Opcode::ResultRow,
+                Opcode::DecrJumpZero,
+                Opcode::Next,
+                Opcode::Close,
+                Opcode::Halt,
+            ]
+        ));
+
+        // DecrJumpZero p1 should be the limit register.
+        let djz = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::DecrJumpZero)
+            .expect("must have DecrJumpZero");
+        assert!(djz.p1 >= 1, "limit register must be allocated");
+    }
+
+    // === Test 12: SELECT with LIMIT and OFFSET ===
+    #[test]
+    fn test_codegen_select_with_limit_offset() {
+        let stmt = star_select_with_limit_offset("t", 5, 3);
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // Should have both IfPos (offset skip) and DecrJumpZero (limit).
+        assert!(has_opcodes(
+            &prog,
+            &[
+                Opcode::Integer, // limit value
+                Opcode::Integer, // offset value
+                Opcode::OpenRead,
+                Opcode::Rewind,
+                Opcode::IfPos, // offset countdown
+                Opcode::Column,
+                Opcode::ResultRow,
+                Opcode::DecrJumpZero, // limit countdown
+                Opcode::Next,
+                Opcode::Close,
+                Opcode::Halt,
+            ]
+        ));
+
+        // Verify IfPos p3 == 1 (decrement by 1).
+        let ifpos = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::IfPos)
+            .expect("must have IfPos");
+        assert_eq!(ifpos.p3, 1, "IfPos should decrement offset by 1");
+    }
+
+    // === Test 13: SELECT without LIMIT has no DecrJumpZero ===
+    #[test]
+    fn test_codegen_select_no_limit_no_decr() {
+        let stmt = star_select("t");
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // Without LIMIT, there should be no DecrJumpZero.
+        let djz_count = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::DecrJumpZero)
+            .count();
+        assert_eq!(djz_count, 0, "no DecrJumpZero without LIMIT");
+
+        // And no IfPos either.
+        let ifpos_count = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::IfPos)
+            .count();
+        assert_eq!(ifpos_count, 0, "no IfPos without OFFSET");
+    }
+
+    // === Test 14: LIMIT labels properly resolved ===
+    #[test]
+    fn test_codegen_select_limit_labels_resolved() {
+        let stmt = star_select_with_limit_offset("t", 10, 5);
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // All jump targets should be valid addresses.
+        for op in prog.ops() {
+            if op.opcode.is_jump() {
+                assert!(
+                    op.p2 >= 0,
+                    "unresolved jump at {:?}: p2 = {}",
+                    op.opcode,
+                    op.p2
+                );
+                assert!(
+                    usize::try_from(op.p2).unwrap() <= prog.len(),
+                    "jump target out of range at {:?}: p2 = {} (prog len = {})",
+                    op.opcode,
+                    op.p2,
+                    prog.len()
+                );
+            }
+        }
+    }
+
+    // ── ORDER BY test helpers ──
+
+    fn star_select_order_by(table: &str, col: &str, desc: bool) -> SelectStatement {
+        SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Star],
+                    from: Some(from_table(table)),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![OrderingTerm {
+                expr: Expr::Column(ColumnRef::bare(col), Span::ZERO),
+                direction: if desc {
+                    Some(SortDirection::Desc)
+                } else {
+                    None
+                },
+                nulls: None,
+            }],
+            limit: None,
+        }
+    }
+
+    fn select_col_order_by(
+        table: &str,
+        select_col: &str,
+        order_col: &str,
+        desc: bool,
+    ) -> SelectStatement {
+        SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Expr {
+                        expr: Expr::Column(ColumnRef::bare(select_col), Span::ZERO),
+                        alias: None,
+                    }],
+                    from: Some(from_table(table)),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![OrderingTerm {
+                expr: Expr::Column(ColumnRef::bare(order_col), Span::ZERO),
+                direction: if desc {
+                    Some(SortDirection::Desc)
+                } else {
+                    None
+                },
+                nulls: None,
+            }],
+            limit: None,
+        }
+    }
+
+    fn star_select_order_by_with_limit(table: &str, col: &str, limit: i64) -> SelectStatement {
+        SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Star],
+                    from: Some(from_table(table)),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![OrderingTerm {
+                expr: Expr::Column(ColumnRef::bare(col), Span::ZERO),
+                direction: None,
+                nulls: None,
+            }],
+            limit: Some(LimitClause {
+                limit: Expr::Literal(Literal::Integer(limit), Span::ZERO),
+                offset: None,
+            }),
+        }
+    }
+
+    fn star_select_order_by_expr(table: &str, expr: Expr) -> SelectStatement {
+        SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Star],
+                    from: Some(from_table(table)),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![OrderingTerm {
+                expr,
+                direction: None,
+                nulls: None,
+            }],
+            limit: None,
+        }
+    }
+
+    // === Test 15: SELECT with ORDER BY ===
+    #[test]
+    fn test_codegen_select_order_by() {
+        let stmt = star_select_order_by("t", "a", false);
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // Two-pass pattern: SorterOpen, OpenRead, scan loop, SorterSort, output loop.
+        assert!(has_opcodes(
+            &prog,
+            &[
+                Opcode::SorterOpen,
+                Opcode::OpenRead,
+                Opcode::Rewind,
+                Opcode::Column,
+                Opcode::MakeRecord,
+                Opcode::SorterInsert,
+                Opcode::Next,
+                Opcode::Close,
+                Opcode::SorterSort,
+                Opcode::SorterData,
+                Opcode::Column,
+                Opcode::ResultRow,
+                Opcode::SorterNext,
+                Opcode::Close,
+                Opcode::Halt,
+            ]
+        ));
+
+        // SorterOpen p2 should be 1 (one sort key column).
+        let so = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::SorterOpen)
+            .unwrap();
+        assert_eq!(so.p2, 1, "SorterOpen should have 1 key column");
+    }
+
+    // === Test 16: SELECT ORDER BY DESC ===
+    #[test]
+    fn test_codegen_select_order_by_desc() {
+        let stmt = star_select_order_by("t", "b", true);
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // Should have SorterOpen with sort order in P4.
+        let so = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::SorterOpen)
+            .unwrap();
+        assert_eq!(so.p2, 1, "SorterOpen should have 1 key column");
+        // P4 should contain the '-' (DESC) sort order.
+        assert!(
+            matches!(&so.p4, P4::Str(s) if s == "-"),
+            "SorterOpen P4 should be '-' for DESC, got {:?}",
+            so.p4
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_order_by_uses_index_without_sorter() {
+        let stmt = star_select_order_by("t", "b", false);
+        let schema = test_schema_with_index();
+        let ctx = CodegenContext {
+            index_ordered_scan_reliable: true,
+            ..CodegenContext::default()
+        };
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // ORDER BY on indexed column should stream via index cursor.
+        assert!(has_opcodes(
+            &prog,
+            &[
+                Opcode::OpenRead, // table
+                Opcode::OpenRead, // index
+                Opcode::Rewind,
+                Opcode::IdxRowid,
+                Opcode::SeekRowid,
+                Opcode::ResultRow,
+                Opcode::Next,
+                Opcode::Halt,
+            ]
+        ));
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::OpenRead
+                && matches!(&op.p4, P4::Index(name) if name == "idx_t_b")),
+            "expected index cursor open for ORDER BY optimization"
+        );
+
+        let sorter_count = prog
+            .ops()
+            .iter()
+            .filter(|op| {
+                matches!(
+                    op.opcode,
+                    Opcode::SorterOpen
+                        | Opcode::SorterInsert
+                        | Opcode::SorterSort
+                        | Opcode::SorterData
+                        | Opcode::SorterNext
+                )
+            })
+            .count();
+        assert_eq!(
+            sorter_count, 0,
+            "index-assisted ORDER BY should bypass sorter"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_order_by_desc_uses_index_reverse_scan_without_sorter() {
+        let stmt = star_select_order_by("t", "b", true);
+        let schema = test_schema_with_index();
+        let ctx = CodegenContext {
+            index_ordered_scan_reliable: true,
+            ..CodegenContext::default()
+        };
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(has_opcodes(
+            &prog,
+            &[
+                Opcode::OpenRead, // table
+                Opcode::OpenRead, // index
+                Opcode::Last,
+                Opcode::IdxRowid,
+                Opcode::SeekRowid,
+                Opcode::ResultRow,
+                Opcode::Prev,
+                Opcode::Halt,
+            ]
+        ));
+        assert!(
+            !prog.ops().iter().any(|op| {
+                matches!(
+                    op.opcode,
+                    Opcode::SorterOpen
+                        | Opcode::SorterInsert
+                        | Opcode::SorterSort
+                        | Opcode::SorterData
+                        | Opcode::SorterNext
+                )
+            }),
+            "descending index-assisted ORDER BY should bypass sorter"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_covering_order_by_skips_table_lookup() {
+        let stmt = select_col_order_by("t", "b", "b", false);
+        let schema = test_schema_with_index();
+        let ctx = CodegenContext {
+            index_ordered_scan_reliable: true,
+            ..CodegenContext::default()
+        };
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        let table_open_count = prog
+            .ops()
+            .iter()
+            .filter(|op| {
+                op.opcode == Opcode::OpenRead && matches!(&op.p4, P4::Table(name) if name == "t")
+            })
+            .count();
+        assert_eq!(
+            table_open_count, 0,
+            "covering ORDER BY path should not open table cursor"
+        );
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::OpenRead
+                && matches!(&op.p4, P4::Index(name) if name == "idx_t_b")),
+            "covering ORDER BY path should open index cursor"
+        );
+        assert!(
+            !prog.ops().iter().any(|op| op.opcode == Opcode::SeekRowid),
+            "covering ORDER BY path should not perform table rowid lookups"
+        );
+        assert!(
+            !prog.ops().iter().any(|op| {
+                matches!(
+                    op.opcode,
+                    Opcode::SorterOpen
+                        | Opcode::SorterInsert
+                        | Opcode::SorterSort
+                        | Opcode::SorterData
+                        | Opcode::SorterNext
+                )
+            }),
+            "covering ORDER BY path should bypass sorter"
+        );
+    }
+
+    // === Test 17: SELECT ORDER BY + LIMIT ===
+    #[test]
+    fn test_codegen_select_order_by_with_limit() {
+        let stmt = star_select_order_by_with_limit("t", "a", 5);
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // Should have SorterSort + DecrJumpZero (LIMIT on sorted output).
+        assert!(has_opcodes(
+            &prog,
+            &[
+                Opcode::SorterOpen,
+                Opcode::SorterSort,
+                Opcode::SorterData,
+                Opcode::ResultRow,
+                Opcode::DecrJumpZero,
+                Opcode::SorterNext,
+            ]
+        ));
+
+        // Integer for LIMIT should appear after scan pass.
+        let integers: Vec<_> = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::Integer)
+            .collect();
+        assert!(
+            integers.iter().any(|op| op.p1 == 5),
+            "should have Integer with limit value 5"
+        );
+
+        let sorter_open = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::SorterOpen)
+            .expect("ORDER BY + LIMIT should open a sorter");
+        assert_eq!(
+            sorter_open.p3, 5,
+            "simple ORDER BY + LIMIT should encode top-N pruning limit in SorterOpen.p3"
+        );
+    }
+
+    // === Test 17b: ORDER BY arithmetic expression ===
+    #[test]
+    fn test_codegen_select_order_by_arithmetic_expression() {
+        let stmt = star_select_order_by_expr(
+            "t",
+            Expr::BinaryOp {
+                left: Box::new(Expr::Column(ColumnRef::bare("a"), Span::ZERO)),
+                op: AstBinaryOp::Add,
+                right: Box::new(Expr::Column(ColumnRef::bare("b"), Span::ZERO)),
+                span: Span::ZERO,
+            },
+        );
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(has_opcodes(
+            &prog,
+            &[
+                Opcode::SorterOpen,
+                Opcode::OpenRead,
+                Opcode::Add,
+                Opcode::SorterInsert,
+                Opcode::SorterSort,
+                Opcode::ResultRow,
+            ]
+        ));
+    }
+
+    // === Test 17c: ORDER BY scalar function expression ===
+    #[test]
+    fn test_codegen_select_order_by_function_expression() {
+        let stmt = star_select_order_by_expr(
+            "t",
+            Expr::FunctionCall {
+                name: "length".to_owned(),
+                args: FunctionArgs::List(vec![Expr::Column(ColumnRef::bare("b"), Span::ZERO)]),
+                distinct: false,
+                order_by: vec![],
+                filter: None,
+                over: None,
+                span: Span::ZERO,
+            },
+        );
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(has_opcodes(
+            &prog,
+            &[
+                Opcode::SorterOpen,
+                Opcode::OpenRead,
+                Opcode::PureFunc,
+                Opcode::SorterInsert,
+                Opcode::SorterSort,
+                Opcode::ResultRow,
+            ]
+        ));
+    }
+
+    #[test]
+    fn test_codegen_select_where_literal_like_uses_const_fast_opcode() {
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Star],
+                    from: Some(from_table("t")),
+                    where_clause: Some(Box::new(Expr::Like {
+                        expr: Box::new(Expr::Column(ColumnRef::bare("b"), Span::ZERO)),
+                        pattern: Box::new(Expr::Literal(
+                            Literal::String("prefix%".to_owned()),
+                            Span::ZERO,
+                        )),
+                        escape: None,
+                        op: fsqlite_ast::LikeOp::Like,
+                        not: false,
+                        span: Span::ZERO,
+                    })),
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(
+            prog.ops()
+                .iter()
+                .any(|op| op.opcode == Opcode::LikeConstFast),
+            "literal LIKE should use LikeConstFast opcode"
+        );
+        assert!(
+            !prog.ops().iter().any(|op| op.opcode == Opcode::PureFunc),
+            "literal LIKE fast path should bypass generic PureFunc dispatch"
+        );
+        assert!(
+            prog.ops()
+                .iter()
+                .any(|op| op.opcode == Opcode::LikeConstFast
+                    && op.p4 == P4::Str("prefix".to_owned())),
+            "prefix LIKE should hoist the trimmed literal into LikeConstFast"
+        );
+    }
+
+    // === Test 18: ORDER BY no sorter without ORDER BY ===
+    #[test]
+    fn test_codegen_select_no_order_by_no_sorter() {
+        let stmt = star_select("t");
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // Without ORDER BY, there should be no sorter opcodes.
+        let sorter_count = prog
+            .ops()
+            .iter()
+            .filter(|op| {
+                matches!(
+                    op.opcode,
+                    Opcode::SorterOpen
+                        | Opcode::SorterInsert
+                        | Opcode::SorterSort
+                        | Opcode::SorterData
+                        | Opcode::SorterNext
+                )
+            })
+            .count();
+        assert_eq!(sorter_count, 0, "no sorter opcodes without ORDER BY");
+    }
+
+    // === Test 19: ORDER BY labels properly resolved ===
+    #[test]
+    fn test_codegen_select_order_by_labels_resolved() {
+        let stmt = star_select_order_by("t", "a", false);
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // All jump targets should be valid addresses.
+        for op in prog.ops() {
+            if op.opcode.is_jump() {
+                assert!(
+                    op.p2 >= 0,
+                    "unresolved jump at {:?}: p2 = {}",
+                    op.opcode,
+                    op.p2
+                );
+                assert!(
+                    usize::try_from(op.p2).unwrap() <= prog.len(),
+                    "jump target out of range at {:?}: p2 = {} (prog len = {})",
+                    op.opcode,
+                    op.p2,
+                    prog.len()
+                );
+            }
+        }
+
+        // SorterNext p2 should point to SorterData (within bounds).
+        let sn = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::SorterNext)
+            .unwrap();
+        let target_index = usize::try_from(sn.p2).unwrap();
+        let target_op = &prog.ops()[target_index];
+        assert_eq!(
+            target_op.opcode,
+            Opcode::SorterData,
+            "SorterNext should jump back to SorterData"
+        );
+    }
+
+    // === Test: SELECT ORDER BY expression (a + 1) ===
+    #[test]
+    fn test_codegen_select_order_by_expression() {
+        // SELECT * FROM t ORDER BY a + 1
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Star],
+                    from: Some(from_table("t")),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![OrderingTerm {
+                expr: Expr::BinaryOp {
+                    left: Box::new(Expr::Column(ColumnRef::bare("a"), Span::ZERO)),
+                    op: fsqlite_ast::BinaryOp::Add,
+                    right: Box::new(Expr::Literal(Literal::Integer(1), Span::ZERO)),
+                    span: Span::ZERO,
+                },
+                direction: None,
+                nulls: None,
+            }],
+            limit: None,
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // Should use the sorter (two-pass pattern).
+        assert!(has_opcodes(
+            &prog,
+            &[
+                Opcode::SorterOpen,
+                Opcode::OpenRead,
+                Opcode::Rewind,
+                Opcode::SorterInsert,
+                Opcode::Next,
+                Opcode::SorterSort,
+                Opcode::SorterData,
+                Opcode::ResultRow,
+                Opcode::SorterNext,
+                Opcode::Halt,
+            ]
+        ));
+
+        // The sort key is an expression, so we should see an Add opcode
+        // in the first pass (before SorterInsert).
+        let sorter_insert_idx = prog
+            .ops()
+            .iter()
+            .position(|op| op.opcode == Opcode::SorterInsert)
+            .unwrap();
+        let has_add_before_sorter = prog.ops()[..sorter_insert_idx]
+            .iter()
+            .any(|op| op.opcode == Opcode::Add);
+        assert!(
+            has_add_before_sorter,
+            "expression ORDER BY should emit Add before SorterInsert"
+        );
+    }
+
+    // ── Aggregate test helpers ──
+
+    /// Build `SELECT count(*) FROM table`.
+    fn agg_count_star(table: &str) -> SelectStatement {
+        SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Expr {
+                        expr: Expr::FunctionCall {
+                            name: "count".to_owned(),
+                            args: FunctionArgs::Star,
+                            distinct: false,
+                            order_by: vec![],
+                            filter: None,
+                            over: None,
+                            span: Span::ZERO,
+                        },
+                        alias: None,
+                    }],
+                    from: Some(from_table(table)),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        }
+    }
+
+    /// Build `SELECT count(*) FROM table WHERE rowid >= low AND rowid < high`.
+    fn agg_count_star_rowid_range(table: &str, low: i64, high: i64) -> SelectStatement {
+        SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Expr {
+                        expr: Expr::FunctionCall {
+                            name: "count".to_owned(),
+                            args: FunctionArgs::Star,
+                            distinct: false,
+                            order_by: vec![],
+                            filter: None,
+                            over: None,
+                            span: Span::ZERO,
+                        },
+                        alias: None,
+                    }],
+                    from: Some(from_table(table)),
+                    where_clause: Some(Box::new(Expr::BinaryOp {
+                        left: Box::new(Expr::BinaryOp {
+                            left: Box::new(Expr::Column(ColumnRef::bare("rowid"), Span::ZERO)),
+                            op: AstBinaryOp::Ge,
+                            right: Box::new(Expr::Literal(Literal::Integer(low), Span::ZERO)),
+                            span: Span::ZERO,
+                        }),
+                        op: AstBinaryOp::And,
+                        right: Box::new(Expr::BinaryOp {
+                            left: Box::new(Expr::Column(ColumnRef::bare("rowid"), Span::ZERO)),
+                            op: AstBinaryOp::Lt,
+                            right: Box::new(Expr::Literal(Literal::Integer(high), Span::ZERO)),
+                            span: Span::ZERO,
+                        }),
+                        span: Span::ZERO,
+                    })),
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        }
+    }
+
+    fn agg_count_star_exists_rowid_probe() -> SelectStatement {
+        SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Expr {
+                        expr: Expr::FunctionCall {
+                            name: "count".to_owned(),
+                            args: FunctionArgs::Star,
+                            distinct: false,
+                            order_by: vec![],
+                            filter: None,
+                            over: None,
+                            span: Span::ZERO,
+                        },
+                        alias: None,
+                    }],
+                    from: Some(from_table("t")),
+                    where_clause: Some(Box::new(Expr::Exists {
+                        subquery: Box::new(SelectStatement {
+                            with: None,
+                            body: SelectBody {
+                                select: SelectCore::Select {
+                                    distinct: Distinctness::All,
+                                    columns: vec![ResultColumn::Expr {
+                                        expr: Expr::Literal(Literal::Integer(1), Span::ZERO),
+                                        alias: None,
+                                    }],
+                                    from: Some(FromClause {
+                                        source: TableOrSubquery::Table {
+                                            name: QualifiedName::bare("s"),
+                                            alias: Some("s".to_owned()),
+                                            index_hint: None,
+                                            time_travel: None,
+                                        },
+                                        joins: vec![],
+                                    }),
+                                    where_clause: Some(Box::new(Expr::BinaryOp {
+                                        left: Box::new(Expr::BinaryOp {
+                                            left: Box::new(Expr::Column(
+                                                ColumnRef::qualified("s", "rowid"),
+                                                Span::ZERO,
+                                            )),
+                                            op: AstBinaryOp::Eq,
+                                            right: Box::new(Expr::Column(
+                                                ColumnRef::qualified("t", "b"),
+                                                Span::ZERO,
+                                            )),
+                                            span: Span::ZERO,
+                                        }),
+                                        op: AstBinaryOp::And,
+                                        right: Box::new(Expr::BinaryOp {
+                                            left: Box::new(Expr::Column(
+                                                ColumnRef::qualified("s", "rowid"),
+                                                Span::ZERO,
+                                            )),
+                                            op: AstBinaryOp::Le,
+                                            right: Box::new(Expr::Literal(
+                                                Literal::Integer(5),
+                                                Span::ZERO,
+                                            )),
+                                            span: Span::ZERO,
+                                        }),
+                                        span: Span::ZERO,
+                                    })),
+                                    group_by: vec![],
+                                    having: None,
+                                    windows: vec![],
+                                },
+                                compounds: vec![],
+                            },
+                            order_by: vec![],
+                            limit: None,
+                        }),
+                        not: false,
+                        span: Span::ZERO,
+                    })),
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        }
+    }
+
+    /// Build `SELECT func(col) FROM table`.
+    fn agg_func_col(func: &str, col: &str, table: &str) -> SelectStatement {
+        SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Expr {
+                        expr: Expr::FunctionCall {
+                            name: func.to_owned(),
+                            args: FunctionArgs::List(vec![Expr::Column(
+                                ColumnRef::bare(col),
+                                Span::ZERO,
+                            )]),
+                            distinct: false,
+                            order_by: Vec::new(),
+                            filter: None,
+                            over: None,
+                            span: Span::ZERO,
+                        },
+                        alias: None,
+                    }],
+                    from: Some(from_table(table)),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        }
+    }
+
+    /// Build `SELECT count(*), sum(col) FROM table`.
+    fn agg_count_star_and_sum(col: &str, table: &str) -> SelectStatement {
+        SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![
+                        ResultColumn::Expr {
+                            expr: Expr::FunctionCall {
+                                name: "count".to_owned(),
+                                args: FunctionArgs::Star,
+                                distinct: false,
+                                order_by: vec![],
+                                filter: None,
+                                over: None,
+                                span: Span::ZERO,
+                            },
+                            alias: None,
+                        },
+                        ResultColumn::Expr {
+                            expr: Expr::FunctionCall {
+                                name: "sum".to_owned(),
+                                args: FunctionArgs::List(vec![Expr::Column(
+                                    ColumnRef::bare(col),
+                                    Span::ZERO,
+                                )]),
+                                distinct: false,
+                                order_by: Vec::new(),
+                                filter: None,
+                                over: None,
+                                span: Span::ZERO,
+                            },
+                            alias: None,
+                        },
+                    ],
+                    from: Some(from_table(table)),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        }
+    }
+
+    /// Build `SELECT count(*) FROM table HAVING sum(col) > threshold`.
+    fn agg_count_star_having_sum_gt(col: &str, threshold: i64, table: &str) -> SelectStatement {
+        SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Expr {
+                        expr: Expr::FunctionCall {
+                            name: "count".to_owned(),
+                            args: FunctionArgs::Star,
+                            distinct: false,
+                            order_by: vec![],
+                            filter: None,
+                            over: None,
+                            span: Span::ZERO,
+                        },
+                        alias: None,
+                    }],
+                    from: Some(from_table(table)),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: Some(Box::new(Expr::BinaryOp {
+                        left: Box::new(Expr::FunctionCall {
+                            name: "sum".to_owned(),
+                            args: FunctionArgs::List(vec![Expr::Column(
+                                ColumnRef::bare(col),
+                                Span::ZERO,
+                            )]),
+                            distinct: false,
+                            order_by: vec![],
+                            filter: None,
+                            over: None,
+                            span: Span::ZERO,
+                        }),
+                        op: AstBinaryOp::Gt,
+                        right: Box::new(Expr::Literal(Literal::Integer(threshold), Span::ZERO)),
+                        span: Span::ZERO,
+                    })),
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        }
+    }
+
+    /// Build `SELECT count(*) FROM table HAVING count(*) > threshold`.
+    fn agg_count_star_having_count_gt(threshold: i64, table: &str) -> SelectStatement {
+        SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Expr {
+                        expr: Expr::FunctionCall {
+                            name: "count".to_owned(),
+                            args: FunctionArgs::Star,
+                            distinct: false,
+                            order_by: vec![],
+                            filter: None,
+                            over: None,
+                            span: Span::ZERO,
+                        },
+                        alias: None,
+                    }],
+                    from: Some(from_table(table)),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: Some(Box::new(Expr::BinaryOp {
+                        left: Box::new(Expr::FunctionCall {
+                            name: "count".to_owned(),
+                            args: FunctionArgs::Star,
+                            distinct: false,
+                            order_by: vec![],
+                            filter: None,
+                            over: None,
+                            span: Span::ZERO,
+                        }),
+                        op: AstBinaryOp::Gt,
+                        right: Box::new(Expr::Literal(Literal::Integer(threshold), Span::ZERO)),
+                        span: Span::ZERO,
+                    })),
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        }
+    }
+
+    // === Test 20: SELECT count(*) ===
+    #[test]
+    fn test_codegen_select_count_star() {
+        let stmt = agg_count_star("t");
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // COUNT(*) now takes the direct Count fast path.
+        assert!(has_opcodes(
+            &prog,
+            &[
+                Opcode::Init,
+                Opcode::Transaction,
+                Opcode::OpenRead,
+                Opcode::Count,
+                Opcode::ResultRow,
+                Opcode::Close,
+                Opcode::Halt,
+            ]
+        ));
+        assert!(
+            !prog
+                .ops()
+                .iter()
+                .any(|op| matches!(op.opcode, Opcode::AggStep | Opcode::AggFinal)),
+            "COUNT(*) fast path should bypass aggregate opcodes"
+        );
+
+        // ResultRow should cover 1 column.
+        let rr = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::ResultRow)
+            .unwrap();
+        assert_eq!(rr.p2, 1, "count(*) produces 1 result column");
+    }
+
+    #[test]
+    fn test_codegen_select_count_star_rowid_range_uses_counter_loop() {
+        let stmt = agg_count_star_rowid_range("t", 10, 20);
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(
+            prog.ops()
+                .iter()
+                .any(|op| matches!(op.opcode, Opcode::SeekGE | Opcode::SeekGT)),
+            "rowid-bounded COUNT(*) should seek into range instead of rewinding from row 0"
+        );
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::AddImm),
+            "specialized COUNT(*) loop should increment a counter register directly"
+        );
+        assert!(
+            !prog
+                .ops()
+                .iter()
+                .any(|op| matches!(op.opcode, Opcode::AggStep | Opcode::AggFinal)),
+            "rowid-bounded COUNT(*) should bypass generic aggregate execution"
+        );
+    }
+
+    #[test]
+    fn test_codegen_exists_subquery_uses_rowid_probe_when_available() {
+        let stmt = agg_count_star_exists_rowid_probe();
+        let schema = test_schema_with_subquery_source();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::SeekRowid),
+            "correlated EXISTS on inner rowid should probe directly with SeekRowid"
+        );
+        let rewind_count = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::Rewind)
+            .count();
+        assert_eq!(
+            rewind_count, 1,
+            "only the outer scan should rewind when EXISTS lowers to a direct rowid probe"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_uncorrelated_exists_subquery_uses_once_cached_boolean() {
+        let where_expr = Expr::Exists {
+            subquery: Box::new(SelectStatement {
+                with: None,
+                body: SelectBody {
+                    select: SelectCore::Select {
+                        distinct: Distinctness::All,
+                        columns: vec![ResultColumn::Expr {
+                            expr: Expr::Literal(Literal::Integer(1), Span::ZERO),
+                            alias: None,
+                        }],
+                        from: Some(FromClause {
+                            source: TableOrSubquery::Table {
+                                name: QualifiedName::bare("s"),
+                                alias: Some("s".to_owned()),
+                                index_hint: None,
+                                time_travel: None,
+                            },
+                            joins: vec![],
+                        }),
+                        where_clause: Some(Box::new(Expr::BinaryOp {
+                            left: Box::new(Expr::Column(
+                                ColumnRef::qualified("s", "b"),
+                                Span::ZERO,
+                            )),
+                            op: AstBinaryOp::Le,
+                            right: Box::new(Expr::Literal(Literal::Integer(5), Span::ZERO)),
+                            span: Span::ZERO,
+                        })),
+                        group_by: vec![],
+                        having: None,
+                        windows: vec![],
+                    },
+                    compounds: vec![],
+                },
+                order_by: vec![],
+                limit: None,
+            }),
+            not: false,
+            span: Span::ZERO,
+        };
+        let stmt = simple_select(&["a"], "t", Some(Box::new(where_expr)));
+
+        let schema = test_schema_with_subquery_source();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::Once),
+            "uncorrelated EXISTS subqueries should be evaluated once and cached"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_correlated_exists_subquery_does_not_use_once_materialization() {
+        let where_expr = Expr::Exists {
+            subquery: Box::new(SelectStatement {
+                with: None,
+                body: SelectBody {
+                    select: SelectCore::Select {
+                        distinct: Distinctness::All,
+                        columns: vec![ResultColumn::Expr {
+                            expr: Expr::Literal(Literal::Integer(1), Span::ZERO),
+                            alias: None,
+                        }],
+                        from: Some(FromClause {
+                            source: TableOrSubquery::Table {
+                                name: QualifiedName::bare("s"),
+                                alias: Some("s".to_owned()),
+                                index_hint: None,
+                                time_travel: None,
+                            },
+                            joins: vec![],
+                        }),
+                        where_clause: Some(Box::new(Expr::BinaryOp {
+                            left: Box::new(Expr::Column(
+                                ColumnRef::qualified("s", "b"),
+                                Span::ZERO,
+                            )),
+                            op: AstBinaryOp::Eq,
+                            right: Box::new(Expr::Column(
+                                ColumnRef::qualified("t", "a"),
+                                Span::ZERO,
+                            )),
+                            span: Span::ZERO,
+                        })),
+                        group_by: vec![],
+                        having: None,
+                        windows: vec![],
+                    },
+                    compounds: vec![],
+                },
+                order_by: vec![],
+                limit: None,
+            }),
+            not: false,
+            span: Span::ZERO,
+        };
+        let stmt = simple_select(&["a"], "t", Some(Box::new(where_expr)));
+
+        let schema = test_schema_with_subquery_source();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(
+            !prog.ops().iter().any(|op| op.opcode == Opcode::Once),
+            "correlated EXISTS subqueries must not be cached once because they depend on outer-row values"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_large_in_list_uses_once_materialized_autoindex() {
+        let values = (1..=8)
+            .map(|value| Expr::Literal(Literal::Integer(value), Span::ZERO))
+            .collect();
+        let where_expr = Expr::In {
+            expr: Box::new(Expr::Column(ColumnRef::bare("a"), Span::ZERO)),
+            set: InSet::List(values),
+            not: false,
+            span: Span::ZERO,
+        };
+        let stmt = simple_select(&["a"], "t", Some(Box::new(where_expr)));
+
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::Once),
+            "large IN lists should materialize their membership set once per statement"
+        );
+        assert!(
+            prog.ops()
+                .iter()
+                .any(|op| op.opcode == Opcode::OpenAutoindex),
+            "large IN lists should build an ephemeral autoindex"
+        );
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::IdxInsert),
+            "large IN lists should populate the ephemeral autoindex"
+        );
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::Found),
+            "large IN lists should probe membership via Found"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_uncorrelated_in_subquery_uses_once_materialized_autoindex() {
+        let where_expr = Expr::In {
+            expr: Box::new(Expr::Column(ColumnRef::bare("a"), Span::ZERO)),
+            set: InSet::Subquery(Box::new(SelectStatement {
+                with: None,
+                body: SelectBody {
+                    select: SelectCore::Select {
+                        distinct: Distinctness::All,
+                        columns: vec![ResultColumn::Expr {
+                            expr: Expr::Column(ColumnRef::qualified("s", "b"), Span::ZERO),
+                            alias: None,
+                        }],
+                        from: Some(FromClause {
+                            source: TableOrSubquery::Table {
+                                name: QualifiedName::bare("s"),
+                                alias: Some("s".to_owned()),
+                                index_hint: None,
+                                time_travel: None,
+                            },
+                            joins: vec![],
+                        }),
+                        where_clause: Some(Box::new(Expr::BinaryOp {
+                            left: Box::new(Expr::Column(
+                                ColumnRef::qualified("s", "b"),
+                                Span::ZERO,
+                            )),
+                            op: AstBinaryOp::Le,
+                            right: Box::new(Expr::Literal(Literal::Integer(5), Span::ZERO)),
+                            span: Span::ZERO,
+                        })),
+                        group_by: vec![],
+                        having: None,
+                        windows: vec![],
+                    },
+                    compounds: vec![],
+                },
+                order_by: vec![],
+                limit: None,
+            })),
+            not: false,
+            span: Span::ZERO,
+        };
+        let stmt = simple_select(&["a"], "t", Some(Box::new(where_expr)));
+
+        let schema = test_schema_with_subquery_source();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::Once),
+            "uncorrelated IN subqueries should materialize once per statement"
+        );
+        assert!(
+            prog.ops()
+                .iter()
+                .any(|op| op.opcode == Opcode::OpenAutoindex),
+            "uncorrelated IN subqueries should build an ephemeral autoindex"
+        );
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::IdxInsert),
+            "uncorrelated IN subqueries should populate the ephemeral autoindex"
+        );
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::Found),
+            "uncorrelated IN subqueries should probe membership via Found"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_uncorrelated_in_subquery_with_overlapping_column_names_materializes_once()
+     {
+        let where_expr = Expr::In {
+            expr: Box::new(Expr::Column(ColumnRef::bare("a"), Span::ZERO)),
+            set: InSet::Subquery(Box::new(SelectStatement {
+                with: None,
+                body: SelectBody {
+                    select: SelectCore::Select {
+                        distinct: Distinctness::All,
+                        columns: vec![ResultColumn::Expr {
+                            expr: Expr::Column(ColumnRef::bare("b"), Span::ZERO),
+                            alias: None,
+                        }],
+                        from: Some(from_table("s")),
+                        where_clause: Some(Box::new(Expr::BinaryOp {
+                            left: Box::new(Expr::Column(ColumnRef::bare("b"), Span::ZERO)),
+                            op: AstBinaryOp::Le,
+                            right: Box::new(Expr::Literal(Literal::Integer(5), Span::ZERO)),
+                            span: Span::ZERO,
+                        })),
+                        group_by: vec![],
+                        having: None,
+                        windows: vec![],
+                    },
+                    compounds: vec![],
+                },
+                order_by: vec![],
+                limit: None,
+            })),
+            not: false,
+            span: Span::ZERO,
+        };
+        let stmt = simple_select(&["a"], "t", Some(Box::new(where_expr)));
+
+        let schema = test_schema_with_subquery_source();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(
+            prog.ops()
+                .iter()
+                .any(|op| op.opcode == Opcode::OpenAutoindex),
+            "local subquery columns that overlap outer column names must still materialize once"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_correlated_in_subquery_does_not_use_once_materialization() {
+        let where_expr = Expr::In {
+            expr: Box::new(Expr::Column(ColumnRef::bare("a"), Span::ZERO)),
+            set: InSet::Subquery(Box::new(SelectStatement {
+                with: None,
+                body: SelectBody {
+                    select: SelectCore::Select {
+                        distinct: Distinctness::All,
+                        columns: vec![ResultColumn::Expr {
+                            expr: Expr::Column(ColumnRef::bare("b"), Span::ZERO),
+                            alias: None,
+                        }],
+                        from: Some(FromClause {
+                            source: TableOrSubquery::Table {
+                                name: QualifiedName::bare("s"),
+                                alias: Some("s".to_owned()),
+                                index_hint: None,
+                                time_travel: None,
+                            },
+                            joins: vec![],
+                        }),
+                        where_clause: Some(Box::new(Expr::BinaryOp {
+                            left: Box::new(Expr::Column(
+                                ColumnRef::qualified("s", "b"),
+                                Span::ZERO,
+                            )),
+                            op: AstBinaryOp::Eq,
+                            right: Box::new(Expr::Column(
+                                ColumnRef::qualified("t", "a"),
+                                Span::ZERO,
+                            )),
+                            span: Span::ZERO,
+                        })),
+                        group_by: vec![],
+                        having: None,
+                        windows: vec![],
+                    },
+                    compounds: vec![],
+                },
+                order_by: vec![],
+                limit: None,
+            })),
+            not: false,
+            span: Span::ZERO,
+        };
+        let stmt = simple_select(&["a"], "t", Some(Box::new(where_expr)));
+
+        let schema = test_schema_with_subquery_source();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(
+            !prog
+                .ops()
+                .iter()
+                .any(|op| op.opcode == Opcode::OpenAutoindex),
+            "correlated IN subqueries must not materialize once because they depend on outer-row values"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_count_star_indexed_in_list_uses_index_probe_expansion() {
+        let where_expr = Expr::In {
+            expr: Box::new(Expr::Column(ColumnRef::bare("b"), Span::ZERO)),
+            set: InSet::List(
+                (1..=8)
+                    .map(|value| Expr::Literal(Literal::Integer(value), Span::ZERO))
+                    .collect(),
+            ),
+            not: false,
+            span: Span::ZERO,
+        };
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Expr {
+                        expr: Expr::FunctionCall {
+                            name: "count".to_owned(),
+                            args: FunctionArgs::Star,
+                            distinct: false,
+                            order_by: vec![],
+                            filter: None,
+                            over: None,
+                            span: Span::ZERO,
+                        },
+                        alias: None,
+                    }],
+                    from: Some(from_table("t")),
+                    where_clause: Some(Box::new(where_expr)),
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+
+        let schema = test_schema_with_index();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(
+            prog.ops().iter().any(|op| matches!(&op.p4, P4::Index(name) if op.opcode == Opcode::OpenRead && name == "idx_t_b")),
+            "count(*) with indexed IN-list should open the outer index"
+        );
+        assert!(
+            prog.ops()
+                .iter()
+                .any(|op| op.opcode == Opcode::OpenAutoindex),
+            "count(*) with indexed IN-list should build a deduplicated probe set"
+        );
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::SeekGE),
+            "count(*) with indexed IN-list should seek into the outer index per probe value"
+        );
+        assert!(
+            !prog.ops().iter().any(|op| matches!(&op.p4, P4::Table(name) if op.opcode == Opcode::OpenRead && name == "t")),
+            "count(*) with indexed IN-list should not fall back to opening the base table"
+        );
+        assert!(
+            !prog
+                .ops()
+                .iter()
+                .any(|op| matches!(op.opcode, Opcode::AggStep | Opcode::AggFinal)),
+            "count(*) with indexed IN-list should stay on the direct counter path"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_count_star_indexed_in_subquery_uses_index_probe_expansion() {
+        let where_expr = Expr::In {
+            expr: Box::new(Expr::Column(ColumnRef::bare("b"), Span::ZERO)),
+            set: InSet::Subquery(Box::new(SelectStatement {
+                with: None,
+                body: SelectBody {
+                    select: SelectCore::Select {
+                        distinct: Distinctness::All,
+                        columns: vec![ResultColumn::Expr {
+                            expr: Expr::Column(ColumnRef::bare("b"), Span::ZERO),
+                            alias: None,
+                        }],
+                        from: Some(from_table("s")),
+                        where_clause: Some(Box::new(Expr::BinaryOp {
+                            left: Box::new(Expr::Column(ColumnRef::bare("b"), Span::ZERO)),
+                            op: AstBinaryOp::Le,
+                            right: Box::new(Expr::Literal(Literal::Integer(5), Span::ZERO)),
+                            span: Span::ZERO,
+                        })),
+                        group_by: vec![],
+                        having: None,
+                        windows: vec![],
+                    },
+                    compounds: vec![],
+                },
+                order_by: vec![],
+                limit: None,
+            })),
+            not: false,
+            span: Span::ZERO,
+        };
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Expr {
+                        expr: Expr::FunctionCall {
+                            name: "count".to_owned(),
+                            args: FunctionArgs::Star,
+                            distinct: false,
+                            order_by: vec![],
+                            filter: None,
+                            over: None,
+                            span: Span::ZERO,
+                        },
+                        alias: None,
+                    }],
+                    from: Some(from_table("t")),
+                    where_clause: Some(Box::new(where_expr)),
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+
+        let schema = test_schema_with_index_and_subquery_source();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(
+            prog.ops().iter().any(|op| matches!(&op.p4, P4::Index(name) if op.opcode == Opcode::OpenRead && name == "idx_t_b")),
+            "count(*) with indexed IN-subquery should open the outer index"
+        );
+        assert!(
+            prog.ops().iter().any(|op| matches!(&op.p4, P4::Table(name) if op.opcode == Opcode::OpenRead && name == "s")),
+            "count(*) with indexed IN-subquery should still read the inner probe source once"
+        );
+        assert!(
+            prog.ops()
+                .iter()
+                .any(|op| op.opcode == Opcode::OpenAutoindex),
+            "count(*) with indexed IN-subquery should materialize a deduplicated RHS probe set once"
+        );
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::SeekGE),
+            "count(*) with indexed IN-subquery should seek into the outer index per probe value"
+        );
+        assert!(
+            !prog
+                .ops()
+                .iter()
+                .any(|op| op.opcode == Opcode::CountIndexEqRun),
+            "non-rowid IN-subquery should stay on per-probe indexed seeks"
+        );
+        assert!(
+            !prog.ops().iter().any(|op| matches!(&op.p4, P4::Table(name) if op.opcode == Opcode::OpenRead && name == "t")),
+            "count(*) with indexed IN-subquery should avoid reopening the base table"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_count_star_indexed_in_rowid_subquery_uses_bounded_source_scan() {
+        let where_expr = Expr::In {
+            expr: Box::new(Expr::Column(ColumnRef::bare("b"), Span::ZERO)),
+            set: InSet::Subquery(Box::new(SelectStatement {
+                with: None,
+                body: SelectBody {
+                    select: SelectCore::Select {
+                        distinct: Distinctness::All,
+                        columns: vec![ResultColumn::Expr {
+                            expr: Expr::Column(ColumnRef::bare("rowid"), Span::ZERO),
+                            alias: None,
+                        }],
+                        from: Some(from_table("s")),
+                        where_clause: Some(Box::new(Expr::BinaryOp {
+                            left: Box::new(Expr::Column(ColumnRef::bare("rowid"), Span::ZERO)),
+                            op: AstBinaryOp::Le,
+                            right: Box::new(Expr::Literal(Literal::Integer(5), Span::ZERO)),
+                            span: Span::ZERO,
+                        })),
+                        group_by: vec![],
+                        having: None,
+                        windows: vec![],
+                    },
+                    compounds: vec![],
+                },
+                order_by: vec![],
+                limit: None,
+            })),
+            not: false,
+            span: Span::ZERO,
+        };
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Expr {
+                        expr: Expr::FunctionCall {
+                            name: "count".to_owned(),
+                            args: FunctionArgs::Star,
+                            distinct: false,
+                            order_by: vec![],
+                            filter: None,
+                            over: None,
+                            span: Span::ZERO,
+                        },
+                        alias: None,
+                    }],
+                    from: Some(from_table("t")),
+                    where_clause: Some(Box::new(where_expr)),
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+
+        let schema = test_schema_with_index_and_subquery_source();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(
+            prog.ops()
+                .iter()
+                .any(|op| op.opcode == Opcode::OpenAutoindex),
+            "rowid-driven IN-subquery should still materialize the RHS probe set once"
+        );
+        assert!(
+            prog.ops()
+                .iter()
+                .any(|op| op.opcode == Opcode::CountIndexEqRun),
+            "rowid-driven IN-subquery should consume the materialized RHS via duplicate-run counting"
+        );
+        assert!(
+            prog.ops()
+                .iter()
+                .any(|op| matches!(op.opcode, Opcode::Ge | Opcode::Gt)),
+            "rowid-driven IN-subquery should bound the inner probe-source rowid scan"
+        );
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::Rowid),
+            "rowid-driven IN-subquery should read source rowids for bounded stop checks"
+        );
+    }
+
+    #[test]
+    fn test_extract_count_indexed_in_target_uses_direct_probe_source_for_bounded_ipk_subquery() {
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Expr {
+                        expr: Expr::FunctionCall {
+                            name: "count".to_owned(),
+                            args: FunctionArgs::Star,
+                            distinct: false,
+                            order_by: vec![],
+                            filter: None,
+                            over: None,
+                            span: Span::ZERO,
+                        },
+                        alias: None,
+                    }],
+                    from: Some(from_table("t")),
+                    where_clause: Some(Box::new(Expr::In {
+                        expr: Box::new(Expr::Column(ColumnRef::bare("b"), Span::ZERO)),
+                        set: InSet::Subquery(Box::new(SelectStatement {
+                            with: None,
+                            body: SelectBody {
+                                select: SelectCore::Select {
+                                    distinct: Distinctness::All,
+                                    columns: vec![ResultColumn::Expr {
+                                        expr: Expr::Column(
+                                            ColumnRef::qualified("s", "id"),
+                                            Span::ZERO,
+                                        ),
+                                        alias: None,
+                                    }],
+                                    from: Some(FromClause {
+                                        source: TableOrSubquery::Table {
+                                            name: QualifiedName::bare("s"),
+                                            alias: Some("s".to_owned()),
+                                            index_hint: None,
+                                            time_travel: None,
+                                        },
+                                        joins: vec![],
+                                    }),
+                                    where_clause: Some(Box::new(Expr::BinaryOp {
+                                        left: Box::new(Expr::Column(
+                                            ColumnRef::qualified("s", "id"),
+                                            Span::ZERO,
+                                        )),
+                                        op: AstBinaryOp::Le,
+                                        right: Box::new(Expr::Literal(
+                                            Literal::Integer(5),
+                                            Span::ZERO,
+                                        )),
+                                        span: Span::ZERO,
+                                    })),
+                                    group_by: vec![],
+                                    having: None,
+                                    windows: vec![],
+                                },
+                                compounds: vec![],
+                            },
+                            order_by: vec![],
+                            limit: None,
+                        })),
+                        not: false,
+                        span: Span::ZERO,
+                    })),
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+
+        let schema = vec![
+            TableSchema {
+                name: "t".to_owned(),
+                root_page: 2,
+                columns: vec![
+                    ColumnInfo::basic("a", 'd', false),
+                    ColumnInfo::basic("b", 'd', false),
+                ],
+                indexes: vec![IndexSchema {
+                    name: "idx_t_b".to_owned(),
+                    root_page: 4,
+                    columns: vec!["b".to_owned()],
+                    key_expressions: vec!["b".to_owned()],
+                    key_sort_directions: vec![],
+                    where_clause: None,
+                    is_unique: false,
+                    key_collations: vec![],
+                }],
+                strict: false,
+                without_rowid: false,
+                primary_key_constraints: Vec::new(),
+                foreign_keys: Vec::new(),
+                check_constraints: Vec::new(),
+            },
+            TableSchema {
+                name: "s".to_owned(),
+                root_page: 3,
+                columns: vec![
+                    ColumnInfo::basic("id", 'd', true),
+                    ColumnInfo::basic("name", 'a', false),
+                ],
+                indexes: vec![],
+                strict: false,
+                without_rowid: false,
+                primary_key_constraints: Vec::new(),
+                foreign_keys: Vec::new(),
+                check_constraints: Vec::new(),
+            },
+        ];
+
+        let table = find_table(&schema, "t").expect("outer table should exist");
+        let scan_ctx = ScanCtx {
+            cursor: 0,
+            table,
+            table_alias: None,
+            schema: Some(&schema),
+            register_base: None,
+            secondary: None,
+        };
+        let SelectCore::Select {
+            where_clause: Some(where_clause),
+            ..
+        } = &stmt.body.select
+        else {
+            panic!("fixture should include a WHERE clause");
+        };
+
+        let extracted =
+            extract_count_indexed_in_target(Some(where_clause), table, None, &schema, &scan_ctx)
+                .expect("indexed IN target should match");
+
+        assert_eq!(extracted.0.name, "idx_t_b");
+        match extracted.1 {
+            CountIndexedInTarget::ProbeSource(probe_source) => {
+                assert!(matches!(probe_source.value, InProbeValue::Rowid));
+            }
+            CountIndexedInTarget::MaterializedProbeSource(_) => {
+                panic!(
+                    "bounded IPK-projected IN target should lower to a direct rowid probe source"
+                );
+            }
+            CountIndexedInTarget::List(_) => {
+                panic!("IPK-projected IN target should lower to a rowid probe source");
+            }
+        }
+    }
+
+    #[test]
+    fn test_codegen_select_count_star_exists_semijoin_uses_duplicate_run_count_opcode() {
+        let stmt = agg_count_star_exists_rowid_probe();
+        let schema = test_schema_with_index_and_subquery_source();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(
+            prog.ops().iter().any(
+                |op| matches!(&op.p4, P4::Index(name) if op.opcode == Opcode::OpenRead && name == "idx_t_b")
+            ),
+            "count(*) EXISTS semijoin fast path should open the outer index"
+        );
+        assert!(
+            prog.ops().iter().any(
+                |op| matches!(&op.p4, P4::Table(name) if op.opcode == Opcode::OpenRead && name == "s")
+            ),
+            "count(*) EXISTS semijoin fast path should still read the inner probe source once"
+        );
+        assert!(
+            prog.ops()
+                .iter()
+                .any(|op| matches!(op.opcode, Opcode::Ge | Opcode::Gt | Opcode::SeekGE)),
+            "count(*) EXISTS semijoin fast path should keep the bounded source scan and indexed outer probe"
+        );
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::Rowid),
+            "count(*) EXISTS semijoin fast path should read source rowids for bounded stop checks"
+        );
+        assert!(
+            prog.ops()
+                .iter()
+                .any(|op| op.opcode == Opcode::CountIndexEqRun),
+            "count(*) EXISTS semijoin fast path should fuse duplicate-run counting into a dedicated opcode"
+        );
+        assert!(
+            !prog.ops().iter().any(|op| op.opcode == Opcode::Eq),
+            "count(*) EXISTS semijoin fast path should avoid interpreter-level duplicate-run equality loops"
+        );
+        assert!(
+            !prog
+                .ops()
+                .iter()
+                .any(|op| op.opcode == Opcode::OpenAutoindex),
+            "count(*) EXISTS semijoin fast path should stay off temp materialization"
+        );
+        assert!(
+            !prog
+                .ops()
+                .iter()
+                .any(|op| matches!(&op.p4, P4::Table(name) if op.opcode == Opcode::OpenRead && name == "t")),
+            "count(*) EXISTS semijoin fast path should avoid reopening the outer base table"
+        );
+        assert!(
+            !prog
+                .ops()
+                .iter()
+                .any(|op| matches!(op.opcode, Opcode::AggStep | Opcode::AggFinal)),
+            "count(*) EXISTS semijoin fast path should stay on the direct counter path"
+        );
+    }
+
+    #[test]
+    fn test_codegen_single_inner_join_uses_index_lookup_plan() {
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![
+                        ResultColumn::Expr {
+                            expr: Expr::Column(ColumnRef::qualified("c", "name"), Span::ZERO),
+                            alias: None,
+                        },
+                        ResultColumn::Expr {
+                            expr: Expr::Column(ColumnRef::qualified("o", "amount"), Span::ZERO),
+                            alias: None,
+                        },
+                    ],
+                    from: Some(FromClause {
+                        source: TableOrSubquery::Table {
+                            name: QualifiedName::bare("customers"),
+                            alias: Some("c".to_owned()),
+                            index_hint: None,
+                            time_travel: None,
+                        },
+                        joins: vec![fsqlite_ast::JoinClause {
+                            join_type: fsqlite_ast::JoinType {
+                                kind: fsqlite_ast::JoinKind::Inner,
+                                natural: false,
+                            },
+                            table: TableOrSubquery::Table {
+                                name: QualifiedName::bare("orders"),
+                                alias: Some("o".to_owned()),
+                                index_hint: None,
+                                time_travel: None,
+                            },
+                            constraint: Some(fsqlite_ast::JoinConstraint::On(Expr::BinaryOp {
+                                left: Box::new(Expr::Column(
+                                    ColumnRef::qualified("o", "customer_id"),
+                                    Span::ZERO,
+                                )),
+                                op: AstBinaryOp::Eq,
+                                right: Box::new(Expr::Column(
+                                    ColumnRef::qualified("c", "id"),
+                                    Span::ZERO,
+                                )),
+                                span: Span::ZERO,
+                            })),
+                        }],
+                    }),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+
+        let schema = test_schema_with_join_lookup();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let rewind_count = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::Rewind)
+            .count();
+
+        assert_eq!(
+            rewind_count, 1,
+            "lookup join should only rewind the outer table"
+        );
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::SeekGE),
+            "lookup join should seek into the right-side index"
+        );
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::IdxRowid),
+            "lookup join should extract matching rowids from the right-side index"
+        );
+    }
+
+    #[test]
+    fn test_codegen_single_left_join_uses_index_lookup_plan() {
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![
+                        ResultColumn::Expr {
+                            expr: Expr::Column(ColumnRef::qualified("c", "name"), Span::ZERO),
+                            alias: None,
+                        },
+                        ResultColumn::Expr {
+                            expr: Expr::Column(ColumnRef::qualified("o", "amount"), Span::ZERO),
+                            alias: None,
+                        },
+                    ],
+                    from: Some(FromClause {
+                        source: TableOrSubquery::Table {
+                            name: QualifiedName::bare("customers"),
+                            alias: Some("c".to_owned()),
+                            index_hint: None,
+                            time_travel: None,
+                        },
+                        joins: vec![fsqlite_ast::JoinClause {
+                            join_type: fsqlite_ast::JoinType {
+                                kind: fsqlite_ast::JoinKind::Left,
+                                natural: false,
+                            },
+                            table: TableOrSubquery::Table {
+                                name: QualifiedName::bare("orders"),
+                                alias: Some("o".to_owned()),
+                                index_hint: None,
+                                time_travel: None,
+                            },
+                            constraint: Some(fsqlite_ast::JoinConstraint::On(Expr::BinaryOp {
+                                left: Box::new(Expr::Column(
+                                    ColumnRef::qualified("o", "customer_id"),
+                                    Span::ZERO,
+                                )),
+                                op: AstBinaryOp::Eq,
+                                right: Box::new(Expr::Column(
+                                    ColumnRef::qualified("c", "id"),
+                                    Span::ZERO,
+                                )),
+                                span: Span::ZERO,
+                            })),
+                        }],
+                    }),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+
+        let schema = test_schema_with_join_lookup();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let rewind_count = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::Rewind)
+            .count();
+
+        assert_eq!(
+            rewind_count, 1,
+            "lookup left join should only rewind the outer table"
+        );
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::SeekGE),
+            "left join should seek into the right-side index"
+        );
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::NullRow),
+            "left join should still null-extend unmatched right rows"
+        );
+    }
+
+    #[test]
+    fn test_codegen_single_inner_join_uses_rowid_lookup_plan() {
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![
+                        ResultColumn::Expr {
+                            expr: Expr::Column(ColumnRef::qualified("o", "amount"), Span::ZERO),
+                            alias: None,
+                        },
+                        ResultColumn::Expr {
+                            expr: Expr::Column(ColumnRef::qualified("c", "name"), Span::ZERO),
+                            alias: None,
+                        },
+                    ],
+                    from: Some(FromClause {
+                        source: TableOrSubquery::Table {
+                            name: QualifiedName::bare("orders"),
+                            alias: Some("o".to_owned()),
+                            index_hint: None,
+                            time_travel: None,
+                        },
+                        joins: vec![fsqlite_ast::JoinClause {
+                            join_type: fsqlite_ast::JoinType {
+                                kind: fsqlite_ast::JoinKind::Inner,
+                                natural: false,
+                            },
+                            table: TableOrSubquery::Table {
+                                name: QualifiedName::bare("customers"),
+                                alias: Some("c".to_owned()),
+                                index_hint: None,
+                                time_travel: None,
+                            },
+                            constraint: Some(fsqlite_ast::JoinConstraint::On(Expr::BinaryOp {
+                                left: Box::new(Expr::Column(
+                                    ColumnRef::qualified("c", "id"),
+                                    Span::ZERO,
+                                )),
+                                op: AstBinaryOp::Eq,
+                                right: Box::new(Expr::Column(
+                                    ColumnRef::qualified("o", "customer_id"),
+                                    Span::ZERO,
+                                )),
+                                span: Span::ZERO,
+                            })),
+                        }],
+                    }),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+
+        let schema = test_schema_with_join_lookup();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let rewind_count = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::Rewind)
+            .count();
+
+        assert_eq!(
+            rewind_count, 1,
+            "rowid lookup join should only rewind the outer table"
+        );
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::SeekRowid),
+            "join against an INTEGER PRIMARY KEY should seek by rowid"
+        );
+        assert!(
+            !prog.ops().iter().any(|op| op.opcode == Opcode::SeekGE),
+            "rowid lookup join should not use a secondary-index probe"
+        );
+    }
+
+    #[test]
+    fn test_codegen_grouped_inner_join_uses_index_lookup_plan() {
+        let stmt = grouped_join_count_sum_index_lookup_stmt();
+        let schema = test_schema_with_join_lookup();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let rewind_count = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::Rewind)
+            .count();
+
+        assert_eq!(
+            rewind_count, 1,
+            "grouped lookup join should only rewind the outer table"
+        );
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::SeekGE),
+            "grouped lookup join should seek into the right-side index"
+        );
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::IdxRowid),
+            "grouped lookup join should fetch rowids from the right-side index"
+        );
+        assert!(
+            prog.ops()
+                .iter()
+                .any(|op| op.opcode == Opcode::SorterInsert),
+            "grouped lookup join should still materialize rows for grouped aggregation"
+        );
+    }
+
+    #[test]
+    fn test_codegen_grouped_inner_join_uses_rowid_lookup_plan() {
+        let stmt = grouped_join_count_sum_rowid_lookup_stmt();
+        let schema = test_schema_with_join_lookup();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let rewind_count = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::Rewind)
+            .count();
+
+        assert_eq!(
+            rewind_count, 1,
+            "grouped rowid lookup join should only rewind the outer table"
+        );
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::SeekRowid),
+            "grouped rowid lookup join should seek the right table by rowid"
+        );
+        assert!(
+            !prog.ops().iter().any(|op| op.opcode == Opcode::SeekGE),
+            "grouped rowid lookup join should not use a secondary-index probe"
+        );
+    }
+
+    #[test]
+    fn test_extract_count_indexed_exists_target_matches_indexed_outer_column() {
+        let stmt = agg_count_star_exists_rowid_probe();
+        let schema = test_schema_with_index_and_subquery_source();
+        let SelectCore::Select {
+            from, where_clause, ..
+        } = &stmt.body.select
+        else {
+            panic!("expected SELECT core");
+        };
+        let FromClause { source, .. } = from.as_ref().expect("outer FROM should exist");
+        let TableOrSubquery::Table { alias, .. } = source else {
+            panic!("expected plain outer table");
+        };
+        let table = find_table(&schema, "t").expect("outer table should exist");
+        let Expr::Exists { subquery, .. } =
+            where_clause.as_deref().expect("outer WHERE should exist")
+        else {
+            panic!("expected EXISTS predicate");
+        };
+        let SelectCore::Select {
+            from: Some(sub_from),
+            where_clause: Some(sub_where),
+            ..
+        } = &subquery.body.select
+        else {
+            panic!("expected simple subquery shape");
+        };
+        let TableOrSubquery::Table {
+            name: sub_name,
+            alias: sub_alias,
+            ..
+        } = &sub_from.source
+        else {
+            panic!("expected plain inner table");
+        };
+        let sub_table = find_table(&schema, &sub_name.name).expect("inner table should exist");
+        let (probe_expr, residual_terms) =
+            extract_exists_rowid_probe(sub_where, sub_table, sub_alias.as_deref())
+                .expect("rowid probe should match");
+
+        assert_eq!(
+            column_name(probe_expr, table, alias.as_deref()).as_deref(),
+            Some("b"),
+            "outer probe should resolve to the indexed outer column"
+        );
+        assert_eq!(
+            residual_terms.len(),
+            1,
+            "fixture should leave exactly one inner residual term"
+        );
+        assert!(
+            table.index_for_column("b").is_some(),
+            "outer fixture should expose an index on b"
+        );
+
+        let extracted = extract_count_indexed_exists_target(
+            where_clause.as_deref(),
+            table,
+            alias.as_deref(),
+            &schema,
+        )
+        .expect("indexed EXISTS target should match");
+
+        assert_eq!(extracted.0.name, "idx_t_b");
+        match extracted.1 {
+            CountIndexedInTarget::ProbeSource(probe_source) => {
+                assert!(matches!(probe_source.value, InProbeValue::Rowid));
+            }
+            CountIndexedInTarget::MaterializedProbeSource(_) => {
+                panic!("EXISTS target should lower to a direct probe source");
+            }
+            CountIndexedInTarget::List(_) => {
+                panic!("EXISTS target should lower to a probe source");
+            }
+        }
+    }
+
+    #[test]
+    fn test_codegen_scalar_subquery_uses_rowid_probe_when_available() {
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![
+                        ResultColumn::Expr {
+                            expr: Expr::Column(ColumnRef::bare("a"), Span::ZERO),
+                            alias: None,
+                        },
+                        ResultColumn::Expr {
+                            expr: Expr::Subquery(
+                                Box::new(SelectStatement {
+                                    with: None,
+                                    body: SelectBody {
+                                        select: SelectCore::Select {
+                                            distinct: Distinctness::All,
+                                            columns: vec![ResultColumn::Expr {
+                                                expr: Expr::Column(
+                                                    ColumnRef::qualified("s", "b"),
+                                                    Span::ZERO,
+                                                ),
+                                                alias: None,
+                                            }],
+                                            from: Some(FromClause {
+                                                source: TableOrSubquery::Table {
+                                                    name: QualifiedName::bare("s"),
+                                                    alias: Some("s".to_owned()),
+                                                    index_hint: None,
+                                                    time_travel: None,
+                                                },
+                                                joins: vec![],
+                                            }),
+                                            where_clause: Some(Box::new(Expr::BinaryOp {
+                                                left: Box::new(Expr::Column(
+                                                    ColumnRef::qualified("s", "rowid"),
+                                                    Span::ZERO,
+                                                )),
+                                                op: AstBinaryOp::Eq,
+                                                right: Box::new(Expr::Column(
+                                                    ColumnRef::qualified("t", "a"),
+                                                    Span::ZERO,
+                                                )),
+                                                span: Span::ZERO,
+                                            })),
+                                            group_by: vec![],
+                                            having: None,
+                                            windows: vec![],
+                                        },
+                                        compounds: vec![],
+                                    },
+                                    order_by: vec![],
+                                    limit: None,
+                                }),
+                                Span::ZERO,
+                            ),
+                            alias: None,
+                        },
+                    ],
+                    from: Some(from_table("t")),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+
+        let schema = test_schema_with_subquery_source();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::SeekRowid),
+            "scalar subquery on inner rowid should probe directly with SeekRowid"
+        );
+        let rewind_count = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::Rewind)
+            .count();
+        assert_eq!(
+            rewind_count, 1,
+            "only the outer scan should rewind when scalar subquery lowers to a direct rowid probe"
+        );
+        let open_read_count = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::OpenRead)
+            .count();
+        assert_eq!(
+            open_read_count, 2,
+            "scalar subquery should open the inner table once alongside the outer scan"
+        );
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::Once),
+            "scalar subquery should hoist its inner cursor open behind Once"
+        );
+    }
+
+    #[test]
+    fn test_codegen_scalar_count_star_subquery_uses_count_opcode() {
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![
+                        ResultColumn::Expr {
+                            expr: Expr::Column(ColumnRef::bare("a"), Span::ZERO),
+                            alias: None,
+                        },
+                        ResultColumn::Expr {
+                            expr: Expr::Subquery(Box::new(agg_count_star("s")), Span::ZERO),
+                            alias: None,
+                        },
+                    ],
+                    from: Some(from_table("t")),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+
+        let schema = test_schema_with_subquery_source();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::Count),
+            "scalar COUNT(*) subqueries should use the Count opcode directly"
+        );
+        assert!(
+            !prog
+                .ops()
+                .iter()
+                .any(|op| matches!(op.opcode, Opcode::AggStep | Opcode::AggFinal)),
+            "scalar COUNT(*) subqueries should bypass generic aggregate opcodes"
+        );
+        let rewind_count = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::Rewind)
+            .count();
+        assert_eq!(
+            rewind_count, 1,
+            "the inner COUNT(*) subquery should not rewind/scan when Count is available"
+        );
+    }
+
+    #[test]
+    fn test_codegen_scalar_count_star_subquery_with_where_uses_counter_loop() {
+        let count_subquery = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Expr {
+                        expr: Expr::FunctionCall {
+                            name: "count".to_owned(),
+                            args: FunctionArgs::Star,
+                            distinct: false,
+                            order_by: vec![],
+                            filter: None,
+                            over: None,
+                            span: Span::ZERO,
+                        },
+                        alias: None,
+                    }],
+                    from: Some(FromClause {
+                        source: TableOrSubquery::Table {
+                            name: QualifiedName::bare("s"),
+                            alias: Some("s".to_owned()),
+                            index_hint: None,
+                            time_travel: None,
+                        },
+                        joins: vec![],
+                    }),
+                    where_clause: Some(Box::new(Expr::BinaryOp {
+                        left: Box::new(Expr::Column(ColumnRef::qualified("s", "b"), Span::ZERO)),
+                        op: AstBinaryOp::Le,
+                        right: Box::new(Expr::Literal(Literal::Integer(5), Span::ZERO)),
+                        span: Span::ZERO,
+                    })),
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![
+                        ResultColumn::Expr {
+                            expr: Expr::Column(ColumnRef::bare("a"), Span::ZERO),
+                            alias: None,
+                        },
+                        ResultColumn::Expr {
+                            expr: Expr::Subquery(Box::new(count_subquery), Span::ZERO),
+                            alias: None,
+                        },
+                    ],
+                    from: Some(from_table("t")),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+
+        let schema = test_schema_with_subquery_source();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::AddImm),
+            "scalar COUNT(*) subqueries with WHERE should use a direct counter loop"
+        );
+        assert!(
+            !prog
+                .ops()
+                .iter()
+                .any(|op| matches!(op.opcode, Opcode::AggStep | Opcode::AggFinal)),
+            "scalar COUNT(*) subqueries with WHERE should bypass generic aggregate opcodes"
+        );
+    }
+
+    #[test]
+    fn test_codegen_select_correlated_in_subquery_value_expr_does_not_use_once_materialization() {
+        let where_expr = Expr::In {
+            expr: Box::new(Expr::Column(ColumnRef::bare("a"), Span::ZERO)),
+            set: InSet::Subquery(Box::new(SelectStatement {
+                with: None,
+                body: SelectBody {
+                    select: SelectCore::Select {
+                        distinct: Distinctness::All,
+                        columns: vec![ResultColumn::Expr {
+                            expr: Expr::Column(ColumnRef::qualified("t", "a"), Span::ZERO),
+                            alias: None,
+                        }],
+                        from: Some(from_table("s")),
+                        where_clause: Some(Box::new(Expr::BinaryOp {
+                            left: Box::new(Expr::Column(ColumnRef::bare("b"), Span::ZERO)),
+                            op: AstBinaryOp::Le,
+                            right: Box::new(Expr::Literal(Literal::Integer(5), Span::ZERO)),
+                            span: Span::ZERO,
+                        })),
+                        group_by: vec![],
+                        having: None,
+                        windows: vec![],
+                    },
+                    compounds: vec![],
+                },
+                order_by: vec![],
+                limit: None,
+            })),
+            not: false,
+            span: Span::ZERO,
+        };
+        let stmt = simple_select(&["a"], "t", Some(Box::new(where_expr)));
+
+        let schema = test_schema_with_subquery_source();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(
+            !prog
+                .ops()
+                .iter()
+                .any(|op| op.opcode == Opcode::OpenAutoindex),
+            "IN subqueries whose selected probe values depend on outer-row values must not materialize once"
+        );
+    }
+
+    #[test]
+    #[ignore = "ScanCtx/SecondaryScanCtx/InProbeSource structs not yet defined"]
+    fn test_in_probe_source_reference_detection_considers_secondary_outer_scan() {
+        let schema = test_schema_with_subquery_source();
+        let outer_table = &schema[0];
+        let probe_table = &schema[1];
+        let secondary_table = TableSchema {
+            name: "u".to_owned(),
+            root_page: 4,
+            columns: vec![ColumnInfo::basic("b", 'd', false)],
+            indexes: vec![],
+            strict: false,
+            without_rowid: false,
+            primary_key_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
+            check_constraints: Vec::new(),
+        };
+        let scan_ctx = ScanCtx {
+            cursor: 0,
+            table: outer_table,
+            table_alias: Some("t"),
+            schema: Some(&schema),
+            register_base: None,
+            secondary: Some(SecondaryScan {
+                cursor: 1,
+                table: &secondary_table,
+                table_alias: Some("u"),
+            }),
+        };
+        let probe_source = InProbeSource {
+            table: probe_table,
+            table_alias: Some("s"),
+            where_clause: Some(&Expr::BinaryOp {
+                left: Box::new(Expr::Column(ColumnRef::qualified("u", "b"), Span::ZERO)),
+                op: AstBinaryOp::Eq,
+                right: Box::new(Expr::Column(ColumnRef::qualified("s", "b"), Span::ZERO)),
+                span: Span::ZERO,
+            }),
+            value: InProbeValue::FirstColumn,
+        };
+
+        assert!(
+            in_probe_source_references_outer_scan(&probe_source, &scan_ctx),
+            "secondary outer scan references must keep IN probe sources on the correlated path"
+        );
+    }
+
+    // === Test 21: SELECT sum(col) ===
+    #[test]
+    fn test_codegen_select_sum_col() {
+        let stmt = agg_func_col("sum", "a", "t");
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // Should have Column (read arg) + AggStep in the loop.
+        assert!(has_opcodes(
+            &prog,
+            &[
+                Opcode::OpenRead,
+                Opcode::Rewind,
+                Opcode::Column,
+                Opcode::AggStep,
+                Opcode::Next,
+                Opcode::AggFinal,
+                Opcode::ResultRow,
+            ]
+        ));
+
+        // AggStep p5 = 1 (one argument).
+        let step = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::AggStep)
+            .unwrap();
+        assert_eq!(step.p5, 1, "sum(col) should have p5=1 (one arg)");
+
+        // AggFinal P4 should be FuncName("SUM").
+        let fin = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::AggFinal)
+            .unwrap();
+        assert!(
+            matches!(&fin.p4, P4::FuncName(f) if f == "SUM"),
+            "AggFinal P4 should be FuncName(SUM), got {:?}",
+            fin.p4
+        );
+    }
+
+    // === Test 22: SELECT count(*), sum(a) ===
+    #[test]
+    fn test_codegen_select_multiple_aggregates() {
+        let stmt = agg_count_star_and_sum("a", "t");
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::Count),
+            "COUNT(*) in the COUNT+SUM fast path should use Count directly"
+        );
+
+        // COUNT(*) should bypass AggStep/AggFinal; SUM(a) still needs one.
+        let step_count = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::AggStep)
+            .count();
+        assert_eq!(step_count, 1, "COUNT(*) + SUM(a) should only step SUM(a)");
+
+        let final_count = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::AggFinal)
+            .count();
+        assert_eq!(
+            final_count, 1,
+            "COUNT(*) + SUM(a) should only finalize SUM(a)"
+        );
+
+        // ResultRow should cover 2 columns.
+        let rr = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::ResultRow)
+            .unwrap();
+        assert_eq!(rr.p2, 2, "two aggregate columns");
+
+        // The remaining aggregate opcodes should belong to SUM(a).
+        let steps: Vec<_> = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::AggStep)
+            .collect();
+        assert!(matches!(&steps[0].p4, P4::FuncName(f) if f == "SUM"));
+    }
+
+    // === Test 22b: HAVING-only aggregate is accumulated (bd-3ew8w) ===
+    #[test]
+    fn test_codegen_select_having_only_aggregate_is_accumulated() {
+        let stmt = agg_count_star_having_sum_gt("a", 10, "t");
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // COUNT(*) in SELECT + SUM(a) in HAVING must both be stepped/finalized.
+        let step_count = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::AggStep)
+            .count();
+        assert_eq!(step_count, 2, "HAVING-only SUM(a) must emit AggStep");
+
+        let final_count = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::AggFinal)
+            .count();
+        assert_eq!(final_count, 2, "HAVING-only SUM(a) must emit AggFinal");
+
+        assert!(
+            prog.ops().iter().any(
+                |op| matches!(&op.p4, P4::FuncName(f) if op.opcode == Opcode::AggStep && f == "SUM")
+            ),
+            "expected AggStep for SUM(a) referenced only by HAVING"
+        );
+        assert!(
+            prog.ops().iter().any(
+                |op| matches!(&op.p4, P4::FuncName(f) if op.opcode == Opcode::AggFinal && f == "SUM")
+            ),
+            "expected AggFinal for SUM(a) referenced only by HAVING"
+        );
+
+        assert!(
+            has_opcodes(&prog, &[Opcode::IfNot, Opcode::ResultRow]),
+            "HAVING clause should emit IfNot guard before ResultRow"
+        );
+        let rr = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::ResultRow)
+            .unwrap();
+        assert_eq!(rr.p2, 1, "query still returns one SELECT column");
+    }
+
+    // === Test 22c: HAVING aggregate deduplicates with SELECT aggregate ===
+    #[test]
+    fn test_codegen_select_having_aggregate_reuses_select_aggregate() {
+        let stmt = agg_count_star_having_count_gt(1, "t");
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        let step_count = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::AggStep)
+            .count();
+        assert_eq!(step_count, 1, "COUNT(*) should not be duplicated");
+
+        let final_count = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::AggFinal)
+            .count();
+        assert_eq!(
+            final_count, 1,
+            "COUNT(*) finalization should not be duplicated"
+        );
+    }
+
+    // === Test 23: Non-aggregate SELECT does not emit AggStep ===
+    #[test]
+    fn test_codegen_select_no_agg_no_aggstep() {
+        let stmt = star_select("t");
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        let agg_count = prog
+            .ops()
+            .iter()
+            .filter(|op| {
+                matches!(
+                    op.opcode,
+                    Opcode::AggStep | Opcode::AggFinal | Opcode::AggValue
+                )
+            })
+            .count();
+        assert_eq!(agg_count, 0, "no aggregate opcodes in non-aggregate SELECT");
+    }
+
+    // === Test 24: Aggregate labels properly resolved ===
+    #[test]
+    fn test_codegen_select_aggregate_labels_resolved() {
+        let stmt = agg_count_star("t");
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        for op in prog.ops() {
+            if op.opcode.is_jump() {
+                assert!(
+                    op.p2 >= 0,
+                    "unresolved jump at {:?}: p2 = {}",
+                    op.opcode,
+                    op.p2
+                );
+                assert!(
+                    usize::try_from(op.p2).unwrap() <= prog.len(),
+                    "jump target out of range at {:?}: p2 = {} (prog len = {})",
+                    op.opcode,
+                    op.p2,
+                    prog.len()
+                );
+            }
+        }
+    }
+
+    // === Test 25: Bare column with aggregate (no GROUP BY) ===
+    #[test]
+    fn test_codegen_select_mixed_agg_bare_column() {
+        // SELECT count(*), a FROM t — SQLite allows bare columns without GROUP BY.
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![
+                        ResultColumn::Expr {
+                            expr: Expr::FunctionCall {
+                                name: "count".to_owned(),
+                                args: FunctionArgs::Star,
+                                distinct: false,
+                                order_by: vec![],
+                                filter: None,
+                                over: None,
+                                span: Span::ZERO,
+                            },
+                            alias: None,
+                        },
+                        ResultColumn::Expr {
+                            expr: Expr::Column(ColumnRef::bare("a"), Span::ZERO),
+                            alias: None,
+                        },
+                    ],
+                    from: Some(from_table("t")),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx)
+            .expect("bare column with aggregate should succeed");
+        let prog = b.finish().unwrap();
+
+        // Should have exactly 1 AggStep (for count(*)) and 1 AggFinal.
+        let step_count = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::AggStep)
+            .count();
+        assert_eq!(step_count, 1, "only count(*) should emit AggStep");
+
+        let final_count = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::AggFinal)
+            .count();
+        assert_eq!(final_count, 1, "only count(*) should emit AggFinal");
+
+        // ResultRow should cover 2 columns.
+        let rr = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::ResultRow)
+            .unwrap();
+        assert_eq!(rr.p2, 2, "ResultRow should output 2 columns");
+    }
+
+    // === Test 26: AVG aggregate ===
+    #[test]
+    fn test_codegen_select_avg() {
+        let stmt = agg_func_col("avg", "a", "t");
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // AggStep P4 should be "AVG".
+        let step = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::AggStep)
+            .unwrap();
+        assert!(
+            matches!(&step.p4, P4::FuncName(f) if f == "AVG"),
+            "AggStep P4 should be FuncName(AVG), got {:?}",
+            step.p4
+        );
+
+        // AggFinal should also be "AVG".
+        let fin = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::AggFinal)
+            .unwrap();
+        assert!(
+            matches!(&fin.p4, P4::FuncName(f) if f == "AVG"),
+            "AggFinal P4 should be FuncName(AVG), got {:?}",
+            fin.p4
+        );
+    }
+
+    // === Test: GROUP BY with HAVING clause ===
+    #[test]
+    fn test_codegen_select_group_by_having() {
+        // SELECT a, count(*) FROM t GROUP BY a HAVING count(*) > 1
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![
+                        ResultColumn::Expr {
+                            expr: Expr::Column(ColumnRef::bare("a"), Span::ZERO),
+                            alias: None,
+                        },
+                        ResultColumn::Expr {
+                            expr: Expr::FunctionCall {
+                                name: "count".to_owned(),
+                                args: FunctionArgs::Star,
+                                distinct: false,
+                                order_by: vec![],
+                                filter: None,
+                                over: None,
+                                span: Span::ZERO,
+                            },
+                            alias: None,
+                        },
+                    ],
+                    from: Some(from_table("t")),
+                    where_clause: None,
+                    group_by: vec![Expr::Column(ColumnRef::bare("a"), Span::ZERO)],
+                    having: Some(Box::new(Expr::BinaryOp {
+                        left: Box::new(Expr::FunctionCall {
+                            name: "count".to_owned(),
+                            args: FunctionArgs::Star,
+                            distinct: false,
+                            order_by: vec![],
+                            filter: None,
+                            over: None,
+                            span: Span::ZERO,
+                        }),
+                        op: AstBinaryOp::Gt,
+                        right: Box::new(Expr::Literal(Literal::Integer(1), Span::ZERO)),
+                        span: Span::ZERO,
+                    })),
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // Should produce GROUP BY with HAVING filter: SorterOpen, AggStep,
+        // AggFinal, IfNot (HAVING check), ResultRow.
+        assert!(has_opcodes(
+            &prog,
+            &[
+                Opcode::SorterOpen,
+                Opcode::AggStep,
+                Opcode::AggFinal,
+                Opcode::IfNot, // HAVING filter
+                Opcode::ResultRow,
+                Opcode::Halt,
+            ]
+        ));
+
+        // There should be IfNot opcodes (HAVING filter) in the program.
+        let if_not_count = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::IfNot)
+            .count();
+        assert!(
+            if_not_count >= 1,
+            "HAVING should generate at least one IfNot, got {if_not_count}"
+        );
+    }
+
+    // === Test: GROUP BY with FILTER clause emits IfNot ===
+    #[test]
+    fn test_codegen_select_group_by_filter_emits_ifnot() {
+        // SELECT a, count(*) FILTER (WHERE b > 0) FROM t GROUP BY a
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![
+                        ResultColumn::Expr {
+                            expr: Expr::Column(ColumnRef::bare("a"), Span::ZERO),
+                            alias: None,
+                        },
+                        ResultColumn::Expr {
+                            expr: Expr::FunctionCall {
+                                name: "count".to_owned(),
+                                args: FunctionArgs::Star,
+                                distinct: false,
+                                order_by: vec![],
+                                filter: Some(Box::new(Expr::BinaryOp {
+                                    left: Box::new(Expr::Column(ColumnRef::bare("b"), Span::ZERO)),
+                                    op: AstBinaryOp::Gt,
+                                    right: Box::new(Expr::Literal(Literal::Integer(0), Span::ZERO)),
+                                    span: Span::ZERO,
+                                })),
+                                over: None,
+                                span: Span::ZERO,
+                            },
+                            alias: None,
+                        },
+                    ],
+                    from: Some(from_table("t")),
+                    where_clause: None,
+                    group_by: vec![Expr::Column(ColumnRef::bare("a"), Span::ZERO)],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // There should be an IfNot opcode BEFORE AggStep (the FILTER check).
+        let agg_step_positions: Vec<usize> = prog
+            .ops()
+            .iter()
+            .enumerate()
+            .filter(|(_, op)| op.opcode == Opcode::AggStep)
+            .map(|(i, _)| i)
+            .collect();
+
+        // There should be at least one AggStep (in the sort iteration loop).
+        assert!(
+            !agg_step_positions.is_empty(),
+            "GROUP BY FILTER should have AggStep"
+        );
+
+        // There should be IfNot before AggStep (FILTER check).
+        let if_not_before_agg = prog.ops().iter().enumerate().any(|(i, op)| {
+            op.opcode == Opcode::IfNot
+                && agg_step_positions
+                    .iter()
+                    .any(|&as_pos| i < as_pos && as_pos - i <= 5)
+        });
+        assert!(
+            if_not_before_agg,
+            "GROUP BY FILTER should emit IfNot before AggStep"
+        );
+    }
+
+    #[test]
+    fn test_codegen_group_by_rowid_bucket_sum_skips_sorter() {
+        let group_expr = Expr::BinaryOp {
+            left: Box::new(Expr::Column(ColumnRef::bare("id"), Span::ZERO)),
+            op: AstBinaryOp::Divide,
+            right: Box::new(Expr::Literal(Literal::Integer(10), Span::ZERO)),
+            span: Span::ZERO,
+        };
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![
+                        ResultColumn::Expr {
+                            expr: group_expr.clone(),
+                            alias: None,
+                        },
+                        ResultColumn::Expr {
+                            expr: Expr::FunctionCall {
+                                name: "sum".to_owned(),
+                                args: FunctionArgs::List(vec![Expr::Column(
+                                    ColumnRef::bare("value"),
+                                    Span::ZERO,
+                                )]),
+                                distinct: false,
+                                order_by: vec![],
+                                filter: None,
+                                over: None,
+                                span: Span::ZERO,
+                            },
+                            alias: None,
+                        },
+                    ],
+                    from: Some(from_table("bench")),
+                    where_clause: None,
+                    group_by: vec![group_expr],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+
+        let schema = test_small_bench_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(
+            !prog.ops().iter().any(|op| {
+                matches!(
+                    op.opcode,
+                    Opcode::SorterOpen
+                        | Opcode::SorterInsert
+                        | Opcode::SorterSort
+                        | Opcode::SorterData
+                        | Opcode::SorterNext
+                )
+            }),
+            "rowid-bucket SUM GROUP BY fast path should bypass the sorter"
+        );
+        assert!(has_opcodes(
+            &prog,
+            &[
+                Opcode::OpenRead,
+                Opcode::Int64,
+                Opcode::Rowid,
+                Opcode::Divide,
+                Opcode::AggStep,
+                Opcode::AggFinal,
+                Opcode::ResultRow,
+                Opcode::Halt,
+            ]
+        ));
+        assert!(
+            prog.ops()
+                .iter()
+                .any(|op| matches!(op.p4, P4::Int64(value) if value == 10)),
+            "fast path should encode the bucket divisor literal"
+        );
+    }
+
+    #[test]
+    fn test_codegen_parsed_group_by_rowid_bucket_sum_skips_sorter() {
+        let sql = "SELECT (id / 3), SUM(value) FROM bench GROUP BY (id / 3)";
+        let Some((statement, tail)) = parse_first_statement_with_tail(sql).unwrap() else {
+            panic!("expected parsed statement");
+        };
+        assert_eq!(
+            tail,
+            sql.len(),
+            "parser should consume the whole SQL string"
+        );
+        let stmt = match statement {
+            Statement::Select(stmt) => stmt,
+            other => panic!("expected SELECT statement, got {other:?}"),
+        };
+
+        let schema = test_small_bench_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(
+            !prog.ops().iter().any(|op| {
+                matches!(
+                    op.opcode,
+                    Opcode::SorterOpen
+                        | Opcode::SorterInsert
+                        | Opcode::SorterSort
+                        | Opcode::SorterData
+                        | Opcode::SorterNext
+                )
+            }),
+            "parsed rowid-bucket SUM GROUP BY should also bypass the sorter"
+        );
+        assert!(
+            prog.ops()
+                .iter()
+                .any(|op| matches!(op.p4, P4::Int64(value) if value == 3)),
+            "parsed SQL fast path should encode the parsed divisor literal"
+        );
+    }
+
+    #[test]
+    fn test_execute_rowid_bucket_projection_keeps_integer_keys() {
+        let group_expr = Expr::BinaryOp {
+            left: Box::new(Expr::Column(ColumnRef::bare("id"), Span::ZERO)),
+            op: AstBinaryOp::Divide,
+            right: Box::new(Expr::Literal(Literal::Integer(3), Span::ZERO)),
+            span: Span::ZERO,
+        };
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Expr {
+                        expr: group_expr,
+                        alias: None,
+                    }],
+                    from: Some(from_table("bench")),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+
+        let rows = execute_codegen_select_with_storage_cursor(
+            &stmt,
+            &test_small_bench_schema(),
+            seed_small_bench_db(7),
+        );
+
+        assert_eq!(
+            rows,
+            vec![
+                vec![SqliteValue::Integer(0)],
+                vec![SqliteValue::Integer(0)],
+                vec![SqliteValue::Integer(0)],
+                vec![SqliteValue::Integer(1)],
+                vec![SqliteValue::Integer(1)],
+                vec![SqliteValue::Integer(1)],
+                vec![SqliteValue::Integer(2)],
+            ]
+        );
+    }
+
+    #[test]
+    fn test_execute_group_by_rowid_bucket_sum_storage_cursor_rows() {
+        let group_expr = Expr::BinaryOp {
+            left: Box::new(Expr::Column(ColumnRef::bare("id"), Span::ZERO)),
+            op: AstBinaryOp::Divide,
+            right: Box::new(Expr::Literal(Literal::Integer(3), Span::ZERO)),
+            span: Span::ZERO,
+        };
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![
+                        ResultColumn::Expr {
+                            expr: group_expr.clone(),
+                            alias: None,
+                        },
+                        ResultColumn::Expr {
+                            expr: Expr::FunctionCall {
+                                name: "sum".to_owned(),
+                                args: FunctionArgs::List(vec![Expr::Column(
+                                    ColumnRef::bare("value"),
+                                    Span::ZERO,
+                                )]),
+                                distinct: false,
+                                order_by: vec![],
+                                filter: None,
+                                over: None,
+                                span: Span::ZERO,
+                            },
+                            alias: None,
+                        },
+                    ],
+                    from: Some(from_table("bench")),
+                    where_clause: None,
+                    group_by: vec![group_expr],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+
+        let rows = execute_codegen_select_with_storage_cursor(
+            &stmt,
+            &test_small_bench_schema(),
+            seed_small_bench_db(7),
+        );
+
+        assert_eq!(
+            rows,
+            vec![
+                vec![SqliteValue::Integer(0), SqliteValue::Float(12.0)],
+                vec![SqliteValue::Integer(1), SqliteValue::Float(39.0)],
+                vec![SqliteValue::Integer(2), SqliteValue::Float(19.0)],
+            ]
+        );
+    }
+
+    // === Tests for bd-2vza: UPDATE/DELETE WHERE with qualified alias columns ===
+
+    #[test]
+    fn test_codegen_update_where_qualified_alias() {
+        // UPDATE t AS u SET b = ?1 WHERE u.a = ?2
+        let stmt = UpdateStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedTableRef {
+                name: QualifiedName::bare("t"),
+                alias: Some("u".to_owned()),
+                index_hint: None,
+                time_travel: None,
+            },
+            assignments: vec![Assignment {
+                target: AssignmentTarget::Column("b".to_owned()),
+                value: placeholder(1),
+            }],
+            from: None,
+            where_clause: Some(Expr::BinaryOp {
+                left: Box::new(Expr::Column(ColumnRef::qualified("u", "a"), Span::ZERO)),
+                op: AstBinaryOp::Eq,
+                right: Box::new(placeholder(2)),
+                span: Span::ZERO,
+            }),
+            returning: vec![],
+            order_by: vec![],
+            limit: None,
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_update(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // The qualified alias "u.a" should resolve to Column opcode
+        // for filter comparison (Ne), not silently skip filtering.
+        assert!(has_opcodes(
+            &prog,
+            &[
+                Opcode::Rewind,
+                Opcode::Column, // read u.a for WHERE comparison
+                Opcode::Variable,
+                Opcode::Ne, // filter non-matching rows
+            ]
+        ));
+    }
+
+    #[test]
+    fn test_codegen_update_where_uses_resolved_collation_and_affinity() {
+        let stmt = UpdateStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedTableRef {
+                name: QualifiedName::bare("t"),
+                alias: None,
+                index_hint: None,
+                time_travel: None,
+            },
+            assignments: vec![Assignment {
+                target: AssignmentTarget::Column("a".to_owned()),
+                value: placeholder(1),
+            }],
+            from: None,
+            where_clause: Some(Expr::BinaryOp {
+                left: Box::new(Expr::Column(ColumnRef::bare("name"), Span::ZERO)),
+                op: AstBinaryOp::Eq,
+                right: Box::new(placeholder(2)),
+                span: Span::ZERO,
+            }),
+            returning: vec![],
+            order_by: vec![],
+            limit: None,
+        };
+        let schema = test_schema_with_nocase_text_column();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_update(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        let filter_cmp = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::Ne)
+            .expect("scan-based WHERE should emit Ne");
+        assert_eq!(filter_cmp.p4, P4::Collation("NOCASE".to_owned()));
+        assert_eq!(filter_cmp.p5, 0x80 | u16::from(b'B'));
+    }
+
+    #[test]
+    fn test_codegen_delete_where_qualified_alias() {
+        // DELETE FROM t AS u WHERE u.a = ?1
+        let stmt = DeleteStatement {
+            with: None,
+            table: QualifiedTableRef {
+                name: QualifiedName::bare("t"),
+                alias: Some("u".to_owned()),
+                index_hint: None,
+                time_travel: None,
+            },
+            where_clause: Some(Expr::BinaryOp {
+                left: Box::new(Expr::Column(ColumnRef::qualified("u", "a"), Span::ZERO)),
+                op: AstBinaryOp::Eq,
+                right: Box::new(placeholder(1)),
+                span: Span::ZERO,
+            }),
+            returning: vec![],
+            order_by: vec![],
+            limit: None,
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_delete(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // The qualified alias "u.a" should resolve correctly (two-pass delete).
+        assert!(has_opcodes(
+            &prog,
+            &[
+                Opcode::Rewind,
+                Opcode::Column, // read u.a for WHERE comparison
+                Opcode::Variable,
+                Opcode::Ne,    // filter non-matching rows
+                Opcode::Rowid, // collect matching rowid
+                Opcode::RowSetAdd,
+                Opcode::RowSetRead, // pass 2: delete collected rows
+                Opcode::SeekRowid,
+                Opcode::Delete,
+            ]
+        ));
+    }
+
+    #[test]
+    fn test_codegen_update_where_qualified_rowid_alias() {
+        // UPDATE t AS u SET b = ?1 WHERE u.rowid = ?2
+        let stmt = UpdateStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedTableRef {
+                name: QualifiedName::bare("t"),
+                alias: Some("u".to_owned()),
+                index_hint: None,
+                time_travel: None,
+            },
+            assignments: vec![Assignment {
+                target: AssignmentTarget::Column("b".to_owned()),
+                value: placeholder(1),
+            }],
+            from: None,
+            where_clause: Some(Expr::BinaryOp {
+                left: Box::new(Expr::Column(ColumnRef::qualified("u", "rowid"), Span::ZERO)),
+                op: AstBinaryOp::Eq,
+                right: Box::new(placeholder(2)),
+                span: Span::ZERO,
+            }),
+            returning: vec![],
+            order_by: vec![],
+            limit: None,
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_update(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // The qualified alias "u.rowid" should resolve to the rowid fast path.
+        assert!(has_opcodes(&prog, &[Opcode::Variable, Opcode::SeekRowid]));
+    }
+
+    #[test]
+    fn test_codegen_update_from_generates_nested_loop() {
+        // UPDATE t SET b = s.b FROM s WHERE t.a = s.b
+        let stmt = UpdateStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedTableRef {
+                name: QualifiedName::bare("t"),
+                alias: None,
+                index_hint: None,
+                time_travel: None,
+            },
+            assignments: vec![Assignment {
+                target: AssignmentTarget::Column("b".to_owned()),
+                value: Expr::Column(ColumnRef::qualified("s", "b"), Span::ZERO),
+            }],
+            from: Some(from_table("s")),
+            where_clause: Some(Expr::BinaryOp {
+                left: Box::new(Expr::Column(ColumnRef::qualified("t", "a"), Span::ZERO)),
+                op: AstBinaryOp::Eq,
+                right: Box::new(Expr::Column(ColumnRef::qualified("s", "b"), Span::ZERO)),
+                span: Span::ZERO,
+            }),
+            returning: vec![],
+            order_by: vec![],
+            limit: None,
+        };
+        let schema = test_schema_with_subquery_source();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_update(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        let opcodes = opcode_sequence(&prog);
+        // Expect two Rewind opcodes (outer FROM, inner target).
+        let rewind_count = opcodes.iter().filter(|&&o| o == Opcode::Rewind).count();
+        assert_eq!(rewind_count, 2, "expected nested loop with 2 Rewind ops");
+        // Expect two Next opcodes (inner and outer).
+        let next_count = opcodes.iter().filter(|&&o| o == Opcode::Next).count();
+        assert_eq!(next_count, 2, "expected nested loop with 2 Next ops");
+        // Expect OpenWrite for target and OpenRead for FROM.
+        assert!(
+            opcodes.contains(&Opcode::OpenWrite),
+            "expected OpenWrite for target table"
+        );
+        assert!(
+            opcodes.contains(&Opcode::OpenRead),
+            "expected OpenRead for FROM table"
+        );
+        // Expect Delete + Insert for the update-as-delete+insert pattern.
+        assert!(
+            opcodes.contains(&Opcode::Delete),
+            "expected Delete for old row"
+        );
+        assert!(
+            opcodes.contains(&Opcode::Insert),
+            "expected Insert for updated row"
+        );
+    }
+
+    #[test]
+    fn test_codegen_update_rejects_unmaterialized_order_by_limit() {
+        let stmt = UpdateStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedTableRef {
+                name: QualifiedName::bare("t"),
+                alias: None,
+                index_hint: None,
+                time_travel: None,
+            },
+            assignments: vec![Assignment {
+                target: AssignmentTarget::Column("b".to_owned()),
+                value: placeholder(1),
+            }],
+            from: None,
+            where_clause: Some(Expr::BinaryOp {
+                left: Box::new(Expr::Column(ColumnRef::bare("a"), Span::ZERO)),
+                op: AstBinaryOp::Eq,
+                right: Box::new(placeholder(2)),
+                span: Span::ZERO,
+            }),
+            returning: vec![],
+            order_by: vec![OrderingTerm {
+                expr: Expr::Column(ColumnRef::bare("a"), Span::ZERO),
+                direction: Some(SortDirection::Desc),
+                nulls: None,
+            }],
+            limit: Some(LimitClause {
+                limit: Expr::Literal(Literal::Integer(1), Span::ZERO),
+                offset: Some(Expr::Literal(Literal::Integer(1), Span::ZERO)),
+            }),
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        let err = codegen_update(&mut b, &stmt, &schema, &ctx).unwrap_err();
+        assert!(
+            matches!(&err, CodegenError::Unsupported(msg) if msg.contains("materialized")),
+            "expected explicit unsupported error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_codegen_update_where_in_subquery_supported_without_rewrite() {
+        // UPDATE t SET b = ?1 WHERE a IN (SELECT b FROM s)
+        let subquery = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Expr {
+                        expr: Expr::Column(ColumnRef::bare("b"), Span::ZERO),
+                        alias: None,
+                    }],
+                    from: Some(from_table("s")),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+        let stmt = UpdateStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedTableRef {
+                name: QualifiedName::bare("t"),
+                alias: None,
+                index_hint: None,
+                time_travel: None,
+            },
+            assignments: vec![Assignment {
+                target: AssignmentTarget::Column("b".to_owned()),
+                value: placeholder(1),
+            }],
+            from: None,
+            where_clause: Some(Expr::In {
+                expr: Box::new(Expr::Column(ColumnRef::bare("a"), Span::ZERO)),
+                set: InSet::Subquery(Box::new(subquery)),
+                not: false,
+                span: Span::ZERO,
+            }),
+            returning: vec![],
+            order_by: vec![],
+            limit: None,
+        };
+
+        let schema = test_schema_with_subquery_source();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_update(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(
+            prog.ops()
+                .iter()
+                .any(|op| op.opcode == Opcode::OpenRead && op.p2 == 3),
+            "expected subquery probe OpenRead on root page 3"
+        );
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::Eq),
+            "expected Eq comparison in IN probe scan"
+        );
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::Insert),
+            "expected update writeback Insert"
+        );
+    }
+
+    #[test]
+    fn test_codegen_update_set_subquery_anonymous_placeholder_offsets_where_and_returning() {
+        // UPDATE t
+        // SET b = a IN (SELECT b FROM s WHERE b = ?)
+        // WHERE a = ?
+        // RETURNING ?
+        //
+        // SQL placeholder order: SET-subquery first, WHERE second.
+        // Bytecode emission order is WHERE first, then SET; codegen must offset
+        // WHERE placeholder numbering so WHERE uses parameter 2.
+        let set_subquery = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Expr {
+                        expr: Expr::Column(ColumnRef::bare("b"), Span::ZERO),
+                        alias: None,
+                    }],
+                    from: Some(from_table("s")),
+                    where_clause: Some(Box::new(Expr::BinaryOp {
+                        left: Box::new(Expr::Column(ColumnRef::bare("b"), Span::ZERO)),
+                        op: AstBinaryOp::Eq,
+                        right: Box::new(Expr::Placeholder(PlaceholderType::Anonymous, Span::ZERO)),
+                        span: Span::ZERO,
+                    })),
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+        let stmt = UpdateStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedTableRef {
+                name: QualifiedName::bare("t"),
+                alias: None,
+                index_hint: None,
+                time_travel: None,
+            },
+            assignments: vec![Assignment {
+                target: AssignmentTarget::Column("b".to_owned()),
+                value: Expr::In {
+                    expr: Box::new(Expr::Column(ColumnRef::bare("a"), Span::ZERO)),
+                    set: InSet::Subquery(Box::new(set_subquery)),
+                    not: false,
+                    span: Span::ZERO,
+                },
+            }],
+            from: None,
+            where_clause: Some(Expr::BinaryOp {
+                left: Box::new(Expr::Column(ColumnRef::bare("a"), Span::ZERO)),
+                op: AstBinaryOp::Eq,
+                right: Box::new(Expr::Placeholder(PlaceholderType::Anonymous, Span::ZERO)),
+                span: Span::ZERO,
+            }),
+            returning: vec![ResultColumn::Expr {
+                expr: Expr::Placeholder(PlaceholderType::Anonymous, Span::ZERO),
+                alias: None,
+            }],
+            order_by: vec![],
+            limit: None,
+        };
+
+        let schema = test_schema_with_subquery_source();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_update(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        let variable_params: Vec<i32> = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::Variable)
+            .map(|op| op.p1)
+            .collect();
+        assert_eq!(
+            variable_params,
+            vec![2, 1, 3],
+            "placeholder numbering must follow SQL lexical order across WHERE (emitted first), SET, and RETURNING"
+        );
+    }
+
+    #[test]
+    fn test_codegen_delete_where_in_table_supported_without_rewrite() {
+        // DELETE FROM t WHERE a IN s
+        let stmt = DeleteStatement {
+            with: None,
+            table: QualifiedTableRef {
+                name: QualifiedName::bare("t"),
+                alias: None,
+                index_hint: None,
+                time_travel: None,
+            },
+            where_clause: Some(Expr::In {
+                expr: Box::new(Expr::Column(ColumnRef::bare("a"), Span::ZERO)),
+                set: InSet::Table(QualifiedName::bare("s")),
+                not: false,
+                span: Span::ZERO,
+            }),
+            returning: vec![],
+            order_by: vec![],
+            limit: None,
+        };
+
+        let schema = test_schema_with_subquery_source();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_delete(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(
+            prog.ops()
+                .iter()
+                .any(|op| op.opcode == Opcode::OpenRead && op.p2 == 3),
+            "expected IN-table probe OpenRead on root page 3"
+        );
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::Eq),
+            "expected Eq comparison in IN probe scan"
+        );
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::Delete),
+            "expected delete operation"
+        );
+    }
+
+    #[test]
+    fn test_codegen_delete_where_not_in_subquery_with_order_by_limit() {
+        // DELETE FROM t WHERE a NOT IN (SELECT b FROM s ORDER BY b LIMIT ?1)
+        // Tests the complex IN subquery path with ORDER BY and LIMIT.
+        let subquery = SelectStatement {
+            with: None,
+            body: fsqlite_ast::SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Expr {
+                        expr: Expr::Column(ColumnRef::bare("b"), Span::ZERO),
+                        alias: None,
+                    }],
+                    from: Some(fsqlite_ast::FromClause {
+                        source: TableOrSubquery::Table {
+                            name: QualifiedName::bare("s"),
+                            alias: None,
+                            index_hint: None,
+                            time_travel: None,
+                        },
+                        joins: vec![],
+                    }),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![OrderingTerm {
+                expr: Expr::Column(ColumnRef::bare("b"), Span::ZERO),
+                direction: None,
+                nulls: None,
+            }],
+            limit: Some(LimitClause {
+                limit: Expr::Placeholder(fsqlite_ast::PlaceholderType::Numbered(1), Span::ZERO),
+                offset: None,
+            }),
+        };
+
+        let stmt = DeleteStatement {
+            with: None,
+            table: QualifiedTableRef {
+                name: QualifiedName::bare("t"),
+                alias: None,
+                index_hint: None,
+                time_travel: None,
+            },
+            where_clause: Some(Expr::In {
+                expr: Box::new(Expr::Column(ColumnRef::bare("a"), Span::ZERO)),
+                set: InSet::Subquery(Box::new(subquery)),
+                not: true,
+                span: Span::ZERO,
+            }),
+            returning: vec![],
+            order_by: vec![],
+            limit: None,
+        };
+
+        let schema = test_schema_with_subquery_source();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_delete(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // Should have SorterOpen for materializing the subquery with ORDER BY.
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::SorterOpen),
+            "expected SorterOpen for ORDER BY subquery"
+        );
+
+        // Should have SorterSort to sort the materialized results.
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::SorterSort),
+            "expected SorterSort opcode"
+        );
+
+        // Should have SorterInsert to populate the sorter.
+        assert!(
+            prog.ops()
+                .iter()
+                .any(|op| op.opcode == Opcode::SorterInsert),
+            "expected SorterInsert opcode"
+        );
+
+        // Should have DecrJumpZero for LIMIT handling.
+        assert!(
+            prog.ops()
+                .iter()
+                .any(|op| op.opcode == Opcode::DecrJumpZero),
+            "expected DecrJumpZero for LIMIT"
+        );
+
+        // Should have Delete opcode for the deletion.
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::Delete),
+            "expected Delete opcode"
+        );
+
+        // Should have Variable opcode for the LIMIT parameter.
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::Variable),
+            "expected Variable opcode for LIMIT parameter"
+        );
+    }
+
+    #[test]
+    fn test_codegen_delete_rejects_unmaterialized_order_by_limit() {
+        let stmt = DeleteStatement {
+            with: None,
+            table: QualifiedTableRef {
+                name: QualifiedName::bare("t"),
+                alias: None,
+                index_hint: None,
+                time_travel: None,
+            },
+            where_clause: Some(Expr::BinaryOp {
+                left: Box::new(Expr::Column(ColumnRef::bare("a"), Span::ZERO)),
+                op: AstBinaryOp::Eq,
+                right: Box::new(placeholder(1)),
+                span: Span::ZERO,
+            }),
+            returning: vec![],
+            order_by: vec![OrderingTerm {
+                expr: Expr::Column(ColumnRef::bare("a"), Span::ZERO),
+                direction: None,
+                nulls: None,
+            }],
+            limit: Some(LimitClause {
+                limit: Expr::Literal(Literal::Integer(2), Span::ZERO),
+                offset: Some(Expr::Literal(Literal::Integer(1), Span::ZERO)),
+            }),
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        let err = codegen_delete(&mut b, &stmt, &schema, &ctx).unwrap_err();
+        assert!(
+            matches!(&err, CodegenError::Unsupported(msg) if msg.contains("materialized")),
+            "expected explicit unsupported error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_codegen_delete_where_bare_rowid_eq() {
+        // DELETE FROM t WHERE rowid = ?1
+        // Ensures unqualified rowid in Eq fast-path emits Rowid opcode.
+        let stmt = DeleteStatement {
+            with: None,
+            table: QualifiedTableRef {
+                name: QualifiedName::bare("t"),
+                alias: None,
+                index_hint: None,
+                time_travel: None,
+            },
+            where_clause: Some(Expr::BinaryOp {
+                left: Box::new(Expr::Column(ColumnRef::bare("rowid"), Span::ZERO)),
+                op: AstBinaryOp::Eq,
+                right: Box::new(placeholder(1)),
+                span: Span::ZERO,
+            }),
+            returning: vec![],
+            order_by: vec![],
+            limit: None,
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_delete(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // Bare rowid in DELETE WHERE Eq should use the direct rowid probe path.
+        assert!(has_opcodes(
+            &prog,
+            &[
+                Opcode::Variable,
+                Opcode::SeekRowid, // direct probe
+                Opcode::RowSetAdd,
+                Opcode::RowSetRead, // pass 2: delete collected rows
+                Opcode::SeekRowid,
+                Opcode::Delete,
+            ]
+        ));
+    }
+
+    #[test]
+    fn test_codegen_delete_where_shadowed_rowid_eq_uses_visible_column_filter() {
+        let stmt = DeleteStatement {
+            with: None,
+            table: QualifiedTableRef {
+                name: QualifiedName::bare("t"),
+                alias: None,
+                index_hint: None,
+                time_travel: None,
+            },
+            where_clause: Some(Expr::BinaryOp {
+                left: Box::new(Expr::Column(ColumnRef::bare("rowid"), Span::ZERO)),
+                op: AstBinaryOp::Eq,
+                right: Box::new(placeholder(1)),
+                span: Span::ZERO,
+            }),
+            returning: vec![],
+            order_by: vec![],
+            limit: None,
+        };
+        let schema = schema_with_visible_rowid_column();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_delete(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(has_opcodes(
+            &prog,
+            &[
+                Opcode::Rewind,
+                Opcode::Column, // visible rowid column comparison
+                Opcode::Variable,
+                Opcode::Ne,
+                Opcode::Rowid, // collect hidden rowid for deletion
+                Opcode::RowSetAdd,
+                Opcode::RowSetRead,
+                Opcode::SeekRowid,
+                Opcode::Delete,
+            ]
+        ));
+    }
+
+    // === Test: UPDATE SET with column self-reference (bd-2eau) ===
+
+    #[test]
+    fn test_codegen_update_set_column_self_ref() {
+        // UPDATE t SET a = a + 1
+        // The SET expression `a + 1` should generate a Column opcode to read
+        // the current value of `a`, NOT a Null opcode.
+        let stmt = UpdateStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedTableRef {
+                name: QualifiedName::bare("t"),
+                alias: None,
+                index_hint: None,
+                time_travel: None,
+            },
+            assignments: vec![Assignment {
+                target: AssignmentTarget::Column("a".to_owned()),
+                value: Expr::BinaryOp {
+                    left: Box::new(Expr::Column(ColumnRef::bare("a"), Span::ZERO)),
+                    op: AstBinaryOp::Add,
+                    right: Box::new(Expr::Literal(Literal::Integer(1), Span::ZERO)),
+                    span: Span::ZERO,
+                },
+            }],
+            from: None,
+            where_clause: None,
+            returning: vec![],
+            order_by: vec![],
+            limit: None,
+        };
+        let schema = test_schema();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_update(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // The SET expression should emit Column (reading `a`) + Integer(1) + Add,
+        // NOT Null. Count Column opcodes — there should be at least 3:
+        // 2 from reading all columns, plus 1+ from evaluating `a` in the expression.
+        let column_count = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::Column)
+            .count();
+        assert!(
+            column_count >= 3,
+            "expected >= 3 Column ops (2 for reading all cols + 1 for SET expr), got {column_count}"
+        );
+
+        // There should be an Add opcode for `a + 1`.
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::Add),
+            "expected Add opcode for `a + 1` expression"
+        );
+
+        // There should be NO Null opcodes for column references.
+        // (Null would only appear if the ScanCtx was missing.)
+        let null_count = prog
+            .ops()
+            .iter()
+            .filter(|op| op.opcode == Opcode::Null)
+            .count();
+        assert_eq!(
+            null_count, 0,
+            "expected 0 Null opcodes (column refs should resolve), got {null_count}"
+        );
+    }
+
+    // =================================================================
+    // IPK codegen tests (bd-3l6e / PARITY-B5)
+    // =================================================================
+
+    /// INSERT VALUES with IPK column should emit IsNull+Copy routing, NOT
+    /// unconditional NewRowid.
+    #[test]
+    fn test_codegen_insert_values_ipk_uses_copy_not_new_rowid() {
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec![],
+            source: InsertSource::Values(vec![vec![placeholder(1), placeholder(2)]]),
+            upsert: vec![],
+            returning: vec![],
+        };
+        let schema = schema_with_ipk_alias();
+        let ctx = CodegenContext {
+            concurrent_mode: false,
+            rowid_alias_col_idx: Some(0),
+            ..CodegenContext::default()
+        };
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = opcode_sequence(&prog);
+
+        // Must contain IsNull (conditional branch) and Copy (value→rowid).
+        assert!(
+            ops.contains(&Opcode::IsNull),
+            "IPK INSERT should emit IsNull to check for NULL IPK value"
+        );
+        assert!(
+            ops.contains(&Opcode::Copy),
+            "IPK INSERT should emit Copy to move IPK value to rowid register"
+        );
+        // The sequence must be: Variable (values) → IsNull → Copy → Goto
+        //                       (or the NULL path: NewRowid → Copy)
+        assert!(has_opcodes(
+            &prog,
+            &[
+                Opcode::Init,
+                Opcode::Transaction,
+                Opcode::OpenWrite,
+                Opcode::Variable,
+                Opcode::Variable,
+                Opcode::IsNull,
+                Opcode::Copy,
+                Opcode::MakeRecord,
+                Opcode::Insert,
+                Opcode::Close,
+                Opcode::Halt,
+            ]
+        ));
+    }
+
+    #[test]
+    fn test_codegen_insert_values_ipk_literals_preformat_record_blob() {
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec![],
+            source: InsertSource::Values(vec![vec![
+                Expr::Literal(Literal::Integer(7), Span::ZERO),
+                Expr::Literal(Literal::String("payload".to_owned()), Span::ZERO),
+            ]]),
+            upsert: vec![],
+            returning: vec![],
+        };
+        let schema = schema_with_ipk_alias();
+        let ctx = CodegenContext {
+            concurrent_mode: false,
+            rowid_alias_col_idx: Some(0),
+            ..CodegenContext::default()
+        };
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = opcode_sequence(&prog);
+
+        assert!(ops.contains(&Opcode::IsNull));
+        assert!(ops.contains(&Opcode::Copy));
+        assert!(ops.contains(&Opcode::Blob));
+        assert!(
+            !ops.contains(&Opcode::MakeRecord),
+            "IPK literal INSERT should still preformat the table record payload"
+        );
+    }
+
+    /// INSERT VALUES without IPK should still use unconditional NewRowid.
+    #[test]
+    fn test_codegen_insert_values_no_ipk_uses_new_rowid() {
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec![],
+            source: InsertSource::Values(vec![vec![placeholder(1), placeholder(2)]]),
+            upsert: vec![],
+            returning: vec![],
+        };
+        let schema = test_schema(); // no IPK
+        let ctx = CodegenContext::default(); // rowid_alias_col_idx = None
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = opcode_sequence(&prog);
+
+        assert!(
+            ops.contains(&Opcode::NewRowid),
+            "non-IPK INSERT should use NewRowid"
+        );
+        assert!(
+            !ops.contains(&Opcode::IsNull),
+            "non-IPK INSERT should NOT emit IsNull routing"
+        );
+    }
+
+    #[test]
+    fn test_codegen_insert_visible_rowid_column_does_not_use_explicit_rowid_path() {
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec!["rowid".to_owned(), "b".to_owned()],
+            source: InsertSource::Values(vec![vec![placeholder(1), placeholder(2)]]),
+            upsert: vec![],
+            returning: vec![],
+        };
+        let schema = schema_with_visible_rowid_column();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = opcode_sequence(&prog);
+
+        assert!(
+            ops.contains(&Opcode::NewRowid),
+            "shadowed rowid column should still auto-generate the hidden rowid"
+        );
+        assert!(
+            !ops.contains(&Opcode::IsNull),
+            "visible rowid column must not be routed through the explicit hidden-rowid path"
+        );
+    }
+
+    /// INSERT with explicit column list where IPK is in non-first position.
+    #[test]
+    fn test_codegen_insert_values_ipk_column_list_reorder() {
+        // Table: (a INTEGER PRIMARY KEY, b TEXT)
+        // INSERT INTO t(b, a) VALUES (?, ?)  →  IPK is at VALUES position 1
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec!["b".to_owned(), "a".to_owned()],
+            source: InsertSource::Values(vec![vec![placeholder(1), placeholder(2)]]),
+            upsert: vec![],
+            returning: vec![],
+        };
+        let schema = schema_with_ipk_alias();
+        let ctx = CodegenContext {
+            concurrent_mode: false,
+            rowid_alias_col_idx: Some(0), // IPK is column 0 in schema
+            ..CodegenContext::default()
+        };
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = opcode_sequence(&prog);
+
+        // Should still emit IPK routing (IsNull + Copy) because 'a' is in
+        // the column list at position 1.
+        assert!(
+            ops.contains(&Opcode::IsNull),
+            "reordered column list with IPK should emit IsNull"
+        );
+    }
+
+    #[test]
+    fn test_codegen_insert_allows_duplicate_target_columns() {
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec!["b".to_owned(), "b".to_owned()],
+            source: InsertSource::Values(vec![vec![placeholder(1), placeholder(2)]]),
+            upsert: vec![],
+            returning: vec![],
+        };
+        let schema = schema_with_ipk_alias();
+        let ctx = CodegenContext {
+            concurrent_mode: false,
+            rowid_alias_col_idx: Some(0),
+            ..CodegenContext::default()
+        };
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap();
+    }
+
+    #[test]
+    fn test_codegen_insert_allows_hidden_rowid_and_ipk_targets() {
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec!["rowid".to_owned(), "a".to_owned()],
+            source: InsertSource::Values(vec![vec![placeholder(1), placeholder(2)]]),
+            upsert: vec![],
+            returning: vec![],
+        };
+        let schema = schema_with_ipk_alias();
+        let ctx = CodegenContext {
+            concurrent_mode: false,
+            rowid_alias_col_idx: Some(0),
+            ..CodegenContext::default()
+        };
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap();
+    }
+
+    #[test]
+    fn test_codegen_insert_hidden_rowid_after_ipk_uses_rowid_source() {
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec!["a".to_owned(), "rowid".to_owned()],
+            source: InsertSource::Values(vec![vec![placeholder(1), placeholder(2)]]),
+            upsert: vec![],
+            returning: vec![],
+        };
+        let schema = schema_with_ipk_alias();
+        let ctx = CodegenContext {
+            concurrent_mode: false,
+            rowid_alias_col_idx: Some(0),
+            ..CodegenContext::default()
+        };
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = opcode_sequence(&prog);
+        assert!(
+            ops.contains(&Opcode::Copy),
+            "rowid/IPK mixed target list should still emit rowid routing"
+        );
+    }
+
+    #[test]
+    fn test_codegen_insert_values_rejects_explicit_column_arity_mismatch() {
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec!["b".to_owned()],
+            source: InsertSource::Values(vec![vec![placeholder(1), placeholder(2)]]),
+            upsert: vec![],
+            returning: vec![],
+        };
+        let schema = schema_with_ipk_alias();
+        let ctx = CodegenContext {
+            concurrent_mode: false,
+            rowid_alias_col_idx: Some(0),
+            ..CodegenContext::default()
+        };
+        let mut b = ProgramBuilder::new();
+        let err = codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap_err();
+        assert!(
+            matches!(err, CodegenError::Unsupported(ref message) if message.contains("INSERT target list has 1 columns but 2 values were supplied")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    /// INSERT with explicit column list that OMITS the IPK column.
+    /// The reorder fills the IPK position with NULL, so IsNull routing is
+    /// emitted but always takes the auto-generate path.
+    #[test]
+    fn test_codegen_insert_values_ipk_column_list_omitted() {
+        // Table: (a INTEGER PRIMARY KEY, b TEXT)
+        // INSERT INTO t(b) VALUES (?)  →  IPK omitted, reorder fills NULL
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec!["b".to_owned()],
+            source: InsertSource::Values(vec![vec![placeholder(1)]]),
+            upsert: vec![],
+            returning: vec![],
+        };
+        let schema = schema_with_ipk_alias();
+        let ctx = CodegenContext {
+            concurrent_mode: false,
+            rowid_alias_col_idx: Some(0),
+            ..CodegenContext::default()
+        };
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = opcode_sequence(&prog);
+
+        // Reorder fills IPK slot with NULL → IPK routing still emitted
+        // (IsNull will always fire, triggering NewRowid).
+        assert!(
+            ops.contains(&Opcode::NewRowid),
+            "omitted IPK should use NewRowid"
+        );
+        // The reordered row has 2 columns (full table width), not 1.
+        let n_null = ops.iter().filter(|&&op| op == Opcode::Null).count();
+        assert!(
+            n_null >= 1,
+            "reorder should emit Null for the omitted IPK column"
+        );
+    }
+
+    /// Multi-row VALUES with IPK should emit IPK routing for each row.
+    #[test]
+    fn test_codegen_insert_values_ipk_multi_row() {
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec![],
+            source: InsertSource::Values(vec![
+                vec![placeholder(1), placeholder(2)],
+                vec![placeholder(3), placeholder(4)],
+                vec![placeholder(5), placeholder(6)],
+            ]),
+            upsert: vec![],
+            returning: vec![],
+        };
+        let schema = schema_with_ipk_alias();
+        let ctx = CodegenContext {
+            concurrent_mode: false,
+            rowid_alias_col_idx: Some(0),
+            ..CodegenContext::default()
+        };
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = opcode_sequence(&prog);
+
+        // Three rows → three IsNull opcodes (one per row).
+        let is_null_count = ops.iter().filter(|&&op| op == Opcode::IsNull).count();
+        assert_eq!(
+            is_null_count, 3,
+            "3-row INSERT with IPK should emit 3 IsNull opcodes, got {is_null_count}"
+        );
+    }
+
+    #[test]
+    fn test_codegen_insert_default_values_uses_expression_default() {
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec![],
+            source: InsertSource::DefaultValues,
+            upsert: vec![],
+            returning: vec![],
+        };
+        let schema = vec![TableSchema {
+            name: "t".to_owned(),
+            root_page: 2,
+            columns: vec![
+                ColumnInfo::basic("id", 'd', false),
+                ColumnInfo {
+                    name: "total".to_owned(),
+                    affinity: 'd',
+                    is_ipk: false,
+                    type_name: None,
+                    notnull: false,
+                    unique: false,
+                    default_value: Some("(40 + 2)".to_owned()),
+                    strict_type: None,
+                    generated_expr: None,
+                    generated_stored: None,
+                    collation: None,
+                },
+            ],
+            indexes: vec![],
+            strict: false,
+            without_rowid: false,
+            primary_key_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
+            check_constraints: Vec::new(),
+        }];
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::Add),
+            "expression defaults should compile as expressions, not string literals"
+        );
+    }
+
+    #[test]
+    fn test_codegen_insert_default_values_rejects_unparseable_default() {
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec![],
+            source: InsertSource::DefaultValues,
+            upsert: vec![],
+            returning: vec![],
+        };
+        let schema = vec![TableSchema {
+            name: "t".to_owned(),
+            root_page: 2,
+            columns: vec![ColumnInfo {
+                name: "broken".to_owned(),
+                affinity: 'C',
+                is_ipk: false,
+                type_name: None,
+                notnull: false,
+                unique: false,
+                default_value: Some("('unterminated".to_owned()),
+                strict_type: None,
+                generated_expr: None,
+                generated_stored: None,
+                collation: None,
+            }],
+            indexes: vec![],
+            strict: false,
+            without_rowid: false,
+            primary_key_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
+            check_constraints: Vec::new(),
+        }];
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        let err = codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap_err();
+        assert!(
+            matches!(err, CodegenError::Unsupported(ref msg) if msg.contains("failed to parse DEFAULT expression")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_codegen_insert_default_values_rejects_non_self_contained_default() {
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec![],
+            source: InsertSource::DefaultValues,
+            upsert: vec![],
+            returning: vec![],
+        };
+        let schema = vec![TableSchema {
+            name: "t".to_owned(),
+            root_page: 2,
+            columns: vec![
+                ColumnInfo::basic("a", 'D', false),
+                ColumnInfo {
+                    name: "b".to_owned(),
+                    affinity: 'D',
+                    is_ipk: false,
+                    type_name: None,
+                    notnull: false,
+                    unique: false,
+                    default_value: Some("(a + 1)".to_owned()),
+                    strict_type: None,
+                    generated_expr: None,
+                    generated_stored: None,
+                    collation: None,
+                },
+            ],
+            indexes: vec![],
+            strict: false,
+            without_rowid: false,
+            primary_key_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
+            check_constraints: Vec::new(),
+        }];
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        let err = codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap_err();
+        assert!(
+            matches!(err, CodegenError::Unsupported(ref msg) if msg.contains("is not self-contained")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    /// Schema: CREATE TABLE t (a INTEGER, b INTEGER, c GENERATED ALWAYS AS (a + b) STORED)
+    fn test_schema_with_stored_generated() -> Vec<TableSchema> {
+        vec![TableSchema {
+            name: "t".to_owned(),
+            root_page: 2,
+            columns: vec![
+                ColumnInfo::basic("a", 'd', false),
+                ColumnInfo::basic("b", 'd', false),
+                ColumnInfo {
+                    name: "c".to_owned(),
+                    affinity: 'd',
+                    is_ipk: false,
+                    type_name: Some("INTEGER".to_owned()),
+                    notnull: false,
+                    unique: false,
+                    default_value: None,
+                    strict_type: None,
+                    generated_expr: Some("a + b".to_owned()),
+                    generated_stored: Some(true),
+                    collation: None,
+                },
+            ],
+            indexes: vec![],
+            strict: false,
+            without_rowid: false,
+            primary_key_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
+            check_constraints: Vec::new(),
+        }]
+    }
+
+    /// Schema: CREATE TABLE t (a INTEGER, b INTEGER, c GENERATED ALWAYS AS (a * 2) VIRTUAL)
+    fn test_schema_with_virtual_generated() -> Vec<TableSchema> {
+        vec![TableSchema {
+            name: "t".to_owned(),
+            root_page: 2,
+            columns: vec![
+                ColumnInfo::basic("a", 'd', false),
+                ColumnInfo::basic("b", 'd', false),
+                ColumnInfo {
+                    name: "c".to_owned(),
+                    affinity: 'd',
+                    is_ipk: false,
+                    type_name: Some("INTEGER".to_owned()),
+                    notnull: false,
+                    unique: false,
+                    default_value: None,
+                    strict_type: None,
+                    generated_expr: Some("a * 2".to_owned()),
+                    generated_stored: Some(false),
+                    collation: None,
+                },
+            ],
+            indexes: vec![],
+            strict: false,
+            without_rowid: false,
+            primary_key_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
+            check_constraints: Vec::new(),
+        }]
+    }
+
+    #[test]
+    fn test_codegen_insert_stored_generated_column_emits_copy_and_add() {
+        // INSERT INTO t VALUES (?, ?, DEFAULT) — 3 columns, c is STORED generated
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec![],
+            source: InsertSource::Values(vec![vec![
+                placeholder(1),
+                placeholder(2),
+                Expr::Literal(Literal::Null, Span::ZERO), // placeholder for generated col
+            ]]),
+            upsert: vec![],
+            returning: vec![],
+        };
+        let schema = test_schema_with_stored_generated();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = opcode_sequence(&prog);
+
+        // The generated column (c = a + b) should emit Copy opcodes to read
+        // columns a and b from their registers, then Add to compute the result.
+        assert!(
+            ops.contains(&Opcode::Copy),
+            "STORED generated column should emit Copy opcodes for column references"
+        );
+        assert!(
+            ops.contains(&Opcode::Add),
+            "STORED generated column 'a + b' should emit Add opcode"
+        );
+    }
+
+    #[test]
+    fn test_codegen_insert_virtual_generated_column_emits_null() {
+        // INSERT INTO t VALUES (?, ?, DEFAULT) — c is VIRTUAL generated (not stored)
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec![],
+            source: InsertSource::Values(vec![vec![
+                placeholder(1),
+                placeholder(2),
+                Expr::Literal(Literal::Null, Span::ZERO),
+            ]]),
+            upsert: vec![],
+            returning: vec![],
+        };
+        let schema = test_schema_with_virtual_generated();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = opcode_sequence(&prog);
+
+        // VIRTUAL generated column should NOT emit Add (expression not evaluated
+        // at insert time); it should just emit Null.
+        assert!(
+            !ops.contains(&Opcode::Multiply),
+            "VIRTUAL generated column should not evaluate expression during INSERT"
+        );
+    }
+
+    #[test]
+    fn test_codegen_insert_default_values_stored_generated() {
+        // INSERT INTO t DEFAULT VALUES — with a STORED generated column
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec![],
+            source: InsertSource::DefaultValues,
+            upsert: vec![],
+            returning: vec![],
+        };
+        let schema = test_schema_with_stored_generated();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = opcode_sequence(&prog);
+
+        // Even with DEFAULT VALUES, stored generated columns should evaluate.
+        assert!(
+            ops.contains(&Opcode::Copy),
+            "DEFAULT VALUES with STORED generated column should emit Copy for references"
+        );
+        assert!(
+            ops.contains(&Opcode::Add),
+            "DEFAULT VALUES with STORED generated column 'a + b' should emit Add"
+        );
+    }
+
+    #[test]
+    fn test_codegen_insert_stored_generated_with_explicit_columns() {
+        // INSERT INTO t(a, b) VALUES (?, ?) — c is omitted (STORED generated)
+        let stmt = InsertStatement {
+            with: None,
+            or_conflict: None,
+            table: QualifiedName::bare("t"),
+            alias: None,
+            columns: vec!["a".to_owned(), "b".to_owned()],
+            source: InsertSource::Values(vec![vec![placeholder(1), placeholder(2)]]),
+            upsert: vec![],
+            returning: vec![],
+        };
+        let schema = test_schema_with_stored_generated();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_insert(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = opcode_sequence(&prog);
+
+        // With explicit column list omitting the generated column, it should
+        // still evaluate the STORED expression.
+        assert!(
+            ops.contains(&Opcode::Add),
+            "Explicit column list INSERT with STORED generated column should emit Add"
+        );
+    }
+
+    #[test]
+    fn test_codegen_update_stored_generated_column_recomputed() {
+        // UPDATE t SET a = ? WHERE b = ?
+        // STORED generated column c = a + b should be recomputed.
+        let stmt = fsqlite_ast::UpdateStatement {
+            with: None,
+            or_conflict: None,
+            table: fsqlite_ast::QualifiedTableRef {
+                name: QualifiedName::bare("t"),
+                alias: None,
+                index_hint: None,
+                time_travel: None,
+            },
+            assignments: vec![fsqlite_ast::Assignment {
+                target: fsqlite_ast::AssignmentTarget::Column("a".to_owned()),
+                value: placeholder(1),
+            }],
+            from: None,
+            where_clause: Some(Expr::BinaryOp {
+                left: Box::new(Expr::Column(
+                    fsqlite_ast::ColumnRef {
+                        table: None,
+                        column: "b".to_owned(),
+                    },
+                    Span::ZERO,
+                )),
+                op: fsqlite_ast::BinaryOp::Eq,
+                right: Box::new(placeholder(2)),
+                span: Span::ZERO,
+            }),
+            returning: vec![],
+            order_by: vec![],
+            limit: None,
+        };
+        let schema = test_schema_with_stored_generated();
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_update(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+        let ops = opcode_sequence(&prog);
+
+        // UPDATE should recompute STORED generated column.
+        assert!(
+            ops.contains(&Opcode::Add),
+            "UPDATE should recompute STORED generated column 'a + b'"
+        );
+    }
+
+    /// bd-wwqen.1: Verify cheapest-index COUNT optimization fires —
+    /// when a table has a non-partial index, COUNT(*) opens the index
+    /// root page instead of the table root page.
+    #[test]
+    fn test_count_star_opens_cheapest_index_not_table() {
+        let schema = test_schema_with_index();
+        // table root_page = 2, index root_page = 3
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Expr {
+                        expr: Expr::FunctionCall {
+                            name: "count".to_owned(),
+                            args: FunctionArgs::Star,
+                            distinct: false,
+                            order_by: vec![],
+                            filter: None,
+                            over: None,
+                            span: Span::ZERO,
+                        },
+                        alias: None,
+                    }],
+                    from: Some(from_table("t")),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        // The OpenRead should target the INDEX root page (3), not
+        // the table root page (2).
+        let open_read = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::OpenRead)
+            .expect("COUNT(*) program must have OpenRead");
+        assert_eq!(
+            open_read.p2, 3,
+            "bd-wwqen.1: COUNT(*) should open cheapest index (root=3), \
+             not table (root=2); got root={}",
+            open_read.p2
+        );
+
+        // The Count opcode must be present.
+        assert!(
+            prog.ops().iter().any(|op| op.opcode == Opcode::Count),
+            "bd-wwqen.1: COUNT(*) program must contain Opcode::Count"
+        );
+    }
+
+    /// bd-wwqen.1: COUNT(*) on a table with NO indexes falls back
+    /// to the table root page.
+    #[test]
+    fn test_count_star_uses_table_when_no_index() {
+        let schema = test_schema(); // no indexes
+        let stmt = SelectStatement {
+            with: None,
+            body: SelectBody {
+                select: SelectCore::Select {
+                    distinct: Distinctness::All,
+                    columns: vec![ResultColumn::Expr {
+                        expr: Expr::FunctionCall {
+                            name: "count".to_owned(),
+                            args: FunctionArgs::Star,
+                            distinct: false,
+                            order_by: vec![],
+                            filter: None,
+                            over: None,
+                            span: Span::ZERO,
+                        },
+                        alias: None,
+                    }],
+                    from: Some(from_table("t")),
+                    where_clause: None,
+                    group_by: vec![],
+                    having: None,
+                    windows: vec![],
+                },
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        };
+        let ctx = CodegenContext::default();
+        let mut b = ProgramBuilder::new();
+        codegen_select(&mut b, &stmt, &schema, &ctx).unwrap();
+        let prog = b.finish().unwrap();
+
+        let open_read = prog
+            .ops()
+            .iter()
+            .find(|op| op.opcode == Opcode::OpenRead)
+            .expect("COUNT(*) program must have OpenRead");
+        assert_eq!(
+            open_read.p2, 2,
+            "bd-wwqen.1: COUNT(*) with no indexes should open table (root=2), got root={}",
+            open_read.p2
+        );
+    }
+}
