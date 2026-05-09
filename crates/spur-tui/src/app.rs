@@ -6795,6 +6795,23 @@ mod synopsis_wire_tests {
 mod theme_threading_tests {
     use super::*;
     use crate::theme::runtime::test_support::with_isolated_dirs;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn app_with_theme(theme: &str) -> App {
+        let mut spur_config = spur_acp::SpurConfig::default();
+        spur_config.tui.theme = theme.to_string();
+
+        App::new_with_config(
+            None,
+            false,
+            std::sync::Arc::new(spur_config),
+            crate::landing::LandingDecision::ShowDashboard,
+        )
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
 
     /// Boots `App` with `tui.theme = "light"` and confirms (a) construction
     /// does not panic even though no surface consumes the theme yet, and
@@ -6946,28 +6963,102 @@ mod theme_threading_tests {
     #[test]
     fn theme_picker_accept_switches_theme() {
         with_isolated_dirs(|_, _| {
-            let mut spur_config = spur_acp::SpurConfig::default();
-            spur_config.tui.theme = "dark".to_string();
-
-            let mut app = App::new_with_config(
-                None,
-                false,
-                std::sync::Arc::new(spur_config),
-                crate::landing::LandingDecision::ShowDashboard,
-            );
+            let mut app = app_with_theme("dark");
 
             app.process_action(crate::action::Action::ThemeCommand { arg: String::new() });
-            app.handle_crossterm_event_for_test(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Down,
-                crossterm::event::KeyModifiers::NONE,
-            ));
-            app.handle_crossterm_event_for_test(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Enter,
-                crossterm::event::KeyModifiers::NONE,
-            ));
+            app.handle_crossterm_event_for_test(key(KeyCode::Down));
+            app.handle_crossterm_event_for_test(key(KeyCode::Enter));
 
             assert_eq!(app.theme.name, "light");
             assert_eq!(app.active_theme_name, "light");
+        });
+    }
+
+    #[test]
+    fn theme_picker_esc_cancels_without_changing_dashboard_theme() {
+        with_isolated_dirs(|_, _| {
+            let mut app = app_with_theme("dark");
+
+            app.process_action(crate::action::Action::ThemeCommand { arg: String::new() });
+            assert!(app.dashboard_for_test().completion_active());
+
+            app.handle_crossterm_event_for_test(key(KeyCode::Esc));
+
+            assert!(!app.dashboard_for_test().completion_active());
+            assert_eq!(app.theme.name, "dark");
+            assert_eq!(app.active_theme_name, "dark");
+        });
+    }
+
+    #[test]
+    fn slash_theme_reload_reloads_active_theme() {
+        with_isolated_dirs(|_, _| {
+            let mut app = app_with_theme("light");
+
+            app.process_action(crate::action::Action::ThemeCommand {
+                arg: "reload".to_string(),
+            });
+
+            assert_eq!(app.theme.name, "light");
+            assert_eq!(app.active_theme_name, "light");
+            let hint = app
+                .transient_hint_for_test()
+                .expect("reload should flash status");
+            assert_eq!(hint.text, "theme reloaded: light");
+        });
+    }
+
+    #[test]
+    fn session_detail_theme_picker_accept_switches_theme() {
+        with_isolated_dirs(|_, _| {
+            let mut app = app_with_theme("dark");
+            let session_id = spur_acp::SessionId("palette-test".into());
+            app.session_detail = Some(
+                crate::views::session_detail::SessionDetailView::new_for_palette_test(
+                    crate::commands::CommandRegistry::default(),
+                ),
+            );
+            app.current_view = ViewId::SessionDetail(session_id);
+
+            app.process_action(crate::action::Action::ThemeCommand { arg: String::new() });
+            assert!(
+                app.session_detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.completion_active()),
+                "bare `/theme` should open the session detail theme picker"
+            );
+
+            app.handle_crossterm_event_for_test(key(KeyCode::Down));
+            app.handle_crossterm_event_for_test(key(KeyCode::Enter));
+
+            assert_eq!(app.theme.name, "light");
+            assert_eq!(app.active_theme_name, "light");
+        });
+    }
+
+    #[test]
+    fn bare_theme_in_unwired_view_flashes_theme_status() {
+        with_isolated_dirs(|_, _| {
+            let mut app = app_with_theme("dark");
+            app.current_view = ViewId::SessionPicker;
+
+            app.process_action(crate::action::Action::ThemeCommand { arg: String::new() });
+
+            let hint = app
+                .transient_hint_for_test()
+                .expect("unwired views should show theme status");
+            assert!(
+                hint.text.contains("themes:"),
+                "theme status flash should list themes, got `{}`",
+                hint.text
+            );
+            assert!(
+                hint.text.contains("* dark"),
+                "active theme marker should include a space, got `{}`",
+                hint.text
+            );
+            assert_eq!(app.theme.name, "dark");
+            assert_eq!(app.active_theme_name, "dark");
         });
     }
 }
