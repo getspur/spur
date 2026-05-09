@@ -1866,6 +1866,7 @@ pub(crate) async fn emit_retry_requested_audit(
     attempt: u32,
     error: &str,
     worker_branch: Option<String>,
+    amended_prompt_summary: Option<String>,
 ) -> anyhow::Result<()> {
     let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
         return Ok(());
@@ -1892,6 +1893,7 @@ pub(crate) async fn emit_retry_requested_audit(
         attempt,
         error: error.to_string(),
         worker_branch,
+        amended_prompt_summary,
     };
     let body = crate::plan::audit_sentinel::encode_comment(&kind);
     adv.add_comment(issue_id, &body).await?;
@@ -2483,6 +2485,15 @@ async fn persist_completion_result_with_retry_for_task(
     }
 
     if let (Some(attempt), Some(error)) = (retry_attempt, retry_error.as_deref()) {
+        let amended_prompt_summary = Some(format!(
+            "Attempt {} recovery: {}{}",
+            attempt,
+            error,
+            retry_worker_branch
+                .as_deref()
+                .map(|b| format!(" (branch: {b})"))
+                .unwrap_or_default()
+        ));
         emit_retry_requested_audit(
             Some(pm),
             &Some(issue_id.to_string()),
@@ -2492,6 +2503,7 @@ async fn persist_completion_result_with_retry_for_task(
             attempt,
             error,
             retry_worker_branch.clone(),
+            amended_prompt_summary,
         )
         .await?;
     }
@@ -5134,6 +5146,7 @@ mod tests {
         assert!(super::is_terminal_plan_status("has_rejections"));
         assert!(super::is_terminal_plan_status("partial"));
         assert!(!super::is_terminal_plan_status("unknown"));
+        assert!(!super::is_terminal_plan_status("escalated"));
     }
 
     #[test]
