@@ -79,6 +79,148 @@ type LoadedBrainSessionBootstrap = (
     SessionId,
 );
 
+const MAX_SESSION_LIST_PAGES: usize = 1000;
+const MAX_SESSION_LIST_SESSIONS: usize = 100_000;
+const CODEX_DISK_ROLLOUT_SCAN_LIMIT: usize = 500;
+
+fn filter_sessions_for_repo(sessions: Vec<SessionInfo>, repo_root: &Path) -> Vec<SessionInfo> {
+    sessions
+        .into_iter()
+        .filter(|session| session.cwd.starts_with(repo_root))
+        .collect()
+}
+
+fn list_codex_sessions_from_disk_root(sessions_root: &Path) -> Result<Vec<SessionInfo>> {
+    if !sessions_root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut sessions = Vec::new();
+    for path in codex_rollout_paths(sessions_root)? {
+        if let Some(session) = parse_codex_rollout_header(&path) {
+            sessions.push(session);
+        }
+    }
+
+    sessions.sort_by(|a, b| {
+        let a_time = a.updated_at.as_deref().unwrap_or("");
+        let b_time = b.updated_at.as_deref().unwrap_or("");
+        b_time.cmp(a_time)
+    });
+
+    Ok(sessions)
+}
+
+fn codex_rollout_paths(sessions_root: &Path) -> Result<Vec<PathBuf>> {
+    let mut day_dirs = Vec::new();
+    for year_dir in sorted_child_dirs(sessions_root)? {
+        for month_dir in sorted_child_dirs(&year_dir)? {
+            day_dirs.extend(sorted_child_dirs(&month_dir)?);
+        }
+    }
+    day_dirs.sort_by(|a, b| b.cmp(a));
+
+    let mut paths = Vec::new();
+    for day_dir in day_dirs {
+        for path in sorted_rollout_files(&day_dir)? {
+            paths.push(path);
+            if paths.len() >= CODEX_DISK_ROLLOUT_SCAN_LIMIT {
+                return Ok(paths);
+            }
+        }
+    }
+
+    Ok(paths)
+}
+
+fn sorted_child_dirs(path: &Path) -> Result<Vec<PathBuf>> {
+    let mut dirs = Vec::new();
+    for entry in std::fs::read_dir(path)? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
+        if file_type.is_dir() {
+            dirs.push(entry.path());
+        }
+    }
+    dirs.sort_by(|a, b| b.cmp(a));
+    Ok(dirs)
+}
+
+fn sorted_rollout_files(day_dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(day_dir)? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let path = entry.path();
+        let is_rollout = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("rollout-"));
+        let is_jsonl = path.extension().and_then(|ext| ext.to_str()) == Some("jsonl");
+        if is_rollout && is_jsonl {
+            paths.push(path);
+        }
+    }
+    paths.sort_by(|a, b| b.cmp(a));
+    Ok(paths)
+}
+
+fn parse_codex_rollout_header(path: &Path) -> Option<SessionInfo> {
+    use std::io::BufRead;
+
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+    if reader.read_line(&mut line).ok()? == 0 {
+        return None;
+    }
+
+    parse_codex_session_header(&line)
+}
+
+fn parse_codex_session_header(line: &str) -> Option<SessionInfo> {
+    let json: serde_json::Value = serde_json::from_str(line).ok()?;
+    let payload = json.get("payload").unwrap_or(&json);
+
+    let session_id = json_string_field(payload, "id")
+        .or_else(|| json_string_field(payload, "session_id"))
+        .or_else(|| json_string_field(&json, "id"))
+        .or_else(|| json_string_field(&json, "session_id"))?;
+    let cwd = json_string_field(payload, "cwd").or_else(|| json_string_field(&json, "cwd"))?;
+    let updated_at = json_string_field(payload, "timestamp")
+        .or_else(|| json_string_field(&json, "timestamp"))
+        .map(str::to_string);
+    let title = json_string_field(payload, "title")
+        .or_else(|| json_string_field(&json, "title"))
+        .or_else(|| json_string_field(payload, "instructions"))
+        .map(str::to_string);
+
+    let mut info = SessionInfo::new(session_id.to_string(), PathBuf::from(cwd));
+    info = info.updated_at(updated_at);
+    info = info.title(title);
+    Some(info)
+}
+
+fn json_string_field<'a>(json: &'a serde_json::Value, field: &str) -> Option<&'a str> {
+    json.get(field).and_then(|value| value.as_str())
+}
+
 // ─── Agent name normalization ─────────────────────────────────────────
 
 /// Normalize an agent name for equality comparison.
@@ -3545,9 +3687,8 @@ impl Orchestrator {
                             }
                         };
 
-                        let list_req = ListSessionsRequest::new().cwd(self.repo_root.clone());
-                        let sessions_result = match conn.list_sessions(list_req).await {
-                            Ok(response) => Ok(response.sessions),
+                        let sessions_result = match Self::list_sessions_from_rpc(&mut *conn).await {
+                            Ok(sessions) => Ok(sessions),
                             Err(e) => {
                                 warn!(error = %e, "list_sessions failed, trying filesystem fallback");
                                 Self::list_sessions_from_disk(&brain_name)
@@ -3556,6 +3697,7 @@ impl Orchestrator {
 
                         match sessions_result {
                             Ok(sessions) => {
+                                let sessions = filter_sessions_for_repo(sessions, &self.repo_root);
                                 self.emit(SpurEvent::now(SpurEventBody::SessionsListed {
                                     agent: brain_name.clone(),
                                     sessions,
@@ -5819,8 +5961,49 @@ impl Orchestrator {
         .await
     }
 
+    async fn list_sessions_from_rpc(conn: &mut dyn AgentConnection) -> Result<Vec<SessionInfo>> {
+        let mut sessions = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        for page_index in 0..MAX_SESSION_LIST_PAGES {
+            // Some agents treat `cwd` as an exact match, which hides sessions
+            // rooted in repo-owned worktrees. Fetch broadly and apply the
+            // repo-prefix filter before emitting to the TUI.
+            let list_req = ListSessionsRequest::new()
+                .cwd(None::<PathBuf>)
+                .cursor(cursor.clone());
+            let response = conn.list_sessions(list_req).await?;
+            let next_cursor = response.next_cursor;
+
+            let remaining = MAX_SESSION_LIST_SESSIONS.saturating_sub(sessions.len());
+            if response.sessions.len() > remaining {
+                sessions.extend(response.sessions.into_iter().take(remaining));
+                warn!(
+                    count = sessions.len(),
+                    "list_sessions session cap reached; truncating remaining pages"
+                );
+                break;
+            }
+            sessions.extend(response.sessions);
+
+            if next_cursor.is_none() {
+                break;
+            }
+            if page_index + 1 >= MAX_SESSION_LIST_PAGES {
+                warn!(
+                    pages = MAX_SESSION_LIST_PAGES,
+                    "list_sessions page cap reached; truncating remaining pages"
+                );
+                break;
+            }
+            cursor = next_cursor;
+        }
+
+        Ok(sessions)
+    }
+
     /// Fallback: read sessions from an agent's local storage on disk.
-    /// Currently supports kiro-cli (~/.kiro/sessions/cli/*.json).
+    /// Currently supports kiro-cli and codex.
     fn list_sessions_from_disk(agent_name: &str) -> Result<Vec<SessionInfo>> {
         // kiro-cli stores sessions in ~/.kiro/sessions/cli/<uuid>.json
         if agent_name.contains("kiro") {
@@ -5884,6 +6067,19 @@ impl Orchestrator {
             info!(
                 count = sessions.len(),
                 "Loaded sessions from kiro disk storage"
+            );
+            return Ok(sessions);
+        }
+
+        // Codex stores rollout JSONL files under ~/.codex/sessions/YYYY/MM/DD.
+        // Cap the scan to the newest rollout headers so fallback stays bounded.
+        if agent_name.contains("codex") {
+            let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
+            let sessions_root = home.join(".codex/sessions");
+            let sessions = list_codex_sessions_from_disk_root(&sessions_root)?;
+            info!(
+                count = sessions.len(),
+                "Loaded sessions from codex disk storage"
             );
             return Ok(sessions);
         }
@@ -9356,6 +9552,77 @@ pub mod test_support {
                 }
             })
             .await
+    }
+}
+
+#[cfg(test)]
+mod list_sessions_tests {
+    use super::*;
+
+    #[test]
+    fn filters_sessions_to_repo_root_prefix() {
+        let repo_root = Path::new("/repo/spur");
+        let sessions = vec![
+            SessionInfo::new("root", "/repo/spur"),
+            SessionInfo::new("worker", "/repo/spur/.spur/worktrees/worker-1"),
+            SessionInfo::new("sibling-prefix", "/repo/spur-other"),
+            SessionInfo::new("other", "/repo/other"),
+        ];
+
+        let filtered = filter_sessions_for_repo(sessions, repo_root);
+        let ids: Vec<_> = filtered
+            .iter()
+            .map(|session| session.session_id.0.as_ref())
+            .collect();
+
+        assert_eq!(ids, vec!["root", "worker"]);
+    }
+
+    #[test]
+    fn parses_codex_rollout_headers_from_newest_day_dirs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_root = temp.path().join(".codex/sessions");
+        let newest = sessions_root.join("2026/05/09");
+        let older = sessions_root.join("2026/05/08");
+        std::fs::create_dir_all(&newest).expect("newest dir");
+        std::fs::create_dir_all(&older).expect("older dir");
+
+        std::fs::write(
+            newest.join("rollout-2026-05-09T09-00-00-new.jsonl"),
+            r#"{"timestamp":"2026-05-09T02:00:00.000Z","type":"session_meta","payload":{"id":"new","timestamp":"2026-05-09T01:59:00.000Z","cwd":"/repo/spur/.spur/worktrees/worker","title":"Worker task"}}"#,
+        )
+        .expect("new rollout");
+        std::fs::write(
+            older.join("rollout-2026-05-08T09-00-00-old.jsonl"),
+            r#"{"timestamp":"2026-05-08T02:00:00.000Z","type":"session_meta","payload":{"session_id":"old","cwd":"/repo/spur"}}"#,
+        )
+        .expect("old rollout");
+        std::fs::write(
+            newest.join("not-a-rollout.jsonl"),
+            r#"{"timestamp":"2026-05-09T03:00:00.000Z","payload":{"id":"ignored","cwd":"/repo/spur"}}"#,
+        )
+        .expect("ignored file");
+        std::fs::write(newest.join("rollout-invalid.jsonl"), "not json").expect("invalid rollout");
+
+        let sessions =
+            list_codex_sessions_from_disk_root(&sessions_root).expect("codex sessions from disk");
+
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].session_id.0.as_ref(), "new");
+        assert_eq!(
+            sessions[0].cwd,
+            PathBuf::from("/repo/spur/.spur/worktrees/worker")
+        );
+        assert_eq!(
+            sessions[0].updated_at.as_deref(),
+            Some("2026-05-09T01:59:00.000Z")
+        );
+        assert_eq!(sessions[0].title.as_deref(), Some("Worker task"));
+        assert_eq!(sessions[1].session_id.0.as_ref(), "old");
+        assert_eq!(
+            sessions[1].updated_at.as_deref(),
+            Some("2026-05-08T02:00:00.000Z")
+        );
     }
 }
 
