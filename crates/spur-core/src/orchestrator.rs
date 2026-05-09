@@ -37,7 +37,7 @@ use spur_blob_store::{
 };
 use spur_cost::CostTracker;
 use spur_license::SpurLicense;
-use spur_mcp::tools::{BaseSpec, BaseTarget};
+use spur_mcp::tools::BaseSpec;
 use spur_mcp::worker_server::WorkerMcpServer;
 use spur_mcp::{
     build_worker_info, DelegationChannel, DelegationRequest, McpCallbackServer, WorkerInfo,
@@ -53,6 +53,7 @@ use crate::review_sink::ReviewSink;
 use crate::scheduler::TurnGuard;
 
 mod codex_discovery;
+mod delegation;
 pub mod input;
 mod plan_ops;
 mod pm_bridge;
@@ -62,6 +63,12 @@ mod util;
 mod worker_mcp;
 
 use codex_discovery::{filter_sessions_for_repo, list_codex_sessions_from_disk_root};
+use delegation::base_spec::{
+    emit_dispatch_overlay_applied, extract_overlays, resolve_base_branch,
+    snapshot_required_for_dispatch,
+};
+use delegation::file_touch::{maybe_synthesize_file_touch, FileTouchDedup};
+use delegation::peer_mailbox::drain_peer_acks_with_timeout;
 use input::strip_bang_prefix;
 pub use input::InteractiveInput;
 use plan_ops::load_plan_summaries;
@@ -109,71 +116,6 @@ type LoadedBrainSessionBootstrap = (
 
 const MAX_SESSION_LIST_PAGES: usize = 1000;
 const MAX_SESSION_LIST_SESSIONS: usize = 100_000;
-
-/// Resolve a BaseSpec into the concrete ref passed to create_worktree.
-fn resolve_base_branch(spec: &BaseSpec, snapshot_branch: &str) -> String {
-    match spec {
-        BaseSpec::RepoMain => snapshot_branch.to_string(),
-        BaseSpec::Branch { name } => name.clone(),
-        BaseSpec::Commit { oid } => oid.clone(),
-        BaseSpec::WithOverlay { base, .. } => resolve_base_target(base, snapshot_branch),
-    }
-}
-
-fn resolve_base_target(base: &BaseTarget, snapshot_branch: &str) -> String {
-    match base {
-        BaseTarget::RepoMain => snapshot_branch.to_string(),
-        BaseTarget::Branch { name } => name.clone(),
-        BaseTarget::Commit { oid } => oid.clone(),
-    }
-}
-
-/// Extract the overlay list from a BaseSpec, preserving reconciler order.
-fn extract_overlays(spec: &BaseSpec) -> Vec<(String, String, String)> {
-    match spec {
-        BaseSpec::WithOverlay { overlays, .. } => overlays
-            .iter()
-            .map(|overlay| {
-                (
-                    overlay.source_task_id.clone(),
-                    overlay.base_oid.clone(),
-                    overlay.tip_oid.clone(),
-                )
-            })
-            .collect(),
-        BaseSpec::RepoMain | BaseSpec::Branch { .. } | BaseSpec::Commit { .. } => Vec::new(),
-    }
-}
-
-/// Whether the dispatch path needs to call `snapshot_brain_state`.
-/// Required only when the resolved base would fall back to the snapshot
-/// branch — i.e. `None` / `RepoMain` / `WithOverlay { base: RepoMain }`.
-/// Explicit `Branch` / `Commit` bases consume no snapshot, so taking one
-/// just to throw it away is wasted work and (per br-osl) actively breaks
-/// dispatch when the brain WT is dirty.
-fn snapshot_required_for_dispatch(spec: Option<&BaseSpec>) -> bool {
-    match spec {
-        None => true,
-        Some(BaseSpec::RepoMain) => true,
-        Some(BaseSpec::Branch { .. }) | Some(BaseSpec::Commit { .. }) => false,
-        Some(BaseSpec::WithOverlay { base, .. }) => matches!(base, BaseTarget::RepoMain),
-    }
-}
-
-fn emit_dispatch_overlay_applied(
-    funnel: &crate::event_funnel::FunnelHandle,
-    request_id: &str,
-    base: Option<&BaseSpec>,
-    dispatched_base_oid: &str,
-    overlays: &[(String, String, String)],
-) {
-    funnel.emit(SpurEventBody::DispatchOverlayApplied {
-        request_id: request_id.to_string(),
-        base_spec: serde_json::to_value(base).unwrap_or(serde_json::Value::Null),
-        dispatched_base_oid: dispatched_base_oid.to_string(),
-        overlay_task_ids: overlays.iter().map(|(id, _, _)| id.clone()).collect(),
-    });
-}
 
 #[cfg(test)]
 mod session_attach_guard_transfer_tests {
@@ -6571,127 +6513,6 @@ fn build_connection_from_transport(
     }
 }
 
-// ─── WorkerFileTouched synthesis (S5 / Task 17) ──────────────────────
-//
-// Workers using general-purpose agents (kiro, claude-code, codex) do
-// NOT emit `_spur/file_touched` ExtNotifications. Instead, the
-// orchestrator synthesizes `WorkerFileTouched` events by observing
-// the worker's ToolCall stream for known file-op tool names and
-// extracting the `path`/`file_path` input field. A 200ms de-dup
-// window coalesces repeated ToolCall / ToolCallUpdate events for the
-// same (executor, path, kind) so a single logical file operation
-// emits at most one `WorkerFileTouched` per 200ms window.
-//
-// Note: this dedup is local to the synthesizer's stream loop. It
-// does NOT coordinate with `spur_ext_interp::interpret`, which
-// handles the explicit `_spur/file_touched` ExtNotification path —
-// if a SPUR-aware worker ever emits both an explicit event AND a
-// matching ToolCall, the subscriber would see two events. Future
-// work: share an `Arc<FileTouchDedup>` across both paths to
-// guarantee at-most-one emit per (executor, path, kind).
-
-/// De-dup key for the 200ms file-touch window.
-#[derive(Hash, Eq, PartialEq, Clone)]
-struct FileTouchKey {
-    executor_id: String,
-    path: std::path::PathBuf,
-    kind: spur_acp::domain::events::FileTouchKind,
-}
-
-/// Per-worker-attempt de-dup for `WorkerFileTouched` synthesis.
-/// Coalesces repeated ToolCall / ToolCallUpdate events for the same
-/// (executor, path, kind) within a 200ms window, so a single logical
-/// file operation emits at most one `WorkerFileTouched` per window.
-///
-/// Scope is a single `run_one_worker_attempt` invocation; cross-worker
-/// coordination isn't needed because `executor_id` is unique per worker.
-struct FileTouchDedup {
-    last_seen: std::sync::Mutex<std::collections::HashMap<FileTouchKey, std::time::Instant>>,
-    ttl: std::time::Duration,
-}
-
-impl FileTouchDedup {
-    fn new() -> Self {
-        Self {
-            last_seen: std::sync::Mutex::new(std::collections::HashMap::new()),
-            ttl: std::time::Duration::from_millis(200),
-        }
-    }
-
-    /// Returns true if this (executor, path, kind) is fresh and should
-    /// be emitted. Updates the last-seen map.
-    fn should_emit(&self, key: &FileTouchKey) -> bool {
-        let now = std::time::Instant::now();
-        let mut map = self.last_seen.lock().unwrap();
-        // Garbage collect stale entries opportunistically.
-        map.retain(|_, t| now.duration_since(*t) < self.ttl * 5);
-        match map.get(key) {
-            Some(last) if now.duration_since(*last) < self.ttl => false,
-            _ => {
-                map.insert(key.clone(), now);
-                true
-            }
-        }
-    }
-}
-
-/// If `notification` is a ToolCall matching a known file-op tool name,
-/// synthesize a WorkerFileTouched event (subject to dedup).
-///
-/// The `title` field of the ACP `ToolCall` struct carries the tool name
-/// as populated by adapters (e.g. claude_events maps Anthropic's
-/// `tool_use.name` into `title`). Path extraction tries `raw_input`'s
-/// `path` / `file_path` fields first, then falls back to the first
-/// entry in `locations` if raw_input is missing the key.
-fn maybe_synthesize_file_touch(
-    notification: &agent_client_protocol::schema::SessionNotification,
-    brain_session_id: &spur_acp::types::SessionId,
-    executor_id: &str,
-    dedup: &FileTouchDedup,
-    funnel: &crate::event_funnel::FunnelHandle,
-) {
-    let tc = match &notification.update {
-        SessionUpdate::ToolCall(tc) => tc,
-        _ => return,
-    };
-    let kind = match tc.title.as_str() {
-        "read_file" | "Read" => spur_acp::domain::events::FileTouchKind::Read,
-        "write_file" | "Write" | "edit_file" | "Edit" => {
-            spur_acp::domain::events::FileTouchKind::Write
-        }
-        _ => return,
-    };
-    // Prefer explicit raw_input path; fall back to first location entry.
-    let path = tc
-        .raw_input
-        .as_ref()
-        .and_then(|v| {
-            v.get("path")
-                .and_then(|p| p.as_str())
-                .map(std::path::PathBuf::from)
-                .or_else(|| {
-                    v.get("file_path")
-                        .and_then(|p| p.as_str())
-                        .map(std::path::PathBuf::from)
-                })
-        })
-        .or_else(|| tc.locations.first().map(|loc| loc.path.clone()));
-    let Some(path) = path else { return };
-    let key = FileTouchKey {
-        executor_id: executor_id.to_string(),
-        path: path.clone(),
-        kind,
-    };
-    if dedup.should_emit(&key) {
-        funnel.emit(SpurEventBody::WorkerFileTouched {
-            brain_session_id: brain_session_id.clone(),
-            executor_id: executor_id.to_string(),
-            path,
-            kind,
-        });
-    }
-}
-
 /// Run a single worker attempt: snapshot brain state, create worktree,
 /// spawn agent, prompt, collect diff.
 ///
@@ -7334,144 +7155,6 @@ async fn run_one_worker_attempt(
         worktree_path,
         artifact,
     })
-}
-
-async fn candidate_set_for_target(
-    bundle: &crate::peer_mailbox::PeerMailboxBundle,
-    delegation_id: &spur_acp::domain::delegation::DelegationId,
-) -> Vec<crate::peer_mailbox::LedgerEntry> {
-    let mut candidates = bundle.ledger.pending_for_target(delegation_id).await;
-    candidates.extend(
-        bundle
-            .ledger
-            .non_terminal_entries()
-            .await
-            .into_iter()
-            .filter(|entry| &entry.envelope.target_delegation_id == delegation_id),
-    );
-    let mut seen = std::collections::HashSet::new();
-    candidates.retain(|entry| seen.insert(entry.envelope.message_id));
-    candidates
-}
-
-/// Forced-terminal-timeout drain. Waits up to `quiet_window` for peer-ack
-/// notifications scoped to `delegation_id`. Each ack resets the window.
-/// The drain is also bounded by `max_total`. After either deadline elapses,
-/// delivered non-terminal peer messages are forced to `Ignored` with a reason
-/// that classifies the exit path.
-async fn drain_peer_acks_with_timeout(
-    bundle: &crate::peer_mailbox::PeerMailboxBundle,
-    delegation_id: &spur_acp::domain::delegation::DelegationId,
-    quiet_window: std::time::Duration,
-    max_total: std::time::Duration,
-    brain_session_id: &spur_acp::BrainSessionId,
-    funnel: &crate::event_funnel::FunnelHandle,
-    mut ack_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
-) {
-    use spur_acp::domain::peer_message::{LedgerState, TerminalOutcome};
-
-    let cap_deadline = tokio::time::Instant::now() + max_total;
-    let drain_start = tokio::time::Instant::now();
-    let mut cap_hit = false;
-    let mut acks_received: u32 = 0;
-    let candidates_at_start = candidate_set_for_target(bundle, delegation_id).await.len() as u32;
-
-    funnel.emit(spur_acp::SpurEventBody::WorkerPeerMessageDrainStarted {
-        brain_session_id: brain_session_id.to_string(),
-        target_delegation_id: delegation_id.clone(),
-        candidates_at_start,
-        cap_ms: max_total.as_millis() as u64,
-        quiet_window_ms: quiet_window.as_millis() as u64,
-    });
-
-    loop {
-        let now = tokio::time::Instant::now();
-        if now >= cap_deadline {
-            cap_hit = true;
-            break;
-        }
-
-        let quiet_deadline = now + quiet_window;
-        let next_deadline = quiet_deadline.min(cap_deadline);
-        let waiting_for_cap = next_deadline == cap_deadline;
-
-        match tokio::time::timeout_at(next_deadline, ack_rx.recv()).await {
-            Ok(Some(())) => {
-                acks_received = acks_received.saturating_add(1);
-            }
-            Ok(None) => break,
-            Err(_) => {
-                cap_hit = waiting_for_cap;
-                break;
-            }
-        }
-    }
-
-    let actual_elapsed_ms = drain_start.elapsed().as_millis() as u64;
-
-    let candidates = candidate_set_for_target(bundle, delegation_id).await;
-    let remaining_messages = candidates
-        .iter()
-        .filter(|entry| {
-            matches!(
-                entry.state,
-                LedgerState::Delivered | LedgerState::DeliveredInflight
-            )
-        })
-        .count() as u32;
-
-    if cap_hit {
-        funnel.emit(spur_acp::SpurEventBody::WorkerPeerMessageDrainCappedOut {
-            brain_session_id: brain_session_id.to_string(),
-            target_delegation_id: delegation_id.clone(),
-            acks_received,
-            remaining_messages,
-            cap_ms: max_total.as_millis() as u64,
-            actual_elapsed_ms,
-        });
-    } else if remaining_messages > 0 {
-        funnel.emit(spur_acp::SpurEventBody::WorkerPeerMessageDrainTimedOut {
-            brain_session_id: brain_session_id.to_string(),
-            target_delegation_id: delegation_id.clone(),
-            acks_received,
-            remaining_messages,
-            cap_ms: max_total.as_millis() as u64,
-            quiet_window_ms: quiet_window.as_millis() as u64,
-            actual_elapsed_ms,
-        });
-    }
-
-    let reason = if cap_hit {
-        "drain_capped"
-    } else {
-        "drain_timeout"
-    };
-    for entry in candidates {
-        let message_id = entry.envelope.message_id;
-        if !matches!(
-            entry.state,
-            LedgerState::Delivered | LedgerState::DeliveredInflight
-        ) {
-            continue;
-        }
-        if let Err(err) = bundle
-            .router
-            .record_terminal(
-                brain_session_id.as_session_id().0.as_str(),
-                &message_id,
-                TerminalOutcome::Ignored {
-                    reason: reason.into(),
-                },
-            )
-            .await
-        {
-            tracing::warn!(
-                message_id = ?message_id,
-                ?err,
-                "peer mailbox: forced-terminal-timeout drain failed"
-            );
-        }
-    }
 }
 
 /// Tail-weighted, UTF-8-safe truncation for worker summaries.
@@ -8120,7 +7803,7 @@ mod list_sessions_tests {
 
 #[cfg(test)]
 mod peer_mailbox_drain_tests {
-    use super::drain_peer_acks_with_timeout;
+    use super::delegation::peer_mailbox::drain_peer_acks_with_timeout;
     use crate::peer_mailbox::router::Acceptance;
     use crate::peer_mailbox::{
         prompt_builder::PeerPromptContextBuilder, InMemoryLedger, Limits, PeerMailboxBundle,
@@ -9179,7 +8862,7 @@ mod build_diff_summary_tests {
 
 #[cfg(test)]
 mod base_spec_dispatch_tests {
-    use super::{
+    use super::delegation::base_spec::{
         emit_dispatch_overlay_applied, extract_overlays, resolve_base_branch,
         snapshot_required_for_dispatch,
     };
