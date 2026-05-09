@@ -146,3 +146,22 @@ fn format_input_command_field() {
         other => panic!("expected Command, got {:?}", other),
     }
 }
+
+#[test]
+fn codex_harmony_command_array_formats_as_command_input() {
+    let raw = json!({
+        "command": ["/bin/zsh", "-lc", "sed -n '1,180p' AGENTS.md"],
+        "cwd": "/Volumes/Projects/spur",
+        "source": "unified_exec_startup"
+    });
+
+    let display = adapter::format_input(&raw, AgentKind::CodexAcp);
+
+    match display {
+        adapter::ToolInputDisplay::Command { cmd, cwd } => {
+            assert_eq!(cmd, "sed -n '1,180p' AGENTS.md");
+            assert_eq!(cwd.as_deref(), Some("/Volumes/Projects/spur"));
+        }
+        other => panic!("expected Command display for Codex harmony input, got {other:?}"),
+    }
+}

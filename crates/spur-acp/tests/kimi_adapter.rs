@@ -3,17 +3,22 @@ use agent_client_protocol::schema::{
     ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 use serde_json::json;
-use spur_acp::adapter::SessionUpdateNormalizer;
+use spur_acp::{adapter, AgentKind};
 
 fn text_tool_content(text: &str) -> ToolCallContent {
     ToolCallContent::Content(Content::new(ContentBlock::Text(TextContent::new(text))))
 }
 
 #[test]
-fn kimi_argument_content_update_populates_raw_input_and_kind() {
+fn agent_kind_recognizes_kimi() {
+    assert_eq!(AgentKind::from_name("kimi"), AgentKind::Kimi);
+}
+
+#[test]
+fn kimi_standardizer_populates_raw_input_and_kind_from_streamed_arguments() {
     let id = "call-kimi";
-    let mut normalizer = SessionUpdateNormalizer::default();
-    normalizer.normalize(SessionNotification::new(
+    let mut standardizer = adapter::SessionEventStandardizer::for_agent(AgentKind::Kimi);
+    standardizer.standardize(SessionNotification::new(
         "session",
         SessionUpdate::ToolCall(
             ToolCall::new(id, "ReadFile")
@@ -22,7 +27,7 @@ fn kimi_argument_content_update_populates_raw_input_and_kind() {
         ),
     ));
 
-    let out = normalizer.normalize(SessionNotification::new(
+    let out = standardizer.standardize(SessionNotification::new(
         "session",
         SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
             id,
@@ -46,10 +51,10 @@ fn kimi_argument_content_update_populates_raw_input_and_kind() {
 }
 
 #[test]
-fn kimi_completed_content_update_populates_file_raw_output_from_known_input() {
+fn kimi_standardizer_populates_file_raw_output_from_known_input() {
     let id = "call-kimi-output";
-    let mut normalizer = SessionUpdateNormalizer::default();
-    normalizer.normalize(SessionNotification::new(
+    let mut standardizer = adapter::SessionEventStandardizer::for_agent(AgentKind::Kimi);
+    standardizer.standardize(SessionNotification::new(
         "session",
         SessionUpdate::ToolCall(
             ToolCall::new(id, "ReadFile")
@@ -57,7 +62,7 @@ fn kimi_completed_content_update_populates_file_raw_output_from_known_input() {
                 .content(vec![text_tool_content("")]),
         ),
     ));
-    normalizer.normalize(SessionNotification::new(
+    standardizer.standardize(SessionNotification::new(
         "session",
         SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
             id,
@@ -70,7 +75,7 @@ fn kimi_completed_content_update_populates_file_raw_output_from_known_input() {
         )),
     ));
 
-    let out = normalizer.normalize(SessionNotification::new(
+    let out = standardizer.standardize(SessionNotification::new(
         "session",
         SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
             id,
@@ -90,23 +95,4 @@ fn kimi_completed_content_update_populates_file_raw_output_from_known_input() {
             "content": "[workspace]\nmembers = []\n"
         }))
     );
-}
-
-#[test]
-fn codex_harmony_command_array_formats_as_command_input() {
-    let raw = json!({
-        "command": ["/bin/zsh", "-lc", "sed -n '1,180p' AGENTS.md"],
-        "cwd": "/Volumes/Projects/spur",
-        "source": "unified_exec_startup"
-    });
-
-    let display = spur_acp::adapter::format_input(&raw, spur_acp::AgentKind::CodexAcp);
-
-    match display {
-        spur_acp::adapter::ToolInputDisplay::Command { cmd, cwd } => {
-            assert_eq!(cmd, "sed -n '1,180p' AGENTS.md");
-            assert_eq!(cwd.as_deref(), Some("/Volumes/Projects/spur"));
-        }
-        other => panic!("expected Command display for Codex harmony input, got {other:?}"),
-    }
 }
