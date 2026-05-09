@@ -343,6 +343,14 @@ impl ReactTrace {
                     ColorDepth::Truecolor,
                 ),
             ),
+            AgentKind::Kimi => (
+                " Session · kimi ",
+                resolve_token(
+                    &self.theme,
+                    "react_trace.title.generic.fg",
+                    ColorDepth::Truecolor,
+                ),
+            ),
             AgentKind::Generic => (
                 " Session ",
                 resolve_token(

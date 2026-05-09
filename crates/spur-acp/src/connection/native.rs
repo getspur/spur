@@ -70,7 +70,7 @@ use crate::connection::child_stderr_bridge::ChildStderrBridge;
 use crate::connection::{AgentConnection, ExtNotificationPayload};
 use crate::error::AcpError;
 use crate::spur_agent_caps::SpurAgentCaps;
-use crate::types::AgentHealth;
+use crate::types::{AgentHealth, AgentKind};
 
 /// Spur's canonical `ClientCapabilities` literal advertised at every
 /// `initialize` call. Spec §6.2.
@@ -175,6 +175,8 @@ enum AcpCommand {
 pub struct NativeAcpConnection {
     /// Human-readable agent name.
     agent_name: String,
+    /// Wire-level adapter kind used to standardize incoming ACP events.
+    agent_kind: AgentKind,
     /// Binary to invoke.
     command: String,
     /// Extra arguments passed to the binary on startup.
@@ -361,6 +363,18 @@ impl NativeAcpConnection {
         extra_args: Vec<String>,
         permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
     ) -> Self {
+        let agent_name = agent_name.into();
+        let agent_kind = AgentKind::from_name(&agent_name);
+        Self::new_with_kind(agent_name, command, extra_args, agent_kind, permission_tx)
+    }
+
+    pub fn new_with_kind(
+        agent_name: impl Into<String>,
+        command: impl Into<String>,
+        extra_args: Vec<String>,
+        agent_kind: AgentKind,
+        permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
+    ) -> Self {
         let (ext_tx, ext_rx) = mpsc::unbounded_channel::<ExtNotificationPayload>();
         // Capacity 4096 per the broadcast-sizing invariant (anchor 3ff4e86):
         // bursty history replay from `load_session` can produce O(hundreds)
@@ -369,6 +383,7 @@ impl NativeAcpConnection {
         let (session_notif_tx, _) = tokio::sync::broadcast::channel(4096);
         Self {
             agent_name: agent_name.into(),
+            agent_kind,
             command: command.into(),
             extra_args,
             cmd_tx: None,
@@ -459,6 +474,7 @@ impl AgentConnection for NativeAcpConnection {
         request.client_capabilities = spur_client_capabilities();
 
         let agent_name = self.agent_name.clone();
+        let agent_kind = self.agent_kind;
         let command = self.command.clone();
         let extra_args = self.extra_args.clone();
 
@@ -485,6 +501,7 @@ impl AgentConnection for NativeAcpConnection {
             .spawn(move || {
                 acp_thread_main(
                     thread_agent_name,
+                    agent_kind,
                     command,
                     extra_args,
                     cmd_rx,
@@ -956,6 +973,7 @@ impl AgentConnection for NativeAcpConnection {
 #[allow(clippy::too_many_arguments)]
 fn acp_thread_main(
     agent_name: String,
+    agent_kind: AgentKind,
     command: String,
     extra_args: Vec<String>,
     mut cmd_rx: mpsc::UnboundedReceiver<AcpCommand>,
@@ -1178,8 +1196,10 @@ fn acp_thread_main(
         let cwd: Arc<Mutex<PathBuf>> = Arc::new(Mutex::new(PathBuf::from(".")));
         let terminals: Arc<Mutex<HashMap<String, TerminalState>>> =
             Arc::new(Mutex::new(HashMap::new()));
-        let session_update_normalizer: Arc<Mutex<crate::adapter::SessionUpdateNormalizer>> =
-            Arc::new(Mutex::new(crate::adapter::SessionUpdateNormalizer::default()));
+        let session_event_standardizer: Arc<Mutex<crate::adapter::SessionEventStandardizer>> =
+            Arc::new(Mutex::new(
+                crate::adapter::SessionEventStandardizer::for_agent(agent_kind),
+            ));
 
         // !Send slots used to ferry oneshot replies between the connect_with
         // closure (which is allowed to be !Send) and the post-connection
@@ -1201,7 +1221,7 @@ fn acp_thread_main(
             let perm_tx_h = permission_tx.clone();
             let session_notif_tx_h = session_notif_tx.clone();
             let ext_notification_tx_h = ext_notification_tx.clone();
-            let session_update_normalizer_h = session_update_normalizer.clone();
+            let session_event_standardizer_h = session_event_standardizer.clone();
 
             let cwd_read = cwd.clone();
             let cwd_write = cwd.clone();
@@ -1529,10 +1549,10 @@ fn acp_thread_main(
                     async move |notif: agent_client_protocol::AgentNotification, _cx| {
                         match notif {
                             agent_client_protocol::AgentNotification::SessionNotification(args) => {
-                                let args = session_update_normalizer_h
+                                let args = session_event_standardizer_h
                                     .lock()
                                     .unwrap()
-                                    .normalize(args);
+                                    .standardize(args);
                                 let variant = session_update_variant_name(&args.update);
                                 let text_len = match &args.update {
                                     SessionUpdate::AgentMessageChunk(c)

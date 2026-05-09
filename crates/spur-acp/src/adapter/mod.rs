@@ -3,15 +3,13 @@ pub mod claude;
 pub mod codex;
 pub mod config_options;
 pub mod generic;
+pub mod kimi;
 pub mod kiro;
 pub mod mcp;
-pub mod session_update_normalizer;
 
 use crate::types::AgentKind;
-use agent_client_protocol::schema::{ToolCall, ToolKind};
+use agent_client_protocol::schema::{SessionNotification, ToolCall, ToolKind};
 use serde_json::Value;
-
-pub use session_update_normalizer::SessionUpdateNormalizer;
 
 /// Mirrors ACP `ToolKind` 1:1 with TUI-specific refinements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +126,7 @@ pub fn classify_tool(tc: &ToolCall, kind: AgentKind) -> ToolFamily {
     match kind {
         AgentKind::ClaudeCodeAcp | AgentKind::ClaudeStreamJson => claude::refine(&tc.title, base),
         AgentKind::CodexAcp => codex::refine(&tc.title, base),
+        AgentKind::Kimi => kimi::refine(&tc.title, base),
         AgentKind::Kiro => kiro::refine(&tc.title, base),
         AgentKind::Generic => generic::refine(&tc.title, base),
     }
@@ -141,6 +140,7 @@ pub fn format_input(raw_input: &Value, kind: AgentKind) -> ToolInputDisplay {
             claude::try_format_input(raw_input)
         }
         AgentKind::CodexAcp => codex::try_format_input(raw_input),
+        AgentKind::Kimi => kimi::try_format_input(raw_input),
         AgentKind::Kiro => kiro::try_format_input(raw_input),
         AgentKind::Generic => None,
     };
@@ -155,6 +155,7 @@ pub fn extract_observe(raw_output: &Value, kind: AgentKind) -> ObservePayload {
             claude::try_extract_observe(&unwrapped)
         }
         AgentKind::CodexAcp => codex::try_extract_observe(&unwrapped),
+        AgentKind::Kimi => kimi::try_extract_observe(&unwrapped),
         AgentKind::Kiro => kiro::try_extract_observe(&unwrapped),
         AgentKind::Generic => None,
     };
@@ -167,6 +168,7 @@ pub fn mode_badge(mode_id: &str, kind: AgentKind) -> Option<ModeBadge> {
     match kind {
         AgentKind::ClaudeCodeAcp | AgentKind::ClaudeStreamJson => claude::mode_badge(mode_id),
         AgentKind::CodexAcp => codex::mode_badge(mode_id),
+        AgentKind::Kimi => None,
         AgentKind::Kiro => kiro::mode_badge(mode_id),
         AgentKind::Generic => None,
     }
@@ -194,7 +196,30 @@ pub fn extract_tool_meta(tc: &ToolCall, kind: AgentKind) -> SpurToolMeta {
     match kind {
         AgentKind::ClaudeCodeAcp | AgentKind::ClaudeStreamJson => claude::extract_tool_meta(tc),
         AgentKind::CodexAcp => codex::extract_tool_meta(tc),
+        AgentKind::Kimi => kimi::extract_tool_meta(tc),
         AgentKind::Kiro => kiro::extract_tool_meta(tc),
         AgentKind::Generic => SpurToolMeta::default(),
+    }
+}
+
+#[derive(Debug)]
+pub enum SessionEventStandardizer {
+    Kimi(kimi::SessionStandardizer),
+    Passthrough,
+}
+
+impl SessionEventStandardizer {
+    pub fn for_agent(kind: AgentKind) -> Self {
+        match kind {
+            AgentKind::Kimi => Self::Kimi(kimi::SessionStandardizer::default()),
+            _ => Self::Passthrough,
+        }
+    }
+
+    pub fn standardize(&mut self, notification: SessionNotification) -> SessionNotification {
+        match self {
+            Self::Kimi(standardizer) => standardizer.standardize(notification),
+            Self::Passthrough => notification,
+        }
     }
 }

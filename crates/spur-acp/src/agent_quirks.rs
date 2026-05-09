@@ -23,6 +23,7 @@ mod tests {
             (AgentKind::ClaudeCodeAcp, false),
             (AgentKind::CodexAcp, true),
             (AgentKind::Kiro, true),
+            (AgentKind::Kimi, true),
             (AgentKind::Generic, true),
         ];
 

@@ -1005,6 +1005,7 @@ mod tests {
             .iter()
             .find(|a| a.name == "kimi")
             .expect("kimi should be in seed template");
+        assert_eq!(kimi.kind, crate::types::AgentKind::Kimi);
         assert_eq!(
             kimi.effective_args(),
             vec!["-y".to_string(), "--afk".to_string(), "acp".to_string()],
