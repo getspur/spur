@@ -35,6 +35,7 @@ const EXPECTED: &[&str] = &[
     "get_task_diff",
     "preview_task_base",
     "plan_truncate_and_restart",
+    "recover_orphaned_dispatch",
     "review_task",
     "submit_plan_mutation",
     "report_signal",

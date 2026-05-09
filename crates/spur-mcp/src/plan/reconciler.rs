@@ -2720,6 +2720,44 @@ mod tests {
         )
     }
 
+    fn run_git(repo: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .current_dir(repo)
+            .args(args)
+            .output()
+            .expect("git command failed to start");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("git stdout should be utf-8")
+            .trim()
+            .to_string()
+    }
+
+    fn seed_git_repo(repo: &std::path::Path) -> String {
+        run_git(repo, &["init", "-q", "-b", "main"]);
+        run_git(repo, &["config", "user.email", "test@spur"]);
+        run_git(repo, &["config", "user.name", "spur-test"]);
+        std::fs::write(repo.join("seed.txt"), "seed\n").expect("write seed file");
+        run_git(repo, &["add", "seed.txt"]);
+        run_git(repo, &["commit", "-q", "-m", "seed"]);
+        run_git(repo, &["rev-parse", "HEAD"])
+    }
+
+    fn create_worker_branch(repo: &std::path::Path, branch: &str, file: &str) -> String {
+        run_git(repo, &["checkout", "-q", "main"]);
+        run_git(repo, &["checkout", "-q", "-b", branch]);
+        std::fs::write(repo.join(file), format!("{branch}\n")).expect("write worker file");
+        run_git(repo, &["add", file]);
+        run_git(repo, &["commit", "-q", "-m", branch]);
+        run_git(repo, &["checkout", "-q", "main"]);
+        branch.to_string()
+    }
+
     fn test_dispatch_ctx(
         delegation_tx: tokio::sync::mpsc::Sender<crate::tools::DelegationRequest>,
         brain_session_id: spur_acp::BrainSessionId,
@@ -2743,6 +2781,9 @@ mod tests {
         plan_id: &str,
         brain_session_id: &spur_acp::BrainSessionId,
     ) -> (Arc<spur_pm::PmService>, String, String) {
+        let base_oid = seed_git_repo(repo);
+        let x_worker_branch = create_worker_branch(repo, "spur/worker-X", "x.rs");
+        let z_worker_branch = create_worker_branch(repo, "spur/worker-Z", "z.rs");
         let empty = spur_pm::test_workspace::TestBeadsWorkspace::init();
         let beads_dir = repo.join(".beads");
         std::fs::create_dir(&beads_dir).expect("create test .beads directory");
@@ -2785,6 +2826,21 @@ mod tests {
             })
             .await
             .expect("create dep task");
+        let second_dep_issue_id = pm
+            .create_issue(spur_pm::IssueCreate {
+                title: "Z: approved dep".into(),
+                description: Some("approved dependency".into()),
+                issue_type: Some("task".into()),
+                labels: vec![
+                    crate::plan::labels::plan_id(plan_id),
+                    crate::plan::labels::plan_task_id("Z"),
+                    crate::plan::labels::agent("codex"),
+                ],
+                parent: Some(epic_id.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("create second dep task");
         let ready_issue_id = pm
             .create_issue(spur_pm::IssueCreate {
                 title: "Y: ready task".into(),
@@ -2796,7 +2852,7 @@ mod tests {
                     crate::plan::labels::agent("codex"),
                 ],
                 parent: Some(epic_id.clone()),
-                depends_on: vec![dep_issue_id.clone()],
+                depends_on: vec![dep_issue_id.clone(), second_dep_issue_id.clone()],
                 ..Default::default()
             })
             .await
@@ -2808,8 +2864,12 @@ mod tests {
                 &crate::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
                     plan_id: plan_id.to_string(),
                     epic_issue_id: epic_id.clone(),
-                    task_ids: vec![dep_issue_id.clone(), ready_issue_id.clone()],
-                    base_snapshot_branch: Some("HEAD".to_string()),
+                    task_ids: vec![
+                        dep_issue_id.clone(),
+                        second_dep_issue_id.clone(),
+                        ready_issue_id.clone(),
+                    ],
+                    base_snapshot_branch: Some("main".to_string()),
                     base_snapshot_oid: None,
                     execution_mode: None,
                     brain_session_id: Some(brain_session_id.as_session_id().0.clone()),
@@ -2822,46 +2882,53 @@ mod tests {
         crate::plan::emit_task_spec_audit(adv, &dep_issue_id, "X", &["x.rs".to_string()])
             .await
             .expect("dep task spec audit");
+        crate::plan::emit_task_spec_audit(adv, &second_dep_issue_id, "Z", &["z.rs".to_string()])
+            .await
+            .expect("second dep task spec audit");
         crate::plan::emit_task_spec_audit(adv, &ready_issue_id, "Y", &["y.rs".to_string()])
             .await
             .expect("ready task spec audit");
 
-        let base_oid = "1111111111111111111111111111111111111111";
-        let worker_tip = "2222222222222222222222222222222222222222";
-        crate::plan::emit_completion_audit(
-            Some(pm.as_ref()),
-            &Some(dep_issue_id.clone()),
-            feature_gate.as_ref(),
-            plan_id,
-            "del-X",
-            crate::plan::audit_sentinel::CompletionState::AwaitingReview,
-            false,
-            crate::plan::audit_sentinel::CompletionAuditFields {
-                worker_branch: Some(worker_tip.to_string()),
-                result_summary: Some("approved dep".into()),
-                dispatched_base_oid: Some(base_oid.to_string()),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("completion audit");
-        crate::plan::emit_approval_audit(
-            Some(pm.as_ref()),
-            &Some(dep_issue_id.clone()),
-            feature_gate.as_ref(),
-            plan_id,
-            "del-X",
-        )
-        .await;
-        pm.update_issue(
-            &dep_issue_id,
-            spur_pm::IssueUpdate {
-                status: Some(pm.closed_status().to_string()),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("close dep task");
+        for (issue_id, task_id, worker_branch) in [
+            (&dep_issue_id, "X", &x_worker_branch),
+            (&second_dep_issue_id, "Z", &z_worker_branch),
+        ] {
+            let delegation_id = format!("del-{task_id}");
+            crate::plan::emit_completion_audit(
+                Some(pm.as_ref()),
+                &Some(issue_id.to_string()),
+                feature_gate.as_ref(),
+                plan_id,
+                &delegation_id,
+                crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+                false,
+                crate::plan::audit_sentinel::CompletionAuditFields {
+                    worker_branch: Some(worker_branch.to_string()),
+                    result_summary: Some(format!("approved dep {task_id}")),
+                    dispatched_base_oid: Some(base_oid.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("completion audit");
+            crate::plan::emit_approval_audit(
+                Some(pm.as_ref()),
+                &Some(issue_id.to_string()),
+                feature_gate.as_ref(),
+                plan_id,
+                &delegation_id,
+            )
+            .await;
+            pm.update_issue(
+                issue_id,
+                spur_pm::IssueUpdate {
+                    status: Some(pm.closed_status().to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("close dep task");
+        }
 
         (pm, dep_issue_id, ready_issue_id)
     }
