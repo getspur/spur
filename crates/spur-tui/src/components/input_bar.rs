@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::io::Write as _;
+use std::path::PathBuf;
 use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -11,6 +13,7 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 use spur_acp::config::EditorMode;
+use tempfile::TempPath;
 use tui_textarea::{CursorMove, Input, Key, TextArea};
 
 use crate::components::completion_trigger::IntentEvent;
@@ -26,11 +29,18 @@ pub enum RangeKind {
     Atom,
     /// Pasted block; on submit, replace placeholder with `pastes[id]`.
     PasteRef(usize),
+    /// Inline image attachment; on submit, replaced with ContentBlock::Image.
+    #[serde(skip)]
+    ImageRef(usize),
 }
 
 impl RangeKind {
     fn is_atom(&self) -> bool {
         matches!(self, Self::Atom)
+    }
+
+    fn skip_kind_field(&self) -> bool {
+        self.is_atom() || matches!(self, Self::ImageRef(_))
     }
 }
 
@@ -41,10 +51,20 @@ impl RangeKind {
 pub struct ProtectedRange {
     pub start: usize,
     pub end: usize,
-    #[serde(default, skip_serializing_if = "RangeKind::is_atom")]
+    #[serde(default, skip_serializing_if = "RangeKind::skip_kind_field")]
     pub kind: RangeKind,
     pub uri: String,
     pub name: String,
+}
+
+#[derive(Debug)]
+pub struct ImageAttachment {
+    pub id: usize,
+    pub source_path: PathBuf,
+    pub mime_type: String,
+    pub dimensions: (u32, u32),
+    pub byte_size: usize,
+    pub owned_temp: Option<TempPath>,
 }
 
 /// Editing mode for the input bar.
@@ -140,8 +160,13 @@ pub struct InputBar {
     protected_ranges: Vec<ProtectedRange>,
     /// Side store for atomized paste content keyed by paste id.
     pastes: BTreeMap<usize, String>,
+    /// Side store for image attachments keyed by image id.
+    images: BTreeMap<usize, ImageAttachment>,
     /// Monotonic paste counter (per-session). Never decrements.
     next_paste_id: usize,
+    /// Monotonic image counter (per-session). Never decrements.
+    #[allow(dead_code)]
+    next_image_id: usize,
     /// Fallback detector for terminals that deliver paste as rapid key events.
     paste_burst: PasteBurst,
     /// Runtime gate for the fallback paste-burst detector.
@@ -156,6 +181,8 @@ pub struct InputBar {
     tick_counter: std::cell::Cell<u32>,
     /// Capture of the most recent Enter-submit: `(text, ranges, interrupt)`.
     submit_capture: Option<(String, Vec<ProtectedRange>, bool)>,
+    /// Images captured during submit, held until view drains them.
+    pending_submit_images: Vec<ImageAttachment>,
     /// Submitted input history, oldest first. Capped at [`HISTORY_CAP`].
     history: Vec<InputHistoryEntry>,
     /// `None` = editing live draft; `Some(i)` = browsing `history[i]`.
@@ -181,6 +208,64 @@ pub struct InputBar {
 const BORDER_OVERHEAD_ROWS: u16 = 2; // Borders::TOP | Borders::BOTTOM
 const BORDER_OVERHEAD_COLS: u16 = 0; // no left/right side borders
 const PASTE_STORE_CAP: usize = 50;
+
+/// Read the current clipboard image and write it to a temp PNG file.
+///
+/// `owned_temp` keeps the file path alive until the attachment is dropped.
+#[allow(dead_code)]
+fn try_paste_clipboard_image() -> anyhow::Result<ImageAttachment> {
+    let mut clipboard = arboard::Clipboard::new()?;
+    let image_data = clipboard.get_image()?;
+    let width = image_data.width as u32;
+    let height = image_data.height as u32;
+
+    let rgba = image::RgbaImage::from_raw(width, height, image_data.bytes.into_owned())
+        .ok_or_else(|| anyhow::anyhow!("clipboard image has invalid dimensions"))?;
+    let mut image = image::DynamicImage::ImageRgba8(rgba);
+
+    const MAX_DIM: u32 = 2048;
+    if image.width() > MAX_DIM || image.height() > MAX_DIM {
+        image = image.resize(MAX_DIM, MAX_DIM, image::imageops::FilterType::Lanczos3);
+    }
+
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut cursor, image::ImageFormat::Png)?;
+    let png_bytes = cursor.into_inner();
+
+    const MAX_B64_BYTES: usize = 10 * 1024 * 1024;
+    let encoded_len = base64::encoded_len(png_bytes.len(), true)
+        .ok_or_else(|| anyhow::anyhow!("image too large to base64-encode"))?;
+    if encoded_len > MAX_B64_BYTES {
+        anyhow::bail!("image too large ({encoded_len} bytes base64); max 10 MB");
+    }
+
+    let mut temp_file = tempfile::Builder::new()
+        .prefix("spur-img-")
+        .suffix(".png")
+        .tempfile()?;
+    temp_file.write_all(&png_bytes)?;
+    let (_file, temp_path) = temp_file.into_parts();
+    let source_path = temp_path.to_path_buf();
+    let byte_size = png_bytes.len();
+    let dimensions = (image.width(), image.height());
+
+    Ok(ImageAttachment {
+        id: 0,
+        source_path,
+        mime_type: "image/png".into(),
+        dimensions,
+        byte_size,
+        owned_temp: Some(temp_path),
+    })
+}
+
+fn try_as_image_path(text: &str) -> Option<(PathBuf, (u32, u32))> {
+    let path = PathBuf::from(text.trim());
+    if !path.exists() {
+        return None;
+    }
+    image::image_dimensions(&path).ok().map(|dims| (path, dims))
+}
 
 #[cfg(test)]
 fn default_paste_burst_enabled() -> bool {
@@ -220,7 +305,9 @@ impl InputBar {
             vim_pending: None,
             protected_ranges: Vec::new(),
             pastes: BTreeMap::new(),
+            images: BTreeMap::new(),
             next_paste_id: 1,
+            next_image_id: 0,
             paste_burst: PasteBurst::default(),
             paste_burst_enabled: default_paste_burst_enabled(),
             line_cache: vec![0],
@@ -228,6 +315,7 @@ impl InputBar {
             activity: ActivityKind::Idle,
             tick_counter: std::cell::Cell::new(0),
             submit_capture: None,
+            pending_submit_images: Vec::new(),
             history: Vec::new(),
             history_cursor: None,
             draft: InputStateSnapshot::default(),
@@ -483,6 +571,12 @@ impl InputBar {
                     self.delete_span(start, cursor);
                 }
                 return HandleOutcome::Key(IntentEvent::DeletedChar);
+            }
+            KeyCode::Char('v')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                return self.handle_clipboard_image_paste();
             }
             KeyCode::Char(c) => {
                 if let Some(intent) = self.capture_paste_burst_char(c, key) {
@@ -1031,6 +1125,12 @@ impl InputBar {
                 self.textarea.move_cursor(CursorMove::End);
                 return HandleOutcome::Key(IntentEvent::MovedCursor);
             }
+            KeyCode::Char('v')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                return self.handle_clipboard_image_paste();
+            }
             KeyCode::Char(c) => {
                 if let Some(intent) = self.capture_paste_burst_char(c, key) {
                     return HandleOutcome::Key(intent);
@@ -1053,6 +1153,23 @@ impl InputBar {
         self.textarea.input(input);
         self.rebuild_line_cache();
         HandleOutcome::Key(IntentEvent::NoOp)
+    }
+
+    fn handle_clipboard_image_paste(&mut self) -> HandleOutcome {
+        match try_paste_clipboard_image() {
+            Ok(attachment) => {
+                self.insert_image_atom(attachment);
+                HandleOutcome::Key(IntentEvent::Pasted)
+            }
+            Err(e) => {
+                tracing::warn!("clipboard image paste failed: {e}");
+                self.set_status(
+                    Some(format!("Clipboard image paste failed: {e}")),
+                    ActivityKind::Idle,
+                );
+                HandleOutcome::Key(IntentEvent::NoOp)
+            }
+        }
     }
 
     // ── Protected Range Helpers ─────────────────────────────────────────────
@@ -1144,8 +1261,19 @@ impl InputBar {
             return;
         }
         let deleted = end - start;
-        self.protected_ranges
-            .retain(|r| r.end <= start || r.start >= end);
+        let mut removed_image_ids = Vec::new();
+        self.protected_ranges.retain(|r| {
+            let keep = r.end <= start || r.start >= end;
+            if !keep {
+                if let RangeKind::ImageRef(id) = &r.kind {
+                    removed_image_ids.push(*id);
+                }
+            }
+            keep
+        });
+        for id in removed_image_ids {
+            self.images.remove(&id);
+        }
         for r in &mut self.protected_ranges {
             if r.start >= end {
                 r.start -= deleted;
@@ -1327,6 +1455,7 @@ impl InputBar {
         let (expanded, ranges) = expand_paste_refs(&text, &self.protected_ranges, &self.pastes);
         let interrupt = expanded.starts_with('!');
         self.submit_capture = Some((expanded.clone(), ranges.clone(), interrupt));
+        self.pending_submit_images = std::mem::take(&mut self.images).into_values().collect();
 
         // Push to history
         self.history
@@ -1341,6 +1470,7 @@ impl InputBar {
         self.draft = InputStateSnapshot::default();
         self.clear();
         self.pastes.clear();
+        self.images.clear();
 
         Some((expanded, interrupt))
     }
@@ -1372,6 +1502,21 @@ impl InputBar {
     /// Insert pasted text (may contain newlines). Does not trigger submit.
     pub fn insert_paste(&mut self, text: &str) {
         if text.is_empty() {
+            return;
+        }
+        if let Some((img_path, dims)) = try_as_image_path(text) {
+            let byte_size = std::fs::metadata(&img_path)
+                .map(|metadata| metadata.len() as usize)
+                .unwrap_or(0);
+            let attachment = ImageAttachment {
+                id: 0,
+                source_path: img_path,
+                mime_type: "image/png".into(),
+                dimensions: dims,
+                byte_size,
+                owned_temp: None,
+            };
+            self.insert_image_atom(attachment);
             return;
         }
         // Normalize line endings before the multi-line gate. Clipboards from
@@ -1439,6 +1584,39 @@ impl InputBar {
         self.goal_vcol = None;
     }
 
+    /// Store an image attachment and insert its protected placeholder label.
+    #[allow(dead_code)]
+    fn insert_image_atom(&mut self, mut attachment: ImageAttachment) {
+        if self.history_cursor.is_some() {
+            self.restore_draft();
+        }
+        if let Some(idx) = self.range_at_cursor() {
+            self.delete_range(idx);
+        }
+        let cursor = self.cursor_to_byte();
+        let id = self.next_image_id;
+        self.next_image_id += 1;
+        attachment.id = id;
+        let (w, h) = attachment.dimensions;
+        let label = format!("[Image #{} · {}×{}]", id + 1, w, h);
+        self.images.insert(id, attachment);
+
+        self.textarea.insert_str(&label);
+        self.rebuild_line_cache();
+        let end = cursor + label.len();
+        self.shift_ranges(cursor, label.len() as isize);
+        self.protected_ranges.push(ProtectedRange {
+            start: cursor,
+            end,
+            kind: RangeKind::ImageRef(id),
+            uri: String::new(),
+            name: label,
+        });
+        self.protected_ranges.sort_by_key(|r| r.start);
+        self.history_cursor = None;
+        self.goal_vcol = None;
+    }
+
     /// The current text content.
     pub fn text(&self) -> String {
         self.textarea.lines().join("\n")
@@ -1464,6 +1642,7 @@ impl InputBar {
         self.line_cache = vec![0];
         self.protected_ranges.clear();
         self.pastes.clear();
+        self.images.clear();
         self.last_inner_width.set(last_w);
         self.goal_vcol = None;
         self.activity = ActivityKind::Idle;
@@ -1515,6 +1694,11 @@ impl InputBar {
     /// Take and reset the most recent Enter-submit capture.
     pub fn take_submit_capture(&mut self) -> Option<(String, Vec<ProtectedRange>, bool)> {
         self.submit_capture.take()
+    }
+
+    /// Take and reset images captured by the most recent submit.
+    pub fn take_pending_images(&mut self) -> Vec<ImageAttachment> {
+        std::mem::take(&mut self.pending_submit_images)
     }
 
     /// Replace text and cursor wholesale.
@@ -2009,6 +2193,9 @@ fn expand_paste_refs(
                     expanded.push_str(&text[range.start..range.end]);
                 }
             }
+            RangeKind::ImageRef(_) => {
+                expanded.push_str(&text[range.start..range.end]);
+            }
         }
         cursor = range_end;
     }
@@ -2023,6 +2210,235 @@ fn expand_paste_refs(
 impl Default for InputBar {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn test_image(id: usize) -> ImageAttachment {
+        ImageAttachment {
+            id,
+            source_path: PathBuf::from(format!("/tmp/test-{id}.png")),
+            mime_type: "image/png".to_string(),
+            dimensions: (800, 600),
+            byte_size: 1024,
+            owned_temp: None,
+        }
+    }
+
+    #[test]
+    fn image_attachment_fields_accessible() {
+        let a = test_image(0);
+
+        assert_eq!(a.id, 0);
+        assert_eq!(a.mime_type, "image/png");
+        assert_eq!(a.dimensions, (800, 600));
+    }
+
+    #[test]
+    fn range_kind_image_ref_is_not_atom() {
+        let k = RangeKind::ImageRef(3);
+
+        assert!(!k.is_atom());
+    }
+
+    #[test]
+    fn new_input_bar_starts_with_empty_image_store() {
+        let mut bar = InputBar::new();
+
+        assert!(bar.images.is_empty());
+        assert_eq!(bar.next_image_id, 0);
+        assert!(bar.take_pending_images().is_empty());
+    }
+
+    #[test]
+    fn submit_preserves_pending_images_until_drained() {
+        let mut bar = InputBar::new();
+        bar.set_text("send image".to_string(), "send image".len());
+        bar.images.insert(1, test_image(1));
+
+        bar.submit().unwrap();
+
+        assert!(bar.images.is_empty());
+        let images = bar.take_pending_images();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].id, 1);
+        assert!(bar.take_pending_images().is_empty());
+    }
+
+    #[test]
+    fn clear_drops_unsubmitted_images() {
+        let mut bar = InputBar::new();
+        bar.images.insert(1, test_image(1));
+
+        bar.clear();
+
+        assert!(bar.images.is_empty());
+        assert!(bar.take_pending_images().is_empty());
+    }
+
+    #[test]
+    fn clear_does_not_reset_image_counter() {
+        let mut bar = InputBar::new();
+        bar.next_image_id = 3;
+
+        bar.clear();
+
+        assert_eq!(bar.next_image_id, 3);
+    }
+
+    #[test]
+    fn insert_image_atom_stores_attachment_and_shifts_existing_ranges() {
+        let mut bar = InputBar::new();
+        bar.insert_atom("@foo", "file:///foo".to_string(), "foo".to_string());
+        bar.move_cursor_to_byte(0);
+
+        bar.insert_image_atom(test_image(99));
+
+        let label = "[Image #1 · 800×600]";
+        assert_eq!(bar.text(), format!("{label}@foo"));
+        assert_eq!(bar.next_image_id, 1);
+        assert_eq!(bar.images.len(), 1);
+        assert_eq!(bar.images[&0].id, 0);
+
+        let ranges = bar.protected_ranges();
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0].kind, RangeKind::ImageRef(0));
+        assert_eq!((ranges[0].start, ranges[0].end), (0, label.len()));
+        assert_eq!(ranges[0].uri, "");
+        assert_eq!(ranges[0].name, label);
+        assert_eq!(ranges[1].kind, RangeKind::Atom);
+        assert_eq!(
+            (ranges[1].start, ranges[1].end),
+            (label.len(), label.len() + 4)
+        );
+    }
+
+    #[test]
+    fn deleting_image_atom_removes_attachment_from_store() {
+        let mut bar = InputBar::new();
+
+        bar.insert_image_atom(test_image(99));
+        bar.set_text_cursor_for_test(0);
+        bar.delete_char_after_cursor();
+
+        assert_eq!(bar.text(), "");
+        assert!(bar.protected_ranges.is_empty());
+        assert!(bar.images.is_empty());
+    }
+
+    #[test]
+    fn ctrl_alt_v_does_not_type_literal_v_in_emacs_mode() {
+        let mut bar = InputBar::new();
+        let key = KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        );
+
+        let outcome = bar.handle_key(key);
+
+        assert_eq!(outcome, HandleOutcome::Key(IntentEvent::NoOp));
+        assert_ne!(bar.text(), "v");
+        assert!(bar
+            .status
+            .as_deref()
+            .is_some_and(|status| status.starts_with("Clipboard image paste failed: ")));
+        assert_eq!(bar.activity, ActivityKind::Idle);
+    }
+
+    #[test]
+    fn ctrl_alt_v_does_not_type_literal_v_in_vim_insert_mode() {
+        let mut bar = InputBar::new();
+        bar.set_mode(EditMode::Vim(VimMode::Insert));
+        let key = KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        );
+
+        let outcome = bar.handle_key(key);
+
+        assert_eq!(outcome, HandleOutcome::Key(IntentEvent::NoOp));
+        assert_ne!(bar.text(), "v");
+        assert!(bar
+            .status
+            .as_deref()
+            .is_some_and(|status| status.starts_with("Clipboard image paste failed: ")));
+        assert_eq!(bar.activity, ActivityKind::Idle);
+    }
+
+    #[test]
+    fn image_attachment_from_rgba_bytes_dimensions() {
+        let rgba_bytes = vec![0u8; 4 * 4 * 4];
+        let img = image::RgbaImage::from_raw(4, 4, rgba_bytes).unwrap();
+        let dyn_img = image::DynamicImage::ImageRgba8(img);
+
+        assert_eq!(dyn_img.width(), 4);
+        assert_eq!(dyn_img.height(), 4);
+    }
+
+    #[test]
+    fn try_as_image_path_returns_none_for_non_path() {
+        let result = try_as_image_path("hello world this is not a path");
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn try_as_image_path_returns_none_for_text_file() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), b"hello").unwrap();
+        let path_str = tmp.path().to_str().unwrap().to_string();
+
+        let result = try_as_image_path(&path_str);
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn try_as_image_path_returns_path_and_dims_for_png() {
+        let tmp = tempfile::Builder::new().suffix(".png").tempfile().unwrap();
+        let img = image::RgbaImage::from_raw(1, 1, vec![0u8; 4]).unwrap();
+        let dyn_img = image::DynamicImage::ImageRgba8(img);
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        dyn_img
+            .write_to(&mut cursor, image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(tmp.path(), cursor.into_inner()).unwrap();
+        let path_str = tmp.path().to_str().unwrap().to_string();
+
+        let result = try_as_image_path(&path_str);
+
+        assert!(result.is_some());
+        let (path, dims) = result.unwrap();
+        assert_eq!(path, tmp.path());
+        assert_eq!(dims, (1, 1));
+    }
+
+    #[test]
+    fn insert_paste_converts_image_path_to_image_atom() {
+        let tmp = tempfile::Builder::new().suffix(".png").tempfile().unwrap();
+        let img = image::RgbaImage::from_raw(1, 1, vec![0u8; 4]).unwrap();
+        let dyn_img = image::DynamicImage::ImageRgba8(img);
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        dyn_img
+            .write_to(&mut cursor, image::ImageFormat::Png)
+            .unwrap();
+        let png_bytes = cursor.into_inner();
+        std::fs::write(tmp.path(), &png_bytes).unwrap();
+
+        let mut bar = InputBar::new();
+        bar.insert_paste(&format!("  {}  ", tmp.path().display()));
+
+        assert_eq!(bar.text(), "[Image #1 · 1×1]");
+        assert!(bar.pastes.is_empty());
+        assert_eq!(bar.images.len(), 1);
+        assert_eq!(bar.images[&0].source_path, tmp.path());
+        assert_eq!(bar.images[&0].dimensions, (1, 1));
+        assert_eq!(bar.images[&0].byte_size, png_bytes.len());
+        assert_eq!(bar.protected_ranges[0].kind, RangeKind::ImageRef(0));
     }
 }
 

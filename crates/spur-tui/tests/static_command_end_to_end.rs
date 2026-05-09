@@ -34,7 +34,7 @@ fn static_vendor_exec_command_routes_to_submit_decision_vendor_exec() {
 
     // Static /help must be resolvable before any set_agent_commands call.
     // Use explicit kiro: prefix to select the agent command over spur-local /help.
-    let decision = route("/kiro:help", &[], &registry, false);
+    let decision = route("/kiro:help", &[], &[], &registry, false);
     match decision {
         SubmitDecision::VendorExec { method, params } => {
             assert_eq!(method, "_kiro.dev/commands/execute");
@@ -60,7 +60,7 @@ fn static_prompt_text_command_routes_to_send_with_text() {
     };
     let registry = CommandRegistry::from_configs(&[cfg]);
 
-    let decision = route("/compact", &[], &registry, false);
+    let decision = route("/compact", &[], &[], &registry, false);
     match decision {
         SubmitDecision::Send { blocks, .. } => {
             let text = blocks_preview(&blocks);
