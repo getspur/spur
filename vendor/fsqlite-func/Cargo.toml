@@ -1,0 +1,17 @@
+[package]
+name = "fsqlite-func"
+version = "0.1.2"
+description = "Built-in scalar, aggregate, and window functions"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+fsqlite-types = { workspace = true }
+fsqlite-error = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

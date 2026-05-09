@@ -1,0 +1,48 @@
+[package]
+name = "fsqlite-mvcc"
+version = "0.1.2"
+description = "MVCC page-level versioning for concurrent writers"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["native"]
+native = ["fsqlite-btree/native", "fsqlite-pager/native", "fsqlite-wal/native"]
+wasm = ["fsqlite-btree/wasm", "fsqlite-pager/wasm", "fsqlite-wal/wasm"]
+linux-asupersync-uring = ["fsqlite-pager/linux-asupersync-uring"]
+
+[dependencies]
+blake3 = { workspace = true }
+crc32c = { workspace = true }
+crossbeam-epoch = { workspace = true }
+fsqlite-types = { workspace = true }
+fsqlite-error = { workspace = true }
+fsqlite-observability = { workspace = true }
+fsqlite-btree = { version = "0.1.2", path = "../fsqlite-btree", default-features = false }
+fsqlite-pager = { version = "0.1.2", path = "../fsqlite-pager", default-features = false }
+fsqlite-wal = { version = "0.1.2", path = "../fsqlite-wal", default-features = false }
+smallvec = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+xxhash-rust = { workspace = true }
+serde_json.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+nix = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+loom = "0.7.2"
+proptest = { workspace = true }
+serde_json = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "mvcc_bench"
+harness = false
