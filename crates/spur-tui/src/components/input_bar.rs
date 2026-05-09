@@ -159,8 +159,13 @@ pub struct InputBar {
     protected_ranges: Vec<ProtectedRange>,
     /// Side store for atomized paste content keyed by paste id.
     pastes: BTreeMap<usize, String>,
+    /// Side store for image attachments keyed by image id.
+    images: BTreeMap<usize, ImageAttachment>,
     /// Monotonic paste counter (per-session). Never decrements.
     next_paste_id: usize,
+    /// Monotonic image counter (per-session). Never decrements.
+    #[allow(dead_code)]
+    next_image_id: usize,
     /// Fallback detector for terminals that deliver paste as rapid key events.
     paste_burst: PasteBurst,
     /// Runtime gate for the fallback paste-burst detector.
@@ -175,6 +180,8 @@ pub struct InputBar {
     tick_counter: std::cell::Cell<u32>,
     /// Capture of the most recent Enter-submit: `(text, ranges, interrupt)`.
     submit_capture: Option<(String, Vec<ProtectedRange>, bool)>,
+    /// Images captured during submit, held until view drains them.
+    pending_submit_images: Vec<ImageAttachment>,
     /// Submitted input history, oldest first. Capped at [`HISTORY_CAP`].
     history: Vec<InputHistoryEntry>,
     /// `None` = editing live draft; `Some(i)` = browsing `history[i]`.
@@ -239,7 +246,9 @@ impl InputBar {
             vim_pending: None,
             protected_ranges: Vec::new(),
             pastes: BTreeMap::new(),
+            images: BTreeMap::new(),
             next_paste_id: 1,
+            next_image_id: 0,
             paste_burst: PasteBurst::default(),
             paste_burst_enabled: default_paste_burst_enabled(),
             line_cache: vec![0],
@@ -247,6 +256,7 @@ impl InputBar {
             activity: ActivityKind::Idle,
             tick_counter: std::cell::Cell::new(0),
             submit_capture: None,
+            pending_submit_images: Vec::new(),
             history: Vec::new(),
             history_cursor: None,
             draft: InputStateSnapshot::default(),
@@ -1346,6 +1356,7 @@ impl InputBar {
         let (expanded, ranges) = expand_paste_refs(&text, &self.protected_ranges, &self.pastes);
         let interrupt = expanded.starts_with('!');
         self.submit_capture = Some((expanded.clone(), ranges.clone(), interrupt));
+        self.pending_submit_images = std::mem::take(&mut self.images).into_values().collect();
 
         // Push to history
         self.history
@@ -1360,6 +1371,7 @@ impl InputBar {
         self.draft = InputStateSnapshot::default();
         self.clear();
         self.pastes.clear();
+        self.images.clear();
 
         Some((expanded, interrupt))
     }
@@ -1483,6 +1495,7 @@ impl InputBar {
         self.line_cache = vec![0];
         self.protected_ranges.clear();
         self.pastes.clear();
+        self.images.clear();
         self.last_inner_width.set(last_w);
         self.goal_vcol = None;
         self.activity = ActivityKind::Idle;
@@ -1534,6 +1547,11 @@ impl InputBar {
     /// Take and reset the most recent Enter-submit capture.
     pub fn take_submit_capture(&mut self) -> Option<(String, Vec<ProtectedRange>, bool)> {
         self.submit_capture.take()
+    }
+
+    /// Take and reset images captured by the most recent submit.
+    pub fn take_pending_images(&mut self) -> Vec<ImageAttachment> {
+        std::mem::take(&mut self.pending_submit_images)
     }
 
     /// Replace text and cursor wholesale.
@@ -2053,16 +2071,20 @@ mod image_tests {
     use super::*;
     use std::path::PathBuf;
 
-    #[test]
-    fn image_attachment_fields_accessible() {
-        let a = ImageAttachment {
-            id: 0,
-            source_path: PathBuf::from("/tmp/test.png"),
+    fn test_image(id: usize) -> ImageAttachment {
+        ImageAttachment {
+            id,
+            source_path: PathBuf::from(format!("/tmp/test-{id}.png")),
             mime_type: "image/png".to_string(),
             dimensions: (800, 600),
             byte_size: 1024,
             owned_temp: None,
-        };
+        }
+    }
+
+    #[test]
+    fn image_attachment_fields_accessible() {
+        let a = test_image(0);
 
         assert_eq!(a.id, 0);
         assert_eq!(a.mime_type, "image/png");
@@ -2074,6 +2096,51 @@ mod image_tests {
         let k = RangeKind::ImageRef(3);
 
         assert!(!k.is_atom());
+    }
+
+    #[test]
+    fn new_input_bar_starts_with_empty_image_store() {
+        let mut bar = InputBar::new();
+
+        assert!(bar.images.is_empty());
+        assert_eq!(bar.next_image_id, 0);
+        assert!(bar.take_pending_images().is_empty());
+    }
+
+    #[test]
+    fn submit_preserves_pending_images_until_drained() {
+        let mut bar = InputBar::new();
+        bar.set_text("send image".to_string(), "send image".len());
+        bar.images.insert(1, test_image(1));
+
+        bar.submit().unwrap();
+
+        assert!(bar.images.is_empty());
+        let images = bar.take_pending_images();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].id, 1);
+        assert!(bar.take_pending_images().is_empty());
+    }
+
+    #[test]
+    fn clear_drops_unsubmitted_images() {
+        let mut bar = InputBar::new();
+        bar.images.insert(1, test_image(1));
+
+        bar.clear();
+
+        assert!(bar.images.is_empty());
+        assert!(bar.take_pending_images().is_empty());
+    }
+
+    #[test]
+    fn clear_does_not_reset_image_counter() {
+        let mut bar = InputBar::new();
+        bar.next_image_id = 3;
+
+        bar.clear();
+
+        assert_eq!(bar.next_image_id, 3);
     }
 }
 
