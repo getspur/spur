@@ -237,9 +237,9 @@ pub enum Action {
     },
     OpenInsights,
     /// Spur-local `/theme` slash command. `arg` is the raw rest after the
-    /// `/theme` token: `""` lists available themes, `"reload"` re-resolves
-    /// the active theme name from disk, and any other value is treated as
-    /// a theme name to switch to via `load_runtime_theme`.
+    /// `/theme` token: `""` opens the interactive theme picker, `"reload"`
+    /// re-resolves the active theme name from disk, and any other value is
+    /// treated as a theme name to switch to via `load_runtime_theme`.
     ThemeCommand {
         arg: String,
     },

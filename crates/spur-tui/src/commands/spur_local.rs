@@ -116,7 +116,7 @@ impl SpurLocalSource {
             },
             CommandEntry {
                 name: "theme".into(),
-                description: "List, switch, or reload the active TUI theme".into(),
+                description: "Pick, switch, or reload the active TUI theme".into(),
                 hint: Some("[name|reload]".into()),
                 source: CommandSource::Spur,
                 dispatch: Dispatch::SpurLocal(Action::ThemeCommand { arg: String::new() }),

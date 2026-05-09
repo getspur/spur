@@ -4,6 +4,9 @@ use std::collections::HashMap;
 const DARK_DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("status_bar.fg", "fg"),
     ("spinner.fg", "accent"),
+    ("picker.selected.bg", "bg_selection"),
+    ("picker.selected.fg", "fg"),
+    ("picker.hint.fg", "fg_subtle"),
     ("picker.match.fg", "highlight"),
     ("status_bar.tombstone.fg", "fg_subtle"),
     ("status_bar.issue_count.fg", "accent"),
@@ -197,7 +200,7 @@ mod tests {
 
     #[test]
     fn dark_default_contains_all_spec_sample_bindings() {
-        assert_eq!(TokenMap::dark_default().0.len(), 120);
+        assert_eq!(TokenMap::dark_default().0.len(), 123);
     }
 
     #[test]
@@ -249,6 +252,15 @@ mod tests {
         );
         assert_eq!(
             tokens.0.get("status_bar.separator.fg"),
+            Some(&"fg_subtle".to_string())
+        );
+        assert_eq!(
+            tokens.0.get("picker.selected.bg"),
+            Some(&"bg_selection".to_string())
+        );
+        assert_eq!(tokens.0.get("picker.selected.fg"), Some(&"fg".to_string()));
+        assert_eq!(
+            tokens.0.get("picker.hint.fg"),
             Some(&"fg_subtle".to_string())
         );
     }

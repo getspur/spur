@@ -849,32 +849,7 @@ impl App {
     fn handle_theme_command(&mut self, arg: String) {
         let arg = arg.trim();
         if arg.is_empty() {
-            let available = crate::theme::list_available_themes();
-            let active = &self.active_theme_name;
-            // Show every theme entry the cascade can resolve, tagged by
-            // origin so users can see when a project/user file shadows a
-            // built-in. The active marker `*` always attaches to the
-            // active name regardless of source — load_runtime_theme
-            // determines which file actually loaded (project > user >
-            // built-in cascade).
-            let mark = |name: &str| {
-                if name == active {
-                    format!("*{name}")
-                } else {
-                    name.to_string()
-                }
-            };
-            let mut parts: Vec<String> = available.built_in.iter().map(|n| mark(n)).collect();
-            for name in &available.project {
-                parts.push(format!("{} [project]", mark(name)));
-            }
-            for name in &available.user {
-                parts.push(format!("{} [user]", mark(name)));
-            }
-            self.flash_hint(
-                format!("themes: {} (active *)", parts.join(", ")),
-                Duration::from_secs(4),
-            );
+            self.open_theme_picker_or_flash_status();
             return;
         }
 
@@ -1113,6 +1088,53 @@ impl App {
         self.license_badge = license_badge_from_state(&license_state);
         self.license_state = license_state;
         self.dirty = true;
+    }
+
+    fn open_theme_picker_or_flash_status(&mut self) {
+        match &self.current_view {
+            ViewId::Dashboard => {
+                self.dashboard.open_theme_picker(&self.active_theme_name);
+                self.dirty = true;
+            }
+            ViewId::SessionDetail(_) => {
+                if let Some(ref mut detail) = self.session_detail {
+                    detail.open_theme_picker(&self.active_theme_name);
+                    self.dirty = true;
+                } else {
+                    self.flash_theme_status();
+                }
+            }
+            _ => self.flash_theme_status(),
+        }
+    }
+
+    fn flash_theme_status(&mut self) {
+        let available = crate::theme::list_available_themes();
+        let active = &self.active_theme_name;
+        // Show every theme entry the cascade can resolve, tagged by
+        // origin so users can see when a project/user file shadows a
+        // built-in. The active marker `*` always attaches to the
+        // active name regardless of source — load_runtime_theme
+        // determines which file actually loaded (project > user >
+        // built-in cascade).
+        let mark = |name: &str| {
+            if name == active {
+                format!("*{name}")
+            } else {
+                name.to_string()
+            }
+        };
+        let mut parts: Vec<String> = available.built_in.iter().map(|n| mark(n)).collect();
+        for name in &available.project {
+            parts.push(format!("{} [project]", mark(name)));
+        }
+        for name in &available.user {
+            parts.push(format!("{} [user]", mark(name)));
+        }
+        self.flash_hint(
+            format!("themes: {} (active *)", parts.join(", ")),
+            Duration::from_secs(4),
+        );
     }
 
     fn open_palette(&mut self) {
@@ -6892,6 +6914,60 @@ mod theme_threading_tests {
                 "error hint should mention not-found, got `{}`",
                 hint.text
             );
+        });
+    }
+
+    #[test]
+    fn bare_slash_theme_opens_theme_picker() {
+        with_isolated_dirs(|_, _| {
+            let mut spur_config = spur_acp::SpurConfig::default();
+            spur_config.tui.theme = "dark".to_string();
+
+            let mut app = App::new_with_config(
+                None,
+                false,
+                std::sync::Arc::new(spur_config),
+                crate::landing::LandingDecision::ShowDashboard,
+            );
+
+            app.process_action(crate::action::Action::ThemeCommand { arg: String::new() });
+
+            assert!(
+                app.dashboard_for_test().completion_active(),
+                "bare `/theme` should open the fuzzy theme picker"
+            );
+            assert!(
+                app.transient_hint_for_test().is_none(),
+                "bare `/theme` should not show the old theme-list flash"
+            );
+        });
+    }
+
+    #[test]
+    fn theme_picker_accept_switches_theme() {
+        with_isolated_dirs(|_, _| {
+            let mut spur_config = spur_acp::SpurConfig::default();
+            spur_config.tui.theme = "dark".to_string();
+
+            let mut app = App::new_with_config(
+                None,
+                false,
+                std::sync::Arc::new(spur_config),
+                crate::landing::LandingDecision::ShowDashboard,
+            );
+
+            app.process_action(crate::action::Action::ThemeCommand { arg: String::new() });
+            app.handle_crossterm_event_for_test(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Down,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+            app.handle_crossterm_event_for_test(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+
+            assert_eq!(app.theme.name, "light");
+            assert_eq!(app.active_theme_name, "light");
         });
     }
 }

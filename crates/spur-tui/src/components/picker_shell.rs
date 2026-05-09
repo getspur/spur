@@ -14,6 +14,11 @@ use crate::components::mini_input::MiniInput;
 use crate::components::query_source::{
     QueryMode, QuerySource, RetrievalAccept, RetrievalPreview, RetrievalRow,
 };
+use crate::theme::{resolve_token, ColorDepth, Theme};
+
+fn token(theme: &Theme, name: &str) -> Color {
+    resolve_token(theme, name, ColorDepth::Truecolor)
+}
 
 /// Below 100 cols total terminal width, the preview pane is suppressed and
 /// the picker renders single-pane to preserve readability.
@@ -242,7 +247,7 @@ impl PickerShell {
     // ── Rendering ──────────────────────────────────────────────────────
 
     /// Render above `anchor` (the InputBar's rect), clipped to `container`.
-    pub fn render(&mut self, frame: &mut Frame, anchor: Rect, container: Rect) {
+    pub fn render(&mut self, frame: &mut Frame, anchor: Rect, container: Rect, theme: &Theme) {
         let query_mode_owned = self.source.query_mode() == QueryMode::OwnedByShell;
         self.update_active_preview();
         let show_preview = self.active_preview.is_some() && container.width >= MIN_PREVIEW_WIDTH;
@@ -274,8 +279,11 @@ impl PickerShell {
         let title = format!(" {} ", self.source.title());
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
-            .title(Span::styled(title, Style::default().fg(Color::Cyan)));
+            .border_style(Style::default().fg(token(theme, "picker.match.fg")))
+            .title(Span::styled(
+                title,
+                Style::default().fg(token(theme, "picker.match.fg")),
+            ));
 
         let inner = block.inner(popup_area);
         frame.render_widget(block, popup_area);
@@ -309,7 +317,7 @@ impl PickerShell {
             let prompt_len = prompt.len() as u16;
             let q_text = self.query.text();
             let line = Line::from(vec![
-                Span::styled(prompt, Style::default().fg(Color::DarkGray)),
+                Span::styled(prompt, Style::default().fg(token(theme, "picker.hint.fg"))),
                 Span::raw(q_text.to_string()),
             ]);
             frame.render_widget(Paragraph::new(line), q_area);
@@ -328,10 +336,10 @@ impl PickerShell {
             list_column
         };
 
-        self.render_rows(frame, list_area);
+        self.render_rows(frame, list_area, theme);
 
         if let (Some((_, preview)), Some(area)) = (self.active_preview.as_ref(), preview_area) {
-            self.render_preview(frame, area, preview);
+            self.render_preview(frame, area, preview, theme);
         }
 
         if let Some((cx, cy)) = cursor_cell {
@@ -352,11 +360,11 @@ impl PickerShell {
         self.active_preview = self.source.preview_for(idx).map(|preview| (idx, preview));
     }
 
-    fn render_rows(&self, frame: &mut Frame, list_area: Rect) {
+    fn render_rows(&self, frame: &mut Frame, list_area: Rect, theme: &Theme) {
         if self.rows.is_empty() {
             let p = Paragraph::new(Line::from(Span::styled(
                 "No matches. Type to refine, Esc to dismiss.",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(token(theme, "picker.hint.fg")),
             )));
             frame.render_widget(p, list_area);
             return;
@@ -372,7 +380,7 @@ impl PickerShell {
                     spans.push(Span::styled(
                         r.primary.clone(),
                         Style::default()
-                            .fg(Color::Green)
+                            .fg(token(theme, "picker.selected.fg"))
                             .add_modifier(Modifier::BOLD),
                     ));
                 } else {
@@ -382,7 +390,7 @@ impl PickerShell {
                             spans.push(Span::styled(
                                 r.primary[cursor..a].to_string(),
                                 Style::default()
-                                    .fg(Color::Green)
+                                    .fg(token(theme, "picker.selected.fg"))
                                     .add_modifier(Modifier::BOLD),
                             ));
                         }
@@ -391,7 +399,7 @@ impl PickerShell {
                             spans.push(Span::styled(
                                 r.primary[a..end].to_string(),
                                 Style::default()
-                                    .fg(Color::LightBlue)
+                                    .fg(token(theme, "picker.match.fg"))
                                     .add_modifier(Modifier::UNDERLINED),
                             ));
                             cursor = end;
@@ -401,7 +409,7 @@ impl PickerShell {
                         spans.push(Span::styled(
                             r.primary[cursor..].to_string(),
                             Style::default()
-                                .fg(Color::Green)
+                                .fg(token(theme, "picker.selected.fg"))
                                 .add_modifier(Modifier::BOLD),
                         ));
                     }
@@ -410,29 +418,35 @@ impl PickerShell {
                     spans.push(Span::raw("  "));
                     spans.push(Span::styled(
                         r.secondary.clone(),
-                        Style::default().fg(Color::White),
+                        Style::default().fg(token(theme, "picker.selected.fg")),
                     ));
                 }
                 if !r.tag.is_empty() {
                     spans.push(Span::raw("  "));
                     spans.push(Span::styled(
                         r.tag.clone(),
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(token(theme, "picker.hint.fg")),
                     ));
                 }
                 ListItem::new(Line::from(spans))
             })
             .collect();
-        let list =
-            List::new(items).highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        let list = List::new(items)
+            .highlight_style(Style::default().bg(token(theme, "picker.selected.bg")));
         let mut list_state = self.list_state.clone();
         frame.render_stateful_widget(list, list_area, &mut list_state);
     }
 
-    fn render_preview(&self, frame: &mut Frame, area: Rect, preview: &RetrievalPreview) {
+    fn render_preview(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        preview: &RetrievalPreview,
+        theme: &Theme,
+    ) {
         let block = Block::default().borders(Borders::LEFT).title(Span::styled(
             format!(" {} ", preview.title),
-            Style::default().fg(Color::Cyan),
+            Style::default().fg(token(theme, "picker.match.fg")),
         ));
         let body_rows = area.height.saturating_sub(1) as usize;
         let body_width = area.width.saturating_sub(1) as usize;
@@ -539,7 +553,7 @@ mod tests {
             .draw(|f| {
                 let anchor = Rect::new(anchor_x, height - 1, width.saturating_sub(anchor_x), 1);
                 let container = Rect::new(0, 0, width, height);
-                shell.render(f, anchor, container);
+                shell.render(f, anchor, container, crate::theme::fallback_theme());
             })
             .unwrap();
         terminal.backend().buffer().clone()
@@ -836,7 +850,14 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal
-            .draw(|f| shell.render_preview(f, Rect::new(0, 0, width, height), &preview))
+            .draw(|f| {
+                shell.render_preview(
+                    f,
+                    Rect::new(0, 0, width, height),
+                    &preview,
+                    crate::theme::fallback_theme(),
+                )
+            })
             .unwrap();
 
         let buffer = terminal.backend().buffer();

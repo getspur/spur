@@ -607,6 +607,11 @@ impl DashboardView {
         self.completion.is_active()
     }
 
+    pub(crate) fn open_theme_picker(&mut self, active_theme_name: &str) {
+        self.mode = DashboardMode::Compose;
+        self.completion.open_theme_picker(active_theme_name);
+    }
+
     #[cfg(any(test, debug_assertions))]
     pub fn open_slash_picker_for_test(&mut self) {
         self.mode = DashboardMode::Compose;
@@ -746,7 +751,8 @@ impl DashboardView {
         } else {
             self.input_bar.render(frame, input_bar_area);
         }
-        self.completion.render(frame, input_bar_area, area);
+        self.completion
+            .render(frame, input_bar_area, area, ctx.theme);
         StatusBar::render(
             frame,
             chunks[status_chunk],
@@ -859,7 +865,8 @@ impl DashboardView {
         } else {
             self.input_bar.render(frame, input_bar_area);
         }
-        self.completion.render(frame, input_bar_area, area);
+        self.completion
+            .render(frame, input_bar_area, area, ctx.theme);
         StatusBar::render(
             frame,
             chunks[2],
@@ -1009,7 +1016,7 @@ impl DashboardView {
         } else {
             self.input_bar.render(frame, input_bar_area);
         }
-        self.completion.render(frame, input_bar_area, area);
+        self.completion.render(frame, input_bar_area, area, theme);
         StatusBar::render(
             frame,
             chunks[2],
@@ -1624,10 +1631,10 @@ impl DashboardView {
         let owner = self.key_owner(key);
 
         match owner {
-            KeyOwner::Picker => {
-                let _ = self.completion.handle_picker_key(key, &mut self.input_bar);
-                None
-            }
+            KeyOwner::Picker => self
+                .completion
+                .handle_picker_key(key, &mut self.input_bar)
+                .and_then(|accept| self.action_from_picker_accept(accept)),
             KeyOwner::Composer => {
                 // Enter Compose mode when typing in Navigate mode.
                 if self.mode == DashboardMode::Navigate {
@@ -1731,6 +1738,21 @@ impl DashboardView {
                 }
                 self.handle_view_key(key, lineage, worker_streams)
             }
+        }
+    }
+
+    fn action_from_picker_accept(
+        &self,
+        accept: crate::components::query_source::RetrievalAccept,
+    ) -> Option<Action> {
+        let crate::components::query_source::RetrievalAccept::SubmitText { text } = accept else {
+            return None;
+        };
+
+        use crate::commands::submit_router::{route, SubmitDecision};
+        match route(&text, &[], &self.command_registry, false) {
+            SubmitDecision::Local { action } => Some(action),
+            _ => None,
         }
     }
 }
