@@ -1511,6 +1511,55 @@ pub async fn emit_dispatch_audit(
     }
 }
 
+/// Emit a `[[spur-audit v1]] WorkerStarted` sentinel comment on the task issue.
+/// Best-effort only: every failure is logged and delegation continues.
+#[allow(clippy::too_many_arguments)]
+pub async fn emit_worker_started_audit(
+    pm: Option<&dyn PmLike>,
+    issue_id: &Option<String>,
+    feature_gate: &spur_license::FeatureGate,
+    delegation_id: &str,
+    worker_branch: &str,
+    worker_session_id: &str,
+    dispatched_base_oid: &str,
+) {
+    let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
+        return;
+    };
+    if let Err(error) = crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        feature_gate,
+    ) {
+        warn!(
+            target: "spur.audit.emit_failure",
+            kind = "worker_started",
+            issue_id = %issue_id,
+            delegation_id = %delegation_id,
+            "WorkerStarted audit comment emission skipped: {error:?}"
+        );
+        return;
+    }
+    let Some(adv) = pm.advanced() else { return };
+    let kind = crate::plan::audit_sentinel::AuditSentinelKind::WorkerStarted {
+        delegation_id: delegation_id.to_string(),
+        worker_branch: worker_branch.to_string(),
+        worker_session_id: worker_session_id.to_string(),
+        dispatched_base_oid: dispatched_base_oid.to_string(),
+    };
+    let body = crate::plan::audit_sentinel::encode_comment(&kind);
+    if let Err(e) = adv.add_comment(issue_id, &body).await {
+        warn!(
+            target: "spur.audit.emit_failure",
+            kind = "worker_started",
+            issue_id = %issue_id,
+            delegation_id = %delegation_id,
+            worker_branch = %worker_branch,
+            worker_session_id = %worker_session_id,
+            "WorkerStarted audit comment emission failed: {e}"
+        );
+    }
+}
+
 pub(crate) async fn emit_task_spec_audit(
     advanced: &dyn spur_pm::BeadsAdvanced,
     issue_id: &str,
@@ -2174,6 +2223,7 @@ fn apply_worker_output_invariant(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CompletionPersistenceAction {
     Completed(crate::plan::audit_sentinel::CompletionState),
+    AlreadyCompleted,
     AutoRetried {
         error: String,
         worker_branch: Option<String>,
@@ -2389,6 +2439,24 @@ async fn persist_completion_result_with_retry_for_task(
     let escalation_worker_branch = escalate.then(|| fields.worker_branch.clone()).flatten();
 
     if !already_emitted && completion_state != CompletionState::Superseded {
+        if completion_state == CompletionState::AwaitingReview {
+            if crate::server::require_feature(
+                spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+                feature_gate,
+            )
+            .is_ok()
+            {
+                if let Some(adv) = pm.advanced() {
+                    let current_audits = crate::plan::projector::collect_sorted_audits_for_issue(
+                        issue_id,
+                        adv.list_comments(issue_id).await?,
+                    );
+                    if completion_audit_already_emitted(delegation_id, &current_audits) {
+                        return Ok(CompletionPersistenceAction::AlreadyCompleted);
+                    }
+                }
+            }
+        }
         emit_completion_audit(
             Some(pm),
             &Some(issue_id.to_string()),
@@ -2507,6 +2575,7 @@ pub(crate) async fn persist_worker_completion_and_notify(
         attempt,
         materializer,
         dispatched_base_oid,
+        None,
         task_id,
     )
     .await
@@ -2540,6 +2609,7 @@ pub(crate) async fn persist_system_completion_and_notify(
     attempt: u32,
     materializer: &crate::outcome_materializer::OutcomeMaterializer,
     dispatched_base_oid: Option<String>,
+    repo_root: Option<std::path::PathBuf>,
     task_id: Option<&str>,
 ) -> anyhow::Result<Option<DeferredCompletionPush>> {
     let audits = read_audits_if_advanced(pm, feature_gate, issue_id).await?;
@@ -2561,6 +2631,7 @@ pub(crate) async fn persist_system_completion_and_notify(
         attempt,
         materializer,
         dispatched_base_oid,
+        repo_root,
         task_id,
     )
     .await
@@ -2661,6 +2732,7 @@ async fn persist_completion_inner(
     attempt: u32,
     materializer: &crate::outcome_materializer::OutcomeMaterializer,
     dispatched_base_oid: Option<String>,
+    repo_root: Option<std::path::PathBuf>,
     task_id: Option<&str>,
 ) -> anyhow::Result<Option<DeferredCompletionPush>> {
     use crate::plan::audit_sentinel::CompletionState;
@@ -2678,7 +2750,7 @@ async fn persist_completion_inner(
                 result_summary: result.summary.clone(),
                 artifact_uri: None,
                 dispatched_base_oid,
-                repo_root: None,
+                repo_root,
             },
             already_emitted,
         )
@@ -2730,7 +2802,7 @@ async fn persist_completion_inner(
                 .or_else(|| failure_reason_from_status(&result.status)),
             artifact_uri,
             dispatched_base_oid,
-            repo_root: None,
+            repo_root,
         },
         already_emitted,
         attempt,
@@ -2788,6 +2860,7 @@ async fn persist_completion_inner(
             }));
         }
         CompletionPersistenceAction::Completed(completion_state) => completion_state,
+        CompletionPersistenceAction::AlreadyCompleted => return Ok(None),
     };
 
     // Cancelled completions persist audit but emit no event/continuation.
@@ -6477,6 +6550,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn emit_worker_started_audit_records_branch_session_and_base() {
+        let pm = RecordingPm {
+            advanced: RecordingAdvanced {
+                comments: std::sync::Mutex::new(vec![]),
+            },
+        };
+
+        super::emit_worker_started_audit(
+            Some(&pm),
+            &Some("bd-1".to_string()),
+            pro_feature_gate().as_ref(),
+            "del-A",
+            "spur/worker/v2/codex/brain/worker",
+            "worker",
+            "base-oid",
+        )
+        .await;
+
+        let comments = pm.advanced.comments.lock().expect("comments lock");
+        let body = comments.first().expect("worker-started audit");
+        let parsed = crate::plan::audit_sentinel::parse_comment(body)
+            .expect("sentinel")
+            .expect("parse");
+        assert!(matches!(
+            parsed,
+            crate::plan::audit_sentinel::AuditSentinelKind::WorkerStarted {
+                delegation_id,
+                worker_branch,
+                worker_session_id,
+                dispatched_base_oid,
+            } if delegation_id == "del-A"
+                && worker_branch == "spur/worker/v2/codex/brain/worker"
+                && worker_session_id == "worker"
+                && dispatched_base_oid == "base-oid"
+        ));
+    }
+
+    #[tokio::test]
     async fn persist_worker_completion_and_notify_materializes_artifact_uri_in_audit() {
         let pm = RecordingPm {
             advanced: RecordingAdvanced {
@@ -7544,7 +7655,19 @@ mod tests {
         }
 
         async fn list_comments(&self, _issue_id: &str) -> anyhow::Result<Vec<spur_pm::Comment>> {
-            Ok(vec![])
+            Ok(self
+                .comments
+                .lock()
+                .expect("comments lock")
+                .iter()
+                .enumerate()
+                .map(|(index, body)| spur_pm::Comment {
+                    id: format!("c{}", index + 1),
+                    body: body.clone(),
+                    actor: "test".to_string(),
+                    created_at: chrono::Utc::now(),
+                })
+                .collect())
         }
 
         async fn add_comment(&self, _issue_id: &str, body: &str) -> anyhow::Result<String> {
@@ -7744,6 +7867,60 @@ mod tests {
         }
 
         (dir, base)
+    }
+
+    #[tokio::test]
+    async fn awaiting_review_completion_rechecks_audits_before_writing_duplicate() {
+        let delegation_label = crate::plan::labels::delegation_id("del-A");
+        let pm = CompletionWritebackPm::new(vec![delegation_label]);
+        pm.advanced.comments.lock().expect("comments lock").push(
+            crate::plan::audit_sentinel::encode_comment(
+                &crate::plan::audit_sentinel::AuditSentinelKind::Completion {
+                    delegation_id: "del-A".into(),
+                    completion_state: crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+                    superseded: false,
+                    worker_branch: Some("spur/worker-test".into()),
+                    result_summary: Some("already completed".into()),
+                    artifact_uri: None,
+                    dispatched_base_oid: None,
+                },
+            ),
+        );
+        let seeded_comments = spur_pm::BeadsAdvanced::list_comments(&pm.advanced, "bd-1")
+            .await
+            .expect("list seeded comments");
+        let seeded_audits =
+            crate::plan::projector::collect_sorted_audits_for_issue("bd-1", seeded_comments);
+        assert!(
+            super::completion_audit_already_emitted("del-A", &seeded_audits),
+            "test precondition must expose the seeded completion audit"
+        );
+
+        let action = super::persist_completion_result_with_retry_for_task(
+            &pm,
+            "bd-1",
+            pro_feature_gate().as_ref(),
+            "plan-1",
+            "del-A",
+            crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+            completion_audit_fields(),
+            false,
+            Some(1),
+            Some("t1"),
+        )
+        .await
+        .expect("idempotent completion recheck");
+
+        assert_eq!(action, super::CompletionPersistenceAction::AlreadyCompleted);
+        assert_eq!(
+            pm.completion_comment_count(),
+            1,
+            "guard must not append a duplicate completion audit"
+        );
+        assert!(
+            pm.updates.lock().expect("updates lock").is_empty(),
+            "guard must return before applying label/status updates"
+        );
     }
 
     #[tokio::test]
