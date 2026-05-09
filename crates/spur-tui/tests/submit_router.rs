@@ -6,7 +6,7 @@ use spur_tui::commands::CommandRegistry;
 #[test]
 fn plain_text_routes_to_send() {
     let reg = CommandRegistry::new();
-    let dec = route("hello world", &[], &reg, false);
+    let dec = route("hello world", &[], &[], &reg, false);
     match dec {
         SubmitDecision::Send { blocks, interrupt } => {
             assert_eq!(blocks.len(), 1);
@@ -20,7 +20,7 @@ fn plain_text_routes_to_send() {
 #[test]
 fn spur_local_slash_dispatches_action() {
     let reg = CommandRegistry::new();
-    let dec = route("/help", &[], &reg, false);
+    let dec = route("/help", &[], &[], &reg, false);
     match dec {
         SubmitDecision::Local { action } => {
             assert!(matches!(action, Action::ShowHelp));
@@ -44,7 +44,7 @@ fn agent_slash_becomes_text_block_stripped_of_prefix() {
         "claude",
         vec![prompt_text_entry("claude", "compact", "compact history")],
     );
-    let dec = route("/compact please", &[], &reg, false);
+    let dec = route("/compact please", &[], &[], &reg, false);
     match dec {
         SubmitDecision::Send { blocks, .. } => {
             assert_eq!(blocks.len(), 1);
@@ -61,7 +61,7 @@ fn agent_slash_becomes_text_block_stripped_of_prefix() {
 fn explicit_prefix_claude_help_sends_bare_to_claude() {
     let mut reg = CommandRegistry::new();
     reg.set_agent_commands("claude", vec![prompt_text_entry("claude", "help", "help")]);
-    let dec = route("/claude:help", &[], &reg, false);
+    let dec = route("/claude:help", &[], &[], &reg, false);
     match dec {
         SubmitDecision::Send { blocks, .. } => match &blocks[0] {
             ContentBlock::Text(t) => assert_eq!(t.text, "/help"),
@@ -74,7 +74,7 @@ fn explicit_prefix_claude_help_sends_bare_to_claude() {
 #[test]
 fn interrupt_prefix_bang_is_preserved() {
     let reg = CommandRegistry::new();
-    let dec = route("!stop now", &[], &reg, true);
+    let dec = route("!stop now", &[], &[], &reg, true);
     match dec {
         SubmitDecision::Send { interrupt, blocks } => {
             assert!(interrupt);

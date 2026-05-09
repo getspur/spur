@@ -1469,6 +1469,7 @@ impl SessionDetailView {
                             banner.record_message_sent();
                         }
                         self.dispatch_intent(IntentEvent::Submitted);
+                        let pending_images = self.input_bar.take_pending_images();
                         if let Some((text, ranges, interrupt)) =
                             self.input_bar.take_submit_capture()
                         {
@@ -1476,6 +1477,7 @@ impl SessionDetailView {
                             let dec = route_with_caps(
                                 &text,
                                 &ranges,
+                                &pending_images,
                                 &self.command_registry,
                                 interrupt,
                                 self.spur_agent_caps.as_deref(),

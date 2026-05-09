@@ -8,7 +8,7 @@ license.workspace = true
 
 [features]
 default = ["markdown"]
-markdown = ["dep:tui-markdown", "dep:ratatui-core", "dep:mermaid-rs-renderer", "dep:image", "dep:ratatui-image", "dep:resvg", "dep:pulldown-cmark"]
+markdown = ["dep:tui-markdown", "dep:ratatui-core", "dep:mermaid-rs-renderer", "dep:ratatui-image", "dep:resvg", "dep:pulldown-cmark"]
 analytics = ["dep:spur-context", "spur-context/duckdb", "dep:spur-cost", "dep:directories"]
 
 [dependencies]
@@ -23,6 +23,7 @@ tokio = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true, features = ["event-stream"] }
 anyhow = { workspace = true }
+arboard = { version = "2", default-features = false, features = ["image-data"] }
 base64 = "0.22"
 chrono = { workspace = true }
 futures = { workspace = true }
@@ -37,12 +38,13 @@ nucleo-matcher = "0.3"
 ignore = "0.4"
 tui-textarea = "0.7"
 directories = { version = "5", optional = true }
+tempfile = "3"
 
 # Markdown + mermaid stack (gated by `markdown` feature)
 tui-markdown = { version = "0.3", optional = true }
 ratatui-core = { version = "0.1", default-features = false, optional = true }
 mermaid-rs-renderer = { version = "0.2.2", default-features = false, features = ["png"], optional = true }
-image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+image = { version = "0.25", features = ["png", "jpeg", "webp"] }
 ratatui-image = { version = "9", default-features = false, features = ["tokio"], optional = true }
 resvg = { version = "0.46", optional = true }
 pulldown-cmark = { workspace = true, optional = true }
