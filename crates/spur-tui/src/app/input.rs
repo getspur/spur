@@ -550,13 +550,4 @@ impl App {
         }
         self.dirty = true;
     }
-
-    #[cfg(any(test, debug_assertions))]
-    pub fn age_esc_chain_for_test(&mut self, duration: Duration) {
-        for instant in &mut self.esc_chain {
-            if let Some(aged) = instant.checked_sub(duration) {
-                *instant = aged;
-            }
-        }
-    }
 }
