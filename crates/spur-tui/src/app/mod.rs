@@ -1,3 +1,10 @@
+//! App orchestration root. This module keeps the `App` state, construction,
+//! event tick, render dispatch, and still-unextracted handlers. Submodules own
+//! thematic `impl App` blocks such as analytics initialization and live-cost
+//! refresh plumbing.
+
+mod analytics;
+
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
@@ -276,22 +283,9 @@ fn compute_flag_summary() -> Option<(usize, usize)> {
 // ─── App state ─────────────────────────────────────────────────────────
 
 #[cfg(feature = "analytics")]
-pub struct LiveCostCache {
-    pub by_session: std::collections::HashMap<SessionId, f64>,
-    pub last_refresh: chrono::DateTime<chrono::Utc>,
-    pub last_error: Option<std::sync::Arc<anyhow::Error>>,
-}
-
+use analytics::InsightsInitState;
 #[cfg(feature = "analytics")]
-impl Default for LiveCostCache {
-    fn default() -> Self {
-        Self {
-            by_session: std::collections::HashMap::new(),
-            last_refresh: chrono::Utc::now(),
-            last_error: None,
-        }
-    }
-}
+pub use analytics::LiveCostCache;
 
 /// Inc 2 (bd-d587.2): cap on `App::view_history`. Sized for typical TUI nav
 /// depth (Dashboard → SessionDetail → PlanBrowser → PlanInspector / IssueBrowser);
@@ -300,13 +294,13 @@ impl Default for LiveCostCache {
 const NAV_HISTORY_MAX: usize = 16;
 
 pub struct App {
-    current_view: ViewId,
+    pub(super) current_view: ViewId,
     /// Inc 2 (bd-d587.2): bounded LIFO of recently-left views, capped at
     /// `NAV_HISTORY_MAX`. `navigate_to` pushes the leaving view; `navigate_back`
     /// pops it. Dashboard is the canonical root and clears the stack on entry.
     /// Modal overlays (palette, help, modals) never touch this stack.
     view_history: Vec<ViewId>,
-    dashboard: DashboardView,
+    pub(super) dashboard: DashboardView,
     session_detail: Option<SessionDetailView>,
     session_picker: Option<SessionPickerView>,
     plan_browser: Option<PlanBrowserView>,
@@ -324,7 +318,7 @@ pub struct App {
     /// (Task 1) makes that ownership cheap.
     upgrade_modal: Option<UpgradeModalState>,
     should_quit: bool,
-    dirty: bool,
+    pub(super) dirty: bool,
     /// Top-level user-visible warning banner rendered in a reserved top row.
     user_warning: Option<String>,
     user_input_tx: Option<mpsc::Sender<UserInput>>,
@@ -335,21 +329,22 @@ pub struct App {
     pending_first_user_message: Option<String>,
     pending_permission: Option<(spur_acp::types::PermissionRequest, std::time::Instant)>,
     /// Event-sourced projection of brain → executor lineage.
-    lineage: ExecutorLineage,
+    pub(super) lineage: ExecutorLineage,
     #[cfg(feature = "analytics")]
-    analytics_engine: Option<spur_context::AsyncEngine>,
+    pub(super) analytics_engine: Option<spur_context::AsyncEngine>,
     #[cfg(feature = "analytics")]
-    live_cost_cache: Option<std::sync::Arc<RwLock<LiveCostCache>>>,
+    pub(super) live_cost_cache: Option<std::sync::Arc<RwLock<LiveCostCache>>>,
     #[cfg(feature = "analytics")]
-    live_cost_active_sessions: Option<std::sync::Arc<RwLock<std::collections::HashSet<SessionId>>>>,
+    pub(super) live_cost_active_sessions:
+        Option<std::sync::Arc<RwLock<std::collections::HashSet<SessionId>>>>,
     #[cfg(feature = "analytics")]
-    live_cost_signal_tx: Option<mpsc::Sender<()>>,
+    pub(super) live_cost_signal_tx: Option<mpsc::Sender<()>>,
     #[cfg(feature = "analytics")]
-    live_cost_handle: Option<JoinHandle<()>>,
+    pub(super) live_cost_handle: Option<JoinHandle<()>>,
     /// Lazily constructed on first `Action::OpenInsights`. None until the
     /// user presses Alt+a (or `analytics_engine` is otherwise initialised).
     #[cfg(feature = "analytics")]
-    insights_view: Option<crate::views::insights::InsightsView>,
+    pub(super) insights_view: Option<crate::views::insights::InsightsView>,
     /// In-flight cold-init for the analytics engine. While `Some`, the
     /// Insights view renders an "indexing logs..." placeholder; the
     /// `oneshot::Receiver` is polled on tick and resolves to either the
@@ -358,7 +353,7 @@ pub struct App {
     /// without this the init ran synchronously on the UI thread for ~89s
     /// on first open, freezing the entire TUI.
     #[cfg(feature = "analytics")]
-    insights_init: Option<InsightsInitState>,
+    pub(super) insights_init: Option<InsightsInitState>,
     /// Durable plan snapshots keyed by session and plan id.
     plan_projection: PlanProjectionStore,
     synopsis: SessionSynopsisProjection,
@@ -422,91 +417,6 @@ pub struct App {
     /// Last dispatched Action, for integration tests only.
     #[cfg(any(test, debug_assertions))]
     last_action: Option<crate::action::Action>,
-}
-
-#[cfg(feature = "analytics")]
-struct InsightsInitState {
-    started_at: Instant,
-    rx: tokio::sync::oneshot::Receiver<anyhow::Result<(spur_context::AsyncEngine, bool)>>,
-    /// Whole-second elapsed value last shown on the placeholder. Used to
-    /// throttle redraws to 1Hz when init is in flight (instead of forcing
-    /// dirty on every 30Hz tick). Initialized to `u64::MAX` so the first
-    /// drain after a `Some` insertion always paints.
-    last_displayed_second: u64,
-}
-
-/// Render the cold-init placeholder shown when the user has switched to
-/// `ViewId::Insights` but the analytics engine is still being built on
-/// the background `spawn_blocking` worker. Uses the body area provided
-/// by the App's view-render dispatch (the global header/footer rows are
-/// already drawn around it).
-#[cfg(feature = "analytics")]
-fn render_insights_init_placeholder(
-    frame: &mut Frame,
-    area: ratatui::layout::Rect,
-    started_at: Instant,
-) {
-    use ratatui::{
-        layout::Alignment,
-        style::{Color, Modifier, Style},
-        text::{Line, Span},
-        widgets::Paragraph,
-    };
-
-    let elapsed = started_at.elapsed().as_secs();
-    let title = Line::from(Span::styled(
-        "Indexing logs from agent JSONL files…",
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    ));
-    let progress = Line::from(Span::styled(
-        format!("Elapsed: {elapsed}s   (~90s typical on first open; warm runs are sub-second)"),
-        Style::default().fg(Color::Gray),
-    ));
-    let hint = Line::from(Span::styled(
-        "[Esc] return to Dashboard  (indexing continues in background)",
-        Style::default().fg(Color::DarkGray),
-    ));
-    let body = vec![
-        Line::from(""),
-        title,
-        Line::from(""),
-        progress,
-        Line::from(""),
-        hint,
-    ];
-    frame.render_widget(Paragraph::new(body).alignment(Alignment::Center), area);
-}
-
-/// Cold init pipeline for the analytics engine. Blocks (DuckDB I/O +
-/// JSONL scan); ALWAYS run inside `tokio::task::spawn_blocking`.
-#[cfg(feature = "analytics")]
-fn build_analytics_engine_blocking() -> anyhow::Result<(spur_context::AsyncEngine, bool)> {
-    use spur_context::{AnalyticsEngine, AsyncEngine};
-
-    let t0 = std::time::Instant::now();
-    let cache_dir = directories::BaseDirs::new()
-        .map(|b| b.home_dir().join(".spur").join("cache"))
-        .unwrap_or_else(|| std::path::PathBuf::from(".spur/cache"));
-    std::fs::create_dir_all(&cache_dir)?;
-    let cache_path = cache_dir.join("cost.duckdb");
-    tracing::info!(target: "spur_tui::insights", path = %cache_path.display(), "opening DuckDB cache (background)");
-
-    let (engine, recovered) = AnalyticsEngine::open(&cache_path)?;
-    engine.initialize()?;
-    let view_status = engine.create_agent_views()?;
-    engine.load_pricing(&spur_cost::PricingRegistry::with_builtin_prices())?;
-    let materialized = engine.refresh_cache()?;
-    engine.use_cached_events()?;
-    tracing::info!(
-        target: "spur_tui::insights",
-        total_ms = t0.elapsed().as_millis() as u64,
-        materialized_rows = materialized,
-        ?view_status,
-        "analytics engine cold init done"
-    );
-    Ok((AsyncEngine::new(engine), recovered))
 }
 
 #[derive(Debug, Clone)]
@@ -1503,278 +1413,6 @@ impl App {
     pub(crate) fn sync_dashboard_workers(&mut self) {
         let workers = self.build_worker_snapshot();
         self.dashboard.set_worker_snapshot(workers);
-    }
-
-    /// Lazily open the shared DuckDB analytics cache, materialise per-agent
-    /// Kick off (or no-op) the analytics-engine cold init.
-    ///
-    /// Returns immediately. If no init is needed (engine already cached
-    /// or insights_view already constructed), nothing happens. Otherwise
-    /// spawns a `spawn_blocking` task that runs the heavy DuckDB pipeline
-    /// (open / initialize / create_agent_views / load_pricing /
-    /// refresh_cache / use_cached_events) on a worker thread and posts
-    /// the resulting `AsyncEngine` (or error) through a `oneshot` that
-    /// the App's tick path drains. While in flight, the Insights view
-    /// renders an "indexing logs..." placeholder.
-    ///
-    /// Cold first run can take ~90s (full JSONL scan across all agent
-    /// homes); warm runs reuse the cache at `~/.spur/cache/cost.duckdb`
-    /// and return in milliseconds. Shares the cache path with `spur cost`
-    /// so a prior CLI invocation primes the data.
-    #[cfg(feature = "analytics")]
-    fn start_insights_init(&mut self) {
-        if self.insights_view.is_some() || self.insights_init.is_some() {
-            return;
-        }
-
-        if let Some(existing) = self.analytics_engine.clone() {
-            // Engine already built (e.g., earlier cold init for the
-            // dashboard's live-cost cache). Construct the view directly.
-            self.insights_view = Some(crate::views::insights::InsightsView::new(existing));
-            return;
-        }
-
-        tracing::info!(target: "spur_tui::insights", "start_insights_init: dispatching cold init to spawn_blocking");
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        tokio::task::spawn_blocking(move || {
-            let _ = tx.send(build_analytics_engine_blocking());
-        });
-        self.insights_init = Some(InsightsInitState {
-            started_at: Instant::now(),
-            rx,
-            last_displayed_second: u64::MAX,
-        });
-    }
-
-    /// Drain a completed `insights_init` outcome, if any. Called from the
-    /// tick path. On success: caches the engine, constructs the view,
-    /// keeps `current_view = Insights` so the user sees the populated
-    /// dashboard. On failure: surfaces a warning and routes back to
-    /// Dashboard.
-    #[cfg(feature = "analytics")]
-    fn drain_insights_init(&mut self) {
-        let Some(mut state) = self.insights_init.take() else {
-            return;
-        };
-        match state.rx.try_recv() {
-            Ok(Ok((engine, recovered))) => {
-                tracing::info!(target: "spur_tui::insights", elapsed_ms = state.started_at.elapsed().as_millis() as u64, "insights init complete; constructing view");
-                self.analytics_engine = Some(engine.clone());
-                self.insights_view = Some(crate::views::insights::InsightsView::new(engine));
-                if recovered {
-                    self.show_user_warning(
-                        "Analytics WAL was corrupt; renamed to *.broken and re-opened. Last refresh window may be missing."
-                            .to_string(),
-                    );
-                }
-                self.dirty = true;
-            }
-            Ok(Err(e)) => {
-                tracing::warn!(target: "spur_tui::insights", error = %format!("{e:#}"), "insights init failed");
-                self.show_user_warning(format!("Analytics unavailable: {e:#}"));
-                if matches!(self.current_view, ViewId::Insights) {
-                    self.navigate_to(ViewId::Dashboard);
-                }
-                self.dirty = true;
-            }
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
-                // Still in flight. Throttle redraws to 1Hz: only mark
-                // dirty when the user is actually viewing the placeholder
-                // AND the displayed whole-second has advanced. Avoids
-                // 30Hz × 90s = ~2700 wasted redraws when the user has
-                // Esc'd back to Dashboard while init continues.
-                let elapsed = state.started_at.elapsed().as_secs();
-                let visible = matches!(self.current_view, ViewId::Insights);
-                if visible && elapsed != state.last_displayed_second {
-                    state.last_displayed_second = elapsed;
-                    self.dirty = true;
-                }
-                self.insights_init = Some(state);
-            }
-            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                tracing::warn!(target: "spur_tui::insights", "insights init worker channel closed without sending result");
-                self.show_user_warning(
-                    "Analytics init worker exited before reporting a result".to_string(),
-                );
-                if matches!(self.current_view, ViewId::Insights) {
-                    self.navigate_to(ViewId::Dashboard);
-                }
-                self.dirty = true;
-            }
-        }
-    }
-
-    #[cfg(feature = "analytics")]
-    fn sync_live_cost_active_sessions(&mut self) {
-        let active_sessions: std::collections::HashSet<SessionId> = self
-            .lineage
-            .nodes()
-            .filter(|node| {
-                matches!(
-                    node.phase,
-                    spur_core::LifecycleState::Running | spur_core::LifecycleState::Spawning
-                )
-            })
-            .filter_map(|node| {
-                node.current_attempt()
-                    .map(|attempt| attempt.session_id.clone())
-            })
-            .collect();
-
-        let changed = self
-            .live_cost_active_sessions
-            .as_ref()
-            .and_then(|shared| shared.try_write().ok())
-            .map(|mut guard| {
-                if *guard == active_sessions {
-                    false
-                } else {
-                    *guard = active_sessions;
-                    true
-                }
-            })
-            .unwrap_or(false);
-
-        if changed {
-            if let Some(tx) = &self.live_cost_signal_tx {
-                let _ = tx.try_send(());
-            }
-        }
-    }
-
-    #[cfg(feature = "analytics")]
-    fn spawn_live_cost_refresh(&mut self) {
-        if self.live_cost_handle.is_some() {
-            return;
-        }
-
-        let Some(engine) = self.analytics_engine.clone() else {
-            return;
-        };
-        let Some(cache) = self.live_cost_cache.clone() else {
-            return;
-        };
-        let Some(active_sessions) = self.live_cost_active_sessions.clone() else {
-            return;
-        };
-
-        let (signal_tx, mut signal_rx) = mpsc::channel(8);
-        self.live_cost_signal_tx = Some(signal_tx);
-        self.live_cost_handle = Some(tokio::spawn(async move {
-            loop {
-                let interval = {
-                    let guard = active_sessions.read().await;
-                    if guard.is_empty() {
-                        Duration::from_secs(30)
-                    } else {
-                        Duration::from_secs(5)
-                    }
-                };
-
-                tokio::select! {
-                    _ = tokio::time::sleep(interval) => {}
-                    opt = signal_rx.recv() => {
-                        if opt.is_none() {
-                            return;
-                        }
-                    }
-                }
-
-                let active_ids: Vec<SessionId> =
-                    active_sessions.read().await.iter().cloned().collect();
-                let refresh = engine.run(move |e| {
-                    let mut out = std::collections::HashMap::new();
-                    for sid in active_ids {
-                        if let Some(snapshot) = e.live_session_snapshot(&sid.0)? {
-                            out.insert(sid, snapshot.cost_usd);
-                        }
-                    }
-                    Ok(out)
-                });
-
-                // Timeout stops waiting; it does not cancel AsyncEngine's
-                // spawn_blocking closure, which will still run to completion.
-                let result = tokio::time::timeout(Duration::from_secs(30), refresh).await;
-                let mut guard = cache.write().await;
-                match result {
-                    Ok(Ok(costs)) => {
-                        guard.by_session = costs;
-                        guard.last_refresh = chrono::Utc::now();
-                        guard.last_error = None;
-                    }
-                    Ok(Err(error)) => {
-                        guard.last_error = Some(std::sync::Arc::new(error));
-                    }
-                    Err(_) => {
-                        guard.last_error = Some(std::sync::Arc::new(anyhow::anyhow!(
-                            "live cost refresh timed out (30s)"
-                        )));
-                    }
-                }
-            }
-        }));
-    }
-
-    #[cfg(feature = "analytics")]
-    pub async fn shutdown_analytics(&mut self) {
-        self.insights_view.take();
-        self.live_cost_signal_tx.take();
-        if let Some(handle) = self.live_cost_handle.take() {
-            handle.abort();
-        }
-
-        let Some(engine) = self.analytics_engine.clone() else {
-            return;
-        };
-        match timeout(Duration::from_secs(2), engine.run(|e| e.checkpoint())).await {
-            Ok(Ok(())) => {
-                tracing::debug!(target: "spur_tui::insights", "analytics checkpoint completed during shutdown");
-            }
-            Ok(Err(error)) => {
-                tracing::warn!(target: "spur_tui::insights", error = %format!("{error:#}"), "analytics checkpoint failed during shutdown");
-            }
-            Err(_) => {
-                tracing::warn!(target: "spur_tui::insights", "analytics checkpoint timed out during shutdown");
-            }
-        }
-    }
-
-    #[cfg(not(feature = "analytics"))]
-    pub async fn shutdown_analytics(&mut self) {}
-
-    #[cfg(feature = "analytics")]
-    fn via_analytics_visible_for_current_view(&self) -> bool {
-        let Some(cache) = &self.live_cost_cache else {
-            return false;
-        };
-        let Ok(guard) = cache.try_read() else {
-            return false;
-        };
-
-        match &self.current_view {
-            ViewId::Dashboard => {
-                if let Some(node_id) = self.dashboard.focused_node() {
-                    return self
-                        .lineage
-                        .node(node_id)
-                        .and_then(|node| node.current_attempt())
-                        .is_some_and(|attempt| guard.by_session.contains_key(&attempt.session_id));
-                }
-                self.lineage
-                    .nodes()
-                    .filter_map(|node| node.current_attempt())
-                    .any(|attempt| guard.by_session.contains_key(&attempt.session_id))
-            }
-            ViewId::SessionDetail(session) | ViewId::PlanInspector(session) => {
-                guard.by_session.contains_key(session)
-            }
-            #[cfg(feature = "markdown")]
-            ViewId::MermaidOverlay(session) => guard.by_session.contains_key(session),
-            ViewId::SessionPicker
-            | ViewId::IssueBrowser
-            | ViewId::PlanBrowser
-            | ViewId::Insights => false,
-        }
     }
 
     fn show_user_warning(&mut self, message: String) {
@@ -4477,7 +4115,7 @@ impl App {
                 if let Some(ref mut view) = self.insights_view {
                     view.render(frame, view_area, &ctx);
                 } else if let Some(state) = self.insights_init.as_ref() {
-                    render_insights_init_placeholder(frame, view_area, state.started_at);
+                    analytics::render_insights_init_placeholder(frame, view_area, state.started_at);
                 }
             }
             #[cfg(not(feature = "analytics"))]
@@ -4625,6 +4263,7 @@ pub async fn run_tui(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_tui_with_license(
     event_rx: broadcast::Receiver<SpurEvent>,
     user_input_tx: Option<mpsc::Sender<UserInput>>,

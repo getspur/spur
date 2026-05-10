@@ -240,10 +240,7 @@ impl ReactTrace {
     /// trace tracks the user's configured palette. Bumps generation so
     /// cached lines rebuild against the new tokens on next render.
     pub fn set_theme(&mut self, theme: &crate::theme::Theme) {
-        if self.theme.name != theme.name {
-            self.theme = theme.clone();
-            self.invalidate_cache();
-        } else if self.theme != *theme {
+        if self.theme.name != theme.name || self.theme != *theme {
             self.theme = theme.clone();
             self.invalidate_cache();
         }
