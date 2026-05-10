@@ -201,7 +201,7 @@ pub enum Action {
         session_id: SessionId,
         plan_id: String,
     },
-    /// Navigate to Sprints and focus a persisted implementation plan.
+    /// Navigate to Plans and focus a persisted implementation plan.
     OpenPlanInBrowser {
         plan_id: String,
     },
