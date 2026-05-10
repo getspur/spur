@@ -281,6 +281,9 @@ pub(crate) async fn run_one_worker_attempt(
             )));
         }
     };
+    worktrees
+        .update_base_commit(&worker_session, dispatched_base_oid.clone())
+        .map_err(|e| AttemptSetupError::WorktreeFailed(format!("update base commit: {e}")))?;
     if let Err(e) = persist_dispatched_base_oid_label(
         ctx.pm_service,
         ctx.issue_id.as_deref(),

@@ -147,6 +147,8 @@ struct ContinuationResourceBody<'a> {
     artifact_id: &'a Option<spur_acp::domain::outcome::OutcomeKey>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fetch_hint: &'a Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    base_hint: &'a Option<String>,
     created_at_wall: &'a chrono::DateTime<chrono::Utc>,
 }
 
@@ -165,6 +167,7 @@ fn continuation_resource_body(c: &BrainContinuation) -> ContinuationResourceBody
         estimated_cost_micros: &c.payload.estimated_cost_micros,
         artifact_id: &c.payload.artifact_id,
         fetch_hint: &c.payload.fetch_hint,
+        base_hint: &c.payload.base_hint,
         created_at_wall: &c.created_at_wall,
     }
 }
@@ -333,6 +336,8 @@ mod tests {
                 estimated_cost_micros: None,
                 artifact_id: None,
                 fetch_hint: None,
+                base_hint: None,
+                setup_conflict_topology: None,
             },
             created_at_wall: Utc.with_ymd_and_hms(2026, 4, 24, 12, 34, 56).unwrap(),
             created_at_mono: Instant::now(),
@@ -635,6 +640,7 @@ mod tests {
             attempt: 1,
         });
         continuation.payload.fetch_hint = Some("Call fetch_outcome_artifact.".into());
+        continuation.payload.base_hint = Some("Pass worker_branch as base for follow-up.".into());
         let outcome = render_autonomous_turn_with_spill_v2(
             std::slice::from_ref(&continuation),
             continuation_cost(&continuation),
@@ -647,6 +653,10 @@ mod tests {
         assert_eq!(
             json["fetch_hint"],
             Value::from("Call fetch_outcome_artifact.")
+        );
+        assert_eq!(
+            json["base_hint"],
+            Value::from("Pass worker_branch as base for follow-up.")
         );
     }
 
@@ -665,6 +675,7 @@ mod tests {
         assert!(json.get("estimated_cost_micros").is_none());
         assert!(json.get("artifact_id").is_none());
         assert!(json.get("fetch_hint").is_none());
+        assert!(json.get("base_hint").is_none());
     }
 
     #[test]
