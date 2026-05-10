@@ -1322,9 +1322,9 @@ impl SessionDetailView {
             return Some(Action::RequestSessions);
         }
 
-        // Alt+w → jump to Dashboard with Agents panel focused on the
+        // Alt+e → jump to Dashboard with Agents panel focused on the
         // highest-priority worker executor.
-        if matches!(key.code, KeyCode::Char('w')) && key.modifiers.contains(KeyModifiers::ALT) {
+        if matches!(key.code, KeyCode::Char('e')) && key.modifiers.contains(KeyModifiers::ALT) {
             return Some(Action::InspectWorkers);
         }
 
