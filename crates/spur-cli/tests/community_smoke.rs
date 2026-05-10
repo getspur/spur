@@ -25,7 +25,7 @@ fn fresh_process_no_env_vars_is_community() {
     );
     assert!(license.has_entitlement("core_core_brain_session"));
     assert!(license.has_entitlement("pm_core_browse"));
-    assert!(!license.has_entitlement("pm_pro_beads_advanced"));
+    assert!(license.has_entitlement("pm_pro_beads_advanced"));
 }
 
 #[test]

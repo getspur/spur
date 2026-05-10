@@ -199,7 +199,7 @@ impl FeatureGate {
     }
 
     fn resolve_feature_keys(policy: &PolicyResolver, tier: &str) -> AHashSet<FeatureKey> {
-        policy
+        let mut features: AHashSet<FeatureKey> = policy
             .tier_features(tier)
             .unwrap_or_else(|err| {
                 tracing::warn!("policy tier {tier:?} malformed: {err}; using empty features");
@@ -207,7 +207,10 @@ impl FeatureGate {
             })
             .into_iter()
             .filter_map(|s| FeatureKey::from_known(&s))
-            .collect()
+            .collect();
+
+        apply_community_compatibility_feature_grants(tier, &mut features);
+        features
     }
 
     fn extract_flags(doc: Arc<PolicyDocument>) -> HashMap<FlagKey, FlagSpec> {
@@ -215,6 +218,15 @@ impl FeatureGate {
             .iter()
             .map(|(&key, spec)| (key, spec.clone()))
             .collect()
+    }
+}
+
+fn apply_community_compatibility_feature_grants(tier: &str, features: &mut AHashSet<FeatureKey>) {
+    if tier == "community" {
+        // The signed 2026-04-27 policy still models this as Pro, but SPUR's
+        // local beads plan substrate is part of the Community daily-driver
+        // workflow. Keep the override narrow so unrelated Pro gates stay paid.
+        features.insert(FeatureKey::PM_PRO_BEADS_ADVANCED);
     }
 }
 
