@@ -2441,21 +2441,20 @@ async fn persist_completion_result_with_retry_for_task(
     let escalation_worker_branch = escalate.then(|| fields.worker_branch.clone()).flatten();
 
     if !already_emitted && completion_state != CompletionState::Superseded {
-        if completion_state == CompletionState::AwaitingReview {
-            if crate::server::require_feature(
+        if completion_state == CompletionState::AwaitingReview
+            && crate::server::require_feature(
                 spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
                 feature_gate,
             )
             .is_ok()
-            {
-                if let Some(adv) = pm.advanced() {
-                    let current_audits = crate::plan::projector::collect_sorted_audits_for_issue(
-                        issue_id,
-                        adv.list_comments(issue_id).await?,
-                    );
-                    if completion_audit_already_emitted(delegation_id, &current_audits) {
-                        return Ok(CompletionPersistenceAction::AlreadyCompleted);
-                    }
+        {
+            if let Some(adv) = pm.advanced() {
+                let current_audits = crate::plan::projector::collect_sorted_audits_for_issue(
+                    issue_id,
+                    adv.list_comments(issue_id).await?,
+                );
+                if completion_audit_already_emitted(delegation_id, &current_audits) {
+                    return Ok(CompletionPersistenceAction::AlreadyCompleted);
                 }
             }
         }
