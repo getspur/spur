@@ -215,7 +215,7 @@ fn default_attempt() -> u32 {
 }
 
 /// Runtime state of a submitted plan.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PlanState {
     pub plan_id: String,
     pub tasks: Vec<PlanTaskEntry>,
@@ -4425,6 +4425,21 @@ struct PendingBeadsOp {
     update: spur_pm::IssueUpdate,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewWriteMode {
+    Advisory,
+    NonAdvisory,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ReviewBeadsVersion(u64);
+
+const REVIEW_WRITE_BACKOFFS: [Duration; 3] = [
+    Duration::from_millis(100),
+    Duration::from_millis(500),
+    Duration::from_millis(2_000),
+];
+
 /// Events to be emitted after the plan lock is released.
 enum PendingEvent {
     TaskReviewed {
@@ -4444,23 +4459,150 @@ enum PendingAuditEmit {
     Approval {
         issue_id: Option<String>,
         plan_id: String,
+        task_id: String,
         delegation_id: String,
     },
     Rejection {
         issue_id: Option<String>,
         plan_id: String,
+        task_id: String,
         delegation_id: String,
         feedback: String,
     },
     ReviewFeedback {
         issue_id: Option<String>,
         plan_id: String,
+        task_id: String,
         delegation_id: String,
         attempt: u32,
         feedback: String,
         worker_branch: Option<String>,
         summary: Option<String>,
     },
+}
+
+impl PendingAuditEmit {
+    fn into_beads_ops(self, epic_id: Option<&str>) -> Vec<PendingBeadsOp> {
+        let mut ops = Vec::with_capacity(2);
+        match self {
+            PendingAuditEmit::Approval {
+                issue_id,
+                plan_id,
+                task_id,
+                delegation_id,
+            } => {
+                if let Some(issue_id) = issue_id {
+                    let kind = audit_sentinel::AuditSentinelKind::Approval { delegation_id };
+                    ops.push(PendingBeadsOp {
+                        issue_id,
+                        update: spur_pm::IssueUpdate {
+                            comment: Some(audit_sentinel::encode_comment(&kind)),
+                            ..Default::default()
+                        },
+                    });
+                }
+                push_task_transition_audit(
+                    &mut ops,
+                    epic_id,
+                    plan_id,
+                    task_id,
+                    "awaiting_review",
+                    "approved",
+                );
+            }
+            PendingAuditEmit::Rejection {
+                issue_id,
+                plan_id,
+                task_id,
+                delegation_id,
+                feedback,
+            } => {
+                if let Some(issue_id) = issue_id {
+                    let kind = audit_sentinel::AuditSentinelKind::Rejection {
+                        delegation_id,
+                        feedback,
+                    };
+                    ops.push(PendingBeadsOp {
+                        issue_id,
+                        update: spur_pm::IssueUpdate {
+                            comment: Some(audit_sentinel::encode_comment(&kind)),
+                            ..Default::default()
+                        },
+                    });
+                }
+                push_task_transition_audit(
+                    &mut ops,
+                    epic_id,
+                    plan_id,
+                    task_id,
+                    "awaiting_review",
+                    "rejected",
+                );
+            }
+            PendingAuditEmit::ReviewFeedback {
+                issue_id,
+                plan_id,
+                task_id,
+                delegation_id,
+                attempt,
+                feedback,
+                worker_branch,
+                summary,
+            } => {
+                if let Some(issue_id) = issue_id {
+                    let kind = audit_sentinel::AuditSentinelKind::ReviewFeedback {
+                        delegation_id,
+                        attempt,
+                        feedback,
+                        worker_branch,
+                        summary,
+                    };
+                    ops.push(PendingBeadsOp {
+                        issue_id,
+                        update: spur_pm::IssueUpdate {
+                            comment: Some(audit_sentinel::encode_comment(&kind)),
+                            ..Default::default()
+                        },
+                    });
+                }
+                push_task_transition_audit(
+                    &mut ops,
+                    epic_id,
+                    plan_id,
+                    task_id,
+                    "awaiting_review",
+                    "pending",
+                );
+            }
+        }
+        ops
+    }
+}
+
+fn push_task_transition_audit(
+    ops: &mut Vec<PendingBeadsOp>,
+    epic_id: Option<&str>,
+    plan_id: String,
+    task_id: String,
+    from_status: &str,
+    to_status: &str,
+) {
+    let Some(epic_id) = epic_id else {
+        return;
+    };
+    let kind = audit_sentinel::AuditSentinelKind::TaskTransition {
+        plan_id,
+        task_id,
+        from_status: from_status.to_string(),
+        to_status: to_status.to_string(),
+    };
+    ops.push(PendingBeadsOp {
+        issue_id: epic_id.to_string(),
+        update: spur_pm::IssueUpdate {
+            comment: Some(audit_sentinel::encode_comment(&kind)),
+            ..Default::default()
+        },
+    });
 }
 
 /// Everything produced by `apply_decision_and_extract` under the plan lock.
@@ -4544,6 +4686,7 @@ fn apply_decision_and_extract(
             audit_emits.push(PendingAuditEmit::Approval {
                 issue_id: issue_id.clone(),
                 plan_id: plan_id.to_string(),
+                task_id: task_id.to_string(),
                 delegation_id: last_del_id.unwrap_or_default(),
             });
 
@@ -4582,6 +4725,7 @@ fn apply_decision_and_extract(
             audit_emits.push(PendingAuditEmit::Rejection {
                 issue_id: issue_id.clone(),
                 plan_id: plan_id.to_string(),
+                task_id: task_id.to_string(),
                 delegation_id: last_del_id.unwrap_or_default(),
                 feedback: feedback_str.to_string(),
             });
@@ -4628,6 +4772,7 @@ fn apply_decision_and_extract(
                     audit_emits.push(PendingAuditEmit::Rejection {
                         issue_id: issue_id.clone(),
                         plan_id: plan_id.to_string(),
+                        task_id: task_id.to_string(),
                         delegation_id: last_del_id.unwrap_or_default(),
                         feedback: exhausted_fb.clone(),
                     });
@@ -4737,6 +4882,7 @@ fn apply_decision_and_extract(
                 audit_emits.push(PendingAuditEmit::ReviewFeedback {
                     issue_id: Some(id),
                     plan_id: plan_id.to_string(),
+                    task_id: task_id.to_string(),
                     delegation_id: attempt_delegation_id,
                     attempt: attempt_no,
                     feedback: fb.to_string(),
@@ -4806,17 +4952,131 @@ pub async fn handle_review_task(
     task_tracker: Option<&tokio_util::task::TaskTracker>,
     feature_gate: Arc<spur_license::FeatureGate>,
 ) -> Result<serde_json::Value, String> {
+    handle_review_task_with_write_mode(
+        plan_arc,
+        plan_id,
+        task_id,
+        decision,
+        feedback,
+        pm,
+        sink,
+        delegation_tx,
+        task_tracker,
+        feature_gate,
+        ReviewWriteMode::Advisory,
+    )
+    .await
+}
+
+async fn review_beads_version(
+    pm: &dyn PmLike,
+    issue_ids: &BTreeSet<String>,
+) -> Result<ReviewBeadsVersion, String> {
+    let Some(advanced) = pm.advanced() else {
+        return Err("non-advisory review writes require beads advanced read-back".to_string());
+    };
+    let mut total = 0u64;
+    for issue_id in issue_ids {
+        let comments = advanced.list_comments(issue_id).await.map_err(|error| {
+            format!("read-back comments for issue '{issue_id}' failed: {error}")
+        })?;
+        total += comments.len() as u64;
+    }
+    Ok(ReviewBeadsVersion(total))
+}
+
+async fn apply_review_ops_nonadvisory(
+    pm: &dyn PmLike,
+    ops: Vec<PendingBeadsOp>,
+) -> Result<(), String> {
+    if ops.is_empty() {
+        return Ok(());
+    }
+
+    let issue_ids: BTreeSet<String> = ops.iter().map(|op| op.issue_id.clone()).collect();
+    let before = review_beads_version(pm, &issue_ids).await?;
+    let mut last_error = String::new();
+    let mut succeeded = vec![false; ops.len()];
+
+    for (attempt_idx, backoff) in REVIEW_WRITE_BACKOFFS.iter().enumerate() {
+        let attempt_no = attempt_idx + 1;
+        let mut write_failed = false;
+        for (op_idx, op) in ops.iter().enumerate() {
+            if succeeded[op_idx] {
+                continue;
+            }
+            if let Err(error) = apply_issue_update(pm, &op.issue_id, op.update.clone()).await {
+                write_failed = true;
+                last_error = format!(
+                    "non-advisory review write attempt {attempt_no}/{} failed for issue '{}': {error}",
+                    REVIEW_WRITE_BACKOFFS.len(),
+                    op.issue_id
+                );
+                warn!("{last_error}");
+                break;
+            }
+            // update_issue(comment=...) appends to beads. Track per-op success
+            // so retrying a later failure does not duplicate audit comments.
+            succeeded[op_idx] = true;
+        }
+
+        if !write_failed {
+            // INV-S1: only the caller may install `candidate_state` in the
+            // cache, and only after this read-back proves the substrate
+            // version advanced. INV-S4: the audit ops above are in the same
+            // bounded write batch as the task status/label mutation.
+            match review_beads_version(pm, &issue_ids).await {
+                Ok(after) if after > before => return Ok(()),
+                Ok(after) => {
+                    last_error = format!(
+                        "non-advisory review write attempt {attempt_no}/{} did not advance BeadsVersion (before: {before:?}, after: {after:?})",
+                        REVIEW_WRITE_BACKOFFS.len()
+                    );
+                }
+                Err(error) => {
+                    last_error = format!(
+                        "non-advisory review write attempt {attempt_no}/{} read-back failed: {error}",
+                        REVIEW_WRITE_BACKOFFS.len()
+                    );
+                }
+            }
+            warn!("{last_error}");
+        }
+
+        if attempt_no < REVIEW_WRITE_BACKOFFS.len() {
+            tokio::time::sleep(*backoff).await;
+        }
+    }
+
+    Err(last_error)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_review_task_with_write_mode(
+    plan_arc: std::sync::Arc<tokio::sync::Mutex<PlanState>>,
+    plan_id: &str,
+    task_id: &str,
+    decision: &str,
+    feedback: Option<&str>,
+    pm: Option<Arc<dyn PmLike>>,
+    sink: Option<&dyn crate::events::McpEventSink>,
+    delegation_tx: Option<&tokio::sync::mpsc::Sender<crate::tools::DelegationRequest>>,
+    task_tracker: Option<&tokio_util::task::TaskTracker>,
+    feature_gate: Arc<spur_license::FeatureGate>,
+    write_mode: ReviewWriteMode,
+) -> Result<serde_json::Value, String> {
     let pm_closed_status = pm.as_deref().map(|p| p.closed_status().to_string());
 
     // 1) Sync mutation under lock — no .await inside this block.
-    let outcome = {
-        let mut state = plan_arc.lock().await;
+    let (mut outcome, candidate_state) = {
+        let state = plan_arc.lock().await;
+        let mut candidate = state.clone();
         apply_decision_and_extract(
             plan_id,
             task_id,
             decision,
             feedback,
-            &mut state,
+            &mut candidate,
             pm_closed_status.as_deref(),
             delegation_tx,
             task_tracker,
@@ -4824,78 +5084,106 @@ pub async fn handle_review_task(
             sink,
             pm.as_ref(),
         )
+        .map(|outcome| (outcome, candidate))
     }?; // lock released here.
 
     // 2) Async beads I/O — outside the lock.
     if let Some(pm) = pm.as_deref() {
-        for op in outcome.beads_ops {
-            if let Err(e) = apply_issue_update(pm, &op.issue_id, op.update).await {
-                // Beads failures are best-effort; already baked into warnings
-                // inside the response if any were anticipated.
-                warn!(
-                    "handle_review_task: beads update failed for {}: {e}",
-                    op.issue_id
+        match write_mode {
+            ReviewWriteMode::Advisory => {
+                for op in std::mem::take(&mut outcome.beads_ops) {
+                    if let Err(e) = apply_issue_update(pm, &op.issue_id, op.update).await {
+                        // Beads failures are best-effort; already baked into warnings
+                        // inside the response if any were anticipated.
+                        warn!(
+                            "handle_review_task: beads update failed for {}: {e}",
+                            op.issue_id
+                        );
+                    }
+                }
+            }
+            ReviewWriteMode::NonAdvisory => {
+                let mut ops = std::mem::take(&mut outcome.beads_ops);
+                let epic_id = candidate_state.epic_id.as_deref();
+                ops.extend(
+                    std::mem::take(&mut outcome.audit_emits)
+                        .into_iter()
+                        .flat_map(|emit| emit.into_beads_ops(epic_id)),
                 );
+                apply_review_ops_nonadvisory(pm, ops).await?;
             }
         }
 
         // 2b) Flush audit sentinel emissions — advisory, outside the lock.
-        for emit in outcome.audit_emits {
-            match emit {
-                PendingAuditEmit::Approval {
-                    issue_id,
-                    plan_id,
-                    delegation_id,
-                } => {
-                    emit_approval_audit(
-                        Some(pm),
-                        &issue_id,
-                        feature_gate.as_ref(),
-                        &plan_id,
-                        &delegation_id,
-                    )
-                    .await;
-                }
-                PendingAuditEmit::Rejection {
-                    issue_id,
-                    plan_id,
-                    delegation_id,
-                    feedback,
-                } => {
-                    emit_rejection_audit(
-                        Some(pm),
-                        &issue_id,
-                        feature_gate.as_ref(),
-                        &plan_id,
-                        &delegation_id,
-                        &feedback,
-                    )
-                    .await;
-                }
-                PendingAuditEmit::ReviewFeedback {
-                    issue_id,
-                    plan_id,
-                    delegation_id,
-                    attempt,
-                    feedback,
-                    worker_branch,
-                    summary,
-                } => {
-                    emit_review_feedback_audit(
-                        Some(pm),
-                        &issue_id,
-                        feature_gate.as_ref(),
-                        &plan_id,
-                        &delegation_id,
+        if matches!(write_mode, ReviewWriteMode::Advisory) {
+            for emit in std::mem::take(&mut outcome.audit_emits) {
+                match emit {
+                    PendingAuditEmit::Approval {
+                        issue_id,
+                        plan_id,
+                        task_id: _,
+                        delegation_id,
+                    } => {
+                        emit_approval_audit(
+                            Some(pm),
+                            &issue_id,
+                            feature_gate.as_ref(),
+                            &plan_id,
+                            &delegation_id,
+                        )
+                        .await;
+                    }
+                    PendingAuditEmit::Rejection {
+                        issue_id,
+                        plan_id,
+                        task_id: _,
+                        delegation_id,
+                        feedback,
+                    } => {
+                        emit_rejection_audit(
+                            Some(pm),
+                            &issue_id,
+                            feature_gate.as_ref(),
+                            &plan_id,
+                            &delegation_id,
+                            &feedback,
+                        )
+                        .await;
+                    }
+                    PendingAuditEmit::ReviewFeedback {
+                        issue_id,
+                        plan_id,
+                        task_id: _,
+                        delegation_id,
                         attempt,
-                        &feedback,
+                        feedback,
                         worker_branch,
                         summary,
-                    )
-                    .await;
+                    } => {
+                        emit_review_feedback_audit(
+                            Some(pm),
+                            &issue_id,
+                            feature_gate.as_ref(),
+                            &plan_id,
+                            &delegation_id,
+                            attempt,
+                            &feedback,
+                            worker_branch,
+                            summary,
+                        )
+                        .await;
+                    }
                 }
             }
         }
+    }
+
+    // INV-S1: update the cache only after substrate persistence has completed.
+    // In non-advisory mode, audit sentinels are included in the write set
+    // (INV-S4) and read-back must advance before this assignment.
+    {
+        let mut state = plan_arc.lock().await;
+        *state = candidate_state;
     }
 
     // 3) Emit events.

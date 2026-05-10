@@ -427,9 +427,13 @@ pub struct PlanConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlanSubstrateMigrationConfig {
-    /// PR2 guard: default off because task-level review/completion audits do
-    /// not advance the epic audit sequence until PR3.
+    /// PR2 guard: default off during staged rollout. When enabled, persisted
+    /// plan reads may serve from cache if the epic audit sequence is unchanged.
     pub versioned_cache_serve: bool,
+    /// PR3 guard: when true, review_task writes are non-advisory. The task
+    /// decision is applied to the in-memory cache only after beads write +
+    /// read-back confirms the substrate version advanced.
+    pub nonadvisory_review_writes: bool,
 }
 
 /// Runtime knobs for `delegate_to_worker` / `delegate_parallel` dispatch.
@@ -1142,9 +1146,11 @@ mod tests {
     fn plan_substrate_migration_versioned_cache_serve_defaults_off() {
         let cfg = SpurConfig::default();
         assert!(!cfg.plan.substrate_migration.versioned_cache_serve);
+        assert!(!cfg.plan.substrate_migration.nonadvisory_review_writes);
 
         let parsed: SpurConfig = toml::from_str("").unwrap();
         assert!(!parsed.plan.substrate_migration.versioned_cache_serve);
+        assert!(!parsed.plan.substrate_migration.nonadvisory_review_writes);
     }
 
     #[test]
@@ -1153,10 +1159,12 @@ mod tests {
             r#"
             [plan.substrate_migration]
             versioned_cache_serve = true
+            nonadvisory_review_writes = true
             "#,
         )
         .unwrap();
         assert!(cfg.plan.substrate_migration.versioned_cache_serve);
+        assert!(cfg.plan.substrate_migration.nonadvisory_review_writes);
     }
 
     #[test]
