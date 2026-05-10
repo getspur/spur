@@ -50,7 +50,6 @@ use crate::review_sink::ReviewSink;
 use crate::scheduler::TurnGuard;
 
 pub mod adhoc;
-mod codex_discovery;
 pub mod connection;
 mod delegation;
 pub mod input;
@@ -60,12 +59,12 @@ mod pm_bridge;
 pub mod prompt;
 mod review;
 pub mod session;
+mod session_discovery;
 mod support;
 pub mod types;
 mod util;
 mod worker_mcp;
 
-use codex_discovery::filter_sessions_for_repo;
 pub use delegation::cleanup::{should_commit_worker_diff, should_preserve_worktree};
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use delegation::execute::{render_retry_context, RetryAttempt};
@@ -77,6 +76,7 @@ use pm_bridge::{handle_get_issue_graph, issue_to_detail_event, refresh_pm_state}
 use review::apply_decision_to_candidate;
 pub use review::{cleanup_cancelled_review, review_dispatcher_loop};
 use session::{abort_mcp_handle, cleanup_mcp_on_err, retire_brain_session};
+use session_discovery::classify_sessions;
 pub use types::{
     ActiveConnection, BrainSession, FaultInjectionHooks, LoadBrainSessionError, ReconnectError,
     RunOpts, RunResult,

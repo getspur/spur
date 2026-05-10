@@ -11,7 +11,7 @@ use spur_acp::connection::{
 };
 use spur_acp::types::{AgentHealth, TransportKind};
 
-use crate::orchestrator::codex_discovery::list_codex_sessions_from_disk_root;
+use crate::orchestrator::session_discovery::discovery_for_kind;
 use crate::orchestrator::{Orchestrator, MAX_SESSION_LIST_PAGES, MAX_SESSION_LIST_SESSIONS};
 
 impl Orchestrator {
@@ -172,91 +172,16 @@ impl Orchestrator {
     }
 
     /// Fallback: read sessions from an agent's local storage on disk.
-    /// Currently supports kiro-cli and codex.
-    pub(super) fn list_sessions_from_disk(agent_name: &str) -> Result<Vec<SessionInfo>> {
-        // kiro-cli stores sessions in ~/.kiro/sessions/cli/<uuid>.json
-        if agent_name.contains("kiro") {
-            let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
-            let sessions_dir = home.join(".kiro/sessions/cli");
-
-            if !sessions_dir.exists() {
-                return Ok(Vec::new());
-            }
-
-            let mut sessions: Vec<SessionInfo> = Vec::new();
-            for entry in std::fs::read_dir(&sessions_dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                    continue;
-                }
-
-                let content = match std::fs::read_to_string(&path) {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                };
-
-                // Parse the minimal fields we need from kiro's session format.
-                let json: serde_json::Value = match serde_json::from_str(&content) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-
-                let session_id = match json.get("session_id").and_then(|v| v.as_str()) {
-                    Some(id) => id.to_string(),
-                    None => continue,
-                };
-                let cwd = json
-                    .get("cwd")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let title = json
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let updated_at = json
-                    .get("updated_at")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-
-                let mut info = SessionInfo::new(session_id, PathBuf::from(cwd));
-                info = info.title(title);
-                info = info.updated_at(updated_at);
-                sessions.push(info);
-            }
-
-            // Sort by updated_at descending (most recent first).
-            sessions.sort_by(|a, b| {
-                let a_time = a.updated_at.as_deref().unwrap_or("");
-                let b_time = b.updated_at.as_deref().unwrap_or("");
-                b_time.cmp(a_time)
-            });
-
-            info!(
-                count = sessions.len(),
-                "Loaded sessions from kiro disk storage"
-            );
-            return Ok(sessions);
-        }
-
-        // Codex stores rollout JSONL files under ~/.codex/sessions/YYYY/MM/DD.
-        // Cap the scan to the newest rollout headers so fallback stays bounded.
-        if agent_name.contains("codex") {
-            let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
-            let sessions_root = home.join(".codex/sessions");
-            let sessions = list_codex_sessions_from_disk_root(&sessions_root)?;
-            info!(
-                count = sessions.len(),
-                "Loaded sessions from codex disk storage"
-            );
-            return Ok(sessions);
-        }
-
-        anyhow::bail!(
-            "No filesystem fallback available for agent '{}'",
-            agent_name
-        )
+    pub(super) fn list_sessions_from_disk(
+        agent_config: &spur_acp::config::AgentConfig,
+    ) -> Result<Vec<SessionInfo>> {
+        let discovery = discovery_for_kind(agent_config.kind).ok_or_else(|| {
+            anyhow!(
+                "No filesystem fallback available for agent '{}'",
+                agent_config.name
+            )
+        })?;
+        discovery.discover()
     }
 
     /// Read conversation history from a kiro session's JSONL file on disk.
