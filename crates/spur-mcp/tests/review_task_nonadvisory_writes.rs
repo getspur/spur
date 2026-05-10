@@ -4,7 +4,9 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 use spur_acp::{BrainSessionId, SessionId};
-use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
+use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind, CompletionState};
+use spur_mcp::plan::labels;
+use spur_mcp::plan::test_util::MockPm;
 use spur_mcp::plan::{
     handle_review_task_with_write_mode, PlanMergeState, PlanState, PlanTask, PlanTaskEntry,
     PlanTaskStatus, PmLike, ReviewWriteMode,
@@ -43,6 +45,16 @@ impl FaultyReviewPm {
     }
 }
 
+struct FailingMockPm {
+    inner: Arc<MockPm>,
+}
+
+impl FailingMockPm {
+    fn new(inner: Arc<MockPm>) -> Self {
+        Self { inner }
+    }
+}
+
 #[async_trait::async_trait]
 impl PmLike for FaultyReviewPm {
     async fn update_issue(&self, id: &str, update: spur_pm::IssueUpdate) -> anyhow::Result<()> {
@@ -73,6 +85,94 @@ impl PmLike for FaultyReviewPm {
 
     fn advanced(&self) -> Option<&dyn spur_pm::BeadsAdvanced> {
         Some(self)
+    }
+}
+
+#[async_trait::async_trait]
+impl PmLike for FailingMockPm {
+    async fn get_issue(&self, id: &str) -> anyhow::Result<spur_pm::Issue> {
+        self.inner.get_issue(id).await
+    }
+
+    async fn list_issues(
+        &self,
+        filter: spur_pm::IssueFilter,
+    ) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
+        self.inner.list_issues(filter).await
+    }
+
+    async fn create_issue(&self, params: spur_pm::IssueCreate) -> anyhow::Result<String> {
+        self.inner.create_issue(params).await
+    }
+
+    async fn update_issue(&self, id: &str, _update: spur_pm::IssueUpdate) -> anyhow::Result<()> {
+        anyhow::bail!("injected review write failure for {id}");
+    }
+
+    async fn add_dependency(&self, issue_id: &str, depends_on_id: &str) -> anyhow::Result<()> {
+        self.inner.add_dependency(issue_id, depends_on_id).await
+    }
+
+    async fn issue_labels(&self, id: &str) -> anyhow::Result<Vec<String>> {
+        self.inner.issue_labels(id).await
+    }
+
+    fn closed_status(&self) -> &str {
+        "closed"
+    }
+
+    fn source_str(&self) -> &'static str {
+        "beads"
+    }
+
+    fn advanced(&self) -> Option<&dyn spur_pm::BeadsAdvanced> {
+        Some(self)
+    }
+}
+
+#[async_trait::async_trait]
+impl spur_pm::BeadsAdvanced for FailingMockPm {
+    async fn list_ready(
+        &self,
+        filter: spur_pm::ReadyFilter,
+    ) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
+        self.inner
+            .advanced()
+            .expect("MockPm exposes advanced")
+            .list_ready(filter)
+            .await
+    }
+
+    async fn list_comments(&self, issue_id: &str) -> anyhow::Result<Vec<spur_pm::Comment>> {
+        self.inner
+            .advanced()
+            .expect("MockPm exposes advanced")
+            .list_comments(issue_id)
+            .await
+    }
+
+    async fn add_comment(&self, issue_id: &str, body: &str) -> anyhow::Result<spur_pm::CommentId> {
+        self.inner
+            .advanced()
+            .expect("MockPm exposes advanced")
+            .add_comment(issue_id, body)
+            .await
+    }
+
+    async fn remove_dependency(&self, issue_id: &str, depends_on_id: &str) -> anyhow::Result<()> {
+        self.inner
+            .advanced()
+            .expect("MockPm exposes advanced")
+            .remove_dependency(issue_id, depends_on_id)
+            .await
+    }
+
+    async fn dep_cycles(&self) -> anyhow::Result<Vec<spur_pm::DependencyCycle>> {
+        self.inner
+            .advanced()
+            .expect("MockPm exposes advanced")
+            .dep_cycles()
+            .await
     }
 }
 
@@ -158,7 +258,7 @@ async fn nonadvisory_retry_does_not_duplicate_successful_audit_ops() {
         None,
         None,
         None,
-        spur_mcp::server::community_feature_gate(),
+        common::server_builder::pro_feature_gate(),
         ReviewWriteMode::NonAdvisory,
     )
     .await
@@ -191,7 +291,7 @@ async fn nonadvisory_review_writes_epic_task_transition_audit() {
         None,
         None,
         None,
-        spur_mcp::server::community_feature_gate(),
+        common::server_builder::pro_feature_gate(),
         ReviewWriteMode::NonAdvisory,
     )
     .await
@@ -216,19 +316,6 @@ async fn nonadvisory_review_writes_epic_task_transition_audit() {
     );
 }
 
-fn run_br(repo: &Path, args: &[&str]) -> Result<(), String> {
-    common::beads::run_br(repo, args).map(|_| ())
-}
-
-async fn beads_pm(repo: &Path) -> Arc<spur_pm::PmService> {
-    Arc::new(
-        spur_pm::PmService::try_new(None, true, false, repo, None)
-            .await
-            .expect("PmService::try_new failed")
-            .expect("expected beads pm"),
-    )
-}
-
 fn decode_error_message(response: &Value) -> String {
     response["error"]["message"]
         .as_str()
@@ -250,20 +337,44 @@ fn extract_submit_plan_id(response: &Value) -> String {
         .expect("submit_plan response must include plan_id line")
 }
 
+fn run_git(repo: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("git invocation failed");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn init_git_repo(repo: &Path) {
+    run_git(repo, &["init", "-q"]);
+    run_git(repo, &["config", "user.email", "test@spur"]);
+    run_git(repo, &["config", "user.name", "spur-test"]);
+    std::fs::write(repo.join("seed.txt"), "seed\n").expect("write seed");
+    run_git(repo, &["add", "seed.txt"]);
+    run_git(repo, &["commit", "-q", "-m", "seed"]);
+}
+
 #[tokio::test]
 async fn server_nonadvisory_review_error_invalidates_active_plan_cache() {
     let dir = TempDir::new().expect("tempdir");
-    run_br(dir.path(), &["init"]).expect("br init");
-    let pm = beads_pm(dir.path()).await;
+    init_git_repo(dir.path());
+    let mock_pm = MockPm::new().arc();
     let session_id = BrainSessionId::new(SessionId("brain".into()));
     let (mut server, _channel) = McpCallbackServer::new(
         Some(&session_id),
-        Some(pm),
+        None,
         None,
         common::server_builder::continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
         common::server_builder::pro_feature_gate(),
     );
+    server.__test_set_pm_like(Arc::clone(&mock_pm) as Arc<dyn PmLike>);
+    server.set_repo_root(dir.path().to_path_buf());
     server.set_nonadvisory_review_writes(true);
     let submit_response = server
         .__test_call_tool(
@@ -286,14 +397,46 @@ async fn server_nonadvisory_review_error_invalidates_active_plan_cache() {
         .__test_load_or_project_plan(&plan_id)
         .await
         .expect("project submitted plan");
-    let mut cached_state = projected.lock().await.clone();
-    cached_state.tasks[0].status = PlanTaskStatus::AwaitingReview {
-        summary: Some("ready".into()),
-    };
-    cached_state.tasks[0].spec.issue_id = Some("bd-missing-review-task".into());
-    cached_state.tasks[0].last_delegation_id = Some("del-1".into());
-    server.__test_install_plan(cached_state).await;
+    let task_issue = projected.lock().await.tasks[0]
+        .spec
+        .issue_id
+        .clone()
+        .expect("submitted task issue id");
+    mock_pm
+        .update_issue(
+            &task_issue,
+            spur_pm::IssueUpdate {
+                add_labels: vec![labels::READY_FOR_REVIEW.to_string()],
+                comment: Some(audit_sentinel::encode_comment(
+                    &AuditSentinelKind::Completion {
+                        delegation_id: "del-1".into(),
+                        worker_branch: Some("feat/worker".into()),
+                        result_summary: Some("ready".into()),
+                        completion_state: CompletionState::AwaitingReview,
+                        superseded: false,
+                        artifact_uri: None,
+                        dispatched_base_oid: None,
+                    },
+                )),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed durable awaiting-review completion");
+    let projected = server
+        .__test_load_or_project_plan(&plan_id)
+        .await
+        .expect("project awaiting-review plan");
+    {
+        let state = projected.lock().await;
+        assert!(
+            matches!(state.tasks[0].status, PlanTaskStatus::AwaitingReview { .. }),
+            "durable MockPm projection should put t1 in AwaitingReview"
+        );
+    }
     assert_eq!(server.__test_active_plan_count().await, 1);
+    let failing_pm: Arc<dyn PmLike> = Arc::new(FailingMockPm::new(Arc::clone(&mock_pm)));
+    server.__test_set_pm_like(failing_pm);
 
     let response = server
         .__test_call_tool(
@@ -307,13 +450,14 @@ async fn server_nonadvisory_review_error_invalidates_active_plan_cache() {
         .await;
     assert!(
         response.get("error").is_some(),
-        "injected missing issue failure must surface through review_task: {response}"
+        "injected MockPm write failure must surface through review_task: {response}"
     );
     assert_eq!(
         server.__test_active_plan_count().await,
         0,
         "server wrapper must invalidate cached plan on exhausted non-advisory write retries"
     );
+    server.__test_set_pm_like(Arc::clone(&mock_pm) as Arc<dyn PmLike>);
 
     let status_response = server
         .__test_call_tool("get_plan_status", json!({ "plan_id": plan_id }))
@@ -329,7 +473,7 @@ async fn server_nonadvisory_review_error_invalidates_active_plan_cache() {
             .expect("get_plan_status response text");
         let status: Value = serde_json::from_str(text).expect("status json");
         assert_eq!(
-            status["tasks"][0]["status"], "ready",
+            status["tasks"][0]["status"], "awaiting_review",
             "get_plan_status must re-project durable beads state after eviction"
         );
     }

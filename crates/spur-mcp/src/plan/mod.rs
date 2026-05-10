@@ -21,7 +21,7 @@ pub mod signal_watcher;
 pub mod signals;
 pub mod snapshot;
 pub mod staging;
-#[cfg(test)]
+#[doc(hidden)]
 pub mod test_util;
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
@@ -4417,8 +4417,14 @@ pub async fn handle_review_task(
 
 async fn review_beads_version(
     pm: &dyn PmLike,
+    feature_gate: &spur_license::FeatureGate,
     issue_ids: &BTreeSet<String>,
 ) -> Result<ReviewBeadsVersion, String> {
+    crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        feature_gate,
+    )
+    .map_err(crate::server::feature_error_message)?;
     let Some(advanced) = pm.advanced() else {
         return Err("non-advisory review writes require beads advanced read-back".to_string());
     };
@@ -4434,6 +4440,7 @@ async fn review_beads_version(
 
 async fn apply_review_ops_nonadvisory(
     pm: &dyn PmLike,
+    feature_gate: &spur_license::FeatureGate,
     ops: Vec<PendingBeadsOp>,
 ) -> Result<(), String> {
     if ops.is_empty() {
@@ -4441,7 +4448,7 @@ async fn apply_review_ops_nonadvisory(
     }
 
     let issue_ids: BTreeSet<String> = ops.iter().map(|op| op.issue_id.clone()).collect();
-    let before = review_beads_version(pm, &issue_ids).await?;
+    let before = review_beads_version(pm, feature_gate, &issue_ids).await?;
     let mut last_error = String::new();
     let mut succeeded = vec![false; ops.len()];
 
@@ -4472,7 +4479,7 @@ async fn apply_review_ops_nonadvisory(
             // cache, and only after this read-back proves the substrate
             // version advanced. INV-S4: the audit ops above are in the same
             // bounded write batch as the task status/label mutation.
-            match review_beads_version(pm, &issue_ids).await {
+            match review_beads_version(pm, feature_gate, &issue_ids).await {
                 Ok(after) if after > before => return Ok(()),
                 Ok(after) => {
                     last_error = format!(
@@ -4557,7 +4564,7 @@ pub async fn handle_review_task_with_write_mode(
                         .into_iter()
                         .flat_map(|emit| emit.into_beads_ops(epic_id)),
                 );
-                apply_review_ops_nonadvisory(pm, ops).await?;
+                apply_review_ops_nonadvisory(pm, feature_gate.as_ref(), ops).await?;
             }
         }
 
