@@ -225,7 +225,8 @@ pub enum Action {
     Issue(IssueAction),
     /// Navigate to Dashboard with Agents panel focused and the
     /// highest-priority executor pre-selected (AwaitingReview > Running
-    /// > most recent worker). Emitted by Alt+g in SessionDetailView.
+    /// > most recent worker). Emitted by Alt+g globally (toggles between
+    /// SessionDetail and Dashboard with Agents focused).
     InspectWorkers,
     /// Plan C Tier 2 — show the capability-tease modal in response to
     /// a TUI-side feature-gate denial. The orchestrator-resolved
