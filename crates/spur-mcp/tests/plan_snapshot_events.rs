@@ -298,11 +298,10 @@ async fn recover_persisted_plans_skips_unowned_legacy_plan() {
         pm.advanced().expect("advanced beads backend"),
         "legacy-plan",
         &subgraph,
-        None,
-        None,
-        Some("submit_plan"),
-        None,
-        None,
+        spur_mcp::PlanSubmitAuditContext {
+            execution_mode: Some("submit_plan"),
+            ..Default::default()
+        },
     )
     .await;
 

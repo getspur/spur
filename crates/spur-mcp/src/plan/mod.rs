@@ -2185,41 +2185,40 @@ pub fn completion_audit_already_emitted(
     })
 }
 
-fn apply_worker_output_invariant(
-    completion_state: crate::plan::audit_sentinel::CompletionState,
-    mut fields: crate::plan::audit_sentinel::CompletionAuditFields,
-) -> (
-    crate::plan::audit_sentinel::CompletionState,
-    crate::plan::audit_sentinel::CompletionAuditFields,
+fn log_worker_output_commit_count(
+    completion_state: &crate::plan::audit_sentinel::CompletionState,
+    fields: &crate::plan::audit_sentinel::CompletionAuditFields,
 ) {
     use crate::plan::audit_sentinel::CompletionState;
 
-    if completion_state != CompletionState::AwaitingReview {
-        return (completion_state, fields);
+    if completion_state != &CompletionState::AwaitingReview {
+        return;
     }
 
     let (Some(base), Some(branch)) = (
         fields.dispatched_base_oid.as_deref(),
         fields.worker_branch.as_deref(),
     ) else {
-        return (completion_state, fields);
+        return;
     };
 
     let repo_root = fields
         .repo_root
         .as_deref()
         .unwrap_or_else(|| std::path::Path::new("."));
-    let diagnostic =
-        match crate::plan::audit_sentinel::count_worker_commits(repo_root, base, branch) {
-            Ok(1) => return (completion_state, fields),
-            Ok(count) => format!(
-                "worker output invariant violated: branch {branch} has {count} commits in {base}..; expected exactly 1. you produced {count} commits; please make exactly 1 squashed commit with git commit --amend or an interactive rebase."
-            ),
-            Err(error) => format!("worker output invariant check failed: {error}"),
-        };
-
-    fields.result_summary = Some(diagnostic);
-    (CompletionState::Failed, fields)
+    match crate::plan::audit_sentinel::count_worker_commits(repo_root, base, branch) {
+        Ok(count) => tracing::info!(
+            branch,
+            base,
+            count,
+            "observed worker output commit count at completion"
+        ),
+        Err(error) => tracing::warn!(
+            branch,
+            base,
+            "worker output commit count observation failed: {error}"
+        ),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2307,7 +2306,7 @@ async fn persist_completion_result_after_worker_output_invariant(
     fields: crate::plan::audit_sentinel::CompletionAuditFields,
     already_emitted: bool,
 ) -> anyhow::Result<()> {
-    let (completion_state, fields) = apply_worker_output_invariant(completion_state, fields);
+    log_worker_output_commit_count(&completion_state, &fields);
     persist_completion_result(
         pm,
         issue_id,
@@ -2334,7 +2333,7 @@ pub(crate) async fn persist_completion_result_after_worker_output_invariant_with
     attempt: u32,
     task_id: Option<&str>,
 ) -> anyhow::Result<CompletionPersistenceAction> {
-    let (completion_state, fields) = apply_worker_output_invariant(completion_state, fields);
+    log_worker_output_commit_count(&completion_state, &fields);
     persist_completion_result_with_retry_for_task(
         pm,
         issue_id,
@@ -8063,7 +8062,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn emit_completion_audit_downgrades_to_failed_on_invariant_violation() {
+    async fn emit_completion_audit_preserves_awaiting_review_for_multi_commit_output() {
         let (repo, base) = worker_output_repo(2);
         let delegation_label = crate::plan::labels::delegation_id("del-A");
         let lease_label = crate::plan::labels::lease_expires_at(1_777_777_777);
@@ -8085,7 +8084,7 @@ mod tests {
             false,
         )
         .await
-        .expect("persist downgraded completion");
+        .expect("persist completion");
 
         match single_completion_comment(&pm) {
             crate::plan::audit_sentinel::AuditSentinelKind::Completion {
@@ -8097,47 +8096,37 @@ mod tests {
             } => {
                 assert_eq!(
                     completion_state,
-                    crate::plan::audit_sentinel::CompletionState::Failed
+                    crate::plan::audit_sentinel::CompletionState::AwaitingReview
                 );
                 assert_eq!(worker_branch.as_deref(), Some("worker"));
                 assert_eq!(dispatched_base_oid.as_deref(), Some(base.as_str()));
-                let summary = result_summary.expect("diagnostic summary");
-                assert!(
-                    summary.contains(
-                        "worker output invariant violated: branch worker has 2 commits in"
-                    ),
-                    "diagnostic should include branch and count: {summary}"
-                );
-                assert!(
-                    summary.contains("you produced 2 commits; please make exactly 1"),
-                    "diagnostic should tell the worker how to repair output: {summary}"
-                );
+                assert_eq!(result_summary.as_deref(), Some("worker done"));
             }
             other => panic!("expected completion audit, got {other:?}"),
         }
 
         assert_eq!(
             pm.status.lock().expect("status lock").as_deref(),
-            Some("closed"),
-            "downgraded completion should use the terminal Failed update"
+            None,
+            "awaiting-review completion should not close the issue"
         );
         let labels = pm.labels.lock().expect("labels lock");
         assert!(
             !labels.contains(&delegation_label),
-            "delegation label must be cleared after downgrade"
+            "delegation label must be cleared after completion write"
         );
         assert!(
             !labels.contains(&lease_label),
             "lease label must be cleared after downgrade"
         );
         assert!(
-            !labels.contains(&crate::plan::labels::READY_FOR_REVIEW.to_string()),
-            "downgraded completion must not add ready-for-review"
+            labels.contains(&crate::plan::labels::READY_FOR_REVIEW.to_string()),
+            "awaiting review completion must add ready-for-review"
         );
     }
 
     #[tokio::test]
-    async fn invariant_violation_at_attempt_1_retries_with_recovery_prompt() {
+    async fn zero_commit_output_does_not_auto_retry_after_normalization_design() {
         let (repo, base) = worker_output_repo(0);
         let delegation_label = crate::plan::labels::delegation_id("del-A");
         let lease_label = crate::plan::labels::lease_expires_at(1_777_777_777);
@@ -8165,12 +8154,14 @@ mod tests {
 
         assert!(matches!(
             action,
-            super::CompletionPersistenceAction::AutoRetried { .. }
+            super::CompletionPersistenceAction::Completed(
+                crate::plan::audit_sentinel::CompletionState::AwaitingReview
+            )
         ));
         assert_eq!(
             pm.status.lock().expect("status lock").as_deref(),
-            Some("open"),
-            "attempt 1 invariant failure should keep the issue open for retry"
+            None,
+            "awaiting-review completion should leave issue status unchanged"
         );
 
         let comments = pm.advanced.comments.lock().expect("comments lock");
@@ -8186,15 +8177,8 @@ mod tests {
                 } => Some((error, worker_branch)),
                 _ => None,
             })
-            .expect("RetryRequested audit");
-        assert!(
-            retry
-                .0
-                .contains("you produced 0 commits; please make exactly 1"),
-            "retry reason should tell the worker how to repair the invariant: {}",
-            retry.0
-        );
-        assert_eq!(retry.1.as_deref(), Some("worker"));
+            .is_some();
+        assert!(!retry, "normalization design must not emit RetryRequested");
     }
 
     #[derive(Default)]
