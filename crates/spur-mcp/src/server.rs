@@ -690,6 +690,15 @@ pub struct EpicSubgraph {
     pub task_map: std::collections::HashMap<String, String>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PlanSubmitAuditContext<'a> {
+    pub base_snapshot_branch: Option<&'a str>,
+    pub base_snapshot_oid: Option<&'a str>,
+    pub execution_mode: Option<&'a str>,
+    pub brain_session_id: Option<&'a SessionId>,
+    pub explicit_base: Option<&'a crate::tools::BaseTarget>,
+}
+
 /// Compose a beads epic + child issues + dependency edges from a
 /// validated plan. Labels each child with `spur:plan-id:<plan_id>` so
 /// review_task can correlate approvals back to beads.
@@ -812,21 +821,17 @@ pub async fn emit_plan_submit_audit(
     advanced: &dyn spur_pm::BeadsAdvanced,
     plan_id: &str,
     sg: &EpicSubgraph,
-    base_snapshot_branch: Option<&str>,
-    base_snapshot_oid: Option<&str>,
-    execution_mode: Option<&str>,
-    brain_session_id: Option<&SessionId>,
-    explicit_base: Option<&crate::tools::BaseTarget>,
+    context: PlanSubmitAuditContext<'_>,
 ) {
     let kind = crate::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
         plan_id: plan_id.to_string(),
         epic_issue_id: sg.epic_id.clone(),
         task_ids: sg.task_map.values().cloned().collect(),
-        base_snapshot_branch: base_snapshot_branch.map(str::to_string),
-        base_snapshot_oid: base_snapshot_oid.map(str::to_string),
-        execution_mode: execution_mode.map(str::to_string),
-        brain_session_id: brain_session_id.map(ToString::to_string),
-        explicit_base: explicit_base.cloned(),
+        base_snapshot_branch: context.base_snapshot_branch.map(str::to_string),
+        base_snapshot_oid: context.base_snapshot_oid.map(str::to_string),
+        execution_mode: context.execution_mode.map(str::to_string),
+        brain_session_id: context.brain_session_id.map(ToString::to_string),
+        explicit_base: context.explicit_base.cloned(),
     };
     let body = crate::plan::audit_sentinel::encode_comment(&kind);
     if let Err(e) = advanced.add_comment(&sg.epic_id, &body).await {
@@ -5576,11 +5581,13 @@ impl McpCallbackServer {
                     adv,
                     &plan_id,
                     sg,
-                    base_snapshot_branch.as_deref(),
-                    base_snapshot_oid.as_deref(),
-                    Some("submit_plan"),
-                    Some(self.brain_session_id().as_session_id()),
-                    explicit_base.as_ref(),
+                    PlanSubmitAuditContext {
+                        base_snapshot_branch: base_snapshot_branch.as_deref(),
+                        base_snapshot_oid: base_snapshot_oid.as_deref(),
+                        execution_mode: Some("submit_plan"),
+                        brain_session_id: Some(self.brain_session_id().as_session_id()),
+                        explicit_base: explicit_base.as_ref(),
+                    },
                 )
                 .await;
             }
@@ -6048,11 +6055,13 @@ impl McpCallbackServer {
                 adv,
                 &plan_id,
                 &sg,
-                base_snapshot_branch.as_deref(),
-                base_snapshot_oid.as_deref(),
-                Some("execute_epic"),
-                Some(self.brain_session_id().as_session_id()),
-                None,
+                PlanSubmitAuditContext {
+                    base_snapshot_branch: base_snapshot_branch.as_deref(),
+                    base_snapshot_oid: base_snapshot_oid.as_deref(),
+                    execution_mode: Some("execute_epic"),
+                    brain_session_id: Some(self.brain_session_id().as_session_id()),
+                    explicit_base: None,
+                },
             )
             .await;
 
@@ -9491,11 +9500,13 @@ mod merge_plan_tests {
             adv,
             plan_id,
             &subgraph,
-            Some("spur/brain-snapshot-test"),
-            Some(base_snapshot_oid.as_str()),
-            Some("submit_plan"),
-            None,
-            None,
+            crate::PlanSubmitAuditContext {
+                base_snapshot_branch: Some("spur/brain-snapshot-test"),
+                base_snapshot_oid: Some(base_snapshot_oid.as_str()),
+                execution_mode: Some("submit_plan"),
+                brain_session_id: None,
+                explicit_base: None,
+            },
         )
         .await;
 
@@ -9694,11 +9705,13 @@ mod merge_plan_tests {
             adv,
             plan_id,
             &subgraph,
-            Some("spur/brain-snapshot-test"),
-            Some(base_snapshot_oid.as_str()),
-            Some("submit_plan"),
-            None,
-            None,
+            crate::PlanSubmitAuditContext {
+                base_snapshot_branch: Some("spur/brain-snapshot-test"),
+                base_snapshot_oid: Some(base_snapshot_oid.as_str()),
+                execution_mode: Some("submit_plan"),
+                brain_session_id: None,
+                explicit_base: None,
+            },
         )
         .await;
 
@@ -10004,11 +10017,13 @@ mod merge_plan_tests {
             adv,
             plan_id,
             &subgraph,
-            Some("spur/brain-snapshot-test"),
-            Some(base_snapshot_oid.as_str()),
-            Some("submit_plan"),
-            None,
-            None,
+            crate::PlanSubmitAuditContext {
+                base_snapshot_branch: Some("spur/brain-snapshot-test"),
+                base_snapshot_oid: Some(base_snapshot_oid.as_str()),
+                execution_mode: Some("submit_plan"),
+                brain_session_id: None,
+                explicit_base: None,
+            },
         )
         .await;
         for (issue_id, audit) in [
@@ -11219,11 +11234,13 @@ mod reconciler_fast_forward_tests {
             adv,
             "plan-1",
             &sg,
-            Some("main"),
-            Some("abc123"),
-            Some("test"),
-            None,
-            None,
+            crate::PlanSubmitAuditContext {
+                base_snapshot_branch: Some("main"),
+                base_snapshot_oid: Some("abc123"),
+                execution_mode: Some("test"),
+                brain_session_id: None,
+                explicit_base: None,
+            },
         )
         .await;
 
@@ -11269,7 +11286,8 @@ mod reconciler_fast_forward_tests {
         )
         .expect("pro gate");
         let adv = pm.advanced().expect("advanced");
-        crate::emit_plan_submit_audit(adv, "plan-1", &sg, None, None, None, None, None).await;
+        crate::emit_plan_submit_audit(adv, "plan-1", &sg, crate::PlanSubmitAuditContext::default())
+            .await;
 
         // The detector must report that legacy reclaim is still needed.
         let needs_reclaim =

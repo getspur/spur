@@ -676,7 +676,9 @@ pub async fn report_signal(
     // going through a forged comment. `PotentialClobber` remains brain-only.
     if !matches!(
         args.signal,
-        WorkerSignal::ScopeDrift { .. } | WorkerSignal::RetryExhausted { .. }
+        WorkerSignal::ScopeDrift { .. }
+            | WorkerSignal::RetryExhausted { .. }
+            | WorkerSignal::MarkNoop { .. }
     ) {
         return Err(McpHandlerError::InvalidParams(format!(
             "report_signal: only worker-emittable signal kinds are accepted; got {}",
@@ -749,6 +751,9 @@ pub async fn report_signal(
         }
         WorkerSignal::RetryExhausted { .. } => {
             (0.0, String::new(), args.signal.kind_label().to_string())
+        }
+        WorkerSignal::MarkNoop { reason, .. } => {
+            (0.0, reason.clone(), args.signal.kind_label().to_string())
         }
     };
 

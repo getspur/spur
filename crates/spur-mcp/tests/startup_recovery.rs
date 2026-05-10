@@ -59,11 +59,11 @@ async fn create_persisted_plan(
         pm.advanced().expect("advanced beads backend"),
         plan_id,
         &subgraph,
-        None,
-        None,
-        Some("test"),
-        owner.map(BrainSessionId::as_session_id),
-        None,
+        spur_mcp::PlanSubmitAuditContext {
+            execution_mode: Some("test"),
+            brain_session_id: owner.map(BrainSessionId::as_session_id),
+            ..Default::default()
+        },
     )
     .await;
 

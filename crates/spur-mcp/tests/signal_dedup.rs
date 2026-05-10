@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -21,10 +22,21 @@ use spur_mcp::plan::signals::{self, WorkerSignal};
 use spur_mcp::plan::{PlanState, PlanTask};
 use spur_pm::PmService;
 use tempfile::TempDir;
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use tokio::time::sleep;
 use uuid::Uuid;
 
 mod common;
+
+static SIGNAL_TEST_MUTEX: OnceLock<Arc<AsyncMutex<()>>> = OnceLock::new();
+
+async fn signal_test_guard() -> OwnedMutexGuard<()> {
+    SIGNAL_TEST_MUTEX
+        .get_or_init(|| Arc::new(AsyncMutex::new(())))
+        .clone()
+        .lock_owned()
+        .await
+}
 
 fn run_br(repo: &Path, args: &[&str]) -> Result<String, String> {
     common::beads::run_br(repo, args)
@@ -272,6 +284,7 @@ where
 
 #[tokio::test]
 async fn duplicate_signal_comments_with_same_signal_id_commit_once() {
+    let _guard = signal_test_guard().await;
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
 
@@ -328,6 +341,7 @@ async fn duplicate_signal_comments_with_same_signal_id_commit_once() {
 
 #[tokio::test]
 async fn watcher_skips_signal_task_without_ready_for_review_label() {
+    let _guard = signal_test_guard().await;
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
 
@@ -362,6 +376,7 @@ async fn watcher_skips_signal_task_without_ready_for_review_label() {
 
 #[tokio::test]
 async fn watcher_projects_real_plan_state_for_scoring() {
+    let _guard = signal_test_guard().await;
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
 
@@ -406,6 +421,7 @@ async fn watcher_projects_real_plan_state_for_scoring() {
 
 #[tokio::test]
 async fn watcher_processes_only_one_signal_per_task_per_tick() {
+    let _guard = signal_test_guard().await;
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
 
@@ -464,6 +480,7 @@ async fn watcher_processes_only_one_signal_per_task_per_tick() {
 
 #[tokio::test]
 async fn watcher_skips_review_rejected_tasks_even_if_signal_label_exists() {
+    let _guard = signal_test_guard().await;
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
 
@@ -507,6 +524,7 @@ async fn watcher_skips_review_rejected_tasks_even_if_signal_label_exists() {
 
 #[tokio::test]
 async fn watcher_retries_signal_after_invariant_violation_without_marking_processed() {
+    let _guard = signal_test_guard().await;
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
 
@@ -612,6 +630,7 @@ async fn watcher_retries_signal_after_invariant_violation_without_marking_proces
 
 #[tokio::test]
 async fn distinct_signal_on_task_with_prior_processed_label_is_not_skipped() {
+    let _guard = signal_test_guard().await;
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
 

@@ -436,6 +436,7 @@ dispatch_lease_heartbeat_secs = 200
 
 [tui]
 edit_mode = "vim"
+theme = "high-contrast"
 
 [log]
 level = "warn,spur_core::orchestrator=info"
