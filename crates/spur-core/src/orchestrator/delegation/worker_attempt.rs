@@ -238,6 +238,10 @@ pub(crate) async fn run_one_worker_attempt(
             )));
         }
     };
+    worktrees
+        .update_base_commit(&worker_session, dispatched_base_oid.clone())
+        .map_err(|e| AttemptSetupError::WorktreeFailed(format!("update base commit: {e}")))?;
+
     if let Some(tx) = &ctx.dispatched_base_oid_tx {
         let _ = tx.send(Some(dispatched_base_oid.clone()));
     }
