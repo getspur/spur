@@ -10,7 +10,7 @@ fn community_has_core_features() {
     let gate = FeatureGate::new(policy);
     assert!(gate.has(FeatureKey::CORE_CORE_BRAIN_SESSION));
     assert!(gate.has(FeatureKey::CORE_CORE_PARALLEL_WORKERS));
-    assert!(!gate.has(FeatureKey::PM_PRO_BEADS_ADVANCED));
+    assert!(gate.has(FeatureKey::PM_PRO_BEADS_ADVANCED));
     assert_eq!(gate.tier(), Tier::Community);
 }
 
@@ -25,10 +25,10 @@ fn community_quota_defaults() {
 }
 
 #[test]
-fn unknown_feature_returns_false() {
+fn community_compat_grants_pm_beads_advanced() {
     let policy = PolicyResolver::embedded();
     let gate = FeatureGate::new(policy);
-    assert!(!gate.has(FeatureKey::PM_PRO_BEADS_ADVANCED));
+    assert!(gate.has(FeatureKey::PM_PRO_BEADS_ADVANCED));
 }
 
 #[test]
