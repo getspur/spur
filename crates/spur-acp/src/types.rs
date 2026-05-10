@@ -175,6 +175,8 @@ pub enum AgentKind {
     Kimi,
     /// Gemini CLI via `gemini --acp`.
     Gemini,
+    /// OpenCode CLI via `opencode acp`.
+    OpenCode,
     /// Any ACP-speaking agent not otherwise recognized.
     #[default]
     Generic,
@@ -198,6 +200,7 @@ impl AgentKind {
             "kiro" => AgentKind::Kiro,
             "kimi" | "kimi-code" | "kimi code" => AgentKind::Kimi,
             "gemini" | "gemini-acp" | "gemini-cli" | "gemini cli" => AgentKind::Gemini,
+            "opencode" | "open-code" => AgentKind::OpenCode,
             _ => AgentKind::Generic,
         }
     }
@@ -271,6 +274,7 @@ mod agent_kind_tests {
         assert_eq!(AgentKind::from_name("kiro"), AgentKind::Kiro);
         assert_eq!(AgentKind::from_name("kimi"), AgentKind::Kimi);
         assert_eq!(AgentKind::from_name("gemini"), AgentKind::Gemini);
+        assert_eq!(AgentKind::from_name("opencode"), AgentKind::OpenCode);
         assert_eq!(AgentKind::from_name("generic"), AgentKind::Generic);
     }
 
