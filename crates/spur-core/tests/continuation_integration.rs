@@ -32,6 +32,7 @@ fn mk_cont(id: &str) -> BrainContinuation {
             artifact_id: None,
             fetch_hint: None,
             base_hint: None,
+            setup_conflict_topology: None,
         },
         created_at_wall: Utc::now(),
         created_at_mono: Instant::now(),

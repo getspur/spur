@@ -36,6 +36,10 @@ pub enum ContinuationSource {
     /// was promoted to `EscalatedToBrain`. The brain receives the continuation
     /// directly (option A) and resolves via `submit_plan_mutation`.
     PlanTaskEscalated,
+    /// bd-88r — predispatch overlay preview predicted a setup conflict.
+    /// The brain receives compiled git topology and resolves via
+    /// `plan_truncate_and_restart` or `submit_plan_mutation`.
+    PlanTaskBlockedOnSetupConflict,
 }
 
 /// Kind of side-channel continuation artifact the brain can fetch on demand.
@@ -68,6 +72,36 @@ pub struct ArtifactRef {
     /// 40-char hex SHA-1 of the git blob; survives ref deletion until git GC.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_blob_sha: Option<String>,
+}
+
+/// Verified git topology of approved tasks and the predicted overlay conflict.
+/// Compiled by the engine (bd-88r) so the brain does not hallucinate commit
+/// parentage or diff scope during `plan_truncate_and_restart` recovery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetupConflictTopology {
+    pub base_oid: String,
+    pub blocked_task_id: String,
+    pub conflict_dep_task_id: String,
+    pub conflict_files: Vec<String>,
+    pub approved_chain: Vec<ApprovedTaskGitNode>,
+}
+
+/// One node in the verified approved-task chain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovedTaskGitNode {
+    pub task_id: String,
+    pub worker_branch: String,
+    pub tip_oid: String,
+    pub parent_oid: String,
+    /// `git diff --stat <base_oid>..<tip_oid>` — cumulative content.
+    pub cumulative_diff_stat: crate::domain::events::DiffSummary,
+    /// `git diff --stat <parent_oid>..<tip_oid>` — incremental content.
+    /// Empty when `parent_oid == base_oid` and the tip is the first approved
+    /// task (diff stat is identical to cumulative).
+    pub incremental_diff_stat: crate::domain::events::DiffSummary,
+    /// True when the incremental diff is non-empty but much smaller than the
+    /// cumulative diff, indicating this tip bundles content from prior deps.
+    pub appears_flattened: bool,
 }
 
 /// Narrow projection of a worker outcome for scheduler consumption.
@@ -110,6 +144,11 @@ pub struct ContinuationPayload {
     /// of defaulting to RepoMain. Capped at 256 B by the materializer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_hint: Option<String>,
+    /// NEW (bd-88r) — compiled git topology of approved tasks and the predicted
+    /// overlay conflict, produced by the engine so the brain does not hallucinate
+    /// commit parentage or diff scope during conflict recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_conflict_topology: Option<SetupConflictTopology>,
 }
 
 impl ContinuationPayload {
@@ -225,6 +264,7 @@ mod tests {
             artifact_id: None,
             fetch_hint: None,
             base_hint: None,
+            setup_conflict_topology: None,
         };
         assert_eq!(p.summary.as_deref(), Some("done"));
         assert!(matches!(p.status, DelegationStatus::Success));
@@ -256,6 +296,7 @@ mod tests {
             }),
             fetch_hint: Some("Full diff truncated. Call fetch_outcome_artifact.".into()),
             base_hint: None,
+            setup_conflict_topology: None,
         };
         let s = serde_json::to_string(&payload).expect("serialize");
         let back: ContinuationPayload = serde_json::from_str(&s).expect("deserialize");
@@ -274,6 +315,7 @@ mod tests {
             artifact_id: None,
             fetch_hint: None,
             base_hint: None,
+            setup_conflict_topology: None,
         };
         let usd = payload.estimated_cost_usd().expect("Some");
         assert!((usd - 1.234567).abs() < 1e-9);
@@ -291,6 +333,7 @@ mod tests {
             artifact_id: None,
             fetch_hint: None,
             base_hint: None,
+            setup_conflict_topology: None,
         };
         assert!(none_payload.estimated_cost_usd().is_none());
 
@@ -361,6 +404,7 @@ mod tests {
                 artifact_id: None,
                 fetch_hint: None,
                 base_hint: None,
+                setup_conflict_topology: None,
             },
             created_at_wall: Utc.with_ymd_and_hms(2026, 4, 24, 12, 34, 56).unwrap(),
             created_at_mono: Instant::now(),
@@ -409,6 +453,7 @@ mod tests {
                 artifact_id: None,
                 fetch_hint: None,
                 base_hint: None,
+                setup_conflict_topology: None,
             },
             created_at_wall: Utc.with_ymd_and_hms(2026, 4, 24, 12, 34, 56).unwrap(),
             created_at_mono: Instant::now(),

@@ -337,6 +337,7 @@ mod tests {
                 artifact_id: None,
                 fetch_hint: None,
                 base_hint: None,
+                setup_conflict_topology: None,
             },
             created_at_wall: Utc.with_ymd_and_hms(2026, 4, 24, 12, 34, 56).unwrap(),
             created_at_mono: Instant::now(),

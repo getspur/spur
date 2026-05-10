@@ -268,6 +268,7 @@ impl OutcomeMaterializer {
             artifact_id: Some(key.clone()),
             fetch_hint,
             base_hint,
+            setup_conflict_topology: None,
         };
 
         let cont = BrainContinuation {
@@ -385,6 +386,7 @@ impl OutcomeMaterializer {
             artifact_id: None,
             fetch_hint: None,
             base_hint: None,
+            setup_conflict_topology: None,
         };
 
         let mut cont = BrainContinuation {
