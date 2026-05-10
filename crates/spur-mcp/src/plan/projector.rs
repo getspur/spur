@@ -354,7 +354,7 @@ pub fn project_status_for_issue(
     }
 
     // bd-2m2u Phase 2d — `signal:escalated` marks an open issue whose
-    // `AUTO_RETRY_BUDGET` is exhausted and is awaiting a brain
+    // auto-retry budget (1 attempt) is exhausted and is awaiting a brain
     // `submit_plan_mutation` decision. The label is cleared by
     // `submit_plan_mutation` on success, so a present label is authoritative
     // for the projection.
@@ -522,7 +522,7 @@ pub fn plan_submit_brain_session_id(audits: &[AuditSentinelKind]) -> Option<Brai
 }
 
 pub async fn project_plan_from_beads(
-    pm: &spur_pm::PmService,
+    pm: &dyn crate::plan::PmLike,
     plan_id: &str,
     feature_gate: &spur_license::FeatureGate,
 ) -> anyhow::Result<PlanState> {
