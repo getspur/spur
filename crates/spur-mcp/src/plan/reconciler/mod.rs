@@ -17,6 +17,18 @@
 //! In v0c the reconciler is wired into `server.rs` startup with a live
 //! `ReconcilerDispatchCtx`, so persisted plans are reclaimed and dispatched by
 //! the same loop that owns completion writeback.
+//!
+//! # Submodule layout
+//!
+//! | Module | Responsibility |
+//! |---|---|
+//! | `leases` | Sweep expired dispatch leases and reclaim orphaned dispatches. |
+//! | `conflict` | Detect and persist overlay conflicts (setup and predispatch). |
+//! | `ready` | Observe ready tasks from beads backend with plan-activation guards. |
+//! | `base_spec` | Git helpers and base-spec construction for dispatch overlays. |
+//! | `guards` | Plan activation guards (`plan_allows_dispatch`, `plan_allows_writes`). |
+//! | `terminal` | Reconcile terminal epics: completion audits, auto-merge, auto-PR. |
+//! | `tests` | Unit tests, mocks, and shared fixtures for the reconciler. |
 
 mod leases;
 
