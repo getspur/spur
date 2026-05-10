@@ -2,6 +2,7 @@ peer_mailbox_enabled = false
 
 [plan.substrate_migration]
 versioned_cache_serve = false
+nonadvisory_review_writes = true
 
 [brain]
 default = "claude-code"

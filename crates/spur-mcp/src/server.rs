@@ -640,9 +640,13 @@ pub struct McpCallbackServer {
     /// persisted-plan epics.
     plan_pending_grace: std::time::Duration,
     /// PR2 guard: when false, persisted plan reads always re-project from
-    /// beads and never serve by the epic audit sequence token. PR3 flips this
-    /// once task-level writes advance the epic audit sequence.
+    /// beads and never serve by the epic audit sequence token. PR3 advances
+    /// the epic audit sequence on every task transition; once landed, this
+    /// flag can be flipped on separately.
     versioned_cache_serve: bool,
+    /// PR3 guard: when true, review_task uses the substrate-first
+    /// non-advisory write path and invalidates the cache on exhausted retries.
+    nonadvisory_review_writes: bool,
     /// Duration written into `spur:lease-expires-at:<ts>` labels for
     /// reconciler-owned persisted-plan dispatches.
     dispatch_lease_duration: std::time::Duration,
@@ -2251,6 +2255,7 @@ impl McpCallbackServer {
             auto_merge_approved_plans: false,
             plan_pending_grace: DEFAULT_PLAN_PENDING_GRACE,
             versioned_cache_serve: false,
+            nonadvisory_review_writes: false,
             dispatch_lease_duration: std::time::Duration::from_secs(600),
         };
 
@@ -2500,6 +2505,12 @@ impl McpCallbackServer {
     /// makes task-level durable writes advance the epic audit sequence.
     pub fn set_versioned_cache_serve(&mut self, enabled: bool) {
         self.versioned_cache_serve = enabled;
+    }
+
+    /// Configure PR3 non-advisory review writes. Default is off for staged
+    /// production rollout; dev configs can opt in explicitly.
+    pub fn set_nonadvisory_review_writes(&mut self, enabled: bool) {
+        self.nonadvisory_review_writes = enabled;
     }
 
     /// Configure persisted dispatch lease duration for reconciler dispatches.
@@ -6776,7 +6787,13 @@ impl McpCallbackServer {
             .clone()
             .map(|s| s as std::sync::Arc<dyn crate::plan::PmLike>);
 
-        let result = crate::plan::handle_review_task(
+        let write_mode = if self.nonadvisory_review_writes {
+            crate::plan::ReviewWriteMode::NonAdvisory
+        } else {
+            crate::plan::ReviewWriteMode::Advisory
+        };
+
+        let result = crate::plan::handle_review_task_with_write_mode(
             Arc::clone(&plan_arc),
             &plan_id,
             &task_id,
@@ -6787,8 +6804,18 @@ impl McpCallbackServer {
             Some(&self.delegation_tx),
             Some(&self.task_tracker),
             Arc::clone(&self.feature_gate),
+            write_mode,
         )
-        .await?;
+        .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                if matches!(write_mode, crate::plan::ReviewWriteMode::NonAdvisory) {
+                    self.active_plans.lock().await.remove(&plan_id);
+                }
+                return Err(error);
+            }
+        };
         let mut result = result;
 
         if decision == "approve" {
@@ -7077,8 +7104,8 @@ impl McpCallbackServer {
 
         // PR2 cache token: the monotonic sequence is the ordinal of audit
         // sentinel comments on the epic issue after projector ordering.
-        // PR3 must advance this epic sequence for every durable task-level
-        // plan write before `versioned_cache_serve` can be flipped on.
+        // PR3 advances this epic sequence for every durable task-level plan
+        // write; once landed, `versioned_cache_serve` can be flipped on.
         let audit_seq = crate::plan::projector::sort_projection_comments(comments)
             .into_iter()
             .filter(|comment| {
