@@ -4625,6 +4625,7 @@ pub async fn run_tui(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_tui_with_license(
     event_rx: broadcast::Receiver<SpurEvent>,
     user_input_tx: Option<mpsc::Sender<UserInput>>,
