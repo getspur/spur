@@ -275,7 +275,7 @@ args = [
     "deep-thinker",
 ]
 transport = "acp"
-kind = "generic"
+kind = "gemini"
 role = "both"
 capabilities = []
 cost_tier = "low"
@@ -367,7 +367,7 @@ args = [
     "acp",
 ]
 transport = "acp"
-kind = "generic"
+kind = "kimi"
 role = "both"
 capabilities = []
 cost_tier = "medium"
