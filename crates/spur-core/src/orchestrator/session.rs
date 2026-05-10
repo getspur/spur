@@ -1456,6 +1456,7 @@ impl Orchestrator {
             std::time::Duration::from_secs(self.config.spur.dispatch_lease_secs),
             std::time::Duration::from_secs(self.config.spur.dispatch_lease_heartbeat_secs),
             self.worker_mcp_fetcher_for(Arc::clone(&mcp_server)),
+            self.config.delegation.normalize.bypass_hooks,
         ));
 
         // Spawn the vendor-extension notification pump (if the transport
@@ -1807,6 +1808,7 @@ impl Orchestrator {
             std::time::Duration::from_secs(self.config.spur.dispatch_lease_secs),
             std::time::Duration::from_secs(self.config.spur.dispatch_lease_heartbeat_secs),
             self.worker_mcp_fetcher_for(Arc::clone(&mcp_server)),
+            self.config.delegation.normalize.bypass_hooks,
         ));
 
         // Pump vendor-extension notifications onto the event stream.

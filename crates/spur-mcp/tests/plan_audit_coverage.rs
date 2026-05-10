@@ -156,15 +156,17 @@ async fn plan_audit_coverage_all_four_sentinels() {
 
     // ── 1. PlanSubmit — on epic issue ───────────────────────────────────────
     let adv = pm.advanced().expect("beads backend must have advanced()");
+    let brain_session_id = spur_acp::SessionId("brain".into());
     spur_mcp::emit_plan_submit_audit(
         adv,
         "audit-plan-1",
         &subgraph,
-        Some("spur/brain-snapshot-test"),
-        Some("0123456789abcdef0123456789abcdef01234567"),
-        None,
-        Some(&spur_acp::SessionId("brain".into())),
-        None,
+        spur_mcp::PlanSubmitAuditContext {
+            base_snapshot_branch: Some("spur/brain-snapshot-test"),
+            base_snapshot_oid: Some("0123456789abcdef0123456789abcdef01234567"),
+            brain_session_id: Some(&brain_session_id),
+            ..Default::default()
+        },
     )
     .await;
 
