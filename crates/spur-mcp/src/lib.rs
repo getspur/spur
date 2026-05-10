@@ -3,6 +3,7 @@ pub mod handlers;
 pub mod outcome_materializer;
 pub mod plan;
 pub mod server;
+mod submit_plan_dedup;
 pub mod token;
 pub mod tool_schemas;
 pub mod tools;
