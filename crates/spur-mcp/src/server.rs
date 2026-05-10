@@ -9300,13 +9300,16 @@ mod recover_orphaned_dispatch_tests {
         .expect("checkout worker branch");
         commit_file(dir.path(), "worker.txt", "worker\n", "worker change").await;
 
-        let fixture = setup_recovery_task(dir.path(), "recover-orphan", "del-A").await;
+        let fixture =
+            setup_recovery_task(dir.path(), "recover-orphan-missing-plan-id", "del-A").await;
         fixture
             .pm
             .update_issue(
                 &fixture.task_issue_id,
                 spur_pm::IssueUpdate {
-                    remove_labels: vec![crate::plan::labels::plan_id("recover-orphan")],
+                    remove_labels: vec![crate::plan::labels::plan_id(
+                        "recover-orphan-missing-plan-id",
+                    )],
                     ..Default::default()
                 },
             )
