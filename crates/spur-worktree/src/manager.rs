@@ -1117,6 +1117,22 @@ impl WorktreeManager {
 
         Ok(removed)
     }
+    /// Updates the recorded base_commit for an active worktree.
+    /// This is used to adjust the baseline after overlays are applied,
+    /// ensuring that subsequent commit counting and squashing ignores the overlays.
+    pub fn update_base_commit(
+        &mut self,
+        session_id: &SessionId,
+        base_commit: String,
+    ) -> Result<()> {
+        let key = session_id.to_string();
+        let info = self
+            .active
+            .get_mut(&key)
+            .ok_or_else(|| anyhow::anyhow!("worktree for session {} not found", session_id))?;
+        info.base_commit = base_commit;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
