@@ -64,6 +64,7 @@ pub fn source_issue(issue_id: &str) -> String {
 }
 
 pub const DELEGATION_ID_PREFIX: &str = "spur:delegation-id:";
+pub const DISPATCHED_BASE_OID_PREFIX: &str = "spur:dispatched-base-oid:";
 pub const LEASE_EXPIRES_AT_PREFIX: &str = "spur:lease-expires-at:";
 pub const PLAN_OWNER_PREFIX: &str = "spur:plan-owner:";
 pub const PLAN_OWNER_TOKEN_PREFIX: &str = "spur:plan-owner-token:";
@@ -87,6 +88,16 @@ pub fn compact_label_component(value: &str) -> String {
 
 pub fn delegation_id(delegation_id: &str) -> String {
     format!("{DELEGATION_ID_PREFIX}{delegation_id}")
+}
+
+pub fn dispatched_base_oid(oid: &str) -> String {
+    format!("{DISPATCHED_BASE_OID_PREFIX}{oid}")
+}
+
+pub fn parse_dispatched_base_oid(label: &str) -> Option<&str> {
+    label
+        .strip_prefix(DISPATCHED_BASE_OID_PREFIX)
+        .filter(|oid| !oid.is_empty())
 }
 
 /// Mint a fresh 16-char hex delegation_id derived from a v4 UUID. The 16-char
