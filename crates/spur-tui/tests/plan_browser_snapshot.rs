@@ -1,4 +1,4 @@
-//! Snapshot/state tests for the Sprints plan browser MVP.
+//! Snapshot/state tests for the plan browser.
 
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -180,7 +180,7 @@ fn renders_all_owner_state_rows_with_lifecycle_and_progress() {
 }
 
 #[test]
-fn renders_empty_state_and_empty_current_sprint_slot() {
+fn renders_empty_state_and_empty_current_plan_slot() {
     let mut view = PlanBrowserView::new(SessionId("brain-1".into()));
     let lineage = ExecutorLineage::new();
     let plans = PlanProjectionStore::default();
@@ -267,14 +267,14 @@ fn blocked_claim_when_current_brain_already_has_active_mine_plan() {
 
     match action {
         Some(Action::FlashHint { message }) => {
-            assert!(message.contains("already owns active sprint"), "{message}");
+            assert!(message.contains("already owns active plan"), "{message}");
         }
         other => panic!("expected blocked FlashHint, got {other:?}"),
     }
 }
 
 #[test]
-fn enter_on_active_mine_plan_opens_current_session_sprint() {
+fn enter_on_active_mine_plan_opens_current_session_plan() {
     let mut view = PlanBrowserView::new(SessionId("brain-1".into()));
     let lineage = ExecutorLineage::new();
     let plans = plan_store_with_current("plan-a1");

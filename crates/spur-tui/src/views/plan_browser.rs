@@ -4,7 +4,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     symbols::border,
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
     Frame,
 };
 use spur_acp::{
@@ -186,7 +186,7 @@ impl PlanBrowserView {
             }),
             PlanOwnerStateEvent::Unowned if self.has_current_active_plan(ctx) => {
                 Some(Action::FlashHint {
-                    message: "Cannot claim: current brain already owns active sprint".into(),
+                    message: "Cannot claim: current brain already owns active plan".into(),
                 })
             }
             PlanOwnerStateEvent::Unowned => {
@@ -229,7 +229,7 @@ impl PlanBrowserView {
                     && !self.selected_is_current_active_plan(plan, ctx) =>
             {
                 Some(Action::FlashHint {
-                    message: "Cannot start: current brain already owns active sprint".into(),
+                    message: "Cannot start: current brain already owns active plan".into(),
                 })
             }
             PlanOwnerStateEvent::Mine => {
@@ -387,7 +387,7 @@ impl PlanBrowserView {
             ),
         ];
         let block = Block::default()
-            .title(" Sprints ")
+            .title(" Plans ")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(token(ctx.theme, "plan_browser.border.fg")));
         frame.render_widget(Paragraph::new(lines).block(block), area);
@@ -410,67 +410,46 @@ impl PlanBrowserView {
             return;
         }
 
-        let mut lines = vec![Line::from(vec![
-            Span::styled(
-                "  Plan          ",
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "Work item    ",
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "Owner           ",
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "State            ",
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Progress", Style::default().add_modifier(Modifier::BOLD)),
-        ])];
+        let header = Row::new([
+            Cell::from("Plan").style(Style::default().add_modifier(Modifier::BOLD)),
+            Cell::from("Work item").style(Style::default().add_modifier(Modifier::BOLD)),
+            Cell::from("Owner").style(Style::default().add_modifier(Modifier::BOLD)),
+            Cell::from("State").style(Style::default().add_modifier(Modifier::BOLD)),
+            Cell::from("Progress").style(Style::default().add_modifier(Modifier::BOLD)),
+        ]);
 
-        let visible_rows = inner.height.saturating_sub(1) as usize;
-        let start = if visible_rows == 0 || self.selected < visible_rows {
-            0
-        } else {
-            self.selected + 1 - visible_rows
-        };
-        let end = if visible_rows == 0 {
-            start
-        } else {
-            (start + visible_rows).min(self.plans.len())
-        };
+        let rows: Vec<Row> = self
+            .plans
+            .iter()
+            .map(|plan| {
+                Row::new([
+                    Cell::from(truncate(&plan.plan_id, 18)),
+                    Cell::from(truncate(&plan.epic_id, 16)),
+                    Cell::from(truncate(&Self::owner_label(&plan.owner_state), 12)),
+                    Cell::from(Self::lifecycle_label(plan.lifecycle)),
+                    Cell::from(Self::progress_text(plan.counts.as_ref())),
+                ])
+            })
+            .collect();
 
-        for (idx, plan) in self.plans.iter().enumerate().skip(start).take(end - start) {
-            let marker = if idx == self.selected { ">" } else { " " };
-            let style = if idx == self.selected {
-                Style::default().fg(token(theme, "plan_browser.row.selected.fg"))
-            } else {
-                Style::default()
-            };
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{marker} {:<13}", truncate(&plan.plan_id, 13)),
-                    style,
-                ),
-                Span::styled(format!("{:<13}", truncate(&plan.epic_id, 13)), style),
-                Span::styled(
-                    format!(
-                        "{:<16}",
-                        truncate(&Self::owner_label(&plan.owner_state), 16)
-                    ),
-                    style,
-                ),
-                Span::styled(
-                    format!("{:<17}", Self::lifecycle_label(plan.lifecycle)),
-                    style,
-                ),
-                Span::styled(Self::progress_text(plan.counts.as_ref()), style),
-            ]));
-        }
+        let widths = [
+            Constraint::Length(18),
+            Constraint::Length(16),
+            Constraint::Length(12),
+            Constraint::Length(14),
+            Constraint::Length(10),
+        ];
 
-        frame.render_widget(Paragraph::new(lines), inner);
+        let table = Table::new(rows, widths)
+            .header(header)
+            .highlight_symbol("> ")
+            .highlight_spacing(ratatui::widgets::HighlightSpacing::Always)
+            .row_highlight_style(Style::default().fg(token(theme, "plan_browser.row.selected.fg")));
+
+        let mut state = ratatui::widgets::TableState::default();
+        state.select(Some(self.selected));
+
+        frame.render_stateful_widget(table, inner, &mut state);
     }
 
     fn render_detail(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -865,14 +844,13 @@ impl View for PlanBrowserView {
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {
-    if value.chars().count() <= max_chars {
+    let count = value.chars().count();
+    if count <= max_chars {
         value.to_string()
+    } else if max_chars <= 3 {
+        value.chars().take(max_chars).collect()
     } else {
-        value
-            .chars()
-            .take(max_chars.saturating_sub(1))
-            .collect::<String>()
-            + "..."
+        value.chars().take(max_chars - 3).collect::<String>() + "..."
     }
 }
 
