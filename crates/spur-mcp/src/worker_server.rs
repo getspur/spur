@@ -1006,6 +1006,28 @@ async fn dispatch(ctx: WorkerCallContext, body: Vec<u8>, deps: Arc<DispatcherDep
     let params = parsed.get("params").cloned().unwrap_or_else(|| json!({}));
 
     match method.as_str() {
+        "initialize" => {
+            // Provide a bare-minimum MCP initialization response.
+            // This is required for real worker clients to establish the connection
+            // before they invoke tools/list.
+            success_response(
+                id,
+                json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {
+                        "tools": { "listChanged": false }
+                    },
+                    "serverInfo": {
+                        "name": "spur-worker-mcp",
+                        "version": "1.0.0"
+                    }
+                }),
+            )
+        }
+        "notifications/initialized" => {
+            // Client acknowledges initialization. No response needed for notifications.
+            String::new()
+        }
         "tools/list" => {
             let tools = crate::tools::worker_tools_list();
             success_response(id, json!({ "tools": tools }))
