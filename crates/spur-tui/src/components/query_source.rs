@@ -109,6 +109,7 @@ pub trait QuerySource {
 use crate::input_history::InputHistoryEntry;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
+use std::collections::HashSet;
 
 /// QuerySource backed by a snapshot of the global input history, oldest-first.
 pub struct HistoryQuerySource {
@@ -129,8 +130,16 @@ pub struct HistoryQuerySource {
 
 impl HistoryQuerySource {
     pub fn new(history: Vec<InputHistoryEntry>) -> Self {
+        let mut seen = HashSet::new();
+        let mut deduped: Vec<InputHistoryEntry> = history
+            .into_iter()
+            .rev()
+            .filter(|entry| seen.insert(entry.snapshot.text.clone()))
+            .collect();
+        deduped.reverse();
+
         Self {
-            history,
+            history: deduped,
             matcher: Matcher::new(Config::DEFAULT),
             last_snapshots: Vec::new(),
             cached_pattern: None,
@@ -154,7 +163,7 @@ impl HistoryQuerySource {
             !matches!(&self.cached_pattern, Some((cached_q, _)) if cached_q == query);
         if needs_refresh {
             self.parse_count += 1;
-            let pat = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+            let pat = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
             self.cached_pattern = Some((query.to_string(), pat));
         }
         &self
@@ -216,7 +225,7 @@ impl HistoryQuerySource {
 
 impl QuerySource for HistoryQuerySource {
     fn title(&self) -> &str {
-        "History · bck-i-search"
+        "History · bck-i-search  ^prefix 'exact !exclude"
     }
 
     fn query_mode(&self) -> QueryMode {
@@ -245,12 +254,12 @@ impl QuerySource for HistoryQuerySource {
                 .enumerate()
                 .filter_map(|(i, h)| {
                     buf.clear();
-                    let score =
-                        pattern.score(Utf32Str::new(&h.snapshot.text, &mut buf), matcher)?;
+                    let haystack = h.snapshot.text.replace('\n', " ");
+                    let score = pattern.score(Utf32Str::new(&haystack, &mut buf), matcher)?;
                     Some((score, i))
                 })
                 .collect();
-            scored.sort_by(|a, b| b.0.cmp(&a.0));
+            scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
             scored.into_iter().take(20).map(|(_, i)| i).collect()
         };
         let rows = picked
@@ -629,6 +638,14 @@ mod tests {
         InputHistoryEntry::new(InputStateSnapshot::from_text(text))
     }
 
+    fn mk_entry_with_agent(text: &str, agent: &str) -> InputHistoryEntry {
+        InputHistoryEntry::new(InputStateSnapshot::from_text(text)).with_context(
+            None,
+            None,
+            Some(agent.to_string()),
+        )
+    }
+
     #[test]
     fn retrieval_row_atoms_are_byte_ranges() {
         // Smoke test: atoms use byte offsets, so multi-byte primary stays
@@ -684,6 +701,49 @@ mod tests {
     }
 
     #[test]
+    fn history_source_fuzzy_ties_prefer_newer_entries() {
+        let hist = vec![
+            mk_entry("alpha one"),
+            mk_entry("unrelated"),
+            mk_entry("alpha two"),
+        ];
+        let mut src = HistoryQuerySource::new(hist);
+
+        let rows = src.refresh("alpha");
+
+        assert_eq!(rows[0].primary, "alpha two");
+        assert_eq!(rows[1].primary, "alpha one");
+    }
+
+    #[test]
+    fn history_source_deduplicates_by_text_and_keeps_newest_entry() {
+        let hist = vec![
+            mk_entry_with_agent("repeat me", "old"),
+            mk_entry_with_agent("unique", "middle"),
+            mk_entry_with_agent("repeat me", "new"),
+        ];
+        let mut src = HistoryQuerySource::new(hist);
+
+        let rows = src.refresh("");
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].primary, "repeat me");
+        assert_eq!(rows[0].tag, "⟨new⟩");
+        assert_eq!(rows[1].primary, "unique");
+    }
+
+    #[test]
+    fn history_source_uses_smart_case_matching() {
+        let hist = vec![mk_entry("deploy prod"), mk_entry("Deploy Prod")];
+        let mut src = HistoryQuerySource::new(hist);
+
+        let rows = src.refresh("Deploy");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].primary, "Deploy Prod");
+    }
+
+    #[test]
     fn history_source_accept_returns_replace_state_snapshot() {
         let hist = vec![mk_entry("newest")];
         let mut src = HistoryQuerySource::new(hist);
@@ -718,7 +778,10 @@ mod tests {
     #[test]
     fn history_source_title_is_bck_i_search() {
         let src = HistoryQuerySource::new(Vec::new());
-        assert_eq!(src.title(), "History · bck-i-search");
+        assert_eq!(
+            src.title(),
+            "History · bck-i-search  ^prefix 'exact !exclude"
+        );
     }
 
     #[test]
