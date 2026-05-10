@@ -9,7 +9,7 @@ pub mod finalize;
 pub mod peer_mailbox;
 pub mod worker_attempt;
 
-pub(crate) use cleanup::apply_worktree_cleanup;
+pub(crate) use cleanup::{apply_worktree_cleanup, WorktreeCleanupContext};
 pub(crate) use diff_artifact::{
     build_diff_summary, decide_artifact_handling, sha256_hex_for_outcome, summary_cap_bytes,
     truncate_summary_env_default,
@@ -87,6 +87,7 @@ pub(crate) async fn handle_delegations(
     dispatch_lease_duration: std::time::Duration,
     dispatch_lease_heartbeat: std::time::Duration,
     worker_mcp_fetcher: WorkerMcpFetcher,
+    normalize_bypass_hooks: bool,
 ) {
     let semaphore = Arc::new(Semaphore::new(max_concurrent.max(1)));
     // Debounce: skip post-delegation refresh if another completed <3s ago.
@@ -332,6 +333,7 @@ pub(crate) async fn handle_delegations(
                     worker_mcp_fetcher,
                     pm_service.clone(),
                     feature_gate,
+                    normalize_bypass_hooks,
                 ) => r,
             };
             drop(dispatch_lease_heartbeat_handle);

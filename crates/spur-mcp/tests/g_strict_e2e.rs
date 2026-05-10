@@ -8,12 +8,27 @@
 
 mod common;
 
+use std::sync::Arc;
+use std::sync::OnceLock;
+
 use common::g_strict_harness::TestHarness;
 use serde_json::json;
 use spur_mcp::tools::BaseSpec;
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+
+static G_STRICT_TEST_MUTEX: OnceLock<Arc<AsyncMutex<()>>> = OnceLock::new();
+
+async fn g_strict_test_guard() -> OwnedMutexGuard<()> {
+    G_STRICT_TEST_MUTEX
+        .get_or_init(|| Arc::new(AsyncMutex::new(())))
+        .clone()
+        .lock_owned()
+        .await
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn g_strict_prevents_bd_2dww_class_loss() {
+    let _guard = g_strict_test_guard().await;
     let mut harness = TestHarness::new().await;
     let plan_id = harness.submit_plan().await;
 
@@ -91,6 +106,7 @@ async fn g_strict_prevents_bd_2dww_class_loss() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn single_parent_fast_path_emits_base_branch() {
+    let _guard = g_strict_test_guard().await;
     let mut harness = TestHarness::new().await;
     let plan_id = harness
         .submit_plan_with_tasks(
@@ -151,6 +167,7 @@ async fn single_parent_fast_path_emits_base_branch() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn g_strict_diamond_dag_closure_walks_both_parents() {
+    let _guard = g_strict_test_guard().await;
     let mut harness = TestHarness::new().await;
     let plan_id = harness.submit_diamond_plan().await;
 
@@ -233,6 +250,7 @@ async fn g_strict_diamond_dag_closure_walks_both_parents() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn g_strict_grandparent_depth_chain_walks_full_closure() {
+    let _guard = g_strict_test_guard().await;
     let mut harness = TestHarness::new().await;
     let plan_id = harness.submit_grandparent_plan().await;
 
