@@ -263,16 +263,29 @@ impl Orchestrator {
                             Ok(sessions) => Ok(sessions),
                             Err(e) => {
                                 warn!(error = %e, "list_sessions failed, trying filesystem fallback");
-                                Self::list_sessions_from_disk(&brain_name)
+                                match self.registry.get(&brain_name) {
+                                    Some(cfg) => Self::list_sessions_from_disk(cfg),
+                                    None => Err(anyhow::anyhow!(
+                                        "Agent '{}' not found in registry for disk fallback",
+                                        brain_name
+                                    )),
+                                }
                             }
                         };
 
                         match sessions_result {
                             Ok(sessions) => {
-                                let sessions = filter_sessions_for_repo(sessions, &self.repo_root);
+                                let (brain_sessions, worker_sessions) =
+                                    classify_sessions(sessions, &self.repo_root);
+                                if !worker_sessions.is_empty() {
+                                    debug!(
+                                        count = worker_sessions.len(),
+                                        "Worker sessions excluded from brain picker"
+                                    );
+                                }
                                 self.emit(SpurEvent::now(SpurEventBody::SessionsListed {
                                     agent: brain_name.clone(),
-                                    sessions,
+                                    sessions: brain_sessions,
                                 }));
                             }
                             Err(e) => {
