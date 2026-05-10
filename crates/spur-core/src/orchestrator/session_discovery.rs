@@ -553,13 +553,9 @@ mod kimi {
     fn parse_kimi_session(uuid_path: &Path, cwd: &str) -> Option<SessionInfo> {
         let state_path = uuid_path.join("state.json");
 
-        let state_json: serde_json::Value = match std::fs::read_to_string(&state_path)
+        let state_json: serde_json::Value = std::fs::read_to_string(&state_path)
             .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-        {
-            Some(v) => v,
-            None => return None,
-        };
+            .and_then(|s| serde_json::from_str(&s).ok())?;
 
         // Skip archived sessions.
         if state_json
