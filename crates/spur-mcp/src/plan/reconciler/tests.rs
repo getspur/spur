@@ -1,4 +1,3 @@
-
 fn pro_feature_gate() -> Arc<spur_license::FeatureGate> {
     let gate = Arc::new(spur_license::FeatureGate::new(
         spur_license::policy::PolicyResolver::embedded(),
