@@ -225,7 +225,8 @@ impl Drop for StartupRecoveryProbeGuard {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-static STARTUP_RECOVERY_PROBE: Mutex<Option<Arc<StartupRecoveryProbe>>> = Mutex::new(None);
+pub(crate) static STARTUP_RECOVERY_PROBE: Mutex<Option<Arc<StartupRecoveryProbe>>> =
+    Mutex::new(None);
 
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn pause_startup_recovery_if_probed() {

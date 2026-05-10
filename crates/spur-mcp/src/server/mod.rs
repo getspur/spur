@@ -726,7 +726,7 @@ impl McpCallbackServer {
     pub fn __test_install_startup_recovery_probe(
         probe: Arc<StartupRecoveryProbe>,
     ) -> StartupRecoveryProbeGuard {
-        *STARTUP_RECOVERY_PROBE.lock().unwrap() = Some(probe);
+        *types::STARTUP_RECOVERY_PROBE.lock().unwrap() = Some(probe);
         StartupRecoveryProbeGuard
     }
 
