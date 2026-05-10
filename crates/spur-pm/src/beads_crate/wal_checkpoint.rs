@@ -8,7 +8,7 @@ pub(crate) fn checkpoint_wal_truncate_best_effort(db_path: &Path) {
 
     let _ = conn.busy_timeout(std::time::Duration::ZERO);
     match wal_checkpoint(&conn, "TRUNCATE") {
-        Ok((busy, _, _)) if busy == 0 => {}
+        Ok((0, _, _)) => {}
         Ok(_) => {
             tracing::debug!("WAL TRUNCATE checkpoint busy; falling back to PASSIVE");
             let _ = wal_checkpoint(&conn, "PASSIVE");
