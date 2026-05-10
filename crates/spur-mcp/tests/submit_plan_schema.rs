@@ -57,6 +57,30 @@ fn schema_advertises_epic_body_as_string() {
 }
 
 #[test]
+fn schema_advertises_client_idempotency_key_as_optional_string() {
+    let schema = submit_plan_def();
+    let prop = schema
+        .get("properties")
+        .and_then(|p| p.get("client_idempotency_key"))
+        .expect("client_idempotency_key must be advertised");
+    assert_eq!(
+        prop.get("type").and_then(|v| v.as_str()),
+        Some("string"),
+        "client_idempotency_key must be string"
+    );
+
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    assert!(
+        !required.contains(&"client_idempotency_key"),
+        "client_idempotency_key must remain optional"
+    );
+}
+
+#[test]
 fn persist_fields_are_not_required() {
     let schema = submit_plan_def();
     let required: Vec<&str> = schema

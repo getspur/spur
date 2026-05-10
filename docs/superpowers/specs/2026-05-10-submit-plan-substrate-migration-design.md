@@ -305,6 +305,8 @@ These remain after migration completes. They are accepted under the principle.
 | Cache invalidation races (read-through projection + concurrent writers) | MEDIUM | `BeadsVersion` token + retry-on-mismatch; bounded retry count; if exceeded, return error to caller |
 | Audit comment growth not GC'd → projector O(N) scan slows over plan lifetime | LOW | Snapshot-audit compaction (out of scope for this spec; track as follow-up if measurable) |
 | Idempotency dedup map grows unboundedly in beads | LOW | TTL on dedup entries (e.g. 24h); document bound in spec |
+| INV-S6 partial-failure orphan: `record()` failure after epic build leaves no dedup entry; retry creates a second epic | MED | Detect via dedup-entry lifecycle audit; closure deferred to PR3 (two-phase commit pattern) |
+| INV-S6 concurrent race: two concurrent same-key submits both build epics; second `record()` collides but server returns the new plan_id | MED | beads lacks atomic CAS at issue level; accepted residual; mitigate via brain-side serialization of same-key submits |
 
 ---
 
