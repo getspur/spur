@@ -42,6 +42,8 @@ fn sample_snapshot(plan_id: &str, status: &str, tasks: Vec<PlanSnapshotTask>) ->
                 .iter()
                 .filter(|task| task.status == "cancelled")
                 .count() as u32,
+            escalated: 0,
+            auto_retried: 0,
         },
         tasks,
         owner_brain_session_id: None,
