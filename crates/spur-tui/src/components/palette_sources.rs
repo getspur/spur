@@ -36,7 +36,7 @@ impl PaletteSource for ViewSource {
             },
             PaletteResult {
                 kind: PaletteKind::View,
-                label: "Sprints".into(),
+                label: "Plans".into(),
                 subtitle: "view · open plan browser".into(),
                 payload: PalettePayload::View {
                     action: Action::NavigateTo(ViewId::PlanBrowser),
