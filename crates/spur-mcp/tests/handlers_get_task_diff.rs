@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::json;
+use spur_license::{EntitlementSnapshot, FeatureGate};
 use spur_mcp::handlers::{get_task_diff, McpHandlerError, PlanResolver, WorkerCallContext};
 use spur_mcp::plan::{
     AttemptRecord, PlanMergeState, PlanState, PlanTask, PlanTaskEntry, PlanTaskStatus,
@@ -60,6 +61,14 @@ fn ctx() -> WorkerCallContext {
 
 fn community_gate() -> Arc<spur_license::FeatureGate> {
     spur_mcp::server::community_feature_gate()
+}
+
+fn empty_gate() -> Arc<FeatureGate> {
+    let gate = Arc::new(FeatureGate::new(
+        spur_license::policy::PolicyResolver::embedded(),
+    ));
+    gate.set_snapshot_for_test(EntitlementSnapshot::default());
+    gate
 }
 
 fn make_plan_with_cached_result(plan_id: &str) -> PlanState {
@@ -208,15 +217,14 @@ async fn get_task_diff_cached_result_succeeds_without_pm_or_repo_root() {
 }
 
 #[tokio::test]
-async fn get_task_diff_unauthorized_when_recovery_needs_pro_feature() {
+async fn get_task_diff_unauthorized_when_recovery_feature_absent() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let pm = test_pm_service(dir.path()).await;
-    // Community gate denies PM_PRO_BEADS_ADVANCED — the helpers used by the
-    // recovery branch (`read_latest_task_completion`) reject up-front, and
-    // the freestanding handler must surface that as Unauthorized so the
-    // dispatcher returns -32001 instead of -32603.
-    let gate = community_gate();
+    // An explicitly empty test snapshot denies PM_PRO_BEADS_ADVANCED. The
+    // recovery branch (`read_latest_task_completion`) must surface that as
+    // Unauthorized so the dispatcher returns -32001 instead of -32603.
+    let gate = empty_gate();
     let resolver = FixedPlanResolver {
         plan: Arc::new(Mutex::new(make_plan_needing_recovery("plan-recover"))),
     };
@@ -230,7 +238,7 @@ async fn get_task_diff_unauthorized_when_recovery_needs_pro_feature() {
         json!({ "plan_id": "plan-recover", "task_id": "task-recover" }),
     )
     .await
-    .expect_err("recovery branch under community gate must error");
+    .expect_err("recovery branch under empty gate must error");
 
     assert!(
         matches!(err, McpHandlerError::Unauthorized(_)),

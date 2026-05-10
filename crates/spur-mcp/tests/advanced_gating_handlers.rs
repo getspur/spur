@@ -35,7 +35,7 @@ fn advanced_submit_args() -> Value {
 }
 
 #[tokio::test]
-async fn submit_plan_persist_as_epic_returns_not_licensed_for_community_gate() {
+async fn submit_plan_persist_as_epic_proceeds_for_community_gate() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let pm = beads_pm(dir.path()).await;
@@ -46,14 +46,15 @@ async fn submit_plan_persist_as_epic_returns_not_licensed_for_community_gate() {
     let response = server
         .__test_call_tool("submit_plan", advanced_submit_args())
         .await;
-    let error = response.get("error").expect("community gate must reject");
 
-    assert_eq!(error["code"], -32041);
-    assert_eq!(error["data"]["reason"], "not_licensed");
-    assert_eq!(
-        error["data"]["feature"],
-        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED.as_str()
+    assert!(
+        response.get("error").is_none(),
+        "community gate should allow persisted submit_plan: {response}"
     );
+    let text = response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("text response");
+    assert!(text.contains("epic_id:"));
 }
 
 #[tokio::test]

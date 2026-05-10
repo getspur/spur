@@ -12,7 +12,6 @@ mod input;
 mod navigation;
 mod overlays;
 mod session;
-#[cfg(any(test, debug_assertions))]
 mod test_utils;
 #[cfg(test)]
 mod tests;

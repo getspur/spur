@@ -1,6 +1,5 @@
 use super::*;
 
-#[cfg(any(test, debug_assertions))]
 impl App {
     pub fn new_with_metadata_path_for_test(metadata_path: std::path::PathBuf) -> Self {
         Self::build_with_license_state_from_metadata_path(
@@ -308,6 +307,7 @@ impl App {
         }]);
     }
 
+    #[cfg(any(test, debug_assertions))]
     pub fn last_action_for_test(&self) -> Option<crate::action::Action> {
         self.last_action.clone()
     }
@@ -328,6 +328,7 @@ impl App {
         Self::new(None, false)
     }
 
+    #[cfg(any(test, debug_assertions))]
     pub fn seed_session_detail_with_dynamic_command_for_test(
         &mut self,
         handle: &str,

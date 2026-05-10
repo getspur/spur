@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use crate::licenseseat::LicenseSeatProvider;
-use crate::policy::PolicyResolver;
+use crate::policy::{FeatureKey, PolicyResolver};
 use crate::provider::{LicenseProvider, RefreshPolicy};
 use crate::{LicenseError, LicenseEvent, LicenseState, Plan, Result};
 
@@ -26,10 +26,12 @@ pub struct CommunityProvider {
 impl CommunityProvider {
     pub fn new(resolver: Arc<PolicyResolver>) -> Self {
         let resolve_features = |tier: &str| -> BTreeSet<String> {
-            resolver.tier_features(tier).unwrap_or_else(|err| {
+            let mut features = resolver.tier_features(tier).unwrap_or_else(|err| {
                 tracing::warn!("policy tier {tier:?} malformed: {err}; using empty features");
                 BTreeSet::new()
-            })
+            });
+            apply_community_compatibility_feature_grants(tier, &mut features);
+            features
         };
 
         // Dev-tier override is compile-gated to debug builds only.
@@ -67,6 +69,14 @@ impl CommunityProvider {
 
         let (events_tx, _) = broadcast::channel(1);
         Self { state, events_tx }
+    }
+}
+
+fn apply_community_compatibility_feature_grants(tier: &str, features: &mut BTreeSet<String>) {
+    if tier == "community" {
+        // Compatibility grant for local beads-backed planning while the
+        // embedded signed policy catches up to the Community product surface.
+        features.insert(FeatureKey::PM_PRO_BEADS_ADVANCED.as_str().to_string());
     }
 }
 
@@ -221,7 +231,7 @@ mod tests {
             gate.quota(QuotaKey::MaxConcurrentWorkers),
             Some(QuotaValue::Count(1))
         );
-        assert!(!p.has_entitlement("pm_pro_beads_advanced"));
+        assert!(p.has_entitlement("pm_pro_beads_advanced"));
     }
 
     #[tokio::test]
