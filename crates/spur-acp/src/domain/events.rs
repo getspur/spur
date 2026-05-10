@@ -1139,6 +1139,19 @@ pub enum SpurEventBody {
         worker_branch: Option<String>,
     },
 
+    /// bd-88r — predispatch overlay preview predicted a setup conflict.
+    /// Brain receives compiled git topology via `BrainContinuation` and
+    /// resolves via `plan_truncate_and_restart` or `submit_plan_mutation`.
+    PlanTaskBlockedOnSetupConflict {
+        plan_id: String,
+        task_id: String,
+        delegation_id: String,
+        dep_task_id: String,
+        files: Vec<String>,
+        #[serde(default)]
+        topology: Option<crate::domain::continuation::SetupConflictTopology>,
+    },
+
     /// bd-2m2u Phase 2d — `submit_plan_mutation` applied a `MutationBatch`
     /// successfully. Surfaces op tags and affected task ids so observers can
     /// follow the recovery action without parsing the audit log directly.

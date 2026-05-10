@@ -55,6 +55,8 @@ use base_spec::plan_dispatch_base_spec;
 
 mod guards;
 
+mod topology;
+
 pub use terminal::ReconcilerAutomation;
 mod terminal;
 
@@ -201,6 +203,82 @@ async fn prune_projected_terminal_task_outcomes(
     for task_id in terminal_task_ids {
         outcomes.prune_task(plan_id, &task_id);
     }
+}
+
+struct SetupConflictContinuation<'a> {
+    plan: &'a crate::plan::PlanState,
+    repo_root: &'a std::path::Path,
+    task_id: &'a str,
+    delegation_id: &'a str,
+    attempt: u32,
+    dep_task_id: &'a str,
+    files: &'a [String],
+    summary: &'static str,
+    event_sink: Option<&'a dyn crate::events::McpEventSink>,
+    continuation_ctx: &'a crate::server::DetachedContinuationCtx,
+}
+
+async fn emit_setup_conflict_continuation(input: SetupConflictContinuation<'_>) {
+    let topology = match topology::compile_setup_conflict_topology(
+        input.plan,
+        input.repo_root,
+        input.task_id,
+        input.dep_task_id,
+        input.files,
+    )
+    .await
+    {
+        Ok(t) => Some(t),
+        Err(error) => {
+            tracing::warn!(
+                plan_id = %input.plan.plan_id,
+                task_id = %input.task_id,
+                "setup conflict topology compilation failed: {error}"
+            );
+            None
+        }
+    };
+
+    let payload = spur_acp::domain::continuation::ContinuationPayload {
+        status: spur_acp::domain::delegation::DelegationStatus::SetupFailed {
+            error: spur_acp::domain::delegation::AttemptSetupError::OverlayConflict {
+                source_task_id: input.dep_task_id.to_string(),
+                files: input.files.to_vec(),
+            },
+        },
+        summary: Some(input.summary.into()),
+        diff_summary: None,
+        worker_branch: None,
+        artifact_ref: None,
+        estimated_cost_micros: None,
+        artifact_id: None,
+        fetch_hint: None,
+        base_hint: None,
+        setup_conflict_topology: topology.clone(),
+    };
+
+    let cont = spur_acp::domain::continuation::BrainContinuation {
+        delegation_id: spur_acp::DelegationId(input.delegation_id.to_string()),
+        attempt: input.attempt,
+        brain_session: input.plan.brain_session_id.as_session_id().clone(),
+        source: spur_acp::domain::continuation::ContinuationSource::PlanTaskBlockedOnSetupConflict,
+        payload,
+        created_at_wall: chrono::Utc::now(),
+        created_at_mono: std::time::Instant::now(),
+    };
+
+    if let Some(sink) = input.event_sink {
+        sink.emit(spur_acp::SpurEventBody::PlanTaskBlockedOnSetupConflict {
+            plan_id: input.plan.plan_id.clone(),
+            task_id: input.task_id.to_string(),
+            delegation_id: input.delegation_id.to_string(),
+            dep_task_id: input.dep_task_id.to_string(),
+            files: input.files.to_vec(),
+            topology,
+        });
+    }
+
+    (input.continuation_ctx.on_complete)(cont, input.delegation_id.to_string()).await;
 }
 
 #[derive(Clone)]
@@ -751,6 +829,25 @@ impl Reconciler {
                     .await;
                     continue;
                 }
+
+                // bd-88r — compile verified git topology and push a brain
+                // continuation so the brain does not hallucinate parentage.
+                if let Some(dispatch) = self.dispatch.as_ref() {
+                    emit_setup_conflict_continuation(SetupConflictContinuation {
+                        plan: &projected,
+                        repo_root: &self.config.repo_root,
+                        task_id: &task.spec.task_id,
+                        delegation_id: &delegation_id,
+                        attempt: task_attempt,
+                        dep_task_id: &conflict.dep_task_id,
+                        files: &conflict.files,
+                        summary: "Predispatch overlay preview predicted a setup conflict.",
+                        event_sink: dispatch.event_sink.as_deref(),
+                        continuation_ctx: dispatch.continuation_ctx.as_ref(),
+                    })
+                    .await;
+                }
+
                 self.record_skipped(
                     Some(plan_id),
                     &task.spec.task_id,
@@ -872,6 +969,7 @@ impl Reconciler {
             let task_id = task.spec.task_id.clone();
             let issue_id = summary.id.clone();
             let delegation_id_for_completion = delegation_id.clone();
+            let repo_root = self.config.repo_root.clone();
             let fast_forward = Arc::clone(&self.fast_forward);
             let event_sink = dispatch.event_sink.clone();
             let brain_session_id = dispatch.brain_session_id.clone();
@@ -941,6 +1039,19 @@ impl Reconciler {
                             if let Some(sink) = event_sink.as_deref() {
                                 crate::plan::snapshot::emit_plan_snapshot(Some(sink), &projected);
                             }
+                            emit_setup_conflict_continuation(SetupConflictContinuation {
+                                plan: &projected,
+                                repo_root: &repo_root,
+                                task_id: &task_id,
+                                delegation_id: &delegation_id_for_completion,
+                                attempt: task_attempt,
+                                dep_task_id: source_task_id,
+                                files,
+                                summary: "Worker setup failed with an overlay conflict.",
+                                event_sink: event_sink.as_deref(),
+                                continuation_ctx: continuation_ctx.as_ref(),
+                            })
+                            .await;
                         }
                         Err(error) => tracing::warn!(
                             %plan_id,
