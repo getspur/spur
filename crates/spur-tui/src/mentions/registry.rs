@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
-    Matcher,
+    Config, Matcher,
 };
 use spur_acp::SessionId;
 
@@ -56,6 +56,7 @@ impl From<CompletionScope<'_>> for CompletionScopeKey {
 pub struct MentionRegistry {
     sources: Vec<Box<dyn MentionSource>>,
     cache: HashMap<CompletionScopeKey, CachedIndex>,
+    matcher: Matcher,
 }
 
 impl MentionRegistry {
@@ -64,6 +65,7 @@ impl MentionRegistry {
         Self {
             sources: vec![Box::new(FileMentionSource)],
             cache: HashMap::new(),
+            matcher: Matcher::new(Config::DEFAULT),
         }
     }
 
@@ -76,6 +78,7 @@ impl MentionRegistry {
                 Box::new(WorkerMentionSource::new(workers)),
             ],
             cache: HashMap::new(),
+            matcher: Matcher::new(Config::DEFAULT),
         }
     }
 
@@ -184,15 +187,16 @@ impl MentionRegistry {
         }
 
         // Typed-query branch: nucleo score with a +25 % boost for workers.
-        let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
-        let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+        let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+        let mut buf = Vec::new();
         let mut scored: Vec<(u32, MentionEntry)> = entries
             .iter()
             .filter_map(|e| {
+                buf.clear();
                 let haystack = e.search_text.as_deref().unwrap_or(&e.display);
                 let raw = pattern.score(
-                    nucleo_matcher::Utf32Str::new(haystack, &mut Vec::new()),
-                    &mut matcher,
+                    nucleo_matcher::Utf32Str::new(haystack, &mut buf),
+                    &mut self.matcher,
                 )?;
                 let boosted = if e.kind == MentionKind::Worker {
                     // Ceiling division so small scores still receive at least
@@ -251,6 +255,7 @@ mod tests {
                 Some("alice"),
             )]))],
             cache: HashMap::new(),
+            matcher: Matcher::new(Config::DEFAULT),
         };
 
         let results = registry.query(CompletionScope::PreSession, Path::new("."), "alice", 10);
@@ -268,6 +273,7 @@ mod tests {
                 None,
             )]))],
             cache: HashMap::new(),
+            matcher: Matcher::new(Config::DEFAULT),
         };
 
         let first = registry.query(CompletionScope::PreSession, Path::new("."), "old", 10);
@@ -280,5 +286,22 @@ mod tests {
         assert!(old.is_empty());
         assert_eq!(new.len(), 1);
         assert_eq!(new[0].display, "bd-2 New title");
+    }
+
+    #[test]
+    fn query_uses_smart_case_matching() {
+        let mut registry = MentionRegistry {
+            sources: vec![Box::new(IssueMentionSource::new(vec![
+                issue("bd-1", "deploy prod", None),
+                issue("bd-2", "Deploy Prod", None),
+            ]))],
+            cache: HashMap::new(),
+            matcher: Matcher::new(Config::DEFAULT),
+        };
+
+        let results = registry.query(CompletionScope::PreSession, Path::new("."), "Deploy", 10);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].display, "bd-2 Deploy Prod");
     }
 }
