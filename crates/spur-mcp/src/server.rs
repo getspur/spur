@@ -5342,6 +5342,74 @@ impl McpCallbackServer {
     }
 
     async fn handle_submit_plan(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let client_idempotency_key = match args.get("client_idempotency_key") {
+            None | Some(Value::Null) => None,
+            Some(value) => match value.as_str() {
+                Some(key) => {
+                    let key = key.trim();
+                    if key.is_empty() {
+                        return JsonRpcResponse::invalid_params(
+                            id,
+                            "submit_plan: client_idempotency_key must be non-empty",
+                        );
+                    }
+                    Some(key.to_string())
+                }
+                None => {
+                    return JsonRpcResponse::invalid_params(
+                        id,
+                        "submit_plan: client_idempotency_key must be a string",
+                    )
+                }
+            },
+        };
+
+        if let Some(key) = client_idempotency_key.as_deref() {
+            if self.pm_service.as_deref().map(|p| p.source_str()) == Some("beads") {
+                let pm = self
+                    .pm_service
+                    .as_deref()
+                    .expect("source check ensures pm exists");
+                match crate::submit_plan_dedup::lookup(pm, key).await {
+                    Ok(Some(hit)) => {
+                        info!(
+                            plan_id = %hit.plan_id,
+                            dedup_issue_id = %hit.issue_id,
+                            "submit_plan: client idempotency key hit"
+                        );
+                        let response_text = format!(
+                            "Plan submitted: idempotency key hit.\n\
+                             plan_id: {}\n\
+                             Existing persisted plan was returned; no new beads epic was created.",
+                            hit.plan_id
+                        );
+                        return JsonRpcResponse::success(
+                            id,
+                            json!({
+                                "continuation_will_fire": true,
+                                "auto_serialized": [],
+                                "content": [{
+                                    "type": "text",
+                                    "text": response_text
+                                }]
+                            }),
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        error!("submit_plan: failed to resolve client idempotency key: {error}");
+                        return JsonRpcResponse::error(
+                            id,
+                            -32000,
+                            format!(
+                                "submit_plan: failed to resolve client idempotency key: {error}"
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+
         let tasks_val = match args.get("tasks").and_then(|v| v.as_array()) {
             Some(t) => t.clone(),
             None => return JsonRpcResponse::invalid_params(id, "Missing required field 'tasks'"),
@@ -5590,6 +5658,27 @@ impl McpCallbackServer {
                     },
                 )
                 .await;
+            }
+            if let Some(key) = client_idempotency_key.as_deref() {
+                let pm = self
+                    .pm_service
+                    .as_deref()
+                    .expect("persisted plan has pm_service");
+                // Residual PR1 failure window: the beads epic has already been
+                // persisted, but its dedup ledger entry has not. If this write
+                // fails, retrying the same key can orphan this plan and create
+                // a second epic; see PR3 + spec Risks for closure plan.
+                if let Err(error) = crate::submit_plan_dedup::record(pm, key, &plan_id).await {
+                    error!(
+                        plan_id = %plan_id,
+                        "submit_plan: failed to record client idempotency key: {error}"
+                    );
+                    return JsonRpcResponse::error(
+                        id,
+                        -32000,
+                        format!("submit_plan: failed to record client idempotency key: {error}"),
+                    );
+                }
             }
         }
 
