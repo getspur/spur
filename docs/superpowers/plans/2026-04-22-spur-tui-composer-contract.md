@@ -764,9 +764,9 @@ pub(crate) fn hint_for_session_detail(
     esc_consumed_by_composer: bool,
 ) -> &'static str {
     if stream_in_flight && !esc_consumed_by_composer {
-        " [Enter]send [Esc]stop [j/k]scroll [Alt-m]plan [Alt-d]panel [Alt-g]workers [Ctrl-r]history [?]help"
+        " [Enter]send [Esc]stop [j/k]scroll [Alt-m]plan [Alt-d]panel [Alt-g]toggle [Ctrl-r]history [?]help"
     } else {
-        " [Enter]send [Esc]back [j/k]scroll [Alt-m]plan [Alt-d]panel [Alt-g]workers [Ctrl-r]history [?]help"
+        " [Enter]send [Esc]back [j/k]scroll [Alt-m]plan [Alt-d]panel [Alt-g]toggle [Ctrl-r]history [?]help"
     }
 }
 ```

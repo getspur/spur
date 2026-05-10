@@ -65,7 +65,7 @@ stateDiagram-v2
     SessionPicker --> Dashboard: Esc (no filter) / NewSessionRequested
 
     SessionDetail --> MermaidOverlay: Alt+v
-    SessionDetail --> Dashboard: Alt+g (InspectWorkers)
+    SessionDetail --> Dashboard: Alt+g (InspectWorkers toggle)
     SessionDetail --> Dashboard: NavigateBack (Esc idle)
 
     MermaidOverlay --> SessionDetail: Esc / q
@@ -341,7 +341,7 @@ Layout: header · ReactTrace · WorkersPanel · InputBar · StatusBar (`session_
 | `Alt+v` | Open `MermaidOverlay` (when picker available) | `895-901` |
 | `Alt+m` | `TogglePlanMode` | `action.rs:71` |
 | `Alt+d` | Toggle workers panel | `830-833` |
-| `Alt+g` | `InspectWorkers` → Dashboard | `825-827`, `app.rs:957-963` |
+| `Alt+g` | Toggle between SessionDetail and Dashboard (Agents focused) | `825-827`, `app.rs:957-963` |
 | `Ctrl+R` / `Alt+R` | Fuzzy history search popup | `977-983` |
 | `Alt+I` | Toggle vim mode | via `Action::ToggleVimMode` |
 

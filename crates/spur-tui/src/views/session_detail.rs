@@ -1322,12 +1322,6 @@ impl SessionDetailView {
             return Some(Action::RequestSessions);
         }
 
-        // Alt+g → jump to Dashboard with Agents panel focused on the
-        // highest-priority worker executor.
-        if matches!(key.code, KeyCode::Char('g')) && key.modifiers.contains(KeyModifiers::ALT) {
-            return Some(Action::InspectWorkers);
-        }
-
         // Alt+D → toggle inline workers panel collapse.
         if matches!(key.code, KeyCode::Char('d')) && key.modifiers.contains(KeyModifiers::ALT) {
             self.workers_panel_collapsed = !self.workers_panel_collapsed;

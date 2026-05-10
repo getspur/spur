@@ -310,7 +310,7 @@ impl StatusBar {
         } else {
             match props.view {
                 ViewId::Dashboard => {
-                    " [i]nput [Enter]focus [r]eview [s]essions [Esc]back [Ctrl+C]quit [?]help"
+                    " [i]nput [Enter]focus [r]eview [s]essions [Alt-g]session [Esc]back [Ctrl+C]quit [?]help"
                 }
                 ViewId::IssueBrowser => {
                     " [j/k]navigate [Enter]detail [o/w/b/x]status [W]work [Esc]back [?]help"
