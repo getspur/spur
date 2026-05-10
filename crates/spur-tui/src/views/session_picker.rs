@@ -611,6 +611,7 @@ impl SessionPickerView {
             .unwrap_or_else(|| cwd.to_str().unwrap_or(""))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_loading(
         &self,
         frame: &mut Frame,

@@ -514,13 +514,6 @@ pub(crate) async fn build_detached_continuation(
         .await
 }
 
-// ─── McpCallbackServer ───────────────────────────────────────────────
-
-/// MCP callback server that brain agents connect to via HTTP.
-///
-/// Exposes delegation and PM tools via JSON-RPC over HTTP POST,
-/// compatible with the MCP Streamable HTTP transport.
-
 /// Validate args for `delegate_parallel` beyond what the schema shape
 /// enforces. Currently: per-task `issue_id` values must be pairwise
 /// unique across the batch when non-null. Public (crate-level) for

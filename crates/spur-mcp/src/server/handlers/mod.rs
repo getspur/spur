@@ -1,6 +1,7 @@
 pub(crate) mod delegation;
 pub(crate) mod graph;
 pub(crate) mod plan;
+pub(crate) mod plan_execute;
 pub(crate) mod pm;
 
 use super::McpCallbackServer;
