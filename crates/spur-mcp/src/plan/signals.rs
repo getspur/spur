@@ -49,6 +49,10 @@ pub enum WorkerSignal {
         attempt: u32,
         last_error: String,
     },
+    /// Worker asserts that completing with no file changes is intentional.
+    /// The orchestrator uses this as the no-op acknowledgement when branch
+    /// finalization observes zero commits and a clean tree.
+    MarkNoop { signal_id: Uuid, reason: String },
 }
 
 impl WorkerSignal {
@@ -58,6 +62,7 @@ impl WorkerSignal {
             WorkerSignal::ScopeDrift { signal_id, .. } => *signal_id,
             WorkerSignal::PotentialClobber { signal_id, .. } => *signal_id,
             WorkerSignal::RetryExhausted { signal_id, .. } => *signal_id,
+            WorkerSignal::MarkNoop { signal_id, .. } => *signal_id,
         }
     }
 
@@ -67,6 +72,7 @@ impl WorkerSignal {
             WorkerSignal::ScopeDrift { .. } => "scope-drift",
             WorkerSignal::PotentialClobber { .. } => "potential-clobber",
             WorkerSignal::RetryExhausted { .. } => "retry-exhausted",
+            WorkerSignal::MarkNoop { .. } => "mark-noop",
         }
     }
 }

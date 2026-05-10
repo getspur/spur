@@ -1,3 +1,7 @@
+use super::*;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Notify;
 
 fn pro_feature_gate() -> Arc<spur_license::FeatureGate> {
     let gate = Arc::new(spur_license::FeatureGate::new(
@@ -573,7 +577,7 @@ async fn tick_once_predicts_overlay_conflict_and_blocks_without_dispatch() {
         matches!(
             &ready_task.status,
             crate::plan::PlanTaskStatus::BlockedOnSetupConflict { dep_task_id, files }
-                if dep_task_id == "X" && files == &vec!["a.rs".to_string()]
+                if dep_task_id == "X" && files == &["a.rs".to_string()]
         ),
         "ready task should be blocked on predicted conflict, got {:?}",
         ready_task.status

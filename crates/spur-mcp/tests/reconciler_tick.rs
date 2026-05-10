@@ -493,15 +493,17 @@ async fn tick_once_dispatches_ready_task_with_single_approved_dep_branch_base() 
     let task_2_issue = subgraph.task_map["T2"].clone();
 
     let adv = pm.advanced().expect("beads backend");
+    let brain_session = SessionId("brain".to_string());
     spur_mcp::emit_plan_submit_audit(
         adv,
         "overlay-plan",
         &subgraph,
-        Some("spur/plan-base-overlay"),
-        Some("base-snapshot-oid"),
-        None,
-        Some(&SessionId("brain".to_string())),
-        None,
+        spur_mcp::PlanSubmitAuditContext {
+            base_snapshot_branch: Some("spur/plan-base-overlay"),
+            base_snapshot_oid: Some("base-snapshot-oid"),
+            brain_session_id: Some(&brain_session),
+            ..Default::default()
+        },
     )
     .await;
     adv.add_comment(
@@ -661,15 +663,17 @@ async fn overlay_conflict_routes_to_blocked_on_setup_conflict() {
     let task_2_issue = subgraph.task_map["T2"].clone();
 
     let adv = pm.advanced().expect("beads backend");
+    let brain_session = SessionId("brain".to_string());
     spur_mcp::emit_plan_submit_audit(
         adv,
         "overlay-conflict-plan",
         &subgraph,
-        Some("spur/plan-base-overlay-conflict"),
-        Some("base-snapshot-oid"),
-        None,
-        Some(&SessionId("brain".to_string())),
-        None,
+        spur_mcp::PlanSubmitAuditContext {
+            base_snapshot_branch: Some("spur/plan-base-overlay-conflict"),
+            base_snapshot_oid: Some("base-snapshot-oid"),
+            brain_session_id: Some(&brain_session),
+            ..Default::default()
+        },
     )
     .await;
     adv.add_comment(

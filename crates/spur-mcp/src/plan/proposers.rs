@@ -85,6 +85,7 @@ impl MutationProposer for ScopeDriftSplitProposer {
             }
             WorkerSignal::PotentialClobber { .. } => vec![],
             WorkerSignal::RetryExhausted { .. } => vec![],
+            WorkerSignal::MarkNoop { .. } => vec![],
         }
     }
 }
@@ -239,6 +240,7 @@ mod tests {
             WorkerSignal::ScopeDrift { severity, .. } => *severity >= threshold,
             WorkerSignal::PotentialClobber { .. } => false,
             WorkerSignal::RetryExhausted { .. } => false,
+            WorkerSignal::MarkNoop { .. } => false,
         }
     }
 
