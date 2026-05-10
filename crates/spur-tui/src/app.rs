@@ -1980,6 +1980,13 @@ impl App {
                     return;
                 }
 
+                if key.modifiers.contains(KeyModifiers::ALT)
+                    && matches!(key.code, KeyCode::Char('g'))
+                {
+                    self.process_action(Action::InspectWorkers);
+                    return;
+                }
+
                 // === All overlay/modal/help/global-shortcut owners run above this line. ===
                 // === Tombstone undo is the residual key-owner: fires only when no       ===
                 // === narrower visible context wants u/Ctrl+Z.                            ===
@@ -3258,6 +3265,15 @@ impl App {
             Action::InspectWorkers => {
                 use crate::views::dashboard::Panel;
                 use spur_acp::LifecycleState;
+
+                // Toggle: Dashboard -> SessionDetail, otherwise -> Dashboard with Agents focused.
+                if matches!(self.current_view, ViewId::Dashboard) {
+                    if let Some(ref detail) = self.session_detail {
+                        self.navigate_to(ViewId::SessionDetail(detail.session_id().clone()));
+                    }
+                    return;
+                }
+
                 // Pre-select: AwaitingReview > Running > most recent worker.
                 let priority = self
                     .lineage
