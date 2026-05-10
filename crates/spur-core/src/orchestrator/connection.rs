@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use tracing::{debug, info, warn};
@@ -13,6 +14,25 @@ use spur_acp::types::{AgentHealth, TransportKind};
 
 use crate::orchestrator::session_discovery::discovery_for_kind;
 use crate::orchestrator::{Orchestrator, MAX_SESSION_LIST_PAGES, MAX_SESSION_LIST_SESSIONS};
+
+fn merge_sessions_by_id(
+    scoped_sessions: Vec<SessionInfo>,
+    broad_sessions: Vec<SessionInfo>,
+) -> Vec<SessionInfo> {
+    let mut seen = HashSet::new();
+    let mut merged = Vec::new();
+
+    for session in scoped_sessions.into_iter().chain(broad_sessions) {
+        if seen.insert(session.session_id.clone()) {
+            merged.push(session);
+            if merged.len() >= MAX_SESSION_LIST_SESSIONS {
+                break;
+            }
+        }
+    }
+
+    merged
+}
 
 impl Orchestrator {
     /// Initialize: scan $PATH for agents declared in the embedded seed
@@ -126,16 +146,29 @@ impl Orchestrator {
 
     pub(super) async fn list_sessions_from_rpc(
         conn: &mut dyn AgentConnection,
+        repo_root: &Path,
+    ) -> Result<Vec<SessionInfo>> {
+        // Some agents treat ACP `cwd` as a prefix and some as an exact
+        // match. Query the repo root first so repo scoping is explicit, then
+        // query broadly so subdirectory/worktree sessions are still available
+        // for local prefix classification.
+        let scoped_sessions =
+            Self::list_sessions_from_rpc_with_cwd(conn, Some(repo_root.to_path_buf())).await?;
+        let broad_sessions = Self::list_sessions_from_rpc_with_cwd(conn, None).await?;
+
+        Ok(merge_sessions_by_id(scoped_sessions, broad_sessions))
+    }
+
+    async fn list_sessions_from_rpc_with_cwd(
+        conn: &mut dyn AgentConnection,
+        cwd: Option<PathBuf>,
     ) -> Result<Vec<SessionInfo>> {
         let mut sessions = Vec::new();
         let mut cursor: Option<String> = None;
 
         for page_index in 0..MAX_SESSION_LIST_PAGES {
-            // Some agents treat `cwd` as an exact match, which hides sessions
-            // rooted in repo-owned worktrees. Fetch broadly and apply the
-            // repo-prefix filter before emitting to the TUI.
             let list_req = ListSessionsRequest::new()
-                .cwd(None::<PathBuf>)
+                .cwd(cwd.clone())
                 .cursor(cursor.clone());
             let response = conn.list_sessions(list_req).await?;
             let next_cursor = response.next_cursor;
