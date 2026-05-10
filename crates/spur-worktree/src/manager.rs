@@ -651,11 +651,12 @@ impl WorktreeManager {
         crate::artifact::persist(&info.path, &session_id.to_string(), output_text, kind).await
     }
 
-    /// Cherry-pick the worker's latest commit onto `target_branch`.
+    /// Squash-merge the worker branch onto `target_branch`.
     pub async fn merge_worker(
         &self,
         session_id: &SessionId,
         target_branch: &str,
+        message: &str,
     ) -> Result<MergeResult> {
         let info = self.lookup(session_id)?;
 
@@ -664,10 +665,44 @@ impl WorktreeManager {
             .await
             .with_context(|| format!("failed to checkout target branch '{target_branch}'"))?;
 
-        let result = self.run_git(&["cherry-pick", &info.branch], None).await;
+        let result = self
+            .run_git(&["merge", "--squash", &info.branch], None)
+            .await;
 
         match result {
-            Ok(_) => Ok(MergeResult::Success),
+            Ok(_) => {
+                let staged = Command::new("git")
+                    .args(["diff", "--cached", "--quiet"])
+                    .current_dir(&self.repo_root)
+                    .output()
+                    .await
+                    .context("failed to execute staged squash merge check")?;
+                match staged.status.code() {
+                    Some(0) => {
+                        debug!(
+                            session = %session_id,
+                            branch = %info.branch,
+                            target_branch = %target_branch,
+                            "squash merge produced no staged changes"
+                        );
+                        return Ok(MergeResult::Success);
+                    }
+                    Some(1) => {}
+                    _ => {
+                        let stderr = String::from_utf8_lossy(&staged.stderr).trim().to_string();
+                        return Err(anyhow!(
+                            "git diff --cached --quiet failed (exit {}): {}",
+                            staged.status.code().unwrap_or(-1),
+                            stderr
+                        ));
+                    }
+                }
+
+                self.run_git(&["commit", "-m", message], None)
+                    .await
+                    .context("failed to commit squash merge")?;
+                Ok(MergeResult::Success)
+            }
             Err(_) => {
                 // Determine which files are in conflict.
                 let conflict_output = self
@@ -681,9 +716,11 @@ impl WorktreeManager {
                     .map(|l| l.to_string())
                     .collect();
 
-                // Abort the failed cherry-pick so the repo is not left in a
-                // broken state.
-                let _ = self.run_git(&["cherry-pick", "--abort"], None).await;
+                // Abort the failed merge so the repo is not left in a broken
+                // state.
+                if self.run_git(&["merge", "--abort"], None).await.is_err() {
+                    let _ = self.run_git(&["reset", "--merge"], None).await;
+                }
 
                 Ok(MergeResult::Conflict { files })
             }
@@ -1304,6 +1341,185 @@ mod overlay_tests {
         assert_eq!(
             head_after, head_before,
             "backwards overlay range must leave HEAD unchanged"
+        );
+    }
+}
+
+#[cfg(test)]
+mod merge_worker_tests {
+    use super::*;
+    use std::process::Command as StdCommand;
+    use tempfile::TempDir;
+
+    fn run_git(repo: &std::path::Path, args: &[&str]) -> String {
+        let out = StdCommand::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn init_repo() -> TempDir {
+        let dir = TempDir::new().unwrap();
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "t@t"]);
+        run_git(dir.path(), &["config", "user.name", "t"]);
+        std::fs::write(dir.path().join("README"), "init\n").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-q", "-m", "init"]);
+        dir
+    }
+
+    fn manager_with_worker(
+        dir: &TempDir,
+        session_id: &SessionId,
+        branch: &str,
+    ) -> (WorktreeManager, std::path::PathBuf, String) {
+        let base_commit = run_git(dir.path(), &["rev-parse", "HEAD"]);
+        let worker_path = dir.path().join(".spur/worktrees/worker");
+        run_git(
+            dir.path(),
+            &[
+                "worktree",
+                "add",
+                worker_path.to_str().unwrap(),
+                "-b",
+                branch,
+                "main",
+            ],
+        );
+
+        let mut manager = WorktreeManager::new_for_test(dir.path().to_path_buf());
+        manager.register_for_test(
+            session_id.clone(),
+            worker_path.clone(),
+            branch.to_string(),
+            base_commit.clone(),
+            "codex".to_string(),
+        );
+        (manager, worker_path, base_commit)
+    }
+
+    #[tokio::test]
+    async fn merge_worker_squashes_multiple_worker_commits_with_message() {
+        let dir = init_repo();
+        let session_id = SessionId("550e8400-e29b-41d4-a716-446655440000".into());
+        let (manager, worker_path, main_before) =
+            manager_with_worker(&dir, &session_id, "worker/multi");
+
+        std::fs::write(worker_path.join("one.txt"), "one\n").unwrap();
+        run_git(&worker_path, &["add", "one.txt"]);
+        run_git(&worker_path, &["commit", "-q", "-m", "worker one"]);
+        std::fs::write(worker_path.join("two.txt"), "two\n").unwrap();
+        run_git(&worker_path, &["add", "two.txt"]);
+        run_git(&worker_path, &["commit", "-q", "-m", "worker two"]);
+
+        let result = manager
+            .merge_worker(&session_id, "main", "test-msg")
+            .await
+            .expect("merge should run");
+        assert!(matches!(result, MergeResult::Success));
+
+        let main_after = run_git(dir.path(), &["rev-parse", "main"]);
+        assert_ne!(main_after, main_before, "merge should create one commit");
+        assert_eq!(
+            run_git(
+                dir.path(),
+                &["rev-list", "--count", &format!("{main_before}..main")]
+            ),
+            "1",
+            "worker commits must be squashed into one target commit"
+        );
+        assert_eq!(
+            run_git(dir.path(), &["log", "-1", "--format=%s", "main"]),
+            "test-msg"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("one.txt")).unwrap(),
+            "one\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("two.txt")).unwrap(),
+            "two\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_worker_skips_commit_when_branch_delta_already_on_target() {
+        let dir = init_repo();
+        let session_id = SessionId("550e8400-e29b-41d4-a716-446655440000".into());
+        let (manager, worker_path, _) =
+            manager_with_worker(&dir, &session_id, "worker/already-applied");
+
+        std::fs::write(worker_path.join("done.txt"), "done\n").unwrap();
+        run_git(&worker_path, &["add", "done.txt"]);
+        run_git(&worker_path, &["commit", "-q", "-m", "worker done"]);
+        run_git(dir.path(), &["checkout", "-q", "main"]);
+        std::fs::write(dir.path().join("done.txt"), "done\n").unwrap();
+        run_git(dir.path(), &["add", "done.txt"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "already applied"]);
+        let main_before = run_git(dir.path(), &["rev-parse", "main"]);
+
+        let result = manager
+            .merge_worker(&session_id, "main", "should-not-commit")
+            .await
+            .expect("empty merge should run");
+        assert!(matches!(result, MergeResult::Success));
+
+        let main_after = run_git(dir.path(), &["rev-parse", "main"]);
+        assert_eq!(main_after, main_before, "empty squash must not commit");
+        assert_eq!(
+            run_git(dir.path(), &["log", "-1", "--format=%s", "main"]),
+            "already applied"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_worker_returns_conflict_files_and_aborts_squash_merge() {
+        let dir = init_repo();
+        std::fs::write(dir.path().join("shared.txt"), "base\n").unwrap();
+        run_git(dir.path(), &["add", "shared.txt"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "shared base"]);
+
+        let session_id = SessionId("550e8400-e29b-41d4-a716-446655440000".into());
+        let (manager, worker_path, _) = manager_with_worker(&dir, &session_id, "worker/conflict");
+
+        std::fs::write(worker_path.join("shared.txt"), "worker\n").unwrap();
+        run_git(&worker_path, &["add", "shared.txt"]);
+        run_git(&worker_path, &["commit", "-q", "-m", "worker conflict"]);
+
+        run_git(dir.path(), &["checkout", "-q", "main"]);
+        std::fs::write(dir.path().join("shared.txt"), "main\n").unwrap();
+        run_git(dir.path(), &["add", "shared.txt"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "main conflict"]);
+        let main_before = run_git(dir.path(), &["rev-parse", "main"]);
+
+        let result = manager
+            .merge_worker(&session_id, "main", "conflict-msg")
+            .await
+            .expect("conflict should be reported, not returned as an error");
+
+        match result {
+            MergeResult::Conflict { files } => {
+                assert_eq!(files, vec!["shared.txt".to_string()]);
+            }
+            MergeResult::Success => panic!("expected conflict"),
+        }
+        assert_eq!(run_git(dir.path(), &["rev-parse", "main"]), main_before);
+        assert_eq!(
+            run_git(
+                dir.path(),
+                &["status", "--porcelain", "--untracked-files=no"]
+            ),
+            "",
+            "merge abort should leave target worktree clean"
         );
     }
 }
