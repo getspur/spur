@@ -895,6 +895,7 @@ impl DashboardView {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_setup_nudge(
         &mut self,
         frame: &mut Frame,
