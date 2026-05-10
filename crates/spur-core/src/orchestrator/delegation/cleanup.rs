@@ -1,4 +1,5 @@
 use super::*;
+use spur_worktree::manager::{FinalizeCase, FinalizeOutcome};
 
 /// Returns `true` if the worktree should be preserved (not removed) for
 /// this final `DelegationStatus`.
@@ -55,6 +56,59 @@ pub fn should_commit_worker_diff(status: &DelegationStatus) -> bool {
     )
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct WorktreeCleanupOutcome {
+    pub(crate) worker_branch: Option<String>,
+    pub(crate) normalization_warning: Option<String>,
+}
+
+pub(crate) struct WorktreeCleanupContext<'a> {
+    pub(crate) agent: &'a str,
+    pub(crate) worktree_path: &'a std::path::Path,
+    pub(crate) bypass_hooks: bool,
+    pub(crate) pm_service: Option<&'a Arc<PmService>>,
+    pub(crate) issue_id: Option<&'a str>,
+}
+
+fn normalization_warning(outcome: &FinalizeOutcome, mark_noop: bool) -> Option<String> {
+    match outcome.case {
+        FinalizeCase::NoOp if mark_noop => None,
+        FinalizeCase::NoOp => Some(
+            "[normalize: worker produced no changes; no mark_noop signal received - review whether the task was actually a no-op]"
+                .to_string(),
+        ),
+        FinalizeCase::Squashed => Some(format!(
+            "[normalize: squashed {} worker commits into 1; please maintain a clean tree or commit exactly once]",
+            outcome.intermediate_commits
+        )),
+        FinalizeCase::CommittedDirty => Some(
+            "[normalize: committed dirty worker tree into 1 commit; please maintain a clean tree or commit exactly once]"
+                .to_string(),
+        ),
+        FinalizeCase::AmendedDirty => Some(
+            "[normalize: amended dirty worker tree into existing commit; please maintain a clean tree or commit exactly once]"
+                .to_string(),
+        ),
+        FinalizeCase::AlreadyAtomic => None,
+    }
+}
+
+async fn has_mark_noop_signal(pm_service: Option<&Arc<PmService>>, issue_id: Option<&str>) -> bool {
+    let (Some(pm), Some(issue_id)) = (pm_service, issue_id) else {
+        return false;
+    };
+    match pm.get_issue(issue_id).await {
+        Ok(issue) => issue
+            .labels
+            .iter()
+            .any(|label| label == &spur_mcp::plan::labels::signal_kind("mark-noop")),
+        Err(error) => {
+            tracing::warn!(issue_id, "failed to inspect mark_noop signal: {error}");
+            false
+        }
+    }
+}
+
 /// Post-gate cleanup: commit the worker diff (if approved) and either
 /// preserve or remove the worktree based on the final status.
 ///
@@ -65,38 +119,103 @@ pub(crate) async fn apply_worktree_cleanup(
     worktrees: &mut WorktreeManager,
     worker_session: &SessionId,
     final_status: &DelegationStatus,
-    diff: &Option<String>,
-    agent: &str,
-    worktree_path: &std::path::Path,
-) -> Option<String> {
-    if should_commit_worker_diff(final_status) && diff.is_some() {
-        if let Err(e) = worktrees
-            .commit_worker_changes(worker_session, &format!("spur: worker {} output", agent))
+    ctx: WorktreeCleanupContext<'_>,
+) -> WorktreeCleanupOutcome {
+    let mut normalize_warning = None;
+    if should_commit_worker_diff(final_status) {
+        match worktrees
+            .finalize_worker_branch(
+                worker_session,
+                &format!("spur: worker {} output", ctx.agent),
+                ctx.bypass_hooks,
+            )
             .await
         {
-            tracing::warn!(error = %e, "failed to commit worker diff");
+            Ok(outcome) => {
+                let mark_noop = has_mark_noop_signal(ctx.pm_service, ctx.issue_id).await;
+                normalize_warning = normalization_warning(&outcome, mark_noop);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to finalize worker branch");
+            }
         }
     }
 
     if should_preserve_worktree(final_status) {
         tracing::info!(
-            worktree = %worktree_path.display(),
+            worktree = %ctx.worktree_path.display(),
             status = ?final_status,
             "preserving worktree for review inspection"
         );
-        None
+        WorktreeCleanupOutcome {
+            worker_branch: None,
+            normalization_warning: normalize_warning,
+        }
     } else if should_commit_worker_diff(final_status) {
         // Approved work: remove worktree dir but keep branch for merge.
-        match worktrees.detach_worktree(worker_session).await {
+        let worker_branch = match worktrees.detach_worktree(worker_session).await {
             Ok(branch) => Some(branch),
             Err(e) => {
                 tracing::warn!(error = %e, "detach_worktree failed, falling back to full remove");
                 let _ = worktrees.remove_worktree(worker_session).await;
                 None
             }
+        };
+        WorktreeCleanupOutcome {
+            worker_branch,
+            normalization_warning: normalize_warning,
         }
     } else {
         let _ = worktrees.remove_worktree(worker_session).await;
-        None
+        WorktreeCleanupOutcome {
+            worker_branch: None,
+            normalization_warning: normalize_warning,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalization_warning, FinalizeCase, FinalizeOutcome};
+
+    #[test]
+    fn squashed_normalization_warning_mentions_intermediate_commit_count() {
+        let warning = normalization_warning(
+            &FinalizeOutcome {
+                case: FinalizeCase::Squashed,
+                intermediate_commits: 3,
+            },
+            false,
+        )
+        .expect("warning");
+
+        assert!(warning.contains("normalize: squashed 3 worker commits into 1"));
+    }
+
+    #[test]
+    fn no_op_without_mark_noop_warns() {
+        let warning = normalization_warning(
+            &FinalizeOutcome {
+                case: FinalizeCase::NoOp,
+                intermediate_commits: 0,
+            },
+            false,
+        )
+        .expect("warning");
+
+        assert!(warning.contains("no mark_noop signal received"));
+    }
+
+    #[test]
+    fn no_op_with_mark_noop_is_quiet() {
+        let warning = normalization_warning(
+            &FinalizeOutcome {
+                case: FinalizeCase::NoOp,
+                intermediate_commits: 0,
+            },
+            true,
+        );
+
+        assert_eq!(warning, None);
     }
 }

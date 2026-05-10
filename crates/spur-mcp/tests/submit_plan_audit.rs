@@ -169,15 +169,15 @@ async fn emit_plan_submit_audit_writes_sentinel_on_epic() {
     let adv = pm
         .advanced()
         .expect("beads-backed PmService must return advanced()");
+    let brain_session = spur_acp::SessionId("brain-1".into());
     spur_mcp::emit_plan_submit_audit(
         adv,
         "P1",
         &subgraph,
-        None,
-        None,
-        None,
-        Some(&spur_acp::SessionId("brain-1".into())),
-        None,
+        spur_mcp::PlanSubmitAuditContext {
+            brain_session_id: Some(&brain_session),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -246,15 +246,16 @@ async fn plan_submit_audit_includes_brain_session_id() {
     let adv = pm
         .advanced()
         .expect("beads-backed PmService must return advanced()");
+    let brain_session = spur_acp::SessionId("brain-99".into());
     spur_mcp::emit_plan_submit_audit(
         adv,
         "P1b",
         &subgraph,
-        None,
-        None,
-        Some("submit_plan"),
-        Some(&spur_acp::SessionId("brain-99".into())),
-        None,
+        spur_mcp::PlanSubmitAuditContext {
+            execution_mode: Some("submit_plan"),
+            brain_session_id: Some(&brain_session),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -307,15 +308,17 @@ async fn plan_submit_audit_includes_explicit_base() {
     let explicit_base = BaseTarget::Branch {
         name: "feature/br-osl".into(),
     };
+    let brain_session = spur_acp::SessionId("brain-explicit".into());
     spur_mcp::emit_plan_submit_audit(
         adv,
         "P1c",
         &subgraph,
-        None,
-        None,
-        Some("submit_plan"),
-        Some(&spur_acp::SessionId("brain-explicit".into())),
-        Some(&explicit_base),
+        spur_mcp::PlanSubmitAuditContext {
+            execution_mode: Some("submit_plan"),
+            brain_session_id: Some(&brain_session),
+            explicit_base: Some(&explicit_base),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -365,15 +368,18 @@ async fn plan_submit_audit_includes_merge_base_and_execution_mode() {
     let adv = pm
         .advanced()
         .expect("beads-backed PmService must return advanced()");
+    let brain_session = spur_acp::SessionId("brain-2".into());
     spur_mcp::emit_plan_submit_audit(
         adv,
         "P2",
         &subgraph,
-        Some("refs/heads/main"),
-        Some("0123456789abcdef0123456789abcdef01234567"),
-        Some("execute_epic"),
-        Some(&spur_acp::SessionId("brain-2".into())),
-        None,
+        spur_mcp::PlanSubmitAuditContext {
+            base_snapshot_branch: Some("refs/heads/main"),
+            base_snapshot_oid: Some("0123456789abcdef0123456789abcdef01234567"),
+            execution_mode: Some("execute_epic"),
+            brain_session_id: Some(&brain_session),
+            ..Default::default()
+        },
     )
     .await;
 
