@@ -12,11 +12,12 @@ When you install spur with no LicenseSeat configuration, it runs on the **Commun
 | Full TUI: dashboard, session detail, plan inspector, issue browser | `tui_core_view_*` | ✓ |
 | Ad-hoc CLI runs (`spur run`, `spur exec`, `spur cost`) | `cli_core_run`, `cli_core_exec`, `cli_core_cost`, … | ✓ |
 | Local PM browse and beads-basic integration | `pm_core_browse`, `pm_core_beads_basic` | ✓ |
+| Local beads-backed plan persistence and mutation | `pm_pro_beads_advanced` compatibility grant | ✓ |
 | MCP delegate / PR-creation tools | `mcp_core_delegate`, `mcp_core_pr` | ✓ |
 
-Pro adds: parallel workers within one orchestrator (`max_concurrent_workers = 10`), durable multi-step plan execution (`mcp_pro_plan_durable`), per-project cost analytics (`cost_pro_per_project_tracking`, `ctx_pro_duckdb_engine`), Telegram remote review (`bot_pro_telegram_solo`, `bot_pro_inline_review`), and automation policies (`core_pro_review_auto_approve`, `skills_pro_custom`).
+Pro adds: parallel workers within one orchestrator (`max_concurrent_workers = 10`), per-project cost analytics (`cost_pro_per_project_tracking`, `ctx_pro_duckdb_engine`), Telegram remote review (`bot_pro_telegram_solo`, `bot_pro_inline_review`), and automation policies (`core_pro_review_auto_approve`, `skills_pro_custom`).
 
-The canonical feature list lives in [`crates/spur-license/resources/default_policy.json`](../../crates/spur-license/resources/default_policy.json) under `tier_policies`. It is signed (Ed25519) and verified at compile time and runtime — so this table is illustrative; the policy file is authoritative.
+The canonical feature list lives in [`crates/spur-license/resources/default_policy.json`](../../crates/spur-license/resources/default_policy.json) under `tier_policies`. It is signed (Ed25519) and verified at compile time and runtime. Runtime compatibility grants in `spur-license` may temporarily widen Community access while the signed policy catches up.
 
 ## Single SPUR per repo
 
