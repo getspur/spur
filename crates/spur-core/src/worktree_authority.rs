@@ -41,12 +41,29 @@ pub struct SweepReport {
     pub skipped_unknown_owner: usize,
     pub skipped_fs_unsafe: usize,
     pub remove_failures: usize,
+    pub salvage_committed: usize,
+    pub salvage_commit_failed: usize,
+    pub salvage_ref_moved: usize,
+    pub salvage_ref_failed: usize,
 }
 
 #[derive(Debug)]
 pub enum AuthorityError {
     Io(std::io::Error),
     Git(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SalvageDirtyOutcome {
+    Clean,
+    Committed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SalvageRefOutcome {
+    Moved,
+    Failed,
 }
 
 impl std::fmt::Display for AuthorityError {
@@ -158,7 +175,7 @@ impl WorktreeAuthority {
                 }
                 SessionLivenessProbeResult::Missing => {
                     if self.is_quarantine_expired(&brain_session_id, now, &last_seen) {
-                        if let Err(e) = self.sweep_one(&path, trimmed).await {
+                        if let Err(e) = self.sweep_one(&path, trimmed, &mut report).await {
                             warn!(error=%e, path=%path.display(), "sweep_one (missing lock) failed");
                             report.remove_failures += 1;
                         } else {
@@ -170,7 +187,7 @@ impl WorktreeAuthority {
                 }
                 SessionLivenessProbeResult::DeadAcquired(guard) => {
                     if self.is_quarantine_expired(&brain_session_id, now, &last_seen) {
-                        if let Err(e) = self.sweep_one(&path, trimmed).await {
+                        if let Err(e) = self.sweep_one(&path, trimmed, &mut report).await {
                             warn!(error=%e, path=%path.display(), "sweep_one failed");
                             report.remove_failures += 1;
                         } else {
@@ -204,6 +221,10 @@ impl WorktreeAuthority {
             skipped_unknown_owner = report.skipped_unknown_owner,
             skipped_fs_unsafe = report.skipped_fs_unsafe,
             remove_failures = report.remove_failures,
+            salvage_committed = report.salvage_committed,
+            salvage_commit_failed = report.salvage_commit_failed,
+            salvage_ref_moved = report.salvage_ref_moved,
+            salvage_ref_failed = report.salvage_ref_failed,
             "WorktreeAuthority sweep complete"
         );
         Ok(report)
@@ -261,7 +282,12 @@ impl WorktreeAuthority {
         Ok(result)
     }
 
-    async fn sweep_one(&self, path: &std::path::Path, branch: &str) -> Result<(), AuthorityError> {
+    async fn sweep_one(
+        &self,
+        path: &std::path::Path,
+        branch: &str,
+        report: &mut SweepReport,
+    ) -> Result<(), AuthorityError> {
         let path_str = path
             .to_str()
             .ok_or_else(|| AuthorityError::Git("worktree path not UTF-8".into()))?;
@@ -278,6 +304,11 @@ impl WorktreeAuthority {
             backtrace = %bt,
             "WorktreeAuthority sweep removing worktree"
         );
+        match self.salvage_dirty_worktree(path, branch).await {
+            SalvageDirtyOutcome::Clean => {}
+            SalvageDirtyOutcome::Committed => report.salvage_committed += 1,
+            SalvageDirtyOutcome::Failed => report.salvage_commit_failed += 1,
+        }
         let out = Command::new("git")
             .args(["worktree", "remove", "--force", "--force", path_str])
             .current_dir(&*self.repo_root)
@@ -287,6 +318,10 @@ impl WorktreeAuthority {
             return Err(AuthorityError::Git(
                 String::from_utf8_lossy(&out.stderr).trim().to_string(),
             ));
+        }
+        match self.move_branch_to_salvage_ref(branch).await {
+            SalvageRefOutcome::Moved => report.salvage_ref_moved += 1,
+            SalvageRefOutcome::Failed => report.salvage_ref_failed += 1,
         }
         match Command::new("git")
             .args(["branch", "-D", branch])
@@ -307,6 +342,206 @@ impl WorktreeAuthority {
             Ok(_) => {}
         }
         Ok(())
+    }
+
+    async fn salvage_dirty_worktree(
+        &self,
+        path: &std::path::Path,
+        branch: &str,
+    ) -> SalvageDirtyOutcome {
+        match Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(path)
+            .output()
+            .await
+        {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                warn!(
+                    target: "spur.worktree.audit",
+                    op = "authority_sweep_salvage_add_failed",
+                    path = %path.display(),
+                    branch = %branch,
+                    stderr = %String::from_utf8_lossy(&o.stderr).trim(),
+                    "git add -A failed during authority sweep salvage; continuing sweep"
+                );
+                return SalvageDirtyOutcome::Failed;
+            }
+            Err(e) => {
+                warn!(
+                    target: "spur.worktree.audit",
+                    op = "authority_sweep_salvage_add_spawn_failed",
+                    path = %path.display(),
+                    branch = %branch,
+                    error = %e,
+                    "git add -A spawn failed during authority sweep salvage; continuing sweep"
+                );
+                return SalvageDirtyOutcome::Failed;
+            }
+        }
+
+        let status = match Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(path)
+            .output()
+            .await
+        {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            Ok(o) => {
+                warn!(
+                    target: "spur.worktree.audit",
+                    op = "authority_sweep_salvage_status_failed",
+                    path = %path.display(),
+                    branch = %branch,
+                    stderr = %String::from_utf8_lossy(&o.stderr).trim(),
+                    "git status --porcelain failed during authority sweep salvage; continuing sweep"
+                );
+                return SalvageDirtyOutcome::Failed;
+            }
+            Err(e) => {
+                warn!(
+                    target: "spur.worktree.audit",
+                    op = "authority_sweep_salvage_status_spawn_failed",
+                    path = %path.display(),
+                    branch = %branch,
+                    error = %e,
+                    "git status --porcelain spawn failed during authority sweep salvage; continuing sweep"
+                );
+                return SalvageDirtyOutcome::Failed;
+            }
+        };
+
+        if status.is_empty() {
+            return SalvageDirtyOutcome::Clean;
+        }
+
+        let message = format!("spur-salvage: {branch}");
+        match Command::new("git")
+            .args([
+                "-c",
+                "user.email=spur-salvage@local",
+                "-c",
+                "user.name=SPUR Salvage",
+                "commit",
+                "-m",
+                &message,
+            ])
+            .current_dir(path)
+            .output()
+            .await
+        {
+            Ok(o) if o.status.success() => {
+                info!(
+                    target: "spur.worktree.audit",
+                    op = "authority_sweep_salvage_commit",
+                    path = %path.display(),
+                    branch = %branch,
+                    "committed dirty worktree before authority sweep removal"
+                );
+                SalvageDirtyOutcome::Committed
+            }
+            Ok(o) => {
+                warn!(
+                    target: "spur.worktree.audit",
+                    op = "authority_sweep_salvage_commit_failed",
+                    path = %path.display(),
+                    branch = %branch,
+                    stderr = %String::from_utf8_lossy(&o.stderr).trim(),
+                    stdout = %String::from_utf8_lossy(&o.stdout).trim(),
+                    "git commit failed during authority sweep salvage; continuing sweep"
+                );
+                SalvageDirtyOutcome::Failed
+            }
+            Err(e) => {
+                warn!(
+                    target: "spur.worktree.audit",
+                    op = "authority_sweep_salvage_commit_spawn_failed",
+                    path = %path.display(),
+                    branch = %branch,
+                    error = %e,
+                    "git commit spawn failed during authority sweep salvage; continuing sweep"
+                );
+                SalvageDirtyOutcome::Failed
+            }
+        }
+    }
+
+    async fn move_branch_to_salvage_ref(&self, branch: &str) -> SalvageRefOutcome {
+        let head_ref = format!("refs/heads/{branch}");
+        let salvage_ref = format!("refs/spur/salvage/{branch}");
+        let oid = match Command::new("git")
+            .args(["rev-parse", &head_ref])
+            .current_dir(&*self.repo_root)
+            .output()
+            .await
+        {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            Ok(o) => {
+                warn!(
+                    target: "spur.worktree.audit",
+                    op = "authority_sweep_salvage_rev_parse_failed",
+                    branch = %branch,
+                    head_ref = %head_ref,
+                    stderr = %String::from_utf8_lossy(&o.stderr).trim(),
+                    "failed to resolve worker branch before salvage ref move; continuing sweep"
+                );
+                return SalvageRefOutcome::Failed;
+            }
+            Err(e) => {
+                warn!(
+                    target: "spur.worktree.audit",
+                    op = "authority_sweep_salvage_rev_parse_spawn_failed",
+                    branch = %branch,
+                    head_ref = %head_ref,
+                    error = %e,
+                    "git rev-parse spawn failed during salvage ref move; continuing sweep"
+                );
+                return SalvageRefOutcome::Failed;
+            }
+        };
+
+        match Command::new("git")
+            .args(["update-ref", &salvage_ref, &oid])
+            .current_dir(&*self.repo_root)
+            .output()
+            .await
+        {
+            Ok(o) if o.status.success() => {
+                info!(
+                    target: "spur.worktree.audit",
+                    op = "authority_sweep_salvage_ref_moved",
+                    branch = %branch,
+                    salvage_ref = %salvage_ref,
+                    oid = %oid,
+                    "moved worker branch tip to salvage ref before branch deletion"
+                );
+                SalvageRefOutcome::Moved
+            }
+            Ok(o) => {
+                warn!(
+                    target: "spur.worktree.audit",
+                    op = "authority_sweep_salvage_update_ref_failed",
+                    branch = %branch,
+                    salvage_ref = %salvage_ref,
+                    oid = %oid,
+                    stderr = %String::from_utf8_lossy(&o.stderr).trim(),
+                    "git update-ref failed during salvage ref move; continuing sweep"
+                );
+                SalvageRefOutcome::Failed
+            }
+            Err(e) => {
+                warn!(
+                    target: "spur.worktree.audit",
+                    op = "authority_sweep_salvage_update_ref_spawn_failed",
+                    branch = %branch,
+                    salvage_ref = %salvage_ref,
+                    oid = %oid,
+                    error = %e,
+                    "git update-ref spawn failed during salvage ref move; continuing sweep"
+                );
+                SalvageRefOutcome::Failed
+            }
+        }
     }
 
     /// Detect whether the repo's `.spur/sessions/` directory supports
@@ -354,6 +589,10 @@ impl WorktreeAuthority {
                             skipped_unknown_owner = report.skipped_unknown_owner,
                             skipped_fs_unsafe = report.skipped_fs_unsafe,
                             remove_failures = report.remove_failures,
+                            salvage_committed = report.salvage_committed,
+                            salvage_commit_failed = report.salvage_commit_failed,
+                            salvage_ref_moved = report.salvage_ref_moved,
+                            salvage_ref_failed = report.salvage_ref_failed,
                             "periodic sweep complete"
                         );
                     }
@@ -420,6 +659,10 @@ mod tests {
         assert_eq!(r.skipped_unknown_owner, 0);
         assert_eq!(r.skipped_fs_unsafe, 0);
         assert_eq!(r.remove_failures, 0);
+        assert_eq!(r.salvage_committed, 0);
+        assert_eq!(r.salvage_commit_failed, 0);
+        assert_eq!(r.salvage_ref_moved, 0);
+        assert_eq!(r.salvage_ref_failed, 0);
     }
 
     #[test]
@@ -592,6 +835,103 @@ mod tests {
         let r = auth.sweep_once().await.expect("sweep ok");
         assert_eq!(r.swept, 1);
         assert_eq!(r.probed, 1);
+    }
+
+    #[tokio::test]
+    async fn sweep_salvages_dirty_v2_worktree_before_deleting_branch() {
+        let td = TempDir::new().unwrap();
+        let brain = "550e8400-e29b-41d4-a716-446655440000";
+        let worker = "deadbeef-1111-2222-3333-444455556666";
+        let branch = format!("spur/worker/v2/codex/{brain}/{worker}");
+        let wt = seed_repo_with_worktree(&td, &branch).await;
+        Command::new("git")
+            .args(["config", "--unset", "user.email"])
+            .current_dir(td.path())
+            .output()
+            .await
+            .unwrap();
+        Command::new("git")
+            .args(["config", "--unset", "user.name"])
+            .current_dir(td.path())
+            .output()
+            .await
+            .unwrap();
+        tokio::fs::write(wt.join("dirty.txt"), b"dirty contents\n")
+            .await
+            .unwrap();
+
+        let (funnel, _rx) = event_funnel::test_channel();
+        let auth = WorktreeAuthority::new(
+            td.path().to_path_buf(),
+            SelfHeldSet::new(),
+            funnel,
+            AuthorityConfig {
+                quarantine_grace: Duration::ZERO,
+                ..AuthorityConfig::default()
+            },
+        );
+
+        let r = auth.sweep_once().await.expect("sweep ok");
+        assert_eq!(r.swept, 1);
+        assert_eq!(r.salvage_committed, 1);
+        assert_eq!(r.salvage_ref_moved, 1);
+        assert!(
+            !wt.exists(),
+            "sweep should remove the abandoned worker worktree"
+        );
+
+        let head_ref = format!("refs/heads/{branch}");
+        let head_check = Command::new("git")
+            .args(["rev-parse", "--verify", &head_ref])
+            .current_dir(td.path())
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            !head_check.status.success(),
+            "authority should delete the original worker branch"
+        );
+
+        let salvage_ref = format!("refs/spur/salvage/{branch}");
+        let salvage_oid = Command::new("git")
+            .args(["rev-parse", "--verify", &salvage_ref])
+            .current_dir(td.path())
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            salvage_oid.status.success(),
+            "salvage ref should exist: {}",
+            String::from_utf8_lossy(&salvage_oid.stderr)
+        );
+        let author = Command::new("git")
+            .args(["show", "-s", "--format=%an <%ae>", &salvage_ref])
+            .current_dir(td.path())
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            author.status.success(),
+            "salvage commit author should be readable: {}",
+            String::from_utf8_lossy(&author.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&author.stdout).trim(),
+            "SPUR Salvage <spur-salvage@local>"
+        );
+
+        let show = Command::new("git")
+            .args(["show", &format!("{salvage_ref}:dirty.txt")])
+            .current_dir(td.path())
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            show.status.success(),
+            "salvage commit should contain dirty file: {}",
+            String::from_utf8_lossy(&show.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&show.stdout), "dirty contents\n");
     }
 
     #[tokio::test]

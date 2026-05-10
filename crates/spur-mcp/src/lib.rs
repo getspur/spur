@@ -14,6 +14,6 @@ pub use events::McpEventSink;
 pub use server::{
     build_entries_with_task_map, build_epic_subgraph, build_worker_info, emit_plan_submit_audit,
     parse_parallel_tasks, plan_epic_issue_creates, validate_parallel_args, EpicSubgraph,
-    McpCallbackServer, WorkerInfo,
+    McpCallbackServer, PlanSubmitAuditContext, WorkerInfo,
 };
 pub use tools::{tools_list, DelegationChannel, DelegationRequest, ToolDefinition};

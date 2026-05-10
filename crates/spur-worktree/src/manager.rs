@@ -90,6 +90,21 @@ pub enum MergeResult {
     Conflict { files: Vec<String> },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalizeCase {
+    NoOp,
+    AlreadyAtomic,
+    CommittedDirty,
+    AmendedDirty,
+    Squashed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinalizeOutcome {
+    pub case: FinalizeCase,
+    pub intermediate_commits: usize,
+}
+
 #[derive(Debug)]
 pub enum WorktreeError {
     Anyhow(anyhow::Error),
@@ -607,29 +622,211 @@ impl WorktreeManager {
         }
     }
 
-    /// Stage and commit all changes in a worker's worktree.
-    /// No-op if there is nothing to commit.
-    pub async fn commit_worker_changes(&self, session_id: &SessionId, message: &str) -> Result<()> {
+    /// Normalize a worker branch to integration-ready output.
+    ///
+    /// Cases:
+    /// - 0 commits + dirty tree: stage and create one commit with `message`.
+    /// - 1 commit + clean tree: no-op, preserving the worker's commit message.
+    /// - 1 commit + dirty tree: stage and `commit --amend --no-edit`, preserving
+    ///   the worker's commit message while mutating the committer timestamp.
+    /// - N commits + any tree state: stage dirt if present, soft-reset to the
+    ///   recorded base commit, then create one commit with `message`. This
+    ///   flattens intermediate commits, including merge commits, so their
+    ///   messages and topology are intentionally discarded.
+    /// - 0 commits + clean tree: no-op and returns [`FinalizeCase::NoOp`].
+    ///
+    /// Before normalizing, aborts in-progress rebase, merge, cherry-pick, or
+    /// revert state so poisoned worker worktrees cannot leak partial git
+    /// operations into integration.
+    pub async fn finalize_worker_branch(
+        &self,
+        session_id: &SessionId,
+        message: &str,
+        bypass_hooks: bool,
+    ) -> Result<FinalizeOutcome> {
+        self.finalize_worker_branch_inner(session_id, message, bypass_hooks, None)
+            .await
+    }
+
+    async fn finalize_worker_branch_inner(
+        &self,
+        session_id: &SessionId,
+        message: &str,
+        bypass_hooks: bool,
+        forced_post_count: Option<usize>,
+    ) -> Result<FinalizeOutcome> {
         let info = self.lookup(session_id)?;
 
-        self.run_git(&["add", "-A"], Some(&info.path))
-            .await
-            .context("failed to stage changes")?;
+        self.abort_in_progress_git_operations(&info.path).await?;
 
-        // Check if there is anything staged to commit.
-        let status = self
-            .run_git(&["status", "--porcelain"], Some(&info.path))
+        let commits_before = self
+            .worker_commit_count(&info.path, &info.base_commit)
             .await?;
+        let dirty_before = self.worktree_dirty(&info.path).await?;
 
-        if status.is_empty() {
-            debug!(session = %session_id, "nothing to commit");
-            return Ok(());
+        let case = match (commits_before, dirty_before) {
+            (0, false) => FinalizeCase::NoOp,
+            (0, true) => {
+                self.run_git(&["add", "-A"], Some(&info.path))
+                    .await
+                    .context("failed to stage dirty worker changes")?;
+                self.commit_with_message(&info.path, message, bypass_hooks)
+                    .await
+                    .context("failed to commit dirty worker changes")?;
+                FinalizeCase::CommittedDirty
+            }
+            (1, false) => FinalizeCase::AlreadyAtomic,
+            (1, true) => {
+                self.run_git(&["add", "-A"], Some(&info.path))
+                    .await
+                    .context("failed to stage dirty worker changes for amend")?;
+                self.amend_no_edit(&info.path, bypass_hooks)
+                    .await
+                    .context("failed to amend dirty worker changes")?;
+                FinalizeCase::AmendedDirty
+            }
+            (n, _) => {
+                if dirty_before {
+                    self.run_git(&["add", "-A"], Some(&info.path))
+                        .await
+                        .context("failed to stage dirty worker changes before squash")?;
+                }
+                self.run_git(&["reset", "--soft", &info.base_commit], Some(&info.path))
+                    .await
+                    .with_context(|| {
+                        format!("failed to soft-reset worker branch to {}", info.base_commit)
+                    })?;
+                self.commit_with_message(&info.path, message, bypass_hooks)
+                    .await
+                    .context("failed to commit squashed worker changes")?;
+                debug!(
+                    session = %session_id,
+                    intermediate_commits = n,
+                    "squashed worker branch during finalization"
+                );
+                FinalizeCase::Squashed
+            }
+        };
+
+        let commits_after = match forced_post_count {
+            Some(count) => count,
+            None => {
+                self.worker_commit_count(&info.path, &info.base_commit)
+                    .await?
+            }
+        };
+        if commits_after > 1 {
+            tracing::warn!(
+                session = %session_id,
+                commits_after,
+                "worker branch finalization did not converge"
+            );
+            return Err(anyhow!(
+                "worker branch finalization did not converge: {commits_after} commits remain"
+            ));
         }
 
-        self.run_git(&["commit", "-m", message], Some(&info.path))
-            .await
-            .context("failed to commit worker changes")?;
+        Ok(FinalizeOutcome {
+            case,
+            intermediate_commits: if case == FinalizeCase::Squashed {
+                commits_before
+            } else {
+                0
+            },
+        })
+    }
 
+    async fn worker_commit_count(&self, worktree_path: &Path, base_commit: &str) -> Result<usize> {
+        let range = format!("{base_commit}..HEAD");
+        let out = self
+            .run_git(&["rev-list", "--count", &range], Some(worktree_path))
+            .await
+            .with_context(|| format!("failed to count worker commits in {range}"))?;
+        out.trim()
+            .parse::<usize>()
+            .with_context(|| format!("invalid git rev-list count: {out:?}"))
+    }
+
+    async fn worktree_dirty(&self, worktree_path: &Path) -> Result<bool> {
+        let status = self
+            .run_git(&["status", "--porcelain"], Some(worktree_path))
+            .await
+            .context("failed to inspect worker status")?;
+        Ok(!status.is_empty())
+    }
+
+    async fn commit_with_message(
+        &self,
+        worktree_path: &Path,
+        message: &str,
+        bypass_hooks: bool,
+    ) -> Result<String> {
+        if bypass_hooks {
+            self.run_git(
+                &["commit", "--no-verify", "--no-gpg-sign", "-m", message],
+                Some(worktree_path),
+            )
+            .await
+        } else {
+            self.run_git(&["commit", "-m", message], Some(worktree_path))
+                .await
+        }
+    }
+
+    async fn amend_no_edit(&self, worktree_path: &Path, bypass_hooks: bool) -> Result<String> {
+        if bypass_hooks {
+            self.run_git(
+                &[
+                    "commit",
+                    "--amend",
+                    "--no-edit",
+                    "--no-verify",
+                    "--no-gpg-sign",
+                ],
+                Some(worktree_path),
+            )
+            .await
+        } else {
+            self.run_git(&["commit", "--amend", "--no-edit"], Some(worktree_path))
+                .await
+        }
+    }
+
+    async fn abort_in_progress_git_operations(&self, worktree_path: &Path) -> Result<()> {
+        let git_dir = self
+            .run_git(&["rev-parse", "--git-dir"], Some(worktree_path))
+            .await
+            .context("failed to resolve worker git dir")?;
+        let git_dir = PathBuf::from(git_dir.trim());
+        let git_dir = if git_dir.is_absolute() {
+            git_dir
+        } else {
+            worktree_path.join(git_dir)
+        };
+
+        if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
+            self.run_git(&["rebase", "--abort"], Some(worktree_path))
+                .await
+                .context("failed to abort in-progress rebase")?;
+        }
+
+        if git_dir.join("MERGE_HEAD").exists() {
+            self.run_git(&["merge", "--abort"], Some(worktree_path))
+                .await
+                .context("failed to abort in-progress merge")?;
+        }
+
+        if git_dir.join("CHERRY_PICK_HEAD").exists() {
+            self.run_git(&["cherry-pick", "--abort"], Some(worktree_path))
+                .await
+                .context("failed to abort in-progress cherry-pick")?;
+        }
+
+        if git_dir.join("REVERT_HEAD").exists() {
+            self.run_git(&["revert", "--abort"], Some(worktree_path))
+                .await
+                .context("failed to abort in-progress revert")?;
+        }
         Ok(())
     }
 
@@ -651,11 +848,12 @@ impl WorktreeManager {
         crate::artifact::persist(&info.path, &session_id.to_string(), output_text, kind).await
     }
 
-    /// Cherry-pick the worker's latest commit onto `target_branch`.
+    /// Squash-merge the worker branch onto `target_branch`.
     pub async fn merge_worker(
         &self,
         session_id: &SessionId,
         target_branch: &str,
+        message: &str,
     ) -> Result<MergeResult> {
         let info = self.lookup(session_id)?;
 
@@ -664,10 +862,44 @@ impl WorktreeManager {
             .await
             .with_context(|| format!("failed to checkout target branch '{target_branch}'"))?;
 
-        let result = self.run_git(&["cherry-pick", &info.branch], None).await;
+        let result = self
+            .run_git(&["merge", "--squash", &info.branch], None)
+            .await;
 
         match result {
-            Ok(_) => Ok(MergeResult::Success),
+            Ok(_) => {
+                let staged = Command::new("git")
+                    .args(["diff", "--cached", "--quiet"])
+                    .current_dir(&self.repo_root)
+                    .output()
+                    .await
+                    .context("failed to execute staged squash merge check")?;
+                match staged.status.code() {
+                    Some(0) => {
+                        debug!(
+                            session = %session_id,
+                            branch = %info.branch,
+                            target_branch = %target_branch,
+                            "squash merge produced no staged changes"
+                        );
+                        return Ok(MergeResult::Success);
+                    }
+                    Some(1) => {}
+                    _ => {
+                        let stderr = String::from_utf8_lossy(&staged.stderr).trim().to_string();
+                        return Err(anyhow!(
+                            "git diff --cached --quiet failed (exit {}): {}",
+                            staged.status.code().unwrap_or(-1),
+                            stderr
+                        ));
+                    }
+                }
+
+                self.run_git(&["commit", "-m", message], None)
+                    .await
+                    .context("failed to commit squash merge")?;
+                Ok(MergeResult::Success)
+            }
             Err(_) => {
                 // Determine which files are in conflict.
                 let conflict_output = self
@@ -681,9 +913,11 @@ impl WorktreeManager {
                     .map(|l| l.to_string())
                     .collect();
 
-                // Abort the failed cherry-pick so the repo is not left in a
-                // broken state.
-                let _ = self.run_git(&["cherry-pick", "--abort"], None).await;
+                // Abort the failed merge so the repo is not left in a broken
+                // state.
+                if self.run_git(&["merge", "--abort"], None).await.is_err() {
+                    let _ = self.run_git(&["reset", "--merge"], None).await;
+                }
 
                 Ok(MergeResult::Conflict { files })
             }
@@ -1304,6 +1538,498 @@ mod overlay_tests {
         assert_eq!(
             head_after, head_before,
             "backwards overlay range must leave HEAD unchanged"
+        );
+    }
+}
+
+#[cfg(test)]
+mod finalize_worker_branch_tests {
+    use super::*;
+    use std::process::Command as StdCommand;
+    use tempfile::TempDir;
+
+    fn run_git(repo: &std::path::Path, args: &[&str]) -> String {
+        let out = StdCommand::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn try_git(repo: &std::path::Path, args: &[&str]) -> std::process::Output {
+        StdCommand::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap()
+    }
+
+    fn init_repo() -> TempDir {
+        let dir = TempDir::new().unwrap();
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "t@t"]);
+        run_git(dir.path(), &["config", "user.name", "t"]);
+        std::fs::write(dir.path().join("README.md"), "base\n").unwrap();
+        run_git(dir.path(), &["add", "README.md"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "base"]);
+        dir
+    }
+
+    fn setup_worker(dir: &TempDir) -> (WorktreeManager, std::path::PathBuf, SessionId, String) {
+        let base = run_git(dir.path(), &["rev-parse", "HEAD"]);
+        let worker_path = dir.path().join("worker");
+        run_git(
+            dir.path(),
+            &[
+                "worktree",
+                "add",
+                worker_path.to_str().unwrap(),
+                "-b",
+                "worker",
+                "main",
+            ],
+        );
+        let session = SessionId("worker-session".into());
+        let mut manager = WorktreeManager::new_for_test(dir.path().to_path_buf());
+        manager.register_for_test(
+            session.clone(),
+            worker_path.clone(),
+            "worker".into(),
+            base.clone(),
+            "codex".into(),
+        );
+        (manager, worker_path, session, base)
+    }
+
+    fn commit_count(worker_path: &std::path::Path, base: &str) -> String {
+        run_git(
+            worker_path,
+            &["rev-list", "--count", &format!("{base}..HEAD")],
+        )
+    }
+
+    fn git_path(worker_path: &std::path::Path, path: &str) -> std::path::PathBuf {
+        let out = run_git(worker_path, &["rev-parse", "--git-path", path]);
+        let path = std::path::PathBuf::from(out);
+        if path.is_absolute() {
+            path
+        } else {
+            worker_path.join(path)
+        }
+    }
+
+    #[cfg(unix)]
+    fn install_rejecting_pre_commit(worker_path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let hook = git_path(worker_path, "hooks/pre-commit");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, "#!/bin/sh\necho hook rejected >&2\nexit 7\n").unwrap();
+        let mut mode = std::fs::metadata(&hook).unwrap().permissions();
+        mode.set_mode(0o755);
+        std::fs::set_permissions(&hook, mode).unwrap();
+    }
+
+    #[tokio::test]
+    async fn finalize_worker_branch_commits_zero_commits_dirty_tree() {
+        let dir = init_repo();
+        let (manager, worker_path, session, base) = setup_worker(&dir);
+        std::fs::write(worker_path.join("one.txt"), "one\n").unwrap();
+
+        let outcome = manager
+            .finalize_worker_branch(&session, "task message", false)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.case, FinalizeCase::CommittedDirty);
+        assert_eq!(commit_count(&worker_path, &base), "1");
+        assert_eq!(
+            run_git(&worker_path, &["log", "-1", "--format=%s"]),
+            "task message"
+        );
+        assert_eq!(run_git(&worker_path, &["status", "--porcelain"]), "");
+    }
+
+    #[tokio::test]
+    async fn finalize_worker_branch_preserves_one_clean_commit() {
+        let dir = init_repo();
+        let (manager, worker_path, session, base) = setup_worker(&dir);
+        std::fs::write(worker_path.join("one.txt"), "one\n").unwrap();
+        run_git(&worker_path, &["add", "one.txt"]);
+        run_git(&worker_path, &["commit", "-q", "-m", "worker message"]);
+        let head_before = run_git(&worker_path, &["rev-parse", "HEAD"]);
+
+        let outcome = manager
+            .finalize_worker_branch(&session, "task message", false)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.case, FinalizeCase::AlreadyAtomic);
+        assert_eq!(commit_count(&worker_path, &base), "1");
+        assert_eq!(run_git(&worker_path, &["rev-parse", "HEAD"]), head_before);
+        assert_eq!(
+            run_git(&worker_path, &["log", "-1", "--format=%s"]),
+            "worker message"
+        );
+    }
+
+    #[tokio::test]
+    async fn finalize_worker_branch_amends_one_commit_with_dirty_tree() {
+        let dir = init_repo();
+        let (manager, worker_path, session, base) = setup_worker(&dir);
+        std::fs::write(worker_path.join("one.txt"), "one\n").unwrap();
+        run_git(&worker_path, &["add", "one.txt"]);
+        run_git(&worker_path, &["commit", "-q", "-m", "worker message"]);
+        std::fs::write(worker_path.join("two.txt"), "two\n").unwrap();
+
+        let outcome = manager
+            .finalize_worker_branch(&session, "task message", false)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.case, FinalizeCase::AmendedDirty);
+        assert_eq!(commit_count(&worker_path, &base), "1");
+        assert_eq!(
+            run_git(&worker_path, &["log", "-1", "--format=%s"]),
+            "worker message"
+        );
+        assert_eq!(run_git(&worker_path, &["status", "--porcelain"]), "");
+        assert!(worker_path.join("two.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn finalize_worker_branch_squashes_many_commits_and_dirty_tree() {
+        let dir = init_repo();
+        let (manager, worker_path, session, base) = setup_worker(&dir);
+        for i in 1..=3 {
+            std::fs::write(worker_path.join(format!("{i}.txt")), format!("{i}\n")).unwrap();
+            run_git(&worker_path, &["add", "."]);
+            run_git(&worker_path, &["commit", "-q", "-m", &format!("wip {i}")]);
+        }
+        std::fs::write(worker_path.join("dirty.txt"), "dirty\n").unwrap();
+
+        let outcome = manager
+            .finalize_worker_branch(&session, "task message", false)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.case, FinalizeCase::Squashed);
+        assert_eq!(outcome.intermediate_commits, 3);
+        assert_eq!(commit_count(&worker_path, &base), "1");
+        assert_eq!(
+            run_git(&worker_path, &["log", "-1", "--format=%s"]),
+            "task message"
+        );
+        assert_eq!(run_git(&worker_path, &["status", "--porcelain"]), "");
+    }
+
+    #[tokio::test]
+    async fn finalize_worker_branch_noops_zero_commits_clean_tree() {
+        let dir = init_repo();
+        let (manager, worker_path, session, base) = setup_worker(&dir);
+
+        let outcome = manager
+            .finalize_worker_branch(&session, "task message", false)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.case, FinalizeCase::NoOp);
+        assert_eq!(commit_count(&worker_path, &base), "0");
+    }
+
+    #[tokio::test]
+    async fn finalize_worker_branch_aborts_in_progress_merge_before_normalizing() {
+        let dir = init_repo();
+        std::fs::write(dir.path().join("conflict.txt"), "base\n").unwrap();
+        run_git(dir.path(), &["add", "conflict.txt"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "conflict base"]);
+        run_git(dir.path(), &["checkout", "-q", "-b", "other"]);
+        std::fs::write(dir.path().join("conflict.txt"), "other\n").unwrap();
+        run_git(dir.path(), &["add", "conflict.txt"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "other"]);
+        run_git(dir.path(), &["checkout", "-q", "main"]);
+        let (manager, worker_path, session, base) = setup_worker(&dir);
+        std::fs::write(worker_path.join("conflict.txt"), "worker\n").unwrap();
+        run_git(&worker_path, &["add", "conflict.txt"]);
+        run_git(&worker_path, &["commit", "-q", "-m", "worker"]);
+        let merge = try_git(&worker_path, &["merge", "other"]);
+        assert!(!merge.status.success(), "merge should conflict");
+
+        let outcome = manager
+            .finalize_worker_branch(&session, "task message", false)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.case, FinalizeCase::AlreadyAtomic);
+        assert!(!git_path(&worker_path, "MERGE_HEAD").exists());
+        assert_eq!(commit_count(&worker_path, &base), "1");
+    }
+
+    #[tokio::test]
+    async fn finalize_worker_branch_aborts_in_progress_rebase_before_normalizing() {
+        let dir = init_repo();
+        std::fs::write(dir.path().join("conflict.txt"), "base\n").unwrap();
+        run_git(dir.path(), &["add", "conflict.txt"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "conflict base"]);
+        run_git(dir.path(), &["checkout", "-q", "-b", "other"]);
+        std::fs::write(dir.path().join("conflict.txt"), "other\n").unwrap();
+        run_git(dir.path(), &["add", "conflict.txt"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "other"]);
+        run_git(dir.path(), &["checkout", "-q", "main"]);
+        let (manager, worker_path, session, base) = setup_worker(&dir);
+        std::fs::write(worker_path.join("conflict.txt"), "worker\n").unwrap();
+        run_git(&worker_path, &["add", "conflict.txt"]);
+        run_git(&worker_path, &["commit", "-q", "-m", "worker"]);
+        let rebase = try_git(&worker_path, &["rebase", "other"]);
+        assert!(!rebase.status.success(), "rebase should conflict");
+
+        let outcome = manager
+            .finalize_worker_branch(&session, "task message", false)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.case, FinalizeCase::AlreadyAtomic);
+        assert!(!git_path(&worker_path, "rebase-merge").exists());
+        assert_eq!(commit_count(&worker_path, &base), "1");
+    }
+
+    #[tokio::test]
+    async fn finalize_worker_branch_returns_err_when_post_count_exceeds_one() {
+        let dir = init_repo();
+        let (manager, worker_path, session, _base) = setup_worker(&dir);
+        std::fs::write(worker_path.join("one.txt"), "one\n").unwrap();
+
+        let err = manager
+            .finalize_worker_branch_inner(&session, "task message", false, Some(2))
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("did not converge"),
+            "expected convergence error, got {err:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn finalize_worker_branch_does_not_bypass_hooks_by_default() {
+        let dir = init_repo();
+        let (manager, worker_path, session, _base) = setup_worker(&dir);
+        install_rejecting_pre_commit(&worker_path);
+        std::fs::write(worker_path.join("one.txt"), "one\n").unwrap();
+
+        let err = manager
+            .finalize_worker_branch(&session, "task message", false)
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("failed to commit dirty worker changes"),
+            "expected hook failure, got {err:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn finalize_worker_branch_bypasses_hooks_when_configured() {
+        let dir = init_repo();
+        let (manager, worker_path, session, base) = setup_worker(&dir);
+        install_rejecting_pre_commit(&worker_path);
+        std::fs::write(worker_path.join("one.txt"), "one\n").unwrap();
+
+        let outcome = manager
+            .finalize_worker_branch(&session, "task message", true)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.case, FinalizeCase::CommittedDirty);
+        assert_eq!(commit_count(&worker_path, &base), "1");
+    }
+}
+
+#[cfg(test)]
+mod merge_worker_tests {
+    use super::*;
+    use std::process::Command as StdCommand;
+    use tempfile::TempDir;
+
+    fn run_git(repo: &std::path::Path, args: &[&str]) -> String {
+        let out = StdCommand::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn init_repo() -> TempDir {
+        let dir = TempDir::new().unwrap();
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "t@t"]);
+        run_git(dir.path(), &["config", "user.name", "t"]);
+        std::fs::write(dir.path().join("README"), "init\n").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-q", "-m", "init"]);
+        dir
+    }
+
+    fn manager_with_worker(
+        dir: &TempDir,
+        session_id: &SessionId,
+        branch: &str,
+    ) -> (WorktreeManager, std::path::PathBuf, String) {
+        let base_commit = run_git(dir.path(), &["rev-parse", "HEAD"]);
+        let worker_path = dir.path().join(".spur/worktrees/worker");
+        run_git(
+            dir.path(),
+            &[
+                "worktree",
+                "add",
+                worker_path.to_str().unwrap(),
+                "-b",
+                branch,
+                "main",
+            ],
+        );
+
+        let mut manager = WorktreeManager::new_for_test(dir.path().to_path_buf());
+        manager.register_for_test(
+            session_id.clone(),
+            worker_path.clone(),
+            branch.to_string(),
+            base_commit.clone(),
+            "codex".to_string(),
+        );
+        (manager, worker_path, base_commit)
+    }
+
+    #[tokio::test]
+    async fn merge_worker_squashes_multiple_worker_commits_with_message() {
+        let dir = init_repo();
+        let session_id = SessionId("550e8400-e29b-41d4-a716-446655440000".into());
+        let (manager, worker_path, main_before) =
+            manager_with_worker(&dir, &session_id, "worker/multi");
+
+        std::fs::write(worker_path.join("one.txt"), "one\n").unwrap();
+        run_git(&worker_path, &["add", "one.txt"]);
+        run_git(&worker_path, &["commit", "-q", "-m", "worker one"]);
+        std::fs::write(worker_path.join("two.txt"), "two\n").unwrap();
+        run_git(&worker_path, &["add", "two.txt"]);
+        run_git(&worker_path, &["commit", "-q", "-m", "worker two"]);
+
+        let result = manager
+            .merge_worker(&session_id, "main", "test-msg")
+            .await
+            .expect("merge should run");
+        assert!(matches!(result, MergeResult::Success));
+
+        let main_after = run_git(dir.path(), &["rev-parse", "main"]);
+        assert_ne!(main_after, main_before, "merge should create one commit");
+        assert_eq!(
+            run_git(
+                dir.path(),
+                &["rev-list", "--count", &format!("{main_before}..main")]
+            ),
+            "1",
+            "worker commits must be squashed into one target commit"
+        );
+        assert_eq!(
+            run_git(dir.path(), &["log", "-1", "--format=%s", "main"]),
+            "test-msg"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("one.txt")).unwrap(),
+            "one\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("two.txt")).unwrap(),
+            "two\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_worker_skips_commit_when_branch_delta_already_on_target() {
+        let dir = init_repo();
+        let session_id = SessionId("550e8400-e29b-41d4-a716-446655440000".into());
+        let (manager, worker_path, _) =
+            manager_with_worker(&dir, &session_id, "worker/already-applied");
+
+        std::fs::write(worker_path.join("done.txt"), "done\n").unwrap();
+        run_git(&worker_path, &["add", "done.txt"]);
+        run_git(&worker_path, &["commit", "-q", "-m", "worker done"]);
+        run_git(dir.path(), &["checkout", "-q", "main"]);
+        std::fs::write(dir.path().join("done.txt"), "done\n").unwrap();
+        run_git(dir.path(), &["add", "done.txt"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "already applied"]);
+        let main_before = run_git(dir.path(), &["rev-parse", "main"]);
+
+        let result = manager
+            .merge_worker(&session_id, "main", "should-not-commit")
+            .await
+            .expect("empty merge should run");
+        assert!(matches!(result, MergeResult::Success));
+
+        let main_after = run_git(dir.path(), &["rev-parse", "main"]);
+        assert_eq!(main_after, main_before, "empty squash must not commit");
+        assert_eq!(
+            run_git(dir.path(), &["log", "-1", "--format=%s", "main"]),
+            "already applied"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_worker_returns_conflict_files_and_aborts_squash_merge() {
+        let dir = init_repo();
+        std::fs::write(dir.path().join("shared.txt"), "base\n").unwrap();
+        run_git(dir.path(), &["add", "shared.txt"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "shared base"]);
+
+        let session_id = SessionId("550e8400-e29b-41d4-a716-446655440000".into());
+        let (manager, worker_path, _) = manager_with_worker(&dir, &session_id, "worker/conflict");
+
+        std::fs::write(worker_path.join("shared.txt"), "worker\n").unwrap();
+        run_git(&worker_path, &["add", "shared.txt"]);
+        run_git(&worker_path, &["commit", "-q", "-m", "worker conflict"]);
+
+        run_git(dir.path(), &["checkout", "-q", "main"]);
+        std::fs::write(dir.path().join("shared.txt"), "main\n").unwrap();
+        run_git(dir.path(), &["add", "shared.txt"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "main conflict"]);
+        let main_before = run_git(dir.path(), &["rev-parse", "main"]);
+
+        let result = manager
+            .merge_worker(&session_id, "main", "conflict-msg")
+            .await
+            .expect("conflict should be reported, not returned as an error");
+
+        match result {
+            MergeResult::Conflict { files } => {
+                assert_eq!(files, vec!["shared.txt".to_string()]);
+            }
+            MergeResult::Success => panic!("expected conflict"),
+        }
+        assert_eq!(run_git(dir.path(), &["rev-parse", "main"]), main_before);
+        assert_eq!(
+            run_git(
+                dir.path(),
+                &["status", "--porcelain", "--untracked-files=no"]
+            ),
+            "",
+            "merge abort should leave target worktree clean"
         );
     }
 }

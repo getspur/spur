@@ -430,6 +430,17 @@ pub struct DelegationConfig {
     /// returning `status: "pending"` with `continuation_will_fire: true`.
     /// Default `0` — async-first.
     pub inline_wait_ms: u64,
+    /// Orchestrator-side worker branch normalization settings.
+    pub normalize: DelegationNormalizeConfig,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DelegationNormalizeConfig {
+    /// When true, branch normalization git commits use `--no-verify` and
+    /// `--no-gpg-sign`. Default false so user repository hooks and signing
+    /// policies remain authoritative.
+    pub bypass_hooks: bool,
 }
 
 /// Editing-mode preference for the TUI input bar. Stored in config so the

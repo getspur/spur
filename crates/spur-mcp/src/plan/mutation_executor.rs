@@ -254,11 +254,13 @@ pub async fn apply_mutation(
                 apply_modify_task_spec(
                     pm.as_ref(),
                     adv,
-                    issue_id,
-                    new_task.as_deref(),
-                    new_agent.as_deref(),
-                    new_context_files.as_deref(),
-                    new_depends_on.as_deref(),
+                    ModifyTaskSpecInput {
+                        issue_id,
+                        new_task: new_task.as_deref(),
+                        new_agent: new_agent.as_deref(),
+                        new_context_files: new_context_files.as_deref(),
+                        new_depends_on: new_depends_on.as_deref(),
+                    },
                     &mut executed_ops,
                 )
                 .await
@@ -1277,16 +1279,21 @@ async fn apply_retry_task(
 /// Apply ModifyTaskSpec while threading partial-state into `executed_ops` so a
 /// mid-sequence failure (e.g., a cycle-creating `add_dependency`) still leaves
 /// a rollback record covering the work already done.
+struct ModifyTaskSpecInput<'a> {
+    issue_id: &'a str,
+    new_task: Option<&'a str>,
+    new_agent: Option<&'a str>,
+    new_context_files: Option<&'a [String]>,
+    new_depends_on: Option<&'a [String]>,
+}
+
 async fn apply_modify_task_spec(
     pm: &PmService,
     adv: &dyn BeadsAdvanced,
-    issue_id: &str,
-    new_task: Option<&str>,
-    new_agent: Option<&str>,
-    new_context_files: Option<&[String]>,
-    new_depends_on: Option<&[String]>,
+    input: ModifyTaskSpecInput<'_>,
     executed_ops: &mut Vec<ExecutedOp>,
 ) -> Result<()> {
+    let issue_id = input.issue_id;
     let issue = pm
         .get_issue(issue_id)
         .await
@@ -1313,7 +1320,7 @@ async fn apply_modify_task_spec(
     }));
 
     // 1. Body update
-    if let Some(new) = new_task {
+    if let Some(new) = input.new_task {
         if new != original_body {
             pm.update_issue(
                 issue_id,
@@ -1331,7 +1338,7 @@ async fn apply_modify_task_spec(
     }
 
     // 2. Agent label swap
-    if let Some(agent_name) = new_agent {
+    if let Some(agent_name) = input.new_agent {
         let new_label = super::labels::agent(agent_name);
         let mut remove = Vec::new();
         if let Some(old) = original_agent_label.as_deref() {
@@ -1367,7 +1374,7 @@ async fn apply_modify_task_spec(
     //    edges. add_dependency is the most likely source of mid-op failure
     //    (cycle detection in beads_rust); the partial-state recording above
     //    means rollback can clean up.
-    if let Some(targets) = new_depends_on {
+    if let Some(targets) = input.new_depends_on {
         let want: HashSet<&str> = targets.iter().map(String::as_str).collect();
         let have: HashSet<&str> = original_blocked_by.iter().map(String::as_str).collect();
         for dep in &original_blocked_by {
@@ -1401,7 +1408,7 @@ async fn apply_modify_task_spec(
     );
     let (prior_task_id, prior_context_files) = super::projector::latest_task_spec(&prior_audits)
         .unwrap_or_else(|| (issue_id.to_string(), Vec::new()));
-    let context_files: Vec<String> = match new_context_files {
+    let context_files: Vec<String> = match input.new_context_files {
         Some(files) => files.to_vec(),
         None => prior_context_files,
     };
@@ -1411,9 +1418,9 @@ async fn apply_modify_task_spec(
         issue_id,
         &prior_task_id,
         &context_files,
-        new_task,
-        new_agent,
-        new_depends_on,
+        input.new_task,
+        input.new_agent,
+        input.new_depends_on,
     )
     .await
     .with_context(|| format!("emit extended task_spec audit for {issue_id}"))?;

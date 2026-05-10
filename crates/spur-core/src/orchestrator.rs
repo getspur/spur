@@ -345,6 +345,10 @@ impl Orchestrator {
                     swept = report.swept,
                     skipped_unknown_owner = report.skipped_unknown_owner,
                     skipped_live = report.skipped_live,
+                    salvage_committed = report.salvage_committed,
+                    salvage_commit_failed = report.salvage_commit_failed,
+                    salvage_ref_moved = report.salvage_ref_moved,
+                    salvage_ref_failed = report.salvage_ref_failed,
                     "startup worktree authority sweep complete"
                 ),
                 Err(e) => tracing::warn!(
