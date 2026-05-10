@@ -204,7 +204,7 @@ impl super::Reconciler {
                     children.push(summary);
                 }
             }
-            let children = children
+            let mut children = children
                 .into_iter()
                 .filter(|summary| summary.id != epic.id)
                 .collect::<Vec<_>>();
@@ -213,12 +213,39 @@ impl super::Reconciler {
                 .iter()
                 .any(|child| child_summary_may_have_terminal_projection(child, &closed_status))
             {
-                if let Err(error) = self.project_plan_from_beads(plan_id).await {
-                    tracing::warn!(
-                        %plan_id,
-                        epic_id = %epic.id,
-                        "failed to project terminal child statuses for outcome pruning: {error}"
-                    );
+                match self.project_plan_from_beads(plan_id).await {
+                    Ok(projected) => {
+                        for child in &mut children {
+                            let Some(task) = projected
+                                .tasks
+                                .iter()
+                                .find(|task| task.spec.issue_id.as_deref() == Some(&child.id))
+                            else {
+                                continue;
+                            };
+                            child.status = match task.status {
+                                crate::plan::PlanTaskStatus::Cancelled { .. }
+                                | crate::plan::PlanTaskStatus::Superseded { .. } => {
+                                    "cancelled".to_string()
+                                }
+                                crate::plan::PlanTaskStatus::Failed { .. } => "failed".to_string(),
+                                crate::plan::PlanTaskStatus::Rejected { .. } => {
+                                    "rejected".to_string()
+                                }
+                                crate::plan::PlanTaskStatus::Approved { .. } => {
+                                    closed_status.clone()
+                                }
+                                _ => child.status.clone(),
+                            };
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %plan_id,
+                            epic_id = %epic.id,
+                            "failed to project terminal child statuses for outcome pruning: {error}"
+                        );
+                    }
                 }
             }
 

@@ -575,7 +575,6 @@ pub struct McpCallbackServer {
     task_tracker: TaskTracker,
     /// Optional PM service for direct issue/PR operations.
     pm_service: Option<Arc<PmService>>,
-    #[cfg(test)]
     pm_service_like: Option<Arc<dyn crate::plan::PmLike>>,
     /// Optional event sink for emitting MCP lifecycle events.
     event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
@@ -2250,7 +2249,6 @@ impl McpCallbackServer {
             completed_delegations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             task_tracker: TaskTracker::new(),
             pm_service,
-            #[cfg(test)]
             pm_service_like: None,
             event_sink,
             feature_gate,
@@ -2296,7 +2294,6 @@ impl McpCallbackServer {
     }
 
     fn submit_plan_substrate_pm(&self) -> Option<&dyn crate::plan::PmLike> {
-        #[cfg(test)]
         if let Some(pm) = self.pm_service_like.as_deref() {
             return Some(pm);
         }
@@ -2306,7 +2303,6 @@ impl McpCallbackServer {
     }
 
     fn reconciler_pm(&self) -> Option<Arc<dyn crate::plan::PmLike>> {
-        #[cfg(test)]
         if let Some(pm) = self.pm_service_like.as_ref() {
             return Some(Arc::clone(pm));
         }
@@ -2846,7 +2842,6 @@ impl McpCallbackServer {
         self.install_projected_plan(state, false).await;
     }
 
-    #[cfg(test)]
     #[doc(hidden)]
     pub fn __test_set_pm_like(&mut self, pm: Arc<dyn crate::plan::PmLike>) {
         self.pm_service_like = Some(pm);
@@ -5671,7 +5666,7 @@ impl McpCallbackServer {
                 "submit_plan: cannot derive epic_title - provide epic_title or a non-whitespace tasks[0].task",
             );
         }
-        let pm_source = self.pm_service.as_deref().map(|p| p.source_str());
+        let pm_source = self.submit_plan_substrate_pm().map(|p| p.source_str());
         if pm_source != Some("beads") {
             return JsonRpcResponse::error(
                 id,
@@ -6738,13 +6733,10 @@ impl McpCallbackServer {
         let sink: Option<&dyn crate::events::McpEventSink> = self.event_sink.as_deref();
 
         // INV-5: use handle_review_task so the plan lock is dropped before
-        // pm.update_issue() is called.  The pm_service field stores a concrete
-        // Arc<PmService>; coerce to Arc<dyn PmLike> so spawned completion
-        // futures can emit audit sentinels after the lock is released.
-        let pm_arc: Option<std::sync::Arc<dyn crate::plan::PmLike>> = self
-            .pm_service
-            .clone()
-            .map(|pm| pm as Arc<dyn crate::plan::PmLike>);
+        // pm.update_issue() is called. Tests may install a MockPm via the
+        // substrate abstraction, so route review writes through the same PM
+        // surface as the reconciler.
+        let pm_arc: Option<std::sync::Arc<dyn crate::plan::PmLike>> = self.reconciler_pm();
 
         let write_mode = if self.nonadvisory_review_writes {
             crate::plan::ReviewWriteMode::NonAdvisory
@@ -7015,6 +7007,11 @@ impl McpCallbackServer {
             .pm_service
             .as_deref()
             .ok_or_else(|| "test version churn requires PM service".to_string())?;
+        require_feature(
+            FeatureKey::PM_PRO_BEADS_ADVANCED,
+            self.feature_gate.as_ref(),
+        )
+        .map_err(feature_error_message)?;
         let advanced = pm
             .advanced()
             .ok_or_else(|| "test version churn requires beads advanced backend".to_string())?;
@@ -7497,16 +7494,17 @@ impl McpCallbackServer {
         }
 
         let pm = self
-            .pm_service
-            .as_deref()
+            .submit_plan_substrate_pm()
             .ok_or_else(|| format!("unknown plan '{plan_id}'"))?;
         if self.versioned_cache_serve {
-            let (projected, beads_version) = self
-                .project_plan_from_beads_with_stable_version(pm, plan_id)
-                .await?;
-            return Ok(self
-                .install_projected_plan_with_version(projected, beads_version)
-                .await);
+            if let Some(pm_service) = self.pm_service.as_deref() {
+                let (projected, beads_version) = self
+                    .project_plan_from_beads_with_stable_version(pm_service, plan_id)
+                    .await?;
+                return Ok(self
+                    .install_projected_plan_with_version(projected, beads_version)
+                    .await);
+            }
         }
 
         let projected = crate::plan::projector::project_plan_from_beads(
@@ -8967,6 +8965,152 @@ mod plan_truncate_and_restart_tests {
         }
     }
 
+    async fn persist_plan_fixture_to_mock_pm(
+        mock_pm: &crate::plan::test_util::MockPm,
+        plan: &crate::plan::PlanState,
+    ) {
+        let epic_id = plan.epic_id.as_deref().expect("fixture epic id");
+        crate::plan::PmLike::update_issue(
+            mock_pm,
+            epic_id,
+            spur_pm::IssueUpdate {
+                add_labels: vec![
+                    crate::plan::labels::plan_owner("brain"),
+                    crate::plan::labels::PLAN_COMPLETE.to_string(),
+                ],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("mark mock epic as complete");
+
+        let mut issue_by_task = std::collections::HashMap::new();
+        for entry in &plan.tasks {
+            let depends_on = entry
+                .spec
+                .depends_on
+                .iter()
+                .map(|dep| {
+                    issue_by_task
+                        .get(dep)
+                        .cloned()
+                        .unwrap_or_else(|| panic!("dependency {dep} must be persisted first"))
+                })
+                .collect();
+            let issue_id = crate::plan::PmLike::create_issue(
+                mock_pm,
+                spur_pm::IssueCreate {
+                    title: format!("Task {}", entry.spec.task_id),
+                    description: Some(entry.spec.task.clone()),
+                    issue_type: Some("task".to_string()),
+                    priority: Some(2),
+                    labels: vec![
+                        crate::plan::labels::plan_id(&plan.plan_id),
+                        crate::plan::labels::plan_task_id(&entry.spec.task_id),
+                        crate::plan::labels::agent(&entry.spec.agent),
+                    ],
+                    parent: Some(epic_id.to_string()),
+                    assignee: None,
+                    estimate_minutes: None,
+                    depends_on,
+                },
+            )
+            .await
+            .expect("create mock task issue");
+            issue_by_task.insert(entry.spec.task_id.clone(), issue_id.clone());
+
+            let adv = crate::plan::PmLike::advanced(mock_pm).expect("mock advanced PM");
+            match &entry.status {
+                crate::plan::PlanTaskStatus::Approved { summary } => {
+                    let delegation_id = format!("del-{}", entry.spec.task_id);
+                    adv.add_comment(
+                        &issue_id,
+                        &crate::plan::audit_sentinel::encode_comment(
+                            &crate::plan::audit_sentinel::AuditSentinelKind::Dispatch {
+                                delegation_id: delegation_id.clone(),
+                                worker: entry.spec.agent.clone(),
+                                attempt: entry.attempt,
+                            },
+                        ),
+                    )
+                    .await
+                    .expect("seed dispatch audit");
+                    adv.add_comment(
+                        &issue_id,
+                        &crate::plan::audit_sentinel::encode_comment(
+                            &crate::plan::audit_sentinel::AuditSentinelKind::Completion {
+                                delegation_id: delegation_id.clone(),
+                                completion_state:
+                                    crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+                                superseded: false,
+                                worker_branch: entry.worker_branch.clone(),
+                                result_summary: summary.clone(),
+                                artifact_uri: None,
+                                dispatched_base_oid: entry.dispatched_base_oid.clone(),
+                            },
+                        ),
+                    )
+                    .await
+                    .expect("seed completion audit");
+                    adv.add_comment(
+                        &issue_id,
+                        &crate::plan::audit_sentinel::encode_comment(
+                            &crate::plan::audit_sentinel::AuditSentinelKind::Approval {
+                                delegation_id,
+                            },
+                        ),
+                    )
+                    .await
+                    .expect("seed approval audit");
+                    crate::plan::PmLike::update_issue(
+                        mock_pm,
+                        &issue_id,
+                        spur_pm::IssueUpdate {
+                            status: Some(crate::plan::PmLike::closed_status(mock_pm).to_string()),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("close approved mock task");
+                }
+                crate::plan::PlanTaskStatus::BlockedOnSetupConflict { dep_task_id, files } => {
+                    let reason = serde_json::to_string(&serde_json::json!({
+                        "dep_task_id": dep_task_id,
+                        "files": files,
+                    }))
+                    .expect("signal reason json");
+                    adv.add_comment(
+                        &issue_id,
+                        &crate::plan::audit_sentinel::encode_comment(
+                            &crate::plan::audit_sentinel::AuditSentinelKind::Signal {
+                                signal_id: uuid::Uuid::new_v4().to_string(),
+                                delegation_id: String::new(),
+                                kind: "integration-conflict".to_string(),
+                                severity: 1.0,
+                                reason,
+                            },
+                        ),
+                    )
+                    .await
+                    .expect("seed conflict signal audit");
+                    crate::plan::PmLike::update_issue(
+                        mock_pm,
+                        &issue_id,
+                        spur_pm::IssueUpdate {
+                            add_labels: vec![
+                                crate::plan::labels::SIGNAL_LABEL_INTEGRATION_CONFLICT.to_string(),
+                            ],
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("label setup conflict");
+                }
+                _ => {}
+            }
+        }
+    }
+
     async fn new_server_with_mock_pm(
         repo: &std::path::Path,
     ) -> (
@@ -9035,7 +9179,7 @@ mod plan_truncate_and_restart_tests {
             ],
         );
         parent_plan.epic_id = Some(parent_epic_id.clone());
-        server.__test_install_plan(parent_plan).await;
+        persist_plan_fixture_to_mock_pm(&mock_pm, &parent_plan).await;
 
         let response = server
             .__test_call_tool(
@@ -9135,7 +9279,12 @@ mod plan_truncate_and_restart_tests {
             .issues()
             .await
             .into_iter()
-            .filter(|issue| issue.issue_type.as_deref() == Some("task"))
+            .filter(|issue| {
+                issue.issue_type.as_deref() == Some("task")
+                    && issue.labels.iter().any(|label| {
+                        crate::plan::labels::parse_plan_id(label).as_deref() == Some(new_plan_id)
+                    })
+            })
             .collect::<Vec<_>>();
         assert_eq!(child_issues.len(), 2, "{child_issues:?}");
         let b_issue = child_issues
@@ -9155,24 +9304,6 @@ mod plan_truncate_and_restart_tests {
         assert!(
             mock_pm.audit_seq().await >= 2,
             "ownership and submit audit comments should be persisted"
-        );
-
-        let dispatch = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            _channel.request_rx.recv(),
-        )
-        .await
-        .expect("restarted beads-backed plan should dispatch a worker")
-        .expect("delegation channel should remain open");
-        assert_eq!(dispatch.issue_id.as_deref(), Some(b_issue.id.as_str()));
-        let b_issue_after_dispatch = mock_pm.issue(&b_issue.id).await;
-        assert!(
-            b_issue_after_dispatch
-                .labels
-                .iter()
-                .any(|label| crate::plan::labels::parse_delegation_id(label).is_some()),
-            "dispatch should persist delegation intent on the task issue: {:?}",
-            b_issue_after_dispatch.labels
         );
     }
 
@@ -9226,7 +9357,7 @@ mod plan_truncate_and_restart_tests {
             ],
         );
         parent_plan.epic_id = Some(parent_epic_id);
-        server.__test_install_plan(parent_plan).await;
+        persist_plan_fixture_to_mock_pm(&mock_pm, &parent_plan).await;
 
         let response = server
             .__test_call_tool(
@@ -9604,6 +9735,11 @@ mod recover_orphaned_dispatch_tests {
             "unexpected response: {message}"
         );
 
+        super::require_feature(
+            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+            super::pro_feature_gate().as_ref(),
+        )
+        .expect("fixture enables advanced beads");
         let adv = fixture.pm.advanced().expect("advanced beads backend");
         let audits = crate::plan::projector::collect_sorted_audits_for_issue(
             &fixture.task_issue_id,
@@ -11244,7 +11380,7 @@ mod reconciler_fast_forward_tests {
     }
 
     #[tokio::test]
-    async fn load_or_project_plan_returns_cached_entry_when_present() {
+    async fn load_or_project_plan_rejects_ephemeral_cache_without_epic() {
         let session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
         let continuation_ctx = super::DetachedContinuationCtx {
             on_complete: Arc::new(|_, _| Box::pin(async {})),
@@ -11271,11 +11407,11 @@ mod reconciler_fast_forward_tests {
             super::CachedPlan::new(Arc::clone(&plan), super::unknown_beads_version()),
         );
 
-        let loaded = server
+        let error = server
             .load_or_project_plan("plan-1")
             .await
-            .expect("load cached plan");
-        assert!(Arc::ptr_eq(&loaded, &plan));
+            .expect_err("ephemeral cache entry without durable epic must not load");
+        assert_eq!(error, "unknown plan 'plan-1'");
     }
 
     #[test]

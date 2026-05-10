@@ -2,7 +2,11 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 use spur_acp::{BrainSessionId, SessionId};
-use spur_mcp::plan::{PlanMergeState, PlanState, PlanTask, PlanTaskEntry, PlanTaskStatus};
+use spur_license::policy::PolicyResolver;
+use spur_license::{FeatureGate, FeatureKey, LicenseState, Plan};
+use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind, CompletionState};
+use spur_mcp::plan::{labels, PlanMergeState, PlanState, PlanTask, PlanTaskEntry, PlanTaskStatus};
+use spur_mcp::plan::{test_util::MockPm, PmLike};
 use spur_mcp::server::DetachedContinuationCtx;
 use spur_mcp::McpCallbackServer;
 use tempfile::TempDir;
@@ -50,21 +54,31 @@ async fn commit_worker_file(
     tip
 }
 
-fn test_server(repo_root: &std::path::Path) -> McpCallbackServer {
+fn test_server(repo_root: &std::path::Path) -> (McpCallbackServer, Arc<MockPm>) {
     let session_id = BrainSessionId::new(SessionId::new());
     let continuation_ctx = DetachedContinuationCtx {
         on_complete: Arc::new(|_, _| Box::pin(async {})),
     };
+    let mock_pm = MockPm::new().arc();
     let (mut server, _channel) = McpCallbackServer::new(
         Some(&session_id),
         None,
         None,
         continuation_ctx,
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        spur_mcp::server::community_feature_gate(),
+        pro_feature_gate(),
     );
+    server.__test_set_pm_like(Arc::clone(&mock_pm) as Arc<dyn PmLike>);
     server.set_repo_root(repo_root.to_path_buf());
-    server
+    (server, mock_pm)
+}
+
+fn pro_feature_gate() -> Arc<FeatureGate> {
+    let gate = Arc::new(FeatureGate::new(PolicyResolver::embedded()));
+    let features =
+        std::collections::BTreeSet::from([FeatureKey::PM_PRO_BEADS_ADVANCED.as_str().to_string()]);
+    gate.update_state(&LicenseState::active_validated(Plan::Pro, features));
+    gate
 }
 
 fn task_entry(
@@ -107,6 +121,106 @@ fn plan_state(
         base_snapshot_oid: Some(base_snapshot_oid.to_string()),
         merge_state: PlanMergeState::NotStarted,
         epic_id: None,
+    }
+}
+
+async fn persist_plan(pm: &MockPm, mut state: PlanState) {
+    let epic_id = pm
+        .create_issue(spur_pm::IssueCreate {
+            title: format!("Epic {}", state.plan_id),
+            description: Some("preview fixture".to_string()),
+            issue_type: Some("epic".to_string()),
+            priority: Some(2),
+            labels: vec![
+                labels::plan_id(&state.plan_id),
+                labels::plan_owner(state.brain_session_id.as_session_id().0.as_str()),
+                labels::PLAN_COMPLETE.to_string(),
+            ],
+            parent: None,
+            assignee: None,
+            estimate_minutes: None,
+            depends_on: Vec::new(),
+        })
+        .await
+        .expect("create mock epic");
+    state.epic_id = Some(epic_id.clone());
+
+    let mut issue_by_task = std::collections::HashMap::new();
+    for entry in &state.tasks {
+        let depends_on = entry
+            .spec
+            .depends_on
+            .iter()
+            .map(|dep| {
+                issue_by_task
+                    .get(dep)
+                    .cloned()
+                    .unwrap_or_else(|| panic!("dependency {dep} must be persisted first"))
+            })
+            .collect();
+        let issue_id = pm
+            .create_issue(spur_pm::IssueCreate {
+                title: format!("Task {}", entry.spec.task_id),
+                description: Some(entry.spec.task.clone()),
+                issue_type: Some("task".to_string()),
+                priority: Some(2),
+                labels: vec![
+                    labels::plan_id(&state.plan_id),
+                    labels::plan_task_id(&entry.spec.task_id),
+                    labels::agent(&entry.spec.agent),
+                ],
+                parent: Some(epic_id.clone()),
+                assignee: None,
+                estimate_minutes: None,
+                depends_on,
+            })
+            .await
+            .expect("create mock task");
+        issue_by_task.insert(entry.spec.task_id.clone(), issue_id.clone());
+
+        if matches!(entry.status, PlanTaskStatus::Approved { .. }) {
+            let delegation_id = format!("del-{}", entry.spec.task_id);
+            let adv = pm.advanced().expect("mock advanced PM");
+            adv.add_comment(
+                &issue_id,
+                &audit_sentinel::encode_comment(&AuditSentinelKind::Dispatch {
+                    delegation_id: delegation_id.clone(),
+                    worker: entry.spec.agent.clone(),
+                    attempt: entry.attempt,
+                }),
+            )
+            .await
+            .expect("seed dispatch audit");
+            adv.add_comment(
+                &issue_id,
+                &audit_sentinel::encode_comment(&AuditSentinelKind::Completion {
+                    delegation_id: delegation_id.clone(),
+                    completion_state: CompletionState::AwaitingReview,
+                    superseded: false,
+                    worker_branch: entry.worker_branch.clone(),
+                    result_summary: None,
+                    artifact_uri: None,
+                    dispatched_base_oid: entry.dispatched_base_oid.clone(),
+                }),
+            )
+            .await
+            .expect("seed completion audit");
+            adv.add_comment(
+                &issue_id,
+                &audit_sentinel::encode_comment(&AuditSentinelKind::Approval { delegation_id }),
+            )
+            .await
+            .expect("seed approval audit");
+            pm.update_issue(
+                &issue_id,
+                spur_pm::IssueUpdate {
+                    status: Some(pm.closed_status().to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("close approved issue");
+        }
     }
 }
 
@@ -153,9 +267,10 @@ async fn preview_task_base_returns_overlays_and_base_oid_when_clean() {
     )
     .await;
 
-    let server = test_server(dir.path());
-    server
-        .__test_install_plan(plan_state(
+    let (server, mock_pm) = test_server(dir.path());
+    persist_plan(
+        &mock_pm,
+        plan_state(
             "preview-clean",
             "spur/brain-snapshot-preview-clean",
             &base_oid,
@@ -171,8 +286,9 @@ async fn preview_task_base_returns_overlays_and_base_oid_when_clean() {
                 ),
                 task_entry("T2", vec!["T1"], PlanTaskStatus::Pending, None, None),
             ],
-        ))
-        .await;
+        ),
+    )
+    .await;
 
     let response = server
         .__test_call_tool(
@@ -220,9 +336,10 @@ async fn preview_task_base_skips_approved_deps_without_dispatched_base_oid() {
     )
     .await;
 
-    let server = test_server(dir.path());
-    server
-        .__test_install_plan(plan_state(
+    let (server, mock_pm) = test_server(dir.path());
+    persist_plan(
+        &mock_pm,
+        plan_state(
             "preview-skip-legacy",
             "spur/brain-snapshot-preview-skip-legacy",
             &base_oid,
@@ -247,8 +364,9 @@ async fn preview_task_base_skips_approved_deps_without_dispatched_base_oid() {
                 ),
                 task_entry("T3", vec!["T1", "T2"], PlanTaskStatus::Pending, None, None),
             ],
-        ))
-        .await;
+        ),
+    )
+    .await;
 
     let response = server
         .__test_call_tool(
@@ -302,9 +420,10 @@ async fn preview_task_base_reports_conflict_when_overlays_collide() {
     )
     .await;
 
-    let server = test_server(dir.path());
-    server
-        .__test_install_plan(plan_state(
+    let (server, mock_pm) = test_server(dir.path());
+    persist_plan(
+        &mock_pm,
+        plan_state(
             "preview-conflict",
             "spur/brain-snapshot-preview-conflict",
             &base_oid,
@@ -329,8 +448,9 @@ async fn preview_task_base_reports_conflict_when_overlays_collide() {
                 ),
                 task_entry("T3", vec!["T1", "T2"], PlanTaskStatus::Pending, None, None),
             ],
-        ))
-        .await;
+        ),
+    )
+    .await;
 
     let response = server
         .__test_call_tool(

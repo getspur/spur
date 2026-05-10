@@ -860,7 +860,7 @@ fn submit_plan_def() -> ToolDefinition {
                 },
                 "epic_title": {
                     "type": "string",
-                    "description": "Epic title. Required unless a non-empty first task description can derive one."
+                    "description": "Epic title. Required when the first task description is empty or whitespace-only."
                 },
                 "epic_body": {
                     "type": "string",
