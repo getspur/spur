@@ -158,6 +158,12 @@ pub enum AuditSentinelKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<String>,
     },
+    TaskTransition {
+        plan_id: String,
+        task_id: String,
+        from_status: String,
+        to_status: String,
+    },
     RetryRequested {
         delegation_id: String,
         attempt: u32,
@@ -326,6 +332,7 @@ impl AuditSentinelKind {
             Self::Approval { .. } => "approval",
             Self::Rejection { .. } => "rejection",
             Self::ReviewFeedback { .. } => "review-feedback",
+            Self::TaskTransition { .. } => "task-transition",
             Self::RetryRequested { .. } => "retry-requested",
             Self::EscalationRequested { .. } => "escalation-requested",
             Self::Signal { .. } => "signal",
@@ -485,6 +492,12 @@ mod tests {
                 feedback: "add null check".into(),
                 worker_branch: Some("spur/worker-x".into()),
                 summary: Some("did thing".into()),
+            },
+            AuditSentinelKind::TaskTransition {
+                plan_id: "P1".into(),
+                task_id: "t1".into(),
+                from_status: "awaiting_review".into(),
+                to_status: "approved".into(),
             },
             AuditSentinelKind::RetryRequested {
                 delegation_id: "del-A".into(),
@@ -657,6 +670,12 @@ mod tests {
                 feedback: "fix edge case".into(),
                 worker_branch: None,
                 summary: None,
+            },
+            AuditSentinelKind::TaskTransition {
+                plan_id: "P1".into(),
+                task_id: "t1".into(),
+                from_status: "awaiting_review".into(),
+                to_status: "approved".into(),
             },
             AuditSentinelKind::RetryRequested {
                 delegation_id: "del-B".into(),

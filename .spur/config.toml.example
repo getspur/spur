@@ -16,9 +16,11 @@
 # framework = "v1"
 
 # [plan.substrate_migration]
-# # PR2 guard: leave off until PR3 advances the epic audit sequence for
-# # task-level durable plan writes.
+# # PR2 guard: controls whether persisted plan reads may serve from the
+# # active cache when the epic audit sequence is unchanged.
 # versioned_cache_serve = false
+# # PR3 guard: staged rollout for non-advisory review_task writes.
+# nonadvisory_review_writes = false
 
 # ── Brain skills ──────────────────────────────────────────────────
 # SPUR ships bundled SKILL.md files for brain delegation guidance
