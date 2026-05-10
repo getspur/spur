@@ -28,6 +28,7 @@ use crate::events::McpEventSink;
 pub const DEFAULT_SUMMARY_CAP_BYTES: usize = 512;
 pub const DEFAULT_WORKER_BRANCH_CAP_BYTES: usize = 256;
 pub const DEFAULT_FETCH_HINT_CAP_BYTES: usize = 256;
+pub const DEFAULT_BASE_HINT_CAP_BYTES: usize = 256;
 pub const DEFAULT_DIFF_FILES_CAP_COUNT: usize = 16;
 pub const DEFAULT_STATUS_STRING_CAP_BYTES: usize = 512;
 pub const DEFAULT_ARTIFACT_REF_STRING_CAP_BYTES: usize = 256;
@@ -52,6 +53,7 @@ pub struct OutcomeMaterializer {
     summary_cap_bytes: usize,
     worker_branch_cap_bytes: usize,
     fetch_hint_cap_bytes: usize,
+    base_hint_cap_bytes: usize,
     diff_files_cap_count: usize,
     status_string_cap_bytes: usize,
     artifact_ref_string_cap_bytes: usize,
@@ -63,6 +65,7 @@ impl std::fmt::Debug for OutcomeMaterializer {
             .field("summary_cap_bytes", &self.summary_cap_bytes)
             .field("worker_branch_cap_bytes", &self.worker_branch_cap_bytes)
             .field("fetch_hint_cap_bytes", &self.fetch_hint_cap_bytes)
+            .field("base_hint_cap_bytes", &self.base_hint_cap_bytes)
             .field("diff_files_cap_count", &self.diff_files_cap_count)
             .field("status_string_cap_bytes", &self.status_string_cap_bytes)
             .field(
@@ -83,6 +86,7 @@ impl OutcomeMaterializer {
             summary_cap_bytes: DEFAULT_SUMMARY_CAP_BYTES,
             worker_branch_cap_bytes: DEFAULT_WORKER_BRANCH_CAP_BYTES,
             fetch_hint_cap_bytes: DEFAULT_FETCH_HINT_CAP_BYTES,
+            base_hint_cap_bytes: DEFAULT_BASE_HINT_CAP_BYTES,
             diff_files_cap_count: DEFAULT_DIFF_FILES_CAP_COUNT,
             status_string_cap_bytes: DEFAULT_STATUS_STRING_CAP_BYTES,
             artifact_ref_string_cap_bytes: DEFAULT_ARTIFACT_REF_STRING_CAP_BYTES,
@@ -251,6 +255,9 @@ impl OutcomeMaterializer {
         let hint = build_fetch_hint(summary_clipped, diff_files_clipped);
         let (fetch_hint, _) = clip_with_ellipsis(Some(hint), self.fetch_hint_cap_bytes);
 
+        let base_hint = build_base_hint(clipped_branch.as_deref());
+        let (base_hint, _) = clip_with_ellipsis(base_hint, self.base_hint_cap_bytes);
+
         let payload = ContinuationPayload {
             status: clipped_status,
             summary: clipped_summary,
@@ -260,6 +267,7 @@ impl OutcomeMaterializer {
             estimated_cost_micros: Some(usd_to_micros_saturating(result.estimated_cost_usd)),
             artifact_id: Some(key.clone()),
             fetch_hint,
+            base_hint,
         };
 
         let cont = BrainContinuation {
@@ -376,6 +384,7 @@ impl OutcomeMaterializer {
             estimated_cost_micros: None,
             artifact_id: None,
             fetch_hint: None,
+            base_hint: None,
         };
 
         let mut cont = BrainContinuation {
@@ -495,6 +504,20 @@ pub(crate) fn build_fetch_hint(summary_clipped: bool, diff_files_clipped: bool) 
                 .to_string()
         }
     }
+}
+
+/// Contextual reminder for ad-hoc delegations. When a `worker_branch` is present,
+/// tells the brain to pass that branch as `base` in follow-up `delegate_to_worker`
+/// calls so the next worker sees prior context instead of defaulting to RepoMain.
+/// Returns `None` when `worker_branch` is absent (plan-engine dispatches already
+/// manage `WithOverlay` bases automatically).
+pub(crate) fn build_base_hint(worker_branch: Option<&str>) -> Option<String> {
+    worker_branch.map(|branch| {
+        format!(
+            "To delegate follow-up work on this result, pass base: {{\"kind\":\"branch\",\"name\":\"{}\"}}. Omitting base loses all prior worker context.",
+            branch
+        )
+    })
 }
 
 fn sha256_hex(content: &[u8]) -> String {
@@ -965,5 +988,51 @@ mod tests {
             "fallback must preserve Failed status; got {:?}",
             cont.payload.status
         );
+    }
+
+    #[tokio::test]
+    async fn materialize_populates_base_hint_when_worker_branch_present() {
+        let store: Arc<dyn OutcomeStore> = Arc::new(MemoryOutcomeStore::new());
+        let mat = OutcomeMaterializer::new(store);
+        let mut result = small_result();
+        result.worker_branch = Some("spur/worker-codex-deadbeef".into());
+        let cont = mat
+            .materialize(
+                result,
+                delegation_id(),
+                1,
+                brain_session(),
+                ContinuationSource::AsyncRequested,
+                None,
+            )
+            .await;
+        let hint = cont.payload.base_hint.expect("base_hint populated");
+        assert!(
+            hint.contains("spur/worker-codex-deadbeef"),
+            "base_hint must name the worker_branch"
+        );
+        assert!(
+            hint.contains("base"),
+            "base_hint must mention the base parameter"
+        );
+    }
+
+    #[tokio::test]
+    async fn materialize_omits_base_hint_when_worker_branch_absent() {
+        let store: Arc<dyn OutcomeStore> = Arc::new(MemoryOutcomeStore::new());
+        let mat = OutcomeMaterializer::new(store);
+        let mut result = small_result();
+        result.worker_branch = None;
+        let cont = mat
+            .materialize(
+                result,
+                delegation_id(),
+                1,
+                brain_session(),
+                ContinuationSource::AsyncRequested,
+                None,
+            )
+            .await;
+        assert!(cont.payload.base_hint.is_none());
     }
 }
