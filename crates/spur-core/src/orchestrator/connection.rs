@@ -126,16 +126,19 @@ impl Orchestrator {
 
     pub(super) async fn list_sessions_from_rpc(
         conn: &mut dyn AgentConnection,
+        repo_root: &std::path::Path,
     ) -> Result<Vec<SessionInfo>> {
         let mut sessions = Vec::new();
         let mut cursor: Option<String> = None;
 
         for page_index in 0..MAX_SESSION_LIST_PAGES {
-            // Some agents treat `cwd` as an exact match, which hides sessions
-            // rooted in repo-owned worktrees. Fetch broadly and apply the
-            // repo-prefix filter before emitting to the TUI.
+            // Pass the repo root as explicit CWD so the agent scopes
+            // sessions to the current project first. Non-repo sessions
+            // are dropped later by classify_sessions anyway; asking the
+            // agent to pre-filter reduces traffic and surfaces the
+            // most-relevant sessions in the picker.
             let list_req = ListSessionsRequest::new()
-                .cwd(None::<PathBuf>)
+                .cwd(Some(repo_root.to_path_buf()))
                 .cursor(cursor.clone());
             let response = conn.list_sessions(list_req).await?;
             let next_cursor = response.next_cursor;
@@ -175,12 +178,32 @@ impl Orchestrator {
     pub(super) fn list_sessions_from_disk(
         agent_config: &spur_acp::config::AgentConfig,
     ) -> Result<Vec<SessionInfo>> {
-        let discovery = discovery_for_kind(agent_config.kind).ok_or_else(|| {
-            anyhow!(
-                "No filesystem fallback available for agent '{}'",
-                agent_config.name
-            )
-        })?;
+        let kind = agent_config.kind;
+        let discovery = discovery_for_kind(kind)
+            .or_else(|| {
+                // Graceful fallback: if kind is Generic (missing from config),
+                // try to infer from the agent name so users with stale configs
+                // still get disk fallback for known agents.
+                let inferred = spur_acp::AgentKind::from_name(&agent_config.name);
+                if inferred != kind {
+                    tracing::info!(
+                        agent = %agent_config.name,
+                        ?kind,
+                        ?inferred,
+                        "inferred agent kind from name for disk fallback"
+                    );
+                }
+                discovery_for_kind(inferred)
+            })
+            .ok_or_else(|| {
+                anyhow!(
+                    "No filesystem fallback available for agent '{}' (kind: {:?}). \
+                     Add `kind = \"{}\"` to its .spur/config.toml entry.",
+                    agent_config.name,
+                    kind,
+                    agent_config.name
+                )
+            })?;
         discovery.discover()
     }
 
