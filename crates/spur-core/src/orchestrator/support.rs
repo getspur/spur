@@ -153,6 +153,8 @@ impl Orchestrator {
         mcp_server.set_plan_pending_grace(std::time::Duration::from_secs(
             self.config.spur.plan_pending_grace_secs,
         ));
+        mcp_server
+            .set_versioned_cache_serve(self.config.plan.substrate_migration.versioned_cache_serve);
         mcp_server.set_dispatch_lease_duration(std::time::Duration::from_secs(
             self.config.spur.dispatch_lease_secs,
         ));
