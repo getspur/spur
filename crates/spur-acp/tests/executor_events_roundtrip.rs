@@ -567,3 +567,71 @@ fn dispatch_lease_expired_roundtrips() {
     ));
     assert!(json.contains("DispatchLeaseExpired"));
 }
+
+#[test]
+fn plan_task_blocked_on_setup_conflict_roundtrips() {
+    use spur_acp::domain::continuation::SetupConflictTopology;
+    use spur_acp::domain::events::DiffSummary;
+    use spur_acp::{SpurEvent, SpurEventBody};
+
+    let topology = SetupConflictTopology {
+        base_oid: "2779409d".into(),
+        blocked_task_id: "task-9".into(),
+        conflict_dep_task_id: "task-7".into(),
+        conflict_files: vec!["src/main.rs".into()],
+        approved_chain: vec![spur_acp::domain::continuation::ApprovedTaskGitNode {
+            task_id: "task-5".into(),
+            worker_branch: "spur/worker/v2/codex/owner/task-5".into(),
+            tip_oid: "b786d770".into(),
+            parent_oid: "2779409d".into(),
+            cumulative_diff_stat: DiffSummary {
+                files_changed: 2,
+                insertions: 10,
+                deletions: 3,
+                files: vec!["src/main.rs".into(), "src/lib.rs".into()],
+            },
+            incremental_diff_stat: DiffSummary {
+                files_changed: 2,
+                insertions: 10,
+                deletions: 3,
+                files: vec!["src/main.rs".into(), "src/lib.rs".into()],
+            },
+            appears_flattened: false,
+        }],
+    };
+
+    let ev = SpurEvent::now(SpurEventBody::PlanTaskBlockedOnSetupConflict {
+        plan_id: "plan-9".into(),
+        task_id: "task-9".into(),
+        delegation_id: "del-9".into(),
+        dep_task_id: "task-7".into(),
+        files: vec!["src/main.rs".into()],
+        topology: Some(topology),
+    });
+    let json = serde_json::to_string(&ev).unwrap();
+    let round: SpurEvent = serde_json::from_str(&json).unwrap();
+    match round.body {
+        SpurEventBody::PlanTaskBlockedOnSetupConflict {
+            plan_id,
+            task_id,
+            delegation_id,
+            dep_task_id,
+            files,
+            topology,
+        } => {
+            assert_eq!(plan_id, "plan-9");
+            assert_eq!(task_id, "task-9");
+            assert_eq!(delegation_id, "del-9");
+            assert_eq!(dep_task_id, "task-7");
+            assert_eq!(files, vec!["src/main.rs"]);
+            assert!(topology.is_some());
+            let topo = topology.unwrap();
+            assert_eq!(topo.base_oid, "2779409d");
+            assert_eq!(topo.approved_chain.len(), 1);
+            assert_eq!(topo.approved_chain[0].task_id, "task-5");
+        }
+        other => panic!("expected PlanTaskBlockedOnSetupConflict, got {other:?}"),
+    }
+    assert!(json.contains("PlanTaskBlockedOnSetupConflict"));
+    assert!(json.contains("topology"));
+}
