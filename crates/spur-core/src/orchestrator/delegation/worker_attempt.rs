@@ -291,6 +291,8 @@ pub(crate) async fn run_one_worker_attempt(
         let _ = worktrees.remove_worktree(&worker_session).await;
         return Err(e);
     }
+    // INV-S3 audit: the resolved base OID is persisted as a beads label before
+    // the watch channel publishes it to the reconciler's completion task.
     if let Some(tx) = &ctx.dispatched_base_oid_tx {
         let _ = tx.send(Some(dispatched_base_oid.clone()));
     }

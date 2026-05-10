@@ -112,7 +112,7 @@ impl crate::plan::PmLike for MockPm {
             .issues
             .values()
             .filter(|issue| {
-                if !filter.include_closed && issue.status != "open" {
+                if filter.status.is_none() && !filter.include_closed && issue.status != "open" {
                     return false;
                 }
                 if let Some(status) = filter.status.as_deref() {
@@ -298,10 +298,10 @@ impl spur_pm::BeadsAdvanced for MockPm {
             .filter(|issue| {
                 issue.issue_type.as_deref() == Some("epic")
                     || issue.blocked_by.iter().all(|blocker| {
-                        state
-                            .issues
-                            .get(blocker)
-                            .is_none_or(|blocked_by| blocked_by.status != "open")
+                        state.issues.get(blocker).is_none_or(|blocked_by| {
+                            blocked_by.issue_type.as_deref() == Some("epic")
+                                || blocked_by.status != "open"
+                        })
                     })
             })
             .map(issue_summary)

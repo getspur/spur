@@ -812,6 +812,8 @@ impl Reconciler {
                 enable_worker_mcp: None,
             };
 
+            // INV-S3 audit: dispatch intent is durable in beads before this
+            // in-process request becomes observable by the orchestrator.
             if let Err(error) = dispatch.delegation_tx.send(request).await {
                 self.record_skipped(
                     Some(plan_id),
@@ -949,6 +951,10 @@ impl Reconciler {
                     return;
                 }
 
+                // INV-S3 audit: the worker result and base-OID watch value are
+                // consumed only by this completion writer; events,
+                // continuations, and projected state are emitted after the
+                // completion audit/update below succeeds.
                 let dispatched_base_oid = dispatched_base_oid_rx.borrow().clone();
 
                 let deferred = match crate::plan::persist_worker_completion_and_notify(
