@@ -116,7 +116,10 @@ type LoadedBrainSessionBootstrap = (
 );
 
 const MAX_SESSION_LIST_PAGES: usize = 1000;
-const MAX_SESSION_LIST_SESSIONS: usize = 100_000;
+/// Cap session listings at a number appropriate for local CLI agents.
+/// 100k was excessive; even power users rarely exceed a few hundred
+/// sessions per agent.
+const MAX_SESSION_LIST_SESSIONS: usize = 1_000;
 
 // ─── Orchestrator ────────────────────────────────────────────────────
 
