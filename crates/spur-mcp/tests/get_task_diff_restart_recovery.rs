@@ -128,15 +128,18 @@ async fn t_v0d_4_get_task_diff_works_after_restart_for_latest_attempt() {
     )
     .await
     .expect("build epic subgraph");
+    let brain_session = spur_acp::SessionId("brain".into());
     emit_plan_submit_audit(
         pm.advanced().expect("advanced beads backend"),
         plan_id,
         &subgraph,
-        Some("spur/brain-snapshot-test"),
-        Some(base_snapshot_oid.as_str()),
-        Some("submit_plan"),
-        Some(&spur_acp::SessionId("brain".into())),
-        None,
+        spur_mcp::PlanSubmitAuditContext {
+            base_snapshot_branch: Some("spur/brain-snapshot-test"),
+            base_snapshot_oid: Some(base_snapshot_oid.as_str()),
+            execution_mode: Some("submit_plan"),
+            brain_session_id: Some(&brain_session),
+            ..Default::default()
+        },
     )
     .await;
 

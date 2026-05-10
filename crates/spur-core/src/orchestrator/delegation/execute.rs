@@ -23,6 +23,7 @@ pub(crate) async fn execute_delegation(
     worker_mcp_fetcher: WorkerMcpFetcher,
     pm_service: Option<Arc<PmService>>,
     feature_gate: Arc<spur_license::FeatureGate>,
+    normalize_bypass_hooks: bool,
 ) -> (DelegationResult, Option<ExecutorId>) {
     // Bind cache for the flush helpers (`finalize` + abort path)
     // which look up cached servers by brain_session_id without
@@ -220,6 +221,7 @@ pub(crate) async fn execute_delegation(
                         total_cost,
                         None,
                         None,
+                        None,
                     )
                     .await,
                     executor_id.clone(),
@@ -237,13 +239,17 @@ pub(crate) async fn execute_delegation(
 
         // No review gate — commit/remove then emit DelegationCompleted.
         if !agent_config.review.review_required {
-            let preserved_branch = apply_worktree_cleanup(
+            let cleanup = apply_worktree_cleanup(
                 &mut worktrees,
                 &outcome.worker_session,
                 &outcome.candidate_status,
-                &outcome.diff,
-                &agent,
-                &outcome.worktree_path,
+                WorktreeCleanupContext {
+                    agent: &agent,
+                    worktree_path: &outcome.worktree_path,
+                    bypass_hooks: normalize_bypass_hooks,
+                    pm_service: pm_service.as_ref(),
+                    issue_id: issue_id.as_deref(),
+                },
             )
             .await;
             return (
@@ -260,8 +266,9 @@ pub(crate) async fn execute_delegation(
                     outcome.diff_summary,
                     outcome.summary,
                     total_cost,
-                    preserved_branch,
+                    cleanup.worker_branch,
                     None,
+                    cleanup.normalization_warning,
                 )
                 .await,
                 executor_id.clone(),
@@ -290,13 +297,17 @@ pub(crate) async fn execute_delegation(
                 let failed_status = DelegationStatus::Failed {
                     error: format!("review registration failed: {e}"),
                 };
-                let preserved_branch = apply_worktree_cleanup(
+                let cleanup = apply_worktree_cleanup(
                     &mut worktrees,
                     &outcome.worker_session,
                     &failed_status,
-                    &outcome.diff,
-                    &agent,
-                    &outcome.worktree_path,
+                    WorktreeCleanupContext {
+                        agent: &agent,
+                        worktree_path: &outcome.worktree_path,
+                        bypass_hooks: normalize_bypass_hooks,
+                        pm_service: pm_service.as_ref(),
+                        issue_id: issue_id.as_deref(),
+                    },
                 )
                 .await;
                 return (
@@ -313,8 +324,9 @@ pub(crate) async fn execute_delegation(
                         outcome.diff_summary.clone(),
                         outcome.summary,
                         total_cost,
-                        preserved_branch,
+                        cleanup.worker_branch,
                         None,
+                        cleanup.normalization_warning,
                     )
                     .await,
                     executor_id.clone(),
@@ -421,13 +433,17 @@ pub(crate) async fn execute_delegation(
                     reason: "review timeout".to_string(),
                 });
                 // TimedOut → preserve worktree (no commit).
-                let preserved_branch = apply_worktree_cleanup(
+                let cleanup = apply_worktree_cleanup(
                     &mut worktrees,
                     &outcome.worker_session,
                     &final_status,
-                    &outcome.diff,
-                    &agent,
-                    &outcome.worktree_path,
+                    WorktreeCleanupContext {
+                        agent: &agent,
+                        worktree_path: &outcome.worktree_path,
+                        bypass_hooks: normalize_bypass_hooks,
+                        pm_service: pm_service.as_ref(),
+                        issue_id: issue_id.as_deref(),
+                    },
                 )
                 .await;
                 return (
@@ -444,8 +460,9 @@ pub(crate) async fn execute_delegation(
                         outcome.diff_summary.clone(),
                         outcome.summary,
                         total_cost,
-                        preserved_branch,
+                        cleanup.worker_branch,
                         None,
+                        cleanup.normalization_warning,
                     )
                     .await,
                     executor_id.clone(),
@@ -461,13 +478,17 @@ pub(crate) async fn execute_delegation(
                     decision: ReviewDecision::Approve,
                 });
                 // Approve → commit + remove.
-                let preserved_branch = apply_worktree_cleanup(
+                let cleanup = apply_worktree_cleanup(
                     &mut worktrees,
                     &outcome.worker_session,
                     &final_status,
-                    &outcome.diff,
-                    &agent,
-                    &outcome.worktree_path,
+                    WorktreeCleanupContext {
+                        agent: &agent,
+                        worktree_path: &outcome.worktree_path,
+                        bypass_hooks: normalize_bypass_hooks,
+                        pm_service: pm_service.as_ref(),
+                        issue_id: issue_id.as_deref(),
+                    },
                 )
                 .await;
                 return (
@@ -484,8 +505,9 @@ pub(crate) async fn execute_delegation(
                         outcome.diff_summary.clone(),
                         outcome.summary,
                         total_cost,
-                        preserved_branch,
+                        cleanup.worker_branch,
                         None,
+                        cleanup.normalization_warning,
                     )
                     .await,
                     executor_id.clone(),
@@ -500,13 +522,17 @@ pub(crate) async fn execute_delegation(
                     decision: ReviewDecision::Reject { reason },
                 });
                 // Rejected → no commit, preserve worktree.
-                let preserved_branch = apply_worktree_cleanup(
+                let cleanup = apply_worktree_cleanup(
                     &mut worktrees,
                     &outcome.worker_session,
                     &final_status,
-                    &outcome.diff,
-                    &agent,
-                    &outcome.worktree_path,
+                    WorktreeCleanupContext {
+                        agent: &agent,
+                        worktree_path: &outcome.worktree_path,
+                        bypass_hooks: normalize_bypass_hooks,
+                        pm_service: pm_service.as_ref(),
+                        issue_id: issue_id.as_deref(),
+                    },
                 )
                 .await;
                 return (
@@ -523,8 +549,9 @@ pub(crate) async fn execute_delegation(
                         outcome.diff_summary.clone(),
                         outcome.summary,
                         total_cost,
-                        preserved_branch,
+                        cleanup.worker_branch,
                         None,
+                        cleanup.normalization_warning,
                     )
                     .await,
                     executor_id.clone(),
@@ -539,13 +566,17 @@ pub(crate) async fn execute_delegation(
                     decision: ReviewDecision::Modify { note },
                 });
                 // Modified → commit + remove (approved with reviewer note).
-                let preserved_branch = apply_worktree_cleanup(
+                let cleanup = apply_worktree_cleanup(
                     &mut worktrees,
                     &outcome.worker_session,
                     &final_status,
-                    &outcome.diff,
-                    &agent,
-                    &outcome.worktree_path,
+                    WorktreeCleanupContext {
+                        agent: &agent,
+                        worktree_path: &outcome.worktree_path,
+                        bypass_hooks: normalize_bypass_hooks,
+                        pm_service: pm_service.as_ref(),
+                        issue_id: issue_id.as_deref(),
+                    },
                 )
                 .await;
                 return (
@@ -562,8 +593,9 @@ pub(crate) async fn execute_delegation(
                         outcome.diff_summary.clone(),
                         outcome.summary,
                         total_cost,
-                        preserved_branch,
+                        cleanup.worker_branch,
                         None,
+                        cleanup.normalization_warning,
                     )
                     .await,
                     executor_id.clone(),
@@ -586,13 +618,17 @@ pub(crate) async fn execute_delegation(
                     agent_config.review.max_review_retries,
                 ) {
                     // Retry limit → Failed (remove, no commit).
-                    let preserved_branch = apply_worktree_cleanup(
+                    let cleanup = apply_worktree_cleanup(
                         &mut worktrees,
                         &outcome.worker_session,
                         &final_status,
-                        &outcome.diff,
-                        &agent,
-                        &outcome.worktree_path,
+                        WorktreeCleanupContext {
+                            agent: &agent,
+                            worktree_path: &outcome.worktree_path,
+                            bypass_hooks: normalize_bypass_hooks,
+                            pm_service: pm_service.as_ref(),
+                            issue_id: issue_id.as_deref(),
+                        },
                     )
                     .await;
                     return (
@@ -609,8 +645,9 @@ pub(crate) async fn execute_delegation(
                             outcome.diff_summary.clone(),
                             outcome.summary,
                             total_cost,
-                            preserved_branch,
+                            cleanup.worker_branch,
                             None,
+                            cleanup.normalization_warning,
                         )
                         .await,
                         executor_id.clone(),
@@ -693,13 +730,17 @@ pub(crate) async fn execute_delegation(
                     reason: "review sender dropped".to_string(),
                 });
                 // Sender-drop TimedOut → preserve worktree (no commit).
-                let preserved_branch = apply_worktree_cleanup(
+                let cleanup = apply_worktree_cleanup(
                     &mut worktrees,
                     &outcome.worker_session,
                     &final_status,
-                    &outcome.diff,
-                    &agent,
-                    &outcome.worktree_path,
+                    WorktreeCleanupContext {
+                        agent: &agent,
+                        worktree_path: &outcome.worktree_path,
+                        bypass_hooks: normalize_bypass_hooks,
+                        pm_service: pm_service.as_ref(),
+                        issue_id: issue_id.as_deref(),
+                    },
                 )
                 .await;
                 return (
@@ -716,8 +757,9 @@ pub(crate) async fn execute_delegation(
                         outcome.diff_summary.clone(),
                         outcome.summary,
                         total_cost,
-                        preserved_branch,
+                        cleanup.worker_branch,
                         None,
+                        cleanup.normalization_warning,
                     )
                     .await,
                     executor_id.clone(),

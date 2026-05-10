@@ -28,6 +28,7 @@ pub(crate) async fn finalize(
     total_cost: f64,
     worker_branch: Option<String>,
     artifact: Option<spur_acp::WorkerArtifact>,
+    normalization_warning: Option<String>,
 ) -> DelegationResult {
     flush_then_emit_completed(
         funnel,
@@ -40,6 +41,12 @@ pub(crate) async fn finalize(
         &final_status,
     )
     .await;
+    let summary = match (normalization_warning, summary) {
+        (Some(warn), Some(summary)) if !summary.is_empty() => Some(format!("{warn}\n{summary}")),
+        (Some(warn), _) => Some(warn),
+        (None, summary) => summary,
+    };
+
     DelegationResult {
         status: final_status,
         diff,
@@ -350,11 +357,43 @@ mod flush_ordering_tests {
             0.0,
             None,
             None,
+            None,
         )
         .await;
 
         let events = drain_until_pair(&mut body_rx).await;
         assert_summary_precedes_completed(&events);
+    }
+
+    #[tokio::test]
+    async fn finalize_prepends_normalization_warning_to_summary() {
+        let (funnel, _body_rx) = crate::event_funnel::test_channel();
+        let brain_session_id = spur_acp::BrainSessionId::new(spur_acp::types::SessionId::new());
+        let servers: Arc<DashMap<spur_acp::BrainSessionId, Arc<WorkerMcpServer>>> =
+            Arc::new(DashMap::new());
+
+        let result = finalize(
+            &funnel,
+            &servers,
+            None,
+            &brain_session_id,
+            "d-normalize-warning",
+            None,
+            spur_acp::types::SessionId::new(),
+            DelegationStatus::Success,
+            None,
+            None,
+            Some("worker summary".into()),
+            0.0,
+            Some("worker-branch".into()),
+            None,
+            Some("[normalize: squashed 3 worker commits into 1; please maintain a clean tree or commit exactly once]".into()),
+        )
+        .await;
+
+        let summary = result.summary.expect("summary");
+        assert!(summary.starts_with("[normalize: squashed 3 worker commits into 1"));
+        assert!(summary.contains("worker summary"));
     }
 
     /// Abort-path ordering: `flush_then_emit_completed` (used by the
