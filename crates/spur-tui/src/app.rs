@@ -1983,6 +1983,11 @@ impl App {
                 if key.modifiers.contains(KeyModifiers::ALT)
                     && matches!(key.code, KeyCode::Char('g'))
                 {
+                    tracing::info!(
+                        current_view = ?self.current_view,
+                        has_session_detail = self.session_detail.is_some(),
+                        "Alt+g pressed"
+                    );
                     self.process_action(Action::InspectWorkers);
                     return;
                 }
@@ -3269,10 +3274,20 @@ impl App {
                 // Toggle: Dashboard -> SessionDetail, otherwise -> Dashboard with Agents focused.
                 if matches!(self.current_view, ViewId::Dashboard) {
                     if let Some(ref detail) = self.session_detail {
+                        tracing::info!(
+                            session_id = %detail.session_id().0,
+                            "InspectWorkers: toggling Dashboard -> SessionDetail"
+                        );
                         self.navigate_to(ViewId::SessionDetail(detail.session_id().clone()));
+                    } else {
+                        tracing::info!("InspectWorkers: no session_detail, staying in Dashboard");
                     }
                     return;
                 }
+                tracing::info!(
+                    current_view = ?self.current_view,
+                    "InspectWorkers: navigating to Dashboard"
+                );
 
                 // Pre-select: AwaitingReview > Running > most recent worker.
                 let priority = self
