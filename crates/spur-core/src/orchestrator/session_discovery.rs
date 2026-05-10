@@ -59,21 +59,41 @@ pub fn classify_sessions(
     sessions: Vec<SessionInfo>,
     repo_root: &Path,
 ) -> (Vec<SessionInfo>, Vec<SessionInfo>) {
-    let worktree_root = repo_root.join(".spur/worktrees");
+    let worktree_root = normalize_path(&repo_root.join(".spur/worktrees"));
+    let repo_root = normalize_path(repo_root);
 
     let mut brain = Vec::new();
     let mut worker = Vec::new();
 
     for session in sessions {
-        let cwd = &session.cwd;
+        let cwd = normalize_path(&session.cwd);
         if cwd.starts_with(&worktree_root) {
             worker.push(session);
-        } else if cwd.starts_with(repo_root) {
+        } else if cwd.starts_with(&repo_root) {
             brain.push(session);
         }
     }
 
     (brain, worker)
+}
+
+/// Normalize a path by resolving `.` and `..` components without requiring
+/// the path to exist on disk.  This prevents a malicious or stale session
+/// record like `/repo/spur/../other` from spoofing repo-local classification.
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(p) => out.push(p.as_os_str()),
+            std::path::Component::RootDir => out.push("/"),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::Normal(c) => out.push(c),
+        }
+    }
+    out
 }
 
 // ── Codex backend ───────────────────────────────────────────────────────
@@ -440,7 +460,7 @@ mod kimi {
                 .and_then(|n| n.to_str())
                 .map(|s| s.to_string())
                 .unwrap_or_default();
-            let cwd = hash_to_cwd.get(&hash).cloned().unwrap_or_default();
+            let mut cwd = hash_to_cwd.get(&hash).cloned().unwrap_or_default();
 
             for uuid_entry in std::fs::read_dir(&hash_path)? {
                 let uuid_entry = match uuid_entry {
@@ -450,6 +470,14 @@ mod kimi {
                 let uuid_path = uuid_entry.path();
                 if !uuid_path.is_dir() {
                     continue;
+                }
+
+                // If kimi.json didn't have this hash, try to recover cwd
+                // from the session's own context.jsonl.
+                if cwd.is_empty() {
+                    if let Some(fallback_cwd) = extract_kimi_cwd_from_context(&uuid_path) {
+                        cwd = fallback_cwd;
+                    }
                 }
 
                 if let Some(session) = parse_kimi_session(&uuid_path, &cwd) {
@@ -500,6 +528,26 @@ mod kimi {
             map.insert(hash, path.to_string());
         }
         map
+    }
+
+    /// Fallback: read the first user message from `context.jsonl` and extract
+    /// the working directory Kimi recorded at session start.
+    fn extract_kimi_cwd_from_context(uuid_path: &Path) -> Option<String> {
+        let context_path = uuid_path.join("context.jsonl");
+        let content = std::fs::read_to_string(&context_path).ok()?;
+        for line in content.lines() {
+            let json: serde_json::Value = serde_json::from_str(line).ok()?;
+            if json.get("role")?.as_str()? != "user" {
+                continue;
+            }
+            let text = json.get("content")?.as_str()?;
+            // Kimi prefixes the first user turn with "Working directory: <path>"
+            if let Some(after) = text.strip_prefix("Working directory: ") {
+                let cwd = after.lines().next()?;
+                return Some(cwd.to_string());
+            }
+        }
+        None
     }
 
     fn parse_kimi_session(uuid_path: &Path, cwd: &str) -> Option<SessionInfo> {
