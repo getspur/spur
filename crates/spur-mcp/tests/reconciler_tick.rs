@@ -79,6 +79,23 @@ fn run_git(repo: &Path, args: &[&str]) {
     }
 }
 
+fn run_git_output(repo: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("git invocation failed");
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        panic!(
+            "git {args:?} failed (exit {}): stderr={stderr} stdout={stdout}",
+            out.status
+        );
+    }
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
 fn init_git_repo(repo: &Path) {
     run_git(repo, &["init"]);
     run_git(repo, &["config", "user.email", "test@example.com"]);
@@ -467,8 +484,14 @@ async fn tick_once_does_not_reclaim_expired_lease_owned_by_another_brain() {
 async fn tick_once_dispatches_ready_task_with_single_approved_dep_branch_base() {
     let dir = TempDir::new().expect("tempdir");
     init_git_repo(dir.path());
+    let base_branch = run_git_output(dir.path(), &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let base_oid = run_git_output(dir.path(), &["rev-parse", "HEAD"]);
     let worker_branch = "spur-test-t1-worker";
-    run_git(dir.path(), &["branch", worker_branch]);
+    run_git(dir.path(), &["checkout", "-b", worker_branch]);
+    std::fs::write(dir.path().join("dep.txt"), "dependency output\n").expect("write dep");
+    run_git(dir.path(), &["add", "dep.txt"]);
+    run_git(dir.path(), &["commit", "-m", "t1 worker"]);
+    run_git(dir.path(), &["checkout", &base_branch]);
     run_br(dir.path(), &["init"]);
 
     let pm = Arc::new(
@@ -500,7 +523,7 @@ async fn tick_once_dispatches_ready_task_with_single_approved_dep_branch_base() 
         &subgraph,
         spur_mcp::PlanSubmitAuditContext {
             base_snapshot_branch: Some("spur/plan-base-overlay"),
-            base_snapshot_oid: Some("base-snapshot-oid"),
+            base_snapshot_oid: Some(&base_oid),
             brain_session_id: Some(&brain_session),
             ..Default::default()
         },
@@ -634,11 +657,17 @@ async fn tick_once_dispatches_ready_task_with_single_approved_dep_branch_base() 
 }
 
 #[tokio::test]
-async fn overlay_conflict_routes_to_blocked_on_setup_conflict() {
+async fn persisted_overlay_conflict_emits_plan_task_blocked_on_setup_conflict_continuation() {
     let dir = TempDir::new().expect("tempdir");
     init_git_repo(dir.path());
+    let base_branch = run_git_output(dir.path(), &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let base_oid = run_git_output(dir.path(), &["rev-parse", "HEAD"]);
     let worker_branch = "spur-test-t1-worker";
-    run_git(dir.path(), &["branch", worker_branch]);
+    run_git(dir.path(), &["checkout", "-b", worker_branch]);
+    std::fs::write(dir.path().join("dep.txt"), "dependency output\n").expect("write dep");
+    run_git(dir.path(), &["add", "dep.txt"]);
+    run_git(dir.path(), &["commit", "-m", "t1 worker"]);
+    run_git(dir.path(), &["checkout", &base_branch]);
     run_br(dir.path(), &["init"]);
 
     let pm = Arc::new(
@@ -670,7 +699,7 @@ async fn overlay_conflict_routes_to_blocked_on_setup_conflict() {
         &subgraph,
         spur_mcp::PlanSubmitAuditContext {
             base_snapshot_branch: Some("spur/plan-base-overlay-conflict"),
-            base_snapshot_oid: Some("base-snapshot-oid"),
+            base_snapshot_oid: Some(&base_oid),
             brain_session_id: Some(&brain_session),
             ..Default::default()
         },
@@ -719,6 +748,17 @@ async fn overlay_conflict_routes_to_blocked_on_setup_conflict() {
     .expect("close approved T1");
 
     let (delegation_tx, mut delegation_rx) = tokio::sync::mpsc::channel(1);
+    let (continuation_tx, mut continuation_rx) = tokio::sync::mpsc::unbounded_channel();
+    let continuation_ctx = DetachedContinuationCtx {
+        on_complete: Arc::new(move |cont, worker_session| {
+            let continuation_tx = continuation_tx.clone();
+            Box::pin(async move {
+                continuation_tx
+                    .send((cont, worker_session))
+                    .expect("record continuation");
+            })
+        }),
+    };
     let task_tracker = tokio_util::task::TaskTracker::new();
     let reconciler = Reconciler::new(
         ReconcilerConfig {
@@ -733,7 +773,7 @@ async fn overlay_conflict_routes_to_blocked_on_setup_conflict() {
             brain_session_id: BrainSessionId::new(SessionId("brain".to_string())),
             event_sink: None,
             materializer: test_materializer(),
-            continuation_ctx: common::server_builder::continuation_ctx_arc(),
+            continuation_ctx: Arc::new(continuation_ctx),
         }),
         Some("overlay-conflict-plan".to_string()),
         feature_gate,
@@ -745,6 +785,7 @@ async fn overlay_conflict_routes_to_blocked_on_setup_conflict() {
         .await
         .expect("delegation request timeout")
         .expect("delegation request");
+    let expected_delegation_id = request.id.to_string();
 
     request
         .respond_to
@@ -765,6 +806,33 @@ async fn overlay_conflict_routes_to_blocked_on_setup_conflict() {
         .expect("send setup conflict result");
     task_tracker.close();
     task_tracker.wait().await;
+
+    let (continuation, worker_session) =
+        tokio::time::timeout(std::time::Duration::from_secs(5), continuation_rx.recv())
+            .await
+            .expect("continuation timeout")
+            .expect("continuation emitted");
+    assert_eq!(worker_session, expected_delegation_id);
+    assert_eq!(
+        continuation.source,
+        spur_acp::domain::continuation::ContinuationSource::PlanTaskBlockedOnSetupConflict
+    );
+    assert!(matches!(
+        &continuation.payload.status,
+        DelegationStatus::SetupFailed {
+            error: spur_acp::AttemptSetupError::OverlayConflict {
+                source_task_id,
+                files,
+            }
+        } if source_task_id == "T1" && files == &vec!["foo.rs".to_string()]
+    ));
+    let topology = continuation
+        .payload
+        .setup_conflict_topology
+        .expect("setup conflict topology");
+    assert_eq!(topology.blocked_task_id, "T2");
+    assert_eq!(topology.conflict_dep_task_id, "T1");
+    assert_eq!(topology.conflict_files, vec!["foo.rs".to_string()]);
 
     let projected = spur_mcp::plan::projector::project_plan_from_beads(
         pm.as_ref(),
