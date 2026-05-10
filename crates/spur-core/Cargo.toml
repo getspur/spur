@@ -39,6 +39,7 @@ tempfile = "3"
 thiserror = { workspace = true }
 directories = { workspace = true }
 chrono = { workspace = true }
+md5 = "0.7"
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]

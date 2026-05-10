@@ -14,6 +14,7 @@ use spur_acp::AgentKind;
 /// [`discovery_for_kind`].
 #[derive(Debug, Clone, Copy)]
 pub enum SessionDiscoveryKind {
+    Claude,
     Codex,
     Kiro,
     Kimi,
@@ -24,6 +25,7 @@ impl SessionDiscoveryKind {
     /// Scan the agent's local storage and return all sessions found on disk.
     pub fn discover(&self) -> Result<Vec<SessionInfo>> {
         match self {
+            Self::Claude => claude::discover(),
             Self::Codex => codex::discover(),
             Self::Kiro => kiro::discover(),
             Self::Kimi => kimi::discover(),
@@ -35,6 +37,9 @@ impl SessionDiscoveryKind {
 /// Map an [`AgentKind`] to its disk fallback, if any.
 pub fn discovery_for_kind(kind: AgentKind) -> Option<SessionDiscoveryKind> {
     match kind {
+        AgentKind::ClaudeCodeAcp | AgentKind::ClaudeStreamJson => {
+            Some(SessionDiscoveryKind::Claude)
+        }
         AgentKind::CodexAcp => Some(SessionDiscoveryKind::Codex),
         AgentKind::Kiro => Some(SessionDiscoveryKind::Kiro),
         AgentKind::Kimi => Some(SessionDiscoveryKind::Kimi),
@@ -209,6 +214,125 @@ mod codex {
     }
 }
 
+// ── Claude backend ──────────────────────────────────────────────────────
+
+mod claude {
+    use super::*;
+    use std::io::BufRead;
+    use tracing::debug;
+
+    pub(super) fn discover() -> Result<Vec<SessionInfo>> {
+        let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
+        let projects_root = home.join(".claude/projects");
+
+        if !projects_root.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut sessions = Vec::new();
+        for project_entry in std::fs::read_dir(&projects_root)? {
+            let project_entry = match project_entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let project_path = project_entry.path();
+            if !project_path.is_dir() {
+                continue;
+            }
+
+            for session_entry in std::fs::read_dir(&project_path)? {
+                let session_entry = match session_entry {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                let session_path = session_entry.path();
+                if !session_path.is_file() {
+                    continue;
+                }
+                if session_path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
+
+                if let Some(session) = parse_claude_session(&session_path) {
+                    sessions.push(session);
+                }
+            }
+        }
+
+        sessions.sort_by(|a, b| {
+            let a_time = a.updated_at.as_deref().unwrap_or("");
+            let b_time = b.updated_at.as_deref().unwrap_or("");
+            b_time.cmp(a_time)
+        });
+
+        debug!(
+            count = sessions.len(),
+            "Loaded sessions from claude disk storage"
+        );
+        Ok(sessions)
+    }
+
+    fn parse_claude_session(session_path: &Path) -> Option<SessionInfo> {
+        let session_id = session_path
+            .file_stem()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())?;
+
+        let file = std::fs::File::open(session_path).ok()?;
+        let reader = std::io::BufReader::new(file);
+
+        let mut cwd = None;
+        let mut title = None;
+        let mut line_count = 0;
+
+        for line in reader.lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let json: serde_json::Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            if cwd.is_none() {
+                if let Some(c) = json.get("cwd").and_then(|v| v.as_str()) {
+                    cwd = Some(c.to_string());
+                }
+            }
+            if title.is_none() {
+                if let Some(s) = json.get("slug").and_then(|v| v.as_str()) {
+                    title = Some(s.to_string());
+                }
+            }
+
+            line_count += 1;
+            if line_count >= 20 && cwd.is_some() {
+                // Enough lines to get cwd and possibly title.
+                break;
+            }
+        }
+
+        let cwd = cwd.unwrap_or_default();
+        let updated_at = file_mtime_iso(session_path);
+
+        let mut info = SessionInfo::new(session_id, PathBuf::from(cwd));
+        info = info.title(title);
+        info = info.updated_at(updated_at);
+        Some(info)
+    }
+
+    fn file_mtime_iso(path: &Path) -> Option<String> {
+        let meta = std::fs::metadata(path).ok()?;
+        let mtime = meta.modified().ok()?;
+        let dt = chrono::DateTime::<chrono::Utc>::from(mtime);
+        Some(dt.to_rfc3339())
+    }
+}
+
 // ── Kiro backend ────────────────────────────────────────────────────────
 
 mod kiro {
@@ -286,6 +410,7 @@ mod kiro {
 
 mod kimi {
     use super::*;
+    use std::collections::HashMap;
     use tracing::debug;
 
     pub(super) fn discover() -> Result<Vec<SessionInfo>> {
@@ -295,6 +420,10 @@ mod kimi {
         if !sessions_root.exists() {
             return Ok(Vec::new());
         }
+
+        // Kimi stores sessions under ~/.kimi/sessions/<md5(path)>/<uuid>/.
+        // Build a map from hash dir → cwd by parsing ~/.kimi/kimi.json work_dirs.
+        let hash_to_cwd = build_kimi_hash_map(&home);
 
         let mut sessions = Vec::new();
         for hash_entry in std::fs::read_dir(&sessions_root)? {
@@ -306,6 +435,12 @@ mod kimi {
             if !hash_path.is_dir() {
                 continue;
             }
+            let hash = hash_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            let cwd = hash_to_cwd.get(&hash).cloned().unwrap_or_default();
 
             for uuid_entry in std::fs::read_dir(&hash_path)? {
                 let uuid_entry = match uuid_entry {
@@ -317,7 +452,7 @@ mod kimi {
                     continue;
                 }
 
-                if let Some(session) = parse_kimi_session(&uuid_path) {
+                if let Some(session) = parse_kimi_session(&uuid_path, &cwd) {
                     sessions.push(session);
                 }
             }
@@ -336,9 +471,39 @@ mod kimi {
         Ok(sessions)
     }
 
-    fn parse_kimi_session(uuid_path: &Path) -> Option<SessionInfo> {
+    /// Parse ~/.kimi/kimi.json and build a map of hash-dir → cwd.
+    ///
+    /// Kimi stores sessions under `~/.kimi/sessions/<md5(cwd)>/<uuid>/`.
+    /// The `kimi.json` `work_dirs` array contains the original paths, so we
+    /// can reconstruct the cwd for every session by matching the hash dir.
+    fn build_kimi_hash_map(home: &Path) -> HashMap<String, String> {
+        let kimi_json = home.join(".kimi/kimi.json");
+        let content = match std::fs::read_to_string(&kimi_json) {
+            Ok(c) => c,
+            Err(_) => return HashMap::new(),
+        };
+        let json: serde_json::Value = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(_) => return HashMap::new(),
+        };
+        let work_dirs = match json.get("work_dirs").and_then(|v| v.as_array()) {
+            Some(arr) => arr,
+            None => return HashMap::new(),
+        };
+
+        let mut map = HashMap::new();
+        for entry in work_dirs {
+            let Some(path) = entry.get("path").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let hash = format!("{:x}", md5::compute(path));
+            map.insert(hash, path.to_string());
+        }
+        map
+    }
+
+    fn parse_kimi_session(uuid_path: &Path, cwd: &str) -> Option<SessionInfo> {
         let state_path = uuid_path.join("state.json");
-        let context_path = uuid_path.join("context.jsonl");
 
         let state_json: serde_json::Value = match std::fs::read_to_string(&state_path)
             .ok()
@@ -367,8 +532,6 @@ mod kimi {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        let cwd = extract_kimi_cwd(&context_path).unwrap_or_default();
-
         // Fall back to file mtime for updated_at since wire_mtime is often null.
         let updated_at = state_json
             .get("wire_mtime")
@@ -381,32 +544,6 @@ mod kimi {
         info = info.title(title);
         info = info.updated_at(updated_at);
         Some(info)
-    }
-
-    /// Parse the first user message in context.jsonl to extract the working directory.
-    fn extract_kimi_cwd(context_path: &Path) -> Option<String> {
-        use std::io::BufRead;
-        let file = std::fs::File::open(context_path).ok()?;
-        let reader = std::io::BufReader::new(file);
-        for line in reader.lines() {
-            let line = match line {
-                Ok(l) => l,
-                Err(_) => continue,
-            };
-            if line.trim().is_empty() {
-                continue;
-            }
-            let json: serde_json::Value = match serde_json::from_str(&line) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let content = json.get("content").and_then(|v| v.as_str()).unwrap_or("");
-            if let Some(rest) = content.strip_prefix("Working directory: ") {
-                let cwd = rest.split('\n').next().unwrap_or(rest).trim();
-                return Some(cwd.to_string());
-            }
-        }
-        None
     }
 
     fn file_mtime_iso(path: &Path) -> Option<String> {
@@ -511,6 +648,10 @@ fn json_string_field<'a>(json: &'a serde_json::Value, field: &str) -> Option<&'a
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serialize tests that mutate the global `HOME` environment variable.
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
 
     fn write_codex_rollout(path: &Path, id: &str, timestamp: &str) {
         std::fs::write(
@@ -674,6 +815,7 @@ mod tests {
         std::fs::write(sessions_dir.join("broken.json"), "not json").unwrap();
 
         // Override HOME so kiro::discover() reads from our temp dir.
+        let _guard = HOME_LOCK.lock().unwrap();
         let orig_home = std::env::var_os("HOME");
         std::env::set_var("HOME", temp.path());
         let sessions = kiro::discover().expect("kiro discovery");
@@ -682,6 +824,7 @@ mod tests {
         } else {
             std::env::remove_var("HOME");
         }
+        drop(_guard);
 
         assert_eq!(sessions.len(), 2);
         // Sorted by updated_at descending.
@@ -693,7 +836,9 @@ mod tests {
     #[test]
     fn kimi_discovery_reads_state_and_context() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let sessions_dir = temp.path().join(".kimi/sessions/hash123");
+        // Kimi stores sessions under <md5(cwd)>/<uuid>/.
+        let hash = format!("{:x}", md5::compute("/repo/spur"));
+        let sessions_dir = temp.path().join(".kimi/sessions").join(&hash);
         let uuid_dir = sessions_dir.join("uuid-abc");
         std::fs::create_dir_all(&uuid_dir).unwrap();
 
@@ -707,7 +852,15 @@ mod tests {
             r#"{"role":"user","content":"Working directory: /repo/spur\n\nTask: do thing"}"#,
         )
         .unwrap();
+        std::fs::write(
+            temp.path().join(".kimi/kimi.json"),
+            format!(
+                r#"{{"work_dirs":[{{"path":"/repo/spur","kaos":"local","last_session_id":"uuid-abc"}}]}}"#
+            ),
+        )
+        .unwrap();
 
+        let _guard = HOME_LOCK.lock().unwrap();
         let orig_home = std::env::var_os("HOME");
         std::env::set_var("HOME", temp.path());
         let sessions = kimi::discover().expect("kimi discovery");
@@ -716,6 +869,7 @@ mod tests {
         } else {
             std::env::remove_var("HOME");
         }
+        drop(_guard);
 
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id.0.as_ref(), "uuid-abc");
@@ -730,7 +884,8 @@ mod tests {
     #[test]
     fn kimi_discovery_skips_archived_sessions() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let sessions_dir = temp.path().join(".kimi/sessions/hash456");
+        let hash = format!("{:x}", md5::compute("/repo/spur"));
+        let sessions_dir = temp.path().join(".kimi/sessions").join(&hash);
         let uuid_dir = sessions_dir.join("uuid-archived");
         std::fs::create_dir_all(&uuid_dir).unwrap();
 
@@ -744,7 +899,15 @@ mod tests {
             r#"{"role":"user","content":"Working directory: /repo/spur"}"#,
         )
         .unwrap();
+        std::fs::write(
+            temp.path().join(".kimi/kimi.json"),
+            format!(
+                r#"{{"work_dirs":[{{"path":"/repo/spur","kaos":"local","last_session_id":"uuid-archived"}}]}}"#
+            ),
+        )
+        .unwrap();
 
+        let _guard = HOME_LOCK.lock().unwrap();
         let orig_home = std::env::var_os("HOME");
         std::env::set_var("HOME", temp.path());
         let sessions = kimi::discover().expect("kimi discovery");
@@ -753,6 +916,7 @@ mod tests {
         } else {
             std::env::remove_var("HOME");
         }
+        drop(_guard);
 
         assert!(sessions.is_empty(), "archived sessions should be skipped");
     }
@@ -830,13 +994,58 @@ mod tests {
     }
 
     #[test]
+    fn claude_discovery_reads_jsonl_sessions() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let projects_dir = temp.path().join(".claude/projects/-repo-spur");
+        std::fs::create_dir_all(&projects_dir).unwrap();
+
+        std::fs::write(
+            projects_dir.join("sess-abc.jsonl"),
+            r#"{"type":"attachment","sessionId":"sess-abc","timestamp":"2026-05-09T10:00:00Z","cwd":"/repo/spur","slug":"frolicking-kitten"}
+{"type":"user","sessionId":"sess-abc","timestamp":"2026-05-09T10:05:00Z","cwd":"/repo/spur"}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            projects_dir.join("sess-def.jsonl"),
+            r#"{"type":"attachment","sessionId":"sess-def","timestamp":"2026-05-08T10:00:00Z","cwd":"/repo/spur/.spur/worktrees/w1"}
+"#,
+        )
+        .unwrap();
+        std::fs::write(projects_dir.join("not-a-session.txt"), "hello").unwrap();
+
+        let _guard = HOME_LOCK.lock().unwrap();
+        let orig_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", temp.path());
+        let sessions = claude::discover().expect("claude discovery");
+        if let Some(home) = orig_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        drop(_guard);
+
+        assert_eq!(sessions.len(), 2);
+        // Sorted by updated_at descending (mtime).  sess-def was written after
+        // sess-abc so its mtime is slightly newer and it sorts first.
+        assert_eq!(sessions[0].session_id.0.as_ref(), "sess-def");
+        assert_eq!(
+            sessions[0].cwd,
+            PathBuf::from("/repo/spur/.spur/worktrees/w1")
+        );
+        assert_eq!(sessions[1].session_id.0.as_ref(), "sess-abc");
+        assert_eq!(sessions[1].cwd, PathBuf::from("/repo/spur"));
+        assert_eq!(sessions[1].title.as_deref(), Some("frolicking-kitten"));
+    }
+
+    #[test]
     fn discovery_for_kind_maps_expected_variants() {
+        assert!(discovery_for_kind(AgentKind::ClaudeCodeAcp).is_some());
+        assert!(discovery_for_kind(AgentKind::ClaudeStreamJson).is_some());
         assert!(discovery_for_kind(AgentKind::CodexAcp).is_some());
         assert!(discovery_for_kind(AgentKind::Kiro).is_some());
         assert!(discovery_for_kind(AgentKind::Kimi).is_some());
         assert!(discovery_for_kind(AgentKind::OpenCode).is_some());
-        assert!(discovery_for_kind(AgentKind::ClaudeCodeAcp).is_none());
-        assert!(discovery_for_kind(AgentKind::ClaudeStreamJson).is_none());
         assert!(discovery_for_kind(AgentKind::Gemini).is_none());
         assert!(discovery_for_kind(AgentKind::Generic).is_none());
     }
