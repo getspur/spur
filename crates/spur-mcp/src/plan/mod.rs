@@ -21,6 +21,8 @@ pub mod signal_watcher;
 pub mod signals;
 pub mod snapshot;
 pub mod staging;
+#[cfg(test)]
+pub mod test_util;
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -29,12 +31,9 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot, Mutex};
-use tracing::{debug, info, warn};
+use tracing::warn;
 
 use spur_acp::{BrainSessionId, DelegationResult, DelegationStatus};
-
-use crate::tools::DelegationRequest;
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -87,7 +86,7 @@ pub enum PlanTaskStatus {
         dep_task_id: String,
         files: Vec<String>,
     },
-    /// bd-2m2u Phase 2d — `AUTO_RETRY_BUDGET` exhausted; brain must drive
+    /// bd-2m2u Phase 2d — auto-retry budget (1 attempt) exhausted; brain must drive
     /// recovery via `submit_plan_mutation`. Issue stays open with the
     /// `signal:escalated` label so the engine pauses traversal of the task
     /// without closing the underlying beads issue.
@@ -802,10 +801,8 @@ mod scope_snapshot_integration_tests {
 /// `review_task(request_changes)` returns an error — the brain must approve,
 /// reject, or leave the task as-is.
 pub const MAX_ATTEMPTS: u32 = 3;
-pub const AUTO_RETRY_BUDGET: u32 = 1;
-
 fn should_auto_retry(attempt: u32) -> bool {
-    attempt <= AUTO_RETRY_BUDGET
+    attempt <= 1
 }
 
 /// Tracks the active plan for each epic so re-calling `execute_epic(epic_id)`
@@ -851,7 +848,7 @@ pub struct DerivedEpicPlan {
 /// Pure derivation function: given a fetched epic issue, its direct children,
 /// external-dependency statuses, an optional default agent, and the set of
 /// configured agent names, produce a `DerivedEpicPlan` ready to hand off to
-/// the existing `submit_plan` / `run_plan` engine.
+/// the persistent plan engine.
 ///
 /// Errors are returned as human-readable strings with actionable guidance.
 pub fn derive_epic_plan_from_issues(
@@ -2229,7 +2226,7 @@ pub(crate) enum CompletionPersistenceAction {
         error: String,
         worker_branch: Option<String>,
     },
-    /// bd-2m2u Phase 2d — `AUTO_RETRY_BUDGET` exhausted; the issue is kept
+    /// bd-2m2u Phase 2d — auto-retry budget (1 attempt) exhausted; the issue is kept
     /// open with `signal:escalated`, an `EscalationRequested` audit is
     /// emitted, and the caller pushes a `BrainContinuation` with
     /// `ContinuationSource::PlanTaskEscalated`.
@@ -2237,62 +2234,6 @@ pub(crate) enum CompletionPersistenceAction {
         last_error: String,
         worker_branch: Option<String>,
     },
-}
-
-/// Outcome of applying a worker-failure terminal result to an in-memory
-/// `PlanTaskEntry`. bd-2m2u Phase 2d replaces the previous `bool` (true =
-/// auto-retried, false = terminal-failed) with a tri-state because retry-budget
-/// exhaustion now promotes to `EscalatedToBrain` rather than `Failed`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum WorkerFailureAction {
-    AutoRetried,
-    Escalated {
-        last_error: String,
-        worker_branch: Option<String>,
-    },
-}
-
-/// Ephemeral `run_plan` worker-failure chokepoint. This path does not persist
-/// completion audits, so it applies the same `should_auto_retry(attempt)`
-/// policy in memory that `persist_completion_result_with_retry` applies for
-/// persisted plans. Keep the two branches in sync when changing auto-retry
-/// behavior.
-fn apply_worker_failure_status(
-    entry: &mut PlanTaskEntry,
-    error: String,
-    result: Option<&DelegationResult>,
-) -> WorkerFailureAction {
-    let worker_branch = result
-        .and_then(|r| r.worker_branch.clone())
-        .or_else(|| entry.worker_branch.clone());
-    if should_auto_retry(entry.attempt) {
-        let record = AttemptRecord {
-            attempt: entry.attempt,
-            worker_branch: worker_branch.clone(),
-            diff_summary: result
-                .and_then(|r| r.diff_summary.clone())
-                .or_else(|| entry.result.as_ref().and_then(|r| r.diff_summary.clone())),
-            summary: result
-                .and_then(|r| r.summary.clone())
-                .or_else(|| entry.result.as_ref().and_then(|r| r.summary.clone())),
-            feedback: worker_failure_recovery_feedback(&error),
-            dispatched_base_oid: entry.dispatched_base_oid.take(),
-        };
-        entry.history.push(record);
-        entry.result = None;
-        entry.worker_branch = None;
-        entry.status = PlanTaskStatus::Pending;
-        entry.attempt = entry.attempt.saturating_add(1);
-        WorkerFailureAction::AutoRetried
-    } else {
-        entry.status = PlanTaskStatus::EscalatedToBrain {
-            last_error: error.clone(),
-        };
-        WorkerFailureAction::Escalated {
-            last_error: error,
-            worker_branch,
-        }
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2378,8 +2319,7 @@ pub async fn persist_completion_result(
 /// Persisted worker-failure chokepoint. All persisted completion writers flow
 /// through this function after worker-output invariant checks, so the
 /// auto-retry decision lives here to emit `Completion` and `RetryRequested`
-/// audits consistently. Keep this policy in sync with
-/// `apply_worker_failure_status`, which covers the ephemeral `run_plan` path.
+/// audits consistently.
 #[allow(clippy::too_many_arguments)]
 async fn persist_completion_result_with_retry(
     pm: &dyn PmLike,
@@ -2945,7 +2885,7 @@ pub struct PlanTaskAutoRetriedEventPayload {
 }
 
 /// bd-2m2u Phase 2d — payload for the `PlanTaskEscalated` event emitted when
-/// a plan task exhausts `AUTO_RETRY_BUDGET` and is promoted to
+/// a plan task exhausts auto-retry budget (1 attempt) and is promoted to
 /// `EscalatedToBrain`.
 pub struct PlanTaskEscalatedEventPayload {
     pub plan_id: String,
@@ -3136,565 +3076,6 @@ pub(crate) async fn push_plan_completed_continuation(
         1,
         brain_session_id,
         spur_acp::domain::ContinuationSource::PlanCompleted,
-    )
-    .await;
-}
-
-// ─── Executor ────────────────────────────────────────────────────────
-
-/// Run a submitted plan to completion. Dispatches tasks through the
-/// existing delegation channel in dependency order.
-///
-/// Spawned as a tokio task by `handle_submit_plan`. The plan state is
-/// updated in-place; `get_plan_status` reads it concurrently.
-#[allow(clippy::too_many_arguments)]
-pub async fn run_plan(
-    plan: Arc<Mutex<PlanState>>,
-    delegation_tx: mpsc::Sender<DelegationRequest>,
-    event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
-    pm: Option<Arc<dyn PmLike>>,
-    fast_forward: Option<Arc<tokio::sync::Notify>>,
-    continuation_ctx: Arc<crate::server::DetachedContinuationCtx>,
-    materializer: Arc<crate::outcome_materializer::OutcomeMaterializer>,
-    feature_gate: Arc<spur_license::FeatureGate>,
-) {
-    if plan.lock().await.epic_id.is_some() {
-        tracing::warn!(
-            "run_plan is ephemeral-only in v0e; persisted plans must use the reconciler"
-        );
-        return;
-    }
-
-    let plan_id = plan.lock().await.plan_id.clone();
-    info!(plan_id = %plan_id, "Plan executor started");
-
-    let mut in_flight = tokio::task::JoinSet::<String>::new();
-    // Read once — stable for the plan's lifetime.
-    let brain_sid = plan.lock().await.brain_session_id.clone();
-
-    loop {
-        // ── Single-lock pass: compute ready, mark Dispatched, collect specs ──
-        let ready: Vec<(
-            PlanTask,
-            String,
-            u32,
-            String,
-            Option<crate::tools::BaseSpec>,
-        )> = {
-            let mut p = plan.lock().await;
-            let completed: HashSet<String> = p
-                .tasks
-                .iter()
-                .filter(|t| matches!(t.status, PlanTaskStatus::Approved { .. }))
-                .map(|t| t.spec.task_id.clone())
-                .collect();
-            let plan_base = p
-                .base_snapshot_branch
-                .clone()
-                .map(|name| crate::tools::BaseSpec::Branch { name })
-                .or_else(|| {
-                    p.base_snapshot_oid
-                        .clone()
-                        .map(|oid| crate::tools::BaseSpec::Commit { oid })
-                });
-
-            let mut batch = Vec::new();
-            for entry in &mut p.tasks {
-                if matches!(entry.status, PlanTaskStatus::Pending)
-                    && entry
-                        .spec
-                        .depends_on
-                        .iter()
-                        .all(|d| completed.contains(d.as_str()))
-                {
-                    let delegation_id = crate::plan::labels::mint_delegation_id();
-                    let attempt = entry.attempt;
-                    entry.status = PlanTaskStatus::Dispatched {
-                        delegation_id: delegation_id.clone(),
-                    };
-                    entry.last_delegation_id = Some(delegation_id.clone());
-                    let task_text = build_dispatch_task_text(entry);
-                    batch.push((
-                        entry.spec.clone(),
-                        delegation_id,
-                        attempt,
-                        task_text,
-                        plan_base.clone(),
-                    ));
-                }
-            }
-            batch
-        }; // Lock released.
-
-        for (task_spec, delegation_id, task_attempt, task_text, task_base) in ready {
-            let (tx, rx) = oneshot::channel::<DelegationResult>();
-
-            let request = DelegationRequest {
-                id: delegation_id.clone().into(),
-                agent: task_spec.agent.clone(),
-                task: task_text,
-                context_files: task_spec.context_files.clone(),
-                respond_to: tx,
-                brain_session_id: brain_sid.clone(),
-                delegation_plan: None,
-                issue_id: task_spec.issue_id.clone(),
-                base: task_base,
-                dispatched_base_oid_tx: None,
-                attempt_tracker: Arc::new(std::sync::atomic::AtomicU32::new(task_attempt)),
-                enable_worker_mcp: None,
-            };
-
-            if let Err(e) = delegation_tx.send(request).await {
-                warn!(
-                    plan_id = %plan_id,
-                    task_id = %task_spec.task_id,
-                    "Failed to dispatch plan task: {e}"
-                );
-                let mut p = plan.lock().await;
-                if let Some(entry) = p
-                    .tasks
-                    .iter_mut()
-                    .find(|t| t.spec.task_id == task_spec.task_id)
-                {
-                    apply_worker_failure_status(entry, "Delegation channel closed".into(), None);
-                }
-                continue;
-            }
-
-            debug!(
-                plan_id = %plan_id,
-                task_id = %task_spec.task_id,
-                agent = %task_spec.agent,
-                "Plan task dispatched"
-            );
-
-            // Emit Dispatch audit sentinel — outside the plan lock.
-            emit_dispatch_audit(
-                pm.as_deref(),
-                &task_spec.issue_id,
-                feature_gate.as_ref(),
-                &plan_id,
-                &delegation_id,
-                &task_spec.agent,
-                task_attempt,
-            )
-            .await;
-
-            let tid = task_spec.task_id.clone();
-            let plan_ref = Arc::clone(&plan);
-            let pid = plan_id.clone();
-            let pm_ref = pm.clone();
-            let fast_forward_ref = fast_forward.clone();
-            let materializer_ref = Arc::clone(&materializer);
-            let feature_gate_ref = Arc::clone(&feature_gate);
-            let brain_sid_ref = brain_sid.clone();
-            let continuation_ctx_ref = Arc::clone(&continuation_ctx);
-            let event_sink_ref = event_sink.clone();
-            let issue_id_for_completion = task_spec.issue_id.clone();
-            let delegation_id_for_completion = delegation_id.clone();
-
-            in_flight.spawn(async move {
-                match rx.await {
-                    Ok(result) => {
-                        // Collect completion data before acquiring lock.
-                        let mut deferred: Option<DeferredCompletionPush> = None;
-                        let persisted_completion = if let (Some(pm), Some(issue_id)) =
-                            (pm_ref.as_deref(), issue_id_for_completion.as_deref())
-                        {
-                            match persist_worker_completion_and_notify(
-                                pm,
-                                issue_id,
-                                feature_gate_ref.as_ref(),
-                                &pid,
-                                &delegation_id_for_completion,
-                                &fast_forward_ref,
-                                &result,
-                                &brain_sid_ref,
-                                task_attempt,
-                                &materializer_ref,
-                                None,
-                                Some(&tid),
-                            )
-                            .await
-                            {
-                                Ok(payload) => {
-                                    deferred = payload;
-                                    true
-                                }
-                                Err(error) => {
-                                    warn!(
-                                        plan_id = %pid,
-                                        task_id = %tid,
-                                        issue_id = %issue_id,
-                                        "failed to persist completion result: {error}"
-                                    );
-                                    return tid;
-                                }
-                            }
-                        } else {
-                            false
-                        };
-
-                        let mut completion_state = None;
-                        let mut escalation: Option<(String, Option<String>, u32)> = None;
-                        let mut p = plan_ref.lock().await;
-                        if let Some(entry) =
-                            p.tasks.iter_mut().find(|t| t.spec.task_id == tid)
-                        {
-                            let mut retain_result = true;
-                            let handle_failure = |entry: &mut PlanTaskEntry, error: String| {
-                                let action = apply_worker_failure_status(
-                                    entry,
-                                    error,
-                                    Some(&result),
-                                );
-                                match action {
-                                    WorkerFailureAction::AutoRetried => (true, None, None),
-                                    WorkerFailureAction::Escalated {
-                                        last_error,
-                                        worker_branch,
-                                    } => (false, None, Some((last_error, worker_branch))),
-                                }
-                            };
-                            match &result.status {
-                                DelegationStatus::Success | DelegationStatus::Modified { .. } => {
-                                    info!(plan_id = %pid, task_id = %tid, "Plan task awaiting review");
-                                    entry.status = PlanTaskStatus::AwaitingReview {
-                                        summary: result.summary.clone(),
-                                    };
-                                    entry.worker_branch = result.worker_branch.clone();
-                                    completion_state = Some(
-                                        crate::plan::audit_sentinel::CompletionState::AwaitingReview,
-                                    );
-                                }
-                                DelegationStatus::Failed { error } => {
-                                    warn!(plan_id = %pid, task_id = %tid, "Plan task failed: {error}");
-                                    let (drop_result, cs, esc) = handle_failure(entry, error.clone());
-                                    retain_result = !drop_result;
-                                    completion_state = cs;
-                                    if let Some((err, wb)) = esc {
-                                        escalation = Some((err, wb, task_attempt));
-                                    }
-                                }
-                                DelegationStatus::Cancelled { reason } => {
-                                    warn!(plan_id = %pid, task_id = %tid, "Plan task cancelled: {reason}");
-                                    entry.status = PlanTaskStatus::Cancelled {
-                                        reason: reason.clone(),
-                                    };
-                                }
-                                DelegationStatus::SetupFailed {
-                                    error:
-                                        spur_acp::AttemptSetupError::OverlayConflict {
-                                            source_task_id,
-                                            files,
-                                        },
-                                } => {
-                                    warn!(plan_id = %pid, task_id = %tid, "Plan task blocked on setup overlay conflict");
-                                    entry.status = PlanTaskStatus::BlockedOnSetupConflict {
-                                        dep_task_id: source_task_id.clone(),
-                                        files: files.clone(),
-                                    };
-                                }
-                                DelegationStatus::SetupFailed { error } => {
-                                    warn!(plan_id = %pid, task_id = %tid, "Plan task setup failed: {error}");
-                                    let (drop_result, cs, esc) = handle_failure(entry, error.to_string());
-                                    retain_result = !drop_result;
-                                    completion_state = cs;
-                                    if let Some((err, wb)) = esc {
-                                        escalation = Some((err, wb, task_attempt));
-                                    }
-                                }
-                                other => {
-                                    warn!(plan_id = %pid, task_id = %tid, "Plan task ended: {other:?}");
-                                    let (drop_result, cs, esc) = handle_failure(entry, format!("{other:?}"));
-                                    retain_result = !drop_result;
-                                    completion_state = cs;
-                                    if let Some((err, wb)) = esc {
-                                        escalation = Some((err, wb, task_attempt));
-                                    }
-                                }
-                            }
-                            if retain_result {
-                                entry.result = Some(result.clone());
-                            }
-                        }
-                        drop(p);
-
-                        // Build the ephemeral-path DeferredCompletionPush if
-                        // we didn't persist (no PM / no issue_id). Persisted
-                        // path's deferred was returned by persist_*_and_notify
-                        // above. Either way, deliver AFTER drop(p) so events
-                        // and continuations both observe terminal state.
-                        if !persisted_completion {
-                            if let Some(state) = completion_state {
-                                let source = match state {
-                                    crate::plan::audit_sentinel::CompletionState::AwaitingReview => {
-                                        Some(spur_acp::domain::ContinuationSource::PlanTaskAwaitingReview)
-                                    }
-                                    crate::plan::audit_sentinel::CompletionState::Failed => {
-                                        Some(spur_acp::domain::ContinuationSource::PlanTaskFailed)
-                                    }
-                                    crate::plan::audit_sentinel::CompletionState::Cancelled
-                                    | crate::plan::audit_sentinel::CompletionState::Superseded => None,
-                                };
-                                if let Some(source) = source {
-                                    let cont = materializer_ref
-                                        .materialize(
-                                            result.clone(),
-                                            spur_acp::DelegationId::from(
-                                                delegation_id_for_completion.as_str(),
-                                            ),
-                                            task_attempt,
-                                            brain_sid_ref.clone(),
-                                            source.clone(),
-                                            None,
-                                        )
-                                        .await;
-                                    let event = Some(PlanTaskNotificationEventPayload::Terminal(
-                                        PlanTaskTerminalEventPayload {
-                                            plan_id: pid.clone(),
-                                            task_id: tid.clone(),
-                                            delegation_id: delegation_id_for_completion.clone(),
-                                            attempt: task_attempt,
-                                            completion_state: state,
-                                            result_status: result.status.clone(),
-                                        },
-                                    ));
-                                    let _ = source;
-                                    deferred = Some(DeferredCompletionPush {
-                                        cont: Some(cont),
-                                        event,
-                                    });
-                                }
-                            }
-                            // bd-2m2u Phase 2d — escalation continuation. We
-                            // hit this branch when AUTO_RETRY_BUDGET is
-                            // exhausted in the ephemeral path; option A pushes
-                            // a `PlanTaskEscalated` continuation directly so
-                            // the brain wakes via the same channel as
-                            // AwaitingReview (no SignalWatcher detour).
-                            if deferred.is_none() {
-                                if let Some((last_error, worker_branch, attempt_at_escalation)) =
-                                    escalation.clone()
-                                {
-                                    let cont = materializer_ref
-                                        .materialize(
-                                            result.clone(),
-                                            spur_acp::DelegationId::from(
-                                                delegation_id_for_completion.as_str(),
-                                            ),
-                                            attempt_at_escalation,
-                                            brain_sid_ref.clone(),
-                                            spur_acp::domain::ContinuationSource::PlanTaskEscalated,
-                                            None,
-                                        )
-                                        .await;
-                                    let event = Some(
-                                        PlanTaskNotificationEventPayload::Escalated(
-                                            PlanTaskEscalatedEventPayload {
-                                                plan_id: pid.clone(),
-                                                task_id: tid.clone(),
-                                                delegation_id: delegation_id_for_completion.clone(),
-                                                attempt: attempt_at_escalation,
-                                                last_error,
-                                                worker_branch,
-                                            },
-                                        ),
-                                    );
-                                    deferred = Some(DeferredCompletionPush {
-                                        cont: Some(cont),
-                                        event,
-                                    });
-                                }
-                            }
-                        }
-
-                        if let Some(deferred) = deferred {
-                            deferred
-                                .deliver(
-                                    event_sink_ref.as_deref(),
-                                    continuation_ctx_ref.as_ref(),
-                                )
-                                .await;
-                        }
-                    }
-                    Err(_) => {
-                        let mut p = plan_ref.lock().await;
-                        if let Some(entry) =
-                            p.tasks.iter_mut().find(|t| t.spec.task_id == tid)
-                        {
-                            apply_worker_failure_status(
-                                entry,
-                                "Orchestrator channel dropped".into(),
-                                None,
-                            );
-                        }
-                    }
-                }
-                tid
-            });
-        }
-
-        // ── Wait for next completion ─────────────────────────────────
-        if in_flight.is_empty() {
-            // B0: exit only when no further progression is possible. The
-            // three states that can still drive new transitions are:
-            //   - Dispatched: a worker may produce a result (via the
-            //     handle_review_task → dispatch_newly_ready post-review
-            //     path, whose completion futures live on a separate
-            //     TaskTracker and are not tracked in run_plan's in_flight).
-            //   - Ready: scheduled but not yet sent — next iteration
-            //     will dispatch.
-            //   - AwaitingReview: the brain may yet approve / reject /
-            //     request_changes. Exiting here would race with
-            //     handle_review_task and cause DN-6 cleanup to stamp the
-            //     task as Failed with "Plan exited with task awaiting
-            //     review" — exactly the phase-3b dispatch failure.
-            // Pending with only-terminal deps is truly stuck and should
-            // fall through to DN-6 cleanup. Reviews are human-paced, so
-            // the poll interval is coarse.
-            let any_progressable = {
-                let p = plan.lock().await;
-                p.tasks.iter().any(|t| {
-                    matches!(
-                        t.status,
-                        PlanTaskStatus::Dispatched { .. }
-                            | PlanTaskStatus::Ready
-                            | PlanTaskStatus::AwaitingReview { .. }
-                    )
-                })
-            };
-            if !any_progressable {
-                break; // DN-6 cleanup will stamp any Pending orphans.
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            continue;
-        }
-
-        // Await the next completed task.
-        match in_flight.join_next().await {
-            Some(Ok(_task_id)) => {
-                // Status already updated inside the spawned future.
-                // Loop back to check for newly-ready tasks.
-                continue;
-            }
-            Some(Err(e)) => {
-                warn!(plan_id = %plan_id, "Plan task join error: {e}");
-                continue;
-            }
-            None => break,
-        }
-    }
-
-    // DN-6: On terminal loop exit, promote all non-terminal tasks to Failed with
-    // a specific error. Originally this block only caught Pending-with-failed-dep;
-    // now it also catches Pending with missing deps, stuck Ready, stuck Dispatched,
-    // and stuck AwaitingReview. Approved / Rejected / Failed pass through unchanged.
-    {
-        let mut p = plan.lock().await;
-        let failed_ids: HashSet<String> = p
-            .tasks
-            .iter()
-            .filter(|t| matches!(t.status, PlanTaskStatus::Failed { .. }))
-            .map(|t| t.spec.task_id.clone())
-            .collect();
-
-        for entry in &mut p.tasks {
-            match &entry.status {
-                PlanTaskStatus::Pending
-                    if entry.spec.depends_on.iter().any(|d| failed_ids.contains(d)) =>
-                {
-                    entry.status = PlanTaskStatus::Failed {
-                        error: "Blocked by failed dependency".into(),
-                    };
-                }
-                PlanTaskStatus::Pending => {
-                    entry.status = PlanTaskStatus::Failed {
-                        error: "Plan exited with task still pending (dep never satisfied)".into(),
-                    };
-                }
-                PlanTaskStatus::Ready => {
-                    entry.status = PlanTaskStatus::Failed {
-                        error: "Plan exited with task ready but never dispatched".into(),
-                    };
-                }
-                PlanTaskStatus::Dispatched { delegation_id } => {
-                    let err =
-                        format!("Plan exited with task still running (delegation {delegation_id})");
-                    entry.status = PlanTaskStatus::Failed { error: err };
-                }
-                PlanTaskStatus::AwaitingReview { .. } => {
-                    entry.status = PlanTaskStatus::Failed {
-                        error: "Plan exited with task awaiting review".into(),
-                    };
-                }
-                PlanTaskStatus::Approved { .. }
-                | PlanTaskStatus::Rejected { .. }
-                | PlanTaskStatus::Failed { .. }
-                | PlanTaskStatus::Cancelled { .. }
-                | PlanTaskStatus::Superseded { .. }
-                | PlanTaskStatus::BlockedOnSetupConflict { .. }
-                | PlanTaskStatus::EscalatedToBrain { .. } => {}
-            }
-        }
-    }
-
-    // INV-7: Compute terminal counts and emit lifecycle events OUTSIDE the lock.
-    let (approved_count, rejected_count, failed_count, cancelled_count, awaiting_review_count) = {
-        let p = plan.lock().await;
-        let mut a = 0u32;
-        let mut r = 0u32;
-        let mut f = 0u32;
-        let mut c = 0u32;
-        let mut ar = 0u32;
-        for t in &p.tasks {
-            match &t.status {
-                PlanTaskStatus::Approved { .. } => a += 1,
-                PlanTaskStatus::Rejected { .. } => {
-                    r += 1;
-                }
-                PlanTaskStatus::Failed { .. } => {
-                    f += 1;
-                }
-                PlanTaskStatus::Cancelled { .. } => {
-                    c += 1;
-                }
-                PlanTaskStatus::AwaitingReview { .. } => {
-                    ar += 1;
-                }
-                _ => {}
-            }
-        }
-        (a, r, f, c, ar)
-    }; // Lock released before emitting.
-
-    info!(
-        plan_id = %plan_id,
-        awaiting_review = awaiting_review_count,
-        approved = approved_count,
-        failed = failed_count,
-        cancelled = cancelled_count,
-        "Plan executor finished"
-    );
-
-    if let Some(sink) = &event_sink {
-        sink.emit(spur_acp::SpurEventBody::PlanCompleted {
-            plan_id: plan_id.clone(),
-            approved: approved_count,
-            rejected: rejected_count,
-            failed: failed_count,
-            cancelled: cancelled_count,
-        });
-    }
-    push_plan_completed_continuation(
-        continuation_ctx.as_ref(),
-        &materializer,
-        &brain_sid,
-        &plan_id,
-        approved_count,
-        rejected_count,
-        failed_count,
-        cancelled_count,
     )
     .await;
 }
@@ -3971,7 +3352,7 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
             "Resolve the setup overlay conflict, then retry the blocked task.".to_string()
         }
         "escalated" => {
-            "One or more tasks exhausted AUTO_RETRY_BUDGET. Inspect the failed worker branch and call submit_plan_mutation (RetryTask / ModifyTaskSpec / AbandonTask) to resolve.".to_string()
+            "One or more tasks exhausted auto-retry budget (1 attempt). Inspect the failed worker branch and call submit_plan_mutation (RetryTask / ModifyTaskSpec / AbandonTask) to resolve.".to_string()
         }
         "has_failures" => "Some tasks failed. Use get_task_diff to inspect failures.".to_string(),
         "has_rejections" => "Some tasks rejected. Revise the plan or re-submit.".to_string(),
@@ -4390,11 +3771,44 @@ pub async fn review_task(
 /// without standing up a real beads/GitHub backend.
 #[async_trait::async_trait]
 pub trait PmLike: Send + Sync + 'static {
+    async fn get_issue(&self, _id: &str) -> anyhow::Result<spur_pm::Issue> {
+        anyhow::bail!("PmLike::get_issue is not implemented for this test fake")
+    }
+    async fn list_issues(
+        &self,
+        _filter: spur_pm::IssueFilter,
+    ) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
+        anyhow::bail!("PmLike::list_issues is not implemented for this test fake")
+    }
+    async fn create_issue(&self, _params: spur_pm::IssueCreate) -> anyhow::Result<String> {
+        anyhow::bail!("PmLike::create_issue is not implemented for this test fake")
+    }
     async fn update_issue(&self, id: &str, update: spur_pm::IssueUpdate) -> anyhow::Result<()>;
+    async fn add_dependency(&self, _issue_id: &str, _depends_on_id: &str) -> anyhow::Result<()> {
+        anyhow::bail!("PmLike::add_dependency is not implemented for this test fake")
+    }
+    async fn create_pr(&self, _params: spur_pm::PrParams) -> anyhow::Result<String> {
+        anyhow::bail!("PmLike::create_pr is not implemented for this test fake")
+    }
+    async fn poll(&self) -> anyhow::Result<Vec<spur_pm::PmEvent>> {
+        Ok(Vec::new())
+    }
     async fn issue_labels(&self, _id: &str) -> anyhow::Result<Vec<String>> {
         Ok(Vec::new())
     }
     fn closed_status(&self) -> &str;
+    fn source_str(&self) -> &'static str {
+        "mock"
+    }
+    fn issue_graph_available(&self) -> bool {
+        false
+    }
+    async fn issue_subgraph_json(
+        &self,
+        _id: &str,
+    ) -> anyhow::Result<spur_pm::graph::DependencyGraph> {
+        anyhow::bail!("issue graph unavailable for this backend")
+    }
     /// Returns the `BeadsAdvanced` extension surface if the backend is beads.
     /// Returns `None` for non-beads backends (GitHub) and test fakes.
     fn advanced(&self) -> Option<&dyn spur_pm::BeadsAdvanced> {
@@ -4404,14 +3818,47 @@ pub trait PmLike: Send + Sync + 'static {
 
 #[async_trait::async_trait]
 impl PmLike for spur_pm::PmService {
+    async fn get_issue(&self, id: &str) -> anyhow::Result<spur_pm::Issue> {
+        spur_pm::PmService::get_issue(self, id).await
+    }
+    async fn list_issues(
+        &self,
+        filter: spur_pm::IssueFilter,
+    ) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
+        spur_pm::PmService::list_issues(self, filter).await
+    }
+    async fn create_issue(&self, params: spur_pm::IssueCreate) -> anyhow::Result<String> {
+        spur_pm::PmService::create_issue(self, params).await
+    }
     async fn update_issue(&self, id: &str, update: spur_pm::IssueUpdate) -> anyhow::Result<()> {
         spur_pm::PmService::update_issue(self, id, update).await
+    }
+    async fn add_dependency(&self, issue_id: &str, depends_on_id: &str) -> anyhow::Result<()> {
+        spur_pm::PmService::add_dependency(self, issue_id, depends_on_id).await
+    }
+    async fn create_pr(&self, params: spur_pm::PrParams) -> anyhow::Result<String> {
+        spur_pm::PmService::create_pr(self, params).await
+    }
+    async fn poll(&self) -> anyhow::Result<Vec<spur_pm::PmEvent>> {
+        spur_pm::PmService::poll(self).await
     }
     async fn issue_labels(&self, id: &str) -> anyhow::Result<Vec<String>> {
         Ok(spur_pm::PmService::get_issue(self, id).await?.labels)
     }
     fn closed_status(&self) -> &str {
         spur_pm::PmService::closed_status(self)
+    }
+    fn source_str(&self) -> &'static str {
+        spur_pm::PmService::source_str(self)
+    }
+    fn issue_graph_available(&self) -> bool {
+        spur_pm::PmService::issue_graph_available(self)
+    }
+    async fn issue_subgraph_json(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<spur_pm::graph::DependencyGraph> {
+        spur_pm::PmService::issue_subgraph_json(self, id).await
     }
     fn advanced(&self) -> Option<&dyn spur_pm::BeadsAdvanced> {
         spur_pm::PmService::advanced(self)
@@ -5372,7 +4819,6 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spur_acp::SessionId;
     use std::path::Path;
     use std::process::Command;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -5393,12 +4839,6 @@ mod tests {
         Arc::new(crate::outcome_materializer::OutcomeMaterializer::new(
             Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
         ))
-    }
-
-    fn test_continuation_ctx() -> Arc<crate::server::DetachedContinuationCtx> {
-        Arc::new(crate::server::DetachedContinuationCtx {
-            on_complete: Arc::new(|_, _| Box::pin(async {})),
-        })
     }
 
     fn pro_feature_gate() -> Arc<spur_license::FeatureGate> {
@@ -5982,90 +5422,6 @@ mod tests {
     #[test]
     fn max_attempts_is_three() {
         assert_eq!(super::MAX_ATTEMPTS, 3);
-    }
-
-    // ─── run_plan ephemeral-only contract ────────────────────────────────
-
-    fn build_run_plan_fixture(
-        epic_id: Option<String>,
-    ) -> (
-        Arc<Mutex<PlanState>>,
-        mpsc::Sender<DelegationRequest>,
-        mpsc::Receiver<DelegationRequest>,
-    ) {
-        let state = PlanState {
-            plan_id: "p1".into(),
-            tasks: vec![PlanTaskEntry {
-                spec: PlanTask {
-                    task_id: "t1".into(),
-                    agent: "a".into(),
-                    task: "T".into(),
-                    depends_on: vec![],
-                    issue_id: None,
-                    context_files: vec![],
-                },
-                status: PlanTaskStatus::Pending,
-                result: None,
-                worker_branch: None,
-                attempt: 1,
-                history: vec![],
-                last_delegation_id: None,
-                dispatched_base_oid: None,
-            }],
-            brain_session_id: BrainSessionId::new(SessionId("b".into())),
-            base_snapshot_branch: None,
-            base_snapshot_oid: None,
-            merge_state: PlanMergeState::NotStarted,
-            epic_id,
-        };
-        let (tx, rx) = mpsc::channel(8);
-        (Arc::new(Mutex::new(state)), tx, rx)
-    }
-
-    #[tokio::test]
-    async fn run_plan_with_epic_id_does_not_dispatch() {
-        let (plan, tx, mut rx) = build_run_plan_fixture(Some("bd-epic".into()));
-        tokio::spawn(async move {
-            run_plan(
-                plan,
-                tx,
-                None,
-                None,
-                None,
-                test_continuation_ctx(),
-                test_materializer(),
-                pro_feature_gate(),
-            )
-            .await
-        });
-        let recv = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await;
-        assert!(
-            matches!(recv, Ok(None) | Err(_)),
-            "run_plan must not dispatch when epic_id is present; got {recv:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn run_plan_without_epic_id_still_dispatches() {
-        let (plan, tx, mut rx) = build_run_plan_fixture(None);
-        tokio::spawn(async move {
-            run_plan(
-                plan,
-                tx,
-                None,
-                None,
-                None,
-                test_continuation_ctx(),
-                test_materializer(),
-                pro_feature_gate(),
-            )
-            .await
-        });
-        let recv = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await;
-        assert!(
-            matches!(recv, Ok(Some(_))),
-            "run_plan must dispatch when epic_id is None; got {recv:?}"
-        );
     }
 
     #[test]
@@ -6944,197 +6300,6 @@ mod tests {
         assert_eq!(completion.1.as_deref(), Some("worker done"));
     }
 
-    #[tokio::test]
-    async fn worker_failure_at_attempt_1_resets_to_pending_with_amended_prompt() {
-        use std::time::Duration;
-
-        let (plan, delegation_tx, mut delegation_rx) = build_run_plan_fixture(None);
-        let runner = tokio::spawn({
-            let plan = Arc::clone(&plan);
-            async move {
-                run_plan(
-                    plan,
-                    delegation_tx,
-                    None,
-                    None,
-                    None,
-                    test_continuation_ctx(),
-                    test_materializer(),
-                    pro_feature_gate(),
-                )
-                .await
-            }
-        });
-
-        let first = delegation_rx.recv().await.expect("initial dispatch");
-        let _ = first.respond_to.send(spur_acp::DelegationResult {
-            status: spur_acp::DelegationStatus::Failed {
-                error: "worker crashed".into(),
-            },
-            diff: None,
-            diff_summary: None,
-            summary: Some("worker crashed".into()),
-            estimated_cost_usd: 0.0,
-            worker_branch: Some("spur/worker-failed".into()),
-            artifact: None,
-        });
-
-        let second = tokio::time::timeout(Duration::from_secs(1), delegation_rx.recv())
-            .await
-            .expect("auto-retry should redispatch")
-            .expect("retry dispatch request");
-
-        assert!(second.task.contains("## Recovery context"));
-        assert!(second.task.contains("worker crashed"));
-        assert!(second.task.contains("spur/worker-failed"));
-        assert!(!second.task.contains("Brain feedback:"));
-
-        let entry = plan.lock().await.tasks[0].clone();
-        assert_eq!(entry.history.len(), 1);
-        assert!(matches!(
-            entry.history[0].kind(),
-            super::AttemptRecordKind::WorkerFailureRecovery
-        ));
-
-        runner.abort();
-        let _ = runner.await;
-    }
-
-    #[tokio::test]
-    async fn phase1_terminal_failure_promoted_to_escalated_to_brain() {
-        // bd-2m2u Phase 2d migration of `worker_failure_at_attempt_2_terminates_failed`.
-        // Phase 1 stamped attempt 2 failures as terminal `Failed`; Phase 2d
-        // promotes the same path to `EscalatedToBrain` so brain
-        // `submit_plan_mutation` can drive recovery instead of stalling.
-        use std::time::Duration;
-
-        let (plan, delegation_tx, mut delegation_rx) = build_run_plan_fixture(None);
-        {
-            let mut state = plan.lock().await;
-            state.tasks[0].attempt = 2;
-        }
-        let runner = tokio::spawn({
-            let plan = Arc::clone(&plan);
-            async move {
-                run_plan(
-                    plan,
-                    delegation_tx,
-                    None,
-                    None,
-                    None,
-                    test_continuation_ctx(),
-                    test_materializer(),
-                    pro_feature_gate(),
-                )
-                .await
-            }
-        });
-
-        let first = delegation_rx.recv().await.expect("initial dispatch");
-        let _ = first.respond_to.send(spur_acp::DelegationResult {
-            status: spur_acp::DelegationStatus::Failed {
-                error: "worker crashed again".into(),
-            },
-            diff: None,
-            diff_summary: None,
-            summary: Some("worker crashed again".into()),
-            estimated_cost_usd: 0.0,
-            worker_branch: Some("spur/worker-final".into()),
-            artifact: None,
-        });
-
-        match tokio::time::timeout(Duration::from_millis(150), delegation_rx.recv()).await {
-            Ok(Some(_request)) => panic!("attempt 2 must not retry"),
-            Ok(None) | Err(_) => {}
-        }
-
-        let status = plan.lock().await.tasks[0].status.clone();
-        assert!(
-            matches!(
-                status,
-                super::PlanTaskStatus::EscalatedToBrain { ref last_error }
-                    if last_error == "worker crashed again"
-            ),
-            "Phase 2d: attempt-2 failure must escalate, not terminate-Failed; got {status:?}"
-        );
-
-        runner.abort();
-        let _ = runner.await;
-    }
-
-    #[tokio::test]
-    async fn escalation_pushes_brain_continuation_with_plan_task_escalated_source() {
-        use std::sync::Arc as StdArc;
-        use std::sync::Mutex as StdMutex;
-        use std::time::Duration;
-
-        let (plan, delegation_tx, mut delegation_rx) = build_run_plan_fixture(None);
-        {
-            let mut state = plan.lock().await;
-            state.tasks[0].attempt = 2;
-        }
-
-        // Capture the BrainContinuation pushed by the escalation path so we
-        // can assert on its source discriminator.
-        let captured: StdArc<StdMutex<Vec<spur_acp::domain::BrainContinuation>>> =
-            StdArc::new(StdMutex::new(Vec::new()));
-        let captured_clone = StdArc::clone(&captured);
-        let ctx = StdArc::new(crate::server::DetachedContinuationCtx {
-            on_complete: StdArc::new(move |cont, _delegation_id| {
-                let captured = StdArc::clone(&captured_clone);
-                Box::pin(async move {
-                    captured.lock().expect("captured lock").push(cont);
-                })
-            }),
-        });
-
-        let runner = tokio::spawn({
-            let plan = Arc::clone(&plan);
-            async move {
-                run_plan(
-                    plan,
-                    delegation_tx,
-                    None,
-                    None,
-                    None,
-                    ctx,
-                    test_materializer(),
-                    pro_feature_gate(),
-                )
-                .await
-            }
-        });
-
-        let first = delegation_rx.recv().await.expect("initial dispatch");
-        let _ = first.respond_to.send(spur_acp::DelegationResult {
-            status: spur_acp::DelegationStatus::Failed {
-                error: "second crash".into(),
-            },
-            diff: None,
-            diff_summary: None,
-            summary: Some("second crash".into()),
-            estimated_cost_usd: 0.0,
-            worker_branch: Some("spur/worker-final".into()),
-            artifact: None,
-        });
-
-        // Allow the escalation push to land.
-        tokio::time::sleep(Duration::from_millis(150)).await;
-
-        let conts = captured.lock().expect("captured lock").clone();
-        assert!(
-            conts.iter().any(|c| matches!(
-                c.source,
-                spur_acp::domain::ContinuationSource::PlanTaskEscalated
-            )),
-            "expected at least one BrainContinuation with source=PlanTaskEscalated, got {:?}",
-            conts.iter().map(|c| &c.source).collect::<Vec<_>>()
-        );
-
-        runner.abort();
-        let _ = runner.await;
-    }
-
     #[test]
     fn escalated_to_brain_blocks_recompute_open_statuses_promotion() {
         // bd-2m2u Phase 2d — `recompute_open_statuses` must not promote an
@@ -7189,215 +6354,6 @@ mod tests {
             "EscalatedToBrain must NOT be auto-promoted to Ready by recompute_open_statuses; got {:?}",
             tasks[1].status
         );
-    }
-
-    #[tokio::test]
-    async fn run_plan_keeps_task_dispatched_while_completion_persist_in_flight() {
-        use std::sync::Arc;
-        use std::time::Duration;
-        use tokio::sync::{mpsc, oneshot};
-
-        struct BlockingPm {
-            entered_tx: tokio::sync::Mutex<Option<oneshot::Sender<()>>>,
-            release_rx: tokio::sync::Mutex<Option<oneshot::Receiver<()>>>,
-        }
-
-        #[async_trait::async_trait]
-        impl PmLike for BlockingPm {
-            async fn update_issue(
-                &self,
-                _id: &str,
-                _update: spur_pm::IssueUpdate,
-            ) -> anyhow::Result<()> {
-                if let Some(tx) = self.entered_tx.lock().await.take() {
-                    let _ = tx.send(());
-                }
-                if let Some(rx) = self.release_rx.lock().await.take() {
-                    let _ = rx.await;
-                }
-                Ok(())
-            }
-
-            fn closed_status(&self) -> &str {
-                "closed"
-            }
-        }
-
-        let (entered_tx, entered_rx) = oneshot::channel();
-        let (release_tx, release_rx) = oneshot::channel();
-        let pm: Arc<dyn PmLike> = Arc::new(BlockingPm {
-            entered_tx: tokio::sync::Mutex::new(Some(entered_tx)),
-            release_rx: tokio::sync::Mutex::new(Some(release_rx)),
-        });
-
-        let plan = Arc::new(Mutex::new(PlanState {
-            plan_id: "persist-order".into(),
-            brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
-            base_snapshot_branch: None,
-            base_snapshot_oid: None,
-            merge_state: PlanMergeState::NotStarted,
-            epic_id: None,
-            tasks: vec![PlanTaskEntry {
-                spec: PlanTask {
-                    task_id: "t1".into(),
-                    agent: "codex".into(),
-                    task: "Do the thing".into(),
-                    depends_on: vec![],
-                    issue_id: Some("bd-1".into()),
-                    context_files: vec![],
-                },
-                status: PlanTaskStatus::Pending,
-                result: None,
-                worker_branch: None,
-                attempt: 1,
-                history: vec![],
-                last_delegation_id: None,
-                dispatched_base_oid: None,
-            }],
-        }));
-
-        let (delegation_tx, mut delegation_rx) = mpsc::channel(1);
-        let runner = tokio::spawn({
-            let plan = Arc::clone(&plan);
-            let pm = Arc::clone(&pm);
-            async move {
-                run_plan(
-                    plan,
-                    delegation_tx,
-                    None,
-                    Some(pm),
-                    None,
-                    test_continuation_ctx(),
-                    test_materializer(),
-                    pro_feature_gate(),
-                )
-                .await
-            }
-        });
-
-        let request = delegation_rx.recv().await.expect("initial dispatch");
-        let _ = request.respond_to.send(spur_acp::DelegationResult {
-            status: spur_acp::DelegationStatus::Success,
-            diff: None,
-            diff_summary: None,
-            summary: Some("worker done".into()),
-            estimated_cost_usd: 0.0,
-            worker_branch: Some("feat/worker".into()),
-            artifact: None,
-        });
-
-        tokio::time::timeout(Duration::from_millis(100), entered_rx)
-            .await
-            .expect("persist path should begin")
-            .expect("entered signal");
-
-        let status_during_persist = { plan.lock().await.tasks[0].status.clone() };
-        assert!(
-            matches!(status_during_persist, PlanTaskStatus::Dispatched { .. }),
-            "task must stay dispatched until persistence completes, got {status_during_persist:?}"
-        );
-
-        let _ = release_tx.send(());
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let status_after_persist = { plan.lock().await.tasks[0].status.clone() };
-        assert!(
-            matches!(status_after_persist, PlanTaskStatus::AwaitingReview { .. }),
-            "task should advance after persistence completes, got {status_after_persist:?}"
-        );
-
-        runner.abort();
-        let _ = runner.await;
-    }
-
-    #[tokio::test]
-    async fn run_plan_leaves_task_dispatched_when_completion_persist_fails() {
-        use std::sync::Arc;
-        use std::time::Duration;
-        use tokio::sync::mpsc;
-
-        struct FailingPm;
-
-        #[async_trait::async_trait]
-        impl PmLike for FailingPm {
-            async fn update_issue(
-                &self,
-                _id: &str,
-                _update: spur_pm::IssueUpdate,
-            ) -> anyhow::Result<()> {
-                anyhow::bail!("persist failed")
-            }
-
-            fn closed_status(&self) -> &str {
-                "closed"
-            }
-        }
-
-        let plan = Arc::new(Mutex::new(PlanState {
-            plan_id: "persist-failure".into(),
-            brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
-            base_snapshot_branch: None,
-            base_snapshot_oid: None,
-            merge_state: PlanMergeState::NotStarted,
-            epic_id: None,
-            tasks: vec![PlanTaskEntry {
-                spec: PlanTask {
-                    task_id: "t1".into(),
-                    agent: "codex".into(),
-                    task: "Do the thing".into(),
-                    depends_on: vec![],
-                    issue_id: Some("bd-1".into()),
-                    context_files: vec![],
-                },
-                status: PlanTaskStatus::Pending,
-                result: None,
-                worker_branch: None,
-                attempt: 1,
-                history: vec![],
-                last_delegation_id: None,
-                dispatched_base_oid: None,
-            }],
-        }));
-
-        let (delegation_tx, mut delegation_rx) = mpsc::channel(1);
-        let runner = tokio::spawn({
-            let plan = Arc::clone(&plan);
-            async move {
-                run_plan(
-                    plan,
-                    delegation_tx,
-                    None,
-                    Some(Arc::new(FailingPm)),
-                    None,
-                    test_continuation_ctx(),
-                    test_materializer(),
-                    pro_feature_gate(),
-                )
-                .await
-            }
-        });
-
-        let request = delegation_rx.recv().await.expect("initial dispatch");
-        let _ = request.respond_to.send(spur_acp::DelegationResult {
-            status: spur_acp::DelegationStatus::Success,
-            diff: None,
-            diff_summary: None,
-            summary: Some("worker done".into()),
-            estimated_cost_usd: 0.0,
-            worker_branch: Some("feat/worker".into()),
-            artifact: None,
-        });
-
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let status_after_failure = { plan.lock().await.tasks[0].status.clone() };
-        assert!(
-            matches!(status_after_failure, PlanTaskStatus::Dispatched { .. }),
-            "task must remain dispatched when persistence fails, got {status_after_failure:?}"
-        );
-
-        runner.abort();
-        let _ = runner.await;
     }
 
     #[tokio::test]

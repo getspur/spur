@@ -11,12 +11,6 @@ use spur_mcp::plan::{labels, PlanTask};
 
 mod common;
 
-fn test_materializer() -> std::sync::Arc<spur_mcp::outcome_materializer::OutcomeMaterializer> {
-    std::sync::Arc::new(spur_mcp::outcome_materializer::OutcomeMaterializer::new(
-        std::sync::Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-    ))
-}
-
 fn sample_tasks(with_c: bool) -> Vec<PlanTask> {
     let mut v = vec![
         PlanTask {
@@ -163,125 +157,6 @@ fn submit_plan_schema_still_advertises_tasks_as_required() {
     assert!(required.contains(&"tasks"));
 }
 
-#[tokio::test]
-async fn submit_plan_response_advertises_continuation_fire() {
-    let server = common::server_builder::mock_pro_server();
-    let response = server
-        .__test_call_submit_plan(serde_json::json!({
-            "tasks": [{
-                "task_id": "t1",
-                "agent": "codex",
-                "task": "Do one thing",
-                "depends_on": []
-            }]
-        }))
-        .await;
-    assert!(
-        response.get("error").is_none(),
-        "submit_plan should succeed: {response}"
-    );
-    assert_eq!(
-        response["result"]["continuation_will_fire"],
-        serde_json::json!(true),
-        "submit_plan response should advertise detached continuations: {response}"
-    );
-}
-
-/// INV-7: verify that `run_plan` emits `PlanCompleted` when all tasks are
-/// already in a terminal Approved state on entry (so the executor loop exits
-/// immediately without dispatching), but leaves `PlanReadyToMerge` to the
-/// durable reconciler projection path.
-#[tokio::test]
-async fn run_plan_emits_plan_completed_on_terminal_state() {
-    use spur_acp::{SpurEvent, SpurEventBody};
-    use spur_mcp::plan::{run_plan, PlanState, PlanTask, PlanTaskEntry, PlanTaskStatus};
-    use spur_mcp::McpEventSink;
-    use std::sync::Arc;
-    use tokio::sync::{mpsc, Mutex};
-
-    let state = PlanState {
-        plan_id: "p1".into(),
-        tasks: vec![PlanTaskEntry {
-            spec: PlanTask {
-                task_id: "t1".into(),
-                agent: "a".into(),
-                task: "T".into(),
-                depends_on: vec![],
-                issue_id: None,
-                context_files: vec![],
-            },
-            status: PlanTaskStatus::Approved { summary: None },
-            result: None,
-            worker_branch: None,
-            attempt: 1,
-            history: vec![],
-            last_delegation_id: None,
-            dispatched_base_oid: None,
-        }],
-        brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("b".into())),
-        base_snapshot_branch: None,
-        base_snapshot_oid: None,
-        merge_state: spur_mcp::plan::PlanMergeState::NotStarted,
-        epic_id: None,
-    };
-
-    /// A test sink that captures emitted event bodies synchronously.
-    struct CaptureSink {
-        events: std::sync::Mutex<Vec<SpurEvent>>,
-    }
-    impl McpEventSink for CaptureSink {
-        fn emit(&self, body: SpurEventBody) {
-            self.events.lock().unwrap().push(SpurEvent::now(body));
-        }
-    }
-
-    let sink = Arc::new(CaptureSink {
-        events: std::sync::Mutex::new(Vec::new()),
-    });
-    let sink_ref: Arc<dyn McpEventSink> = Arc::clone(&sink) as Arc<dyn McpEventSink>;
-
-    let (dtx, _drx) = mpsc::channel(8);
-
-    run_plan(
-        Arc::new(Mutex::new(state)),
-        dtx,
-        Some(sink_ref),
-        None,
-        None,
-        Arc::new(DetachedContinuationCtx {
-            on_complete: Arc::new(|_, _| Box::pin(async {})),
-        }),
-        test_materializer(),
-        common::server_builder::pro_feature_gate(),
-    )
-    .await;
-
-    let events = sink.events.lock().unwrap();
-    let saw_completed = events.iter().any(|e| {
-        matches!(
-            &e.body,
-            SpurEventBody::PlanCompleted { plan_id, approved, .. }
-                if plan_id == "p1" && *approved == 1
-        )
-    });
-    let saw_ready = events.iter().any(|e| {
-        matches!(
-            &e.body,
-            SpurEventBody::PlanReadyToMerge { plan_id } if plan_id == "p1"
-        )
-    });
-    assert!(
-        saw_completed,
-        "PlanCompleted must be emitted; got: {:?}",
-        events.iter().map(|e| &e.body).collect::<Vec<_>>()
-    );
-    assert!(
-        !saw_ready,
-        "PlanReadyToMerge must be emitted only from durable reconciliation; got: {:?}",
-        events.iter().map(|e| &e.body).collect::<Vec<_>>()
-    );
-}
-
 /// INV-5: verify that `handle_review_task` releases the plan-state lock BEFORE
 /// it calls `pm.update_issue`, so concurrent readers are not blocked by network
 /// latency.
@@ -372,95 +247,6 @@ async fn review_approve_releases_plan_lock_before_beads_io() {
         .await
         .expect("approve task panicked")
         .expect("approve returned Err");
-}
-
-/// DN-6: verify that `run_plan`, on terminal loop exit, promotes ANY
-/// non-terminal task (not just Pending-with-failed-dep) to Failed — including a
-/// Pending task whose declared dependency does not exist in the plan at all.
-#[tokio::test]
-async fn run_plan_marks_pending_tasks_failed_on_terminal_exit() {
-    use spur_acp::{SpurEvent, SpurEventBody};
-    use spur_mcp::plan::{run_plan, PlanState, PlanTask, PlanTaskEntry, PlanTaskStatus};
-    use spur_mcp::McpEventSink;
-    use std::sync::Arc;
-    use tokio::sync::{mpsc, Mutex};
-
-    struct CaptureSink {
-        events: std::sync::Mutex<Vec<SpurEvent>>,
-    }
-    impl McpEventSink for CaptureSink {
-        fn emit(&self, body: SpurEventBody) {
-            self.events.lock().unwrap().push(SpurEvent::now(body));
-        }
-    }
-
-    let state = PlanState {
-        plan_id: "p1".into(),
-        tasks: vec![PlanTaskEntry {
-            spec: PlanTask {
-                task_id: "t1".into(),
-                agent: "a".into(),
-                task: "T".into(),
-                depends_on: vec!["missing-dep".into()],
-                issue_id: None,
-                context_files: vec![],
-            },
-            status: PlanTaskStatus::Pending,
-            result: None,
-            worker_branch: None,
-            attempt: 1,
-            history: vec![],
-            last_delegation_id: None,
-            dispatched_base_oid: None,
-        }],
-        brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("b".into())),
-        base_snapshot_branch: None,
-        base_snapshot_oid: None,
-        merge_state: spur_mcp::plan::PlanMergeState::NotStarted,
-        epic_id: None,
-    };
-
-    let sink = Arc::new(CaptureSink {
-        events: std::sync::Mutex::new(Vec::new()),
-    });
-    let sink_ref: Arc<dyn McpEventSink> = Arc::clone(&sink) as Arc<dyn McpEventSink>;
-    let (dtx, _drx) = mpsc::channel(8);
-    let plan_arc = Arc::new(Mutex::new(state));
-
-    run_plan(
-        Arc::clone(&plan_arc),
-        dtx,
-        Some(sink_ref),
-        None,
-        None,
-        Arc::new(DetachedContinuationCtx {
-            on_complete: Arc::new(|_, _| Box::pin(async {})),
-        }),
-        test_materializer(),
-        common::server_builder::pro_feature_gate(),
-    )
-    .await;
-
-    let st = plan_arc.lock().await;
-    assert!(
-        matches!(st.tasks[0].status, PlanTaskStatus::Failed { .. }),
-        "stuck Pending task must become Failed on terminal exit, got {:?}",
-        st.tasks[0].status
-    );
-    drop(st);
-
-    let events = sink.events.lock().unwrap();
-    let pc = events
-        .iter()
-        .find_map(|e| match &e.body {
-            SpurEventBody::PlanCompleted { failed, .. } => Some(*failed),
-            _ => None,
-        })
-        .expect("PlanCompleted must be emitted");
-    assert_eq!(
-        pc, 1,
-        "stuck Pending task must be counted as failed in PlanCompleted"
-    );
 }
 
 // ─── Task 1: build_entries_with_task_map backfill tests ──────────────────────
@@ -607,6 +393,7 @@ fn continuation_ctx() -> DetachedContinuationCtx {
 struct PersistedSubmitFixture {
     #[allow(dead_code)]
     _dir: TempDir,
+    pm: Arc<PmService>,
     server: McpCallbackServer,
     channel: spur_mcp::tools::DelegationChannel,
 }
@@ -637,7 +424,7 @@ async fn persisted_submit_fixture() -> PersistedSubmitFixture {
     let session_id = BrainSessionId::new(SessionId("brain".into()));
     let (mut server, channel) = McpCallbackServer::new(
         Some(&session_id),
-        Some(pm),
+        Some(Arc::clone(&pm)),
         None,
         continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
@@ -646,9 +433,28 @@ async fn persisted_submit_fixture() -> PersistedSubmitFixture {
     server.set_repo_root(dir.path().to_path_buf());
     PersistedSubmitFixture {
         _dir: dir,
+        pm,
         server,
         channel,
     }
+}
+
+fn extract_submit_plan_epic_id(response: &serde_json::Value) -> String {
+    assert!(
+        response.get("error").is_none(),
+        "submit_plan should succeed: {response}"
+    );
+    let text = response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("submit_plan response text");
+    text.lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("epic_id: ")
+                .and_then(|line| line.strip_suffix(" (beads)"))
+        })
+        .map(str::to_string)
+        .unwrap_or_else(|| panic!("submit_plan response must include epic_id: {text}"))
 }
 
 impl PersistedSubmitFixture {
@@ -687,5 +493,144 @@ async fn persisted_submit_plan_does_not_enqueue_delegation_request() {
     assert!(
         recv.is_err(),
         "persisted submit_plan must not dispatch directly"
+    );
+}
+
+#[tokio::test]
+async fn submit_plan_omitted_persist_as_epic_defaults_to_persisted_path() {
+    let mut fixture = persisted_submit_fixture().await;
+    let response = fixture
+        .server
+        .__test_call_submit_plan(json!({
+            "epic_title": "Default Persisted Submit Epic",
+            "tasks": [{
+                "task_id": "t1",
+                "agent": "codex",
+                "task": "Do something",
+                "depends_on": [],
+            }]
+        }))
+        .await;
+
+    let epic_id = extract_submit_plan_epic_id(&response);
+    let epic = fixture.pm.get_issue(&epic_id).await.expect("get epic");
+    assert_eq!(epic.title, "Default Persisted Submit Epic");
+
+    let recv = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        fixture.channel.request_rx.recv(),
+    )
+    .await;
+    assert!(
+        recv.is_err(),
+        "default persisted submit_plan must not dispatch directly"
+    );
+}
+
+#[tokio::test]
+async fn submit_plan_explicit_false_rejects_with_migration_guidance() {
+    let server = common::server_builder::mock_pro_server();
+
+    let response = server
+        .__test_call_submit_plan(json!({
+            "persist_as_epic": false,
+            "tasks": [{
+                "task_id": "t1",
+                "agent": "codex",
+                "task": "Do something",
+                "depends_on": [],
+            }]
+        }))
+        .await;
+
+    let error = response
+        .get("error")
+        .unwrap_or_else(|| panic!("explicit false submit_plan should reject: {response}"));
+    assert_eq!(error["code"], -32602);
+    let message = error["message"]
+        .as_str()
+        .expect("structured error must include a message");
+    assert!(
+        message.contains("persist_as_epic=false is removed; remove the field"),
+        "error should include migration guidance: {response}"
+    );
+    assert!(
+        message.contains("true is the only supported value"),
+        "error should state true is the only supported value: {response}"
+    );
+    assert!(
+        message.contains(
+            "docs/superpowers/specs/2026-05-10-submit-plan-substrate-migration-design.md"
+        ),
+        "error should link the migration spec: {response}"
+    );
+}
+
+#[tokio::test]
+async fn persisted_submit_plan_derives_epic_title_from_first_task_when_omitted() {
+    let fixture = persisted_submit_fixture().await;
+    let response = fixture
+        .server
+        .__test_call_submit_plan(json!({
+            "persist_as_epic": true,
+            "tasks": [{
+                "task_id": "t1",
+                "agent": "codex",
+                "task": "  Refactor X  ",
+                "depends_on": [],
+            }]
+        }))
+        .await;
+
+    let epic_id = extract_submit_plan_epic_id(&response);
+    let epic = fixture.pm.get_issue(&epic_id).await.expect("get epic");
+    assert_eq!(epic.title, "Refactor X");
+}
+
+#[tokio::test]
+async fn persisted_submit_plan_still_rejects_empty_tasks_without_epic_title() {
+    let fixture = persisted_submit_fixture().await;
+    let response = fixture
+        .server
+        .__test_call_submit_plan(json!({
+            "persist_as_epic": true,
+            "tasks": []
+        }))
+        .await;
+
+    let error = response
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| panic!("submit_plan should reject empty tasks: {response}"));
+    assert_eq!(error, "Plan must contain at least one task");
+}
+
+#[tokio::test]
+async fn persisted_submit_plan_rejects_whitespace_only_task_when_epic_title_omitted() {
+    let fixture = persisted_submit_fixture().await;
+    let response = fixture
+        .server
+        .__test_call_submit_plan(json!({
+            "persist_as_epic": true,
+            "tasks": [{
+                "task_id": "t1",
+                "agent": "codex",
+                "task": "   ",
+                "depends_on": [],
+            }]
+        }))
+        .await;
+
+    let error = response
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| {
+            panic!("submit_plan should reject whitespace-only task fallback: {response}")
+        });
+    assert_eq!(
+        error,
+        "submit_plan: cannot derive epic_title - provide epic_title or a non-whitespace tasks[0].task"
     );
 }

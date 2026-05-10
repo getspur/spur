@@ -39,7 +39,7 @@ pub enum WorkerSignal {
         worker_tip: String,
     },
     /// bd-2m2u Phase 2e — emitted when a task has exhausted its in-engine
-    /// `AUTO_RETRY_BUDGET` (Phase 1) and the autonomous-recovery proposer
+    /// auto-retry budget (1 attempt) (Phase 1) and the autonomous-recovery proposer
     /// path is desired in addition to / instead of the brain escalation
     /// continuation (Phase 2d option A). v0 deterministic proposer matches
     /// on this signal and emits `RetryTask` while attempts < MAX_ATTEMPTS.

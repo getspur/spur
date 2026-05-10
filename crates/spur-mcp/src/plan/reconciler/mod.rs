@@ -44,7 +44,6 @@ use tokio_util::task::TaskTracker;
 use crate::plan::outcomes::{
     DispatchOutcome, NoReadyReason, OutcomeLogDecision, OutcomeStore, SkipReason, StuckTask,
 };
-use spur_pm::PmService;
 
 mod ready;
 
@@ -295,7 +294,7 @@ impl PlanDispatchState {
 
 pub struct Reconciler {
     pub(super) config: ReconcilerConfig,
-    pub(super) pm: Arc<PmService>,
+    pub(super) pm: Arc<dyn crate::plan::PmLike>,
     pub(super) fast_forward: Arc<Notify>,
     pub(super) dispatch: Option<ReconcilerDispatchCtx>,
     pub(super) plan_id: Option<String>,
@@ -310,7 +309,25 @@ pub struct Reconciler {
 impl Reconciler {
     pub fn new(
         config: ReconcilerConfig,
-        pm: Arc<PmService>,
+        pm: Arc<spur_pm::PmService>,
+        fast_forward: Arc<Notify>,
+        dispatch: Option<ReconcilerDispatchCtx>,
+        plan_id: Option<String>,
+        feature_gate: Arc<spur_license::FeatureGate>,
+    ) -> Self {
+        Self::new_with_pm_like(
+            config,
+            pm as Arc<dyn crate::plan::PmLike>,
+            fast_forward,
+            dispatch,
+            plan_id,
+            feature_gate,
+        )
+    }
+
+    pub fn new_with_pm_like(
+        config: ReconcilerConfig,
+        pm: Arc<dyn crate::plan::PmLike>,
         fast_forward: Arc<Notify>,
         dispatch: Option<ReconcilerDispatchCtx>,
         plan_id: Option<String>,
