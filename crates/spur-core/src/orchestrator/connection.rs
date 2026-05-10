@@ -247,64 +247,149 @@ impl Orchestrator {
         discovery.discover()
     }
 
-    /// Read conversation history from a kiro session's JSONL file on disk.
-    /// Returns (role, text) pairs for Prompt and AssistantMessage entries.
+    /// Read conversation history from an agent session's JSONL file on disk.
+    /// Returns (role, text) pairs for user and assistant entries.
     pub(super) fn read_session_history_from_disk(
         session_uuid: &str,
     ) -> Vec<spur_acp::HistoryEntry> {
         let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
         let jsonl_path = home.join(format!(".kiro/sessions/cli/{}.jsonl", session_uuid));
 
-        let content = match std::fs::read_to_string(&jsonl_path) {
-            Ok(c) => c,
-            Err(_) => return Vec::new(),
+        if jsonl_path.exists() {
+            return std::fs::read_to_string(&jsonl_path)
+                .map(|content| parse_kiro_history_from_jsonl(&content))
+                .unwrap_or_default();
+        }
+
+        let Some(context_path) = find_kimi_context_path(&home, session_uuid) else {
+            return Vec::new();
         };
 
-        let mut entries = Vec::new();
-        for line in content.lines() {
-            let json: serde_json::Value = match serde_json::from_str(line) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let kind = json.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-
-            // Concatenate ALL text content blocks (messages can have multiple).
-            let text = json
-                .pointer("/data/content")
-                .and_then(|arr| arr.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|item| {
-                            let item_kind = item.get("kind").and_then(|v| v.as_str())?;
-                            if item_kind == "text" {
-                                item.get("data").and_then(|v| v.as_str())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                })
-                .unwrap_or_default();
-
-            if text.is_empty() {
-                continue;
-            }
-
-            match kind {
-                "Prompt" => entries.push(spur_acp::HistoryEntry {
-                    role: "user".into(),
-                    text,
-                }),
-                "AssistantMessage" => entries.push(spur_acp::HistoryEntry {
-                    role: "assistant".into(),
-                    text,
-                }),
-                _ => {} // Skip ToolResults, etc. for v1
-            }
-        }
-        entries
+        std::fs::read_to_string(&context_path)
+            .map(|content| parse_kimi_history_from_jsonl(&content))
+            .unwrap_or_default()
     }
+}
+
+fn parse_kiro_history_from_jsonl(content: &str) -> Vec<spur_acp::HistoryEntry> {
+    let mut entries = Vec::new();
+    for line in content.lines() {
+        let json: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let kind = json.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+
+        // Concatenate ALL text content blocks (messages can have multiple).
+        let text = json
+            .pointer("/data/content")
+            .and_then(|arr| arr.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| {
+                        let item_kind = item.get("kind").and_then(|v| v.as_str())?;
+                        if item_kind == "text" {
+                            item.get("data").and_then(|v| v.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+
+        if text.is_empty() {
+            continue;
+        }
+
+        match kind {
+            "Prompt" => entries.push(spur_acp::HistoryEntry {
+                role: "user".into(),
+                text,
+            }),
+            "AssistantMessage" => entries.push(spur_acp::HistoryEntry {
+                role: "assistant".into(),
+                text,
+            }),
+            _ => {} // Skip ToolResults, etc. for v1
+        }
+    }
+    entries
+}
+
+fn find_kimi_context_path(home: &Path, session_uuid: &str) -> Option<PathBuf> {
+    let sessions_root = home.join(".kimi/sessions");
+    let mut hash_dirs = std::fs::read_dir(&sessions_root)
+        .ok()?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    hash_dirs.sort();
+
+    for hash_dir in hash_dirs {
+        let context_path = hash_dir.join(session_uuid).join("context.jsonl");
+        if context_path.is_file() {
+            return Some(context_path);
+        }
+    }
+
+    None
+}
+
+fn parse_kimi_history_from_jsonl(content: &str) -> Vec<spur_acp::HistoryEntry> {
+    let mut entries = Vec::new();
+    for line in content.lines() {
+        let json: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        match json.get("role").and_then(|v| v.as_str()).unwrap_or("") {
+            "user" => {
+                let text = json
+                    .get("content")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default();
+                if !text.is_empty() {
+                    entries.push(spur_acp::HistoryEntry {
+                        role: "user".into(),
+                        text: text.to_string(),
+                    });
+                }
+            }
+            "assistant" => {
+                let text = json
+                    .get("content")
+                    .and_then(|value| value.as_array())
+                    .map(|blocks| {
+                        blocks
+                            .iter()
+                            .filter_map(|block| {
+                                if block.get("type").and_then(|value| value.as_str())
+                                    == Some("text")
+                                {
+                                    block.get("text").and_then(|value| value.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                            .filter(|text| !text.is_empty())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_default();
+                if !text.is_empty() {
+                    entries.push(spur_acp::HistoryEntry {
+                        role: "assistant".into(),
+                        text,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    entries
 }
 
 /// Build a boxed `AgentConnection` from the transport declared in `config`.
@@ -345,5 +430,128 @@ pub(super) fn build_connection_from_transport(
             config.command.clone(),
             spawn_args,
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Serialize tests that mutate the global `HOME` environment variable.
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_home<T>(home: &Path, f: impl FnOnce() -> T) -> T {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let orig_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home);
+        let result = f();
+        if let Some(home) = orig_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        result
+    }
+
+    fn write_kimi_context(home: &Path, session_uuid: &str, content: &str) {
+        let session_dir = home.join(".kimi/sessions/fake-cwd-hash").join(session_uuid);
+        std::fs::create_dir_all(&session_dir).expect("create kimi session dir");
+        std::fs::write(session_dir.join("context.jsonl"), content).expect("write context");
+    }
+
+    fn history_entries(session_uuid: &str) -> Vec<(String, String)> {
+        Orchestrator::read_session_history_from_disk(session_uuid)
+            .into_iter()
+            .map(|entry| (entry.role, entry.text))
+            .collect()
+    }
+
+    #[test]
+    fn reads_kimi_user_message_from_context() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_kimi_context(
+            temp.path(),
+            "session-user",
+            r#"{"role":"user","content":"Working directory: /repo/spur\n\nTask: fix it"}"#,
+        );
+
+        let entries = with_home(temp.path(), || history_entries("session-user"));
+
+        assert_eq!(
+            entries,
+            vec![(
+                "user".to_string(),
+                "Working directory: /repo/spur\n\nTask: fix it".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn reads_kimi_assistant_text_and_skips_think_blocks() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_kimi_context(
+            temp.path(),
+            "session-assistant",
+            r#"{"role":"assistant","content":[{"type":"think","think":"hidden reasoning","encrypted":null},{"type":"text","text":"visible response"}],"tool_calls":[]}"#,
+        );
+
+        let entries = with_home(temp.path(), || history_entries("session-assistant"));
+
+        assert_eq!(
+            entries,
+            vec![("assistant".to_string(), "visible response".to_string())]
+        );
+    }
+
+    #[test]
+    fn reads_kimi_assistant_multiple_text_blocks() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_kimi_context(
+            temp.path(),
+            "session-multi-text",
+            r#"{"role":"assistant","content":[{"type":"text","text":"first"},{"type":"text","text":"second"}]}"#,
+        );
+
+        let entries = with_home(temp.path(), || history_entries("session-multi-text"));
+
+        assert_eq!(
+            entries,
+            vec![("assistant".to_string(), "first\nsecond".to_string())]
+        );
+    }
+
+    #[test]
+    fn reads_kimi_mixed_file_and_skips_tools_and_metadata() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_kimi_context(
+            temp.path(),
+            "session-mixed",
+            r#"{"role":"_system_prompt","content":"system"}
+{"role":"user","content":"hello"}
+{"role":"tool","content":"tool result","tool_call_id":"call-1"}
+{"role":"assistant","content":[{"type":"think","think":"hidden"},{"type":"text","text":"hi there"}]}
+{"role":"_usage","content":"usage"}
+{"role":"_checkpoint","content":"checkpoint"}"#,
+        );
+
+        let entries = with_home(temp.path(), || history_entries("session-mixed"));
+
+        assert_eq!(
+            entries,
+            vec![
+                ("user".to_string(), "hello".to_string()),
+                ("assistant".to_string(), "hi there".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_kimi_session_returns_empty_history() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let entries = with_home(temp.path(), || history_entries("missing-session"));
+
+        assert!(entries.is_empty());
     }
 }
