@@ -100,7 +100,7 @@ fn open_palette_surfaces_view_entries_and_sessions_requests_picker() {
         .iter_ranked()
         .map(|r| r.label.as_str())
         .collect();
-    for expected in ["Dashboard", "Issues", "Sprints", "Sessions", "Insights"] {
+    for expected in ["Dashboard", "Issues", "Plans", "Sessions", "Insights"] {
         assert!(
             labels.contains(&expected),
             "expected {expected} view entry in palette; got: {labels:?}"
@@ -114,7 +114,7 @@ fn open_palette_surfaces_view_entries_and_sessions_requests_picker() {
         .collect();
     assert_eq!(
         view_labels,
-        vec!["Dashboard", "Issues", "Sprints", "Sessions", "Insights"]
+        vec!["Dashboard", "Issues", "Plans", "Sessions", "Insights"]
     );
 
     app.palette_state_for_test_mut().set_query("iss");
