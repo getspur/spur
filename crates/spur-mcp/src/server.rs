@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use axum::Router;
@@ -36,6 +37,47 @@ use crate::plan::proposers::{
 use crate::plan::reconciler::{Reconciler, ReconcilerConfig, ReconcilerDispatchCtx};
 use crate::plan::signal_watcher::SignalWatcher;
 use crate::tools::{self, DelegationChannel, DelegationRequest};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BeadsVersion {
+    /// The persisted plan version could not be derived or is intentionally
+    /// unknown for an ephemeral plan. This is distinct from `AuditSeq(0)`,
+    /// which is a real persisted epic with zero audit sentinels.
+    Unknown,
+    /// Monotonic audit-sentinel sequence number on the plan epic issue.
+    AuditSeq(u64),
+}
+
+#[derive(Debug, Clone)]
+struct CachedPlan {
+    state: Arc<tokio::sync::Mutex<crate::plan::PlanState>>,
+    beads_version: BeadsVersion,
+    cached_at: Instant,
+}
+
+impl CachedPlan {
+    fn new(
+        state: Arc<tokio::sync::Mutex<crate::plan::PlanState>>,
+        beads_version: BeadsVersion,
+    ) -> Self {
+        Self {
+            state,
+            beads_version,
+            cached_at: Instant::now(),
+        }
+    }
+}
+
+fn unknown_beads_version() -> BeadsVersion {
+    BeadsVersion::Unknown
+}
+
+const VERSIONED_PLAN_CACHE_MAX_ATTEMPTS: usize = 3;
+const VERSIONED_PLAN_CACHE_BACKOFFS: [std::time::Duration; VERSIONED_PLAN_CACHE_MAX_ATTEMPTS] = [
+    std::time::Duration::from_millis(100),
+    std::time::Duration::from_millis(500),
+    std::time::Duration::from_millis(2_000),
+];
 
 /// How long completed delegation results are retained before lazy eviction.
 ///
@@ -537,8 +579,7 @@ pub struct McpCallbackServer {
     /// Feature gate snapshot shared with the orchestrator/license runtime.
     feature_gate: Arc<spur_license::FeatureGate>,
     /// Active execution plans submitted via `submit_plan`.
-    active_plans:
-        Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<crate::plan::PlanState>>>>>,
+    active_plans: Arc<tokio::sync::Mutex<HashMap<String, CachedPlan>>>,
     /// Ephemeral reconciler outcome buffers. MUST NOT be persisted to beads;
     /// durable plan state is reconstructed from beads on restart.
     reconciler_outcomes: Arc<tokio::sync::Mutex<crate::plan::outcomes::OutcomeStore>>,
@@ -560,6 +601,9 @@ pub struct McpCallbackServer {
     continuation_ctx: Arc<DetachedContinuationCtx>,
     pub(crate) materializer: OutcomeMaterializer,
     pub(crate) outcome_store: Arc<dyn spur_blob_store::OutcomeStore>,
+    /// Test-only hook used to force continuous epic audit churn between
+    /// version reads while exercising retry bounds.
+    version_churn_epic_for_test: Arc<tokio::sync::Mutex<Option<String>>>,
     /// Phase 1c: how long `handle_delegate_to_worker` / `handle_delegate_parallel`
     /// wait inline for a worker's oneshot to fire before handing the receiver
     /// to the detached collector. Default `0` — pure async-first.
@@ -595,6 +639,10 @@ pub struct McpCallbackServer {
     /// Grace period before startup quarantines stale `spur:plan-pending`
     /// persisted-plan epics.
     plan_pending_grace: std::time::Duration,
+    /// PR2 guard: when false, persisted plan reads always re-project from
+    /// beads and never serve by the epic audit sequence token. PR3 flips this
+    /// once task-level writes advance the epic audit sequence.
+    versioned_cache_serve: bool,
     /// Duration written into `spur:lease-expires-at:<ts>` labels for
     /// reconciler-owned persisted-plan dispatches.
     dispatch_lease_duration: std::time::Duration,
@@ -2190,6 +2238,7 @@ impl McpCallbackServer {
             continuation_ctx: Arc::new(continuation_ctx),
             materializer,
             outcome_store,
+            version_churn_epic_for_test: Arc::new(tokio::sync::Mutex::new(None)),
             inline_wait: std::time::Duration::from_millis(0),
             retiring: AtomicBool::new(false),
             cancel_token: CancellationToken::new(),
@@ -2201,6 +2250,7 @@ impl McpCallbackServer {
             repo_root: None,
             auto_merge_approved_plans: false,
             plan_pending_grace: DEFAULT_PLAN_PENDING_GRACE,
+            versioned_cache_serve: false,
             dispatch_lease_duration: std::time::Duration::from_secs(600),
         };
 
@@ -2444,6 +2494,12 @@ impl McpCallbackServer {
     /// Configure startup quarantine grace for stale `spur:plan-pending` epics.
     pub fn set_plan_pending_grace(&mut self, grace: std::time::Duration) {
         self.plan_pending_grace = grace;
+    }
+
+    /// Configure PR2 persisted-plan cache serving. Default is off until PR3
+    /// makes task-level durable writes advance the epic audit sequence.
+    pub fn set_versioned_cache_serve(&mut self, enabled: bool) {
+        self.versioned_cache_serve = enabled;
     }
 
     /// Configure persisted dispatch lease duration for reconciler dispatches.
@@ -2775,7 +2831,7 @@ impl McpCallbackServer {
             .get(plan_id)
             .cloned()
             .ok_or_else(|| format!("unknown cached plan '{plan_id}'"))?;
-        let mut state = plan.lock().await;
+        let mut state = plan.state.lock().await;
         let entry = state
             .tasks
             .iter_mut()
@@ -2810,6 +2866,28 @@ impl McpCallbackServer {
     #[doc(hidden)]
     pub async fn __test_active_plan_count(&self) -> usize {
         self.active_plans.lock().await.len()
+    }
+
+    /// Test-only: clear the read-through active plan cache.
+    #[doc(hidden)]
+    pub async fn __test_clear_active_plans(&self) {
+        self.active_plans.lock().await.clear();
+    }
+
+    /// Test-only: enable continuous audit-sequence churn for one epic.
+    #[doc(hidden)]
+    pub async fn __test_churn_beads_version_for_epic(&self, epic_id: impl Into<String>) {
+        *self.version_churn_epic_for_test.lock().await = Some(epic_id.into());
+    }
+
+    /// Test-only: expose the raw load error instead of the tool-layer
+    /// `Unknown plan_id` normalization.
+    #[doc(hidden)]
+    pub async fn __test_load_or_project_plan(
+        &self,
+        plan_id: &str,
+    ) -> Result<Arc<tokio::sync::Mutex<crate::plan::PlanState>>, String> {
+        self.load_or_project_plan(plan_id).await
     }
 
     /// Test-only: report whether the reconciler task has been spawned.
@@ -5327,10 +5405,10 @@ impl McpCallbackServer {
             epic_id: None,
         };
         let state = Arc::new(tokio::sync::Mutex::new(state));
-        self.active_plans
-            .lock()
-            .await
-            .insert(plan_id.clone(), Arc::clone(&state));
+        self.active_plans.lock().await.insert(
+            plan_id.clone(),
+            CachedPlan::new(Arc::clone(&state), unknown_beads_version()),
+        );
         self.spawn_ephemeral_plan_runner(state);
         info!(plan_id = %plan_id, tasks = task_count, "Plan submitted");
 
@@ -5682,10 +5760,10 @@ impl McpCallbackServer {
             }
         }
 
-        self.active_plans
-            .lock()
-            .await
-            .insert(plan_id.clone(), Arc::clone(&state));
+        self.active_plans.lock().await.insert(
+            plan_id.clone(),
+            CachedPlan::new(Arc::clone(&state), unknown_beads_version()),
+        );
 
         if epic_subgraph.is_some() {
             let state = state.lock().await;
@@ -6203,10 +6281,10 @@ impl McpCallbackServer {
         }
 
         // Insert into active_plans first (no registry lock held here).
-        self.active_plans
-            .lock()
-            .await
-            .insert(plan_id.clone(), Arc::clone(&state));
+        self.active_plans.lock().await.insert(
+            plan_id.clone(),
+            CachedPlan::new(Arc::clone(&state), unknown_beads_version()),
+        );
 
         // Replace the sentinel with the real plan_id now that dispatch is
         // committed. active_plans lock is already released above, so these
@@ -6912,10 +6990,145 @@ impl McpCallbackServer {
         if emit_snapshot {
             crate::plan::snapshot::emit_plan_snapshot(self.event_sink.as_deref(), &projected);
         }
+        self.install_projected_plan_with_version(projected, unknown_beads_version())
+            .await;
+    }
+
+    async fn install_projected_plan_with_version(
+        &self,
+        projected: crate::plan::PlanState,
+        beads_version: BeadsVersion,
+    ) -> Arc<tokio::sync::Mutex<crate::plan::PlanState>> {
+        let plan_id = projected.plan_id.clone();
+        if let Some(epic_id) = projected.epic_id.clone() {
+            self.plan_registry
+                .lock()
+                .await
+                .by_epic
+                .insert(epic_id, plan_id.clone());
+        }
+        let state = Arc::new(tokio::sync::Mutex::new(projected));
         self.active_plans
             .lock()
             .await
-            .insert(plan_id, Arc::new(tokio::sync::Mutex::new(projected)));
+            .insert(plan_id, CachedPlan::new(Arc::clone(&state), beads_version));
+        state
+    }
+
+    async fn maybe_churn_beads_version_for_test(&self, epic_id: &str) -> Result<(), String> {
+        let churn_epic = self.version_churn_epic_for_test.lock().await.clone();
+        if churn_epic.as_deref() != Some(epic_id) {
+            return Ok(());
+        }
+        let pm = self
+            .pm_service
+            .as_deref()
+            .ok_or_else(|| "test version churn requires PM service".to_string())?;
+        let advanced = pm
+            .advanced()
+            .ok_or_else(|| "test version churn requires beads advanced backend".to_string())?;
+        advanced
+            .add_comment(
+                epic_id,
+                &crate::plan::audit_sentinel::encode_comment(
+                    &crate::plan::audit_sentinel::AuditSentinelKind::PlanOwnershipAcquired {
+                        plan_id: "test-version-churn".into(),
+                        owner: "test".into(),
+                        token: uuid::Uuid::new_v4().to_string(),
+                        reason: "versioned-cache-retry-bound".into(),
+                    },
+                ),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| format!("test version churn failed: {error}"))
+    }
+
+    async fn beads_version_for_epic(&self, epic_id: &str) -> Result<BeadsVersion, String> {
+        self.maybe_churn_beads_version_for_test(epic_id).await?;
+        let pm = self.pm_service.as_deref().ok_or_else(|| {
+            format!("beads version unavailable for epic '{epic_id}': PM service not configured")
+        })?;
+        Self::derive_beads_version(pm, self.feature_gate.as_ref(), epic_id).await
+    }
+
+    async fn derive_beads_version(
+        pm: &spur_pm::PmService,
+        feature_gate: &spur_license::FeatureGate,
+        epic_id: &str,
+    ) -> Result<BeadsVersion, String> {
+        require_feature(
+            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+            feature_gate,
+        )
+        .map_err(feature_error_message)?;
+        let adv = pm
+            .advanced()
+            .ok_or_else(|| "beads version derivation requires beads backend".to_string())?;
+        let comments = adv
+            .list_comments(epic_id)
+            .await
+            .map_err(|error| format!("list_comments({epic_id}) failed: {error}"))?;
+
+        // PR2 cache token: the monotonic sequence is the ordinal of audit
+        // sentinel comments on the epic issue after projector ordering.
+        // PR3 must advance this epic sequence for every durable task-level
+        // plan write before `versioned_cache_serve` can be flipped on.
+        let audit_seq = crate::plan::projector::sort_projection_comments(comments)
+            .into_iter()
+            .filter(|comment| {
+                comment
+                    .body
+                    .starts_with(crate::plan::audit_sentinel::SENTINEL_PREFIX)
+            })
+            .count() as u64;
+        Ok(BeadsVersion::AuditSeq(audit_seq))
+    }
+
+    async fn project_plan_from_beads_with_stable_version(
+        &self,
+        pm: &spur_pm::PmService,
+        plan_id: &str,
+    ) -> Result<(crate::plan::PlanState, BeadsVersion), String> {
+        let epic = find_plan_epic(
+            pm,
+            self.feature_gate.as_ref(),
+            plan_id,
+            "load_or_project_plan",
+        )
+        .await?;
+
+        for (attempt, backoff) in VERSIONED_PLAN_CACHE_BACKOFFS.iter().enumerate() {
+            let before_version = self.beads_version_for_epic(&epic.id).await?;
+            let projected = crate::plan::projector::project_plan_from_beads(
+                pm,
+                plan_id,
+                self.feature_gate.as_ref(),
+            )
+            .await
+            .map_err(|error| format!("unknown plan '{plan_id}': {error}"))?;
+            let after_version = self.beads_version_for_epic(&epic.id).await?;
+            if before_version == after_version {
+                return Ok((projected, after_version));
+            }
+
+            tracing::debug!(
+                %plan_id,
+                epic_id = %epic.id,
+                attempt = attempt + 1,
+                before_version = ?before_version,
+                after_version = ?after_version,
+                "persisted plan changed during projection; retrying"
+            );
+
+            if attempt + 1 < VERSIONED_PLAN_CACHE_MAX_ATTEMPTS {
+                tokio::time::sleep(*backoff).await;
+            }
+        }
+
+        Err(format!(
+            "load_or_project_plan: plan '{plan_id}' changed during projection after {VERSIONED_PLAN_CACHE_MAX_ATTEMPTS} attempts"
+        ))
     }
 
     async fn recover_persisted_plans(&self, pm: Arc<spur_pm::PmService>) -> anyhow::Result<()> {
@@ -7269,14 +7482,28 @@ impl McpCallbackServer {
         plan_id: &str,
     ) -> Result<Arc<tokio::sync::Mutex<crate::plan::PlanState>>, String> {
         let cached = self.active_plans.lock().await.get(plan_id).cloned();
-        let persisted_cached = if let Some(existing) = cached.as_ref() {
-            existing.lock().await.epic_id.is_some()
-        } else {
-            false
-        };
         if let Some(existing) = cached.clone() {
-            if !persisted_cached {
-                return Ok(existing);
+            let epic_id = {
+                let state = existing.state.lock().await;
+                state.epic_id.clone()
+            };
+            let Some(epic_id) = epic_id else {
+                return Ok(existing.state);
+            };
+
+            if self.versioned_cache_serve {
+                let current_version = self.beads_version_for_epic(&epic_id).await?;
+                if current_version == existing.beads_version {
+                    return Ok(existing.state);
+                }
+                tracing::debug!(
+                    %plan_id,
+                    %epic_id,
+                    cached_age_ms = existing.cached_at.elapsed().as_millis(),
+                    cached_version = ?existing.beads_version,
+                    current_version = ?current_version,
+                    "persisted plan cache version mismatch; re-projecting from beads"
+                );
             }
         }
 
@@ -7284,6 +7511,15 @@ impl McpCallbackServer {
             .pm_service
             .as_deref()
             .ok_or_else(|| format!("unknown plan '{plan_id}'"))?;
+        if self.versioned_cache_serve {
+            let (projected, beads_version) = self
+                .project_plan_from_beads_with_stable_version(pm, plan_id)
+                .await?;
+            return Ok(self
+                .install_projected_plan_with_version(projected, beads_version)
+                .await);
+        }
+
         let projected = crate::plan::projector::project_plan_from_beads(
             pm,
             plan_id,
@@ -7291,13 +7527,9 @@ impl McpCallbackServer {
         )
         .await
         .map_err(|error| format!("unknown plan '{plan_id}': {error}"))?;
-        self.install_projected_plan(projected, false).await;
-        self.active_plans
-            .lock()
-            .await
-            .get(plan_id)
-            .cloned()
-            .ok_or_else(|| format!("unknown plan '{plan_id}'"))
+        Ok(self
+            .install_projected_plan_with_version(projected, unknown_beads_version())
+            .await)
     }
 }
 
@@ -8822,7 +9054,7 @@ mod plan_truncate_and_restart_tests {
             .get("recover-plan")
             .cloned()
             .expect("original plan");
-        let original = original.lock().await;
+        let original = original.state.lock().await;
         assert!(matches!(
             original.tasks[1].status,
             crate::plan::PlanTaskStatus::Superseded { .. }
@@ -8840,7 +9072,7 @@ mod plan_truncate_and_restart_tests {
             .get(new_plan_id)
             .cloned()
             .expect("new plan");
-        let restarted = restarted.lock().await;
+        let restarted = restarted.state.lock().await;
         assert_eq!(
             restarted.base_snapshot_branch.as_deref(),
             Some("spur/plan-staging/recover-plan")
@@ -10831,11 +11063,10 @@ mod reconciler_fast_forward_tests {
             merge_state: crate::plan::PlanMergeState::NotStarted,
             epic_id: None,
         }));
-        server
-            .active_plans
-            .lock()
-            .await
-            .insert("plan-1".into(), Arc::clone(&plan));
+        server.active_plans.lock().await.insert(
+            "plan-1".into(),
+            super::CachedPlan::new(Arc::clone(&plan), super::unknown_beads_version()),
+        );
 
         let loaded = server
             .load_or_project_plan("plan-1")
@@ -11080,11 +11311,10 @@ mod reconciler_fast_forward_tests {
             merge_state: crate::plan::PlanMergeState::NotStarted,
             epic_id: None,
         }));
-        server
-            .active_plans
-            .lock()
-            .await
-            .insert("plan-1".into(), Arc::clone(&stale));
+        server.active_plans.lock().await.insert(
+            "plan-1".into(),
+            super::CachedPlan::new(Arc::clone(&stale), super::unknown_beads_version()),
+        );
 
         let fresh = crate::plan::PlanState {
             plan_id: "plan-1".into(),
@@ -11120,7 +11350,7 @@ mod reconciler_fast_forward_tests {
             .get("plan-1")
             .cloned()
             .expect("cached plan");
-        assert_eq!(loaded.lock().await.tasks.len(), 1);
+        assert_eq!(loaded.state.lock().await.tasks.len(), 1);
     }
 
     #[tokio::test]
@@ -11195,15 +11425,18 @@ mod reconciler_fast_forward_tests {
         );
         server.active_plans.lock().await.insert(
             "plan-1".into(),
-            Arc::new(tokio::sync::Mutex::new(crate::plan::PlanState {
-                plan_id: "plan-1".into(),
-                tasks: Vec::new(),
-                brain_session_id: session_id.clone(),
-                base_snapshot_branch: None,
-                base_snapshot_oid: None,
-                merge_state: crate::plan::PlanMergeState::NotStarted,
-                epic_id: None,
-            })),
+            super::CachedPlan::new(
+                Arc::new(tokio::sync::Mutex::new(crate::plan::PlanState {
+                    plan_id: "plan-1".into(),
+                    tasks: Vec::new(),
+                    brain_session_id: session_id.clone(),
+                    base_snapshot_branch: None,
+                    base_snapshot_oid: None,
+                    merge_state: crate::plan::PlanMergeState::NotStarted,
+                    epic_id: None,
+                })),
+                super::unknown_beads_version(),
+            ),
         );
 
         let fresh_plan = crate::plan::PlanState {
@@ -11285,7 +11518,7 @@ mod reconciler_fast_forward_tests {
             .get("plan-1")
             .cloned()
             .expect("cached");
-        assert_eq!(cached.lock().await.tasks.len(), 2);
+        assert_eq!(cached.state.lock().await.tasks.len(), 2);
     }
 
     #[tokio::test]

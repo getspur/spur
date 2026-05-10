@@ -88,6 +88,47 @@ fn continuation_ctx() -> DetachedContinuationCtx {
     }
 }
 
+fn decode_tool_json(response: serde_json::Value) -> serde_json::Value {
+    assert!(
+        response.get("error").is_none(),
+        "tool call should succeed: {response}"
+    );
+    let text = response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("tool response text");
+    serde_json::from_str(text).expect("tool response must be json")
+}
+
+fn submit_response_text(response: &serde_json::Value) -> &str {
+    assert!(
+        response.get("error").is_none(),
+        "submit_plan should succeed: {response}"
+    );
+    response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("submit response text")
+}
+
+fn submitted_plan_id(response: &serde_json::Value) -> String {
+    submit_response_text(response)
+        .lines()
+        .find_map(|line| line.strip_prefix("plan_id: "))
+        .expect("submit response includes plan_id")
+        .to_string()
+}
+
+fn submitted_task_issue(response: &serde_json::Value, task_id: &str) -> String {
+    let line = submit_response_text(response)
+        .lines()
+        .find_map(|line| line.strip_prefix("task_map: "))
+        .expect("submit response includes task_map");
+    let task_map: serde_json::Value = serde_json::from_str(line).expect("task_map json");
+    task_map[task_id]
+        .as_str()
+        .expect("task issue id")
+        .to_string()
+}
+
 async fn recv_reconciler_request(
     server: &Arc<McpCallbackServer>,
     request_rx: &mut tokio::sync::mpsc::Receiver<spur_mcp::DelegationRequest>,
@@ -220,6 +261,248 @@ async fn t_v0c_2_reconciler_dispatch_writes_label_and_dispatch_audit() {
     assert!(audits
         .iter()
         .any(|audit| matches!(audit, AuditSentinelKind::Dispatch { .. })));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn active_plan_cache_converges_when_reconciler_ticks_race_review_task() {
+    const N: usize = 8;
+
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init");
+    let pm = beads_pm(dir.path()).await;
+    let session_id = BrainSessionId::new(SessionId("brain".into()));
+    let feature_gate = common::server_builder::pro_feature_gate();
+    let (server, _channel) = McpCallbackServer::new(
+        Some(&session_id),
+        Some(Arc::clone(&pm)),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        Arc::clone(&feature_gate),
+    );
+    let server = Arc::new(server);
+
+    let submit = server
+        .__test_call_submit_plan(json!({
+            "persist_as_epic": true,
+            "epic_title": "Versioned Cache Epic",
+            "tasks": persisted_task("codex"),
+        }))
+        .await;
+    let plan_id = submitted_plan_id(&submit);
+    let task_issue_id = submitted_task_issue(&submit, "t1");
+
+    let _ = decode_tool_json(
+        server
+            .__test_call_tool("get_plan_status", json!({ "plan_id": plan_id }))
+            .await,
+    );
+
+    let adv = pm.advanced().expect("advanced beads backend");
+    adv.add_comment(
+        &task_issue_id,
+        &audit_sentinel::encode_comment(&AuditSentinelKind::Completion {
+            delegation_id: "del-cache-race".into(),
+            completion_state: CompletionState::AwaitingReview,
+            superseded: false,
+            worker_branch: Some("spur/worker-cache-race".into()),
+            result_summary: Some("ready for review".into()),
+            artifact_uri: None,
+            dispatched_base_oid: None,
+        }),
+    )
+    .await
+    .expect("completion audit");
+    pm.update_issue(
+        &task_issue_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![labels::READY_FOR_REVIEW.to_string()],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("ready-for-review label");
+
+    let reconciler = Arc::new(Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        None,
+        Some(plan_id.clone()),
+        Arc::clone(&feature_gate),
+    ));
+
+    let mut handles = Vec::new();
+    for _ in 0..N {
+        let reconciler = Arc::clone(&reconciler);
+        handles.push(tokio::spawn(async move {
+            let _ = reconciler.tick_once().await;
+            None
+        }));
+
+        let server = Arc::clone(&server);
+        let plan_id_for_review = plan_id.clone();
+        handles.push(tokio::spawn(async move {
+            Some(
+                server
+                    .__test_call_tool(
+                        "review_task",
+                        json!({
+                            "plan_id": plan_id_for_review,
+                            "task_id": "t1",
+                            "decision": "approve",
+                        }),
+                    )
+                    .await,
+            )
+        }));
+    }
+
+    let mut approvals = 0usize;
+    for handle in handles {
+        match handle.await.expect("race task must not panic") {
+            Some(value) if value.get("error").is_none() => approvals += 1,
+            _ => {}
+        }
+    }
+    assert!(
+        approvals >= 1,
+        "at least one racing review_task call should apply the approval"
+    );
+
+    let cached = decode_tool_json(
+        server
+            .__test_call_tool("get_plan_status", json!({ "plan_id": plan_id }))
+            .await,
+    );
+    server.__test_clear_active_plans().await;
+    let rehydrated = decode_tool_json(
+        server
+            .__test_call_tool("get_plan_status", json!({ "plan_id": plan_id }))
+            .await,
+    );
+
+    assert_eq!(cached["tasks"], rehydrated["tasks"]);
+    assert_eq!(cached["status"], rehydrated["status"]);
+    assert_eq!(rehydrated["tasks"][0]["status"], "approved");
+}
+
+#[tokio::test]
+#[ignore = "pinned residual; closes in PR3"]
+async fn versioned_cache_stays_stale_when_only_task_audits_advance() {
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init");
+    let pm = beads_pm(dir.path()).await;
+    let session_id = BrainSessionId::new(SessionId("brain".into()));
+    let (mut server, _channel) = McpCallbackServer::new(
+        Some(&session_id),
+        Some(Arc::clone(&pm)),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        common::server_builder::pro_feature_gate(),
+    );
+    server.set_versioned_cache_serve(true);
+    let server = Arc::new(server);
+
+    let submit = server
+        .__test_call_submit_plan(json!({
+            "persist_as_epic": true,
+            "epic_title": "Version Gap Epic",
+            "tasks": persisted_task("codex"),
+        }))
+        .await;
+    let plan_id = submitted_plan_id(&submit);
+    let task_issue_id = submitted_task_issue(&submit, "t1");
+
+    let baseline = decode_tool_json(
+        server
+            .__test_call_tool("get_plan_status", json!({ "plan_id": plan_id }))
+            .await,
+    );
+    assert_ne!(baseline["tasks"][0]["status"], "awaiting_review");
+
+    pm.advanced()
+        .expect("advanced beads backend")
+        .add_comment(
+            &task_issue_id,
+            &audit_sentinel::encode_comment(&AuditSentinelKind::Completion {
+                delegation_id: "del-task-only".into(),
+                completion_state: CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some("spur/task-only".into()),
+                result_summary: Some("ready".into()),
+                artifact_uri: None,
+                dispatched_base_oid: None,
+            }),
+        )
+        .await
+        .expect("task completion audit");
+    pm.update_issue(
+        &task_issue_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![labels::READY_FOR_REVIEW.to_string()],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("ready label");
+
+    let stale = decode_tool_json(
+        server
+            .__test_call_tool("get_plan_status", json!({ "plan_id": plan_id }))
+            .await,
+    );
+    assert_eq!(
+        stale["tasks"], baseline["tasks"],
+        "epic AuditSeq does not advance when only task audits change before PR3"
+    );
+}
+
+#[tokio::test]
+async fn versioned_cache_load_or_project_plan_bounds_retries_at_3() {
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]).expect("br init");
+    let pm = beads_pm(dir.path()).await;
+    let session_id = BrainSessionId::new(SessionId("brain".into()));
+    let (mut server, _channel) = McpCallbackServer::new(
+        Some(&session_id),
+        Some(Arc::clone(&pm)),
+        None,
+        continuation_ctx(),
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        common::server_builder::pro_feature_gate(),
+    );
+    server.set_versioned_cache_serve(true);
+    let server = Arc::new(server);
+
+    let submit = server
+        .__test_call_submit_plan(json!({
+            "persist_as_epic": true,
+            "epic_title": "Version Churn Epic",
+            "tasks": persisted_task("codex"),
+        }))
+        .await;
+    let plan_id = submitted_plan_id(&submit);
+    let task_issue_id = submitted_task_issue(&submit, "t1");
+    let epic_id = pm
+        .get_issue(&task_issue_id)
+        .await
+        .expect("task issue")
+        .blocked_by
+        .first()
+        .cloned()
+        .expect("task is blocked by epic");
+    server.__test_churn_beads_version_for_epic(epic_id).await;
+
+    let error = server
+        .__test_load_or_project_plan(&plan_id)
+        .await
+        .expect_err("continuous version churn should exhaust retry budget");
+    assert!(
+        error.contains("after 3 attempts"),
+        "error should report bounded retry exhaustion: {error}"
+    );
 }
 
 #[tokio::test]
