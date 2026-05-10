@@ -154,6 +154,13 @@ impl Orchestrator {
         // for local prefix classification.
         let scoped_sessions =
             Self::list_sessions_from_rpc_with_cwd(conn, Some(repo_root.to_path_buf())).await?;
+
+        // If scoped results already fill the budget, skip the expensive broad
+        // query — merge would discard the broad results anyway.
+        if scoped_sessions.len() >= MAX_SESSION_LIST_SESSIONS {
+            return Ok(scoped_sessions);
+        }
+
         let broad_sessions = Self::list_sessions_from_rpc_with_cwd(conn, None).await?;
 
         Ok(merge_sessions_by_id(scoped_sessions, broad_sessions))
