@@ -259,7 +259,12 @@ impl Orchestrator {
                             }
                         };
 
-                        let sessions_result = match Self::list_sessions_from_rpc(&mut *conn).await {
+                        let sessions_result = match Self::list_sessions_from_rpc(
+                            &mut *conn,
+                            &self.repo_root,
+                        )
+                        .await
+                        {
                             Ok(sessions) if !sessions.is_empty() => Ok(sessions),
                             Ok(_) => {
                                 // RPC succeeded but returned empty — try disk fallback.
@@ -1319,10 +1324,16 @@ mod list_sessions_tests {
     use agent_client_protocol::schema::{ListSessionsRequest, SessionInfo};
     use async_trait::async_trait;
     use futures::Stream;
+    use std::collections::VecDeque;
     use std::pin::Pin;
 
     struct NonProgressingCursorConnection {
         calls: usize,
+    }
+
+    struct TwoPhaseConnection {
+        requests: Vec<ListSessionsRequest>,
+        responses: VecDeque<Vec<SessionInfo>>,
     }
 
     #[async_trait]
@@ -1366,7 +1377,9 @@ mod list_sessions_tests {
             &mut self,
             request: ListSessionsRequest,
         ) -> anyhow::Result<agent_client_protocol::schema::ListSessionsResponse> {
-            assert!(request.cwd.is_none());
+            assert!(
+                request.cwd.as_deref() == Some(Path::new("/repo/spur")) || request.cwd.is_none()
+            );
             assert!(
                 request.cursor.is_none() || request.cursor.as_deref() == Some("same"),
                 "unexpected cursor {:?}",
@@ -1384,17 +1397,98 @@ mod list_sessions_tests {
         }
     }
 
+    #[async_trait]
+    impl AgentConnection for TwoPhaseConnection {
+        async fn initialize(
+            &mut self,
+            _request: InitializeRequest,
+        ) -> anyhow::Result<agent_client_protocol::schema::InitializeResponse> {
+            unimplemented!("TwoPhaseConnection: initialize")
+        }
+
+        async fn new_session(
+            &mut self,
+            _cwd: PathBuf,
+            _mcp_servers: Vec<McpServer>,
+        ) -> anyhow::Result<agent_client_protocol::schema::NewSessionResponse> {
+            unimplemented!("TwoPhaseConnection: new_session")
+        }
+
+        async fn prompt(
+            &mut self,
+            _request: PromptRequest,
+        ) -> anyhow::Result<Pin<Box<dyn Stream<Item = spur_acp::SessionNotification> + Send>>>
+        {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        async fn cancel(&mut self, _session_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn health(&self) -> AgentHealth {
+            AgentHealth::Ready
+        }
+
+        async fn list_sessions(
+            &mut self,
+            request: ListSessionsRequest,
+        ) -> anyhow::Result<agent_client_protocol::schema::ListSessionsResponse> {
+            self.requests.push(request);
+            let sessions = self.responses.pop_front().expect("queued response");
+            Ok(agent_client_protocol::schema::ListSessionsResponse::new(
+                sessions,
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn list_sessions_queries_repo_root_then_broad_and_merges_by_session_id() {
+        let mut scoped = SessionInfo::new("root", "/repo/spur");
+        scoped.title = Some("scoped title".into());
+        let mut broad_duplicate = SessionInfo::new("root", "/repo/spur");
+        broad_duplicate.title = Some("broad title".into());
+        let worktree = SessionInfo::new("worker", "/repo/spur/.spur/worktrees/task-1");
+        let outside = SessionInfo::new("outside", "/tmp/other");
+        let mut conn = TwoPhaseConnection {
+            requests: Vec::new(),
+            responses: VecDeque::from([
+                vec![scoped],
+                vec![broad_duplicate, worktree.clone(), outside.clone()],
+            ]),
+        };
+
+        let sessions = Orchestrator::list_sessions_from_rpc(&mut conn, Path::new("/repo/spur"))
+            .await
+            .expect("list sessions");
+
+        assert_eq!(conn.requests.len(), 2);
+        assert_eq!(
+            conn.requests[0].cwd.as_deref(),
+            Some(Path::new("/repo/spur"))
+        );
+        assert!(conn.requests[1].cwd.is_none());
+
+        let ids: Vec<_> = sessions.iter().map(|s| s.session_id.0.as_ref()).collect();
+        assert_eq!(ids, vec!["root", "worker", "outside"]);
+        assert_eq!(sessions[0].title.as_deref(), Some("scoped title"));
+    }
+
     #[tokio::test]
     async fn pagination_breaks_on_non_progressing_cursor() {
         let mut conn = NonProgressingCursorConnection { calls: 0 };
 
-        let sessions = Orchestrator::list_sessions_from_rpc(&mut conn)
+        let sessions = Orchestrator::list_sessions_from_rpc(&mut conn, Path::new("/repo/spur"))
             .await
             .expect("list sessions");
 
-        assert_eq!(conn.calls, 2);
-        assert!(conn.calls <= 3);
-        assert_eq!(sessions.len(), 2);
+        assert_eq!(conn.calls, 4);
+        assert!(conn.calls <= 6);
+        assert_eq!(sessions.len(), 4);
     }
 }
 
