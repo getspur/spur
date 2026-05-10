@@ -3396,6 +3396,11 @@ impl McpCallbackServer {
                 "recover_orphaned_dispatch: issue {issue_id} already has ready-for-review label"
             ));
         }
+        let dispatched_base_oid = issue
+            .labels
+            .iter()
+            .find_map(|label| crate::plan::labels::parse_dispatched_base_oid(label))
+            .unwrap_or(dispatched_base_oid);
 
         require_feature(
             FeatureKey::PM_PRO_BEADS_ADVANCED,
@@ -9461,6 +9466,124 @@ mod recover_orphaned_dispatch_tests {
                 Some(worker_branch),
                 Some(base_oid.as_str())
             ))
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_orphaned_dispatch_prefers_dispatched_base_oid_label() {
+        let dir = init_repo().await;
+        commit_file(dir.path(), "base.txt", "base\n", "seed").await;
+        let base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
+            .await
+            .expect("base oid");
+        let worker_branch = "spur/worker/recover-from-label";
+        run_git_capture(
+            dir.path(),
+            None,
+            &["checkout", "-q", "-b", worker_branch, &base_oid],
+        )
+        .await
+        .expect("checkout worker branch");
+        commit_file(dir.path(), "worker.txt", "worker\n", "worker change").await;
+        run_git_capture(dir.path(), None, &["checkout", "-q", "main"])
+            .await
+            .expect("checkout main");
+        commit_file(dir.path(), "wrong-base.txt", "wrong\n", "wrong base").await;
+        let wrong_base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
+            .await
+            .expect("wrong base oid");
+
+        let fixture = setup_recovery_task(dir.path(), "recover-orphan", "del-A").await;
+        fixture
+            .pm
+            .update_issue(
+                &fixture.task_issue_id,
+                spur_pm::IssueUpdate {
+                    add_labels: vec![crate::plan::labels::dispatched_base_oid(&base_oid)],
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("persist dispatched base oid label");
+        let server = recovery_server(
+            dir.path(),
+            Arc::clone(&fixture.pm),
+            Arc::clone(&fixture.feature_gate),
+        );
+
+        let message = server
+            .recover_orphaned_dispatch_with_branch(
+                &fixture.task_issue_id,
+                worker_branch,
+                &wrong_base_oid,
+            )
+            .await
+            .expect("label-backed recovery should succeed");
+        assert!(
+            message.contains("Task promoted to AwaitingReview"),
+            "unexpected response: {message}"
+        );
+
+        let adv = fixture.pm.advanced().expect("advanced beads backend");
+        let audits = crate::plan::projector::collect_sorted_audits_for_issue(
+            &fixture.task_issue_id,
+            adv.list_comments(&fixture.task_issue_id)
+                .await
+                .expect("list comments"),
+        );
+        let recovered_base = audits.iter().find_map(|audit| match audit {
+            AuditSentinelKind::Completion {
+                delegation_id,
+                dispatched_base_oid,
+                ..
+            } if delegation_id == "del-A" => dispatched_base_oid.as_deref(),
+            _ => None,
+        });
+        assert_eq!(recovered_base, Some(base_oid.as_str()));
+    }
+
+    #[tokio::test]
+    #[ignore = "pinned residual; requires deterministic-recovery follow-up"]
+    async fn recover_orphaned_dispatch_with_split_dispatched_base_oid_labels() {
+        let dir = init_repo().await;
+        commit_file(dir.path(), "base.txt", "base\n", "seed").await;
+        let worker_branch = "spur/worker/split-dispatched-base-labels";
+        run_git_capture(dir.path(), None, &["branch", worker_branch])
+            .await
+            .expect("create worker branch");
+
+        let fixture = setup_recovery_task(dir.path(), "recover-orphan", "del-A").await;
+        fixture
+            .pm
+            .update_issue(
+                &fixture.task_issue_id,
+                spur_pm::IssueUpdate {
+                    add_labels: vec![
+                        crate::plan::labels::dispatched_base_oid("aaa1"),
+                        crate::plan::labels::dispatched_base_oid("bbb2"),
+                    ],
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("persist split dispatched base oid labels");
+        let server = recovery_server(
+            dir.path(),
+            Arc::clone(&fixture.pm),
+            Arc::clone(&fixture.feature_gate),
+        );
+
+        let err = server
+            .recover_orphaned_dispatch_with_branch(
+                &fixture.task_issue_id,
+                worker_branch,
+                "fallback-base",
+            )
+            .await
+            .expect_err("current split-label behavior selects a non-git OID and fails validation");
+        assert!(
+            err.contains("base=aaa1"),
+            "current split-label recovery should select the first label; got: {err}"
         );
     }
 

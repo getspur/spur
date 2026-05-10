@@ -132,6 +132,49 @@ pub(crate) struct WorkerAttemptCtx<'a> {
     pub(crate) feature_gate: &'a spur_license::FeatureGate,
 }
 
+async fn persist_dispatched_base_oid_label(
+    pm_service: Option<&PmService>,
+    issue_id: Option<&str>,
+    dispatched_base_oid: &str,
+) -> Result<(), AttemptSetupError> {
+    let (Some(pm), Some(issue_id)) = (pm_service, issue_id) else {
+        return Ok(());
+    };
+
+    let issue = pm.get_issue(issue_id).await.map_err(|e| {
+        AttemptSetupError::WorktreeFailed(format!("persist dispatched base OID label: {e}"))
+    })?;
+    let label = spur_mcp::plan::labels::dispatched_base_oid(dispatched_base_oid);
+    let remove_labels = issue
+        .labels
+        .iter()
+        .filter(|existing| {
+            spur_mcp::plan::labels::parse_dispatched_base_oid(existing).is_some()
+                && existing.as_str() != label
+        })
+        .cloned()
+        .collect();
+
+    // Residual PR4 atomicity window: `update_issue` runs add_labels and
+    // remove_labels as separate beads-rust mutations (each its own SQLite
+    // transaction; see crates/spur-pm/src/beads_crate/adapter.rs:341-344).
+    // A process death between them leaves the issue with both old and new
+    // dispatched-base-oid labels, and `recover_orphaned_dispatch`'s find_map
+    // may select the stale one. See spec Risks for closure plan.
+    pm.update_issue(
+        issue_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![label],
+            remove_labels,
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|e| {
+        AttemptSetupError::WorktreeFailed(format!("persist dispatched base OID label: {e}"))
+    })
+}
+
 /// Returns `Ok(WorkerAttemptOutcome)` for any flow that produced a
 /// worker candidate status — success OR worker-reported errors — both
 /// of which are retry-eligible (the human reviewer decides).
@@ -238,6 +281,16 @@ pub(crate) async fn run_one_worker_attempt(
             )));
         }
     };
+    if let Err(e) = persist_dispatched_base_oid_label(
+        ctx.pm_service,
+        ctx.issue_id.as_deref(),
+        &dispatched_base_oid,
+    )
+    .await
+    {
+        let _ = worktrees.remove_worktree(&worker_session).await;
+        return Err(e);
+    }
     if let Some(tx) = &ctx.dispatched_base_oid_tx {
         let _ = tx.send(Some(dispatched_base_oid.clone()));
     }
