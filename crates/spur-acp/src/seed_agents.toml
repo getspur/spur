@@ -145,7 +145,7 @@ name = "opencode"
 command = "opencode"
 args = ["-m", "openrouter/z-ai/glm-5.1", "acp"]
 transport = "acp"
-kind = "generic"
+kind = "open-code"
 role = "both"
 cost_tier = "medium"
 
