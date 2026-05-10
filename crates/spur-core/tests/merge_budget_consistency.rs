@@ -53,6 +53,7 @@ fn success_payload(id: &str, attempt: u32, summary: &str) -> ContinuationPayload
                 .into(),
         ),
         base_hint: None,
+        setup_conflict_topology: None,
     }
 }
 

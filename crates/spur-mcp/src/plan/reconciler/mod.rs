@@ -56,6 +56,8 @@ use base_spec::plan_dispatch_base_spec;
 
 mod guards;
 
+mod topology;
+
 pub use terminal::ReconcilerAutomation;
 mod terminal;
 
@@ -734,6 +736,76 @@ impl Reconciler {
                     .await;
                     continue;
                 }
+
+                // bd-88r — compile verified git topology and push a brain
+                // continuation so the brain does not hallucinate parentage.
+                if let Some(dispatch) = self.dispatch.as_ref() {
+                    let topology = match topology::compile_setup_conflict_topology(
+                        &projected,
+                        &self.config.repo_root,
+                        &task.spec.task_id,
+                        &conflict.dep_task_id,
+                        &conflict.files,
+                    )
+                    .await
+                    {
+                        Ok(t) => Some(t),
+                        Err(error) => {
+                            tracing::warn!(
+                                %plan_id,
+                                task_id = %task.spec.task_id,
+                                "predispatch preview: topology compilation failed: {error}"
+                            );
+                            None
+                        }
+                    };
+
+                    let payload = spur_acp::domain::continuation::ContinuationPayload {
+                        status: spur_acp::domain::delegation::DelegationStatus::SetupFailed {
+                            error:
+                                spur_acp::domain::delegation::AttemptSetupError::OverlayConflict {
+                                    source_task_id: conflict.dep_task_id.clone(),
+                                    files: conflict.files.clone(),
+                                },
+                        },
+                        summary: Some(
+                            "Predispatch overlay preview predicted a setup conflict.".into(),
+                        ),
+                        diff_summary: None,
+                        worker_branch: None,
+                        artifact_ref: None,
+                        estimated_cost_micros: None,
+                        artifact_id: None,
+                        fetch_hint: None,
+                        base_hint: None,
+                        setup_conflict_topology: topology.clone(),
+                    };
+
+                    let cont = spur_acp::domain::continuation::BrainContinuation {
+                        delegation_id: spur_acp::DelegationId(delegation_id.clone()),
+                        attempt: task_attempt,
+                        brain_session: projected.brain_session_id.as_session_id().clone(),
+                        source: spur_acp::domain::continuation::ContinuationSource::PlanTaskBlockedOnSetupConflict,
+                        payload,
+                        created_at_wall: chrono::Utc::now(),
+                        created_at_mono: std::time::Instant::now(),
+                    };
+
+                    if let Some(sink) = dispatch.event_sink.as_deref() {
+                        sink.emit(spur_acp::SpurEventBody::PlanTaskBlockedOnSetupConflict {
+                            plan_id: plan_id.to_string(),
+                            task_id: task.spec.task_id.clone(),
+                            delegation_id: delegation_id.clone(),
+                            dep_task_id: conflict.dep_task_id.clone(),
+                            files: conflict.files.clone(),
+                            topology,
+                        });
+                    }
+
+                    let delegation_id_for_cont = delegation_id.clone();
+                    (dispatch.continuation_ctx.on_complete)(cont, delegation_id_for_cont).await;
+                }
+
                 self.record_skipped(
                     Some(plan_id),
                     &task.spec.task_id,
