@@ -551,13 +551,13 @@ impl IssueBrowserView {
         let keys_to_remove = self
             .graph_cache
             .iter()
-            .filter_map(|(key, (nodes, edges))| {
-                (nodes.iter().any(|node| node.id == issue_id)
+            .filter(|(_, (nodes, edges))| {
+                nodes.iter().any(|node| node.id == issue_id)
                     || edges
                         .iter()
-                        .any(|edge| edge.from == issue_id || edge.to == issue_id))
-                .then(|| key.clone())
+                        .any(|edge| edge.from == issue_id || edge.to == issue_id)
             })
+            .map(|(key, _)| key.clone())
             .collect::<HashSet<_>>();
 
         if keys_to_remove.is_empty() {

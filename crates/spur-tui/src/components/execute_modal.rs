@@ -96,6 +96,7 @@ impl ExecuteModal {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn action_line3(
     left_key: &'static str,
     left_label: &'static str,
