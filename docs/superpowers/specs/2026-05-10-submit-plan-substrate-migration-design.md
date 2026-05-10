@@ -303,6 +303,7 @@ These remain after migration completes. They are accepted under the principle.
 | Reconciler bug = 100% blast radius | MEDIUM | Watchdog auto-restart; integration tests verify dispatch survives reconciler restart; fuzz the tick loop |
 | Beads write latency is the hard floor for state-transition latency | MEDIUM | Accepted by design; if a specific transition dominates, batch beads writes inside the two-phase commit |
 | Cache invalidation races (read-through projection + concurrent writers) | MEDIUM | `BeadsVersion` token + retry-on-mismatch; bounded retry count; if exceeded, return error to caller |
+| PR2 cache version mechanism does not invalidate on task-level transitions until PR3 lands; mitigated by `versioned_cache_serve` feature flag default-OFF until PR3 ships | HIGH | Gated by config key; flip ON simultaneously with PR3 |
 | Audit comment growth not GC'd → projector O(N) scan slows over plan lifetime | LOW | Snapshot-audit compaction (out of scope for this spec; track as follow-up if measurable) |
 | Idempotency dedup map grows unboundedly in beads | LOW | TTL on dedup entries (e.g. 24h); document bound in spec |
 | INV-S6 partial-failure orphan: `record()` failure after epic build leaves no dedup entry; retry creates a second epic | MED | Detect via dedup-entry lifecycle audit; closure deferred to PR3 (two-phase commit pattern) |

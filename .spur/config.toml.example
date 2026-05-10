@@ -15,6 +15,11 @@
 # # docs/spur/agent-config.md for the lifecycle.
 # framework = "v1"
 
+# [plan.substrate_migration]
+# # PR2 guard: leave off until PR3 advances the epic audit sequence for
+# # task-level durable plan writes.
+# versioned_cache_serve = false
+
 # ── Brain skills ──────────────────────────────────────────────────
 # SPUR ships bundled SKILL.md files for brain delegation guidance
 # (per-agent role reconciliation, dispatch procedure, task structure).

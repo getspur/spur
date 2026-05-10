@@ -402,6 +402,9 @@ pub struct SpurConfig {
     /// Runtime SPUR knobs (v0e+).
     #[serde(default)]
     pub spur: SpurRuntimeConfig,
+    /// Plan runtime and migration knobs.
+    #[serde(default)]
+    pub plan: PlanConfig,
     /// Stage-1 worker peer mailbox feature flag. Default off until explicitly
     /// opted in by production callers.
     #[serde(default)]
@@ -413,6 +416,20 @@ pub struct SpurConfig {
     pub tui: TuiConfig,
     #[serde(default)]
     pub log: LogConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlanConfig {
+    pub substrate_migration: PlanSubstrateMigrationConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlanSubstrateMigrationConfig {
+    /// PR2 guard: default off because task-level review/completion audits do
+    /// not advance the epic audit sequence until PR3.
+    pub versioned_cache_serve: bool,
 }
 
 /// Runtime knobs for `delegate_to_worker` / `delegate_parallel` dispatch.
@@ -1119,6 +1136,27 @@ mod tests {
 
         let parsed: SpurConfig = toml::from_str("").unwrap();
         assert!(!parsed.peer_mailbox_enabled);
+    }
+
+    #[test]
+    fn plan_substrate_migration_versioned_cache_serve_defaults_off() {
+        let cfg = SpurConfig::default();
+        assert!(!cfg.plan.substrate_migration.versioned_cache_serve);
+
+        let parsed: SpurConfig = toml::from_str("").unwrap();
+        assert!(!parsed.plan.substrate_migration.versioned_cache_serve);
+    }
+
+    #[test]
+    fn parses_plan_substrate_migration_versioned_cache_serve() {
+        let cfg: SpurConfig = toml::from_str(
+            r#"
+            [plan.substrate_migration]
+            versioned_cache_serve = true
+            "#,
+        )
+        .unwrap();
+        assert!(cfg.plan.substrate_migration.versioned_cache_serve);
     }
 
     #[test]
