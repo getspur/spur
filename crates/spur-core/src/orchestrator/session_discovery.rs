@@ -17,6 +17,7 @@ pub enum SessionDiscoveryKind {
     Codex,
     Kiro,
     Kimi,
+    OpenCode,
 }
 
 impl SessionDiscoveryKind {
@@ -26,6 +27,7 @@ impl SessionDiscoveryKind {
             Self::Codex => codex::discover(),
             Self::Kiro => kiro::discover(),
             Self::Kimi => kimi::discover(),
+            Self::OpenCode => opencode::discover(),
         }
     }
 }
@@ -36,6 +38,7 @@ pub fn discovery_for_kind(kind: AgentKind) -> Option<SessionDiscoveryKind> {
         AgentKind::CodexAcp => Some(SessionDiscoveryKind::Codex),
         AgentKind::Kiro => Some(SessionDiscoveryKind::Kiro),
         AgentKind::Kimi => Some(SessionDiscoveryKind::Kimi),
+        AgentKind::OpenCode => Some(SessionDiscoveryKind::OpenCode),
         _ => None,
     }
 }
@@ -286,9 +289,214 @@ mod kimi {
     use tracing::debug;
 
     pub(super) fn discover() -> Result<Vec<SessionInfo>> {
-        // TODO: verify on-disk format and path for kimi sessions.
-        debug!("Kimi disk session discovery not yet implemented; returning empty list");
-        Ok(Vec::new())
+        let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
+        let sessions_root = home.join(".kimi/sessions");
+
+        if !sessions_root.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut sessions = Vec::new();
+        for hash_entry in std::fs::read_dir(&sessions_root)? {
+            let hash_entry = match hash_entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let hash_path = hash_entry.path();
+            if !hash_path.is_dir() {
+                continue;
+            }
+
+            for uuid_entry in std::fs::read_dir(&hash_path)? {
+                let uuid_entry = match uuid_entry {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                let uuid_path = uuid_entry.path();
+                if !uuid_path.is_dir() {
+                    continue;
+                }
+
+                if let Some(session) = parse_kimi_session(&uuid_path) {
+                    sessions.push(session);
+                }
+            }
+        }
+
+        sessions.sort_by(|a, b| {
+            let a_time = a.updated_at.as_deref().unwrap_or("");
+            let b_time = b.updated_at.as_deref().unwrap_or("");
+            b_time.cmp(a_time)
+        });
+
+        debug!(
+            count = sessions.len(),
+            "Loaded sessions from kimi disk storage"
+        );
+        Ok(sessions)
+    }
+
+    fn parse_kimi_session(uuid_path: &Path) -> Option<SessionInfo> {
+        let state_path = uuid_path.join("state.json");
+        let context_path = uuid_path.join("context.jsonl");
+
+        let state_json: serde_json::Value = match std::fs::read_to_string(&state_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+        {
+            Some(v) => v,
+            None => return None,
+        };
+
+        // Skip archived sessions.
+        if state_json
+            .get("archived")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            return None;
+        }
+
+        let session_id = uuid_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())?;
+
+        let title = state_json
+            .get("custom_title")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let cwd = extract_kimi_cwd(&context_path).unwrap_or_default();
+
+        // Fall back to file mtime for updated_at since wire_mtime is often null.
+        let updated_at = state_json
+            .get("wire_mtime")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .or_else(|| file_mtime_iso(&state_path));
+
+        let mut info = SessionInfo::new(session_id, PathBuf::from(cwd));
+        info = info.title(title);
+        info = info.updated_at(updated_at);
+        Some(info)
+    }
+
+    /// Parse the first user message in context.jsonl to extract the working directory.
+    fn extract_kimi_cwd(context_path: &Path) -> Option<String> {
+        use std::io::BufRead;
+        let file = std::fs::File::open(context_path).ok()?;
+        let reader = std::io::BufReader::new(file);
+        for line in reader.lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let json: serde_json::Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let content = json.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            if let Some(rest) = content.strip_prefix("Working directory: ") {
+                let cwd = rest.split('\n').next().unwrap_or(rest).trim();
+                return Some(cwd.to_string());
+            }
+        }
+        None
+    }
+
+    fn file_mtime_iso(path: &Path) -> Option<String> {
+        let meta = std::fs::metadata(path).ok()?;
+        let mtime = meta.modified().ok()?;
+        let dt = chrono::DateTime::<chrono::Utc>::from(mtime);
+        Some(dt.to_rfc3339())
+    }
+}
+
+// ── OpenCode backend ────────────────────────────────────────────────────
+
+mod opencode {
+    use super::*;
+    use tracing::{debug, warn};
+
+    pub(super) fn discover() -> Result<Vec<SessionInfo>> {
+        let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
+        let db_path = home.join(".local/share/opencode/opencode.db");
+
+        if !db_path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let conn = match rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(error = %e, "Failed to open opencode database");
+                return Ok(Vec::new());
+            }
+        };
+
+        let mut stmt = match conn.prepare(
+            "SELECT id, directory, title, time_created, time_updated FROM session ORDER BY time_updated DESC"
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "Failed to prepare opencode session query");
+                return Ok(Vec::new());
+            }
+        };
+
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let directory: String = row.get(1)?;
+            let title: Option<String> = row.get(2)?;
+            let time_created: i64 = row.get(3)?;
+            let time_updated: i64 = row.get(4)?;
+            Ok((id, directory, title, time_created, time_updated))
+        });
+
+        let rows = match rows {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(error = %e, "Failed to query opencode sessions");
+                return Ok(Vec::new());
+            }
+        };
+
+        let mut sessions = Vec::new();
+        for row in rows {
+            let (id, directory, title, _time_created, time_updated) = match row {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(error = %e, "Skipping malformed opencode session row");
+                    continue;
+                }
+            };
+
+            let updated_at = ms_to_iso(time_updated);
+            let mut info = SessionInfo::new(id, PathBuf::from(directory));
+            info = info.title(title);
+            info = info.updated_at(updated_at);
+            sessions.push(info);
+        }
+
+        debug!(
+            count = sessions.len(),
+            "Loaded sessions from opencode disk storage"
+        );
+        Ok(sessions)
+    }
+
+    fn ms_to_iso(ts_ms: i64) -> Option<String> {
+        let ts_s = ts_ms / 1000;
+        let naive = chrono::DateTime::from_timestamp(ts_s, 0)?;
+        Some(naive.to_rfc3339())
     }
 }
 
@@ -483,10 +691,150 @@ mod tests {
     }
 
     #[test]
+    fn kimi_discovery_reads_state_and_context() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join(".kimi/sessions/hash123");
+        let uuid_dir = sessions_dir.join("uuid-abc");
+        std::fs::create_dir_all(&uuid_dir).unwrap();
+
+        std::fs::write(
+            uuid_dir.join("state.json"),
+            r#"{"custom_title":"Kimi Task","archived":false,"wire_mtime":"2026-05-09T10:00:00Z"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            uuid_dir.join("context.jsonl"),
+            r#"{"role":"user","content":"Working directory: /repo/spur\n\nTask: do thing"}"#,
+        )
+        .unwrap();
+
+        let orig_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", temp.path());
+        let sessions = kimi::discover().expect("kimi discovery");
+        if let Some(home) = orig_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id.0.as_ref(), "uuid-abc");
+        assert_eq!(sessions[0].title.as_deref(), Some("Kimi Task"));
+        assert_eq!(sessions[0].cwd, PathBuf::from("/repo/spur"));
+        assert_eq!(
+            sessions[0].updated_at.as_deref(),
+            Some("2026-05-09T10:00:00Z")
+        );
+    }
+
+    #[test]
+    fn kimi_discovery_skips_archived_sessions() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join(".kimi/sessions/hash456");
+        let uuid_dir = sessions_dir.join("uuid-archived");
+        std::fs::create_dir_all(&uuid_dir).unwrap();
+
+        std::fs::write(
+            uuid_dir.join("state.json"),
+            r#"{"custom_title":"Old","archived":true}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            uuid_dir.join("context.jsonl"),
+            r#"{"role":"user","content":"Working directory: /repo/spur"}"#,
+        )
+        .unwrap();
+
+        let orig_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", temp.path());
+        let sessions = kimi::discover().expect("kimi discovery");
+        if let Some(home) = orig_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+
+        assert!(sessions.is_empty(), "archived sessions should be skipped");
+    }
+
+    #[test]
+    fn opencode_discovery_reads_sqlite_sessions() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("opencode.db");
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                parent_id TEXT,
+                slug TEXT NOT NULL,
+                directory TEXT NOT NULL,
+                title TEXT NOT NULL,
+                version TEXT NOT NULL,
+                share_url TEXT,
+                summary_additions INTEGER,
+                summary_deletions INTEGER,
+                summary_files INTEGER,
+                summary_diffs TEXT,
+                revert TEXT,
+                permission TEXT,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                time_compacting INTEGER,
+                time_archived INTEGER,
+                workspace_id TEXT
+            )",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO session (id, project_id, slug, directory, title, version, time_created, time_updated)
+             VALUES ('ses_a', 'proj1', 'slug-a', '/repo/spur', 'Task A', '1', 1776761103000, 1776783891000)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session (id, project_id, slug, directory, title, version, time_created, time_updated)
+             VALUES ('ses_b', 'proj1', 'slug-b', '/repo/spur/.spur/worktrees/w1', 'Task B', '1', 1776761103000, 1776782891000)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        // Override the db path by temporarily swapping HOME/.local/share
+        let orig_home = std::env::var_os("HOME");
+        let fake_home = temp.path().join("home");
+        let share_dir = fake_home.join(".local/share/opencode");
+        std::fs::create_dir_all(&share_dir).unwrap();
+        std::fs::copy(&db_path, share_dir.join("opencode.db")).unwrap();
+        std::env::set_var("HOME", &fake_home);
+
+        let sessions = opencode::discover().expect("opencode discovery");
+        if let Some(home) = orig_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].session_id.0.as_ref(), "ses_a");
+        assert_eq!(sessions[0].cwd, PathBuf::from("/repo/spur"));
+        assert_eq!(sessions[0].title.as_deref(), Some("Task A"));
+        assert_eq!(sessions[1].session_id.0.as_ref(), "ses_b");
+        assert_eq!(
+            sessions[1].cwd,
+            PathBuf::from("/repo/spur/.spur/worktrees/w1")
+        );
+    }
+
+    #[test]
     fn discovery_for_kind_maps_expected_variants() {
         assert!(discovery_for_kind(AgentKind::CodexAcp).is_some());
         assert!(discovery_for_kind(AgentKind::Kiro).is_some());
         assert!(discovery_for_kind(AgentKind::Kimi).is_some());
+        assert!(discovery_for_kind(AgentKind::OpenCode).is_some());
         assert!(discovery_for_kind(AgentKind::ClaudeCodeAcp).is_none());
         assert!(discovery_for_kind(AgentKind::ClaudeStreamJson).is_none());
         assert!(discovery_for_kind(AgentKind::Gemini).is_none());
