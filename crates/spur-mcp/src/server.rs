@@ -90,6 +90,7 @@ const VERSIONED_PLAN_CACHE_BACKOFFS: [std::time::Duration; VERSIONED_PLAN_CACHE_
 const COMPLETED_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 const DEFAULT_PLAN_PENDING_GRACE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 const BRAIN_SESSION_BIND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const PERSIST_AS_EPIC_FALSE_REMOVED_MESSAGE: &str = "persist_as_epic=false is removed; remove the field — true is the only supported value. See docs/superpowers/specs/2026-05-10-submit-plan-substrate-migration-design.md.";
 /// Prefix used to mark a comment as a startup-sweep quarantine audit.
 ///
 /// **DO NOT RENAME WITHOUT MIGRATION.** This string is durable state: the
@@ -574,6 +575,8 @@ pub struct McpCallbackServer {
     task_tracker: TaskTracker,
     /// Optional PM service for direct issue/PR operations.
     pm_service: Option<Arc<PmService>>,
+    #[cfg(test)]
+    pm_service_like: Option<Arc<dyn crate::plan::PmLike>>,
     /// Optional event sink for emitting MCP lifecycle events.
     event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
     /// Feature gate snapshot shared with the orchestrator/license runtime.
@@ -765,7 +768,7 @@ pub struct PlanSubmitAuditContext<'a> {
 /// dispatch the partial graph. Startup sweep quarantines stale pending
 /// graphs after the configured grace period.
 pub async fn build_epic_subgraph(
-    pm: &spur_pm::PmService,
+    pm: &dyn crate::plan::PmLike,
     feature_gate: &spur_license::FeatureGate,
     plan_id: &str,
     epic_title: &str,
@@ -779,22 +782,26 @@ pub async fn build_epic_subgraph(
         epic_title,
         epic_body,
         tasks,
+        None,
         Vec::new(),
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn build_epic_subgraph_with_activation_labels(
-    pm: &spur_pm::PmService,
+    pm: &dyn crate::plan::PmLike,
     feature_gate: &spur_license::FeatureGate,
     plan_id: &str,
     epic_title: &str,
     epic_body: Option<&str>,
     tasks: &[crate::plan::PlanTask],
+    parent: Option<&str>,
     activation_add_labels: Vec<String>,
 ) -> Result<EpicSubgraph, String> {
-    let (epic_create, child_specs) =
+    let (mut epic_create, child_specs) =
         plan_epic_issue_creates(plan_id, epic_title, epic_body, tasks)?;
+    epic_create.parent = parent.map(String::from);
     require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED, feature_gate)
         .map_err(feature_error_message)?;
     let advanced = pm.advanced();
@@ -914,7 +921,7 @@ impl PersistedPlanBootstrap {
 }
 
 pub(crate) async fn read_persisted_plan_bootstrap(
-    pm: &spur_pm::PmService,
+    pm: &dyn crate::plan::PmLike,
     feature_gate: &spur_license::FeatureGate,
     plan_id: &str,
     epic_id: &str,
@@ -956,7 +963,7 @@ struct ActiveOwnedPlan {
 }
 
 async fn find_plan_epic(
-    pm: &PmService,
+    pm: &dyn crate::plan::PmLike,
     feature_gate: &spur_license::FeatureGate,
     plan_id: &str,
     operation: &str,
@@ -1063,7 +1070,7 @@ pub(crate) struct PersistedTaskCompletion {
 }
 
 pub(crate) async fn read_latest_task_completion(
-    pm: &spur_pm::PmService,
+    pm: &dyn crate::plan::PmLike,
     feature_gate: &spur_license::FeatureGate,
     issue_id: &str,
 ) -> Result<Option<PersistedTaskCompletion>, String> {
@@ -1092,7 +1099,7 @@ pub(crate) async fn read_latest_task_completion(
 }
 
 pub(crate) async fn reconstruct_historical_attempts(
-    pm: &spur_pm::PmService,
+    pm: &dyn crate::plan::PmLike,
     feature_gate: &spur_license::FeatureGate,
     issue_id: &str,
     current_attempt: u32,
@@ -1209,7 +1216,7 @@ pub(crate) async fn reconstruct_historical_attempts(
 /// `handle_submit_plan_mutation` to populate the `PlanMutationApplied` event.
 /// Returns `None` if the issue cannot be fetched or carries no plan id label.
 async fn derive_plan_id_from_trigger_issue(
-    pm: &spur_pm::PmService,
+    pm: &dyn crate::plan::PmLike,
     issue_id: &str,
 ) -> Option<String> {
     let issue = pm.get_issue(issue_id).await.ok()?;
@@ -1220,7 +1227,7 @@ async fn derive_plan_id_from_trigger_issue(
 }
 
 async fn apply_issue_update(
-    pm: &spur_pm::PmService,
+    pm: &dyn crate::plan::PmLike,
     issue_id: &str,
     mut update: spur_pm::IssueUpdate,
 ) -> anyhow::Result<()> {
@@ -1459,7 +1466,7 @@ fn legacy_reclaim_needed(has_rev1_merge_base_metadata: bool) -> bool {
 }
 
 async fn any_open_epic_lacks_rev1_metadata(
-    pm: &spur_pm::PmService,
+    pm: &dyn crate::plan::PmLike,
     feature_gate: &spur_license::FeatureGate,
 ) -> anyhow::Result<bool> {
     #[cfg(any(test, feature = "test-support"))]
@@ -1829,10 +1836,23 @@ struct PlanBaseSnapshot {
 }
 
 #[derive(Debug)]
-struct SubmitPlanInternalResult {
+struct SubmitPlanAsEpicInput {
+    tasks: Vec<crate::plan::PlanTask>,
+    base: Option<crate::tools::BaseTarget>,
+    parent_epic_id: Option<String>,
+    epic_title: Option<String>,
+    epic_body: Option<String>,
+    brain_session_id: BrainSessionId,
+    execution_mode: &'static str,
+    precomputed_auto_serialized: Option<Vec<crate::plan::SiblingOverlap>>,
+}
+
+#[derive(Debug)]
+struct SubmitPlanAsEpicResult {
     plan_id: String,
     task_count: usize,
     auto_serialized: Vec<crate::plan::SiblingOverlap>,
+    epic_subgraph: EpicSubgraph,
 }
 
 #[cfg(test)]
@@ -2230,6 +2250,8 @@ impl McpCallbackServer {
             completed_delegations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             task_tracker: TaskTracker::new(),
             pm_service,
+            #[cfg(test)]
+            pm_service_like: None,
             event_sink,
             feature_gate,
             active_plans: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -2271,6 +2293,27 @@ impl McpCallbackServer {
         self.brain_session_id
             .get()
             .expect("brain_session_id must be set before MCP handlers dispatch")
+    }
+
+    fn submit_plan_substrate_pm(&self) -> Option<&dyn crate::plan::PmLike> {
+        #[cfg(test)]
+        if let Some(pm) = self.pm_service_like.as_deref() {
+            return Some(pm);
+        }
+        self.pm_service
+            .as_deref()
+            .map(|pm| pm as &dyn crate::plan::PmLike)
+    }
+
+    fn reconciler_pm(&self) -> Option<Arc<dyn crate::plan::PmLike>> {
+        #[cfg(test)]
+        if let Some(pm) = self.pm_service_like.as_ref() {
+            return Some(Arc::clone(pm));
+        }
+        self.pm_service
+            .as_ref()
+            .cloned()
+            .map(|pm| pm as Arc<dyn crate::plan::PmLike>)
     }
 
     /// Wait until the orchestrator binds this callback server to its derived
@@ -2516,27 +2559,6 @@ impl McpCallbackServer {
     /// Configure persisted dispatch lease duration for reconciler dispatches.
     pub fn set_dispatch_lease_duration(&mut self, duration: std::time::Duration) {
         self.dispatch_lease_duration = duration;
-    }
-
-    /// Spawn `run_plan` for an ephemeral plan (no epic_id). Persisted plans
-    /// must use the reconciler; this helper is ephemeral-only by construction.
-    fn spawn_ephemeral_plan_runner(&self, state: Arc<tokio::sync::Mutex<crate::plan::PlanState>>) {
-        let delegation_tx = self.delegation_tx.clone();
-        let plan_sink = self.event_sink.clone();
-        let plan_pm = self
-            .pm_service
-            .clone()
-            .map(|p| p as Arc<dyn crate::plan::PmLike>);
-        self.task_tracker.spawn(crate::plan::run_plan(
-            state,
-            delegation_tx,
-            plan_sink,
-            plan_pm,
-            self.reconciler_fast_forward.as_ref().cloned(),
-            Arc::clone(&self.continuation_ctx),
-            Arc::new(self.materializer.clone()),
-            Arc::clone(&self.feature_gate),
-        ));
     }
 
     /// Spawn a background task that awaits a delegation oneshot and stores
@@ -2824,6 +2846,12 @@ impl McpCallbackServer {
         self.install_projected_plan(state, false).await;
     }
 
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub fn __test_set_pm_like(&mut self, pm: Arc<dyn crate::plan::PmLike>) {
+        self.pm_service_like = Some(pm);
+    }
+
     /// Test-only: mutate a cached plan entry into an impossible state so
     /// persisted read paths can prove they refresh from durable projection
     /// instead of trusting `active_plans`.
@@ -2944,7 +2972,7 @@ impl McpCallbackServer {
             return Ok(());
         }
 
-        let Some(pm) = self.pm_service.as_ref() else {
+        let Some(pm) = self.reconciler_pm() else {
             tracing::debug!("reconciler disabled: no PM service");
             return Ok(());
         };
@@ -2999,9 +3027,8 @@ impl McpCallbackServer {
                 crate::plan::reconciler::monitor_journal_appends(path, Arc::clone(&journal_notify)),
             ))
         };
-        let pm = Arc::clone(pm);
         let handle = AbortOnDropHandle::new(tokio::spawn(async move {
-            let mut reconciler = Reconciler::new(
+            let mut reconciler = Reconciler::new_with_pm_like(
                 reconciler_config,
                 pm,
                 fast_forward,
@@ -4429,7 +4456,7 @@ impl McpCallbackServer {
         if merged_successfully {
             if let (Some(pm), Some(epic_id)) = (self.pm_service.as_ref(), epic_id.as_deref()) {
                 if let Err(error) = apply_issue_update(
-                    pm,
+                    pm.as_ref(),
                     epic_id,
                     spur_pm::IssueUpdate {
                         remove_labels: vec![crate::plan::labels::INTEGRATION_PENDING.to_string()],
@@ -4564,7 +4591,7 @@ impl McpCallbackServer {
     /// most one non-terminal owned plan at a time.
     async fn current_brain_active_owned_plan(
         &self,
-        pm: &spur_pm::PmService,
+        pm: &dyn crate::plan::PmLike,
         exempt_plan_id: Option<&str>,
         exempt_epic_id: Option<&str>,
     ) -> Result<Option<ActiveOwnedPlan>, String> {
@@ -4612,7 +4639,7 @@ impl McpCallbackServer {
 
     async fn nonterminal_plan_status_for_epic(
         &self,
-        pm: &spur_pm::PmService,
+        pm: &dyn crate::plan::PmLike,
         epic_id: &str,
     ) -> Result<Option<(String, serde_json::Value)>, String> {
         let epic = pm
@@ -5390,48 +5417,136 @@ impl McpCallbackServer {
 
     // ─── Plan execution handlers ──────────────────────────────────
 
-    async fn submit_plan_internal(
+    async fn submit_plan_as_epic_internal(
         &self,
-        mut tasks: Vec<crate::plan::PlanTask>,
-        base_branch_override: Option<String>,
-        brain_session_id: BrainSessionId,
-        precomputed_auto_serialized: Option<Vec<crate::plan::SiblingOverlap>>,
-    ) -> Result<SubmitPlanInternalResult, String> {
-        let auto_serialized = match precomputed_auto_serialized {
+        mut input: SubmitPlanAsEpicInput,
+    ) -> Result<SubmitPlanAsEpicResult, String> {
+        if let Err(error) = self.require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED) {
+            return Err(feature_error_message(error));
+        }
+        let pm = self
+            .submit_plan_substrate_pm()
+            .ok_or_else(|| "submit_plan: persist_as_epic requires a beads PM backend (configured backend: none)".to_string())?;
+        if pm.source_str() != "beads" {
+            return Err(format!(
+                "submit_plan: persist_as_epic requires a beads PM backend (configured backend: {})",
+                pm.source_str()
+            ));
+        }
+
+        let auto_serialized = match input.precomputed_auto_serialized {
             Some(overlaps) => overlaps,
-            None => crate::plan::submit_plan_normalize_tasks(&mut tasks)?,
+            None => crate::plan::submit_plan_normalize_tasks(&mut input.tasks)?,
         };
+
         let plan_id = uuid::Uuid::new_v4().to_string();
-        let entries: Vec<crate::plan::PlanTaskEntry> = build_entries_with_task_map(tasks, None);
-        let task_count = entries.len();
-        let (base_snapshot_branch, base_snapshot_oid) = match base_branch_override {
-            Some(branch) => (Some(branch), None),
-            None => {
-                let snapshot = resolve_plan_base(self.repo_root.as_ref(), None).await?;
-                (snapshot.branch, snapshot.oid)
+        let owner_label =
+            crate::plan::labels::plan_owner(&input.brain_session_id.as_session_id().0);
+        let epic_title = match input
+            .epic_title
+            .take()
+            .map(|title| title.trim().to_string())
+        {
+            Some(title) if !title.is_empty() => title,
+            _ => {
+                let parent_epic_id = input.parent_epic_id.as_deref().ok_or_else(|| {
+                    "submit_plan: epic_title is required when persist_as_epic is true".to_string()
+                })?;
+                let parent = pm.get_issue(parent_epic_id).await.map_err(|error| {
+                    format!("submit_plan: failed to load parent epic {parent_epic_id}: {error}")
+                })?;
+                let branch = match input.base.as_ref() {
+                    Some(crate::tools::BaseTarget::Branch { name }) => name.as_str(),
+                    _ => "unspecified base",
+                };
+                format!("{} ({branch})", parent.title)
             }
         };
+
+        let epic_subgraph = build_epic_subgraph_with_activation_labels(
+            pm,
+            self.feature_gate.as_ref(),
+            &plan_id,
+            &epic_title,
+            input.epic_body.as_deref(),
+            &input.tasks,
+            input.parent_epic_id.as_deref(),
+            vec![owner_label],
+        )
+        .await?;
+
+        if let Some(adv) = pm.advanced() {
+            let audit = crate::plan::audit_sentinel::AuditSentinelKind::PlanOwnershipAcquired {
+                plan_id: plan_id.clone(),
+                owner: input.brain_session_id.to_string(),
+                token: uuid::Uuid::new_v4().to_string(),
+                reason: input.execution_mode.to_string(),
+            };
+            let body = crate::plan::audit_sentinel::encode_comment(&audit);
+            if let Err(e) = adv.add_comment(&epic_subgraph.epic_id, &body).await {
+                tracing::warn!(
+                    target: "spur.audit.emit_failure",
+                    kind = "plan_ownership_acquired",
+                    epic_id = %epic_subgraph.epic_id,
+                    plan_id = %plan_id,
+                    "PlanOwnershipAcquired audit comment emission failed (owner label is persisted; audit missing): {e}"
+                );
+            }
+        }
+
+        let entries = build_entries_with_task_map(input.tasks, Some(&epic_subgraph.task_map));
+        let task_count = entries.len();
+        let base_snapshot = resolve_plan_base(self.repo_root.as_ref(), input.base.as_ref()).await?;
         let state = crate::plan::PlanState {
             plan_id: plan_id.clone(),
             tasks: entries,
-            brain_session_id,
-            base_snapshot_branch,
-            base_snapshot_oid,
+            brain_session_id: input.brain_session_id.clone(),
+            base_snapshot_branch: base_snapshot.branch,
+            base_snapshot_oid: base_snapshot.oid,
             merge_state: crate::plan::PlanMergeState::NotStarted,
-            epic_id: None,
+            epic_id: Some(epic_subgraph.epic_id.clone()),
         };
         let state = Arc::new(tokio::sync::Mutex::new(state));
+
+        if let Some(adv) = pm.advanced() {
+            let (base_snapshot_branch, base_snapshot_oid) = {
+                let state = state.lock().await;
+                (
+                    state.base_snapshot_branch.clone(),
+                    state.base_snapshot_oid.clone(),
+                )
+            };
+            emit_plan_submit_audit(
+                adv,
+                &plan_id,
+                &epic_subgraph,
+                PlanSubmitAuditContext {
+                    base_snapshot_branch: base_snapshot_branch.as_deref(),
+                    base_snapshot_oid: base_snapshot_oid.as_deref(),
+                    execution_mode: Some(input.execution_mode),
+                    brain_session_id: Some(input.brain_session_id.as_session_id()),
+                    explicit_base: input.base.as_ref(),
+                },
+            )
+            .await;
+        }
+
         self.active_plans.lock().await.insert(
             plan_id.clone(),
             CachedPlan::new(Arc::clone(&state), unknown_beads_version()),
         );
-        self.spawn_ephemeral_plan_runner(state);
-        info!(plan_id = %plan_id, tasks = task_count, "Plan submitted");
 
-        Ok(SubmitPlanInternalResult {
+        {
+            let state = state.lock().await;
+            crate::plan::snapshot::emit_plan_snapshot(self.event_sink.as_deref(), &state);
+        }
+        self.fast_forward_reconciler();
+
+        Ok(SubmitPlanAsEpicResult {
             plan_id,
             task_count,
             auto_serialized,
+            epic_subgraph,
         })
     }
 
@@ -5525,106 +5640,48 @@ impl McpCallbackServer {
             Err(e) => return JsonRpcResponse::invalid_params(id, e),
         };
 
-        // ─── Persist-as-epic extraction (T2.1) ─────────────────────────
-        let persist_as_epic = args
-            .get("persist_as_epic")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        if args.get("persist_as_epic").and_then(|v| v.as_bool()) == Some(false) {
+            return JsonRpcResponse::invalid_params(id, PERSIST_AS_EPIC_FALSE_REMOVED_MESSAGE);
+        }
         let epic_title = args
             .get("epic_title")
             .and_then(|v| v.as_str())
-            .map(String::from);
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(String::from)
+            .or_else(|| {
+                tasks
+                    .first()
+                    .map(|task| task.task.trim().chars().take(60).collect::<String>())
+                    .filter(|title| !title.is_empty())
+            });
         let epic_body = args
             .get("epic_body")
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        if persist_as_epic {
-            if let Some(response) =
-                self.require_feature_response(id.clone(), FeatureKey::PM_PRO_BEADS_ADVANCED)
-            {
-                return response;
-            }
-            if epic_title
-                .as_deref()
-                .map(str::trim)
-                .unwrap_or("")
-                .is_empty()
-            {
-                return JsonRpcResponse::invalid_params(
-                    id,
-                    "submit_plan: epic_title is required when persist_as_epic is true",
-                );
-            }
-            let pm_source = self.pm_service.as_deref().map(|p| p.source_str());
-            if pm_source != Some("beads") {
-                return JsonRpcResponse::error(
-                    id,
-                    -32000,
-                    format!(
-                        "submit_plan: persist_as_epic requires a beads PM backend (configured backend: {})",
-                        pm_source.unwrap_or("none"),
-                    ),
-                );
-            }
+        if let Some(response) =
+            self.require_feature_response(id.clone(), FeatureKey::PM_PRO_BEADS_ADVANCED)
+        {
+            return response;
         }
-
-        if !persist_as_epic {
-            let submitted = match self
-                .submit_plan_internal(
-                    tasks,
-                    None,
-                    self.brain_session_id().clone(),
-                    Some(auto_serialized),
-                )
-                .await
-            {
-                Ok(submitted) => submitted,
-                Err(error) => return JsonRpcResponse::invalid_params(id, error),
-            };
-
-            let response_text = format!(
-                "Plan submitted: {} tasks. plan_id: {}\n\
-                 A continuation will fire on each per-task failure/awaiting-review and on plan completion. \
-                 Polling get_plan_status remains available as a safety net.",
-                submitted.task_count, submitted.plan_id
-            );
-            let response_text = if submitted.auto_serialized.is_empty() {
-                response_text
-            } else {
-                let edges: Vec<String> = submitted
-                    .auto_serialized
-                    .iter()
-                    .map(|o| {
-                        format!(
-                            "  {} → {} (shared: {})",
-                            o.from,
-                            o.to,
-                            o.shared_files.join(", ")
-                        )
-                    })
-                    .collect();
-                format!(
-                    "{response_text}\n\nAuto-serialized {} sibling pair(s) with overlapping context_files:\n{}",
-                    submitted.auto_serialized.len(),
-                    edges.join("\n")
-                )
-            };
-
-            return JsonRpcResponse::success(
+        if epic_title.is_none() {
+            return JsonRpcResponse::invalid_params(
                 id,
-                json!({
-                    "continuation_will_fire": true,
-                    "auto_serialized": submitted.auto_serialized,
-                    "content": [{
-                        "type": "text",
-                        "text": response_text
-                    }]
-                }),
+                "submit_plan: cannot derive epic_title - provide epic_title or a non-whitespace tasks[0].task",
             );
         }
-
-        let plan_id = uuid::Uuid::new_v4().to_string();
+        let pm_source = self.pm_service.as_deref().map(|p| p.source_str());
+        if pm_source != Some("beads") {
+            return JsonRpcResponse::error(
+                id,
+                -32000,
+                format!(
+                    "submit_plan: persist_as_epic requires a beads PM backend (configured backend: {})",
+                    pm_source.unwrap_or("none"),
+                ),
+            );
+        }
 
         // Parse optional explicit base. Tolerant: `BaseTarget`'s manual
         // Deserialize accepts both `{"kind":...}` and JSON-stringified-object.
@@ -5641,183 +5698,69 @@ impl McpCallbackServer {
             },
         };
 
-        // Build the beads epic subgraph before spawning the executor so
-        // any creation error is surfaced synchronously.
-        let epic_subgraph: Option<EpicSubgraph> = if persist_as_epic {
+        let submitted = match self
+            .submit_plan_as_epic_internal(SubmitPlanAsEpicInput {
+                tasks,
+                base: explicit_base,
+                parent_epic_id: None,
+                epic_title,
+                epic_body,
+                brain_session_id: self.brain_session_id().clone(),
+                execution_mode: "submit_plan",
+                precomputed_auto_serialized: Some(auto_serialized),
+            })
+            .await
+        {
+            Ok(submitted) => submitted,
+            Err(error) => {
+                return JsonRpcResponse::error(
+                    id,
+                    -32000,
+                    format!("submit_plan: failed to persist plan as beads epic: {error}"),
+                );
+            }
+        };
+
+        if let Some(key) = client_idempotency_key.as_deref() {
             let pm = self
                 .pm_service
                 .as_deref()
-                .expect("gate ensures pm is beads");
-            let title = epic_title.as_deref().expect("gate ensures non-empty title");
-            let owner_label =
-                crate::plan::labels::plan_owner(&self.brain_session_id().as_session_id().0);
-            match build_epic_subgraph_with_activation_labels(
-                pm,
-                self.feature_gate.as_ref(),
-                &plan_id,
-                title,
-                epic_body.as_deref(),
-                &tasks,
-                vec![owner_label],
-            )
-            .await
+                .expect("submit_plan persistent path has pm_service");
+            if let Err(error) = crate::submit_plan_dedup::record(pm, key, &submitted.plan_id).await
             {
-                Ok(sg) => {
-                    if let Err(error) = self.require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED) {
-                        return JsonRpcResponse::mcp_error(id.clone(), error);
-                    }
-                    if let Some(adv) = pm.advanced() {
-                        let audit =
-                            crate::plan::audit_sentinel::AuditSentinelKind::PlanOwnershipAcquired {
-                                plan_id: plan_id.clone(),
-                                owner: self.brain_session_id().to_string(),
-                                token: uuid::Uuid::new_v4().to_string(),
-                                reason: "submit_plan".to_string(),
-                            };
-                        let body = crate::plan::audit_sentinel::encode_comment(&audit);
-                        if let Err(e) = adv.add_comment(&sg.epic_id, &body).await {
-                            tracing::warn!(
-                                target: "spur.audit.emit_failure",
-                                kind = "plan_ownership_acquired",
-                                epic_id = %sg.epic_id,
-                                plan_id = %plan_id,
-                                "PlanOwnershipAcquired audit comment emission failed (owner label is persisted; audit missing): {e}"
-                            );
-                        }
-                    }
-
-                    info!(
-                        plan_id = %plan_id,
-                        epic_id = %sg.epic_id,
-                        children = sg.task_map.len(),
-                        "submit_plan: beads epic subgraph created"
-                    );
-                    Some(sg)
-                }
-                Err(e) => {
-                    error!(plan_id = %plan_id, "build_epic_subgraph failed: {e}");
-                    return JsonRpcResponse::error(
-                        id,
-                        -32000,
-                        format!("submit_plan: failed to persist plan as beads epic: {e}"),
-                    );
-                }
-            }
-        } else {
-            None
-        };
-
-        let entries: Vec<crate::plan::PlanTaskEntry> =
-            build_entries_with_task_map(tasks, epic_subgraph.as_ref().map(|sg| &sg.task_map));
-
-        let task_count = entries.len();
-        let base_snapshot =
-            match resolve_plan_base(self.repo_root.as_ref(), explicit_base.as_ref()).await {
-                Ok(snapshot) => snapshot,
-                Err(e) => return JsonRpcResponse::internal_error(id, e),
-            };
-        let state = crate::plan::PlanState {
-            plan_id: plan_id.clone(),
-            tasks: entries,
-            brain_session_id: self.brain_session_id().clone(),
-            base_snapshot_branch: base_snapshot.branch,
-            base_snapshot_oid: base_snapshot.oid,
-            merge_state: crate::plan::PlanMergeState::NotStarted,
-            epic_id: epic_subgraph.as_ref().map(|sg| sg.epic_id.clone()),
-        };
-        let state = Arc::new(tokio::sync::Mutex::new(state));
-
-        if let Some(sg) = &epic_subgraph {
-            if let Err(error) = self.require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED) {
-                return JsonRpcResponse::mcp_error(id, error);
-            }
-            if let Some(adv) = self.pm_service.as_deref().and_then(|pm| pm.advanced()) {
-                let (base_snapshot_branch, base_snapshot_oid) = {
-                    let state = state.lock().await;
-                    (
-                        state.base_snapshot_branch.clone(),
-                        state.base_snapshot_oid.clone(),
-                    )
-                };
-                emit_plan_submit_audit(
-                    adv,
-                    &plan_id,
-                    sg,
-                    PlanSubmitAuditContext {
-                        base_snapshot_branch: base_snapshot_branch.as_deref(),
-                        base_snapshot_oid: base_snapshot_oid.as_deref(),
-                        execution_mode: Some("submit_plan"),
-                        brain_session_id: Some(self.brain_session_id().as_session_id()),
-                        explicit_base: explicit_base.as_ref(),
-                    },
-                )
-                .await;
-            }
-            if let Some(key) = client_idempotency_key.as_deref() {
-                let pm = self
-                    .pm_service
-                    .as_deref()
-                    .expect("persisted plan has pm_service");
-                // Residual PR1 failure window: the beads epic has already been
-                // persisted, but its dedup ledger entry has not. If this write
-                // fails, retrying the same key can orphan this plan and create
-                // a second epic; see PR3 + spec Risks for closure plan.
-                if let Err(error) = crate::submit_plan_dedup::record(pm, key, &plan_id).await {
-                    error!(
-                        plan_id = %plan_id,
-                        "submit_plan: failed to record client idempotency key: {error}"
-                    );
-                    return JsonRpcResponse::error(
-                        id,
-                        -32000,
-                        format!("submit_plan: failed to record client idempotency key: {error}"),
-                    );
-                }
+                error!(
+                    plan_id = %submitted.plan_id,
+                    "submit_plan: failed to record client idempotency key: {error}"
+                );
+                return JsonRpcResponse::error(
+                    id,
+                    -32000,
+                    format!("submit_plan: failed to record client idempotency key: {error}"),
+                );
             }
         }
 
-        self.active_plans.lock().await.insert(
-            plan_id.clone(),
-            CachedPlan::new(Arc::clone(&state), unknown_beads_version()),
+        info!(plan_id = %submitted.plan_id, tasks = submitted.task_count, "Plan submitted");
+
+        let task_map_json = serde_json::to_string(&submitted.epic_subgraph.task_map)
+            .unwrap_or_else(|_| "{}".to_string());
+        let response_text = format!(
+            "Plan submitted: {task_count} tasks.\n\
+             plan_id: {plan_id}\n\
+             epic_id: {epic_id} (beads)\n\
+             task_map: {task_map_json}\n\
+             A continuation will fire on each per-task failure/awaiting-review and on plan completion. \
+             Polling get_plan_status remains available as a safety net.",
+            task_count = submitted.task_count,
+            plan_id = submitted.plan_id,
+            epic_id = submitted.epic_subgraph.epic_id,
         );
 
-        if epic_subgraph.is_some() {
-            let state = state.lock().await;
-            crate::plan::snapshot::emit_plan_snapshot(self.event_sink.as_deref(), &state);
-        }
-
-        if epic_subgraph.is_some() {
-            self.fast_forward_reconciler();
-        } else {
-            self.spawn_ephemeral_plan_runner(state);
-        }
-
-        info!(plan_id = %plan_id, tasks = task_count, "Plan submitted");
-
-        let response_text = if let Some(sg) = &epic_subgraph {
-            let task_map_json =
-                serde_json::to_string(&sg.task_map).unwrap_or_else(|_| "{}".to_string());
-            format!(
-                "Plan submitted: {task_count} tasks.\n\
-                 plan_id: {plan_id}\n\
-                 epic_id: {epic_id} (beads)\n\
-                 task_map: {task_map_json}\n\
-                 A continuation will fire on each per-task failure/awaiting-review and on plan completion. \
-                 Polling get_plan_status remains available as a safety net.",
-                epic_id = sg.epic_id,
-            )
-        } else {
-            format!(
-                "Plan submitted: {task_count} tasks. plan_id: {plan_id}\n\
-                 A continuation will fire on each per-task failure/awaiting-review and on plan completion. \
-                 Polling get_plan_status remains available as a safety net."
-            )
-        };
-
-        let response_text = if auto_serialized.is_empty() {
+        let response_text = if submitted.auto_serialized.is_empty() {
             response_text
         } else {
-            let edges: Vec<String> = auto_serialized
+            let edges: Vec<String> = submitted
+                .auto_serialized
                 .iter()
                 .map(|o| {
                     format!(
@@ -5830,7 +5773,7 @@ impl McpCallbackServer {
                 .collect();
             format!(
                 "{response_text}\n\nAuto-serialized {} sibling pair(s) with overlapping context_files:\n{}",
-                auto_serialized.len(),
+                submitted.auto_serialized.len(),
                 edges.join("\n")
             )
         };
@@ -5839,7 +5782,7 @@ impl McpCallbackServer {
             id,
             json!({
                 "continuation_will_fire": true,
-                "auto_serialized": auto_serialized,
+                "auto_serialized": submitted.auto_serialized,
                 "content": [{
                     "type": "text",
                     "text": response_text
@@ -6689,6 +6632,13 @@ impl McpCallbackServer {
             }
         };
 
+        if snapshot.epic_id.is_none() {
+            return JsonRpcResponse::invalid_params(
+                id,
+                "plan_truncate_and_restart requires a persisted parent plan; the supplied plan has no epic_id",
+            );
+        }
+
         if !snapshot
             .tasks
             .iter()
@@ -6726,12 +6676,21 @@ impl McpCallbackServer {
         }
 
         let submitted = match self
-            .submit_plan_internal(
-                new_tasks,
-                Some(build.branch.clone()),
-                snapshot.brain_session_id.clone(),
-                None,
-            )
+            .submit_plan_as_epic_internal(SubmitPlanAsEpicInput {
+                tasks: new_tasks,
+                base: Some(crate::tools::BaseTarget::Branch {
+                    name: build.branch.clone(),
+                }),
+                parent_epic_id: snapshot.epic_id.clone(),
+                epic_title: None,
+                epic_body: Some(format!(
+                    "Child recovery plan for `{}` rooted at `{}` after `{}` blocked.",
+                    snapshot.plan_id, build.branch, input.blocked_task_id
+                )),
+                brain_session_id: snapshot.brain_session_id.clone(),
+                execution_mode: "plan_truncate_and_restart",
+                precomputed_auto_serialized: None,
+            })
             .await
         {
             Ok(submitted) => submitted,
@@ -6785,7 +6744,7 @@ impl McpCallbackServer {
         let pm_arc: Option<std::sync::Arc<dyn crate::plan::PmLike>> = self
             .pm_service
             .clone()
-            .map(|s| s as std::sync::Arc<dyn crate::plan::PmLike>);
+            .map(|pm| pm as Arc<dyn crate::plan::PmLike>);
 
         let write_mode = if self.nonadvisory_review_writes {
             crate::plan::ReviewWriteMode::NonAdvisory
@@ -7519,23 +7478,21 @@ impl McpCallbackServer {
                 let state = existing.state.lock().await;
                 state.epic_id.clone()
             };
-            let Some(epic_id) = epic_id else {
-                return Ok(existing.state);
-            };
-
-            if self.versioned_cache_serve {
-                let current_version = self.beads_version_for_epic(&epic_id).await?;
-                if current_version == existing.beads_version {
-                    return Ok(existing.state);
+            if let Some(epic_id) = epic_id {
+                if self.versioned_cache_serve {
+                    let current_version = self.beads_version_for_epic(&epic_id).await?;
+                    if current_version == existing.beads_version {
+                        return Ok(existing.state);
+                    }
+                    tracing::debug!(
+                        %plan_id,
+                        %epic_id,
+                        cached_age_ms = existing.cached_at.elapsed().as_millis(),
+                        cached_version = ?existing.beads_version,
+                        current_version = ?current_version,
+                        "persisted plan cache version mismatch; re-projecting from beads"
+                    );
                 }
-                tracing::debug!(
-                    %plan_id,
-                    %epic_id,
-                    cached_age_ms = existing.cached_at.elapsed().as_millis(),
-                    cached_version = ?existing.beads_version,
-                    current_version = ?current_version,
-                    "persisted plan cache version mismatch; re-projecting from beads"
-                );
             }
         }
 
@@ -8910,6 +8867,7 @@ mod clobber_review_tests {
 #[cfg(test)]
 mod plan_truncate_and_restart_tests {
     use super::*;
+    use crate::plan::PmLike;
     use serde_json::json;
     use spur_acp::{BrainSessionId, SessionId};
     use std::sync::Arc;
@@ -9009,18 +8967,32 @@ mod plan_truncate_and_restart_tests {
         }
     }
 
-    fn new_server(repo: &std::path::Path) -> (McpCallbackServer, DelegationChannel) {
+    async fn new_server_with_mock_pm(
+        repo: &std::path::Path,
+    ) -> (
+        Arc<McpCallbackServer>,
+        DelegationChannel,
+        Arc<crate::plan::test_util::MockPm>,
+    ) {
         let session_id = BrainSessionId::new(SessionId("brain".into()));
+        let mock_pm = crate::plan::test_util::MockPm::new().arc();
         let (mut server, channel) = McpCallbackServer::new(
             Some(&session_id),
             None,
             None,
             no_op_ctx(),
             Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-            community_feature_gate(),
+            pro_feature_gate(),
         );
+        server.__test_set_pm_like(mock_pm.clone() as Arc<dyn crate::plan::PmLike>);
         server.set_repo_root(repo.to_path_buf());
-        (server, channel)
+        server.set_reconciler_enabled(true, Some(Arc::new(tokio::sync::Notify::new())));
+        let server = Arc::new(server);
+        Arc::clone(&server)
+            .enable_reconciler()
+            .await
+            .expect("enable mock reconciler");
+        (server, channel, mock_pm)
     }
 
     fn output_json(response: serde_json::Value) -> serde_json::Value {
@@ -9036,24 +9008,34 @@ mod plan_truncate_and_restart_tests {
         let base_oid = run_git(dir.path(), &["rev-parse", "--verify", "main"]).await;
         commit_file_on_branch(dir.path(), "spur/test-task-a", "main", "a.txt", "task A\n").await;
 
-        let (server, mut channel) = new_server(dir.path());
-        server
-            .__test_install_plan(plan_with(
-                "recover-plan",
-                vec![
-                    approved_entry("A", &[], "spur/test-task-a", &base_oid),
-                    entry_for(
-                        "B",
-                        &["A"],
-                        crate::plan::PlanTaskStatus::BlockedOnSetupConflict {
-                            dep_task_id: "A".into(),
-                            files: vec!["a.txt".into()],
-                        },
-                    ),
-                    entry_for("C", &["B"], crate::plan::PlanTaskStatus::Pending),
-                ],
-            ))
-            .await;
+        let (server, mut _channel, mock_pm) = new_server_with_mock_pm(dir.path()).await;
+        let parent_epic_id = mock_pm
+            .create_issue(spur_pm::IssueCreate {
+                title: "Parent Recovery Epic".to_string(),
+                description: Some("parent body".to_string()),
+                issue_type: Some("epic".to_string()),
+                labels: vec![crate::plan::labels::plan_id("recover-plan")],
+                ..Default::default()
+            })
+            .await
+            .expect("create parent epic");
+        let mut parent_plan = plan_with(
+            "recover-plan",
+            vec![
+                approved_entry("A", &[], "spur/test-task-a", &base_oid),
+                entry_for(
+                    "B",
+                    &["A"],
+                    crate::plan::PlanTaskStatus::BlockedOnSetupConflict {
+                        dep_task_id: "A".into(),
+                        files: vec!["a.txt".into()],
+                    },
+                ),
+                entry_for("C", &["B"], crate::plan::PlanTaskStatus::Pending),
+            ],
+        );
+        parent_plan.epic_id = Some(parent_epic_id.clone());
+        server.__test_install_plan(parent_plan).await;
 
         let response = server
             .__test_call_tool(
@@ -9105,9 +9087,22 @@ mod plan_truncate_and_restart_tests {
             .cloned()
             .expect("new plan");
         let restarted = restarted.state.lock().await;
+        assert!(
+            restarted
+                .base_snapshot_branch
+                .as_deref()
+                .is_some_and(|branch| branch.starts_with("spur/brain-snapshot-")),
+            "expected explicit branch base to be captured as snapshot branch, got {:?}",
+            restarted.base_snapshot_branch
+        );
+        let staging_oid = run_git(
+            dir.path(),
+            &["rev-parse", "--verify", "spur/plan-staging/recover-plan"],
+        )
+        .await;
         assert_eq!(
-            restarted.base_snapshot_branch.as_deref(),
-            Some("spur/plan-staging/recover-plan")
+            restarted.base_snapshot_oid.as_deref(),
+            Some(staging_oid.as_str())
         );
         let restarted_ids: Vec<&str> = restarted
             .tasks
@@ -9117,19 +9112,68 @@ mod plan_truncate_and_restart_tests {
         assert_eq!(restarted_ids, vec!["B", "C"]);
         assert_eq!(restarted.tasks[0].spec.depends_on, Vec::<String>::new());
         assert_eq!(restarted.tasks[1].spec.depends_on, vec!["B".to_string()]);
+        let restarted_epic_id = restarted.epic_id.clone().expect("child epic id");
         drop(restarted);
 
-        let request =
-            tokio::time::timeout(std::time::Duration::from_secs(2), channel.request_rx.recv())
-                .await
-                .expect("restarted plan should dispatch")
-                .expect("delegation request");
-        assert_eq!(request.agent, "codex");
-        assert!(matches!(
-            request.base,
-            Some(crate::tools::BaseSpec::Branch { ref name })
-                if name == "spur/plan-staging/recover-plan"
-        ));
+        let child_epic = mock_pm.issue(&restarted_epic_id).await;
+        assert_eq!(
+            child_epic.title,
+            "Parent Recovery Epic (spur/plan-staging/recover-plan)"
+        );
+        assert!(
+            child_epic.blocked_by.contains(&parent_epic_id),
+            "child epic should be linked to parent epic: {child_epic:?}"
+        );
+        assert!(
+            child_epic
+                .labels
+                .contains(&crate::plan::labels::PLAN_COMPLETE.to_string()),
+            "child epic labels: {:?}",
+            child_epic.labels
+        );
+        let child_issues = mock_pm
+            .issues()
+            .await
+            .into_iter()
+            .filter(|issue| issue.issue_type.as_deref() == Some("task"))
+            .collect::<Vec<_>>();
+        assert_eq!(child_issues.len(), 2, "{child_issues:?}");
+        let b_issue = child_issues
+            .iter()
+            .find(|issue| issue.title.contains("B"))
+            .expect("B child");
+        let c_issue = child_issues
+            .iter()
+            .find(|issue| issue.title.contains("C"))
+            .expect("C child");
+        assert!(b_issue.blocked_by.contains(&restarted_epic_id));
+        assert!(c_issue.blocked_by.contains(&restarted_epic_id));
+        assert!(
+            c_issue.blocked_by.contains(&b_issue.id),
+            "C should depend on B via beads edge: {c_issue:?}"
+        );
+        assert!(
+            mock_pm.audit_seq().await >= 2,
+            "ownership and submit audit comments should be persisted"
+        );
+
+        let dispatch = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            _channel.request_rx.recv(),
+        )
+        .await
+        .expect("restarted beads-backed plan should dispatch a worker")
+        .expect("delegation channel should remain open");
+        assert_eq!(dispatch.issue_id.as_deref(), Some(b_issue.id.as_str()));
+        let b_issue_after_dispatch = mock_pm.issue(&b_issue.id).await;
+        assert!(
+            b_issue_after_dispatch
+                .labels
+                .iter()
+                .any(|label| crate::plan::labels::parse_delegation_id(label).is_some()),
+            "dispatch should persist delegation intent on the task issue: {:?}",
+            b_issue_after_dispatch.labels
+        );
     }
 
     #[tokio::test]
@@ -9156,24 +9200,33 @@ mod plan_truncate_and_restart_tests {
         )
         .await;
 
-        let (server, _channel) = new_server(dir.path());
-        server
-            .__test_install_plan(plan_with(
-                "conflict-plan",
-                vec![
-                    approved_entry("A", &[], "spur/test-task-a", &base_oid),
-                    approved_entry("B", &[], "spur/test-task-b", &base_oid),
-                    entry_for(
-                        "C",
-                        &["A", "B"],
-                        crate::plan::PlanTaskStatus::BlockedOnSetupConflict {
-                            dep_task_id: "B".into(),
-                            files: vec!["conflict.txt".into()],
-                        },
-                    ),
-                ],
-            ))
-            .await;
+        let (server, _channel, mock_pm) = new_server_with_mock_pm(dir.path()).await;
+        let parent_epic_id = mock_pm
+            .create_issue(spur_pm::IssueCreate {
+                title: "Conflict Parent Epic".to_string(),
+                issue_type: Some("epic".to_string()),
+                labels: vec![crate::plan::labels::plan_id("conflict-plan")],
+                ..Default::default()
+            })
+            .await
+            .expect("create parent epic");
+        let mut parent_plan = plan_with(
+            "conflict-plan",
+            vec![
+                approved_entry("A", &[], "spur/test-task-a", &base_oid),
+                approved_entry("B", &[], "spur/test-task-b", &base_oid),
+                entry_for(
+                    "C",
+                    &["A", "B"],
+                    crate::plan::PlanTaskStatus::BlockedOnSetupConflict {
+                        dep_task_id: "B".into(),
+                        files: vec!["conflict.txt".into()],
+                    },
+                ),
+            ],
+        );
+        parent_plan.epic_id = Some(parent_epic_id);
+        server.__test_install_plan(parent_plan).await;
 
         let response = server
             .__test_call_tool(

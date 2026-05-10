@@ -174,7 +174,7 @@ pub enum AuditSentinelKind {
         amended_prompt_summary: Option<String>,
     },
     /// bd-2m2u Phase 2d — emitted on a beads task issue when its
-    /// `AUTO_RETRY_BUDGET` is exhausted and the task is promoted to
+    /// auto-retry budget (1 attempt) is exhausted and the task is promoted to
     /// `EscalatedToBrain`. Mirrors `RetryRequested` but signals the brain
     /// must drive recovery via `submit_plan_mutation` (option A routing).
     EscalationRequested {
