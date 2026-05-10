@@ -795,6 +795,7 @@ mod tests {
                 estimated_cost_micros: None,
                 artifact_id: None,
                 fetch_hint: None,
+                base_hint: None,
             },
             created_at_wall: Utc::now(),
             created_at_mono: Instant::now(),
