@@ -259,12 +259,7 @@ impl Orchestrator {
                             }
                         };
 
-                        let sessions_result = match Self::list_sessions_from_rpc(
-                            &mut *conn,
-                            &self.repo_root,
-                        )
-                        .await
-                        {
+                        let sessions_result = match Self::list_sessions_from_rpc(&mut *conn).await {
                             Ok(sessions) if !sessions.is_empty() => Ok(sessions),
                             Ok(_) => {
                                 // RPC succeeded but returned empty — try disk fallback.
@@ -1371,11 +1366,7 @@ mod list_sessions_tests {
             &mut self,
             request: ListSessionsRequest,
         ) -> anyhow::Result<agent_client_protocol::schema::ListSessionsResponse> {
-            assert_eq!(
-                request.cwd.as_deref(),
-                Some(std::path::Path::new("/repo/spur")),
-                "expected cwd scoped to repo root"
-            );
+            assert!(request.cwd.is_none());
             assert!(
                 request.cursor.is_none() || request.cursor.as_deref() == Some("same"),
                 "unexpected cursor {:?}",
@@ -1397,10 +1388,9 @@ mod list_sessions_tests {
     async fn pagination_breaks_on_non_progressing_cursor() {
         let mut conn = NonProgressingCursorConnection { calls: 0 };
 
-        let sessions =
-            Orchestrator::list_sessions_from_rpc(&mut conn, std::path::Path::new("/repo/spur"))
-                .await
-                .expect("list sessions");
+        let sessions = Orchestrator::list_sessions_from_rpc(&mut conn)
+            .await
+            .expect("list sessions");
 
         assert_eq!(conn.calls, 2);
         assert!(conn.calls <= 3);
