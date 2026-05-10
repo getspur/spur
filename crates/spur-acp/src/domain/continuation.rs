@@ -32,7 +32,7 @@ pub enum ContinuationSource {
     PlanCompleted,
     /// `SpurEventBody::PlanReadyToMerge` fired for a plan the brain dispatched.
     PlanReadyToMerge,
-    /// bd-2m2u Phase 2d — a plan task exhausted its `AUTO_RETRY_BUDGET` and
+    /// bd-2m2u Phase 2d — a plan task exhausted its auto-retry budget (1 attempt) and
     /// was promoted to `EscalatedToBrain`. The brain receives the continuation
     /// directly (option A) and resolves via `submit_plan_mutation`.
     PlanTaskEscalated,

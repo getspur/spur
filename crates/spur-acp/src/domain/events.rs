@@ -1124,7 +1124,7 @@ pub enum SpurEventBody {
         delegation_id: String,
     },
 
-    /// bd-2m2u Phase 2d — a plan task exhausted its `AUTO_RETRY_BUDGET` and
+    /// bd-2m2u Phase 2d — a plan task exhausted its auto-retry budget (1 attempt) and
     /// was promoted to `EscalatedToBrain`. Brain receives the matching
     /// `BrainContinuation { source: PlanTaskEscalated }` and resolves via
     /// `submit_plan_mutation`.

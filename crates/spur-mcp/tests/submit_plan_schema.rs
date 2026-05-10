@@ -1,8 +1,7 @@
 //! submit_plan schema shape tests.
 //!
-//! Guards that the new persist_as_epic fields are advertised with the
-//! right types and descriptions. Negative-input behavior is tested in
-//! tests/submit_plan_persist.rs.
+//! Guards submit_plan's persistent-only schema shape. Negative-input behavior
+//! is tested in tests/submit_plan_persist.rs.
 
 use spur_mcp::tools_list;
 
@@ -15,16 +14,14 @@ fn submit_plan_def() -> serde_json::Value {
 }
 
 #[test]
-fn schema_advertises_persist_as_epic() {
+fn schema_does_not_advertise_persist_as_epic() {
     let schema = submit_plan_def();
-    let prop = schema
-        .get("properties")
-        .and_then(|p| p.get("persist_as_epic"))
-        .expect("persist_as_epic must be advertised");
-    assert_eq!(
-        prop.get("type").and_then(|v| v.as_str()),
-        Some("boolean"),
-        "persist_as_epic must be boolean"
+    assert!(
+        schema
+            .get("properties")
+            .and_then(|p| p.get("persist_as_epic"))
+            .is_none(),
+        "persist_as_epic must not be advertised after PR9"
     );
 }
 
@@ -89,17 +86,13 @@ fn persist_fields_are_not_required() {
         .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
     assert!(
-        !required.contains(&"persist_as_epic"),
-        "persist_as_epic must remain optional"
-    );
-    assert!(
         !required.contains(&"epic_title"),
-        "epic_title is only required when persist_as_epic is true (enforced in handler)"
+        "epic_title is conditionally required by the handler"
     );
 }
 
 #[test]
-fn persist_as_epic_without_title_is_documented_as_handler_error() {
+fn missing_epic_title_is_documented_as_handler_error() {
     // Schema-level test only: epic_title is optional at schema level.
     // Handler-level rejection lives in submit_plan_persist.rs once the
     // handler branch is implemented (Task 6).

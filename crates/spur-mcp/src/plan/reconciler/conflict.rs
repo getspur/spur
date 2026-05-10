@@ -14,7 +14,7 @@ pub(super) fn setup_overlay_conflict(
 }
 
 pub(super) async fn persist_setup_overlay_conflict(
-    pm: &spur_pm::PmService,
+    pm: &dyn crate::plan::PmLike,
     issue_id: &str,
     feature_gate: &spur_license::FeatureGate,
     plan_id: &str,
@@ -82,7 +82,7 @@ pub(super) async fn persist_setup_overlay_conflict(
 }
 
 async fn persist_predispatch_overlay_conflict(
-    pm: &spur_pm::PmService,
+    pm: &dyn crate::plan::PmLike,
     issue_id: &str,
     feature_gate: &spur_license::FeatureGate,
     plan_id: &str,

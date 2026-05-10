@@ -1134,21 +1134,12 @@ mod tests {
     }
 
     #[test]
-    fn spur_config_default_has_peer_mailbox_disabled() {
-        let cfg = SpurConfig::default();
-        assert!(!cfg.peer_mailbox_enabled);
-
-        let parsed: SpurConfig = toml::from_str("").unwrap();
-        assert!(!parsed.peer_mailbox_enabled);
-    }
-
-    #[test]
     fn plan_substrate_migration_versioned_cache_serve_defaults_off() {
-        let cfg = SpurConfig::default();
+        let cfg: SpurConfig = toml::from_str("").unwrap();
         assert!(!cfg.plan.substrate_migration.versioned_cache_serve);
         assert!(!cfg.plan.substrate_migration.nonadvisory_review_writes);
 
-        let parsed: SpurConfig = toml::from_str("").unwrap();
+        let parsed: SpurConfig = toml::from_str("[plan.substrate_migration]\n").unwrap();
         assert!(!parsed.plan.substrate_migration.versioned_cache_serve);
         assert!(!parsed.plan.substrate_migration.nonadvisory_review_writes);
     }
@@ -1165,6 +1156,15 @@ mod tests {
         .unwrap();
         assert!(cfg.plan.substrate_migration.versioned_cache_serve);
         assert!(cfg.plan.substrate_migration.nonadvisory_review_writes);
+    }
+
+    #[test]
+    fn spur_config_default_has_peer_mailbox_disabled() {
+        let cfg = SpurConfig::default();
+        assert!(!cfg.peer_mailbox_enabled);
+
+        let parsed: SpurConfig = toml::from_str("").unwrap();
+        assert!(!parsed.peer_mailbox_enabled);
     }
 
     #[test]

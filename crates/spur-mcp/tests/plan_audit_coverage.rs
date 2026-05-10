@@ -18,14 +18,6 @@
 //!
 //! Requires `br` on PATH. Skipped (not failed) when `br` is unavailable.
 //!
-//! TODO(v0b): Add `run_plan_drives_dispatch_and_completion_emission` — a test
-//! that wires a real `mpsc::Sender<DelegationRequest>` + matching rx, spawns a
-//! task that echoes a canned `DelegationResult` back via the response oneshot,
-//! calls `run_plan(...)`, waits for plan completion, then asserts Dispatch +
-//! Completion sentinels appear in `br comments list`. Deferred because it
-//! requires standing up a mock orchestrator in the test process, which is more
-//! invasive than the narrow helper tests above.
-
 use std::path::Path;
 use std::sync::Arc;
 

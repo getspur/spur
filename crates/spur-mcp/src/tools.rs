@@ -858,17 +858,13 @@ fn submit_plan_def() -> ToolDefinition {
                     },
                     "description": "Tasks with dependency edges forming a DAG. Tasks with no depends_on are dispatched immediately."
                 },
-                "persist_as_epic": {
-                    "type": "boolean",
-                    "description": "When true, mirror the plan into beads as an epic with child issues + dependency edges. Each child is labeled `spur:plan-id:<plan_id>` so review_task(approve) can auto-close the matching beads issue. Requires `epic_title` and a beads PM backend. Defaults to false (ephemeral in-memory plan only)."
-                },
                 "epic_title": {
                     "type": "string",
-                    "description": "Epic title. Required when `persist_as_epic` is true. Ignored otherwise."
+                    "description": "Epic title. Required unless a non-empty first task description can derive one."
                 },
                 "epic_body": {
                     "type": "string",
-                    "description": "Epic description / rationale. Optional when `persist_as_epic` is true. Ignored otherwise."
+                    "description": "Epic description / rationale. Optional."
                 },
                 "client_idempotency_key": {
                     "type": "string",
