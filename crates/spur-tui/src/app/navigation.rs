@@ -1,11 +1,6 @@
 use super::*;
 
 impl App {
-    #[cfg(any(test, debug_assertions))]
-    pub fn current_view_for_test(&self) -> &ViewId {
-        &self.current_view
-    }
-
     /// Inc 2 (bd-d587.2): switch to `view`, recording the leaving view in
     /// `view_history` so a subsequent `navigate_back()` returns to it.
     /// Dashboard is the canonical root and clears the stack on entry. Calls
