@@ -104,6 +104,12 @@ pub struct ContinuationPayload {
     /// Capped at 256 B by the materializer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fetch_hint: Option<String>,
+    /// NEW — contextual reminder for ad-hoc delegations. When `worker_branch` is
+    /// present, this tells the brain to pass that branch as `base` in follow-up
+    /// `delegate_to_worker` calls so the next worker sees prior context instead
+    /// of defaulting to RepoMain. Capped at 256 B by the materializer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_hint: Option<String>,
 }
 
 impl ContinuationPayload {
@@ -218,6 +224,7 @@ mod tests {
             estimated_cost_micros: None,
             artifact_id: None,
             fetch_hint: None,
+            base_hint: None,
         };
         assert_eq!(p.summary.as_deref(), Some("done"));
         assert!(matches!(p.status, DelegationStatus::Success));
@@ -248,6 +255,7 @@ mod tests {
                 attempt: 1,
             }),
             fetch_hint: Some("Full diff truncated. Call fetch_outcome_artifact.".into()),
+            base_hint: None,
         };
         let s = serde_json::to_string(&payload).expect("serialize");
         let back: ContinuationPayload = serde_json::from_str(&s).expect("deserialize");
@@ -265,6 +273,7 @@ mod tests {
             estimated_cost_micros: Some(1_234_567),
             artifact_id: None,
             fetch_hint: None,
+            base_hint: None,
         };
         let usd = payload.estimated_cost_usd().expect("Some");
         assert!((usd - 1.234567).abs() < 1e-9);
@@ -281,6 +290,7 @@ mod tests {
             estimated_cost_micros: None,
             artifact_id: None,
             fetch_hint: None,
+            base_hint: None,
         };
         assert!(none_payload.estimated_cost_usd().is_none());
 
@@ -314,6 +324,7 @@ mod tests {
         assert!(back.estimated_cost_micros.is_none());
         assert!(back.artifact_id.is_none());
         assert!(back.fetch_hint.is_none());
+        assert!(back.base_hint.is_none());
     }
 
     #[test]
@@ -349,6 +360,7 @@ mod tests {
                 estimated_cost_micros: None,
                 artifact_id: None,
                 fetch_hint: None,
+                base_hint: None,
             },
             created_at_wall: Utc.with_ymd_and_hms(2026, 4, 24, 12, 34, 56).unwrap(),
             created_at_mono: Instant::now(),
@@ -396,6 +408,7 @@ mod tests {
                 estimated_cost_micros: None,
                 artifact_id: None,
                 fetch_hint: None,
+                base_hint: None,
             },
             created_at_wall: Utc.with_ymd_and_hms(2026, 4, 24, 12, 34, 56).unwrap(),
             created_at_mono: Instant::now(),

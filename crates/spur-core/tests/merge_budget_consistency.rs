@@ -52,6 +52,7 @@ fn success_payload(id: &str, attempt: u32, summary: &str) -> ContinuationPayload
             "Full result available via fetch_outcome_artifact(delegation_id, section='full')."
                 .into(),
         ),
+        base_hint: None,
     }
 }
 
