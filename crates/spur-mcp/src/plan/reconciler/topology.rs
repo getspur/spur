@@ -211,6 +211,100 @@ fn parse_stat_number(part: &str, keyword: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+
+    use crate::plan::{PlanMergeState, PlanTask, PlanTaskEntry};
+
+    fn run_git(repo: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git invocation failed");
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            panic!(
+                "git {args:?} failed (exit {}): stderr={stderr} stdout={stdout}",
+                out.status
+            );
+        }
+    }
+
+    fn run_git_output(repo: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git invocation failed");
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            panic!(
+                "git {args:?} failed (exit {}): stderr={stderr} stdout={stdout}",
+                out.status
+            );
+        }
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn init_git_repo(repo: &Path) {
+        run_git(repo, &["init"]);
+        run_git(repo, &["config", "user.email", "test@example.com"]);
+        run_git(repo, &["config", "user.name", "SPUR Test"]);
+        std::fs::write(repo.join("README.md"), "base\n").expect("write README");
+        run_git(repo, &["add", "README.md"]);
+        run_git(repo, &["commit", "-m", "base"]);
+    }
+
+    fn commit_lines(repo: &Path, branch: &str, path: &str, line_count: usize) -> String {
+        let body = (0..line_count)
+            .map(|idx| format!("{branch} line {idx}\n"))
+            .collect::<String>();
+        std::fs::write(repo.join(path), body).expect("write test file");
+        run_git(repo, &["add", path]);
+        run_git(repo, &["commit", "-m", &format!("{branch} worker")]);
+        run_git_output(repo, &["rev-parse", "HEAD"])
+    }
+
+    fn approved_entry(
+        task_id: &str,
+        deps: &[&str],
+        worker_branch: &str,
+        dispatched_base_oid: &str,
+    ) -> PlanTaskEntry {
+        PlanTaskEntry {
+            spec: PlanTask {
+                task_id: task_id.to_string(),
+                agent: "codex".to_string(),
+                task: format!("Do {task_id}."),
+                depends_on: deps.iter().map(|dep| dep.to_string()).collect(),
+                issue_id: Some(format!("bd-{task_id}")),
+                context_files: Vec::new(),
+            },
+            status: PlanTaskStatus::Approved { summary: None },
+            result: None,
+            worker_branch: Some(worker_branch.to_string()),
+            attempt: 1,
+            history: Vec::new(),
+            last_delegation_id: None,
+            dispatched_base_oid: Some(dispatched_base_oid.to_string()),
+        }
+    }
+
+    fn plan_with_base(base_oid: &str, tasks: Vec<PlanTaskEntry>) -> PlanState {
+        PlanState {
+            plan_id: "topology-test-plan".to_string(),
+            tasks,
+            brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId(
+                "brain".to_string(),
+            )),
+            base_snapshot_branch: None,
+            base_snapshot_oid: Some(base_oid.to_string()),
+            merge_state: PlanMergeState::NotStarted,
+            epic_id: None,
+        }
+    }
 
     #[test]
     fn parse_diff_stat_summary_parses_all_components() {
@@ -258,5 +352,61 @@ mod tests {
         assert_eq!(found_file, Some(0));
         assert_eq!(found_ins, None);
         assert_eq!(found_del, None);
+    }
+
+    #[tokio::test]
+    async fn compile_topology_marks_tip_flattened_when_cumulative_diff_contains_transitive_deps() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        init_git_repo(dir.path());
+        let base_branch = run_git_output(dir.path(), &["rev-parse", "--abbrev-ref", "HEAD"]);
+        let base_oid = run_git_output(dir.path(), &["rev-parse", "HEAD"]);
+
+        run_git(dir.path(), &["checkout", "-b", "spur/pr5"]);
+        let pr5_tip = commit_lines(dir.path(), "pr5", "pr5.txt", 30);
+
+        run_git(dir.path(), &["checkout", "-b", "spur/pr6"]);
+        let pr6_tip = commit_lines(dir.path(), "pr6", "pr6.txt", 30);
+
+        run_git(dir.path(), &["checkout", "-b", "spur/pr7"]);
+        let pr7_tip = commit_lines(dir.path(), "pr7", "pr7.txt", 5);
+
+        run_git(dir.path(), &["checkout", &base_branch]);
+
+        let plan = plan_with_base(
+            &base_oid,
+            vec![
+                approved_entry("PR5", &[], "spur/pr5", &base_oid),
+                approved_entry("PR6", &["PR5"], "spur/pr6", &base_oid),
+                approved_entry("PR7", &["PR6"], "spur/pr7", &base_oid),
+            ],
+        );
+
+        let topology =
+            compile_setup_conflict_topology(&plan, dir.path(), "BLOCKED", "PR7", &[]).await;
+        let topology = topology.expect("compile topology");
+
+        let pr7 = topology
+            .approved_chain
+            .iter()
+            .find(|node| node.task_id == "PR7")
+            .expect("PR7 node");
+        let cumulative_total =
+            pr7.cumulative_diff_stat.insertions + pr7.cumulative_diff_stat.deletions;
+        let incremental_total =
+            pr7.incremental_diff_stat.insertions + pr7.incremental_diff_stat.deletions;
+
+        assert_eq!(pr7.tip_oid, pr7_tip);
+        assert_eq!(pr7.parent_oid, pr6_tip);
+        assert_ne!(pr7.parent_oid, pr5_tip);
+        assert_eq!(cumulative_total, 65);
+        assert_eq!(incremental_total, 5);
+        assert!(
+            cumulative_total - incremental_total > 50,
+            "fixture must exercise the flattening threshold"
+        );
+        assert!(
+            pr7.appears_flattened,
+            "PR7 should appear flattened because base..tip includes PR5+PR6+PR7 while parent..tip only includes PR7"
+        );
     }
 }
