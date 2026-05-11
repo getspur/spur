@@ -44,6 +44,7 @@ fn issue_summary(id: &str, status: &str) -> spur_pm::IssueSummary {
         priority: None,
         issue_type: None,
         assignee: None,
+        description: None,
     }
 }
 

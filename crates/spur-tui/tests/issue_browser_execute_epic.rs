@@ -19,6 +19,7 @@ fn summary(id: &str, title: &str, issue_type: Option<&str>) -> IssueSummaryEvent
         priority: Some(1),
         issue_type: issue_type.map(String::from),
         assignee: None,
+        description: None,
     }
 }
 

@@ -1914,6 +1914,7 @@ mod tests {
             priority: None,
             issue_type: Some("task".into()),
             assignee: None,
+            description: None,
         }
     }
 

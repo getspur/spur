@@ -690,6 +690,7 @@ mod reconciler_fast_forward_tests {
                 priority: Some(2),
                 issue_type: Some("epic".into()),
                 assignee: None,
+                description: None,
             },
             spur_pm::IssueSummary {
                 id: "bd-2".into(),
@@ -704,6 +705,7 @@ mod reconciler_fast_forward_tests {
                 priority: Some(2),
                 issue_type: Some("epic".into()),
                 assignee: None,
+                description: None,
             },
         ];
 
