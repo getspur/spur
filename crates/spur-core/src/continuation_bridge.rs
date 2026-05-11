@@ -253,7 +253,12 @@ pub fn render_merged_turn_with_spill_v2(
         blocks.push(text_block(MARKER_SEPARATOR));
         let mut has_escalation = false;
         for continuation in &packed.delivered {
-            if matches!(continuation.source, ContinuationSource::PlanTaskEscalated) {
+            if matches!(continuation.source, ContinuationSource::PlanTaskEscalated)
+                || matches!(
+                    continuation.source,
+                    ContinuationSource::PlanTaskBlockedOnSetupConflict
+                )
+            {
                 has_escalation = true;
             }
             blocks.push(continuation_resource_block(continuation));
@@ -282,7 +287,12 @@ pub fn render_autonomous_turn_with_spill_v2(
         blocks.push(text_block(MARKER_AUTONOMOUS));
         let mut has_escalation = false;
         for continuation in &packed.delivered {
-            if matches!(continuation.source, ContinuationSource::PlanTaskEscalated) {
+            if matches!(continuation.source, ContinuationSource::PlanTaskEscalated)
+                || matches!(
+                    continuation.source,
+                    ContinuationSource::PlanTaskBlockedOnSetupConflict
+                )
+            {
                 has_escalation = true;
             }
             blocks.push(continuation_resource_block(continuation));
