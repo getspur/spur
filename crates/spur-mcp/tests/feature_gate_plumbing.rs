@@ -20,7 +20,7 @@ fn community_gate() -> Arc<FeatureGate> {
 fn pro_gate() -> Arc<FeatureGate> {
     let gate = Arc::new(FeatureGate::new(PolicyResolver::embedded()));
     let mut features = BTreeSet::new();
-    features.insert(FeatureKey::PM_PRO_BEADS_ADVANCED.as_str().to_string());
+    features.insert(FeatureKey::MCP_PRO_PLAN_DURABLE.as_str().to_string());
     gate.update_state(&LicenseState::active_validated(Plan::Pro, features));
     gate
 }
@@ -43,10 +43,10 @@ fn callback_server_stores_feature_gate_tier_entitlements() {
     let community_server = server_with_gate(community_gate());
     assert!(!community_server
         .feature_gate()
-        .has(FeatureKey::PM_PRO_BEADS_ADVANCED));
+        .has(FeatureKey::MCP_PRO_PLAN_DURABLE));
 
     let pro_server = server_with_gate(pro_gate());
     assert!(pro_server
         .feature_gate()
-        .has(FeatureKey::PM_PRO_BEADS_ADVANCED));
+        .has(FeatureKey::MCP_PRO_PLAN_DURABLE));
 }

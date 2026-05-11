@@ -3,7 +3,7 @@
 
 use serde::Serialize;
 use spur_acp::domain::events::SpurEventBody;
-use spur_acp::domain::{BrainContinuation, DeferReason, DelegationKey};
+use spur_acp::domain::{BrainContinuation, ContinuationSource, DeferReason, DelegationKey};
 use spur_acp::types::SessionId;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -115,6 +115,7 @@ const MARKER_AUTONOMOUS: &str =
 const MARKER_SEPARATOR: &str =
     "[SPUR:background] The following blocks were injected by SPUR, not authored by the user.";
 const ACTION_HINT: &str = "Review the result and decide the next action.";
+const ESCALATION_HINT: &str = "One or more tasks have escalated. Use the `submit_plan_mutation` tool (your 'Swiss Army knife') to recover the escalated task: retry it as-is, rewrite its spec (task body, agent, context, deps), or abandon it.";
 
 #[derive(Debug)]
 pub struct RenderOutcome {
@@ -250,8 +251,15 @@ pub fn render_merged_turn_with_spill_v2(
 
     if !packed.delivered.is_empty() {
         blocks.push(text_block(MARKER_SEPARATOR));
+        let mut has_escalation = false;
         for continuation in &packed.delivered {
+            if matches!(continuation.source, ContinuationSource::PlanTaskEscalated) {
+                has_escalation = true;
+            }
             blocks.push(continuation_resource_block(continuation));
+        }
+        if has_escalation {
+            blocks.push(text_block(ESCALATION_HINT));
         }
     }
 
@@ -272,10 +280,17 @@ pub fn render_autonomous_turn_with_spill_v2(
 
     if !packed.delivered.is_empty() {
         blocks.push(text_block(MARKER_AUTONOMOUS));
+        let mut has_escalation = false;
         for continuation in &packed.delivered {
+            if matches!(continuation.source, ContinuationSource::PlanTaskEscalated) {
+                has_escalation = true;
+            }
             blocks.push(continuation_resource_block(continuation));
         }
         blocks.push(text_block(ACTION_HINT));
+        if has_escalation {
+            blocks.push(text_block(ESCALATION_HINT));
+        }
     }
 
     RenderOutcome {
