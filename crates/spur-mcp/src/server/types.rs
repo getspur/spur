@@ -613,6 +613,7 @@ pub(crate) fn append_review_warning(resp: &mut serde_json::Value, warning: Strin
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub fn unlicensed_feature_gate() -> Arc<spur_license::FeatureGate> {
     let gate = community_feature_gate();
     let mut snapshot = (**gate.snapshot()).clone();
