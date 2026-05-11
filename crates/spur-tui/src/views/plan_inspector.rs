@@ -676,24 +676,12 @@ impl View for PlanInspectorView {
             false
         };
 
-        let enter_hint = if self.open_issue_id.is_some() {
-            "Enter: close issue detail"
-        } else if selected_task_has_issue {
-            "Enter: issue detail"
-        } else {
-            "Enter: no linked issue"
-        };
-        let scroll_hint = if self.open_issue_id.is_some() {
-            "  j/k: line scroll  g/G: top/btm  PgUp/PgDn: page"
-        } else {
-            ""
-        };
+        let is_open_issue = self.open_issue_id.is_some();
+        let footer_hint = build_footer_hint(is_open_issue, selected_task_has_issue, area.width);
+
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
-                format!(
-                    " h/l: lane  j/k: task  b: blocker  {}  o: work item  g/G: ends  Alt+P/Esc: close {}",
-                    enter_hint, scroll_hint
-                ),
+                footer_hint,
                 Style::default().fg(token(ctx.theme, "plan_inspector.footer_hint.fg")),
             )])),
             chunks[2],
@@ -701,6 +689,41 @@ impl View for PlanInspectorView {
     }
 
     fn tick(&mut self) {}
+}
+
+fn build_footer_hint(open_issue: bool, has_linked_issue: bool, width: u16) -> String {
+    let mut parts = Vec::new();
+
+    if width >= 50 {
+        parts.push("h/l: lane");
+        parts.push("j/k: task");
+        parts.push("b: blocker");
+    }
+
+    if open_issue {
+        parts.push("Enter: close");
+        if width >= 80 {
+            parts.push("j/k: scroll");
+            parts.push("g/G: top/btm");
+        }
+    } else if has_linked_issue {
+        parts.push("Enter: issue");
+    } else {
+        parts.push("Enter: —");
+    }
+
+    parts.push("o: work item");
+
+    if width >= 50 {
+        if !open_issue {
+            parts.push("g/G: ends");
+        }
+        parts.push("Alt+P/Esc: close");
+    } else {
+        parts.push("Esc: close");
+    }
+
+    parts.join("  ")
 }
 
 fn plan_status_color(theme: &Theme, status: &str) -> Color {
