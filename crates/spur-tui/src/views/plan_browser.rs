@@ -413,6 +413,7 @@ impl PlanBrowserView {
         let header = Row::new([
             Cell::from("Plan").style(Style::default().add_modifier(Modifier::BOLD)),
             Cell::from("Work item").style(Style::default().add_modifier(Modifier::BOLD)),
+            Cell::from("Title").style(Style::default().add_modifier(Modifier::BOLD)),
             Cell::from("Owner").style(Style::default().add_modifier(Modifier::BOLD)),
             Cell::from("State").style(Style::default().add_modifier(Modifier::BOLD)),
             Cell::from("Progress").style(Style::default().add_modifier(Modifier::BOLD)),
@@ -423,8 +424,9 @@ impl PlanBrowserView {
             .iter()
             .map(|plan| {
                 Row::new([
-                    Cell::from(truncate(&plan.plan_id, 18)),
-                    Cell::from(truncate(&plan.epic_id, 16)),
+                    Cell::from(truncate(&plan.plan_id, 16)),
+                    Cell::from(truncate(&plan.epic_id, 12)),
+                    Cell::from(plan.title.as_str()),
                     Cell::from(truncate(&Self::owner_label(&plan.owner_state), 12)),
                     Cell::from(Self::lifecycle_label(plan.lifecycle)),
                     Cell::from(Self::progress_text(plan.counts.as_ref())),
@@ -433,10 +435,11 @@ impl PlanBrowserView {
             .collect();
 
         let widths = [
-            Constraint::Length(18),
             Constraint::Length(16),
             Constraint::Length(12),
-            Constraint::Length(14),
+            Constraint::Min(12),
+            Constraint::Length(12),
+            Constraint::Length(12),
             Constraint::Length(10),
         ];
 
