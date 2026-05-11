@@ -533,6 +533,7 @@ impl View for PlanInspectorView {
                         selected_task_id,
                         selected_stage_idx,
                         ctx.lineage,
+                        ctx.theme,
                     );
                 }
                 if let Some(task) = selected {
@@ -566,6 +567,7 @@ impl View for PlanInspectorView {
                         plan,
                         selected_task_id,
                         ctx.lineage,
+                        ctx.theme,
                     );
                 }
                 frame.render_widget(
