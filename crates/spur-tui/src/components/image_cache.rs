@@ -26,6 +26,13 @@ use image::DynamicImage;
 use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
 
 use crate::components::mermaid::MermaidId;
+use crate::components::react_trace::types::TraceImageId;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ImageCacheKey {
+    Mermaid(MermaidId),
+    Trace(TraceImageId),
+}
 
 struct CachedProtocol {
     proto: StatefulProtocol,
@@ -37,8 +44,8 @@ struct CachedProtocol {
 
 #[derive(Default)]
 pub struct ImageCache {
-    inline: HashMap<MermaidId, CachedProtocol>,
-    overlay: HashMap<MermaidId, CachedProtocol>,
+    inline: HashMap<ImageCacheKey, CachedProtocol>,
+    overlay: HashMap<ImageCacheKey, CachedProtocol>,
     /// Cell pixel size the current entries were built against. None ⇔
     /// both maps are empty. Drift triggers a full clear.
     last_cell_size: Option<(u16, u16)>,
@@ -66,7 +73,35 @@ impl ImageCache {
             &mut self.last_cell_size,
             picker,
         );
-        Self::get_or_build(&mut self.inline, id, image, image_generation, picker)
+        Self::get_or_build(
+            &mut self.inline,
+            ImageCacheKey::Mermaid(id),
+            image,
+            image_generation,
+            picker,
+        )
+    }
+
+    pub fn inline_trace_protocol_mut(
+        &mut self,
+        id: TraceImageId,
+        image: &Arc<DynamicImage>,
+        image_generation: u64,
+        picker: &Picker,
+    ) -> &mut StatefulProtocol {
+        Self::ensure_cell_size(
+            &mut self.inline,
+            &mut self.overlay,
+            &mut self.last_cell_size,
+            picker,
+        );
+        Self::get_or_build(
+            &mut self.inline,
+            ImageCacheKey::Trace(id),
+            image,
+            image_generation,
+            picker,
+        )
     }
 
     /// Same shape as `inline_protocol_mut` but for the overlay slot.
@@ -83,7 +118,13 @@ impl ImageCache {
             &mut self.last_cell_size,
             picker,
         );
-        Self::get_or_build(&mut self.overlay, id, image, image_generation, picker)
+        Self::get_or_build(
+            &mut self.overlay,
+            ImageCacheKey::Mermaid(id),
+            image,
+            image_generation,
+            picker,
+        )
     }
 
     /// Drop every protocol. Called on `Event::Resize` (terminal resize),
@@ -98,8 +139,8 @@ impl ImageCache {
     /// memory-hygiene; not required for correctness (auto-invalidation
     /// covers state changes).
     pub fn invalidate_id(&mut self, id: MermaidId) {
-        self.inline.remove(&id);
-        self.overlay.remove(&id);
+        self.inline.remove(&ImageCacheKey::Mermaid(id));
+        self.overlay.remove(&ImageCacheKey::Mermaid(id));
     }
 
     /// Test/debug accessor: how many entries each map holds.
@@ -124,8 +165,8 @@ impl ImageCache {
     }
 
     fn get_or_build<'a>(
-        map: &'a mut HashMap<MermaidId, CachedProtocol>,
-        id: MermaidId,
+        map: &'a mut HashMap<ImageCacheKey, CachedProtocol>,
+        id: ImageCacheKey,
         image: &Arc<DynamicImage>,
         image_generation: u64,
         picker: &Picker,
@@ -154,8 +195,8 @@ impl ImageCache {
     }
 
     fn ensure_cell_size(
-        inline: &mut HashMap<MermaidId, CachedProtocol>,
-        overlay: &mut HashMap<MermaidId, CachedProtocol>,
+        inline: &mut HashMap<ImageCacheKey, CachedProtocol>,
+        overlay: &mut HashMap<ImageCacheKey, CachedProtocol>,
         last: &mut Option<(u16, u16)>,
         picker: &Picker,
     ) {
