@@ -165,6 +165,10 @@ crates/spur-graph/
       subgraph.rs
       explain.rs
       search.rs
+    mcp/
+      mod.rs
+      tools.rs
+      payload.rs
     export/
       graph_json.rs
       mermaid.rs
@@ -177,6 +181,7 @@ This keeps runtime responsibilities clean:
 - `store` persists and retrieves Phase 1 snapshots and compatibility artifacts.
 - `graph` builds `petgraph` views and computes operational analytics.
 - `query` turns user questions into subgraph context.
+- `mcp` exposes graph queries as agent-facing tools instead of making agents parse CLI output.
 - `export` emits compatibility artifacts.
 
 ### Typed Fact Model
@@ -322,6 +327,8 @@ sequenceDiagram
     participant QA as graph algorithms
     participant EX as export/report
     participant Q as query/report
+    participant MCP as graph MCP tools
+    participant Agent as brain/worker agent
 
     CLI->>D: scan corpus
     D-->>CLI: file inventory + hashes
@@ -335,6 +342,10 @@ sequenceDiagram
     PG->>QA: run traversal, degree, SCC, reachability
     QA-->>Q: ranked subgraphs and metrics
     PG->>EX: write graph.json and GRAPH_REPORT.md
+    Agent->>MCP: get_callers/get_callees/get_subgraph
+    MCP->>Q: resolve symbol or file query
+    Q-->>MCP: compact graph context
+    MCP-->>Agent: bounded nodes, edges, spans, evidence
 ```
 
 ## Later Analyst Workflow
@@ -465,6 +476,21 @@ The Rust alternative should still export Graphify-compatible artifacts:
 
 This enables migration without breaking consumers that already expect Graphify outputs.
 
+## Day-One Agent Queries
+
+The Phase 1 graph is useful only if agents can call it without becoming graph experts. Expose these as MCP tools and matching CLI commands from the first usable milestone:
+
+| Query | Primary user | Purpose |
+|---|---|---|
+| `get_callers(symbol_id, max_depth)` | worker | Find upstream call sites before changing a signature or behavior. |
+| `get_callees(symbol_id, max_depth)` | worker | Find downstream dependencies before editing a function, struct, class, or module. |
+| `get_subgraph(file_path, radius)` | brain and worker | Return the local neighborhood around a file with bounded nodes, edges, spans, and relation labels. |
+| `find_shortest_path(source_id, target_id)` | worker | Explain how two symbols or files are coupled. |
+| `get_god_nodes(top_n)` | brain | Identify high-blast-radius symbols or files before planning delegation and review. |
+| `rank_review_risk(changed_paths)` | brain | Score a proposed change by touched degree, cross-file edges, and centrality. |
+
+Responses should be compact and evidence-bearing: stable IDs, labels, file paths, source spans, relation kind, confidence, and enough neighboring context for an agent to decide the next file to inspect. They should not dump the full graph.
+
 ## Alternatives
 
 ### Lane 1: Minimal Operational Graph, Rust + Tree-sitter + Petgraph
@@ -593,6 +619,7 @@ The original Graphify remains better for rapid Python algorithm experiments and 
 - Build a `petgraph` graph from typed facts.
 - Export Graphify-compatible `graph.json`.
 - Generate a minimal `GRAPH_REPORT.md`.
+- Expose `get_callers`, `get_callees`, `get_subgraph`, `find_shortest_path`, and `get_god_nodes` as native MCP tools so worker agents can navigate code topology immediately.
 
 ### Phase 2: Tree-sitter Extraction
 
@@ -646,6 +673,8 @@ Required benchmarks:
 - files per second parsed by tree-sitter;
 - facts per second normalized into the graph builder;
 - query latency for reachability, god nodes, and cross-file inferred edges;
+- agent context ROI: reduction in `read_file` and `rg` invocations for refactoring tasks when graph MCP tools are available;
+- graph payload efficiency: tokens returned by graph tools versus tokens saved by avoided file reads;
 - rows per second appended to DuckDB when Lane 2 starts;
 - Onager vs fallback latency for PageRank and connected components when Lane 3 starts;
 - graph export time and output size.
