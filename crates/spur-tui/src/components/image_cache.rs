@@ -19,7 +19,7 @@
 //! accepted Ok completion is structurally unforgeable.
 
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use image::DynamicImage;
@@ -47,6 +47,8 @@ enum ImageCacheKey {
 }
 
 const MAX_INLINE_SLICE_PROTOCOLS: usize = 32;
+const MAX_FULL_IMAGE_PROTOCOLS: usize = 16;
+const MAX_DISPLAY_SURFACES: usize = 16;
 
 impl ImageCacheKey {
     fn is_slice(self) -> bool {
@@ -65,10 +67,40 @@ struct CachedProtocol {
     image_generation: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DisplaySurfaceSource {
+    Mermaid(MermaidId),
+    Trace(TraceImageId),
+}
+
+impl From<MermaidId> for DisplaySurfaceSource {
+    fn from(id: MermaidId) -> Self {
+        Self::Mermaid(id)
+    }
+}
+
+impl From<TraceImageId> for DisplaySurfaceSource {
+    fn from(id: TraceImageId) -> Self {
+        Self::Trace(id)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct DisplaySurfaceKey {
+    source: DisplaySurfaceSource,
+    image_generation: u64,
+    pane_w_cols: u16,
+    cell_w_px: u16,
+    cell_h_px: u16,
+    total_rows: u16,
+}
+
 #[derive(Default)]
 pub struct ImageCache {
     inline: HashMap<ImageCacheKey, CachedProtocol>,
     overlay: HashMap<ImageCacheKey, CachedProtocol>,
+    display_surfaces: HashMap<DisplaySurfaceKey, Arc<DynamicImage>>,
+    display_surface_order: VecDeque<DisplaySurfaceKey>,
     /// Cell pixel size the current entries were built against. None ⇔
     /// both maps are empty. Drift triggers a full clear.
     last_cell_size: Option<(u16, u16)>,
@@ -93,9 +125,12 @@ impl ImageCache {
         Self::ensure_cell_size(
             &mut self.inline,
             &mut self.overlay,
+            &mut self.display_surfaces,
+            &mut self.display_surface_order,
             &mut self.last_cell_size,
             picker,
         );
+        Self::enforce_full_protocol_limit(&mut self.inline, ImageCacheKey::Mermaid(id));
         Self::get_or_build(
             &mut self.inline,
             ImageCacheKey::Mermaid(id),
@@ -115,9 +150,12 @@ impl ImageCache {
         Self::ensure_cell_size(
             &mut self.inline,
             &mut self.overlay,
+            &mut self.display_surfaces,
+            &mut self.display_surface_order,
             &mut self.last_cell_size,
             picker,
         );
+        Self::enforce_full_protocol_limit(&mut self.inline, ImageCacheKey::Trace(id));
         Self::get_or_build(
             &mut self.inline,
             ImageCacheKey::Trace(id),
@@ -140,6 +178,8 @@ impl ImageCache {
         Self::ensure_cell_size(
             &mut self.inline,
             &mut self.overlay,
+            &mut self.display_surfaces,
+            &mut self.display_surface_order,
             &mut self.last_cell_size,
             picker,
         );
@@ -166,6 +206,8 @@ impl ImageCache {
         Self::ensure_cell_size(
             &mut self.inline,
             &mut self.overlay,
+            &mut self.display_surfaces,
+            &mut self.display_surface_order,
             &mut self.last_cell_size,
             picker,
         );
@@ -190,9 +232,12 @@ impl ImageCache {
         Self::ensure_cell_size(
             &mut self.inline,
             &mut self.overlay,
+            &mut self.display_surfaces,
+            &mut self.display_surface_order,
             &mut self.last_cell_size,
             picker,
         );
+        Self::enforce_full_protocol_limit(&mut self.overlay, ImageCacheKey::Mermaid(id));
         Self::get_or_build(
             &mut self.overlay,
             ImageCacheKey::Mermaid(id),
@@ -207,7 +252,51 @@ impl ImageCache {
     pub fn invalidate_all(&mut self) {
         self.inline.clear();
         self.overlay.clear();
+        self.display_surfaces.clear();
+        self.display_surface_order.clear();
         self.last_cell_size = None;
+    }
+
+    pub fn display_surface<I>(
+        &mut self,
+        id: I,
+        source: &Arc<DynamicImage>,
+        image_generation: u64,
+        pane_w_cols: u16,
+        cell_w_px: u16,
+        cell_h_px: u16,
+        total_rows: u16,
+    ) -> Arc<DynamicImage>
+    where
+        I: Into<DisplaySurfaceSource>,
+    {
+        let key = DisplaySurfaceKey {
+            source: id.into(),
+            image_generation,
+            pane_w_cols,
+            cell_w_px,
+            cell_h_px,
+            total_rows,
+        };
+
+        if let Some(surface) = self.display_surfaces.get(&key) {
+            return surface.clone();
+        }
+
+        Self::enforce_display_surface_limit(
+            &mut self.display_surfaces,
+            &mut self.display_surface_order,
+        );
+        let surface = Arc::new(build_display_surface(
+            source.as_ref(),
+            pane_w_cols,
+            cell_w_px,
+            cell_h_px,
+            total_rows,
+        ));
+        self.display_surfaces.insert(key, surface.clone());
+        self.display_surface_order.push_back(key);
+        surface
     }
 
     /// Drop only the protocols for one id. Available for explicit
@@ -219,15 +308,27 @@ impl ImageCache {
         self.inline.retain(|key, _| {
             !matches!(key, ImageCacheKey::MermaidSlice { id: slice_id, .. } if *slice_id == id)
         });
-        self.overlay.retain(|key, _| {
-            !matches!(key, ImageCacheKey::MermaidSlice { id: slice_id, .. } if *slice_id == id)
+        self.retain_display_surfaces(|key| key.source != DisplaySurfaceSource::Mermaid(id));
+    }
+
+    pub fn invalidate_trace_id(&mut self, id: TraceImageId) {
+        self.inline.remove(&ImageCacheKey::Trace(id));
+        self.overlay.remove(&ImageCacheKey::Trace(id));
+        self.inline.retain(|key, _| {
+            !matches!(key, ImageCacheKey::TraceSlice { id: slice_id, .. } if *slice_id == id)
         });
+        self.retain_display_surfaces(|key| key.source != DisplaySurfaceSource::Trace(id));
     }
 
     /// Test/debug accessor: how many entries each map holds.
     #[cfg(any(test, debug_assertions))]
     pub fn len(&self) -> (usize, usize) {
         (self.inline.len(), self.overlay.len())
+    }
+
+    #[cfg(test)]
+    pub fn display_surface_len(&self) -> usize {
+        self.display_surfaces.len()
     }
 
     /// Test-only injection point: simulate a cell-size change without a
@@ -239,6 +340,8 @@ impl ImageCache {
             Some(_) => {
                 self.inline.clear();
                 self.overlay.clear();
+                self.display_surfaces.clear();
+                self.display_surface_order.clear();
                 self.last_cell_size = Some(cur);
             }
             None => self.last_cell_size = Some(cur),
@@ -278,6 +381,8 @@ impl ImageCache {
     fn ensure_cell_size(
         inline: &mut HashMap<ImageCacheKey, CachedProtocol>,
         overlay: &mut HashMap<ImageCacheKey, CachedProtocol>,
+        display_surfaces: &mut HashMap<DisplaySurfaceKey, Arc<DynamicImage>>,
+        display_surface_order: &mut VecDeque<DisplaySurfaceKey>,
         last: &mut Option<(u16, u16)>,
         picker: &Picker,
     ) {
@@ -287,6 +392,8 @@ impl ImageCache {
             Some(_) => {
                 inline.clear();
                 overlay.clear();
+                display_surfaces.clear();
+                display_surface_order.clear();
                 *last = Some(cur);
             }
             None => *last = Some(cur),
@@ -318,6 +425,80 @@ impl ImageCache {
             inline.remove(&key);
         }
     }
+
+    fn enforce_full_protocol_limit(
+        inline: &mut HashMap<ImageCacheKey, CachedProtocol>,
+        current: ImageCacheKey,
+    ) {
+        if inline.contains_key(&current) {
+            return;
+        }
+
+        let full_count = inline.keys().filter(|key| !key.is_slice()).count();
+        if full_count < MAX_FULL_IMAGE_PROTOCOLS {
+            return;
+        }
+
+        let remove_count = full_count + 1 - MAX_FULL_IMAGE_PROTOCOLS;
+        let stale_keys: Vec<_> = inline
+            .keys()
+            .filter(|key| !key.is_slice() && **key != current)
+            .copied()
+            .take(remove_count)
+            .collect();
+
+        for key in stale_keys {
+            inline.remove(&key);
+        }
+    }
+
+    fn enforce_display_surface_limit(
+        surfaces: &mut HashMap<DisplaySurfaceKey, Arc<DynamicImage>>,
+        order: &mut VecDeque<DisplaySurfaceKey>,
+    ) {
+        while surfaces.len() >= MAX_DISPLAY_SURFACES {
+            let Some(key) = order.pop_front() else {
+                break;
+            };
+            surfaces.remove(&key);
+        }
+    }
+
+    fn retain_display_surfaces(&mut self, mut keep: impl FnMut(&DisplaySurfaceKey) -> bool) {
+        self.display_surfaces.retain(|key, _| keep(key));
+        self.display_surface_order
+            .retain(|key| self.display_surfaces.contains_key(key));
+    }
+}
+
+fn build_display_surface(
+    source: &DynamicImage,
+    pane_w_cols: u16,
+    cell_w_px: u16,
+    cell_h_px: u16,
+    total_rows: u16,
+) -> DynamicImage {
+    use image::imageops::FilterType;
+
+    let target_w = (pane_w_cols as u32)
+        .saturating_mul(cell_w_px.max(1) as u32)
+        .max(1);
+    let target_h = (total_rows as u32)
+        .saturating_mul(cell_h_px.max(1) as u32)
+        .max(1);
+
+    if source.width() == 0 || source.height() == 0 {
+        return DynamicImage::new_rgba8(target_w, target_h);
+    }
+
+    let width_for_height = (source.width() as u64)
+        .saturating_mul(target_h as u64)
+        .checked_div(source.height() as u64)
+        .unwrap_or(0)
+        .max(1) as u32;
+    let surface_w = target_w.min(width_for_height).max(1);
+
+    source.resize_exact(surface_w, target_h, FilterType::Lanczos3)
 }
 
 #[cfg(test)]
@@ -481,5 +662,61 @@ mod tests {
             (MAX_INLINE_SLICE_PROTOCOLS, 0),
             "scrolling should not cache every historical slice"
         );
+    }
+
+    #[test]
+    fn display_surface_uses_full_render_dimensions() {
+        let mut c = ImageCache::new();
+        let img = Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(100, 50)));
+
+        let surface = c.display_surface(MermaidId(1), &img, 1, 10, 8, 16, 4);
+
+        assert_eq!(surface.width(), 80);
+        assert_eq!(surface.height(), 64);
+        assert_eq!(c.display_surface_len(), 1);
+    }
+
+    #[test]
+    fn display_surfaces_are_bounded() {
+        let mut c = ImageCache::new();
+        let img = small_image();
+
+        for id in 0..(MAX_DISPLAY_SURFACES as u64 + 1) {
+            c.display_surface(TraceImageId(id), &img, 1, 10, 8, 16, 4);
+        }
+
+        assert_eq!(c.display_surface_len(), MAX_DISPLAY_SURFACES);
+    }
+
+    #[test]
+    fn full_inline_protocols_are_bounded() {
+        let mut c = ImageCache::new();
+        let img = small_image();
+        let p = picker();
+
+        for id in 0..(MAX_FULL_IMAGE_PROTOCOLS as u64 + 1) {
+            c.inline_trace_protocol_mut(TraceImageId(id), &img, 1, &p);
+        }
+
+        assert_eq!(c.len(), (MAX_FULL_IMAGE_PROTOCOLS, 0));
+    }
+
+    #[test]
+    fn invalidate_trace_id_removes_full_slice_and_surface_entries() {
+        let mut c = ImageCache::new();
+        let img = small_image();
+        let p = picker();
+        let id = TraceImageId(7);
+
+        c.inline_trace_protocol_mut(id, &img, 1, &p);
+        c.inline_trace_slice_protocol_mut(id, &img, 1, 2, 4, 10, &p);
+        c.display_surface(id, &img, 1, 10, 8, 16, 10);
+        assert_eq!(c.len(), (2, 0));
+        assert_eq!(c.display_surface_len(), 1);
+
+        c.invalidate_trace_id(id);
+
+        assert_eq!(c.len(), (0, 0));
+        assert_eq!(c.display_surface_len(), 0);
     }
 }
