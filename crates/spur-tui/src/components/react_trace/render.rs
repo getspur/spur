@@ -339,6 +339,9 @@ fn render_inline_image(
     };
 
     let partial = first_row_within != 0 || run_len != total_rows;
+    let (cell_w_px, cell_h_px) = picker.font_size();
+    let cell_w_px = cell_w_px.max(1);
+    let cell_h_px = cell_h_px.max(1);
 
     let proto = match source {
         InlineImageSource::Mermaid(id) => {
@@ -352,10 +355,13 @@ fn render_inline_image(
             };
             let gen = *image_generation;
             let image_arc = image.clone();
+            let surface = ctx.image_cache.display_surface(
+                id, &image_arc, gen, rect.width, cell_w_px, cell_h_px, total_rows,
+            );
             if partial {
                 let Some(slice) = crop_visible_image_slice(
-                    image_arc.as_ref(),
-                    total_rows,
+                    surface.as_ref(),
+                    cell_h_px,
                     first_row_within,
                     run_len,
                 ) else {
@@ -373,17 +379,26 @@ fn render_inline_image(
                 )
             } else {
                 ctx.image_cache
-                    .inline_protocol_mut(id, &image_arc, gen, picker)
+                    .inline_protocol_mut(id, &surface, gen, picker)
             }
         }
         InlineImageSource::Trace(id) => {
             let Some(stored) = trace_images.get(&id) else {
                 return false;
             };
+            let surface = ctx.image_cache.display_surface(
+                id,
+                &stored.image,
+                stored.image_generation,
+                rect.width,
+                cell_w_px,
+                cell_h_px,
+                total_rows,
+            );
             if partial {
                 let Some(slice) = crop_visible_image_slice(
-                    stored.image.as_ref(),
-                    total_rows,
+                    surface.as_ref(),
+                    cell_h_px,
                     first_row_within,
                     run_len,
                 ) else {
@@ -402,7 +417,7 @@ fn render_inline_image(
             } else {
                 ctx.image_cache.inline_trace_protocol_mut(
                     id,
-                    &stored.image,
+                    &surface,
                     stored.image_generation,
                     picker,
                 )
@@ -417,29 +432,21 @@ fn render_inline_image(
 #[cfg(feature = "markdown")]
 pub(crate) fn crop_visible_image_slice(
     image: &image::DynamicImage,
-    total_rows: u16,
+    cell_h_px: u16,
     first_row_within: u16,
     run_len: u16,
 ) -> Option<image::DynamicImage> {
-    if total_rows == 0 || run_len == 0 || image.width() == 0 || image.height() == 0 {
+    let cell_h_px = cell_h_px.max(1) as u32;
+    if run_len == 0 || image.width() == 0 || image.height() == 0 {
         return None;
     }
 
-    let start_row = first_row_within.min(total_rows);
-    let end_row = first_row_within.saturating_add(run_len).min(total_rows);
-    if end_row <= start_row {
-        return None;
-    }
-
-    let height = image.height() as u64;
-    let total = total_rows as u64;
-    let start_y = ((height * start_row as u64) / total).min(height) as u32;
-    let end_y = height
-        .saturating_mul(end_row as u64)
-        .saturating_add(total.saturating_sub(1))
-        / total;
-    let end_y = end_y.min(height).max(start_y as u64 + 1) as u32;
-    let slice_height = end_y.saturating_sub(start_y);
+    let start_y = (first_row_within as u32)
+        .saturating_mul(cell_h_px)
+        .min(image.height());
+    let slice_height = (run_len as u32)
+        .saturating_mul(cell_h_px)
+        .min(image.height().saturating_sub(start_y));
     if slice_height == 0 {
         return None;
     }
@@ -1728,7 +1735,7 @@ mod image_slice_tests {
     fn partial_image_slice_crops_visible_source_rows() {
         let img = striped_image();
 
-        let cropped = crop_visible_image_slice(&img, 10, 3, 4).expect("slice should exist");
+        let cropped = crop_visible_image_slice(&img, 1, 3, 4).expect("slice should exist");
 
         assert_eq!(cropped.dimensions(), (2, 4));
         assert_eq!(cropped.get_pixel(0, 0), Rgba([60, 0, 0, 255]));
@@ -1739,11 +1746,22 @@ mod image_slice_tests {
     fn partial_image_slice_clamps_to_source_bounds() {
         let img = striped_image();
 
-        let cropped = crop_visible_image_slice(&img, 10, 8, 10).expect("slice should exist");
+        let cropped = crop_visible_image_slice(&img, 1, 8, 10).expect("slice should exist");
 
         assert_eq!(cropped.dimensions(), (2, 2));
         assert_eq!(cropped.get_pixel(0, 0), Rgba([160, 0, 0, 255]));
         assert_eq!(cropped.get_pixel(0, 1), Rgba([180, 0, 0, 255]));
+    }
+
+    #[test]
+    fn partial_image_slice_uses_cell_aligned_boundaries() {
+        let img = striped_image();
+
+        let cropped = crop_visible_image_slice(&img, 2, 1, 2).expect("slice should exist");
+
+        assert_eq!(cropped.dimensions(), (2, 4));
+        assert_eq!(cropped.get_pixel(0, 0), Rgba([40, 0, 0, 255]));
+        assert_eq!(cropped.get_pixel(0, 3), Rgba([100, 0, 0, 255]));
     }
 }
 
