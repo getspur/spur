@@ -278,6 +278,7 @@ fn build_task_snapshot(state: &PlanState, task: &PlanTaskEntry) -> PlanSnapshotT
         task_name: display_name(&task.spec.task),
         agent: task.spec.agent.clone(),
         issue_id: task.spec.issue_id.clone(),
+        issue_title: task.spec.issue_title.clone(),
         status,
         attempt: task.attempt,
         max_attempts: MAX_ATTEMPTS,

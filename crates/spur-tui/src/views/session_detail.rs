@@ -3933,6 +3933,7 @@ mod composer_routing_tests {
                             task_name: "task-1".into(),
                             agent: "codex".into(),
                             issue_id: Some("bd-1".into()),
+                            issue_title: None,
                             status: "pending".into(),
                             attempt: 0,
                             max_attempts: 3,
