@@ -151,6 +151,8 @@ struct ContinuationResourceBody<'a> {
     fetch_hint: &'a Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     base_hint: &'a Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    setup_conflict_topology: &'a Option<spur_acp::domain::continuation::SetupConflictTopology>,
     created_at_wall: &'a chrono::DateTime<chrono::Utc>,
 }
 
@@ -170,6 +172,7 @@ fn continuation_resource_body(c: &BrainContinuation) -> ContinuationResourceBody
         artifact_id: &c.payload.artifact_id,
         fetch_hint: &c.payload.fetch_hint,
         base_hint: &c.payload.base_hint,
+        setup_conflict_topology: &c.payload.setup_conflict_topology,
         created_at_wall: &c.created_at_wall,
     }
 }
