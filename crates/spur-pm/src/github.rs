@@ -205,6 +205,7 @@ impl From<GhIssueListItem> for IssueSummary {
             priority: None,
             issue_type: None,
             assignee: None,
+            description: None,
         }
     }
 }
@@ -503,6 +504,7 @@ mod tests {
             priority: None,
             issue_type: None,
             assignee: None,
+            description: None,
         }
     }
 

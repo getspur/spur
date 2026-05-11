@@ -12,6 +12,7 @@ mod issue_browser_navigation_tests {
             priority: Some(1),
             issue_type: Some("bug".into()),
             assignee: None,
+            description: None,
         }
     }
 

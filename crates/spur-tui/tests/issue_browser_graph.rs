@@ -28,6 +28,7 @@ fn sample_summary_with_status(id: &str, title: &str, status: &str) -> IssueSumma
         priority: Some(1),
         issue_type: Some("task".into()),
         assignee: None,
+        description: None,
     }
 }
 

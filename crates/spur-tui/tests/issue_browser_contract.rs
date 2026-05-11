@@ -37,6 +37,7 @@ fn sample_summary(id: &str, title: &str, status: &str) -> IssueSummaryEvent {
         priority: None,
         issue_type: None,
         assignee: None,
+        description: None,
     }
 }
 
@@ -51,6 +52,7 @@ fn sample_pm_summary(id: &str, title: &str) -> spur_pm::IssueSummary {
         priority: Some(1),
         issue_type: Some("bug".into()),
         assignee: None,
+        description: None,
     }
 }
 

@@ -18,6 +18,7 @@ fn sample_summary(id: &str) -> IssueSummaryEvent {
         priority: None,
         issue_type: None,
         assignee: None,
+        description: None,
     }
 }
 

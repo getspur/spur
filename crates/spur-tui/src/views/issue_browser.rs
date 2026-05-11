@@ -1110,6 +1110,7 @@ impl View for IssueBrowserView {
                         priority: i.priority,
                         issue_type: i.issue_type.clone(),
                         assignee: i.assignee.clone(),
+                        description: i.description.clone(),
                     })
                     .collect::<Vec<_>>();
                 sort_issues_parent_first(&mut loaded_issues);
@@ -1338,6 +1339,7 @@ mod tests {
             priority: Some(1),
             issue_type: Some(issue_type.into()),
             assignee: None,
+            description: None,
         }
     }
 

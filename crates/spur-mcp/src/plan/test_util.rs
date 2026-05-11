@@ -371,6 +371,7 @@ fn issue_summary(issue: &spur_pm::Issue) -> spur_pm::IssueSummary {
         priority: issue.priority,
         issue_type: issue.issue_type.clone(),
         assignee: issue.assignee.clone(),
+        description: Some(issue.body.clone()).filter(|b| !b.trim().is_empty()),
     }
 }
 
