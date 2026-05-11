@@ -161,6 +161,18 @@ async fn compensate_mutation_orphans_emits_violation_breadcrumb() {
     .expect("label child mutation");
     run_br(
         dir.path(),
+        &["label", "add", &child, "spur:plan-id:orphan-plan"],
+    )
+    .expect("label child plan scope");
+    run_br(
+        dir.path(),
+        &["label", "add", &child, "spur:plan-task-id:orphan-task"],
+    )
+    .expect("label child task scope");
+    run_br(dir.path(), &["label", "add", &child, "spur:agent:codex"])
+        .expect("label child agent scope");
+    run_br(
+        dir.path(),
         &[
             "label",
             "add",
@@ -231,4 +243,14 @@ async fn compensate_mutation_orphans_emits_violation_breadcrumb() {
 
     let child_issue = pm.get_issue(&child).await.expect("load child");
     assert_eq!(child_issue.status, pm.closed_status());
+    assert!(
+        !child_issue
+            .labels
+            .iter()
+            .any(|label| label.starts_with("spur:plan-id:")
+                || label.starts_with("spur:plan-task-id:")
+                || label.starts_with("spur:agent:")),
+        "closed orphan child must not retain plan-scope labels: {:?}",
+        child_issue.labels
+    );
 }

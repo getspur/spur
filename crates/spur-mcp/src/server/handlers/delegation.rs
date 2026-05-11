@@ -203,7 +203,10 @@ impl McpCallbackServer {
         let delegation_id = issue
             .labels
             .iter()
-            .find_map(|label| crate::plan::labels::parse_delegation_id(label))
+            .find_map(|label| {
+                crate::plan::labels::parse_delegation_id(label)
+                    .or_else(|| label.strip_prefix("delegation-id:"))
+            })
             .map(str::to_string)
             .ok_or_else(|| {
                 format!(
