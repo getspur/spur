@@ -10,6 +10,7 @@ use spur_pm::Issue;
 
 use crate::theme::{resolve_token, ColorDepth, Theme};
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_task_detail(
     frame: &mut Frame,
     area: Rect,
@@ -293,8 +294,20 @@ fn dependency_column(_label: &str, arrow: &str, ids: &[String], plan: &TrackedPl
 
 fn task_ref(id: &str, arrow: &str, plan: &TrackedPlan) -> String {
     match plan.task(id) {
-        Some(task) => format!("{arrow}{id} ({})", task.status),
+        Some(task) => match status_suffix(&task.status) {
+            Some(suffix) => format!("{arrow}{id} {suffix}"),
+            None => format!("{arrow}{id}"),
+        },
         None => format!("{arrow}{id}"),
+    }
+}
+
+fn status_suffix(status: &str) -> Option<&'static str> {
+    match status {
+        "running" | "active" | "dispatched" => Some("(RUN)"),
+        "rejected" => Some("(REJ)"),
+        "failed" | "error" => Some("(ERR)"),
+        _ => None,
     }
 }
 
