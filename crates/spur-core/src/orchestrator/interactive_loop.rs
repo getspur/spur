@@ -719,6 +719,51 @@ impl Orchestrator {
                         }
                     }
 
+                    // ── ForceReclaimPlan ──────────────────────────────────
+                    InteractiveInput::ForceReclaimPlan { plan_id } => {
+                        let server = brain
+                            .as_ref()
+                            .and_then(|b| b.mcp_server.as_ref())
+                            .map(Arc::clone);
+                        if let Some(server) = server {
+                            if let Err(error) = server.call_force_reclaim_plan(&plan_id).await {
+                                self.funnel.emit(SpurEventBody::PlanCommandError {
+                                    operation: "ForceReclaimPlan".into(),
+                                    plan_id: Some(plan_id),
+                                    error,
+                                });
+                            } else if let Some(pm) = &self.pm_service {
+                                let current_session = brain.as_ref().map(|b| &b.spur_session_id);
+                                match load_plan_summaries(pm, current_session).await {
+                                    Ok(load) => {
+                                        self.funnel.emit(SpurEventBody::PlansLoaded {
+                                            plans: load.plans,
+                                            warnings: load.warnings,
+                                        });
+                                    }
+                                    Err(error) => {
+                                        self.funnel.emit(SpurEventBody::PlanCommandError {
+                                            operation: "RefreshPlans".into(),
+                                            plan_id: None,
+                                            error: error.to_string(),
+                                        });
+                                    }
+                                }
+                            }
+                        } else {
+                            let error = if brain.is_some() {
+                                "Brain session initializing - try again in a moment".into()
+                            } else {
+                                "No active brain session - start one to claim plans".into()
+                            };
+                            self.funnel.emit(SpurEventBody::PlanCommandError {
+                                operation: "ForceReclaimPlan".into(),
+                                plan_id: Some(plan_id),
+                                error,
+                            });
+                        }
+                    }
+
                     // ── ResumePlan ────────────────────────────────────────
                     InteractiveInput::ResumePlan { plan_id } => {
                         let server = brain
