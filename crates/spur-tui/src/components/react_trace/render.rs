@@ -128,9 +128,15 @@ pub(crate) fn fence_state_hash(
     for (id, state) in entries {
         id.0.hash(&mut h);
         std::mem::discriminant(state).hash(&mut h);
-        if let MermaidState::Ready { image, .. } = state {
-            image.width().hash(&mut h);
-            image.height().hash(&mut h);
+        match state {
+            MermaidState::Ready { image, .. } => {
+                image.width().hash(&mut h);
+                image.height().hash(&mut h);
+            }
+            MermaidState::ReadyText { text, .. } => {
+                text.hash(&mut h);
+            }
+            _ => {}
         }
     }
     h.finish()
@@ -299,6 +305,7 @@ fn compute_fence_states(
                 cell_w_px,
                 cell_h_px,
             )),
+            MermaidState::ReadyText { text, .. } => FenceRender::ReadyText(text.clone()),
             MermaidState::Pending { .. } | MermaidState::Rendering => FenceRender::Pending,
             MermaidState::Error { .. } => FenceRender::Error,
         };

@@ -39,7 +39,12 @@ impl MermaidViewerView {
             self.focused = entries
                 .iter()
                 .rev()
-                .find(|(_, s)| matches!(s, MermaidState::Ready { .. }))
+                .find(|(_, s)| {
+                    matches!(
+                        s,
+                        MermaidState::Ready { .. } | MermaidState::ReadyText { .. }
+                    )
+                })
                 .map(|(id, _)| *id);
         }
     }
@@ -48,7 +53,12 @@ impl MermaidViewerView {
     pub fn cycle(&mut self, entries: &[(MermaidId, &MermaidState)], forward: bool) {
         let ready_ids: Vec<MermaidId> = entries
             .iter()
-            .filter(|(_, s)| matches!(s, MermaidState::Ready { .. }))
+            .filter(|(_, s)| {
+                matches!(
+                    s,
+                    MermaidState::Ready { .. } | MermaidState::ReadyText { .. }
+                )
+            })
             .map(|(id, _)| *id)
             .collect();
         if ready_ids.is_empty() {
