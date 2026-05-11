@@ -33,6 +33,7 @@ fn sample_summary(id: &str, title: &str, issue_type: &str) -> IssueSummaryEvent 
         priority: Some(1),
         issue_type: Some(issue_type.into()),
         assignee: None,
+        description: None,
     }
 }
 

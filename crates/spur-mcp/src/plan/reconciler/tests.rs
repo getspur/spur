@@ -90,6 +90,7 @@ fn summary(id: &str, status: &str) -> spur_pm::IssueSummary {
         priority: None,
         issue_type: Some("task".into()),
         assignee: None,
+        description: None,
     }
 }
 
