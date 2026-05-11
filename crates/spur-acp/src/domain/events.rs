@@ -373,6 +373,8 @@ pub struct PlanSnapshotTask {
     pub agent: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_title: Option<String>,
     pub status: String,
     pub attempt: u32,
     pub max_attempts: u32,

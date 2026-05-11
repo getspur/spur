@@ -48,6 +48,8 @@ pub struct PlanTask {
     #[serde(default)]
     pub issue_id: Option<String>,
     #[serde(default)]
+    pub issue_title: Option<String>,
+    #[serde(default)]
     pub context_files: Vec<String>,
 }
 
@@ -560,6 +562,7 @@ mod approved_dep_closure_tests {
                 task: format!("Do {id}"),
                 depends_on: deps.iter().map(|dep| dep.to_string()).collect(),
                 issue_id: Some(format!("bd-{id}")),
+                issue_title: None,
                 context_files: Vec::new(),
             },
             status,
@@ -668,6 +671,7 @@ mod scope_snapshot_integration_tests {
             task: format!("Do {task_id}"),
             depends_on: deps.into_iter().map(String::from).collect(),
             issue_id: Some(format!("bd-{task_id}")),
+            issue_title: None,
             context_files: vec![],
         }
     }
@@ -965,12 +969,14 @@ pub fn derive_epic_plan_from_issues(
         }
 
         let id = child.id.clone();
+        let title = child.title.clone();
         plan_tasks.push(PlanTask {
             task_id: id.clone(),
             agent,
             task: task_text,
             depends_on,
             issue_id: Some(id),
+            issue_title: Some(title),
             context_files: vec![],
         });
     }

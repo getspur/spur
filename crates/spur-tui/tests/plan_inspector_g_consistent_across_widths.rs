@@ -54,6 +54,7 @@ fn task(task_id: &str, stage_idx: usize) -> PlanSnapshotTask {
         task_name: task_id.into(),
         agent: "codex".into(),
         issue_id: Some(format!("bd-{task_id}")),
+        issue_title: None,
         status: "pending".into(),
         attempt: 0,
         max_attempts: 3,
