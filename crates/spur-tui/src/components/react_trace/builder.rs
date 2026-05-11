@@ -444,6 +444,32 @@ impl ReactTrace {
                         }
                     }
                 }
+
+                TraceKind::Image { id, label } => {
+                    let path_label = self
+                        .inline_images
+                        .get(id)
+                        .map(|stored| stored.path.display().to_string())
+                        .unwrap_or_else(|| entry.text.clone());
+                    lines.push(Line::from(vec![
+                        ts_span.clone(),
+                        Span::styled(
+                            format!("🖼 {}", label),
+                            Style::default()
+                                .fg(message_title_color)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+                    if !entry.text.is_empty() {
+                        lines.push(Line::from(vec![
+                            Span::raw("   "),
+                            Span::styled(
+                                terminal_safe_text(&path_label),
+                                Style::default().fg(message_body_color),
+                            ),
+                        ]));
+                    }
+                }
             }
 
             // Blank separator between entries. No adjacency skip needed: Act outcome
@@ -460,7 +486,7 @@ impl ReactTrace {
 use crate::components::line_wrap::wrap_line_to_width;
 
 #[cfg(feature = "markdown")]
-use super::types::VirtualRow;
+use super::types::{InlineImageSource, VirtualRow};
 
 #[cfg(feature = "markdown")]
 use crate::components::markdown_stream::{MarkdownStream, StreamItem};
@@ -775,7 +801,7 @@ impl ReactTrace {
                                 BodyRow::Image { id, h } => {
                                     for r in 0..h {
                                         rows.push(VirtualRow::ImageRow {
-                                            id,
+                                            source: InlineImageSource::Mermaid(id),
                                             row_within: r,
                                             total_rows: h,
                                         });
@@ -1127,6 +1153,44 @@ impl ReactTrace {
                                 ]),
                             );
                         }
+                    }
+                }
+
+                TraceKind::Image { id, label } => {
+                    push_wrapped(
+                        &mut rows,
+                        &mut byte_ranges,
+                        content_range.clone(),
+                        Line::from(vec![
+                            ts_span.clone(),
+                            Span::styled(
+                                format!("🖼 {}", label),
+                                Style::default()
+                                    .fg(message_title_color)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        ]),
+                    );
+                    let image_rows = self
+                        .inline_images
+                        .get(id)
+                        .map(|stored| {
+                            crate::components::react_trace::render::compute_inline_height_rows(
+                                stored.image.as_ref(),
+                                effective_width,
+                                60,
+                                8,
+                                16,
+                            )
+                        })
+                        .unwrap_or(1);
+                    for r in 0..image_rows {
+                        rows.push(VirtualRow::ImageRow {
+                            source: InlineImageSource::Trace(*id),
+                            row_within: r,
+                            total_rows: image_rows,
+                        });
+                        byte_ranges.push(content_range.clone());
                     }
                 }
             }
