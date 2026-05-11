@@ -116,6 +116,7 @@ const MARKER_SEPARATOR: &str =
     "[SPUR:background] The following blocks were injected by SPUR, not authored by the user.";
 const ACTION_HINT: &str = "Review the result and decide the next action.";
 const ESCALATION_HINT: &str = "One or more tasks have escalated. Use the `submit_plan_mutation` tool (your 'Swiss Army knife') to recover the escalated task: retry it as-is, rewrite its spec (task body, agent, context, deps), or abandon it.";
+const CONFLICT_HINT: &str = "A task is blocked by a setup conflict. Inspect the provided setup conflict topology, resolve the overlay conflict, and then use the `plan_truncate_and_restart` or `submit_plan_mutation` tool to resume the plan.";
 
 #[derive(Debug)]
 pub struct RenderOutcome {
@@ -252,19 +253,23 @@ pub fn render_merged_turn_with_spill_v2(
     if !packed.delivered.is_empty() {
         blocks.push(text_block(MARKER_SEPARATOR));
         let mut has_escalation = false;
+        let mut has_conflict = false;
         for continuation in &packed.delivered {
-            if matches!(continuation.source, ContinuationSource::PlanTaskEscalated)
-                || matches!(
-                    continuation.source,
-                    ContinuationSource::PlanTaskBlockedOnSetupConflict
-                )
-            {
+            if matches!(continuation.source, ContinuationSource::PlanTaskEscalated) {
                 has_escalation = true;
+            } else if matches!(
+                continuation.source,
+                ContinuationSource::PlanTaskBlockedOnSetupConflict
+            ) {
+                has_conflict = true;
             }
             blocks.push(continuation_resource_block(continuation));
         }
         if has_escalation {
             blocks.push(text_block(ESCALATION_HINT));
+        }
+        if has_conflict {
+            blocks.push(text_block(CONFLICT_HINT));
         }
     }
 
@@ -286,20 +291,24 @@ pub fn render_autonomous_turn_with_spill_v2(
     if !packed.delivered.is_empty() {
         blocks.push(text_block(MARKER_AUTONOMOUS));
         let mut has_escalation = false;
+        let mut has_conflict = false;
         for continuation in &packed.delivered {
-            if matches!(continuation.source, ContinuationSource::PlanTaskEscalated)
-                || matches!(
-                    continuation.source,
-                    ContinuationSource::PlanTaskBlockedOnSetupConflict
-                )
-            {
+            if matches!(continuation.source, ContinuationSource::PlanTaskEscalated) {
                 has_escalation = true;
+            } else if matches!(
+                continuation.source,
+                ContinuationSource::PlanTaskBlockedOnSetupConflict
+            ) {
+                has_conflict = true;
             }
             blocks.push(continuation_resource_block(continuation));
         }
         blocks.push(text_block(ACTION_HINT));
         if has_escalation {
             blocks.push(text_block(ESCALATION_HINT));
+        }
+        if has_conflict {
+            blocks.push(text_block(CONFLICT_HINT));
         }
     }
 
