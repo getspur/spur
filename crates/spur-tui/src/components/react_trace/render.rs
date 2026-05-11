@@ -435,6 +435,10 @@ pub(crate) fn render_partial_card(
         _ => "▲▼ scroll for more",
     };
     let label = image_label(source);
+    let hint = match source {
+        InlineImageSource::Mermaid(_) => "Alt-v · open in full viewer",
+        InlineImageSource::Trace(_) => "Scroll to reveal image",
+    };
 
     let lines: Vec<Line<'static>> = match run_len {
         1 => vec![Line::from(Span::styled(
@@ -447,7 +451,7 @@ pub(crate) fn render_partial_card(
                 Style::default().fg(card_color).add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
-                "Alt-v · open in full viewer",
+                hint,
                 Style::default().fg(hint_color).add_modifier(Modifier::DIM),
             )),
         ],
@@ -460,7 +464,7 @@ pub(crate) fn render_partial_card(
                 )),
                 Line::from(""),
                 Line::from(Span::styled(
-                    "Alt-v · open in full viewer",
+                    hint,
                     Style::default().fg(hint_color).add_modifier(Modifier::DIM),
                 )),
             ]
@@ -1355,6 +1359,7 @@ mod height_tests {
 mod card_tests {
     use super::*;
     use crate::components::mermaid::MermaidId;
+    use crate::components::react_trace::types::TraceImageId;
     use ratatui::{backend::TestBackend, Terminal};
 
     fn render_into(rect_h: u16, body: impl FnOnce(&mut Frame, Rect)) -> Vec<String> {
@@ -1541,6 +1546,30 @@ mod card_tests {
         // 3-line variant: title, blank, hint → 2 non-blank.
         let non_blank = lines.iter().filter(|l| !l.is_empty()).count();
         assert_eq!(non_blank, 2);
+    }
+
+    #[test]
+    fn trace_image_partial_card_does_not_advertise_mermaid_viewer() {
+        let lines = render_into(3, |f, r| {
+            render_partial_card(
+                f,
+                r,
+                InlineImageSource::Trace(TraceImageId(0)),
+                20,
+                15,
+                3,
+                crate::theme::fallback_theme(),
+            );
+        });
+        let joined = lines.join("\n");
+        assert!(
+            !joined.contains("Alt-v"),
+            "trace image card must not advertise Mermaid-only viewer: {joined}"
+        );
+        assert!(
+            joined.contains("image #0"),
+            "trace image identity should remain visible: {joined}"
+        );
     }
 
     #[test]
