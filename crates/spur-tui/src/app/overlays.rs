@@ -323,6 +323,77 @@ pub(super) fn render_user_warning(frame: &mut Frame, area: ratatui::layout::Rect
     );
 }
 
+#[cfg(feature = "markdown")]
+pub(super) fn render_mermaid_overlay(
+    frame: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    viewer: &mut crate::views::mermaid_viewer::MermaidViewerView,
+    detail: &mut crate::views::session_detail::SessionDetailView,
+) {
+    use ratatui::{
+        layout::{Constraint, Layout},
+        style::{Color, Modifier, Style},
+        text::{Line, Span},
+        widgets::Paragraph,
+    };
+    use ratatui_image::{Resize, StatefulImage};
+
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(3),
+        Constraint::Length(1),
+    ])
+    .split(area);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            " Mermaid Viewer ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))),
+        chunks[0],
+    );
+
+    let drew = (|| {
+        let id = viewer.focused?;
+        let picker = detail.render_picker.as_ref()?;
+        let (image, image_generation) = match detail.mermaid_registry.get(&id)? {
+            crate::components::mermaid::MermaidState::Ready {
+                image,
+                image_generation,
+                ..
+            } => (image.clone(), *image_generation),
+            _ => return None,
+        };
+        let proto = detail
+            .image_cache
+            .overlay_protocol_mut(id, &image, image_generation, picker);
+        let widget = StatefulImage::default().resize(Resize::Fit(None));
+        frame.render_stateful_widget(widget, chunks[1], proto);
+        Some(())
+    })()
+    .is_some();
+
+    if !drew {
+        frame.render_widget(
+            Paragraph::new(
+                "No diagram available yet. Wait for render to complete, or press q/Esc to return.",
+            )
+            .style(Style::default().fg(Color::DarkGray)),
+            chunks[1],
+        );
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            " [/]: cycle · q/Esc: close ",
+            Style::default().fg(Color::DarkGray),
+        ))),
+        chunks[2],
+    );
+}
+
 fn ellipsize_for_width(message: &str, width: u16) -> String {
     let width = usize::from(width);
     let char_count = message.chars().count();
