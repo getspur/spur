@@ -431,10 +431,23 @@ pub async fn compensate_mutation_orphans(
                 .await?;
             let child_ids: Vec<String> = summaries.into_iter().map(|summary| summary.id).collect();
             for child_id in &child_ids {
-                pm.update_issue(
+                let child_issue = pm.get_issue(child_id).await?;
+                let remove_labels = child_issue
+                    .labels
+                    .iter()
+                    .filter(|label| {
+                        crate::plan::labels::parse_plan_id(label).is_some()
+                            || crate::plan::labels::parse_plan_task_id(label).is_some()
+                            || crate::plan::labels::parse_agent(label).is_some()
+                    })
+                    .cloned()
+                    .collect();
+                apply_issue_update(
+                    pm.as_ref(),
                     child_id,
                     spur_pm::IssueUpdate {
                         status: Some(pm.closed_status().to_string()),
+                        remove_labels,
                         ..Default::default()
                     },
                 )
