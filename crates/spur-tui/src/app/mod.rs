@@ -147,6 +147,10 @@ pub enum UserInput {
     ClaimPlan {
         plan_id: String,
     },
+    /// Request the orchestrator to force claim a persisted plan from another brain.
+    ForceReclaimPlan {
+        plan_id: String,
+    },
     /// Request the orchestrator to resume a persisted plan.
     ResumePlan {
         plan_id: String,
