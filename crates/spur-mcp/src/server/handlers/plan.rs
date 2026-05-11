@@ -770,7 +770,11 @@ impl McpCallbackServer {
             .await;
         match resp.error {
             Some(e) => Err(e.message),
-            None => Ok(()),
+            None => {
+                let mut active_plans = self.active_plans.lock().await;
+                active_plans.remove(plan_id);
+                Ok(())
+            }
         }
     }
 
