@@ -133,6 +133,44 @@ const DARK_DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("plan_inspector.status.failure.fg", "danger"),
     ("plan_inspector.status.cancelled.fg", "accent_alt"),
     ("plan_inspector.status.unknown.fg", "fg_subtle"),
+    // plan_inspector redesign tokens (2026-05-11).
+    ("plan_inspector.board.selection.fg", "accent"),
+    ("plan_inspector.board.stage.active.fg", "accent"),
+    ("plan_inspector.board.stage.inactive.fg", "fg_subtle"),
+    ("plan_inspector.status.dispatched.fg", "info"),
+    ("plan_inspector.status.awaiting_review.fg", "warning"),
+    ("plan_inspector.status.approved.fg", "success"),
+    ("plan_inspector.status.rejected.fg", "warning"),
+    ("plan_inspector.status.failed.fg", "danger"),
+    ("plan_inspector.status.blocked.fg", "fg_on_danger"),
+    ("plan_inspector.status.blocked.bg", "danger"),
+    ("plan_inspector.status.pending.fg", "fg_subtle"),
+    ("plan_inspector.status.ready.fg", "fg_muted"),
+    ("plan_inspector.chip.retry.fg", "accent_alt"),
+    ("plan_inspector.chip.live.fg", "info"),
+    ("plan_inspector.chip.blocked.fg", "danger"),
+    ("plan_inspector.chip.depends.fg", "fg_subtle"),
+    ("plan_inspector.detail.hero.fg", "fg"),
+    ("plan_inspector.detail.hero.agent.fg", "accent"),
+    ("plan_inspector.detail.blocked_label.fg", "danger"),
+    ("plan_inspector.detail.blocked_value.fg", "danger"),
+    ("plan_inspector.detail.blocked_banner.fg", "fg_on_danger"),
+    ("plan_inspector.detail.blocked_banner.bg", "danger"),
+    ("plan_inspector.detail.section.fg", "fg_subtle"),
+    ("plan_inspector.detail.label.fg", "accent"),
+    ("plan_inspector.detail.edge.structural.fg", "fg_subtle"),
+    ("plan_inspector.detail.edge.blocked.fg", "danger"),
+    ("plan_inspector.detail.edge.highlight.fg", "accent"),
+    ("plan_inspector.header.next_action.fg", "fg"),
+    ("plan_inspector.header.count.dispatched.fg", "info"),
+    ("plan_inspector.header.count.awaiting_review.fg", "warning"),
+    ("plan_inspector.header.count.approved.fg", "success"),
+    ("plan_inspector.header.count.rejected.fg", "warning"),
+    ("plan_inspector.header.count.failed.fg", "danger"),
+    ("plan_inspector.header.count.blocked.fg", "danger"),
+    ("plan_inspector.header.count.cancelled.fg", "accent_alt"),
+    ("plan_inspector.header.count.pending.fg", "fg_subtle"),
+    ("plan_inspector.header.count.ready.fg", "success"),
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -202,7 +240,56 @@ mod tests {
 
     #[test]
     fn dark_default_contains_all_spec_sample_bindings() {
-        assert_eq!(TokenMap::dark_default().0.len(), 125);
+        assert_eq!(TokenMap::dark_default().0.len(), 162);
+    }
+
+    #[test]
+    fn plan_inspector_redesign_tokens_are_bound() {
+        let tokens = TokenMap::dark_default();
+        let expected = [
+            ("plan_inspector.board.selection.fg", "accent"),
+            ("plan_inspector.board.stage.active.fg", "accent"),
+            ("plan_inspector.board.stage.inactive.fg", "fg_subtle"),
+            ("plan_inspector.status.dispatched.fg", "info"),
+            ("plan_inspector.status.awaiting_review.fg", "warning"),
+            ("plan_inspector.status.approved.fg", "success"),
+            ("plan_inspector.status.rejected.fg", "warning"),
+            ("plan_inspector.status.failed.fg", "danger"),
+            ("plan_inspector.status.blocked.fg", "fg_on_danger"),
+            ("plan_inspector.status.blocked.bg", "danger"),
+            ("plan_inspector.status.cancelled.fg", "accent_alt"),
+            ("plan_inspector.status.pending.fg", "fg_subtle"),
+            ("plan_inspector.status.ready.fg", "fg_muted"),
+            ("plan_inspector.chip.retry.fg", "accent_alt"),
+            ("plan_inspector.chip.live.fg", "info"),
+            ("plan_inspector.chip.blocked.fg", "danger"),
+            ("plan_inspector.chip.depends.fg", "fg_subtle"),
+            ("plan_inspector.detail.hero.fg", "fg"),
+            ("plan_inspector.detail.hero.agent.fg", "accent"),
+            ("plan_inspector.detail.blocked_label.fg", "danger"),
+            ("plan_inspector.detail.blocked_value.fg", "danger"),
+            ("plan_inspector.detail.blocked_banner.fg", "fg_on_danger"),
+            ("plan_inspector.detail.blocked_banner.bg", "danger"),
+            ("plan_inspector.detail.section.fg", "fg_subtle"),
+            ("plan_inspector.detail.label.fg", "accent"),
+            ("plan_inspector.detail.edge.structural.fg", "fg_subtle"),
+            ("plan_inspector.detail.edge.blocked.fg", "danger"),
+            ("plan_inspector.detail.edge.highlight.fg", "accent"),
+            ("plan_inspector.header.next_action.fg", "fg"),
+            ("plan_inspector.header.count.dispatched.fg", "info"),
+            ("plan_inspector.header.count.awaiting_review.fg", "warning"),
+            ("plan_inspector.header.count.approved.fg", "success"),
+            ("plan_inspector.header.count.rejected.fg", "warning"),
+            ("plan_inspector.header.count.failed.fg", "danger"),
+            ("plan_inspector.header.count.blocked.fg", "danger"),
+            ("plan_inspector.header.count.cancelled.fg", "accent_alt"),
+            ("plan_inspector.header.count.pending.fg", "fg_subtle"),
+            ("plan_inspector.header.count.ready.fg", "success"),
+        ];
+
+        for (token, palette_role) in expected {
+            assert_eq!(tokens.0.get(token).map(String::as_str), Some(palette_role));
+        }
     }
 
     #[test]

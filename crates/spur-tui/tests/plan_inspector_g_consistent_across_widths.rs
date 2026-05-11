@@ -89,7 +89,7 @@ fn buffer_text(buf: &Buffer) -> String {
 
 fn assert_selected_task(buf: &Buffer, task_id: &str) {
     let text = buffer_text(buf);
-    let needle = format!("task: {task_id}");
+    let needle = format!("{task_id} · codex");
     assert!(
         text.contains(&needle),
         "expected selected task detail to contain {needle:?}, got:\n{text}"
