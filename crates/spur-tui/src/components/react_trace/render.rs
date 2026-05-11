@@ -17,7 +17,7 @@ fn token_color(theme: &Theme, name: &str) -> Color {
 }
 
 #[cfg(feature = "markdown")]
-use super::types::{RenderContext, Segment, VirtualRow};
+use super::types::{InlineImageSource, RenderContext, Segment, VirtualRow};
 use super::ReactTrace;
 use crate::components::spinner;
 
@@ -159,17 +159,20 @@ pub(crate) fn segment_visible_rows(
                 });
             }
             VirtualRow::ImageRow {
-                id,
+                source,
                 row_within,
                 total_rows,
             } => {
-                let run_id = *id;
+                let run_source = *source;
                 let run_total = *total_rows;
                 let first_within = *row_within;
                 let start = i;
                 while i < end_idx {
-                    if let VirtualRow::ImageRow { id: id2, .. } = &rows[i] {
-                        if *id2 == run_id {
+                    if let VirtualRow::ImageRow {
+                        source: source2, ..
+                    } = &rows[i]
+                    {
+                        if *source2 == run_source {
                             i += 1;
                             continue;
                         }
@@ -177,7 +180,7 @@ pub(crate) fn segment_visible_rows(
                     break;
                 }
                 out.push(Segment::Image {
-                    id: run_id,
+                    source: run_source,
                     total_rows: run_total,
                     first_row_within: first_within,
                     run_len: (i - start) as u16,
@@ -311,32 +314,47 @@ fn compute_fence_states(
 fn render_inline_image(
     frame: &mut Frame,
     rect: Rect,
-    id: crate::components::mermaid::MermaidId,
+    source: InlineImageSource,
     ctx: &mut RenderContext<'_>,
+    trace_images: &std::collections::HashMap<
+        crate::components::react_trace::types::TraceImageId,
+        crate::components::react_trace::types::TraceImage,
+    >,
 ) -> bool {
     use crate::components::mermaid::MermaidState;
     use ratatui_image::{Resize, StatefulImage};
 
-    let Some(MermaidState::Ready {
-        image,
-        image_generation,
-        ..
-    }) = ctx.mermaid_registry.get(&id)
-    else {
-        return false;
-    };
     let Some(picker) = ctx.picker else {
         return false;
     };
 
-    // Snapshot generation now — protocol fetch needs &mut on image_cache,
-    // which conflicts with the &mermaid_registry borrow above.
-    let gen = *image_generation;
-    let image_arc = image.clone(); // Arc clone is cheap; satisfies borrowck
-
-    let proto = ctx
-        .image_cache
-        .inline_protocol_mut(id, &image_arc, gen, picker);
+    let proto = match source {
+        InlineImageSource::Mermaid(id) => {
+            let Some(MermaidState::Ready {
+                image,
+                image_generation,
+                ..
+            }) = ctx.mermaid_registry.get(&id)
+            else {
+                return false;
+            };
+            let gen = *image_generation;
+            let image_arc = image.clone();
+            ctx.image_cache
+                .inline_protocol_mut(id, &image_arc, gen, picker)
+        }
+        InlineImageSource::Trace(id) => {
+            let Some(stored) = trace_images.get(&id) else {
+                return false;
+            };
+            ctx.image_cache.inline_trace_protocol_mut(
+                id,
+                &stored.image,
+                stored.image_generation,
+                picker,
+            )
+        }
+    };
     let widget = StatefulImage::default().resize(Resize::Fit(None));
     frame.render_stateful_widget(widget, rect, proto);
     true
@@ -346,6 +364,38 @@ fn render_inline_image(
 /// through to a single-line message.
 #[cfg(feature = "markdown")]
 const PARTIAL_CARD_MIN_ROWS: u16 = 3;
+
+#[cfg(feature = "markdown")]
+fn image_label(source: InlineImageSource) -> String {
+    match source {
+        InlineImageSource::Mermaid(id) => format!("📊 mermaid #{}", id.0),
+        InlineImageSource::Trace(id) => format!("🖼 image #{}", id.0),
+    }
+}
+
+#[cfg(feature = "markdown")]
+fn is_ready_image(source: InlineImageSource, ctx: &RenderContext<'_>) -> bool {
+    match source {
+        InlineImageSource::Mermaid(id) => matches!(
+            ctx.mermaid_registry.get(&id),
+            Some(crate::components::mermaid::MermaidState::Ready { .. })
+        ),
+        InlineImageSource::Trace(_) => true,
+    }
+}
+
+#[cfg(feature = "markdown")]
+fn pending_image_message(source: InlineImageSource, ctx: &RenderContext<'_>) -> String {
+    match source {
+        InlineImageSource::Mermaid(id) => match ctx.mermaid_registry.get(&id) {
+            Some(crate::components::mermaid::MermaidState::Error { .. }) => {
+                format!("   [⚠ mermaid #{} error · Alt-v to view]", id.0)
+            }
+            _ => format!("   [⏳ mermaid #{} rendering…]", id.0),
+        },
+        InlineImageSource::Trace(id) => format!("   [🖼 image #{} unavailable]", id.0),
+    }
+}
 
 /// Render a stable card describing a partially-scrolled diagram. Reserves
 /// the full `run_len`-tall Rect (no layout shift); the card itself occupies
@@ -357,7 +407,7 @@ const PARTIAL_CARD_MIN_ROWS: u16 = 3;
 pub(crate) fn render_partial_card(
     frame: &mut Frame,
     rect: Rect,
-    id: crate::components::mermaid::MermaidId,
+    source: InlineImageSource,
     total_rows: u16,
     first_row_within: u16,
     run_len: u16,
@@ -384,18 +434,16 @@ pub(crate) fn render_partial_card(
         (false, true) => "▲ scroll up",
         _ => "▲▼ scroll for more",
     };
+    let label = image_label(source);
 
     let lines: Vec<Line<'static>> = match run_len {
         1 => vec![Line::from(Span::styled(
-            format!("[📊 mermaid #{} · {}% · {}]", id.0, visible_pct, direction),
+            format!("[{} · {}% · {}]", label, visible_pct, direction),
             Style::default().fg(card_color).add_modifier(Modifier::BOLD),
         ))],
         2 => vec![
             Line::from(Span::styled(
-                format!(
-                    "📊 mermaid #{} · {}% visible · {}",
-                    id.0, visible_pct, direction
-                ),
+                format!("{} · {}% visible · {}", label, visible_pct, direction),
                 Style::default().fg(card_color).add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
@@ -407,10 +455,7 @@ pub(crate) fn render_partial_card(
             debug_assert!(run_len >= PARTIAL_CARD_MIN_ROWS);
             vec![
                 Line::from(Span::styled(
-                    format!(
-                        "📊 mermaid #{} · {}% visible · {}",
-                        id.0, visible_pct, direction
-                    ),
+                    format!("{} · {}% visible · {}", label, visible_pct, direction),
                     Style::default().fg(card_color).add_modifier(Modifier::BOLD),
                 )),
                 Line::from(""),
@@ -779,7 +824,7 @@ impl ReactTrace {
                     y += height;
                 }
                 Segment::Image {
-                    id,
+                    source,
                     total_rows,
                     first_row_within,
                     run_len,
@@ -793,22 +838,19 @@ impl ReactTrace {
                     let fully_visible = first_row_within == 0 && run_len == total_rows;
 
                     let drew_image = if fully_visible {
-                        render_inline_image(frame, rect, id, ctx)
+                        render_inline_image(frame, rect, source, ctx, &self.inline_images)
                     } else {
                         false
                     };
 
                     if !drew_image {
-                        if matches!(
-                            ctx.mermaid_registry.get(&id),
-                            Some(crate::components::mermaid::MermaidState::Ready { .. })
-                        ) {
+                        if is_ready_image(source, ctx) {
                             // Partial visibility OR no graphics protocol available
                             // for a Ready image — render the multi-row card.
                             render_partial_card(
                                 frame,
                                 rect,
-                                id,
+                                source,
                                 total_rows,
                                 first_row_within,
                                 run_len,
@@ -817,14 +859,7 @@ impl ReactTrace {
                         } else {
                             // Pending / Rendering / Error — single-line dim
                             // placeholder. Layout still preserved (run_len rows).
-                            let msg = match ctx.mermaid_registry.get(&id) {
-                                Some(crate::components::mermaid::MermaidState::Error {
-                                    ..
-                                }) => {
-                                    format!("   [⚠ mermaid #{} error · Alt-v to view]", id.0)
-                                }
-                                _ => format!("   [⏳ mermaid #{} rendering…]", id.0),
-                            };
+                            let msg = pending_image_message(source, ctx);
                             let placeholder_color =
                                 token_color(&self.theme, "react_trace.partial_card.hint.fg");
                             let line = Line::from(Span::styled(
@@ -1353,7 +1388,15 @@ mod card_tests {
     fn card_top_visible_says_scroll_down() {
         // first_row_within=0, run_len=5, total_rows=20 → top visible, bottom cropped.
         let lines = render_into(5, |f, r| {
-            render_partial_card(f, r, MermaidId(7), 20, 0, 5, crate::theme::fallback_theme());
+            render_partial_card(
+                f,
+                r,
+                InlineImageSource::Mermaid(MermaidId(7)),
+                20,
+                0,
+                5,
+                crate::theme::fallback_theme(),
+            );
         });
         let joined = lines.join("\n");
         assert!(
@@ -1369,7 +1412,7 @@ mod card_tests {
             render_partial_card(
                 f,
                 r,
-                MermaidId(3),
+                InlineImageSource::Mermaid(MermaidId(3)),
                 20,
                 15,
                 5,
@@ -1387,7 +1430,15 @@ mod card_tests {
     fn card_mid_window_says_scroll_for_more() {
         // first_row_within=8, run_len=5, total_rows=20 → both edges cropped.
         let lines = render_into(5, |f, r| {
-            render_partial_card(f, r, MermaidId(2), 20, 8, 5, crate::theme::fallback_theme());
+            render_partial_card(
+                f,
+                r,
+                InlineImageSource::Mermaid(MermaidId(2)),
+                20,
+                8,
+                5,
+                crate::theme::fallback_theme(),
+            );
         });
         let joined = lines.join("\n");
         assert!(
@@ -1402,7 +1453,7 @@ mod card_tests {
             render_partial_card(
                 f,
                 r,
-                MermaidId(1),
+                InlineImageSource::Mermaid(MermaidId(1)),
                 20,
                 0,
                 10,
@@ -1416,7 +1467,15 @@ mod card_tests {
     #[test]
     fn card_visible_pct_total_zero_returns_100() {
         let lines = render_into(3, |f, r| {
-            render_partial_card(f, r, MermaidId(1), 0, 0, 1, crate::theme::fallback_theme());
+            render_partial_card(
+                f,
+                r,
+                InlineImageSource::Mermaid(MermaidId(1)),
+                0,
+                0,
+                1,
+                crate::theme::fallback_theme(),
+            );
         });
         let joined = lines.join("\n");
         assert!(
@@ -1428,7 +1487,15 @@ mod card_tests {
     #[test]
     fn card_one_line_variant_when_run_len_1() {
         let lines = render_into(1, |f, r| {
-            render_partial_card(f, r, MermaidId(1), 20, 0, 1, crate::theme::fallback_theme());
+            render_partial_card(
+                f,
+                r,
+                InlineImageSource::Mermaid(MermaidId(1)),
+                20,
+                0,
+                1,
+                crate::theme::fallback_theme(),
+            );
         });
         // Exactly one non-blank line.
         let non_blank = lines.iter().filter(|l| !l.is_empty()).count();
@@ -1441,7 +1508,15 @@ mod card_tests {
     #[test]
     fn card_two_line_variant_when_run_len_2() {
         let lines = render_into(2, |f, r| {
-            render_partial_card(f, r, MermaidId(1), 20, 0, 2, crate::theme::fallback_theme());
+            render_partial_card(
+                f,
+                r,
+                InlineImageSource::Mermaid(MermaidId(1)),
+                20,
+                0,
+                2,
+                crate::theme::fallback_theme(),
+            );
         });
         let non_blank = lines.iter().filter(|l| !l.is_empty()).count();
         assert_eq!(
@@ -1453,7 +1528,15 @@ mod card_tests {
     #[test]
     fn card_three_line_variant_when_run_len_3_or_more() {
         let lines = render_into(3, |f, r| {
-            render_partial_card(f, r, MermaidId(1), 20, 0, 3, crate::theme::fallback_theme());
+            render_partial_card(
+                f,
+                r,
+                InlineImageSource::Mermaid(MermaidId(1)),
+                20,
+                0,
+                3,
+                crate::theme::fallback_theme(),
+            );
         });
         // 3-line variant: title, blank, hint → 2 non-blank.
         let non_blank = lines.iter().filter(|l| !l.is_empty()).count();
@@ -1463,7 +1546,15 @@ mod card_tests {
     #[test]
     fn card_early_returns_when_run_len_0() {
         let lines = render_into(1, |f, r| {
-            render_partial_card(f, r, MermaidId(1), 20, 0, 0, crate::theme::fallback_theme());
+            render_partial_card(
+                f,
+                r,
+                InlineImageSource::Mermaid(MermaidId(1)),
+                20,
+                0,
+                0,
+                crate::theme::fallback_theme(),
+            );
         });
         // No content rendered.
         assert!(
@@ -1479,7 +1570,7 @@ mod card_tests {
             render_partial_card(
                 f,
                 r,
-                MermaidId(1),
+                InlineImageSource::Mermaid(MermaidId(1)),
                 20,
                 0,
                 11,

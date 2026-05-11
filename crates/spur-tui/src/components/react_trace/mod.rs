@@ -2,7 +2,7 @@ mod builder;
 mod compact_render;
 pub mod dispatch;
 mod render;
-mod types;
+pub(crate) mod types;
 
 #[cfg(feature = "markdown")]
 pub use types::RenderContext;
@@ -16,6 +16,7 @@ use spur_acp::{
 };
 
 use ratatui::style::Color;
+use std::collections::{HashMap, HashSet};
 
 use super::trace_format::{
     family_glyph, input_display_lines, input_summary, observe_compact, observe_payload_lines,
@@ -48,6 +49,10 @@ pub(crate) enum Surface {
 
 pub struct ReactTrace {
     pub(super) entries: Vec<TraceEntry>,
+    pub(super) inline_images: HashMap<types::TraceImageId, types::TraceImage>,
+    pub(super) image_digests: HashSet<String>,
+    pub(super) next_trace_image_id: u64,
+    pub(super) next_trace_image_generation: u64,
     pub(super) anchor: crate::components::react_trace::types::ScrollAnchor,
     pub(super) tick_counter: u8,
     /// Cached total rendered lines from last render.
@@ -215,6 +220,10 @@ impl ReactTrace {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            inline_images: HashMap::new(),
+            image_digests: HashSet::new(),
+            next_trace_image_id: 0,
+            next_trace_image_generation: 0,
             anchor: crate::components::react_trace::types::ScrollAnchor::default(),
             tick_counter: 0,
             last_total_lines: 0,
@@ -290,6 +299,10 @@ impl ReactTrace {
     /// and derived caches are cleared. Used by `/clear` view reset.
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.inline_images.clear();
+        self.image_digests.clear();
+        self.next_trace_image_id = 0;
+        self.next_trace_image_generation = 0;
         self.anchor = crate::components::react_trace::types::ScrollAnchor::default();
         self.last_total_lines = 0;
         self.last_render_width = None;
@@ -429,6 +442,7 @@ impl ReactTrace {
             TraceKind::Delegate { .. } => "delegate",
             TraceKind::UserMessage => "user_message",
             TraceKind::Permission { .. } => "permission",
+            TraceKind::Image { .. } => "image",
         })
     }
 
@@ -596,6 +610,40 @@ impl ReactTrace {
         if self.is_following() {
             self.scroll_to_bottom();
         }
+    }
+
+    pub(crate) fn append_image(
+        &mut self,
+        image: std::sync::Arc<image::DynamicImage>,
+        path: std::path::PathBuf,
+        sha256: String,
+        timestamp: String,
+    ) -> Option<types::TraceImageId> {
+        if !self.image_digests.insert(sha256.clone()) {
+            return None;
+        }
+        let id = types::TraceImageId(self.next_trace_image_id);
+        self.next_trace_image_id = self.next_trace_image_id.saturating_add(1);
+        self.next_trace_image_generation = self.next_trace_image_generation.saturating_add(1);
+        self.inline_images.insert(
+            id,
+            types::TraceImage {
+                image,
+                path: path.clone(),
+                image_generation: self.next_trace_image_generation,
+            },
+        );
+        self.push(TraceEntry {
+            kind: TraceKind::Image {
+                id,
+                label: format!("image · {}", path.display()),
+            },
+            text: path.display().to_string(),
+            timestamp,
+            #[cfg(feature = "markdown")]
+            markdown: None,
+        });
+        Some(id)
     }
 
     /// Returns true when the viewport is pinned to the tail of the trace.
@@ -903,6 +951,11 @@ impl ReactTrace {
     #[doc(hidden)]
     pub(crate) fn entries_for_test(&self) -> &[TraceEntry] {
         &self.entries
+    }
+
+    #[cfg(test)]
+    pub(crate) fn image_for_test(&self, id: types::TraceImageId) -> Option<&types::TraceImage> {
+        self.inline_images.get(&id)
     }
 
     /// Test-only mutable accessor.
@@ -1228,6 +1281,13 @@ impl ReactTrace {
                         lines.push(format!("   {}", text_line));
                     }
                 }
+
+                TraceKind::Image { label, .. } => {
+                    lines.push(format!("{} 🖼 {}", entry.timestamp, label));
+                    for text_line in entry.text.lines() {
+                        lines.push(format!("   {}", text_line));
+                    }
+                }
             }
 
             // Blank separator between entries. No adjacency skip needed: Act outcome
@@ -1483,10 +1543,10 @@ mod virtual_row_tests {
             .iter()
             .filter_map(|r| match r {
                 VirtualRow::ImageRow {
-                    id,
+                    source,
                     row_within,
                     total_rows,
-                } => Some((*id, *row_within, *total_rows)),
+                } => Some((*source, *row_within, *total_rows)),
                 _ => None,
             })
             .collect();
@@ -1568,6 +1628,43 @@ mod virtual_row_tests {
             .filter(|s| matches!(s, Segment::Text { .. }))
             .count();
         assert!(text_count >= 2, "expected >=2 text segments: {segments:?}");
+    }
+
+    #[test]
+    fn stored_trace_image_expands_to_virtual_image_rows() {
+        let mut trace = ReactTrace::new();
+        let id = trace
+            .append_image(
+                std::sync::Arc::new(image::DynamicImage::ImageRgba8(image::RgbaImage::new(
+                    20, 20,
+                ))),
+                std::path::PathBuf::from("/tmp/spur-image.png"),
+                "sha".to_string(),
+                "10:00".to_string(),
+            )
+            .expect("first digest should append image");
+
+        let (rows, _starts, _byte_ranges) =
+            trace.build_virtual_rows(0, 80, &std::collections::HashMap::new(), None);
+
+        let image_rows: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row {
+                VirtualRow::ImageRow {
+                    source,
+                    row_within,
+                    total_rows,
+                } => Some((*source, *row_within, *total_rows)),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            !image_rows.is_empty(),
+            "stored trace image should create drawable image rows"
+        );
+        assert_eq!(image_rows[0].0, types::InlineImageSource::Trace(id));
+        assert_eq!(image_rows[0].1, 0);
     }
 
     #[test]

@@ -2,6 +2,18 @@ use spur_acp::adapter::{ObservePayload, ToolFamily, ToolInputDisplay};
 use spur_acp::ToolCallId;
 
 use ratatui::text::Line;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TraceImageId(pub u64);
+
+#[derive(Debug, Clone)]
+pub struct TraceImage {
+    pub image: Arc<image::DynamicImage>,
+    pub path: PathBuf,
+    pub image_generation: u64,
+}
 
 /// Terminal/non-terminal state of a tool call.
 ///
@@ -66,6 +78,10 @@ pub enum TraceKind {
         pending: bool,
         countdown: u8,
     },
+    Image {
+        id: TraceImageId,
+        label: String,
+    },
 }
 
 /// A single entry in the full ReAct trace.
@@ -86,10 +102,17 @@ pub struct TraceEntry {
 pub(crate) enum VirtualRow {
     Text(Line<'static>),
     ImageRow {
-        id: crate::components::mermaid::MermaidId,
+        source: InlineImageSource,
         row_within: u16,
         total_rows: u16,
     },
+}
+
+#[cfg(feature = "markdown")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum InlineImageSource {
+    Mermaid(crate::components::mermaid::MermaidId),
+    Trace(TraceImageId),
 }
 
 #[cfg(feature = "markdown")]
@@ -110,7 +133,7 @@ pub(crate) enum Segment {
         len: usize,
     },
     Image {
-        id: crate::components::mermaid::MermaidId,
+        source: InlineImageSource,
         total_rows: u16,
         first_row_within: u16,
         run_len: u16,

@@ -191,6 +191,7 @@ fn compact_kind_tag(k: &TraceKind) -> &'static str {
         TraceKind::Delegate { .. } => "delegate",
         TraceKind::UserMessage => "user",
         TraceKind::Permission { .. } => "permission",
+        TraceKind::Image { .. } => "image",
     }
 }
 
@@ -238,6 +239,12 @@ fn compact_prefix_style(theme: &Theme, k: &TraceKind) -> (&'static str, Style) {
             "  ? ",
             Style::default()
                 .fg(token(theme, "react_trace.permission.fg"))
+                .add_modifier(Modifier::BOLD),
+        ),
+        TraceKind::Image { .. } => (
+            "  ■ ",
+            Style::default()
+                .fg(token(theme, "react_trace.message.title.fg"))
                 .add_modifier(Modifier::BOLD),
         ),
     }
