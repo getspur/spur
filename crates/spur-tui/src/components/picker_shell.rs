@@ -207,22 +207,13 @@ impl PickerShell {
         }
     }
 
-    /// Refresh rows from the source using the current query; preserve
-    /// selection on the same logical row where possible.
+    /// Refresh rows from the source using the current query.
+    /// Resets the selection to the top (0) so the best fuzzy match is highlighted.
     fn refilter(&mut self) {
         self.active_preview = None;
-        let prev_primary = self
-            .list_state
-            .selected()
-            .and_then(|i| self.rows.get(i))
-            .map(|r| r.primary.clone());
         self.rows = self.source.refresh(self.query.text());
-        let new_idx = match prev_primary {
-            Some(p) => self.rows.iter().position(|r| r.primary == p).or(Some(0)),
-            None => (!self.rows.is_empty()).then_some(0),
-        };
         self.list_state
-            .select(if self.rows.is_empty() { None } else { new_idx });
+            .select(if self.rows.is_empty() { None } else { Some(0) });
     }
 
     /// For mention/slash (`QueryMode::ReadFromInputBar`). Called by the
@@ -733,18 +724,14 @@ mod tests {
     }
 
     #[test]
-    fn selection_survives_refilter_when_row_still_present() {
-        // This is the "selection reset on every keystroke" fix.
+    fn selection_resets_to_top_on_refilter() {
         let src = HistoryQuerySource::new(vec![mk("apple pie"), mk("apple juice"), mk("banana")]);
         let mut shell = PickerShell::open(Box::new(src));
         shell.handle_key(key(KeyCode::Down)); // select row 1
         shell.handle_key(key(KeyCode::Char('a'))); // filter — all three still match "a"
-                                                   // Row 1 used to be "apple juice"; after fuzzy scoring it may still
-                                                   // be present. The contract is: if the previously-selected row's
-                                                   // primary text is still in the new row list, selection tracks it.
-        let rows = shell.row_primaries();
-        let idx = rows.iter().position(|p| p == "apple juice");
-        assert_eq!(shell.selected_index(), idx);
+                                                   // The cursor should always reset to the top (0) when the query changes
+                                                   // so the best match is selected.
+        assert_eq!(shell.selected_index(), Some(0));
     }
 
     #[test]
