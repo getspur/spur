@@ -24,6 +24,7 @@
 
 use std::collections::HashMap;
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use spur_acp::{adapter, AgentKind, ContentBlock, ContentChunk, SessionUpdate, ToolCallStatus};
 
 use super::{map_initial_status, merge_status, ReactTrace, TraceEntry, TraceKind};
@@ -246,12 +247,16 @@ fn extract_tool_call_text(content: &[spur_acp::ToolCallContent]) -> Option<Strin
     let mut out = String::new();
     for c in content {
         match c {
-            ToolCallContent::Content(cb) => {
-                if let spur_acp::ContentBlock::Text(tc) = &cb.content {
-                    out.push_str(&tc.text);
+            ToolCallContent::Content(cb) => match &cb.content {
+                spur_acp::ContentBlock::Text(tc) => out.push_str(&tc.text),
+                spur_acp::ContentBlock::Image(image) => {
+                    if !out.is_empty() && !out.ends_with('\n') {
+                        out.push('\n');
+                    }
+                    out.push_str(&format_image_content(image));
                 }
-                // Non-Text ContentBlock variants (Image, Audio, Resource) silently skipped.
-            }
+                _ => {}
+            },
             ToolCallContent::Diff(diff) => {
                 out.push_str(&format_diff_truncated(
                     &diff.path.display().to_string(),
@@ -271,6 +276,18 @@ fn extract_tool_call_text(content: &[spur_acp::ToolCallContent]) -> Option<Strin
         None
     } else {
         Some(out)
+    }
+}
+
+fn format_image_content(image: &agent_client_protocol::schema::ImageContent) -> String {
+    let decoded_len = STANDARD.decode(&image.data).ok().map(|bytes| bytes.len());
+    let size = decoded_len
+        .map(|len| format!("{len} bytes"))
+        .unwrap_or_else(|| format!("{} base64 chars", image.data.len()));
+
+    match image.uri.as_deref().filter(|uri| !uri.trim().is_empty()) {
+        Some(uri) => format!("[image: {}, uri: {}, data: {}]", image.mime_type, uri, size),
+        None => format!("[image: {}, data: {}]", image.mime_type, size),
     }
 }
 
@@ -351,7 +368,7 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 mod tests {
     use super::*;
     use agent_client_protocol::schema::{
-        Content, ToolCall, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+        Content, ImageContent, ToolCall, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
     use spur_acp::{
         ContentBlock, SessionNotification, SessionUpdate, TextContent, ToolCallContent, ToolCallId,
@@ -378,6 +395,14 @@ mod tests {
 
     fn text_tool_content(text: &str) -> ToolCallContent {
         ToolCallContent::Content(Content::new(ContentBlock::Text(TextContent::new(text))))
+    }
+
+    fn image_tool_content(data: &str, mime_type: &str, uri: Option<&str>) -> ToolCallContent {
+        let mut image = ImageContent::new(data, mime_type);
+        if let Some(uri) = uri {
+            image = image.uri(uri.to_string());
+        }
+        ToolCallContent::Content(Content::new(ContentBlock::Image(image)))
     }
 
     #[test]
@@ -474,6 +499,46 @@ mod tests {
                 }
             ),
             "expected synthesized Act to preserve ToolCallUpdate kind"
+        );
+    }
+
+    #[test]
+    fn tool_call_update_with_image_content_renders_image_reference() {
+        let id = ToolCallId::new("ig-1");
+        let mut trace = ReactTrace::new();
+        let mut tool_depth = HashMap::new();
+        let mut ctx = ctx(&mut tool_depth);
+
+        let update = ToolCallUpdate::new(
+            id,
+            ToolCallUpdateFields::new()
+                .title("Image generation")
+                .kind(ToolKind::Other)
+                .status(ToolCallStatus::Completed)
+                .content(vec![image_tool_content(
+                    "Zm9v",
+                    "image/png",
+                    Some("/tmp/ig-1.png"),
+                )]),
+        );
+        dispatch_session_update(&mut trace, &SessionUpdate::ToolCallUpdate(update), &mut ctx);
+
+        let entries = trace.entries_for_test();
+        assert_eq!(entries.len(), 1);
+        assert!(
+            entries[0].text.contains("image/png"),
+            "expected image mime type to be visible, got {:?}",
+            entries[0].text
+        );
+        assert!(
+            entries[0].text.contains("/tmp/ig-1.png"),
+            "expected image URI to be visible, got {:?}",
+            entries[0].text
+        );
+        assert!(
+            entries[0].text.contains("3 bytes"),
+            "expected decoded image data size to be visible, got {:?}",
+            entries[0].text
         );
     }
 
