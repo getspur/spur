@@ -43,6 +43,7 @@ fn action_kind(action: &UserInput) -> &'static str {
         UserInput::RefreshIssues => "RefreshIssues",
         UserInput::RefreshPlans => "RefreshPlans",
         UserInput::ClaimPlan { .. } => "ClaimPlan",
+        UserInput::ForceReclaimPlan { .. } => "ForceReclaimPlan",
         UserInput::ResumePlan { .. } => "ResumePlan",
         UserInput::InspectPlan { .. } => "InspectPlan",
         UserInput::GetIssueDetail { .. } => "GetIssueDetail",

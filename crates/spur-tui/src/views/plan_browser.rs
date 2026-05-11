@@ -48,6 +48,7 @@ enum DetailPeek {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PlanConfirm {
     Claim { plan_id: String },
+    ForceClaim { plan_id: String },
     Start { plan_id: String },
 }
 
@@ -198,15 +199,38 @@ impl PlanBrowserView {
             PlanOwnerStateEvent::Mine => Some(Action::FlashHint {
                 message: format!("Plan {} is already claimed by this brain", plan.plan_id),
             }),
-            PlanOwnerStateEvent::Other { owner } => Some(Action::FlashHint {
-                message: format!("Cannot claim: plan {} is owned by {owner}", plan.plan_id),
-            }),
-            PlanOwnerStateEvent::Ambiguous { .. } => Some(Action::FlashHint {
-                message: format!(
-                    "Cannot claim: plan {} has ambiguous ownership",
-                    plan.plan_id
-                ),
-            }),
+            PlanOwnerStateEvent::Other { .. } => {
+                if !plan_is_active(plan) {
+                    Some(Action::FlashHint {
+                        message: format!("Cannot claim: plan {} is terminal", plan.plan_id),
+                    })
+                } else if self.has_current_active_plan(ctx) {
+                    Some(Action::FlashHint {
+                        message: "Cannot claim: current brain already owns active plan".into(),
+                    })
+                } else {
+                    self.confirm = Some(PlanConfirm::ForceClaim {
+                        plan_id: plan.plan_id.clone(),
+                    });
+                    None
+                }
+            }
+            PlanOwnerStateEvent::Ambiguous { .. } => {
+                if !plan_is_active(plan) {
+                    Some(Action::FlashHint {
+                        message: format!("Cannot claim: plan {} is terminal", plan.plan_id),
+                    })
+                } else if self.has_current_active_plan(ctx) {
+                    Some(Action::FlashHint {
+                        message: "Cannot claim: current brain already owns active plan".into(),
+                    })
+                } else {
+                    self.confirm = Some(PlanConfirm::ForceClaim {
+                        plan_id: plan.plan_id.clone(),
+                    });
+                    None
+                }
+            }
         }
     }
 
@@ -254,6 +278,7 @@ impl PlanBrowserView {
         let confirm = self.confirm.take()?;
         match confirm {
             PlanConfirm::Claim { plan_id } => Some(Action::ClaimPlan { plan_id }),
+            PlanConfirm::ForceClaim { plan_id } => Some(Action::ForceReclaimPlan { plan_id }),
             PlanConfirm::Start { plan_id } => Some(Action::ResumePlan { plan_id }),
         }
     }
@@ -673,6 +698,17 @@ impl PlanBrowserView {
                     Line::from("  This binds the plan to the current brain session."),
                     Line::from("  Only one brain session can own execution for a plan."),
                     Line::from("  Claiming does not start workers yet."),
+                ],
+            ),
+            PlanConfirm::ForceClaim { plan_id } => (
+                " Force Claim Plan ",
+                "Force Claim",
+                vec![
+                    Line::from(format!("  Plan: {plan_id}")),
+                    Line::from(""),
+                    Line::from("  This plan is currently owned by another brain or ambiguous."),
+                    Line::from("  Forcing claim will clobber the other brain's execution state."),
+                    Line::from("  Only do this if the other brain is dead or stuck."),
                 ],
             ),
             PlanConfirm::Start { plan_id } => (
@@ -1191,6 +1227,38 @@ mod tests {
         assert!(matches!(
             action,
             Some(Action::ClaimPlan { plan_id }) if plan_id == "plan-1"
+        ));
+    }
+
+    #[test]
+    fn c_opens_force_claim_confirm_for_other_owner_then_enter_force_claims() {
+        let session_id = SessionId("brain-1".into());
+        let projection = PlanProjectionStore::new();
+        let lineage = ExecutorLineage::new();
+        let synopsis = SessionSynopsisProjection::new();
+        let ctx = ctx(&lineage, &projection, &synopsis);
+        let mut view = PlanBrowserView::new(session_id);
+        view.handle_spur_event(
+            &SpurEvent::now(SpurEventBody::PlansLoaded {
+                plans: vec![summary_with_owner(
+                    "plan-1",
+                    PlanOwnerStateEvent::Other {
+                        owner: "brain-2".into(),
+                    },
+                )],
+                warnings: Vec::new(),
+            }),
+            &ctx,
+        );
+
+        let first = view.handle_key(key(KeyCode::Char('c')), &ctx);
+        assert!(first.is_none(), "c should open confirmation first");
+
+        let action = view.handle_key(key(KeyCode::Enter), &ctx);
+
+        assert!(matches!(
+            action,
+            Some(Action::ForceReclaimPlan { plan_id }) if plan_id == "plan-1"
         ));
     }
 
