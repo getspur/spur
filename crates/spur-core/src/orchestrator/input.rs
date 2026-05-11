@@ -81,6 +81,10 @@ pub enum InteractiveInput {
     ClaimPlan {
         plan_id: String,
     },
+    /// Force claim a persisted plan from another brain.
+    ForceReclaimPlan {
+        plan_id: String,
+    },
     /// Resume a persisted plan.
     ResumePlan {
         plan_id: String,

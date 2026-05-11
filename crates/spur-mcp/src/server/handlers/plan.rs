@@ -763,6 +763,17 @@ impl McpCallbackServer {
         })
     }
 
+    pub async fn call_force_reclaim_plan(&self, plan_id: &str) -> Result<(), String> {
+        let args = serde_json::json!({ "plan_id": plan_id, "confirm": true, "reason": "Operator-initiated takeover via TUI" });
+        let resp = self
+            .handle_force_reclaim_plan(serde_json::Value::Null, args)
+            .await;
+        match resp.error {
+            Some(e) => Err(e.message),
+            None => Ok(()),
+        }
+    }
+
     pub(crate) async fn handle_submit_plan(&self, id: Value, args: Value) -> JsonRpcResponse {
         let client_idempotency_key = match args.get("client_idempotency_key") {
             None | Some(Value::Null) => None,

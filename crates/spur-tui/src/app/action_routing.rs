@@ -989,6 +989,12 @@ impl App {
                     let _ = tx.try_send(UserInput::ClaimPlan { plan_id });
                 }
             }
+            Action::ForceReclaimPlan { plan_id } => {
+                self.flash_hint_short(format!("Force reclaiming plan {plan_id}..."));
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::ForceReclaimPlan { plan_id });
+                }
+            }
             Action::ResumePlan { plan_id } => {
                 // Immediate user feedback: the orchestrator → MCP round-trip can take
                 // 1–3s; without this hint the TUI looks frozen and invites double-press.
