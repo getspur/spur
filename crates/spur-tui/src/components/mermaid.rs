@@ -47,9 +47,32 @@ pub enum MermaidState {
         /// (allocator reuse OR same-bucket Error→Ready replay).
         image_generation: u64,
     },
+    ReadyText {
+        /// Native text rendering from `mermaid-text` for diagram kinds that
+        /// are legible without rasterization.
+        text: Arc<str>,
+        /// Source code retained for consistency with raster Ready states.
+        code: String,
+        /// Width budget passed to the text renderer.
+        rendered_at_width: u32,
+    },
     Error {
         message: String,
     },
+}
+
+/// Result produced by the hybrid render pipeline before it is stored in
+/// [`MermaidState`].
+pub enum MermaidRendered {
+    Image(DynamicImage),
+    Text { text: String },
+}
+
+/// Thread/channel-friendly render completion payload.
+#[derive(Debug, Clone)]
+pub enum MermaidRenderOutput {
+    Image(Arc<DynamicImage>),
+    Text(Arc<str>),
 }
 
 impl std::fmt::Debug for MermaidState {
@@ -71,6 +94,16 @@ impl std::fmt::Debug for MermaidState {
                 .field("rastered_at_bucket", rastered_at_bucket)
                 .field("image_generation", image_generation)
                 .finish(),
+            MermaidState::ReadyText {
+                text,
+                code,
+                rendered_at_width,
+            } => f
+                .debug_struct("ReadyText")
+                .field("text_len", &text.len())
+                .field("code_len", &code.len())
+                .field("rendered_at_width", rendered_at_width)
+                .finish(),
             MermaidState::Error { message } => {
                 f.debug_struct("Error").field("message", message).finish()
             }
@@ -82,11 +115,12 @@ impl std::fmt::Debug for MermaidState {
 /// back-compat `MarkdownStream::lines()` placeholder cache. Encodes the
 /// Pending / Error / Ready distinction with the pre-computed inline row
 /// height for Ready.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum FenceRender {
     Pending,
     Error,
     Ready(u16),
+    ReadyText(Arc<str>),
 }
 
 /// Single source of truth for the placeholder Line emitted when a fence
@@ -113,7 +147,7 @@ pub fn fence_placeholder_line(id: MermaidId, render: FenceRender) -> ratatui::te
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::DIM),
         ),
-        FenceRender::Ready(_) => (
+        FenceRender::Ready(_) | FenceRender::ReadyText(_) => (
             format!("[📊 mermaid #{} · press Alt-v to view]", id.0),
             Style::default()
                 .fg(Color::Magenta)
@@ -205,6 +239,20 @@ pub fn render_mermaid(code: &str, target_width: u32) -> Result<DynamicImage, Ren
     }
 }
 
+/// Render a Mermaid diagram through the native text renderer when the diagram
+/// kind is one of SPUR's supported text-mode kinds. Unsupported kinds and text
+/// parse/render failures fall back to the existing raster pipeline.
+pub fn render_mermaid_hybrid(
+    code: &str,
+    target_width: u32,
+) -> Result<MermaidRendered, RenderError> {
+    if let Some(text) = render_text_if_supported(code, target_width) {
+        return Ok(MermaidRendered::Text { text });
+    }
+
+    render_mermaid(code, target_width).map(MermaidRendered::Image)
+}
+
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 /// Stage 1: mermaid source → SVG string.
@@ -223,6 +271,26 @@ fn render_to_svg_inner(code: &str) -> Result<String, RenderError> {
     mermaid_rs_renderer::render_with_options(code, opts)
         .map(|svg| fix_svg_font_families(&svg))
         .map_err(|e| RenderError::Render(e.to_string()))
+}
+
+fn render_text_if_supported(code: &str, target_width: u32) -> Option<String> {
+    use mermaid_text::detect::DiagramKind;
+
+    let kind = mermaid_text::detect::detect(code).ok()?;
+    if !matches!(
+        kind,
+        DiagramKind::Flowchart | DiagramKind::State | DiagramKind::Class
+    ) {
+        return None;
+    }
+
+    // The existing action field is a raster pixel bucket. Convert it to a
+    // terminal-column budget using the same fallback cell width used when
+    // dispatching render requests without a live picker.
+    let width = (target_width / 8).clamp(20, 240) as usize;
+    panic::catch_unwind(|| mermaid_text::render_with_width(code, Some(width)))
+        .ok()
+        .and_then(Result::ok)
 }
 
 // SVG font-family post-process.
@@ -422,6 +490,35 @@ mod tests {
                 assert_eq!(image_generation, 1);
             }
             _ => panic!("expected Ready"),
+        }
+    }
+
+    #[test]
+    fn hybrid_routes_flowchart_to_text() {
+        let rendered = render_mermaid_hybrid("graph TD\nA[Start] --> B[End]", 800)
+            .expect("flowchart should render through text path");
+
+        match rendered {
+            MermaidRendered::Text { text } => {
+                assert!(text.contains("Start"));
+                assert!(text.contains("End"));
+            }
+            MermaidRendered::Image(_) => panic!("flowchart should use text renderer"),
+        }
+    }
+
+    #[test]
+    fn hybrid_routes_pie_to_raster_fallback() {
+        let rendered =
+            render_mermaid_hybrid("pie title Pets\n    \"Dogs\" : 5\n    \"Cats\" : 3", 800)
+                .expect("pie should fall back to raster renderer");
+
+        match rendered {
+            MermaidRendered::Image(image) => {
+                assert!(image.width() > 0);
+                assert!(image.height() > 0);
+            }
+            MermaidRendered::Text { .. } => panic!("pie should use raster fallback"),
         }
     }
 }
