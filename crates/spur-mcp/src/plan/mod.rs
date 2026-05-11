@@ -3352,7 +3352,7 @@ pub fn build_plan_status(plan_id: &str, state: &PlanState) -> serde_json::Value 
             "Resolve the setup overlay conflict, then retry the blocked task.".to_string()
         }
         "escalated" => {
-            "One or more tasks exhausted auto-retry budget (1 attempt). Inspect the failed worker branch and call submit_plan_mutation (RetryTask / ModifyTaskSpec / AbandonTask) to resolve.".to_string()
+            "One or more tasks exhausted auto-retry budget (1 attempt). Inspect the failed worker branch and call the submit_plan_mutation tool (your 'Swiss Army knife') to resolve by retrying, modifying the spec, or abandoning the task.".to_string()
         }
         "has_failures" => "Some tasks failed. Use get_task_diff to inspect failures.".to_string(),
         "has_rejections" => "Some tasks rejected. Revise the plan or re-submit.".to_string(),
@@ -4860,6 +4860,16 @@ mod tests {
             spur_license::Plan::Pro,
             features,
         ));
+        gate
+    }
+
+    fn unlicensed_feature_gate() -> Arc<spur_license::FeatureGate> {
+        let gate = community_feature_gate();
+        let mut snapshot = (**gate.snapshot()).clone();
+        snapshot
+            .features
+            .remove(&spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED);
+        gate.set_snapshot_for_test(snapshot);
         gate
     }
 
@@ -7214,7 +7224,7 @@ mod tests {
         let result = super::emit_completion_audit(
             Some(&pm),
             &Some("bd-1".to_string()),
-            community_feature_gate().as_ref(),
+            unlicensed_feature_gate().as_ref(),
             "plan-1",
             "del-A",
             crate::plan::audit_sentinel::CompletionState::AwaitingReview,

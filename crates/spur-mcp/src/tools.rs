@@ -1018,9 +1018,10 @@ pub fn review_task_def() -> ToolDefinition {
 fn submit_plan_mutation_def() -> ToolDefinition {
     ToolDefinition {
         name: "submit_plan_mutation".into(),
-        description: "Brain-side recovery tool. Apply an atomic batch of \
-            plan-graph mutations to recover an escalated/failed task: retry \
-            it as-is, rewrite its spec (task body, agent, context, deps), \
+        description: "Brain-side recovery tool. This is the 'Swiss Army knife' for \
+            the brain agent to fix escalated/failed running plans. Apply an \
+            atomic batch of plan-graph mutations to recover an escalated task: \
+            retry it as-is, rewrite its spec (task body, agent, context, deps), \
             or abandon it. Wraps `apply_mutation` end-to-end with cycle \
             detection + rollback. Clears `signal:escalated` from every \
             affected issue on success."
