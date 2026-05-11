@@ -550,6 +550,75 @@ mod plan_truncate_and_restart_tests {
             "task A"
         );
     }
+
+    #[tokio::test]
+    pub(crate) async fn handle_plan_truncate_and_restart_preserves_parent_state_when_submission_fails(
+    ) {
+        let dir = init_repo().await;
+        let base_oid = run_git(dir.path(), &["rev-parse", "--verify", "main"]).await;
+        commit_file_on_branch(dir.path(), "spur/test-task-a", "main", "a.txt", "task A\n").await;
+
+        let (server, _channel, mock_pm) = new_server_with_mock_pm(dir.path()).await;
+        let parent_epic_id = mock_pm
+            .create_issue(spur_pm::IssueCreate {
+                title: "Parent Recovery Epic".to_string(),
+                description: Some("parent body".to_string()),
+                issue_type: Some("epic".to_string()),
+                labels: vec![crate::plan::labels::plan_id("recover-plan-fail")],
+                ..Default::default()
+            })
+            .await
+            .expect("create parent epic");
+        let mut parent_plan = plan_with(
+            "recover-plan-fail",
+            vec![
+                approved_entry("A", &[], "spur/test-task-a", &base_oid),
+                entry_for(
+                    "B",
+                    &["A"],
+                    crate::plan::PlanTaskStatus::BlockedOnSetupConflict {
+                        dep_task_id: "A".into(),
+                        files: vec!["a.txt".into()],
+                    },
+                ),
+                entry_for("C", &["B"], crate::plan::PlanTaskStatus::Pending),
+            ],
+        );
+        parent_plan.epic_id = Some(parent_epic_id);
+        persist_plan_fixture_to_mock_pm(&mock_pm, &parent_plan).await;
+        mock_pm.fail_next_create_issues(1).await;
+
+        let response = server
+            .__test_call_tool(
+                "plan_truncate_and_restart",
+                json!({
+                    "plan_id": "recover-plan-fail",
+                    "blocked_task_id": "B",
+                }),
+            )
+            .await;
+        assert!(
+            response.get("error").is_some(),
+            "expected submission failure, got {response}"
+        );
+
+        let original = server
+            .active_plans
+            .lock()
+            .await
+            .get("recover-plan-fail")
+            .cloned()
+            .expect("original plan");
+        let original = original.state.lock().await;
+        assert!(matches!(
+            original.tasks[1].status,
+            crate::plan::PlanTaskStatus::BlockedOnSetupConflict { .. }
+        ));
+        assert!(matches!(
+            original.tasks[2].status,
+            crate::plan::PlanTaskStatus::Pending
+        ));
+    }
 }
 
 #[cfg(test)]

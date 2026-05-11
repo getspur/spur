@@ -261,6 +261,63 @@ async fn recover_orphaned_dispatch_promotes_dispatched_task_to_awaiting_review()
 }
 
 #[tokio::test]
+async fn recover_orphaned_dispatch_accepts_legacy_delegation_label() {
+    let dir = init_repo().await;
+    commit_file(dir.path(), "base.txt", "base\n", "seed").await;
+    let base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
+        .await
+        .expect("base oid");
+    let worker_branch = "spur/worker/v2/codex/brain/legacy-label";
+    run_git_capture(
+        dir.path(),
+        None,
+        &["checkout", "-q", "-b", worker_branch, &base_oid],
+    )
+    .await
+    .expect("checkout worker branch");
+    commit_file(dir.path(), "worker.txt", "worker\n", "worker change").await;
+    run_git_capture(dir.path(), None, &["checkout", "-q", "main"])
+        .await
+        .expect("checkout main");
+
+    let fixture = setup_recovery_task(dir.path(), "recover-orphan-legacy", "del-legacy").await;
+    fixture
+        .pm
+        .update_issue(
+            &fixture.task_issue_id,
+            spur_pm::IssueUpdate {
+                add_labels: vec!["delegation-id:del-legacy".to_string()],
+                remove_labels: vec![crate::plan::labels::delegation_id("del-legacy")],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("replace delegation label with legacy spelling");
+
+    let server = recovery_server(
+        dir.path(),
+        Arc::clone(&fixture.pm),
+        Arc::clone(&fixture.feature_gate),
+    );
+    let msg = server
+        .recover_orphaned_dispatch_with_branch(&fixture.task_issue_id, worker_branch, &base_oid)
+        .await
+        .expect("legacy delegation label should recover");
+    assert!(msg.contains("Task promoted to AwaitingReview"));
+
+    let issue = fixture
+        .pm
+        .get_issue(&fixture.task_issue_id)
+        .await
+        .expect("load recovered issue");
+    assert!(
+        crate::plan::projector::has_ready_for_review_label_compat(&issue.labels),
+        "ready-for-review label should be present: {:?}",
+        issue.labels
+    );
+}
+
+#[tokio::test]
 async fn recover_orphaned_dispatch_prefers_dispatched_base_oid_label() {
     let dir = init_repo().await;
     commit_file(dir.path(), "base.txt", "base\n", "seed").await;
