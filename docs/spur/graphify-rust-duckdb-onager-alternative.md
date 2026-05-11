@@ -1,24 +1,23 @@
-# Graphify Alternative: Rust, DuckDB, Arrow, Tree-sitter, and Onager
+# Graphify Alternative: Rust, Tree-sitter, Petgraph, DuckDB, and Onager
 
 Date: 2026-05-11
 
-Status: Architecture alternative for discussion
+Status: Phase 1 approved for minimal operational graph
 
 Related document: [Graphify Architecture and Data Flow Review](./graphify-architecture-data-flow-review.md)
 
 ## Executive Summary
 
-The current Graphify architecture is a Python batch graph compiler centered on dictionaries and NetworkX. A stronger SPUR-native alternative would keep the same product goal but change the substrate:
+The current Graphify architecture is a Python batch graph compiler centered on dictionaries and NetworkX. The approved SPUR-native Phase 1 should keep the same product goal but reduce the substrate to the smallest mature Rust path:
 
 - Rust for ingestion, parsing, normalization, identity, and service boundaries.
 - Tree-sitter for deterministic code structure extraction.
-- Apache Arrow Rust for in-memory columnar batches and Parquet interchange.
-- DuckDB for embedded analytical storage, SQL, joins, aggregation, and ad hoc exploration.
-- Onager as an optional DuckDB graph-analytics extension for PageRank, centrality, Louvain, shortest paths, connected components, and graph metrics.
+- Existing `petgraph` for operational traversal, components, degree, PageRank experiments, dependency walks, and review-risk queries.
+- File-backed JSON or lightweight local storage for Graphify-compatible artifacts.
 
-The key shift is from "build a NetworkX object, then export artifacts" to "persist typed facts in analytical tables, then materialize graph views and graph algorithms from those tables."
+The key shift is from "build a NetworkX object in Python, then export artifacts" to "extract typed code facts in Rust, build an operational `petgraph` view, and export stable artifacts that SPUR can use immediately."
 
-Recommended direction: build a hybrid Rust-first analytical graph compiler. Do not make Onager the core storage layer. Treat Onager as an acceleration/plugin layer over stable `nodes` and `edges` tables in DuckDB.
+Recommended direction after review: approve Lane 1 first, a minimal operational graph using Rust + tree-sitter + existing `petgraph`. Do not add DuckDB, Arrow/Parquet, or Onager to the default graph path until Phase 1 has benchmark evidence and real analyst queries that justify the extra dependency surface.
 
 ## First-Principles Goal
 
@@ -26,15 +25,17 @@ The goal is not to port Graphify line-for-line. The goal is to preserve the usef
 
 > A corpus becomes a durable, queryable, provenance-rich graph with confidence-tagged relationships.
 
-From first principles, this needs five capabilities:
+From first principles, this needs these capabilities:
 
 | Capability | Requirement | Best-fit substrate |
 |---|---|---|
 | Fast local extraction | Parse many source files without executing them | Rust + tree-sitter |
-| Stable fact model | Keep nodes, edges, spans, confidence, provenance, versions | Rust typed structs + DuckDB tables |
-| Analytical querying | Ask aggregate and exploratory questions cheaply | DuckDB SQL |
-| Columnar interchange | Move batches between Rust, DuckDB, files, and future engines | Arrow + Parquet |
-| Graph algorithms | Centrality, components, community detection, shortest paths | Onager where available; Rust fallback where not |
+| Stable fact model | Keep nodes, edges, spans, confidence, provenance, versions | Rust typed structs |
+| Operational graph queries | Answer local agent questions cheaply | `petgraph` plus indexed node/edge maps |
+| Compatibility | Preserve existing Graphify consumers | JSON and report exports |
+| Analyst querying | Ask aggregate and exploratory questions cheaply | Later DuckDB lane |
+| Columnar interchange | Move batches between engines | Later Arrow/Parquet lane |
+| Graph acceleration | Centrality, communities, shortest paths at larger scale | Optional Onager lane after benchmarks |
 
 ## Why This Stack Is Stronger
 
@@ -52,18 +53,18 @@ Rust makes the extractor a production system rather than a scripting pipeline. I
 
 Tree-sitter is the right parsing substrate because it is fast, robust with syntax errors, supports incremental parsing, and already has broad language grammar coverage. For code intelligence, it should be the deterministic first pass. LLM extraction should enrich, not replace, tree-sitter facts.
 
-### Arrow and Parquet
+### Petgraph
 
-Arrow gives a stable columnar memory format for batches of nodes, edges, spans, diagnostics, and embeddings. Parquet gives durable, compressed snapshots. This matters because Graphify-style data is naturally analytical:
+`petgraph` is already in the SPUR workspace and already powers `spur-pm` graph analysis. That matters more than adding another analytical engine in Phase 1. The first graph service should reuse this local maturity:
 
-- filter edges by relation/confidence/source;
-- join nodes to files, commits, tasks, costs, and sessions;
-- compute metrics over millions of facts;
-- preserve versioned snapshots for comparison.
+- no new graph algorithm dependency;
+- direct Rust integration with existing SPUR graph-engine patterns;
+- enough algorithms for traversal, dependency walks, strongly connected components, reachability, degree, and risk triage;
+- predictable packaging inside the existing Rust workspace.
 
 ### DuckDB
 
-DuckDB is a strong fit when the graph is represented as analytical tables:
+DuckDB remains a strong fit for the later analyst lane, when the graph is represented as analytical tables:
 
 - `nodes`
 - `edges`
@@ -75,7 +76,18 @@ DuckDB is a strong fit when the graph is represented as analytical tables:
 - `centrality_scores`
 - `query_results`
 
-It gives immediate SQL over graph facts without building a separate graph database. This also aligns with SPUR's current `spur-context` direction, where DuckDB is already used for analytics over agent JSONL and cost data.
+It gives immediate SQL over graph facts without building a separate graph database. This also aligns with SPUR's current `spur-context` direction, where DuckDB is already used for analytics over agent JSONL and cost data. It should not be a Phase 1 requirement for the operational graph.
+
+### Arrow and Parquet
+
+Arrow gives a stable columnar memory format for batches of nodes, edges, spans, diagnostics, and embeddings. Parquet gives durable, compressed snapshots. This matters once the graph becomes a warehouse or interchange boundary:
+
+- filter edges by relation/confidence/source;
+- join nodes to files, commits, tasks, costs, and sessions;
+- compute metrics over millions of facts;
+- preserve versioned snapshots for comparison.
+
+Arrow and Parquet are not necessary for the approved minimal operational graph. They should enter when DuckDB snapshots, external interchange, or large analytical scans become concrete requirements.
 
 ### Onager
 
@@ -86,7 +98,7 @@ SELECT *
 FROM onager_ctr_pagerank('graph_edges');
 ```
 
-Architectural stance: use Onager when installed and compatible. Keep the core graph facts portable and queryable without it.
+Architectural stance: do not put Onager in the Phase 1 critical path. Use it later only when installed, compatible, and benchmarked against `petgraph`/Rust implementations on SPUR fixture graphs.
 
 ## Recommended Architecture
 
@@ -98,27 +110,27 @@ flowchart TB
     Parse --> Facts[typed fact model]
     Semantic --> Facts
 
-    Facts --> Arrow[Arrow RecordBatches]
-    Arrow --> DuckDB[DuckDB graph warehouse]
-    Arrow --> Parquet[Parquet snapshots]
+    Facts --> Build[petgraph builder]
+    Build --> Graph[operational graph]
+    Build --> Json[Graphify-compatible JSON]
+    Build --> Report[GRAPH_REPORT.md]
 
-    DuckDB --> SQL[SQL analytical views]
-    DuckDB --> Onager[Onager graph algorithms]
-    DuckDB --> Reports[reports and diagnostics]
-    DuckDB --> MCP[MCP/query service]
-    DuckDB --> TUI[SPUR TUI insights]
+    Graph --> Algorithms[traversal, SCC, reachability, degree]
+    Graph --> MCP[MCP/query service]
+    Graph --> TUI[SPUR TUI insights]
 
-    Onager --> Scores[centrality, communities, paths]
-    Scores --> DuckDB
+    Facts -. later .-> DuckDB[DuckDB graph warehouse]
+    DuckDB -. later .-> SQL[SQL analytical views]
+    DuckDB -. optional .-> Onager[Onager graph algorithms]
 ```
 
-The core architecture is table-first:
+The approved Phase 1 architecture is graph-first and typed-fact-backed:
 
 1. Extract facts in Rust.
-2. Store facts in DuckDB.
-3. Materialize graph views from tables.
-4. Run graph algorithms through Onager or Rust fallback implementations.
-5. Serve queries, reports, and diagrams from DuckDB views.
+2. Build a `petgraph` graph with stable node and edge identity.
+3. Answer operational graph questions through Rust APIs.
+4. Export Graphify-compatible artifacts.
+5. Defer DuckDB, Arrow/Parquet, and Onager until analyst workloads require them.
 
 ## Component Design
 
@@ -142,14 +154,12 @@ crates/spur-graph/
       semantic.rs
     store/
       mod.rs
-      duckdb.rs
-      arrow.rs
-      parquet.rs
+      json.rs
+      snapshot.rs
     graph/
       mod.rs
       algorithms.rs
-      onager.rs
-      fallback.rs
+      petgraph_builder.rs
     query/
       mod.rs
       subgraph.rs
@@ -164,8 +174,8 @@ crates/spur-graph/
 This keeps runtime responsibilities clean:
 
 - `extract` converts source material into typed facts.
-- `store` persists and retrieves facts.
-- `graph` computes graph analytics.
+- `store` persists and retrieves Phase 1 snapshots and compatibility artifacts.
+- `graph` builds `petgraph` views and computes operational analytics.
 - `query` turns user questions into subgraph context.
 - `export` emits compatibility artifacts.
 
@@ -203,9 +213,9 @@ pub struct SourceSpan {
 }
 ```
 
-The important change from Graphify is that node and edge shape becomes a Rust contract first, then a DuckDB schema second. JSON becomes an export format, not the internal truth.
+The important change from Graphify is that node and edge shape becomes a Rust contract first. JSON becomes an export format, not the internal truth. DuckDB can later mirror these same contracts as tables if the analyst lane is approved.
 
-## DuckDB Schema
+## Future DuckDB Schema
 
 ```sql
 CREATE TABLE extraction_runs (
@@ -298,7 +308,7 @@ FROM graph_edges
 WHERE weight >= 0.85;
 ```
 
-## Data Flow
+## Phase 1 Data Flow
 
 ```mermaid
 sequenceDiagram
@@ -308,9 +318,9 @@ sequenceDiagram
     participant TS as tree_sitter.rs
     participant SEM as semantic.rs
     participant ID as identity.rs
-    participant AR as Arrow batches
-    participant DB as DuckDB
-    participant OG as Onager
+    participant PG as petgraph_builder.rs
+    participant QA as graph algorithms
+    participant EX as export/report
     participant Q as query/report
 
     CLI->>D: scan corpus
@@ -321,16 +331,15 @@ sequenceDiagram
     SEM-->>CLI: semantic nodes/edges
     CLI->>ID: assign stable IDs and deduplicate
     ID-->>CLI: typed graph facts
-    CLI->>AR: build RecordBatches
-    AR->>DB: append nodes, edges, spans, runs
-    DB->>OG: run graph algorithms if extension available
-    OG-->>DB: centrality/community/path tables
-    DB->>Q: SQL views for reports and subgraph retrieval
+    CLI->>PG: build operational graph
+    PG->>QA: run traversal, degree, SCC, reachability
+    QA-->>Q: ranked subgraphs and metrics
+    PG->>EX: write graph.json and GRAPH_REPORT.md
 ```
 
-## Analyst Workflow
+## Later Analyst Workflow
 
-This stack should support analyst-style questions directly in SQL:
+When Lane 2 is approved, the same typed facts should support analyst-style questions directly in SQL:
 
 ```sql
 -- Most connected code symbols.
@@ -374,7 +383,7 @@ FROM onager_ctr_pagerank(
 
 If Onager function signatures require a concrete edge table rather than a subquery, materialize `graph_edges_for_onager` first.
 
-## Onager Integration Strategy
+## Later Onager Integration Strategy
 
 ```mermaid
 flowchart TB
@@ -408,7 +417,7 @@ Do not use Onager for:
 - cache invalidation;
 - security or access control.
 
-Onager should be a replaceable graph-compute adapter. If the extension is not installed, SPUR should still build, query, and report from DuckDB tables.
+Onager should be a replaceable graph-compute adapter. If the extension is not installed, SPUR should still build, query, and report from the Phase 1 `petgraph` path, and from DuckDB tables only when Lane 2 exists.
 
 ## Incremental Build Model
 
@@ -429,8 +438,8 @@ stateDiagram-v2
     ReuseFacts --> MergeRun
     RecomputeEdges --> MergeRun
     TombstoneFacts --> MergeRun
-    MergeRun --> RefreshViews
-    RefreshViews --> RunGraphAlgorithms
+    MergeRun --> BuildPetgraph
+    BuildPetgraph --> RunGraphAlgorithms
     RunGraphAlgorithms --> [*]
 ```
 
@@ -446,28 +455,30 @@ The storage model should be append-friendly:
 
 The Rust alternative should still export Graphify-compatible artifacts:
 
-| Existing artifact | Rust/DuckDB equivalent |
+| Existing artifact | Phase 1 equivalent |
 |---|---|
-| `graphify-out/graph.json` | Export from `nodes` and `edges` view to NetworkX node-link JSON |
-| `GRAPH_REPORT.md` | Render from DuckDB views and graph metrics |
-| `.graphify_analysis.json` | Export from `communities`, `graph_metrics`, and report views |
-| `graph.html` / callflow | Render from stable graph export views |
-| MCP query server | Query DuckDB directly, return subgraph text |
+| `graphify-out/graph.json` | Export from typed nodes/edges and `petgraph` indices to NetworkX node-link JSON |
+| `GRAPH_REPORT.md` | Render from Rust graph metrics |
+| `.graphify_analysis.json` | Export from Rust graph metrics and later optional analyst metrics |
+| `graph.html` / callflow | Render from stable graph export data |
+| MCP query server | Query the typed graph first; DuckDB only in Lane 2 |
 
 This enables migration without breaking consumers that already expect Graphify outputs.
 
 ## Alternatives
 
-### Alternative A: Rust + Petgraph Only
+### Lane 1: Minimal Operational Graph, Rust + Tree-sitter + Petgraph
 
-This is the smallest Rust port: replace NetworkX with `petgraph`, keep JSON files as the primary artifact.
+This is the approved first step. Replace Python extraction and NetworkX graph construction with Rust, tree-sitter, and existing workspace `petgraph` usage. Keep JSON and reports as the primary artifacts until SPUR has enough graph volume and analyst demand to justify a warehouse.
 
 Pros:
 
 - simple;
 - pure Rust;
-- no DuckDB dependency;
+- no new graph algorithm dependency;
 - easy to embed in SPUR.
+- matches the local `spur-pm` graph-engine direction;
+- keeps packaging and CI risk low.
 
 Cons:
 
@@ -476,11 +487,11 @@ Cons:
 - no direct table joins with SPUR costs, tasks, sessions, and events;
 - large graph snapshots remain file-centric.
 
-Use this only if the goal is a direct Graphify rewrite.
+Use this when the goal is fast local code intelligence for agents, review-risk analysis, dependency walks, and Graphify-compatible exports.
 
-### Alternative B: DuckDB-First Tables With Rust Fallback Graph Algorithms
+### Lane 2: DuckDB-First Analyst Tables
 
-This is the strongest default. Store graph facts in DuckDB and implement required algorithms in Rust where needed.
+This is the later analyst lane. Store graph facts in DuckDB and implement required algorithms in Rust where needed.
 
 Pros:
 
@@ -495,11 +506,11 @@ Cons:
 - Rust graph algorithms must be maintained;
 - less turnkey than Onager for centrality/community algorithms.
 
-This is the recommended base.
+Use this when SPUR needs SQL joins across code graph facts, beads issues, plan tasks, sessions, costs, reviews, and outcomes.
 
-### Alternative C: DuckDB + Onager as First-Class Graph Algorithm Layer
+### Lane 3: DuckDB + Onager Accelerator
 
-This extends Alternative B by using Onager when available.
+This extends Lane 2 by using Onager when available.
 
 Pros:
 
@@ -518,24 +529,47 @@ Use this as an optional accelerator, not as the only path.
 
 ## Recommended Decision
 
-Adopt Alternative B as the base architecture and Alternative C as an optional acceleration layer:
+Adopt Lane 1 as the approved Phase 1 architecture. Keep Lane 2 and Lane 3 as explicit later decisions, each gated by evidence:
 
 ```mermaid
 flowchart LR
-    Base[Required base] --> Rust[Rust extraction and identity]
-    Base --> Arrow[Arrow batches and Parquet snapshots]
-    Base --> DuckDB[DuckDB tables and SQL views]
-    DuckDB --> Fallback[Rust fallback graph algorithms]
-    DuckDB --> Optional[Optional Onager extension]
-    Optional --> Faster[centrality, communities, paths]
+    Phase1[Approved Phase 1] --> Rust[Rust extraction and identity]
+    Phase1 --> TS[tree-sitter adapters]
+    Phase1 --> Petgraph[existing petgraph operational graph]
+    Phase1 --> Exports[Graphify JSON and reports]
+
+    Petgraph --> Gate{Need analyst warehouse?}
+    Gate -- yes --> DuckDB[Lane 2: DuckDB tables and SQL views]
+    Gate -- no --> Continue[keep Phase 1 simple]
+
+    DuckDB --> Accel{Need graph SQL acceleration?}
+    Accel -- yes --> Onager[Lane 3: optional Onager]
+    Accel -- no --> RustAlgo[Rust graph algorithms]
 ```
 
-This keeps the system mature and resilient:
+This keeps the system mature and resilient while avoiding premature substrate cost:
 
-- Rust, tree-sitter, Arrow, and DuckDB are foundational dependencies.
-- Onager is powerful but optional.
-- Graph facts remain portable and inspectable even without graph extensions.
-- SPUR can join graph facts with tasks, beads issues, cost, sessions, reviews, and outcomes.
+- Rust and existing `petgraph` are already foundational in SPUR.
+- Tree-sitter is the only new core dependency needed for Phase 1.
+- DuckDB becomes a lane when analyst SQL workflows are proven, not before.
+- Arrow/Parquet become a lane when columnar interchange or snapshot scale is proven.
+- Onager remains optional and benchmark-gated.
+- Graph facts remain portable and inspectable without graph extensions.
+
+## Why Lane 1 Is Better Than Original Graphify First
+
+Lane 1 is better than the original Python/NetworkX architecture for SPUR's immediate needs because it improves the system boundary without importing a warehouse:
+
+| Dimension | Original Graphify | Approved Lane 1 |
+|---|---|---|
+| Runtime substrate | Python scripts and package environment | Rust workspace binary/library |
+| Parser substrate | Python tree-sitter bindings | Rust tree-sitter runtime and grammar crates |
+| Graph algorithms | NetworkX | existing `petgraph` dependency and local graph-engine patterns |
+| Deployment | Python environment management | SPUR-native build and test path |
+| Operational queries | artifact-driven | in-process graph APIs plus compatible exports |
+| Analyst SQL | absent | intentionally deferred until needed |
+
+The original Graphify remains better for rapid Python algorithm experiments and NetworkX breadth. Lane 1 is better for SPUR because it optimizes the first-order requirement: fast, local, typed, agent-consumable code graph facts.
 
 ## Maturity Assessment
 
@@ -543,42 +577,52 @@ This keeps the system mature and resilient:
 |---|---|---|---|
 | Rust | core implementation | already SPUR's native stack | low |
 | tree-sitter | parsing | mature parser runtime with broad grammar ecosystem | medium around per-language grammar quality |
-| Arrow Rust | columnar batches and Parquet bridge | official Apache implementation | low-medium due to API/version churn |
-| DuckDB | embedded analytics | mature OLAP engine with Rust client | medium due to binary/extension packaging |
-| Onager | graph algorithms in DuckDB | promising community extension | medium-high until platform and version support are proven |
+| petgraph | operational graph algorithms | already a workspace dependency used by `spur-pm` | low |
+| DuckDB | later embedded analytics lane | mature OLAP engine with Rust client | medium due to binary/extension packaging |
+| Arrow Rust | later columnar batches and Parquet bridge | official Apache implementation | low-medium due to API/version churn |
+| Onager | later graph algorithms in DuckDB | promising community extension | medium-high until platform and version support are proven |
 
 ## Implementation Phases
 
-### Phase 1: Table-First Graph Store
+### Phase 1: Minimal Operational Graph
 
-- Add `spur-graph` crate behind a feature flag.
+- Add `spur-graph` crate or `spur-pm` graphify module behind a feature flag.
 - Define typed node, edge, file, span, and run structs.
-- Create DuckDB schema and migrations.
-- Ingest a small Rust-only corpus into `nodes`, `edges`, `files`, and `source_spans`.
+- Add tree-sitter runtime and the first grammar crate.
+- Ingest a small Rust-only corpus into typed facts.
+- Build a `petgraph` graph from typed facts.
 - Export Graphify-compatible `graph.json`.
+- Generate a minimal `GRAPH_REPORT.md`.
 
 ### Phase 2: Tree-sitter Extraction
 
-- Implement language adapters for Rust, Python, TypeScript, and Markdown first.
+- Expand language adapters from Rust to Python, TypeScript, and Markdown.
 - Extract file/module/function/class/import/call edges.
 - Persist source spans and confidence metadata.
 - Add incremental content-hash reuse.
 
-### Phase 3: Analysis and Query
+### Phase 3: Operational Analysis and Query
 
-- Add SQL views for degree, cross-file edges, inferred edges, god nodes, and surprising connections.
-- Add MCP/query service over DuckDB.
-- Generate `GRAPH_REPORT.md` from SQL views.
-- Add Rust fallback algorithms for basic BFS, degree, connected components, and PageRank.
+- Add Rust graph analyses for degree, cross-file edges, inferred edges, god nodes, reachability, SCCs, and surprising connections.
+- Add MCP/query service over the typed graph.
+- Improve `GRAPH_REPORT.md` from Rust graph metrics.
+- Add fixture-backed benchmarks for parse throughput and graph query latency.
 
-### Phase 4: Onager Adapter
+### Phase 4: DuckDB Analyst Lane
+
+- Add DuckDB tables only after operational graph facts stabilize.
+- Add SQL views for graph facts, sessions, costs, tasks, reviews, and outcomes.
+- Add Arrow/Parquet only if columnar snapshot or interchange needs are real.
+- Keep `petgraph` as the operational graph path.
+
+### Phase 5: Optional Onager Adapter
 
 - Detect and load Onager when available.
 - Run centrality and community algorithms through Onager.
 - Persist results in `graph_metrics` and `communities`.
 - Compare Onager output against Rust fallback on fixture graphs.
 
-### Phase 5: SPUR Integration
+### Phase 6: SPUR Integration
 
 - Join graph facts to beads issues, plan tasks, worker outcomes, files touched, cost, and review signals.
 - Expose graph analytics in the TUI insights view.
@@ -588,32 +632,34 @@ This keeps the system mature and resilient:
 
 Required tests:
 
-- schema migration tests with in-memory DuckDB;
-- tree-sitter fixture tests per language;
+- tree-sitter fixture tests for the first grammar;
 - stable ID tests across path changes and unchanged content;
 - incremental rebuild tests for changed, unchanged, deleted, and renamed files;
 - Graphify JSON export compatibility tests;
-- SQL view golden tests;
-- Onager adapter tests that skip cleanly when the extension is unavailable;
+- Rust graph analysis golden tests;
+- DuckDB SQL view golden tests when Lane 2 starts;
+- Onager adapter tests that skip cleanly when Lane 3 starts and the extension is unavailable;
 - performance tests on a medium corpus with cold and warm cache timings.
 
 Required benchmarks:
 
 - files per second parsed by tree-sitter;
-- rows per second appended to DuckDB;
-- query latency for god nodes and cross-file inferred edges;
-- Onager vs fallback latency for PageRank and connected components;
+- facts per second normalized into the graph builder;
+- query latency for reachability, god nodes, and cross-file inferred edges;
+- rows per second appended to DuckDB when Lane 2 starts;
+- Onager vs fallback latency for PageRank and connected components when Lane 3 starts;
 - graph export time and output size.
 
 ## Key Architecture Principles
 
 1. Keep extraction deterministic where possible.
-2. Store graph facts as typed rows, not opaque JSON.
-3. Make SQL the analyst interface.
-4. Make Onager optional.
-5. Preserve provenance on every node and edge.
-6. Export compatibility artifacts, but do not make them the source of truth.
-7. Treat semantic LLM extraction as enrichment over deterministic code facts.
+2. Store graph facts as typed records, not opaque JSON.
+3. Make `petgraph` the Phase 1 operational graph.
+4. Make SQL a later analyst interface.
+5. Make Onager optional and benchmark-gated.
+6. Preserve provenance on every node and edge.
+7. Export compatibility artifacts, but do not make them the source of truth.
+8. Treat semantic LLM extraction as enrichment over deterministic code facts.
 
 ## Source Notes
 
@@ -625,12 +671,12 @@ Required benchmarks:
 
 ## Bottom Line
 
-The best alternative is not "Graphify in Rust". It is a SPUR-native analytical graph substrate:
+The approved first alternative is not "Graphify in Rust with every analytical dependency". It is a SPUR-native operational graph substrate:
 
 - tree-sitter creates trustworthy code facts;
 - Rust gives typed contracts and fast orchestration;
-- Arrow and Parquet provide columnar movement and snapshots;
-- DuckDB turns the graph into an analyst-friendly warehouse;
-- Onager adds graph algorithms inside SQL when available.
+- existing `petgraph` answers local graph questions immediately;
+- Graphify-compatible exports preserve interoperability;
+- DuckDB, Arrow/Parquet, and Onager remain later lanes for analyst and acceleration workloads.
 
-This stack is faster, more analyzable, and more mature as a system boundary than the Python/NetworkX model, while still allowing Graphify-compatible exports for interoperability.
+This Phase 1 is better than the Python/NetworkX model for SPUR because it is smaller, native to the Rust workspace, easier to package, and strong enough for operational agent workflows. The heavier DuckDB/Arrow/Onager stack may still become better for analyst-scale graph warehousing, but it should earn that role through benchmarks and concrete queries.
