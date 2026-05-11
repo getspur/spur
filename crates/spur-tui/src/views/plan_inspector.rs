@@ -540,11 +540,13 @@ impl View for PlanInspectorView {
                     crate::components::plan_task_detail::render_task_detail(
                         frame,
                         detail_area,
+                        plan,
                         task,
                         live_node,
                         issue_detail.0,
                         issue_detail.1,
                         self.task_detail_scroll,
+                        ctx.theme,
                     );
                 } else {
                     frame.render_widget(
@@ -583,11 +585,13 @@ impl View for PlanInspectorView {
                     crate::components::plan_task_detail::render_task_detail(
                         frame,
                         detail_area,
+                        plan,
                         task,
                         live_node,
                         issue_detail.0,
                         issue_detail.1,
                         self.task_detail_scroll,
+                        ctx.theme,
                     );
                 }
             }
