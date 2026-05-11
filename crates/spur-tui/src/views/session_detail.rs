@@ -1111,9 +1111,9 @@ impl SessionDetailView {
         &mut self,
         ref_id: crate::components::mermaid::MermaidId,
         target_width: u32,
-        result: Result<std::sync::Arc<image::DynamicImage>, String>,
+        result: Result<crate::components::mermaid::MermaidRenderOutput, String>,
     ) {
-        use crate::components::mermaid::MermaidState;
+        use crate::components::mermaid::{MermaidRenderOutput, MermaidState};
 
         // Always release the in-flight slot, success or failure.
         self.in_flight_renders.remove(&ref_id);
@@ -1124,11 +1124,12 @@ impl SessionDetailView {
         let code = match self.mermaid_registry.get(&ref_id) {
             Some(MermaidState::Pending { code }) => code.clone(),
             Some(MermaidState::Ready { code, .. }) => code.clone(),
+            Some(MermaidState::ReadyText { code, .. }) => code.clone(),
             _ => String::new(),
         };
 
         let state = match result {
-            Ok(image) => {
+            Ok(MermaidRenderOutput::Image(image)) => {
                 self.next_image_generation = self.next_image_generation.saturating_add(1);
                 MermaidState::Ready {
                     image,
@@ -1137,6 +1138,11 @@ impl SessionDetailView {
                     image_generation: self.next_image_generation,
                 }
             }
+            Ok(MermaidRenderOutput::Text(text)) => MermaidState::ReadyText {
+                text,
+                code,
+                rendered_at_width: target_width,
+            },
             Err(message) => MermaidState::Error { message },
         };
         self.mermaid_registry.insert(ref_id, state);
@@ -1167,6 +1173,7 @@ impl SessionDetailView {
                 } if *rastered_at_bucket < new_bucket && !self.in_flight_renders.contains(id) => {
                     Some((*id, code.clone()))
                 }
+                MermaidState::ReadyText { .. } => None,
                 _ => None,
             })
             .collect();
@@ -1236,7 +1243,7 @@ impl SessionDetailView {
                 MermaidState::Pending { .. } | MermaidState::Rendering => {
                     pending.insert(*id);
                 }
-                MermaidState::Ready { .. } => {}
+                MermaidState::Ready { .. } | MermaidState::ReadyText { .. } => {}
             }
         }
         (errors, pending)
@@ -2856,7 +2863,9 @@ mod banner_tests {
 #[cfg(all(test, feature = "markdown"))]
 mod maybe_request_rerasters_tests {
     use super::*;
-    use crate::components::mermaid::{MermaidId, MermaidState, RASTER_BUCKETS};
+    use crate::components::mermaid::{
+        MermaidId, MermaidRenderOutput, MermaidState, RASTER_BUCKETS,
+    };
     use image::{DynamicImage, RgbaImage};
     use std::sync::Arc;
 
@@ -2874,6 +2883,10 @@ mod maybe_request_rerasters_tests {
             rastered_at_bucket: bucket,
             image_generation: gen,
         }
+    }
+
+    fn rendered_image(image: Arc<DynamicImage>) -> MermaidRenderOutput {
+        MermaidRenderOutput::Image(image)
     }
 
     #[test]
@@ -2951,7 +2964,7 @@ mod maybe_request_rerasters_tests {
         view.mermaid_registry
             .insert(MermaidId(6), MermaidState::Pending { code: "g".into() });
         let img = Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(10, 10)));
-        view.handle_mermaid_completed(MermaidId(6), 800, Ok(img));
+        view.handle_mermaid_completed(MermaidId(6), 800, Ok(rendered_image(img)));
         assert!(!view.in_flight_renders.contains(&MermaidId(6)));
     }
 
@@ -2961,7 +2974,7 @@ mod maybe_request_rerasters_tests {
         view.mermaid_registry
             .insert(MermaidId(7), MermaidState::Pending { code: "g".into() });
         let img = Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(10, 10)));
-        view.handle_mermaid_completed(MermaidId(7), 1600, Ok(img));
+        view.handle_mermaid_completed(MermaidId(7), 1600, Ok(rendered_image(img)));
         match view.mermaid_registry.get(&MermaidId(7)) {
             Some(MermaidState::Ready {
                 rastered_at_bucket, ..
@@ -2985,7 +2998,7 @@ mod maybe_request_rerasters_tests {
             },
         );
         let img = Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(20, 20)));
-        view.handle_mermaid_completed(MermaidId(8), 1600, Ok(img));
+        view.handle_mermaid_completed(MermaidId(8), 1600, Ok(rendered_image(img)));
         match view.mermaid_registry.get(&MermaidId(8)) {
             Some(MermaidState::Ready { code, .. }) => assert_eq!(code, "ORIGINAL"),
             _ => panic!("expected Ready"),
@@ -3002,7 +3015,7 @@ mod maybe_request_rerasters_tests {
             },
         );
         let img = Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(10, 10)));
-        view.handle_mermaid_completed(MermaidId(9), 800, Ok(img));
+        view.handle_mermaid_completed(MermaidId(9), 800, Ok(rendered_image(img)));
         match view.mermaid_registry.get(&MermaidId(9)) {
             Some(MermaidState::Ready { code, .. }) => assert_eq!(code, "PENDING_SOURCE"),
             _ => panic!("expected Ready"),
@@ -3015,14 +3028,14 @@ mod maybe_request_rerasters_tests {
         view.mermaid_registry
             .insert(MermaidId(10), MermaidState::Pending { code: "g".into() });
         let img = Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(10, 10)));
-        view.handle_mermaid_completed(MermaidId(10), 800, Ok(img.clone()));
+        view.handle_mermaid_completed(MermaidId(10), 800, Ok(rendered_image(img.clone())));
         let gen1 = match view.mermaid_registry.get(&MermaidId(10)) {
             Some(MermaidState::Ready {
                 image_generation, ..
             }) => *image_generation,
             _ => panic!(),
         };
-        view.handle_mermaid_completed(MermaidId(10), 1200, Ok(img));
+        view.handle_mermaid_completed(MermaidId(10), 1200, Ok(rendered_image(img)));
         let gen2 = match view.mermaid_registry.get(&MermaidId(10)) {
             Some(MermaidState::Ready {
                 image_generation, ..
@@ -3116,7 +3129,7 @@ mod maybe_request_rerasters_tests {
 
         // 3. Worker completes (simulated).
         let img2 = Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(20, 20)));
-        view.handle_mermaid_completed(MermaidId(99), 1600, Ok(img2));
+        view.handle_mermaid_completed(MermaidId(99), 1600, Ok(rendered_image(img2)));
 
         // 4. Verify state.
         assert!(!view.in_flight_renders.contains(&MermaidId(99)));
