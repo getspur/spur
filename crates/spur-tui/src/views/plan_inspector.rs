@@ -24,6 +24,7 @@ pub struct PlanInspectorView {
     session_id: SessionId,
     pinned_plan_id: Option<String>,
     selected_task_id: Option<String>,
+    blocker_cycle: Option<(String, usize)>,
     stacked_mode: bool,
     open_issue_id: Option<String>,
     issue_states: HashMap<String, TaskIssueState>,
@@ -43,6 +44,7 @@ impl PlanInspectorView {
             session_id,
             pinned_plan_id: None,
             selected_task_id: None,
+            blocker_cycle: None,
             stacked_mode: false,
             open_issue_id: None,
             issue_states: HashMap::new(),
@@ -55,6 +57,7 @@ impl PlanInspectorView {
             session_id,
             pinned_plan_id: Some(plan_id),
             selected_task_id: None,
+            blocker_cycle: None,
             stacked_mode: false,
             open_issue_id: None,
             issue_states: HashMap::new(),
@@ -74,6 +77,15 @@ impl PlanInspectorView {
     }
 
     fn set_selected_task_id(&mut self, task_id: Option<String>) {
+        self.blocker_cycle = None;
+        self.set_selected_task_id_inner(task_id);
+    }
+
+    fn set_selected_task_id_from_blocker_jump(&mut self, task_id: Option<String>) {
+        self.set_selected_task_id_inner(task_id);
+    }
+
+    fn set_selected_task_id_inner(&mut self, task_id: Option<String>) {
         if self.selected_task_id.as_deref() != task_id.as_deref() {
             self.open_issue_id = None;
             self.task_detail_scroll = 0;
@@ -266,6 +278,55 @@ impl PlanInspectorView {
             self.set_selected_task_id(Some(task.task_id.clone()));
         }
     }
+
+    fn jump_to_next_blocker(&mut self, plan: &TrackedPlan) -> Option<Action> {
+        let selected_id = self.selected_task_id.as_deref()?;
+        let origin_id = self
+            .blocker_cycle
+            .as_ref()
+            .and_then(|(origin_id, _)| {
+                let origin = plan.task(origin_id)?;
+                let selected_is_origin = selected_id == origin_id;
+                let selected_is_blocker = origin
+                    .blocked_by
+                    .iter()
+                    .any(|blocker_id| blocker_id == selected_id);
+                (selected_is_origin || selected_is_blocker).then(|| origin_id.clone())
+            })
+            .unwrap_or_else(|| selected_id.to_string());
+        let origin = match plan.task(&origin_id) {
+            Some(task) => task,
+            None => {
+                self.blocker_cycle = None;
+                return Some(Action::FlashHint {
+                    message: "Selected task is no longer in the current plan".into(),
+                });
+            }
+        };
+        if origin.blocked_by.is_empty() {
+            self.blocker_cycle = None;
+            return Some(Action::FlashHint {
+                message: "Selected task has no blockers".into(),
+            });
+        }
+
+        let next_idx = self
+            .blocker_cycle
+            .as_ref()
+            .filter(|(cycle_origin, _)| cycle_origin == &origin_id)
+            .map(|(_, idx)| *idx)
+            .unwrap_or(0);
+        let blocker_id = origin.blocked_by[next_idx % origin.blocked_by.len()].clone();
+        self.blocker_cycle = Some((origin_id, next_idx + 1));
+        if plan.task(&blocker_id).is_some() {
+            self.set_selected_task_id_from_blocker_jump(Some(blocker_id));
+            None
+        } else {
+            Some(Action::FlashHint {
+                message: format!("Blocker {blocker_id} is not in the current plan"),
+            })
+        }
+    }
 }
 
 impl View for PlanInspectorView {
@@ -312,6 +373,9 @@ impl View for PlanInspectorView {
                 KeyCode::Char('k') | KeyCode::Up => self.move_task(plan, -1),
                 KeyCode::Char('g') if key.modifiers.is_empty() => self.jump_lane_start(plan),
                 KeyCode::Char('G') => self.jump_lane_end(plan),
+                KeyCode::Char('b') if key.modifiers.is_empty() => {
+                    return self.jump_to_next_blocker(plan);
+                }
                 KeyCode::Enter if key.modifiers.is_empty() => {
                     if let Some(task) = self.selected_task(plan) {
                         if self.selected_issue_id(task).is_some() {
@@ -488,7 +552,7 @@ impl View for PlanInspectorView {
                         Style::default().fg(token(ctx.theme, "plan_inspector.label.fg")),
                     ),
                     Span::raw(truncate_display(
-                        &plan.next_action,
+                        &operator_summary(plan, ctx.lineage),
                         area.width.saturating_sub(8) as usize,
                     )),
                 ])),
@@ -627,7 +691,7 @@ impl View for PlanInspectorView {
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
                 format!(
-                    " h/l: lane  j/k: task  {}  o: work item  g/G: ends  Alt+P/Esc: close {}",
+                    " h/l: lane  j/k: task  b: blocker  {}  o: work item  g/G: ends  Alt+P/Esc: close {}",
                     enter_hint, scroll_hint
                 ),
                 Style::default().fg(token(ctx.theme, "plan_inspector.footer_hint.fg")),
@@ -648,6 +712,100 @@ fn plan_status_color(theme: &Theme, status: &str) -> Color {
         _ => "plan_inspector.status.unknown.fg",
     };
     token(theme, key)
+}
+
+fn operator_summary(plan: &TrackedPlan, lineage: &spur_core::ExecutorLineage) -> String {
+    let mut fragments = Vec::new();
+    let task_by_id: HashMap<&str, &spur_core::TrackedTask> = plan
+        .tasks
+        .iter()
+        .map(|task| (task.task_id.as_str(), task))
+        .collect();
+    for task in &plan.tasks {
+        if task.blocked_by.is_empty() {
+            continue;
+        }
+        for blocker_id in &task.blocked_by {
+            let Some(blocker) = task_by_id.get(blocker_id.as_str()) else {
+                continue;
+            };
+            if matches!(blocker.status.as_str(), "rejected" | "failed" | "error") {
+                fragments.push(format!(
+                    "{} {} {} ago",
+                    blocker.task_id,
+                    operator_status_label(&blocker.status),
+                    format_age(
+                        plan.updated_at
+                            .elapsed()
+                            .ok()
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0)
+                    )
+                ));
+            }
+        }
+    }
+
+    for task in &plan.tasks {
+        if !matches!(task.status.as_str(), "dispatched" | "running" | "active") {
+            continue;
+        }
+        let elapsed_secs = task
+            .issue_id
+            .as_deref()
+            .and_then(|issue_id| {
+                crate::components::plan_stage_board::preferred_live_node(lineage, issue_id)
+            })
+            .map(|node| node.elapsed_secs())
+            .unwrap_or_else(|| {
+                plan.updated_at
+                    .elapsed()
+                    .ok()
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+            });
+        if elapsed_secs >= 10 * 60 {
+            fragments.push(format!(
+                "{} running {}",
+                task.task_id,
+                format_age(elapsed_secs)
+            ));
+        }
+    }
+
+    for task in &plan.tasks {
+        if task.attempt > 1 {
+            fragments.push(format!(
+                "{} retry {}/{}",
+                task.task_id, task.attempt, task.max_attempts
+            ));
+        }
+    }
+
+    if fragments.is_empty() {
+        plan.next_action.clone()
+    } else {
+        format!("risk: {}", fragments.join(" · "))
+    }
+}
+
+fn operator_status_label(status: &str) -> &str {
+    match status {
+        "failed" | "error" => "error",
+        other => other,
+    }
+}
+
+fn format_age(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 60 * 60 {
+        format!("{}m", secs / 60)
+    } else if secs < 48 * 60 * 60 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86_400)
+    }
 }
 
 fn truncate_display(s: &str, max: usize) -> String {
@@ -743,6 +901,96 @@ mod tests {
         projection
     }
 
+    fn projection_with_blocker_cycle(session_id: &SessionId) -> PlanProjectionStore {
+        let mut projection = PlanProjectionStore::new();
+        projection.apply(&SpurEvent::now(SpurEventBody::PlanSnapshotUpdated {
+            session_id: session_id.clone(),
+            snapshot: Box::new(PlanSnapshot {
+                plan_id: "plan-1".into(),
+                epic_id: Some("bd-epic".into()),
+                status: "running".into(),
+                progress: "0/3 done".into(),
+                next_action: "resolve blockers".into(),
+                ready_to_merge: false,
+                counts: PlanSnapshotCounts {
+                    pending: 1,
+                    rejected: 1,
+                    failed: 1,
+                    ..Default::default()
+                },
+                tasks: vec![
+                    PlanSnapshotTask {
+                        task_id: "lint".into(),
+                        task_name: "lint".into(),
+                        agent: "codex".into(),
+                        issue_id: Some("bd-lint".into()),
+                        status: "rejected".into(),
+                        attempt: 1,
+                        max_attempts: 3,
+                        depends_on: Vec::new(),
+                        blocked_by: Vec::new(),
+                        unblocks: vec!["ui".into()],
+                        summary: None,
+                        feedback: None,
+                        error: None,
+                        worker_branch: None,
+                        delegation_id: None,
+                        diff_summary: None,
+                        mutation_id: None,
+                        superseded_by: Vec::new(),
+                        next_action: "fix lint".into(),
+                    },
+                    PlanSnapshotTask {
+                        task_id: "api".into(),
+                        task_name: "api".into(),
+                        agent: "codex".into(),
+                        issue_id: Some("bd-api".into()),
+                        status: "failed".into(),
+                        attempt: 2,
+                        max_attempts: 3,
+                        depends_on: Vec::new(),
+                        blocked_by: Vec::new(),
+                        unblocks: vec!["ui".into()],
+                        summary: None,
+                        feedback: None,
+                        error: Some("build failed".into()),
+                        worker_branch: None,
+                        delegation_id: None,
+                        diff_summary: None,
+                        mutation_id: None,
+                        superseded_by: Vec::new(),
+                        next_action: "retry".into(),
+                    },
+                    PlanSnapshotTask {
+                        task_id: "ui".into(),
+                        task_name: "ui".into(),
+                        agent: "codex".into(),
+                        issue_id: Some("bd-ui".into()),
+                        status: "pending".into(),
+                        attempt: 0,
+                        max_attempts: 3,
+                        depends_on: vec!["lint".into(), "api".into()],
+                        blocked_by: vec!["lint".into(), "api".into()],
+                        unblocks: Vec::new(),
+                        summary: None,
+                        feedback: None,
+                        error: None,
+                        worker_branch: None,
+                        delegation_id: None,
+                        diff_summary: None,
+                        mutation_id: None,
+                        superseded_by: Vec::new(),
+                        next_action: "wait".into(),
+                    },
+                ],
+                owner_brain_session_id: Some(session_id.0.clone()),
+                owner_token: None,
+                owner_acquired_at: None,
+            }),
+        }));
+        projection
+    }
+
     #[test]
     fn o_opens_source_work_item_from_plan_inspector() {
         let session_id = SessionId("brain-1".into());
@@ -757,6 +1005,84 @@ mod tests {
         assert!(matches!(
             action,
             Some(Action::OpenIssueInBacklog { id }) if id == "bd-epic"
+        ));
+    }
+
+    #[test]
+    fn b_cycles_selection_through_selected_task_blockers() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_blocker_cycle(&session_id);
+        let lineage = ExecutorLineage::new();
+        let synopsis = SessionSynopsisProjection::new();
+        let ctx = ctx(&lineage, &projection, &synopsis);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+        let plan = projection.plan("plan-1").unwrap();
+
+        view.set_selected_task_id(Some("ui".into()));
+        assert!(view.handle_key(key(KeyCode::Char('b')), &ctx).is_none());
+        assert_eq!(
+            view.selected_task(plan).map(|task| task.task_id.as_str()),
+            Some("lint")
+        );
+
+        assert!(view.handle_key(key(KeyCode::Char('b')), &ctx).is_none());
+        assert_eq!(
+            view.selected_task(plan).map(|task| task.task_id.as_str()),
+            Some("api")
+        );
+    }
+
+    #[test]
+    fn b_flashes_hint_for_external_blocker() {
+        let session_id = SessionId("brain-1".into());
+        let mut projection = projection_with_blocker_cycle(&session_id);
+        projection.apply(&SpurEvent::now(SpurEventBody::PlanSnapshotUpdated {
+            session_id: session_id.clone(),
+            snapshot: Box::new(PlanSnapshot {
+                plan_id: "external-plan".into(),
+                epic_id: None,
+                status: "running".into(),
+                progress: "0/1 done".into(),
+                next_action: "wait for external issue".into(),
+                ready_to_merge: false,
+                counts: PlanSnapshotCounts {
+                    pending: 1,
+                    ..Default::default()
+                },
+                tasks: vec![PlanSnapshotTask {
+                    task_id: "ui".into(),
+                    task_name: "ui".into(),
+                    agent: "codex".into(),
+                    issue_id: Some("bd-ui".into()),
+                    status: "pending".into(),
+                    attempt: 0,
+                    max_attempts: 3,
+                    depends_on: Vec::new(),
+                    blocked_by: vec!["bd-external".into()],
+                    unblocks: Vec::new(),
+                    summary: None,
+                    feedback: None,
+                    error: None,
+                    worker_branch: None,
+                    delegation_id: None,
+                    diff_summary: None,
+                    mutation_id: None,
+                    superseded_by: Vec::new(),
+                    next_action: "wait".into(),
+                }],
+                owner_brain_session_id: Some(session_id.0.clone()),
+                owner_token: None,
+                owner_acquired_at: None,
+            }),
+        }));
+        let lineage = ExecutorLineage::new();
+        let synopsis = SessionSynopsisProjection::new();
+        let ctx = ctx(&lineage, &projection, &synopsis);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "external-plan".into());
+
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Char('b')), &ctx),
+            Some(Action::FlashHint { message }) if message.contains("bd-external")
         ));
     }
 }
