@@ -176,6 +176,8 @@ pub struct IssueBrowserView {
     detail_mode: DetailMode,
     graph_pane: IssueGraphPane,
     graph_data_epoch: u64,
+    detail_data_epoch: u64,
+    detail_request_epochs: HashMap<String, u64>,
     graph_request_epochs: HashMap<String, u64>,
     graph_cache: HashMap<String, (Vec<GraphNodeEvent>, Vec<GraphEdgeEvent>)>,
     graph_cache_order: VecDeque<String>,
@@ -223,6 +225,8 @@ impl IssueBrowserView {
             detail_mode: DetailMode::Text,
             graph_pane: IssueGraphPane::new(),
             graph_data_epoch: 0,
+            detail_data_epoch: 0,
+            detail_request_epochs: HashMap::new(),
             graph_request_epochs: HashMap::new(),
             graph_cache: HashMap::new(),
             graph_cache_order: VecDeque::new(),
@@ -278,6 +282,7 @@ impl IssueBrowserView {
     pub fn seed_issues(&mut self, mut issues: Vec<spur_pm::IssueSummary>) {
         self.last_refresh_error = None;
         self.bump_graph_data_epoch();
+        self.bump_detail_data_epoch();
         self.invalidate_graph_cache();
         sort_issues_parent_first(&mut issues);
         self.tracked_issues = issues;
@@ -393,6 +398,8 @@ impl IssueBrowserView {
         }
 
         self.issue_focus = IssueFocus::Loading { id: id.clone() };
+        self.detail_request_epochs
+            .insert(id.clone(), self.detail_data_epoch);
         self.detail_mode = DetailMode::Text;
         self.issue_detail_pane.reset();
         self.graph_error = None;
@@ -493,6 +500,10 @@ impl IssueBrowserView {
 
     fn bump_graph_data_epoch(&mut self) {
         self.graph_data_epoch = self.graph_data_epoch.wrapping_add(1);
+    }
+
+    fn bump_detail_data_epoch(&mut self) {
+        self.detail_data_epoch = self.detail_data_epoch.wrapping_add(1);
     }
 
     fn get_issue_graph_action(&mut self, id: String) -> Action {
@@ -597,6 +608,8 @@ impl IssueBrowserView {
             }
             (_, Some(sel)) => {
                 self.issue_focus = IssueFocus::Loading { id: sel.clone() };
+                self.detail_request_epochs
+                    .insert(sel.clone(), self.detail_data_epoch);
                 self.detail_mode = DetailMode::Text;
                 self.issue_detail_pane.reset();
                 self.graph_error = None;
@@ -739,6 +752,9 @@ impl IssueBrowserView {
             KeyCode::Char('?') if key.modifiers.is_empty() => Some(Action::ShowHelp),
             KeyCode::Char('s') if key.modifiers.is_empty() => Some(Action::RequestSessions),
             KeyCode::Char('r') if key.modifiers.is_empty() => {
+                self.bump_graph_data_epoch();
+                self.bump_detail_data_epoch();
+
                 self.invalidate_graph_cache();
                 Some(Action::RefreshIssues)
             }
@@ -1062,6 +1078,7 @@ impl View for IssueBrowserView {
         match &event.body {
             spur_acp::SpurEventBody::IssuesLoaded { issues } => {
                 self.bump_graph_data_epoch();
+                self.bump_detail_data_epoch();
                 self.invalidate_graph_cache_preserving_inflight();
                 self.last_refresh_error = None;
 
@@ -1141,6 +1158,7 @@ impl View for IssueBrowserView {
                 assignee,
             } => {
                 self.bump_graph_data_epoch();
+                self.bump_detail_data_epoch();
                 if let Some(issue) = self.tracked_issues.iter_mut().find(|i| i.id == *id) {
                     if let Some(s) = status {
                         issue.status = s.clone();
@@ -1170,6 +1188,27 @@ impl View for IssueBrowserView {
                 requested_id,
                 issue,
             } => {
+                if let Some(req_epoch) = self.detail_request_epochs.remove(requested_id) {
+                    if req_epoch < self.detail_data_epoch {
+                        tracing::info!(
+                            target: "issue_probe",
+                            site = "detail_response_stale",
+                            id = %requested_id,
+                            req_epoch,
+                            current_epoch = self.detail_data_epoch,
+                        );
+                        let matches_loading = match &self.issue_focus {
+                            IssueFocus::Loading { id: loading_id } => requested_id == loading_id,
+                            _ => false,
+                        };
+                        if matches_loading {
+                            self.issue_focus = IssueFocus::None;
+                            self.issue_detail_pane.reset();
+                            self.reset_armed_state();
+                        }
+                        return;
+                    }
+                }
                 // PROBE: issue_detail_latency — confirm the TUI received the
                 // event and whether `issue_focus` was still Loading for it
                 // (a no-op match here means the user navigated away or Esc'd
@@ -1340,6 +1379,26 @@ mod tests {
             issue_type: Some(issue_type.into()),
             assignee: None,
             description: None,
+        }
+    }
+
+    fn issue_detail_event(id: &str) -> spur_acp::IssueDetailEvent {
+        let now = chrono::Utc::now();
+        spur_acp::IssueDetailEvent {
+            id: id.into(),
+            source: "beads".into(),
+            title: "Current detail".into(),
+            body: "body".into(),
+            status: "open".into(),
+            labels: Vec::new(),
+            assignee: None,
+            url: String::new(),
+            priority: Some(0),
+            issue_type: Some("task".into()),
+            blocked_by: Vec::new(),
+            due_at: None,
+            created_at: now,
+            updated_at: now,
         }
     }
 
@@ -1800,6 +1859,57 @@ mod tests {
         );
 
         assert!(view.graph_cache.contains_key("bd-root"));
+    }
+
+    #[test]
+    fn detail_cache_epoch_drops_stale_response() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+
+        view.open_external_detail("bd-root".into(), OpenMode::FocusText);
+
+        view.handle_spur_event(
+            &SpurEvent::now(spur_acp::SpurEventBody::IssueUpdated {
+                source: "beads".into(),
+                id: "bd-root".into(),
+                status: Some("closed".into()),
+                assignee: None,
+            }),
+            &ctx,
+        );
+
+        view.handle_spur_event(
+            &SpurEvent::now(spur_acp::SpurEventBody::IssueDetailFetched {
+                requested_id: "bd-root".into(),
+                issue: issue_detail_event("bd-root"),
+            }),
+            &ctx,
+        );
+
+        assert!(matches!(view.issue_focus, IssueFocus::None));
+    }
+
+    #[test]
+    fn detail_cache_epoch_keeps_fresh_response() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+
+        view.open_external_detail("bd-root".into(), OpenMode::FocusText);
+
+        view.handle_spur_event(
+            &SpurEvent::now(spur_acp::SpurEventBody::IssueDetailFetched {
+                requested_id: "bd-root".into(),
+                issue: issue_detail_event("bd-root"),
+            }),
+            &ctx,
+        );
+
+        assert!(matches!(
+            view.issue_focus,
+            IssueFocus::Loaded { ref id, .. } if id == "bd-root"
+        ));
     }
 
     #[test]
