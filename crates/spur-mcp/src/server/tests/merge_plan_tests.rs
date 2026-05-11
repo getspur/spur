@@ -1210,7 +1210,7 @@ async fn comment_lookup_returns_false_when_advanced_feature_unlicensed() {
         None,
         continuation_ctx,
         outcome_store,
-        super::community_feature_gate(),
+        super::unlicensed_feature_gate(),
     );
 
     let issue_id = pm
