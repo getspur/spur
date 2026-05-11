@@ -22,9 +22,10 @@
 //!   view) or irrelevant (for per-executor traces).
 //! - Any future variant not listed above is a no-op.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use sha2::{Digest, Sha256};
 use spur_acp::{adapter, AgentKind, ContentBlock, ContentChunk, SessionUpdate, ToolCallStatus};
 
 use super::{map_initial_status, merge_status, ReactTrace, TraceEntry, TraceKind};
@@ -90,6 +91,8 @@ pub fn dispatch_session_update<F: Fn() -> String>(
             let fallback_text = extract_tool_call_text(&tc.content)
                 .or_else(|| tc.raw_input.as_ref().map(format_tool_args))
                 .unwrap_or_default();
+            let images = extract_tool_call_images(&tc.content);
+            let timestamp = (ctx.now_stamp)();
             let status = map_initial_status(tc.status, tc.raw_output.as_ref(), ctx.agent_kind);
             trace.push(TraceEntry {
                 kind: TraceKind::Act {
@@ -100,12 +103,19 @@ pub fn dispatch_session_update<F: Fn() -> String>(
                     status,
                 },
                 text: fallback_text,
-                timestamp: (ctx.now_stamp)(),
+                timestamp: timestamp.clone(),
                 #[cfg(feature = "markdown")]
                 markdown: None,
             });
+            append_images(trace, images, timestamp);
         }
         SessionUpdate::ToolCallUpdate(tcu) => {
+            let images = tcu
+                .fields
+                .content
+                .as_ref()
+                .map(|content| extract_tool_call_images(content))
+                .unwrap_or_default();
             if let Some((idx, act_entry)) = trace.find_act_by_id_mut(&tcu.tool_call_id) {
                 let update_text = tcu
                     .fields
@@ -142,6 +152,7 @@ pub fn dispatch_session_update<F: Fn() -> String>(
                     act_entry.text = text;
                 }
                 trace.mark_dirty_from_for_update(idx);
+                append_images(trace, images, (ctx.now_stamp)());
             } else if tcu.fields.title.is_some() || tcu.fields.kind.is_some() {
                 tracing::debug!(
                     id = ?tcu.tool_call_id,
@@ -172,6 +183,7 @@ pub fn dispatch_session_update<F: Fn() -> String>(
                     .and_then(|content| extract_tool_call_text(content))
                     .or_else(|| tcu.fields.raw_input.as_ref().map(format_tool_args))
                     .unwrap_or_default();
+                let timestamp = (ctx.now_stamp)();
                 trace.push(TraceEntry {
                     kind: TraceKind::Act {
                         tool,
@@ -181,10 +193,11 @@ pub fn dispatch_session_update<F: Fn() -> String>(
                         status,
                     },
                     text,
-                    timestamp: (ctx.now_stamp)(),
+                    timestamp: timestamp.clone(),
                     #[cfg(feature = "markdown")]
                     markdown: None,
                 });
+                append_images(trace, images, timestamp);
             } else {
                 tracing::debug!(
                     id = ?tcu.tool_call_id,
@@ -289,6 +302,88 @@ fn format_image_content(image: &agent_client_protocol::schema::ImageContent) -> 
         Some(uri) => format!("[image: {}, uri: {}, data: {}]", image.mime_type, uri, size),
         None => format!("[image: {}, data: {}]", image.mime_type, size),
     }
+}
+
+struct PersistedTraceImage {
+    image: Arc<image::DynamicImage>,
+    path: PathBuf,
+    sha256: String,
+}
+
+fn append_images(trace: &mut ReactTrace, images: Vec<PersistedTraceImage>, timestamp: String) {
+    for image in images {
+        trace.append_image(image.image, image.path, image.sha256, timestamp.clone());
+    }
+}
+
+fn extract_tool_call_images(content: &[spur_acp::ToolCallContent]) -> Vec<PersistedTraceImage> {
+    use spur_acp::ToolCallContent;
+
+    let mut out = Vec::new();
+    for item in content {
+        let ToolCallContent::Content(content) = item else {
+            continue;
+        };
+        let spur_acp::ContentBlock::Image(image) = &content.content else {
+            continue;
+        };
+        match persist_image_content(image) {
+            Some(persisted) => out.push(persisted),
+            None => tracing::warn!(
+                mime_type = %image.mime_type,
+                uri = ?image.uri,
+                "failed to persist ACP image content"
+            ),
+        }
+    }
+    out
+}
+
+fn persist_image_content(
+    image: &agent_client_protocol::schema::ImageContent,
+) -> Option<PersistedTraceImage> {
+    let bytes = STANDARD.decode(&image.data).ok()?;
+    let decoded = image::load_from_memory(&bytes).ok()?;
+    let sha256 = sha256_hex(&bytes);
+    let path = image_store_dir().ok()?.join(format!(
+        "{}.{}",
+        &sha256[..16],
+        extension_for_mime(&image.mime_type)
+    ));
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok()?;
+        }
+        std::fs::write(&path, &bytes).ok()?;
+    }
+    Some(PersistedTraceImage {
+        image: Arc::new(decoded),
+        path,
+        sha256,
+    })
+}
+
+fn image_store_dir() -> std::io::Result<PathBuf> {
+    if let Some(dir) = std::env::var_os("SPUR_IMAGE_STORE_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return Ok(PathBuf::from(home).join(".spur").join("images"));
+    }
+    std::env::current_dir().map(|cwd| cwd.join(".spur").join("images"))
+}
+
+fn extension_for_mime(mime_type: &str) -> &'static str {
+    match mime_type {
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/webp" => "webp",
+        _ => "png",
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    format!("{digest:x}")
 }
 
 const DIFF_MAX_LINES: usize = 40;
@@ -503,7 +598,9 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_update_with_image_content_renders_image_reference() {
+    fn tool_call_update_with_image_content_persists_drawable_image() {
+        let temp = tempfile::tempdir().expect("temp image store");
+        let _guard = EnvVarGuard::set("SPUR_IMAGE_STORE_DIR", temp.path());
         let id = ToolCallId::new("ig-1");
         let mut trace = ReactTrace::new();
         let mut tool_depth = HashMap::new();
@@ -516,7 +613,7 @@ mod tests {
                 .kind(ToolKind::Other)
                 .status(ToolCallStatus::Completed)
                 .content(vec![image_tool_content(
-                    "Zm9v",
+                    &valid_png_base64(),
                     "image/png",
                     Some("/tmp/ig-1.png"),
                 )]),
@@ -524,22 +621,55 @@ mod tests {
         dispatch_session_update(&mut trace, &SessionUpdate::ToolCallUpdate(update), &mut ctx);
 
         let entries = trace.entries_for_test();
-        assert_eq!(entries.len(), 1);
+        assert_eq!(entries.len(), 2);
+        let TraceKind::Image { id, .. } = entries[1].kind else {
+            panic!("expected image trace entry, got {:?}", entries[1].kind);
+        };
+        let stored = trace
+            .image_for_test(id)
+            .expect("image state must be retained");
+        assert_eq!((stored.image.width(), stored.image.height()), (1, 1));
         assert!(
-            entries[0].text.contains("image/png"),
-            "expected image mime type to be visible, got {:?}",
-            entries[0].text
+            stored.path.exists(),
+            "decoded image must be persisted outside the source temp uri"
         );
         assert!(
-            entries[0].text.contains("/tmp/ig-1.png"),
-            "expected image URI to be visible, got {:?}",
-            entries[0].text
+            stored.path.starts_with(temp.path()),
+            "test override store dir must be used, got {:?}",
+            stored.path
         );
-        assert!(
-            entries[0].text.contains("3 bytes"),
-            "expected decoded image data size to be visible, got {:?}",
-            entries[0].text
-        );
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &std::path::Path) -> Self {
+            let prev = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn valid_png_base64() -> String {
+        use image::{codecs::png::PngEncoder, ColorType, ImageEncoder};
+
+        let mut bytes = Vec::new();
+        PngEncoder::new(&mut bytes)
+            .write_image(&[255, 0, 0, 255], 1, 1, ColorType::Rgba8.into())
+            .expect("encode png");
+        STANDARD.encode(bytes)
     }
 
     #[test]
