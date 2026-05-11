@@ -32,6 +32,7 @@ struct MockPmState {
     next_comment: u64,
     issues: HashMap<String, spur_pm::Issue>,
     comments: HashMap<String, Vec<spur_pm::Comment>>,
+    fail_create_issues_remaining: usize,
 }
 
 impl MockPm {
@@ -88,6 +89,10 @@ impl MockPm {
             .values()
             .map(Vec::len)
             .sum::<usize>() as u64
+    }
+
+    pub async fn fail_next_create_issues(&self, count: usize) {
+        self.inner.lock().await.fail_create_issues_remaining = count;
     }
 }
 
@@ -153,6 +158,10 @@ impl crate::plan::PmLike for MockPm {
 
     async fn create_issue(&self, params: spur_pm::IssueCreate) -> anyhow::Result<String> {
         let mut state = self.inner.lock().await;
+        if state.fail_create_issues_remaining > 0 {
+            state.fail_create_issues_remaining -= 1;
+            anyhow::bail!("mock create_issue failure");
+        }
         state.next_issue += 1;
         let id = format!("bd-mock-{}", state.next_issue);
         let now = Utc::now();

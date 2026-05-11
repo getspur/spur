@@ -1348,19 +1348,6 @@ impl McpCallbackServer {
         let superseded_set: HashSet<&str> =
             superseded_task_ids.iter().map(String::as_str).collect();
 
-        {
-            let mut state = plan_arc.lock().await;
-            let mutation_id = uuid::Uuid::new_v4().to_string();
-            for entry in state.tasks.iter_mut() {
-                if superseded_set.contains(entry.spec.task_id.as_str()) {
-                    entry.status = crate::plan::PlanTaskStatus::Superseded {
-                        mutation_id: mutation_id.clone(),
-                        by: Vec::new(),
-                    };
-                }
-            }
-        }
-
         let submitted = match self
             .submit_plan_as_epic_internal(SubmitPlanAsEpicInput {
                 tasks: new_tasks,
@@ -1387,6 +1374,19 @@ impl McpCallbackServer {
                 );
             }
         };
+
+        {
+            let mut state = plan_arc.lock().await;
+            let mutation_id = uuid::Uuid::new_v4().to_string();
+            for entry in state.tasks.iter_mut() {
+                if superseded_set.contains(entry.spec.task_id.as_str()) {
+                    entry.status = crate::plan::PlanTaskStatus::Superseded {
+                        mutation_id: mutation_id.clone(),
+                        by: Vec::new(),
+                    };
+                }
+            }
+        }
 
         let output = crate::tool_schemas::PlanTruncateAndRestartOutput {
             staging_branch: build.branch,
