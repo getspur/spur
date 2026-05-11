@@ -1017,6 +1017,7 @@ mod tests {
                     task_name: "Stage A".into(),
                     agent: "codex".into(),
                     issue_id: Some("bd-epic.1".into()),
+                    issue_title: None,
                     status: "pending".into(),
                     attempt: 0,
                     max_attempts: 3,

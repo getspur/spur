@@ -184,6 +184,7 @@ fn plan_snapshot_updated_roundtrips() {
                 task_name: "Build PlanProjection".into(),
                 agent: "claude-code".into(),
                 issue_id: Some("BEADS-42".into()),
+                issue_title: None,
                 status: "awaiting_review".into(),
                 attempt: 1,
                 max_attempts: 3,

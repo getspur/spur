@@ -8,6 +8,7 @@ pub struct TrackedTask {
     pub task_name: String,
     pub agent: String,
     pub issue_id: Option<String>,
+    pub issue_title: Option<String>,
     pub status: String,
     pub attempt: u32,
     pub max_attempts: u32,

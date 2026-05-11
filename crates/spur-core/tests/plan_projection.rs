@@ -58,6 +58,7 @@ fn sample_task(task_id: &str, depends_on: &[&str], issue_id: Option<&str>) -> Pl
         task_name: task_id.to_string(),
         agent: "codex".to_string(),
         issue_id: issue_id.map(str::to_string),
+        issue_title: None,
         status: "pending".to_string(),
         attempt: 0,
         max_attempts: 3,

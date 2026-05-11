@@ -155,6 +155,7 @@ mod tests {
             task_name: "overlay projection".into(),
             agent: "codex".into(),
             issue_id: Some("bd-1dwm.2".into()),
+            issue_title: None,
             status: "approved".into(),
             attempt: 1,
             max_attempts: 3,

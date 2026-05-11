@@ -54,7 +54,7 @@ pub fn render_stage_board(
                         status_style(theme, &task.status),
                     ),
                     Span::raw(" "),
-                    Span::raw(task.task_name.clone()),
+                    Span::raw(task.issue_title.as_ref().unwrap_or(&task.task_name).clone()),
                 ];
                 lines.push(Line::from(title_line));
 
@@ -412,6 +412,7 @@ mod tests {
             task_name: format!("{task_id} task"),
             agent: "codex".into(),
             issue_id: Some(format!("bd-1dwm.{task_id}")),
+            issue_title: None,
             status: status.into(),
             attempt: 1,
             max_attempts: 3,
