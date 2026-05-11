@@ -1,4 +1,7 @@
 use super::*;
+use futures::StreamExt;
+use tokio::sync::broadcast;
+use tokio::time::timeout;
 
 impl App {
     fn update_license_state(&mut self, license_state: LicenseStateEvent) {
@@ -524,6 +527,287 @@ impl App {
         // Sync status to InputBars
         self.sync_brain_status();
     }
+}
+
+// ─── Main TUI entry point ──────────────────────────────────────────────
+
+/// Run the TUI dashboard, consuming events from the broadcast receiver.
+pub async fn run_tui(
+    event_rx: broadcast::Receiver<SpurEvent>,
+    user_input_tx: Option<mpsc::Sender<UserInput>>,
+    perm_rx: Option<tokio::sync::mpsc::UnboundedReceiver<spur_acp::types::PermissionRequest>>,
+    start_in_picker: bool,
+) -> anyhow::Result<()> {
+    run_tui_with_license(
+        event_rx,
+        user_input_tx,
+        perm_rx,
+        start_in_picker.then_some(None),
+        std::sync::Arc::new(spur_acp::SpurConfig::default()),
+        App::default_license_state(PLACEHOLDER_STATUS_TEXT),
+        crate::landing::LandingDecision::ShowDashboard,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_tui_with_license(
+    event_rx: broadcast::Receiver<SpurEvent>,
+    user_input_tx: Option<mpsc::Sender<UserInput>>,
+    mut perm_rx: Option<tokio::sync::mpsc::UnboundedReceiver<spur_acp::types::PermissionRequest>>,
+    start_in_picker_with_preselect: Option<Option<String>>,
+    config: std::sync::Arc<spur_acp::SpurConfig>,
+    license_state: LicenseStateEvent,
+    landing: crate::landing::LandingDecision,
+    config_path: Option<std::path::PathBuf>,
+) -> anyhow::Result<()> {
+    let mut terminal = crate::tui::setup()?;
+    let mut app = App::build_with_license_state(
+        user_input_tx,
+        start_in_picker_with_preselect,
+        config.clone(),
+        license_state,
+        landing,
+        config_path,
+    );
+    let mut tick_interval = tokio::time::interval(Duration::from_millis(33));
+    let mut event_stream = crossterm::event::EventStream::new();
+    let mut event_rx = event_rx;
+
+    // === bd-1vnk: rehydrate projections from prior NDJSON before drain begins ===
+    let replay_cfg = spur_core::event_replay::ReplayConfig {
+        replay_horizon: std::time::Duration::from_secs(config.log.event_replay_horizon_secs),
+        ..Default::default()
+    };
+    match spur_core::event_replay::replay_events(&replay_cfg, |ev| {
+        app.lineage.apply(ev);
+        app.plan_projection.apply(ev);
+        app.synopsis.apply(ev);
+    }) {
+        Ok(stats) => tracing::info!(
+            target: "spur.metrics.event_replay",
+            files = stats.files_read,
+            skipped_pid = stats.files_skipped_pid,
+            applied = stats.events_applied,
+            horizon_skipped = stats.events_skipped_horizon,
+            malformed = stats.malformed_lines,
+            elapsed_ms = stats.elapsed.as_millis() as u64,
+        ),
+        Err(e) => tracing::error!(
+            error = %e,
+            "event replay failed; starting with empty projections"
+        ),
+    }
+    // ============================================================================
+
+    // Bridge OS termination signals into the event loop so SIGINT/SIGTERM/SIGHUP/SIGQUIT
+    // run the same teardown as Ctrl-C/Ctrl-Q (raw mode off → alt screen exit →
+    // function returns → caller drops Orchestrator). SIGKILL is uncatchable;
+    // the on-startup orphan sweep is the safety net for that case.
+    //
+    // mpsc(1) coalesces duplicate signals via try_send: Err(Full(_)) means a
+    // shutdown is already pending, which is exactly what we want.
+    let (_shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, Signal, SignalKind};
+        // Graceful fallback on signal-registration failure: log + skip the
+        // handler instead of panicking. A panic here would exit AFTER raw
+        // mode + alt screen are entered, leaving the user with a corrupt
+        // terminal (no echo, stuck alt screen). Rare in practice but
+        // possible in sandboxed / fork-restricted / signalfd-disabled
+        // environments. (bd-2j5e.5)
+        fn install(kind: SignalKind, label: &str) -> Option<Signal> {
+            match signal(kind) {
+                Ok(s) => Some(s),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        signal = %label,
+                        "failed to install signal handler; this signal will not gracefully shut down the TUI"
+                    );
+                    None
+                }
+            }
+        }
+        let mut sigterm = install(SignalKind::terminate(), "SIGTERM");
+        let mut sighup = install(SignalKind::hangup(), "SIGHUP");
+        let mut sigquit = install(SignalKind::quit(), "SIGQUIT");
+        let tx = _shutdown_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    result = tokio::signal::ctrl_c() => {
+                        if let Err(error) = result {
+                            tracing::warn!(%error, "SIGINT handler failed");
+                            return;
+                        }
+                        let _ = tx.try_send(());
+                    }
+                    _ = async {
+                        match sigterm.as_mut() {
+                            Some(s) => { s.recv().await; }
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => { let _ = tx.try_send(()); }
+                    _ = async {
+                        match sighup.as_mut() {
+                            Some(s) => { s.recv().await; }
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => { let _ = tx.try_send(()); }
+                    _ = async {
+                        match sigquit.as_mut() {
+                            Some(s) => { s.recv().await; }
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => { let _ = tx.try_send(()); }
+                }
+            }
+        });
+    }
+
+    loop {
+        // Count how many events feed into each render. H1' detection.
+        let mut spur_drained: u32 = 0;
+        let mut crossterm_drained: u32 = 0;
+
+        // Phase 1: Wait for at least one event (async yield point).
+        tokio::select! {
+            Some(Ok(crossterm_event)) = event_stream.next() => {
+                crossterm_drained += 1;
+                app.handle_crossterm_event(crossterm_event);
+            }
+            result = event_rx.recv() => {
+                match result {
+                    Ok(spur_event) => {
+                        spur_drained += 1;
+                        app.handle_spur_event(spur_event);
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(
+                            streaming_probe = true,
+                            site = "E_broadcast_lag",
+                            lagged_n = n,
+                            source = file!(),
+                            line = line!(),
+                            "TUI broadcast receiver lagged — events dropped"
+                        );
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        app.should_quit = true;
+                    }
+                }
+            }
+            _ = tick_interval.tick() => {
+                app.tick();
+            }
+            Some(perm) = async {
+                match perm_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                app.handle_permission_request(perm);
+            }
+            _ = shutdown_rx.recv() => {
+                // SIGINT / SIGTERM / SIGHUP / SIGQUIT: take the same path as a confirmed
+                // Ctrl-Q. confirm_quit() flushes drafts + sets should_quit; the
+                // existing loop break runs the shared tui::teardown and the
+                // function returns so the caller's host.shutdown().await issues
+                // killpg and unregisters the pgid registry. Bypassing Drop here
+                // (e.g., via std::process::exit) defeats the orphan-reaping
+                // safety guarantees on catchable signals.
+                app.confirm_quit();
+            }
+        }
+
+        // Phase 2: Drain all remaining crossterm events (non-blocking).
+        // This collapses bursts of mouse scroll events into one render pass.
+        while let Ok(Some(Ok(ev))) = timeout(Duration::ZERO, event_stream.next()).await {
+            crossterm_drained += 1;
+            app.handle_crossterm_event(ev);
+        }
+
+        // Phase 3: Drain remaining spur events (non-blocking), capped per frame.
+        //
+        // S1.c (H1') — cap at DRAIN_CAP_PER_FRAME so bursts of streaming chunks
+        // don't collapse into a single paint. Leftover events drain on the next
+        // iteration; no event is lost, just deferred by one frame. `Lagged`
+        // counts toward the cap so a subscriber that's badly behind still makes
+        // progress instead of spinning on drop notifications.
+        const DRAIN_CAP_PER_FRAME: u32 = 8;
+        let mut drained_this_phase: u32 = 0;
+        while drained_this_phase < DRAIN_CAP_PER_FRAME {
+            match event_rx.try_recv() {
+                Ok(spur_event) => {
+                    spur_drained += 1;
+                    drained_this_phase += 1;
+                    app.handle_spur_event(spur_event);
+                }
+                Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                    tracing::warn!(
+                        streaming_probe = true,
+                        site = "E_broadcast_lag",
+                        lagged_n = n,
+                        source = file!(),
+                        line = line!(),
+                        "TUI broadcast receiver lagged (drain phase) — events dropped"
+                    );
+                    drained_this_phase += 1;
+                }
+                Err(broadcast::error::TryRecvError::Empty) => break,
+                Err(broadcast::error::TryRecvError::Closed) => break,
+            }
+        }
+
+        // Phase 4: Single render pass.
+        if app.dirty {
+            if spur_drained > 0 || crossterm_drained > 0 {
+                tracing::debug!(
+                    streaming_probe = true,
+                    site = "F_frame_drain",
+                    spur_drained = spur_drained,
+                    crossterm_drained = crossterm_drained,
+                    "rendering frame"
+                );
+            }
+            terminal.draw(|f| app.render(f))?;
+            app.dirty = false;
+        }
+
+        if app.should_quit {
+            break;
+        }
+    }
+
+    // Restore terminal first so the user regains control immediately,
+    // even if the best-effort analytics checkpoint hits its 2s timeout.
+    crate::tui::teardown(&mut terminal)?;
+    app.shutdown_analytics().await;
+    Ok(())
+}
+
+pub async fn run_tui_with_config(
+    event_rx: broadcast::Receiver<SpurEvent>,
+    user_input_tx: Option<mpsc::Sender<UserInput>>,
+    perm_rx: Option<tokio::sync::mpsc::UnboundedReceiver<spur_acp::types::PermissionRequest>>,
+    start_in_picker: bool,
+    config: std::sync::Arc<spur_acp::SpurConfig>,
+    config_path: Option<std::path::PathBuf>,
+) -> anyhow::Result<()> {
+    run_tui_with_license(
+        event_rx,
+        user_input_tx,
+        perm_rx,
+        start_in_picker.then_some(None),
+        config,
+        App::default_license_state(PLACEHOLDER_STATUS_TEXT),
+        crate::landing::LandingDecision::ShowDashboard,
+        config_path,
+    )
+    .await
 }
 
 /// Apply read-only session-scoped `SessionUpdate` variants to a
