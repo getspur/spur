@@ -1,15 +1,20 @@
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
 use std::time::SystemTime;
 
+use crate::theme::{resolve_token, ColorDepth, Theme};
 use spur_core::{ExecutorLineage, ExecutorNode, LifecycleState, TrackedPlan, TrackedTask};
 
 const BLOCKED_ON_SETUP_CONFLICT_STATUS: &str = "blocked_on_setup_conflict";
+
+fn token(theme: &Theme, name: &str) -> ratatui::style::Color {
+    resolve_token(theme, name, ColorDepth::Truecolor)
+}
 
 pub fn render_stage_board(
     frame: &mut Frame,
@@ -18,6 +23,7 @@ pub fn render_stage_board(
     selected_task_id: &str,
     selected_stage_idx: usize,
     lineage: &ExecutorLineage,
+    theme: &Theme,
 ) {
     let stage_count = max_stage(plan) + 1;
     let constraints = vec![Constraint::Ratio(1, stage_count as u32); stage_count];
@@ -37,19 +43,22 @@ pub fn render_stage_board(
                         if selected { "▶ " } else { "  " },
                         if selected {
                             Style::default()
-                                .fg(Color::Yellow)
+                                .fg(token(theme, "plan_inspector.board.selection.fg"))
                                 .add_modifier(Modifier::BOLD)
                         } else {
                             Style::default()
                         },
                     ),
-                    Span::styled(status_badge(&task.status), status_style(&task.status)),
+                    Span::styled(
+                        status_glyph(&task.status),
+                        status_style(theme, &task.status),
+                    ),
                     Span::raw(" "),
                     Span::raw(task.task_name.clone()),
                 ];
                 lines.push(Line::from(title_line));
 
-                let meta = task_meta_chips(task, lineage);
+                let meta = task_meta_chips(task, lineage, theme);
                 if !meta.is_empty() {
                     let mut meta_line = vec![Span::raw("    ")];
                     for (i, span) in meta.into_iter().enumerate() {
@@ -69,16 +78,16 @@ pub fn render_stage_board(
             .borders(Borders::ALL)
             .title(format!("Stage {}", stage_idx))
             .border_style(if is_active_stage {
-                Style::default().fg(Color::Cyan)
+                Style::default().fg(token(theme, "plan_inspector.board.stage.active.fg"))
             } else {
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(token(theme, "plan_inspector.board.stage.inactive.fg"))
             })
             .title_style(if is_active_stage {
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(token(theme, "plan_inspector.board.stage.active.fg"))
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(token(theme, "plan_inspector.board.stage.inactive.fg"))
             });
         frame.render_widget(Paragraph::new(lines).block(block), *stage_area);
     }
@@ -90,40 +99,80 @@ pub fn render_stacked_stage_groups(
     plan: &TrackedPlan,
     selected_task_id: &str,
     lineage: &ExecutorLineage,
+    theme: &Theme,
 ) {
     let mut lines = Vec::new();
+    let active_stage_idx = plan
+        .tasks
+        .iter()
+        .find(|task| task.task_id == selected_task_id)
+        .map(|task| task.stage_idx);
+
     for stage_idx in 0..=max_stage(plan) {
+        if stage_idx > 0 {
+            lines.push(Line::from(Span::styled(
+                "─".repeat(area.width as usize),
+                Style::default().fg(token(theme, "plan_inspector.board.stage.inactive.fg")),
+            )));
+        }
+        let is_active_stage = active_stage_idx == Some(stage_idx);
         lines.push(Line::from(Span::styled(
             format!("Stage {}", stage_idx),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            if is_active_stage {
+                Style::default()
+                    .fg(token(theme, "plan_inspector.board.stage.active.fg"))
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(token(theme, "plan_inspector.board.stage.inactive.fg"))
+            },
         )));
         for task in tasks_in_stage(plan, stage_idx) {
             let selected = task.task_id == selected_task_id;
-            let mut text = format!(
-                "{}{} {}",
-                if selected { "▶ " } else { "  " },
-                status_badge(&task.status),
-                task.task_name
-            );
-            let meta = task_meta_chips(task, lineage);
+            let mut task_line = vec![
+                Span::styled(
+                    if selected { "▶ " } else { "  " },
+                    if selected {
+                        Style::default()
+                            .fg(token(theme, "plan_inspector.board.selection.fg"))
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    },
+                ),
+                Span::styled(
+                    status_glyph(&task.status),
+                    status_style(theme, &task.status),
+                ),
+                Span::raw(" "),
+                Span::raw(task.task_name.clone()),
+            ];
+            let meta = task_meta_chips(task, lineage, theme);
             if !meta.is_empty() {
-                text.push_str("  ");
+                task_line.push(Span::raw("  "));
                 for (i, span) in meta.into_iter().enumerate() {
                     if i > 0 {
-                        text.push_str("  ");
+                        task_line.push(Span::raw("  "));
                     }
-                    text.push_str(&span.content);
+                    task_line.push(span);
                 }
             }
-            lines.push(Line::from(text));
+            lines.push(Line::from(task_line));
         }
         lines.push(Line::raw(""));
     }
 
     frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Plan board")),
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Plan board")
+                .border_style(
+                    Style::default().fg(token(theme, "plan_inspector.board.stage.inactive.fg")),
+                )
+                .title_style(
+                    Style::default().fg(token(theme, "plan_inspector.board.stage.active.fg")),
+                ),
+        ),
         area,
     );
 }
@@ -169,46 +218,56 @@ fn tasks_in_stage(plan: &TrackedPlan, stage_idx: usize) -> Vec<&TrackedTask> {
         .collect()
 }
 
-fn status_badge(status: &str) -> &str {
+fn status_glyph(status: &str) -> &str {
     match status {
-        "pending" => "[QUE]",
-        "ready" => "[RDY]",
-        "dispatched" => "[RUN]",
-        "awaiting_review" => "[REV]",
-        "approved" => "[PAS]",
-        "rejected" => "[REJ]",
-        "failed" => "[ERR]",
-        "cancelled" => "[SKP]",
-        "superseded" => "[SUP]",
-        BLOCKED_ON_SETUP_CONFLICT_STATUS => " BLOCKED ",
-        _ => "[???]",
+        "pending" => "○",
+        "ready" => "◐",
+        "dispatched" => "◉",
+        "awaiting_review" => "◈",
+        "approved" => "✓",
+        "rejected" => "⊘",
+        "failed" => "✕",
+        "cancelled" => "⊝",
+        "superseded" => "⇢",
+        BLOCKED_ON_SETUP_CONFLICT_STATUS => "⦿",
+        _ => "?",
     }
 }
 
-fn status_style(status: &str) -> Style {
+fn status_style(theme: &Theme, status: &str) -> Style {
     match status {
-        "pending" | "ready" => Style::default().fg(Color::DarkGray),
+        "pending" => Style::default().fg(token(theme, "plan_inspector.status.pending.fg")),
+        "ready" => Style::default().fg(token(theme, "plan_inspector.status.ready.fg")),
         "dispatched" => Style::default()
-            .fg(Color::Blue)
+            .fg(token(theme, "plan_inspector.status.dispatched.fg"))
             .add_modifier(Modifier::BOLD),
         "awaiting_review" => Style::default()
-            .fg(Color::Yellow)
+            .fg(token(theme, "plan_inspector.status.awaiting_review.fg"))
             .add_modifier(Modifier::BOLD),
         "approved" => Style::default()
-            .fg(Color::Green)
+            .fg(token(theme, "plan_inspector.status.approved.fg"))
             .add_modifier(Modifier::BOLD),
-        "rejected" | "failed" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        "rejected" => Style::default()
+            .fg(token(theme, "plan_inspector.status.rejected.fg"))
+            .add_modifier(Modifier::BOLD),
+        "failed" => Style::default()
+            .fg(token(theme, "plan_inspector.status.failed.fg"))
+            .add_modifier(Modifier::BOLD),
         BLOCKED_ON_SETUP_CONFLICT_STATUS => Style::default()
-            .fg(Color::White)
-            .bg(Color::Red)
+            .fg(token(theme, "plan_inspector.status.blocked.fg"))
+            .bg(token(theme, "plan_inspector.status.blocked.bg"))
             .add_modifier(Modifier::BOLD),
-        "cancelled" => Style::default().fg(Color::Magenta),
-        "superseded" => Style::default().fg(Color::Yellow),
+        "cancelled" => Style::default().fg(token(theme, "plan_inspector.status.cancelled.fg")),
+        "superseded" => Style::default().fg(token(theme, "plan_inspector.status.unknown.fg")),
         _ => Style::default(),
     }
 }
 
-fn task_meta_chips<'a>(task: &TrackedTask, lineage: &ExecutorLineage) -> Vec<Span<'a>> {
+fn task_meta_chips<'a>(
+    task: &TrackedTask,
+    lineage: &ExecutorLineage,
+    theme: &Theme,
+) -> Vec<Span<'a>> {
     let mut chips = Vec::new();
 
     // Live worker link (agent + phase)
@@ -216,7 +275,7 @@ fn task_meta_chips<'a>(task: &TrackedTask, lineage: &ExecutorLineage) -> Vec<Spa
         if let Some(node) = preferred_live_node(lineage, issue_id) {
             chips.push(Span::styled(
                 format!("{}:{}", node.agent, phase_label(node.phase)),
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(token(theme, "plan_inspector.chip.live.fg")),
             ));
         }
     }
@@ -228,11 +287,17 @@ fn task_meta_chips<'a>(task: &TrackedTask, lineage: &ExecutorLineage) -> Vec<Spa
         } else {
             format!("blocked:{} deps", task.blocked_by.len())
         };
-        chips.push(Span::styled(label, Style::default().fg(Color::Red)));
+        chips.push(Span::styled(
+            label,
+            Style::default().fg(token(theme, "plan_inspector.chip.blocked.fg")),
+        ));
     }
 
     if let Some(label) = setup_conflict_label(task) {
-        chips.push(Span::styled(label, Style::default().fg(Color::Red)));
+        chips.push(Span::styled(
+            label,
+            Style::default().fg(token(theme, "plan_inspector.chip.blocked.fg")),
+        ));
     }
 
     // Dependency hint
@@ -242,14 +307,17 @@ fn task_meta_chips<'a>(task: &TrackedTask, lineage: &ExecutorLineage) -> Vec<Spa
         } else {
             format!("↑{} deps", task.depends_on.len())
         };
-        chips.push(Span::styled(label, Style::default().fg(Color::DarkGray)));
+        chips.push(Span::styled(
+            label,
+            Style::default().fg(token(theme, "plan_inspector.chip.depends.fg")),
+        ));
     }
 
     // Attempt / retry indicator
     if task.attempt > 1 {
         chips.push(Span::styled(
             format!("retry {}/{}", task.attempt, task.max_attempts),
-            Style::default().fg(Color::Magenta),
+            Style::default().fg(token(theme, "plan_inspector.chip.retry.fg")),
         ));
     }
 
@@ -335,7 +403,8 @@ mod tests {
     use spur_acp::{PlanSnapshotCounts, SessionId};
     use spur_core::{ExecutorLineage, TrackedPlan, TrackedTask};
 
-    use super::render_stage_board;
+    use super::{render_stacked_stage_groups, render_stage_board};
+    use crate::theme::load_built_in;
 
     fn task(task_id: &str, status: &str) -> TrackedTask {
         TrackedTask {
@@ -393,6 +462,22 @@ mod tests {
         None
     }
 
+    fn plan_with_tasks(tasks: Vec<TrackedTask>) -> TrackedPlan {
+        TrackedPlan {
+            session_id: SessionId("brain-1".into()),
+            plan_id: "bd-1dwm".into(),
+            epic_id: None,
+            status: "running".into(),
+            progress: "0 reviewed".into(),
+            next_action: "inspect".into(),
+            ready_to_merge: false,
+            owner_brain_session_id: None,
+            counts: PlanSnapshotCounts::default(),
+            tasks,
+            updated_at: std::time::SystemTime::UNIX_EPOCH,
+        }
+    }
+
     #[test]
     fn plan_stage_board_renders_blocked_on_setup_conflict_distinct_from_failed() {
         let mut blocked = task("T2", "blocked_on_setup_conflict");
@@ -402,37 +487,104 @@ mod tests {
         let mut failed = task("T3", "failed");
         failed.error = Some("worker failed".into());
 
-        let plan = TrackedPlan {
-            session_id: SessionId("brain-1".into()),
-            plan_id: "bd-1dwm".into(),
-            epic_id: None,
-            status: "running".into(),
-            progress: "0/2 reviewed".into(),
-            next_action: "inspect".into(),
-            ready_to_merge: false,
-            owner_brain_session_id: None,
-            counts: PlanSnapshotCounts::default(),
-            tasks: vec![blocked, failed],
-            updated_at: std::time::SystemTime::UNIX_EPOCH,
-        };
+        let plan = plan_with_tasks(vec![blocked, failed]);
         let lineage = ExecutorLineage::new();
         let backend = TestBackend::new(140, 8);
         let mut terminal = Terminal::new(backend).expect("test backend");
+        let theme = load_built_in("dark").expect("built-in dark theme");
 
         terminal
-            .draw(|frame| render_stage_board(frame, frame.area(), &plan, "T2", 0, &lineage))
+            .draw(|frame| render_stage_board(frame, frame.area(), &plan, "T2", 0, &lineage, &theme))
             .expect("render stage board");
 
         let rendered = rendered_buffer_text(&terminal);
-        assert!(rendered.contains("BLOCKED"), "rendered: {rendered}");
+        assert!(rendered.contains("⦿"), "rendered: {rendered}");
         assert!(
             rendered.contains("2 files conflict with T1"),
             "rendered: {rendered}"
         );
-        assert!(rendered.contains("[ERR]"), "rendered: {rendered}");
+        assert!(rendered.contains("✕"), "rendered: {rendered}");
 
-        let blocked_style = style_for_cell_run(&terminal, "BLOCKED").expect("blocked style");
-        let failed_style = style_for_cell_run(&terminal, "[ERR]").expect("failed style");
+        let blocked_style = style_for_cell_run(&terminal, "⦿").expect("blocked style");
+        let failed_style = style_for_cell_run(&terminal, "✕").expect("failed style");
         assert_ne!(blocked_style, failed_style);
+    }
+
+    #[test]
+    fn plan_stage_board_renders_every_status_glyph_without_panics() {
+        let statuses_and_glyphs = [
+            ("pending", "○"),
+            ("ready", "◐"),
+            ("dispatched", "◉"),
+            ("awaiting_review", "◈"),
+            ("approved", "✓"),
+            ("rejected", "⊘"),
+            ("failed", "✕"),
+            ("cancelled", "⊝"),
+            ("superseded", "⇢"),
+            ("blocked_on_setup_conflict", "⦿"),
+            ("unknown_status", "?"),
+        ];
+        let tasks = statuses_and_glyphs
+            .iter()
+            .enumerate()
+            .map(|(idx, (status, _))| {
+                let mut task = task(&format!("T{idx}"), status);
+                task.stage_idx = idx;
+                task
+            })
+            .collect();
+
+        let plan = plan_with_tasks(tasks);
+        let lineage = ExecutorLineage::new();
+        let backend = TestBackend::new(220, 10);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        let theme = load_built_in("dark").expect("built-in dark theme");
+
+        terminal
+            .draw(|frame| render_stage_board(frame, frame.area(), &plan, "T0", 0, &lineage, &theme))
+            .expect("render stage board");
+
+        let rendered = rendered_buffer_text(&terminal);
+        for (_, glyph) in statuses_and_glyphs {
+            assert!(
+                rendered.contains(glyph),
+                "missing glyph {glyph}; rendered: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn stacked_stage_groups_render_lightweight_stage_separators() {
+        let mut first = task("T1", "pending");
+        first.stage_idx = 0;
+        let mut second = task("T2", "ready");
+        second.stage_idx = 1;
+        let mut third = task("T3", "approved");
+        third.stage_idx = 2;
+
+        let plan = plan_with_tasks(vec![first, second, third]);
+        let lineage = ExecutorLineage::new();
+        let backend = TestBackend::new(48, 12);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        let theme = load_built_in("dark").expect("built-in dark theme");
+
+        terminal
+            .draw(|frame| {
+                render_stacked_stage_groups(frame, frame.area(), &plan, "T2", &lineage, &theme)
+            })
+            .expect("render stacked stage groups");
+
+        let rendered = rendered_buffer_text(&terminal);
+        let separator_rows = rendered
+            .lines()
+            .filter(|line| {
+                line.starts_with('│') && line.chars().filter(|ch| *ch == '─').count() >= 8
+            })
+            .count();
+        assert_eq!(separator_rows, 2, "rendered: {rendered}");
+        assert!(rendered.contains("Stage 0"), "rendered: {rendered}");
+        assert!(rendered.contains("Stage 1"), "rendered: {rendered}");
+        assert!(rendered.contains("Stage 2"), "rendered: {rendered}");
     }
 }

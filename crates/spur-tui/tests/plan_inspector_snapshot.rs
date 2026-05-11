@@ -2,14 +2,15 @@ use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
 use spur_acp::{
-    IssueDetailEvent, PlanSnapshot, PlanSnapshotCounts, PlanSnapshotTask, SessionId, SpurEvent,
-    SpurEventBody,
+    IssueDetailEvent, LifecycleState, PlanSnapshot, PlanSnapshotCounts, PlanSnapshotTask, Role,
+    SessionId, SpurEvent, SpurEventBody,
 };
 use spur_core::{ExecutorLineage, PlanProjectionStore, SessionSynopsisProjection};
 use spur_tui::action::{Action, IssueAction};
 use spur_tui::app::BrainStatus;
 use spur_tui::views::plan_inspector::PlanInspectorView;
 use spur_tui::views::{View, ViewContext};
+use std::time::{Duration, SystemTime};
 
 fn sample_plan_store() -> PlanProjectionStore {
     let mut store = PlanProjectionStore::default();
@@ -717,8 +718,8 @@ fn plan_inspector_detail_scroll_reset_when_switching_tasks() {
     let b_open = terminal.backend().buffer().clone();
     assert!(!buffer_contains(&b_open, "A-body-line-020"));
     assert!(
-        !buffer_contains(&b_open, "B-body-line-000"),
-        "switching tasks should reset detail scroll near top"
+        !buffer_contains(&b_open, "B-body-line-020"),
+        "switching tasks should reset detail scroll away from the previous deep offset"
     );
 
     let down_after_switch =
@@ -755,7 +756,7 @@ fn plan_inspector_detail_scroll_reset_when_switching_tasks() {
         !buffer_contains(&b_reopen, "A-body-line-020"),
         "reopening after close should keep switched task content"
     );
-    assert!(!buffer_contains(&b_reopen, "B-body-line-000"));
+    assert!(!buffer_contains(&b_reopen, "B-body-line-020"));
 
     let reopen_down = view.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE), &ctx);
     assert!(matches!(reopen_down, Some(Action::ScrollDown)));
@@ -995,7 +996,7 @@ fn plan_inspector_prefers_live_executor_state_over_stale_higher_id() {
         "board should surface the live executor rather than a stale higher-id executor"
     );
     assert!(
-        buffer_contains(&buffer, "codex running"),
+        buffer_contains(&buffer, "live codex running"),
         "detail pane should join against the live executor for the selected task"
     );
 }
@@ -1043,8 +1044,65 @@ fn plan_inspector_renders_blocked_deps_and_retry_chips() {
         "board should show retry chip when attempt > 1"
     );
     assert!(
-        buffer_contains(&buffer, "blocked_by:"),
-        "detail pane should render blocked_by with prominent styling"
+        buffer_contains(&buffer, "BLOCKED"),
+        "detail pane should render a blocked banner when dependencies block the task"
+    );
+    assert!(
+        buffer_contains(&buffer, "Blocked by"),
+        "detail pane should render the blocked dependency lane"
+    );
+    assert!(
+        buffer_contains(&buffer, "↑parent"),
+        "detail pane should resolve dependency status suffixes from the current plan"
+    );
+}
+
+#[test]
+fn plan_inspector_renders_mixed_status_risk_banner() {
+    let backend = TestBackend::new(160, 32);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut view = PlanInspectorView::new(SessionId("brain-1".into()));
+    let plans = plan_store_with_risk_mix();
+    let lineage = lineage_with_long_running_ui();
+    let synopsis = SessionSynopsisProjection::new();
+    let ctx = ViewContext {
+        lineage: &lineage,
+        plan_projection: &plans,
+        synopsis: &synopsis,
+        brain_status: &BrainStatus::Idle,
+        license_badge: None,
+        flag_summary: None,
+        tombstone: None,
+        transient_hint_override: None,
+        theme: spur_tui::theme::fallback_theme(),
+    };
+
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    assert!(
+        buffer_contains(&buffer, "risk: lint rejected"),
+        "header should surface rejected blockers"
+    );
+    assert!(
+        buffer_contains(&buffer, "build-ui running"),
+        "header should surface long-running dispatched tasks"
+    );
+    assert!(
+        buffer_contains(&buffer, "api retry 2/3"),
+        "header should surface retry pressure"
+    );
+
+    let action = view.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &ctx);
+    assert!(action.is_none(), "navigation should remain in-view");
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    assert!(
+        buffer_contains(&buffer, "↑lint (REJ)"),
+        "detail dependency strip should render compact resolved status suffixes"
     );
 }
 
@@ -1151,4 +1209,172 @@ fn plan_store_with_blocked_and_retry() -> PlanProjectionStore {
         }),
     }));
     store
+}
+
+fn plan_store_with_risk_mix() -> PlanProjectionStore {
+    let mut store = PlanProjectionStore::default();
+    let occurred_at = SystemTime::now()
+        .checked_sub(Duration::from_secs(18 * 60))
+        .unwrap();
+    store.apply(&SpurEvent {
+        occurred_at,
+        seq: 0,
+        body: SpurEventBody::PlanSnapshotUpdated {
+            session_id: SessionId("brain-1".into()),
+            snapshot: Box::new(PlanSnapshot {
+                plan_id: "plan-1".into(),
+                epic_id: None,
+                status: "running".into(),
+                progress: "0/4 done".into(),
+                next_action: "resolve risk".into(),
+                ready_to_merge: false,
+                counts: PlanSnapshotCounts {
+                    pending: 1,
+                    dispatched: 1,
+                    rejected: 1,
+                    failed: 1,
+                    ..Default::default()
+                },
+                tasks: vec![
+                    PlanSnapshotTask {
+                        task_id: "lint".into(),
+                        task_name: "lint".into(),
+                        agent: "codex".into(),
+                        issue_id: Some("bd-lint".into()),
+                        status: "rejected".into(),
+                        attempt: 1,
+                        max_attempts: 3,
+                        depends_on: vec![],
+                        blocked_by: vec![],
+                        unblocks: vec!["release".into()],
+                        summary: None,
+                        feedback: Some("lint failed".into()),
+                        error: None,
+                        worker_branch: None,
+                        delegation_id: None,
+                        diff_summary: None,
+                        mutation_id: None,
+                        superseded_by: vec![],
+                        next_action: "fix lint".into(),
+                    },
+                    PlanSnapshotTask {
+                        task_id: "build-ui".into(),
+                        task_name: "build-ui".into(),
+                        agent: "codex".into(),
+                        issue_id: Some("bd-build-ui".into()),
+                        status: "dispatched".into(),
+                        attempt: 1,
+                        max_attempts: 3,
+                        depends_on: vec![],
+                        blocked_by: vec![],
+                        unblocks: vec![],
+                        summary: None,
+                        feedback: None,
+                        error: None,
+                        worker_branch: Some("worker/build-ui".into()),
+                        delegation_id: Some("req-ui".into()),
+                        diff_summary: None,
+                        mutation_id: None,
+                        superseded_by: vec![],
+                        next_action: "running".into(),
+                    },
+                    PlanSnapshotTask {
+                        task_id: "api".into(),
+                        task_name: "api".into(),
+                        agent: "codex".into(),
+                        issue_id: Some("bd-api".into()),
+                        status: "failed".into(),
+                        attempt: 2,
+                        max_attempts: 3,
+                        depends_on: vec![],
+                        blocked_by: vec![],
+                        unblocks: vec![],
+                        summary: None,
+                        feedback: Some("retry requested".into()),
+                        error: Some("tests failed".into()),
+                        worker_branch: None,
+                        delegation_id: None,
+                        diff_summary: None,
+                        mutation_id: None,
+                        superseded_by: vec![],
+                        next_action: "retry".into(),
+                    },
+                    PlanSnapshotTask {
+                        task_id: "release".into(),
+                        task_name: "release".into(),
+                        agent: "codex".into(),
+                        issue_id: Some("bd-release".into()),
+                        status: "pending".into(),
+                        attempt: 0,
+                        max_attempts: 3,
+                        depends_on: vec!["lint".into()],
+                        blocked_by: vec!["lint".into()],
+                        unblocks: vec![],
+                        summary: None,
+                        feedback: None,
+                        error: None,
+                        worker_branch: None,
+                        delegation_id: None,
+                        diff_summary: None,
+                        mutation_id: None,
+                        superseded_by: vec![],
+                        next_action: "wait".into(),
+                    },
+                ],
+                owner_brain_session_id: None,
+                owner_token: None,
+                owner_acquired_at: None,
+            }),
+        },
+    });
+    store
+}
+
+fn lineage_with_long_running_ui() -> ExecutorLineage {
+    let mut lineage = ExecutorLineage::new();
+    let occurred_at = SystemTime::now()
+        .checked_sub(Duration::from_secs(42 * 60))
+        .unwrap();
+    lineage.apply(&SpurEvent {
+        occurred_at,
+        seq: 0,
+        body: SpurEventBody::ExecutorSpawned {
+            id: "exec-ui".into(),
+            parent_id: None,
+            session_id: SessionId("worker-ui".into()),
+            agent: "codex".into(),
+            role: Role::Executor,
+            task_spec: "build-ui".into(),
+        },
+    });
+    lineage.apply(&SpurEvent {
+        occurred_at,
+        seq: 0,
+        body: SpurEventBody::DelegationRequested {
+            from: SessionId("brain-1".into()),
+            to_agent: "codex".into(),
+            task: "build-ui".into(),
+            request_id: "req-ui".into(),
+            delegation_plan: None,
+            issue_id: Some("bd-build-ui".into()),
+        },
+    });
+    lineage.apply(&SpurEvent {
+        occurred_at,
+        seq: 0,
+        body: SpurEventBody::DelegationDispatched {
+            from: SessionId("brain-1".into()),
+            request_id: "req-ui".into(),
+            executor_id: "exec-ui".into(),
+        },
+    });
+    lineage.apply(&SpurEvent {
+        occurred_at,
+        seq: 0,
+        body: SpurEventBody::ExecutorPhaseChanged {
+            id: "exec-ui".into(),
+            phase: LifecycleState::Running,
+        },
+    });
+    lineage
 }
