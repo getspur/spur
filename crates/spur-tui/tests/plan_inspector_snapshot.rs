@@ -717,8 +717,8 @@ fn plan_inspector_detail_scroll_reset_when_switching_tasks() {
     let b_open = terminal.backend().buffer().clone();
     assert!(!buffer_contains(&b_open, "A-body-line-020"));
     assert!(
-        !buffer_contains(&b_open, "B-body-line-000"),
-        "switching tasks should reset detail scroll near top"
+        !buffer_contains(&b_open, "B-body-line-020"),
+        "switching tasks should reset detail scroll away from the previous deep offset"
     );
 
     let down_after_switch =
@@ -755,7 +755,7 @@ fn plan_inspector_detail_scroll_reset_when_switching_tasks() {
         !buffer_contains(&b_reopen, "A-body-line-020"),
         "reopening after close should keep switched task content"
     );
-    assert!(!buffer_contains(&b_reopen, "B-body-line-000"));
+    assert!(!buffer_contains(&b_reopen, "B-body-line-020"));
 
     let reopen_down = view.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE), &ctx);
     assert!(matches!(reopen_down, Some(Action::ScrollDown)));
@@ -995,7 +995,7 @@ fn plan_inspector_prefers_live_executor_state_over_stale_higher_id() {
         "board should surface the live executor rather than a stale higher-id executor"
     );
     assert!(
-        buffer_contains(&buffer, "codex running"),
+        buffer_contains(&buffer, "live codex running"),
         "detail pane should join against the live executor for the selected task"
     );
 }
@@ -1043,8 +1043,16 @@ fn plan_inspector_renders_blocked_deps_and_retry_chips() {
         "board should show retry chip when attempt > 1"
     );
     assert!(
-        buffer_contains(&buffer, "blocked_by:"),
-        "detail pane should render blocked_by with prominent styling"
+        buffer_contains(&buffer, "BLOCKED"),
+        "detail pane should render a blocked banner when dependencies block the task"
+    );
+    assert!(
+        buffer_contains(&buffer, "Blocked by"),
+        "detail pane should render the blocked dependency lane"
+    );
+    assert!(
+        buffer_contains(&buffer, "↑parent (approved)"),
+        "detail pane should resolve dependency status suffixes from the current plan"
     );
 }
 
