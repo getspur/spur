@@ -322,6 +322,9 @@ fn render_inline_image(
     frame: &mut Frame,
     rect: Rect,
     source: InlineImageSource,
+    total_rows: u16,
+    first_row_within: u16,
+    run_len: u16,
     ctx: &mut RenderContext<'_>,
     trace_images: &std::collections::HashMap<
         crate::components::react_trace::types::TraceImageId,
@@ -335,6 +338,8 @@ fn render_inline_image(
         return false;
     };
 
+    let partial = first_row_within != 0 || run_len != total_rows;
+
     let proto = match source {
         InlineImageSource::Mermaid(id) => {
             let Some(MermaidState::Ready {
@@ -347,24 +352,99 @@ fn render_inline_image(
             };
             let gen = *image_generation;
             let image_arc = image.clone();
-            ctx.image_cache
-                .inline_protocol_mut(id, &image_arc, gen, picker)
+            if partial {
+                let Some(slice) = crop_visible_image_slice(
+                    image_arc.as_ref(),
+                    total_rows,
+                    first_row_within,
+                    run_len,
+                ) else {
+                    return false;
+                };
+                let slice = std::sync::Arc::new(slice);
+                ctx.image_cache.inline_mermaid_slice_protocol_mut(
+                    id,
+                    &slice,
+                    gen,
+                    first_row_within,
+                    run_len,
+                    total_rows,
+                    picker,
+                )
+            } else {
+                ctx.image_cache
+                    .inline_protocol_mut(id, &image_arc, gen, picker)
+            }
         }
         InlineImageSource::Trace(id) => {
             let Some(stored) = trace_images.get(&id) else {
                 return false;
             };
-            ctx.image_cache.inline_trace_protocol_mut(
-                id,
-                &stored.image,
-                stored.image_generation,
-                picker,
-            )
+            if partial {
+                let Some(slice) = crop_visible_image_slice(
+                    stored.image.as_ref(),
+                    total_rows,
+                    first_row_within,
+                    run_len,
+                ) else {
+                    return false;
+                };
+                let slice = std::sync::Arc::new(slice);
+                ctx.image_cache.inline_trace_slice_protocol_mut(
+                    id,
+                    &slice,
+                    stored.image_generation,
+                    first_row_within,
+                    run_len,
+                    total_rows,
+                    picker,
+                )
+            } else {
+                ctx.image_cache.inline_trace_protocol_mut(
+                    id,
+                    &stored.image,
+                    stored.image_generation,
+                    picker,
+                )
+            }
         }
     };
     let widget = StatefulImage::default().resize(Resize::Fit(None));
     frame.render_stateful_widget(widget, rect, proto);
     true
+}
+
+#[cfg(feature = "markdown")]
+pub(crate) fn crop_visible_image_slice(
+    image: &image::DynamicImage,
+    total_rows: u16,
+    first_row_within: u16,
+    run_len: u16,
+) -> Option<image::DynamicImage> {
+    if total_rows == 0 || run_len == 0 || image.width() == 0 || image.height() == 0 {
+        return None;
+    }
+
+    let start_row = first_row_within.min(total_rows);
+    let end_row = first_row_within.saturating_add(run_len).min(total_rows);
+    if end_row <= start_row {
+        return None;
+    }
+
+    let height = image.height() as u64;
+    let total = total_rows as u64;
+    let start_y = ((height * start_row as u64) / total).min(height) as u32;
+    let end_y = height
+        .saturating_mul(end_row as u64)
+        .saturating_add(total.saturating_sub(1))
+        / total;
+    let end_y = end_y.min(height).max(start_y as u64 + 1) as u32;
+    let slice_height = end_y.saturating_sub(start_y);
+    if slice_height == 0 {
+        return None;
+    }
+
+    Some(image.crop_imm(0, start_y, image.width(), slice_height))
 }
 
 /// Minimum `run_len` for the multi-line card variant. Below this we fall
@@ -658,8 +738,8 @@ impl ReactTrace {
     ///
     /// Walks virtual rows, batching contiguous text rows into `Paragraph`
     /// Rects and contiguous `ImageRow` runs per diagram into `StatefulImage`
-    /// Rects. Partial-image runs (scrolled so the diagram is cropped) render
-    /// as a single-row placeholder instead — the v1 graceful-clip policy.
+    /// Rects. Partial-image runs render a source-image slice matching the
+    /// visible virtual rows, so scrolling reveals the full image over time.
     #[cfg(feature = "markdown")]
     pub fn render_with_ctx(
         &mut self,
@@ -846,13 +926,16 @@ impl ReactTrace {
                         width: inner.width,
                         height: run_len,
                     };
-                    let fully_visible = first_row_within == 0 && run_len == total_rows;
-
-                    let drew_image = if fully_visible {
-                        render_inline_image(frame, rect, source, ctx, &self.inline_images)
-                    } else {
-                        false
-                    };
+                    let drew_image = render_inline_image(
+                        frame,
+                        rect,
+                        source,
+                        total_rows,
+                        first_row_within,
+                        run_len,
+                        ctx,
+                        &self.inline_images,
+                    );
 
                     if !drew_image {
                         if is_ready_image(source, ctx) {
@@ -1622,6 +1705,45 @@ mod card_tests {
             "row 4 expected title, got: {:?}",
             lines[4]
         );
+    }
+}
+
+#[cfg(all(test, feature = "markdown"))]
+mod image_slice_tests {
+    use super::*;
+    use image::{DynamicImage, GenericImageView, Rgba, RgbaImage};
+
+    fn striped_image() -> DynamicImage {
+        let mut img = RgbaImage::new(2, 10);
+        for y in 0..10 {
+            let value = (y * 20) as u8;
+            for x in 0..2 {
+                img.put_pixel(x, y, Rgba([value, 0, 0, 255]));
+            }
+        }
+        DynamicImage::ImageRgba8(img)
+    }
+
+    #[test]
+    fn partial_image_slice_crops_visible_source_rows() {
+        let img = striped_image();
+
+        let cropped = crop_visible_image_slice(&img, 10, 3, 4).expect("slice should exist");
+
+        assert_eq!(cropped.dimensions(), (2, 4));
+        assert_eq!(cropped.get_pixel(0, 0), Rgba([60, 0, 0, 255]));
+        assert_eq!(cropped.get_pixel(0, 3), Rgba([120, 0, 0, 255]));
+    }
+
+    #[test]
+    fn partial_image_slice_clamps_to_source_bounds() {
+        let img = striped_image();
+
+        let cropped = crop_visible_image_slice(&img, 10, 8, 10).expect("slice should exist");
+
+        assert_eq!(cropped.dimensions(), (2, 2));
+        assert_eq!(cropped.get_pixel(0, 0), Rgba([160, 0, 0, 255]));
+        assert_eq!(cropped.get_pixel(0, 1), Rgba([180, 0, 0, 255]));
     }
 }
 

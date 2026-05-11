@@ -32,6 +32,29 @@ use crate::components::react_trace::types::TraceImageId;
 enum ImageCacheKey {
     Mermaid(MermaidId),
     Trace(TraceImageId),
+    MermaidSlice {
+        id: MermaidId,
+        first_row_within: u16,
+        run_len: u16,
+        total_rows: u16,
+    },
+    TraceSlice {
+        id: TraceImageId,
+        first_row_within: u16,
+        run_len: u16,
+        total_rows: u16,
+    },
+}
+
+const MAX_INLINE_SLICE_PROTOCOLS: usize = 32;
+
+impl ImageCacheKey {
+    fn is_slice(self) -> bool {
+        matches!(
+            self,
+            ImageCacheKey::MermaidSlice { .. } | ImageCacheKey::TraceSlice { .. }
+        )
+    }
 }
 
 struct CachedProtocol {
@@ -104,6 +127,58 @@ impl ImageCache {
         )
     }
 
+    pub fn inline_mermaid_slice_protocol_mut(
+        &mut self,
+        id: MermaidId,
+        image: &Arc<DynamicImage>,
+        image_generation: u64,
+        first_row_within: u16,
+        run_len: u16,
+        total_rows: u16,
+        picker: &Picker,
+    ) -> &mut StatefulProtocol {
+        Self::ensure_cell_size(
+            &mut self.inline,
+            &mut self.overlay,
+            &mut self.last_cell_size,
+            picker,
+        );
+        let key = ImageCacheKey::MermaidSlice {
+            id,
+            first_row_within,
+            run_len,
+            total_rows,
+        };
+        Self::enforce_inline_slice_limit(&mut self.inline, key);
+        Self::get_or_build(&mut self.inline, key, image, image_generation, picker)
+    }
+
+    pub fn inline_trace_slice_protocol_mut(
+        &mut self,
+        id: TraceImageId,
+        image: &Arc<DynamicImage>,
+        image_generation: u64,
+        first_row_within: u16,
+        run_len: u16,
+        total_rows: u16,
+        picker: &Picker,
+    ) -> &mut StatefulProtocol {
+        Self::ensure_cell_size(
+            &mut self.inline,
+            &mut self.overlay,
+            &mut self.last_cell_size,
+            picker,
+        );
+        let key = ImageCacheKey::TraceSlice {
+            id,
+            first_row_within,
+            run_len,
+            total_rows,
+        };
+        Self::enforce_inline_slice_limit(&mut self.inline, key);
+        Self::get_or_build(&mut self.inline, key, image, image_generation, picker)
+    }
+
     /// Same shape as `inline_protocol_mut` but for the overlay slot.
     pub fn overlay_protocol_mut(
         &mut self,
@@ -141,6 +216,12 @@ impl ImageCache {
     pub fn invalidate_id(&mut self, id: MermaidId) {
         self.inline.remove(&ImageCacheKey::Mermaid(id));
         self.overlay.remove(&ImageCacheKey::Mermaid(id));
+        self.inline.retain(|key, _| {
+            !matches!(key, ImageCacheKey::MermaidSlice { id: slice_id, .. } if *slice_id == id)
+        });
+        self.overlay.retain(|key, _| {
+            !matches!(key, ImageCacheKey::MermaidSlice { id: slice_id, .. } if *slice_id == id)
+        });
     }
 
     /// Test/debug accessor: how many entries each map holds.
@@ -209,6 +290,32 @@ impl ImageCache {
                 *last = Some(cur);
             }
             None => *last = Some(cur),
+        }
+    }
+
+    fn enforce_inline_slice_limit(
+        inline: &mut HashMap<ImageCacheKey, CachedProtocol>,
+        current: ImageCacheKey,
+    ) {
+        if inline.contains_key(&current) {
+            return;
+        }
+
+        let slice_count = inline.keys().filter(|key| key.is_slice()).count();
+        if slice_count < MAX_INLINE_SLICE_PROTOCOLS {
+            return;
+        }
+
+        let remove_count = slice_count + 1 - MAX_INLINE_SLICE_PROTOCOLS;
+        let stale_keys: Vec<_> = inline
+            .keys()
+            .filter(|key| key.is_slice() && **key != current)
+            .copied()
+            .take(remove_count)
+            .collect();
+
+        for key in stale_keys {
+            inline.remove(&key);
         }
     }
 }
@@ -340,5 +447,39 @@ mod tests {
         c.inline_protocol_mut(id, &img, 1, &p);
         c.inline_protocol_mut(id, &img, 1, &p);
         assert_eq!(c.len(), (1, 0));
+    }
+
+    #[test]
+    fn partial_inline_slices_use_distinct_cache_keys() {
+        let mut c = ImageCache::new();
+        let img = small_image();
+        let p = picker();
+
+        c.inline_trace_slice_protocol_mut(TraceImageId(1), &img, 1, 0, 4, 10, &p);
+        c.inline_trace_slice_protocol_mut(TraceImageId(1), &img, 1, 4, 4, 10, &p);
+        c.inline_trace_slice_protocol_mut(TraceImageId(1), &img, 1, 4, 4, 10, &p);
+
+        assert_eq!(
+            c.len(),
+            (2, 0),
+            "two distinct scroll slices should not reuse one protocol"
+        );
+    }
+
+    #[test]
+    fn partial_inline_slices_are_bounded() {
+        let mut c = ImageCache::new();
+        let img = small_image();
+        let p = picker();
+
+        for first_row in 0..(MAX_INLINE_SLICE_PROTOCOLS as u16 + 8) {
+            c.inline_trace_slice_protocol_mut(TraceImageId(1), &img, 1, first_row, 4, 100, &p);
+        }
+
+        assert_eq!(
+            c.len(),
+            (MAX_INLINE_SLICE_PROTOCOLS, 0),
+            "scrolling should not cache every historical slice"
+        );
     }
 }
