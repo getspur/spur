@@ -334,7 +334,7 @@ pub(super) fn render_mermaid_overlay(
         layout::{Constraint, Layout},
         style::{Color, Modifier, Style},
         text::{Line, Span},
-        widgets::Paragraph,
+        widgets::{Paragraph, Wrap},
     };
     use ratatui_image::{Resize, StatefulImage};
 
@@ -357,8 +357,16 @@ pub(super) fn render_mermaid_overlay(
 
     let drew = (|| {
         let id = viewer.focused?;
+        let state = detail.mermaid_registry.get(&id)?;
+        if let crate::components::mermaid::MermaidState::ReadyText { text, .. } = state {
+            frame.render_widget(
+                Paragraph::new(text.as_ref().to_string()).wrap(Wrap { trim: false }),
+                chunks[1],
+            );
+            return Some(());
+        }
         let picker = detail.render_picker.as_ref()?;
-        let (image, image_generation) = match detail.mermaid_registry.get(&id)? {
+        let (image, image_generation) = match state {
             crate::components::mermaid::MermaidState::Ready {
                 image,
                 image_generation,

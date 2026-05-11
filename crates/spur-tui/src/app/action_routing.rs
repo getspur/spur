@@ -935,9 +935,21 @@ impl App {
                 let tx = self.mermaid_tx.clone();
                 let session_cloned = session.clone();
                 tokio::task::spawn_blocking(move || {
-                    let result = crate::components::mermaid::render_mermaid(&code, target_width)
-                        .map(std::sync::Arc::new)
-                        .map_err(|e| e.to_string());
+                    let result =
+                        crate::components::mermaid::render_mermaid_hybrid(&code, target_width)
+                            .map(|rendered| match rendered {
+                                crate::components::mermaid::MermaidRendered::Image(image) => {
+                                    crate::components::mermaid::MermaidRenderOutput::Image(
+                                        std::sync::Arc::new(image),
+                                    )
+                                }
+                                crate::components::mermaid::MermaidRendered::Text { text } => {
+                                    crate::components::mermaid::MermaidRenderOutput::Text(
+                                        std::sync::Arc::<str>::from(text),
+                                    )
+                                }
+                            })
+                            .map_err(|e| e.to_string());
                     let _ = tx.send(Action::MermaidRenderCompleted {
                         session: session_cloned,
                         ref_id,

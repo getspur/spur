@@ -526,7 +526,8 @@ fn render_agent_message_body(
             crate::components::mermaid::FenceRender::Pending => {
                 pending.insert(*id);
             }
-            crate::components::mermaid::FenceRender::Ready(_) => {}
+            crate::components::mermaid::FenceRender::Ready(_)
+            | crate::components::mermaid::FenceRender::ReadyText(_) => {}
         }
     }
     let state_lookup = crate::components::markdown_stream::StateLookup {
@@ -548,9 +549,17 @@ fn render_agent_message_body(
                     emit_line(new_line);
                 }
             }
-            StreamItem::Fence(id) => match fence_state.get(id).copied() {
-                Some(FenceRender::Ready(h)) if h > 0 => {
-                    emit_fence_image(*id, h);
+            StreamItem::Fence(id) => match fence_state.get(id) {
+                Some(FenceRender::Ready(h)) if *h > 0 => {
+                    emit_fence_image(*id, *h);
+                }
+                Some(FenceRender::ReadyText(text)) => {
+                    for text_line in text.lines() {
+                        emit_line(Line::from(vec![
+                            Span::raw("   "),
+                            Span::raw(text_line.to_string()),
+                        ]));
+                    }
                 }
                 other => {
                     let render = match other {

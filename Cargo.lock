@@ -490,6 +490,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ascii-dag"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd898d2dcffeeb51015c511a2849a8637c894b833afc946936d48b1e5c8aa6ec"
+
+[[package]]
 name = "assert_cmd"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4357,6 +4363,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mermaid-text"
+version = "0.56.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a111628078bc477f4905572cada48499eec5e8429dfee63546986975473fb548"
+dependencies = [
+ "ascii-dag",
+ "chrono",
+ "unicode-width 0.2.0",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6795,6 +6812,7 @@ dependencies = [
  "ignore",
  "image 0.25.10",
  "mermaid-rs-renderer",
+ "mermaid-text",
  "nucleo-matcher",
  "pulldown-cmark",
  "ratatui",

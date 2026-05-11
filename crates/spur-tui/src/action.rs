@@ -175,7 +175,7 @@ pub enum Action {
         session: SessionId,
         ref_id: crate::components::mermaid::MermaidId,
         target_width: u32,
-        result: Result<std::sync::Arc<image::DynamicImage>, String>,
+        result: Result<crate::components::mermaid::MermaidRenderOutput, String>,
     },
     /// Halt an in-flight agent stream via ACP cancel. Emitted by
     /// `SessionDetailView` when the user presses `Esc` and a stream is live.
