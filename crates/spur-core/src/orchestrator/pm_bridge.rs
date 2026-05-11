@@ -14,6 +14,7 @@ pub(super) fn to_summary_event(
         priority: issue.priority,
         issue_type: issue.issue_type.clone(),
         assignee: issue.assignee.clone(),
+        description: issue.description.clone(),
     }
 }
 

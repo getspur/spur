@@ -22,6 +22,7 @@ pub struct IssueMentionDescriptor {
     pub issue_type: Option<String>,
     pub labels: Vec<String>,
     pub url: String,
+    pub description: Option<String>,
 }
 
 impl From<&IssueSummary> for IssueMentionDescriptor {
@@ -36,6 +37,7 @@ impl From<&IssueSummary> for IssueMentionDescriptor {
             issue_type: issue.issue_type.clone(),
             labels: issue.labels.clone(),
             url: issue.url.clone(),
+            description: issue.description.clone(),
         }
     }
 }
@@ -159,6 +161,7 @@ mod tests {
             issue_type: Some("bug".to_string()),
             labels: vec!["mentions".to_string(), "tui".to_string()],
             url: format!("https://example.test/{id}"),
+            description: None,
         }
     }
 

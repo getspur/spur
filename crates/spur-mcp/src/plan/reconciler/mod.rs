@@ -105,6 +105,7 @@ fn issue_to_summary(issue: spur_pm::Issue) -> spur_pm::IssueSummary {
         priority: issue.priority,
         issue_type: issue.issue_type,
         assignee: issue.assignee,
+        description: Some(issue.body).filter(|b| !b.trim().is_empty()),
     }
 }
 

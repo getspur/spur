@@ -2076,6 +2076,7 @@ impl View for DashboardView {
                         priority: i.priority,
                         issue_type: i.issue_type.clone(),
                         assignee: i.assignee.clone(),
+                        description: i.description.clone(),
                     })
                     .collect::<Vec<_>>();
                 // Sort by priority ascending (critical first)

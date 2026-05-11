@@ -83,6 +83,7 @@ pub(crate) fn br_to_pm_summary(br: beads_rust::model::Issue) -> IssueSummary {
         priority: Some(br.priority.0),
         issue_type: Some(br.issue_type.to_string()),
         assignee: br.assignee,
+        description: br.description,
     }
 }
 
@@ -158,6 +159,7 @@ impl BeadsCrateAdapter {
                     priority: issue.priority,
                     issue_type: issue.issue_type,
                     assignee: issue.assignee,
+                    description: Some(issue.body).filter(|b| !b.trim().is_empty()),
                 };
                 if had_prior {
                     PmEvent::IssueUpdated(summary)

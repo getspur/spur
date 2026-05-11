@@ -391,6 +391,24 @@ fn issue_preview_for_descriptor(
         lines.push(labels_preview_line(&descriptor.labels));
     }
 
+    if let Some(desc) = descriptor
+        .description
+        .as_deref()
+        .filter(|d| !d.trim().is_empty())
+    {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "Description:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        let sanitized = crate::mentions::issue_source::sanitize_single_line(desc);
+        if sanitized.len() > 280 {
+            lines.push(Line::raw(format!("{}…", &sanitized[..279])));
+        } else {
+            lines.push(Line::raw(sanitized));
+        }
+    }
+
     lines.push(Line::raw(""));
     lines.push(url_preview_line(&descriptor.url));
 
@@ -931,6 +949,7 @@ mod tests {
             issue_type: Some("task".to_string()),
             labels: vec!["mentions".to_string()],
             url: "https://example.test/bd-1".to_string(),
+            description: Some("Test description for preview".to_string()),
         }
     }
 
@@ -1048,6 +1067,7 @@ mod tests {
                 issue_type: Some("task".to_string()),
                 labels: vec!["mentions".to_string()],
                 url: "https://example.test/bd-1".to_string(),
+                description: Some("Test description for preview".to_string()),
             }]);
         let mut src = MentionQuerySource::new(
             Rc::clone(&registry),
@@ -1100,6 +1120,7 @@ mod tests {
                 issue_type: Some("task".to_string()),
                 labels: vec!["mentions".to_string(), "preview".to_string()],
                 url: "https://example.test/bd-42".to_string(),
+                description: None,
             }]);
         let mut src = MentionQuerySource::new(
             Rc::clone(&registry),
