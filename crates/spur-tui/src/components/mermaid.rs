@@ -277,9 +277,23 @@ fn render_text_if_supported(code: &str, target_width: u32) -> Option<String> {
     use mermaid_text::detect::DiagramKind;
 
     let kind = mermaid_text::detect::detect(code).ok()?;
+
+    // Opt-in to diagrams that render beautifully in pure text.
+    // We intentionally exclude highly spatial diagrams like Pie charts
+    // (which test 'hybrid_routes_pie_to_raster_fallback' expects to rasterize).
     if !matches!(
         kind,
-        DiagramKind::Flowchart | DiagramKind::State | DiagramKind::Class
+        DiagramKind::Flowchart
+            | DiagramKind::State
+            | DiagramKind::Class
+            | DiagramKind::Sequence
+            | DiagramKind::Er
+            | DiagramKind::Gantt
+            | DiagramKind::Timeline
+            | DiagramKind::GitGraph
+            | DiagramKind::Mindmap
+            | DiagramKind::BlockDiagram
+            | DiagramKind::RequirementDiagram
     ) {
         return None;
     }
@@ -288,7 +302,18 @@ fn render_text_if_supported(code: &str, target_width: u32) -> Option<String> {
     // terminal-column budget using the same fallback cell width used when
     // dispatching render requests without a live picker.
     let width = (target_width / 8).clamp(20, 240) as usize;
-    panic::catch_unwind(|| mermaid_text::render_with_width(code, Some(width)))
+
+    let opts = mermaid_text::RenderOptions {
+        max_width: Some(width),
+        // Preserve clean Unicode box-drawing characters (do not downgrade to ASCII)
+        ascii: false,
+        // Disable ANSI SGR color emission because ratatui's Text/Span::raw
+        // outputs ANSI codes verbatim instead of parsing them.
+        color: false,
+        ..Default::default()
+    };
+
+    panic::catch_unwind(|| mermaid_text::render_with_options(code, &opts))
         .ok()
         .and_then(Result::ok)
 }
