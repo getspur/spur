@@ -97,6 +97,7 @@ fn tracked_plan_from_snapshot(
                 task_name: task.task_name.clone(),
                 agent: task.agent.clone(),
                 issue_id: task.issue_id.clone(),
+                issue_title: task.issue_title.clone(),
                 status: task.status.clone(),
                 attempt: task.attempt,
                 max_attempts: task.max_attempts,

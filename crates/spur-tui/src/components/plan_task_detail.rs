@@ -190,7 +190,7 @@ fn token(theme: &Theme, name: &str) -> ratatui::style::Color {
 fn hero_line(task: &TrackedTask, live_node: Option<&ExecutorNode>, theme: &Theme) -> Line<'static> {
     let mut spans = vec![
         Span::styled(
-            task.task_name.clone(),
+            task.issue_title.as_ref().unwrap_or(&task.task_name).clone(),
             Style::default()
                 .fg(token(theme, "plan_inspector.detail.hero.fg"))
                 .add_modifier(Modifier::BOLD),
