@@ -1,9 +1,9 @@
 use std::fs;
 
-use spur_tui::mentions::code_graph::validation::{
+use spur_graph::validation::{
     compute_anchor_hash, validate_file, validate_symbol, FailureReason, ValidationOutcome,
 };
-use spur_tui::mentions::code_graph::{
+use spur_graph::{
     load_artifact, GraphFileArtifact, GraphSymbolArtifact, CODE_FILE_URI_PREFIX,
     CODE_SYMBOL_URI_PREFIX,
 };
@@ -11,7 +11,10 @@ use spur_tui::mentions::code_graph::{
 #[test]
 fn load_artifact_accepts_fixture_schema() {
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/graph_index/sample.json");
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root")
+        .join("crates/spur-tui/tests/fixtures/graph_index/sample.json");
     let artifact = load_artifact(&fixture_path).expect("fixture should load");
 
     assert_eq!(artifact.header.graph_index_version, "fixture-2026-05-11");

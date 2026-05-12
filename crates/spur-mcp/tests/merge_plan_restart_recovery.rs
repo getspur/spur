@@ -125,6 +125,7 @@ async fn t_v0d_3_merge_plan_works_after_restart_on_persisted_plan() {
         task: "Integrate worker branch".into(),
         depends_on: Vec::new(),
         issue_id: None,
+        issue_title: None,
         context_files: Vec::new(),
     }];
     let feature_gate = common::server_builder::pro_feature_gate();

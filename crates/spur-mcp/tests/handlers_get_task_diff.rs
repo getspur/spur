@@ -95,6 +95,7 @@ fn make_plan_with_cached_result(plan_id: &str) -> PlanState {
                 task: "do thing".into(),
                 depends_on: vec![],
                 issue_id: None,
+                issue_title: None,
                 context_files: vec![],
             },
             status: PlanTaskStatus::Approved {
@@ -128,6 +129,7 @@ fn make_plan_needing_recovery(plan_id: &str) -> PlanState {
                 task: "do thing".into(),
                 depends_on: vec![],
                 issue_id: Some("issue-task".into()),
+                issue_title: None,
                 context_files: vec![],
             },
             status: PlanTaskStatus::Approved { summary: None },
@@ -331,6 +333,7 @@ fn plan_with_in_memory_history() -> PlanState {
                 task: "do thing".into(),
                 depends_on: vec![],
                 issue_id: None,
+                issue_title: None,
                 context_files: vec![],
             },
             status: PlanTaskStatus::AwaitingReview {

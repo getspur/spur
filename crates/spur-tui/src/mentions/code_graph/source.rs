@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 
-use super::{
+use crate::mentions::entry::{MentionEntry, MentionKind, MentionSource};
+use spur_graph::{
     load_artifact, CodeMentionAuthoritative, CodeMentionDisplayMeta, CodeMentionExtractionHints,
     CodeMentionKind, CodeMentionPayload, CodeMentionValidationSpec, GraphFileArtifact,
     GraphIndexArtifact, GraphSymbolArtifact, CODE_FILE_URI_PREFIX, CODE_SYMBOL_URI_PREFIX,
 };
-use crate::mentions::entry::{MentionEntry, MentionKind, MentionSource};
 
 pub struct CodeGraphMentionSource {
     artifact_path: PathBuf,

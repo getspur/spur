@@ -1,13 +1,14 @@
 use std::fs;
 
 use spur_acp::ContentBlock;
+use spur_graph::validation::{compute_anchor_hash, validate_symbol, ValidationOutcome};
+use spur_graph::{
+    CodeMentionAuthoritative, CodeMentionDisplayMeta, CodeMentionExtractionHints,
+    GraphSymbolArtifact,
+};
 use spur_tui::commands::submit_router::assemble_blocks_with_code_mentions;
 use spur_tui::components::input_bar::{ProtectedRange, RangeKind};
 use spur_tui::mentions::code_graph::expansion::{expand, ExpandedMention, ReplacedWith};
-use spur_tui::mentions::code_graph::validation::{
-    compute_anchor_hash, validate_symbol, ValidationOutcome,
-};
-use spur_tui::mentions::code_graph::GraphSymbolArtifact;
 use spur_tui::mentions::{CodeMentionKind, CodeMentionPayload, CodeMentionValidationSpec};
 
 #[test]
@@ -424,7 +425,7 @@ fn write_source(root: &std::path::Path, relative: &str, source: &str) {
 
 fn file_payload(display: &str, uri: &str, file_path: &str) -> CodeMentionPayload {
     CodeMentionPayload {
-        authoritative: spur_tui::mentions::code_graph::CodeMentionAuthoritative {
+        authoritative: CodeMentionAuthoritative {
             display: display.to_string(),
             uri: uri.to_string(),
             kind: CodeMentionKind::File,
@@ -433,13 +434,13 @@ fn file_payload(display: &str, uri: &str, file_path: &str) -> CodeMentionPayload
                 path: file_path.to_string(),
             },
         },
-        extraction_hints: spur_tui::mentions::code_graph::CodeMentionExtractionHints {
+        extraction_hints: CodeMentionExtractionHints {
             line_range: None,
             byte_range: None,
             symbol_kind: None,
             entity_name: None,
         },
-        display_meta: spur_tui::mentions::code_graph::CodeMentionDisplayMeta {
+        display_meta: CodeMentionDisplayMeta {
             enclosing_scope: None,
             graph_index_version: "test-version".to_string(),
         },
@@ -487,7 +488,7 @@ fn symbol_payload(
     anchor_hash: u64,
 ) -> CodeMentionPayload {
     CodeMentionPayload {
-        authoritative: spur_tui::mentions::code_graph::CodeMentionAuthoritative {
+        authoritative: CodeMentionAuthoritative {
             display: display.to_string(),
             uri: uri.to_string(),
             kind: CodeMentionKind::Symbol,
@@ -500,13 +501,13 @@ fn symbol_payload(
                 anchor_hash: anchor_hash.to_string(),
             },
         },
-        extraction_hints: spur_tui::mentions::code_graph::CodeMentionExtractionHints {
+        extraction_hints: CodeMentionExtractionHints {
             line_range: Some(line_range),
             byte_range: Some(byte_range),
             symbol_kind: Some(symbol_kind.to_string()),
             entity_name: Some(entity_name.to_string()),
         },
-        display_meta: spur_tui::mentions::code_graph::CodeMentionDisplayMeta {
+        display_meta: CodeMentionDisplayMeta {
             enclosing_scope: None,
             graph_index_version: "test-version".to_string(),
         },
