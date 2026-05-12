@@ -101,7 +101,11 @@ impl<'a> FactBuilder<'a> {
             source_node_id: source,
             target_node_id: target,
             relation,
-            confidence: Confidence::Heuristic,
+            confidence: match relation {
+                RelationKind::Contains => Confidence::SyntaxExact,
+                RelationKind::Calls | RelationKind::Imports => Confidence::Heuristic,
+                _ => Confidence::Heuristic,
+            },
             confidence_score: match relation {
                 RelationKind::Contains => 1.0,
                 RelationKind::Calls | RelationKind::Imports => 0.8,
