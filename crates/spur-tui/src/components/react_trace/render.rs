@@ -1766,6 +1766,312 @@ mod image_slice_tests {
 }
 
 #[cfg(all(test, feature = "markdown"))]
+mod inline_image_visual_smoke_tests {
+    use super::*;
+    use crate::components::image_cache::ImageCache;
+    use crate::components::react_trace::types::ScrollAnchor;
+    use image::{DynamicImage, Rgba, RgbaImage};
+    use ratatui::{backend::TestBackend, buffer::Buffer, layout::Rect, style::Color, Terminal};
+    use ratatui_image::picker::Picker;
+    use std::{collections::HashMap, path::PathBuf, sync::Arc};
+
+    #[derive(Debug, Clone, Copy)]
+    struct ColoredArea {
+        min_x: u16,
+        max_x: u16,
+        min_y: u16,
+        max_y: u16,
+        cells: usize,
+    }
+
+    fn solid_image(w: u32, h: u32, rgba: [u8; 4]) -> DynamicImage {
+        DynamicImage::ImageRgba8(RgbaImage::from_pixel(w, h, Rgba(rgba)))
+    }
+
+    fn vertical_gradient(w: u32, h: u32) -> DynamicImage {
+        let mut img = RgbaImage::new(w, h);
+        for y in 0..h {
+            let blue = ((y * 255) / h.saturating_sub(1).max(1)) as u8;
+            let red = 255u8.saturating_sub(blue);
+            for x in 0..w {
+                img.put_pixel(x, y, Rgba([red, 0, blue, 255]));
+            }
+        }
+        DynamicImage::ImageRgba8(img)
+    }
+
+    fn trace_with_image(image: DynamicImage) -> ReactTrace {
+        let mut trace = ReactTrace::new_for_tests();
+        trace
+            .append_image(
+                Arc::new(image),
+                PathBuf::from("inline-smoke.png"),
+                "inline-smoke-digest".to_string(),
+                "12:00".to_string(),
+            )
+            .expect("test image should be inserted");
+        trace
+    }
+
+    fn render_trace(
+        trace: &mut ReactTrace,
+        image_cache: &mut ImageCache,
+        width: u16,
+        height: u16,
+    ) -> Buffer {
+        let registry = HashMap::new();
+        let picker = Picker::halfblocks();
+        let mut ctx = RenderContext {
+            mermaid_registry: &registry,
+            picker: Some(&picker),
+            image_cache,
+        };
+        let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
+        term.draw(|f| {
+            trace.render_with_ctx_focused(f, Rect::new(0, 0, width, height), &mut ctx, None, true)
+        })
+        .unwrap();
+        term.backend().buffer().clone()
+    }
+
+    fn redish(color: Option<Color>) -> bool {
+        matches!(color, Some(Color::Rgb(r, g, b)) if r >= 180 && g <= 80 && b <= 80)
+    }
+
+    fn bluish(color: Option<Color>) -> bool {
+        matches!(color, Some(Color::Rgb(r, g, b)) if b >= 120 && r <= 160 && g <= 80)
+    }
+
+    fn cell_has_color(cell: &ratatui::buffer::Cell, pred: fn(Option<Color>) -> bool) -> bool {
+        let style = cell.style();
+        pred(style.fg) || pred(style.bg)
+    }
+
+    fn colored_area(
+        buf: &Buffer,
+        width: u16,
+        height: u16,
+        pred: fn(Option<Color>) -> bool,
+    ) -> ColoredArea {
+        let mut area: Option<ColoredArea> = None;
+        for y in 0..height {
+            for x in 0..width {
+                let cell = buf.cell((x, y)).expect("cell should be in bounds");
+                if !cell_has_color(cell, pred) {
+                    continue;
+                }
+                area = Some(match area {
+                    Some(a) => ColoredArea {
+                        min_x: a.min_x.min(x),
+                        max_x: a.max_x.max(x),
+                        min_y: a.min_y.min(y),
+                        max_y: a.max_y.max(y),
+                        cells: a.cells + 1,
+                    },
+                    None => ColoredArea {
+                        min_x: x,
+                        max_x: x,
+                        min_y: y,
+                        max_y: y,
+                        cells: 1,
+                    },
+                });
+            }
+        }
+        area.expect("expected colored image cells in render buffer")
+    }
+
+    fn red_rows(buf: &Buffer, width: u16, height: u16) -> Vec<u16> {
+        (0..height)
+            .filter(|&y| {
+                (0..width).any(|x| {
+                    let cell = buf.cell((x, y)).expect("cell should be in bounds");
+                    cell_has_color(cell, redish)
+                })
+            })
+            .collect()
+    }
+
+    fn red_columns(buf: &Buffer, width: u16, height: u16) -> Vec<u16> {
+        (0..width)
+            .filter(|&x| {
+                (0..height).any(|y| {
+                    let cell = buf.cell((x, y)).expect("cell should be in bounds");
+                    cell_has_color(cell, redish)
+                })
+            })
+            .collect()
+    }
+
+    fn row_average_rgb(buf: &Buffer, y: u16, x_start: u16, x_end: u16) -> (u16, u16, u16) {
+        let mut r_sum = 0u32;
+        let mut g_sum = 0u32;
+        let mut b_sum = 0u32;
+        let mut count = 0u32;
+        for x in x_start..=x_end {
+            let cell = buf.cell((x, y)).expect("cell should be in bounds");
+            for color in [cell.style().fg, cell.style().bg] {
+                if let Some(Color::Rgb(r, g, b)) = color {
+                    r_sum += r as u32;
+                    g_sum += g as u32;
+                    b_sum += b as u32;
+                    count += 1;
+                }
+            }
+        }
+        assert!(count > 0, "expected RGB samples on row {y}");
+        (
+            (r_sum / count) as u16,
+            (g_sum / count) as u16,
+            (b_sum / count) as u16,
+        )
+    }
+
+    fn assert_close_rgb(actual: (u16, u16, u16), expected: (u16, u16, u16), tolerance: u16) {
+        let diff = |a: u16, b: u16| a.abs_diff(b);
+        assert!(
+            diff(actual.0, expected.0) <= tolerance
+                && diff(actual.1, expected.1) <= tolerance
+                && diff(actual.2, expected.2) <= tolerance,
+            "expected RGB {actual:?} to be within {tolerance} of {expected:?}",
+        );
+    }
+
+    #[test]
+    fn wide_source_preserves_aspect_with_vertical_letterboxing() {
+        let mut trace = trace_with_image(solid_image(400, 20, [255, 0, 0, 255]));
+        let mut image_cache = ImageCache::new();
+
+        let buf = render_trace(&mut trace, &mut image_cache, 80, 20);
+        let red = colored_area(&buf, 80, 20, redish);
+        let rows = red_rows(&buf, 80, 20);
+
+        assert!(
+            red.max_y - red.min_y + 1 < 8,
+            "wide image content should not vertically fill its 8-row image rect: {red:?}",
+        );
+        assert!(
+            rows.first().copied().unwrap() > 2,
+            "expected background rows above red content; red rows: {rows:?}",
+        );
+        assert!(
+            rows.last().copied().unwrap() < 9,
+            "expected background rows below red content; red rows: {rows:?}",
+        );
+        assert!(
+            red.max_x - red.min_x + 1 >= 76,
+            "red content should span nearly the full inner width: {red:?}",
+        );
+    }
+
+    #[test]
+    fn tall_source_preserves_aspect_with_horizontal_letterboxing() {
+        let mut trace = trace_with_image(solid_image(20, 400, [255, 0, 0, 255]));
+        let mut image_cache = ImageCache::new();
+
+        let buf = render_trace(&mut trace, &mut image_cache, 80, 70);
+        let red = colored_area(&buf, 80, 70, redish);
+        let columns = red_columns(&buf, 80, 70);
+
+        assert!(
+            red.max_x - red.min_x + 1 < 20,
+            "tall image content should not horizontally fill its image rect: {red:?}",
+        );
+        assert!(
+            columns.first().copied().unwrap() > 2,
+            "expected background columns left of red content; red columns: {columns:?}",
+        );
+        assert!(
+            columns.last().copied().unwrap() < 78,
+            "expected background columns right of red content; red columns: {columns:?}",
+        );
+        assert!(
+            red.max_y - red.min_y + 1 >= 54,
+            "red content should span nearly the full image height: {red:?}",
+        );
+    }
+
+    #[test]
+    fn pane_width_resize_rebuilds_trace_image_protocol() {
+        let mut trace = trace_with_image(solid_image(400, 20, [255, 0, 0, 255]));
+        let mut image_cache = ImageCache::new();
+
+        let first = render_trace(&mut trace, &mut image_cache, 60, 20);
+        let first_red = colored_area(&first, 60, 20, redish);
+
+        let second = render_trace(&mut trace, &mut image_cache, 100, 20);
+        let second_red = colored_area(&second, 100, 20, redish);
+
+        let first_extent = first_red.max_x - first_red.min_x + 1;
+        let second_extent = second_red.max_x - second_red.min_x + 1;
+        assert!(
+            second_extent > first_extent + 25,
+            "resized pane should render meaningfully wider content; first={first_red:?}, second={second_red:?}",
+        );
+        assert!(
+            first_extent >= 56 && second_extent >= 96,
+            "content should track the inner pane width, not reuse stale protocol dimensions; first={first_red:?}, second={second_red:?}",
+        );
+    }
+
+    #[test]
+    fn scrolled_slice_matches_full_image_vertical_phase() {
+        let mut trace = trace_with_image(vertical_gradient(80, 400));
+        let mut image_cache = ImageCache::new();
+
+        let full = render_trace(&mut trace, &mut image_cache, 80, 70);
+        let blue = colored_area(&full, 80, 70, bluish);
+        let half_row_within = 28u16;
+        let full_sample_y = 2 + half_row_within;
+        let expected = row_average_rgb(&full, full_sample_y, blue.min_x, blue.max_x);
+
+        trace.anchor = ScrollAnchor::Row {
+            entry_idx: 0,
+            row_within_entry: 1 + half_row_within as usize,
+        };
+        let partial = render_trace(&mut trace, &mut image_cache, 80, 20);
+        let partial_blue = colored_area(&partial, 80, 20, bluish);
+        let actual = row_average_rgb(&partial, 1, partial_blue.min_x, partial_blue.max_x);
+
+        assert_close_rgb(actual, expected, 20);
+        assert_eq!(
+            partial_blue.max_x - partial_blue.min_x,
+            blue.max_x - blue.min_x,
+            "slice width should match the full image width",
+        );
+    }
+
+    #[test]
+    fn bounded_cache_memory_caps_inline_trace_image_entries() {
+        let mut trace = ReactTrace::new_for_tests();
+        for i in 0..20 {
+            trace
+                .append_image(
+                    Arc::new(solid_image(400, 20, [255, 0, 0, 255])),
+                    PathBuf::from(format!("inline-smoke-{i}.png")),
+                    format!("inline-smoke-digest-{i}"),
+                    "12:00".to_string(),
+                )
+                .expect("distinct image digest should be inserted");
+        }
+        let mut image_cache = ImageCache::new();
+
+        let _buf = render_trace(&mut trace, &mut image_cache, 80, 220);
+
+        assert_eq!(
+            image_cache.len(),
+            (16, 0),
+            "full inline protocol cache should be capped at 16 entries",
+        );
+        assert_eq!(
+            image_cache.display_surface_len(),
+            16,
+            "display surface cache should be capped at 16 entries",
+        );
+    }
+}
+
+#[cfg(all(test, feature = "markdown"))]
 mod cache_key_tests {
     use super::*;
 
