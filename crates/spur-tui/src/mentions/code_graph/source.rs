@@ -44,6 +44,13 @@ impl MentionSource for CodeGraphMentionSource {
                 return Ok(Vec::new());
             }
         };
+        for diagnostic in &artifact.diagnostics {
+            tracing::warn!(
+                diagnostic = diagnostic.as_str(),
+                path = %self.artifact_path.display(),
+                "code graph mention source loaded artifact with diagnostic"
+            );
+        }
 
         Ok(entries_and_payloads(artifact, &mut self.payloads))
     }
