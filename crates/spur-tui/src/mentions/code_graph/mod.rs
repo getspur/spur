@@ -5,6 +5,8 @@ use std::path::Path;
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
 
+pub mod validation;
+
 pub const CODE_FILE_URI_PREFIX: &str = "graph://file/";
 pub const CODE_SYMBOL_URI_PREFIX: &str = "graph://symbol/";
 
