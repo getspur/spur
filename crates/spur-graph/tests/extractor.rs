@@ -5,7 +5,7 @@ use spur_graph::extract::tree_sitter::extract_rust_worktree;
 use spur_graph::graph::petgraph_builder::build_petgraph;
 use spur_graph::load_artifact;
 use spur_graph::store::json::{artifact_from_facts, write_artifact};
-use spur_graph::{NodeKind, RelationKind};
+use spur_graph::{Confidence, NodeKind, RelationKind};
 
 fn fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_corpus")
@@ -105,6 +105,35 @@ fn rust_extractor_stable_keys_are_deterministic_across_runs() {
         .collect();
 
     assert_eq!(first_keys, second_keys);
+}
+
+#[test]
+fn rust_extractor_tags_edge_confidence_by_relation_semantics() {
+    let root = fixture_root();
+    let facts = extract_rust_worktree(&root).expect("extract fixture");
+
+    let contains_edge = facts
+        .edges
+        .iter()
+        .find(|edge| edge.relation == RelationKind::Contains)
+        .expect("fixture has contains edge");
+    let imports_edge = facts
+        .edges
+        .iter()
+        .find(|edge| edge.relation == RelationKind::Imports)
+        .expect("fixture has imports edge");
+    let calls_edge = facts
+        .edges
+        .iter()
+        .find(|edge| edge.relation == RelationKind::Calls)
+        .expect("fixture has calls edge");
+
+    assert_eq!(contains_edge.confidence, Confidence::SyntaxExact);
+    assert_eq!(contains_edge.confidence_score, 1.0);
+    assert_eq!(imports_edge.confidence, Confidence::Heuristic);
+    assert_eq!(imports_edge.confidence_score, 0.8);
+    assert_eq!(calls_edge.confidence, Confidence::Heuristic);
+    assert_eq!(calls_edge.confidence_score, 0.8);
 }
 
 #[test]

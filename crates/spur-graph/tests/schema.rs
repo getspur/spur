@@ -40,6 +40,17 @@ fn graph_facts_round_trip_through_json() {
 }
 
 #[test]
+fn syntax_exact_confidence_round_trips_as_snake_case_json() {
+    let encoded = serde_json::to_string(&Confidence::SyntaxExact).unwrap();
+
+    assert_eq!(encoded, "\"syntax_exact\"");
+    assert_eq!(
+        serde_json::from_str::<Confidence>(&encoded).unwrap(),
+        Confidence::SyntaxExact
+    );
+}
+
+#[test]
 fn graph_id_newtypes_are_not_interchangeable_at_runtime() {
     let node_id = NodeId(42);
     let edge_id = EdgeId(42);
