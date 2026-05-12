@@ -1,0 +1,169 @@
+{
+  "header": {
+    "graph_index_version": "spur-graph-phase2"
+  },
+  "files": [
+    {
+      "stable_file_id": "47be906023866267",
+      "file_path": "src/helpers.py"
+    },
+    {
+      "stable_file_id": "81ad1be452968b8a",
+      "file_path": "src/main.py"
+    },
+    {
+      "stable_file_id": "9ef06ba4378f7f11",
+      "file_path": "src/models.py"
+    },
+    {
+      "stable_file_id": "40b8d8fa1434333b",
+      "file_path": "src/pkg.py"
+    }
+  ],
+  "symbols": [
+    {
+      "stable_symbol_id": "a14fefffb164ac8d",
+      "file_path": "src/helpers.py",
+      "byte_range": [
+        0,
+        36
+      ],
+      "line_range": [
+        1,
+        2
+      ],
+      "entity_name": "greet",
+      "symbol_kind": "function",
+      "anchor_hash": "12461118549957327396",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "da6d353240284a1c",
+      "file_path": "src/main.py",
+      "byte_range": [
+        117,
+        280
+      ],
+      "line_range": [
+        8,
+        14
+      ],
+      "entity_name": "run",
+      "symbol_kind": "function",
+      "anchor_hash": "1334120494089021360",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "7fdced4d5a44f8d2",
+      "file_path": "src/main.py",
+      "byte_range": [
+        283,
+        332
+      ],
+      "line_range": [
+        17,
+        18
+      ],
+      "entity_name": "make_message",
+      "symbol_kind": "function",
+      "anchor_hash": "16130603700320025357",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "c1c2bab7d5ceb4be",
+      "file_path": "src/models.py",
+      "byte_range": [
+        0,
+        211
+      ],
+      "line_range": [
+        1,
+        10
+      ],
+      "entity_name": "User",
+      "symbol_kind": "class",
+      "anchor_hash": "16217123041392140823",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "f48ae048e48f10b9",
+      "file_path": "src/models.py",
+      "byte_range": [
+        16,
+        66
+      ],
+      "line_range": [
+        2,
+        3
+      ],
+      "entity_name": "__init__",
+      "symbol_kind": "method",
+      "anchor_hash": "4641732598675805485",
+      "enclosing_scope": "User"
+    },
+    {
+      "stable_symbol_id": "66a5038f04e044ba",
+      "file_path": "src/models.py",
+      "byte_range": [
+        72,
+        126
+      ],
+      "line_range": [
+        5,
+        6
+      ],
+      "entity_name": "normalized",
+      "symbol_kind": "method",
+      "anchor_hash": "6074531788373897476",
+      "enclosing_scope": "User"
+    },
+    {
+      "stable_symbol_id": "b6e148440df0eeba",
+      "file_path": "src/models.py",
+      "byte_range": [
+        150,
+        211
+      ],
+      "line_range": [
+        9,
+        10
+      ],
+      "entity_name": "from_parts",
+      "symbol_kind": "method",
+      "anchor_hash": "7062152415856740356",
+      "enclosing_scope": "User"
+    },
+    {
+      "stable_symbol_id": "8aa22c897aa041f4",
+      "file_path": "src/pkg.py",
+      "byte_range": [
+        0,
+        72
+      ],
+      "line_range": [
+        1,
+        3
+      ],
+      "entity_name": "Client",
+      "symbol_kind": "class",
+      "anchor_hash": "2522700248575330017",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "9e3810147d180a5f",
+      "file_path": "src/pkg.py",
+      "byte_range": [
+        18,
+        72
+      ],
+      "line_range": [
+        2,
+        3
+      ],
+      "entity_name": "send",
+      "symbol_kind": "method",
+      "anchor_hash": "15306036335871841256",
+      "enclosing_scope": "Client"
+    }
+  ]
+}

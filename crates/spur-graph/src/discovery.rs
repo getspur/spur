@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use ignore::{DirEntry, WalkBuilder};
 
-pub fn discover_rust_files(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+pub fn discover_files(root: &Path, allowed_extensions: &[&str]) -> anyhow::Result<Vec<PathBuf>> {
     let root = root
         .canonicalize()
         .with_context(|| format!("failed to canonicalize `{}`", root.display()))?;
@@ -22,7 +22,12 @@ pub fn discover_rust_files(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
             && entry
                 .path()
                 .extension()
-                .is_some_and(|extension| extension == "rs")
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    allowed_extensions
+                        .iter()
+                        .any(|allowed| extension.eq_ignore_ascii_case(allowed))
+                })
         {
             files.push(entry.into_path());
         }
@@ -36,7 +41,7 @@ fn should_descend(entry: &DirEntry) -> bool {
     let Some(file_name) = entry.file_name().to_str() else {
         return true;
     };
-    if file_name == "target" || file_name == ".git" {
+    if file_name == "target" || file_name == ".git" || file_name == "node_modules" {
         return false;
     }
     if entry.depth() > 0 && file_name.starts_with('.') {

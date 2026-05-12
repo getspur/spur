@@ -12,6 +12,8 @@ __pycache__/
 .bv/
 **/.spur/events/**
 **/.spur/logs/**
+/.spur/graph-index.json
+**/.spur/graph-index.json
 **/.spur/pgids/**
 .spur/session_metadata.json
 **/.spur/session_metadata.json
