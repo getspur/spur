@@ -136,10 +136,10 @@ fn at_prefixed_paste_burst_does_not_submit() {
 
     for code in [
         KeyCode::Char('@'),
-        KeyCode::Char('u'),
-        KeyCode::Char('s'),
-        KeyCode::Char('e'),
-        KeyCode::Char('r'),
+        KeyCode::Char('z'),
+        KeyCode::Char('z'),
+        KeyCode::Char('z'),
+        KeyCode::Char('z'),
         KeyCode::Enter,
         KeyCode::Char('x'),
         KeyCode::Char('y'),
