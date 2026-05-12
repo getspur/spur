@@ -362,6 +362,7 @@ pub(crate) async fn reconstruct_historical_attempts(
             summary: record.summary,
             feedback: record.feedback,
             dispatched_base_oid: None,
+            reuse_prior_worktree: None,
         })
         .collect();
     history.sort_by_key(|record| record.attempt);

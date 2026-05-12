@@ -73,6 +73,7 @@ fn every_audit_sentinel_variant_round_trips_through_br_comments() {
             feedback: "add null check".into(),
             worker_branch: Some("spur/worker-x".into()),
             summary: Some("did thing".into()),
+            reuse_prior_worktree: None,
         },
     ];
 

@@ -157,6 +157,8 @@ pub enum AuditSentinelKind {
         worker_branch: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reuse_prior_worktree: Option<bool>,
     },
     TaskTransition {
         plan_id: String,
@@ -492,6 +494,7 @@ mod tests {
                 feedback: "add null check".into(),
                 worker_branch: Some("spur/worker-x".into()),
                 summary: Some("did thing".into()),
+                reuse_prior_worktree: None,
             },
             AuditSentinelKind::TaskTransition {
                 plan_id: "P1".into(),
@@ -670,6 +673,7 @@ mod tests {
                 feedback: "fix edge case".into(),
                 worker_branch: None,
                 summary: None,
+                reuse_prior_worktree: None,
             },
             AuditSentinelKind::TaskTransition {
                 plan_id: "P1".into(),
@@ -972,6 +976,7 @@ mod tests {
             feedback: "fix the edge case".into(),
             worker_branch: Some("spur/worker-bd-33it".into()),
             summary: Some("partial fix".into()),
+            reuse_prior_worktree: None,
         };
         let encoded = encode_comment(&kind);
         let parsed = parse_comment(&encoded).unwrap().unwrap();
@@ -1018,10 +1023,27 @@ mod tests {
             feedback: "add tests".into(),
             worker_branch: None,
             summary: None,
+            reuse_prior_worktree: None,
         };
         let json = serde_json::to_string(&kind).unwrap();
         assert!(!json.contains("worker_branch"));
         assert!(!json.contains("summary"));
+        assert!(!json.contains("reuse_prior_worktree"));
+    }
+
+    #[test]
+    fn review_feedback_round_trips_reuse_prior_worktree_true() {
+        let kind = AuditSentinelKind::ReviewFeedback {
+            delegation_id: "del-1".into(),
+            attempt: 1,
+            feedback: "add tests".into(),
+            worker_branch: None,
+            summary: None,
+            reuse_prior_worktree: Some(true),
+        };
+        let encoded = encode_comment(&kind);
+        let parsed = parse_comment(&encoded).unwrap().unwrap();
+        assert_eq!(parsed, kind);
     }
 
     #[test]
