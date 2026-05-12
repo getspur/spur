@@ -5,6 +5,7 @@ use std::path::Path;
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
 
+pub mod source;
 pub mod validation;
 
 pub const CODE_FILE_URI_PREFIX: &str = "graph://file/";
