@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
@@ -23,6 +24,7 @@ pub fn render_task_detail(
     theme: &Theme,
 ) {
     let content_width = area.width.saturating_sub(2) as usize;
+    let now = Utc::now();
     let mut lines = vec![hero_line(task, live_node, theme)];
     if task_is_blocked(task) {
         lines.push(blocked_banner(task, plan, content_width, theme));
@@ -33,7 +35,6 @@ pub fn render_task_detail(
     if let Some(issue_id) = task.issue_id.as_deref() {
         lines.push(kv(theme, "issue", issue_id));
     }
-    lines.push(kv(theme, "status", &task.status));
 
     if task.summary.is_some()
         || task.feedback.is_some()
@@ -43,7 +44,7 @@ pub fn render_task_detail(
         || !task.superseded_by.is_empty()
         || !task.next_action.is_empty()
     {
-        lines.push(section_header("v Output", theme));
+        lines.extend(section_header("Output", theme));
         if let Some(summary) = task.summary.as_deref() {
             lines.push(kv(theme, "summary", summary));
         }
@@ -75,11 +76,11 @@ pub fn render_task_detail(
     }
 
     if let Some(status) = issue_detail_status {
-        lines.push(section_header("v Issue", theme));
+        lines.extend(section_header("Issue", theme));
         lines.push(kv(theme, "status", status));
     }
     if let Some(issue) = issue_detail {
-        lines.push(section_header("v Issue", theme));
+        lines.extend(section_header("Issue", theme));
         lines.push(kv(theme, "id", &issue.id));
         lines.push(kv(theme, "title", &issue.title));
         lines.push(kv(
@@ -93,45 +94,31 @@ pub fn render_task_detail(
             },
         ));
         lines.push(kv(theme, "status", &issue.status));
-        lines.push(kv(
-            theme,
-            "priority",
-            &issue
-                .priority
-                .map(|priority| format!("P{priority}"))
-                .unwrap_or_else(|| "--".to_string()),
-        ));
-        lines.push(kv(
-            theme,
-            "type",
-            issue.issue_type.as_deref().unwrap_or("--"),
-        ));
+        if let Some(priority) = issue.priority {
+            lines.push(kv(theme, "priority", &format!("P{priority}")));
+        }
+        if let Some(issue_type) = issue.issue_type.as_deref() {
+            lines.push(kv(theme, "type", issue_type));
+        }
         lines.push(kv(
             theme,
             "assignee",
             issue.assignee.as_deref().unwrap_or("unassigned"),
         ));
-        lines.push(kv(
-            theme,
-            "due",
-            &issue
-                .due_at
-                .map(|due_at| due_at.format("%Y-%m-%d").to_string())
-                .unwrap_or_else(|| "--".to_string()),
-        ));
+        if let Some(due_at) = issue.due_at {
+            lines.push(kv(theme, "due", &format_date_with_age(due_at, now)));
+        }
         lines.push(kv(
             theme,
             "created",
-            &issue.created_at.format("%Y-%m-%d").to_string(),
+            &format_date_with_age(issue.created_at, now),
         ));
         lines.push(kv(
             theme,
             "updated",
-            &issue.updated_at.format("%Y-%m-%d").to_string(),
+            &format_date_with_age(issue.updated_at, now),
         ));
-        if !issue.labels.is_empty() {
-            lines.push(kv(theme, "labels", &issue.labels.join(", ")));
-        }
+        lines.extend(labels_block(&issue.labels, theme));
         if !issue.blocked_by.is_empty() {
             lines.push(kv(theme, "blocked_by", &issue.blocked_by.join(", ")));
         }
@@ -139,7 +126,7 @@ pub fn render_task_detail(
             lines.push(kv(theme, "url", &issue.url));
         }
 
-        lines.push(section_header("Description", theme));
+        lines.extend(section_header("Description", theme));
         if issue.body.is_empty() {
             lines.push(kv(theme, "body", "(empty)"));
         } else {
@@ -362,20 +349,74 @@ fn truncate_to_width(value: &str, width: usize) -> String {
     value.chars().take(width).collect()
 }
 
-fn section_header(title: &str, theme: &Theme) -> Line<'static> {
-    Line::from(vec![
-        Span::raw(""),
-        Span::styled(
-            format!("-- {title} "),
+fn section_header(title: &str, theme: &Theme) -> Vec<Line<'static>> {
+    vec![
+        Line::raw(""),
+        Line::from(vec![Span::styled(
+            title.to_string(),
             Style::default()
-                .fg(token(theme, "plan_inspector.detail.section.fg"))
+                .fg(token(theme, "plan_inspector.detail.label.fg"))
                 .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "-".repeat(20),
-            Style::default().fg(token(theme, "plan_inspector.detail.section.fg")),
-        ),
-    ])
+        )]),
+    ]
+}
+
+fn labels_block(labels: &[String], theme: &Theme) -> Vec<Line<'static>> {
+    if labels.is_empty() {
+        return Vec::new();
+    }
+    if labels.len() == 1 {
+        return vec![kv(theme, "labels", &labels[0])];
+    }
+    let mut lines = vec![Line::from(vec![Span::styled(
+        "labels:".to_string(),
+        Style::default()
+            .fg(token(theme, "plan_inspector.detail.label.fg"))
+            .add_modifier(Modifier::BOLD),
+    )])];
+    for label in labels {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "  · ",
+                Style::default().fg(token(theme, "plan_inspector.detail.section.fg")),
+            ),
+            Span::raw(label.clone()),
+        ]));
+    }
+    lines
+}
+
+fn format_date_with_age(when: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let date = when.format("%Y-%m-%d");
+    let secs = (now - when).num_seconds();
+    let age = relative_age(secs);
+    match age {
+        Some(label) => format!("{date} ({label})"),
+        None => date.to_string(),
+    }
+}
+
+fn relative_age(secs: i64) -> Option<String> {
+    if secs.abs() < 60 {
+        return Some("just now".to_string());
+    }
+    let (magnitude, suffix) = if secs >= 0 {
+        (secs, "ago")
+    } else {
+        (-secs, "from now")
+    };
+    let label = if magnitude < 60 * 60 {
+        format!("{}m", magnitude / 60)
+    } else if magnitude < 24 * 60 * 60 {
+        format!("{}h", magnitude / 3600)
+    } else if magnitude < 30 * 24 * 60 * 60 {
+        format!("{}d", magnitude / 86_400)
+    } else if magnitude < 365 * 24 * 60 * 60 {
+        format!("{}mo", magnitude / (30 * 86_400))
+    } else {
+        format!("{}y", magnitude / (365 * 86_400))
+    };
+    Some(format!("{label} {suffix}"))
 }
 
 fn kv(theme: &Theme, label: &str, value: &str) -> Line<'static> {
