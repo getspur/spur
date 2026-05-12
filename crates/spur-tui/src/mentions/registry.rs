@@ -28,6 +28,8 @@ pub(super) const WORKER_PIN_CAP: usize = 6;
 pub(super) const WORKER_SCORE_NUM: u32 = 5;
 pub(super) const WORKER_SCORE_DEN: u32 = 4;
 
+const EMPTY_CODE_GRAPH_CAP: usize = 8;
+
 struct CachedIndex {
     entries: Vec<MentionEntry>,
     built_at: Instant,
@@ -189,7 +191,9 @@ impl MentionRegistry {
 
         if query.is_empty() {
             // Empty-query branch: pin up to WORKER_PIN_CAP workers, then
-            // fill remaining slots with files sorted by display length.
+            // fill remaining slots with issue rows, regular file rows, and a
+            // bounded code-graph sample. Code symbols are intentionally capped
+            // so an empty `@` never becomes a full symbol-table dump.
             // perf: two alloc+sort passes over cached entries on every
             // empty-query call. Acceptable at expected index scale (≤10k);
             // revisit if profiling shows picker latency.
@@ -207,52 +211,261 @@ impl MentionRegistry {
             workers.truncate(WORKER_PIN_CAP.min(limit));
 
             let remaining = limit.saturating_sub(workers.len());
-            let mut files: Vec<MentionEntry> = entries
+            let mut issues: Vec<MentionEntry> = entries
                 .iter()
-                .filter(|e| e.kind != MentionKind::Worker)
+                .filter(|e| e.kind == MentionKind::Issue)
                 .cloned()
                 .collect();
-            files.sort_by_key(|e| e.display.len());
+            issues.sort_by(|a, b| {
+                a.display
+                    .len()
+                    .cmp(&b.display.len())
+                    .then(a.display.cmp(&b.display))
+                    .then(a.uri.cmp(&b.uri))
+            });
+            issues.truncate(remaining);
+
+            let remaining = remaining.saturating_sub(issues.len());
+            let mut files: Vec<MentionEntry> = entries
+                .iter()
+                .filter(|e| matches!(e.kind, MentionKind::File | MentionKind::Directory))
+                .cloned()
+                .collect();
+            files.sort_by(|a, b| {
+                path_depth(&a.display)
+                    .cmp(&path_depth(&b.display))
+                    .then(a.display.len().cmp(&b.display.len()))
+                    .then(a.display.cmp(&b.display))
+                    .then(a.uri.cmp(&b.uri))
+            });
             files.truncate(remaining);
 
+            let remaining = remaining.saturating_sub(files.len());
+            let code_cap = EMPTY_CODE_GRAPH_CAP.min(remaining);
+            let mut code_graph: Vec<MentionEntry> = entries
+                .iter()
+                .filter(|e| matches!(e.kind, MentionKind::CodeFile | MentionKind::CodeSymbol))
+                .cloned()
+                .collect();
+            code_graph.sort_by(|a, b| {
+                empty_code_kind_rank(&a.kind)
+                    .cmp(&empty_code_kind_rank(&b.kind))
+                    .then(path_depth(&a.display).cmp(&path_depth(&b.display)))
+                    .then(a.display.len().cmp(&b.display.len()))
+                    .then(a.display.cmp(&b.display))
+                    .then(a.uri.cmp(&b.uri))
+            });
+            code_graph.truncate(code_cap);
+
+            workers.extend(issues);
             workers.extend(files);
+            workers.extend(code_graph);
             return workers;
         }
 
         // Typed-query branch: nucleo score with a +25 % boost for workers.
         let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+        let code_pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
         let mut buf = Vec::new();
-        let mut scored: Vec<(u32, MentionEntry)> = entries
+        let mut scored: Vec<RankedMention> = entries
             .iter()
             .filter_map(|e| {
                 buf.clear();
-                let haystack = e.search_text.as_deref().unwrap_or(&e.display);
-                let raw = pattern.score(
-                    nucleo_matcher::Utf32Str::new(haystack, &mut buf),
-                    &mut self.matcher,
-                )?;
-                let boosted = if e.kind == MentionKind::Worker {
-                    // Ceiling division so small scores still receive at least
-                    // a +1 boost; otherwise floor truncation made the +25%
-                    // a no-op for raw scores < 4.
-                    raw.saturating_mul(WORKER_SCORE_NUM)
-                        .div_ceil(WORKER_SCORE_DEN)
+                let rank = if matches!(e.kind, MentionKind::CodeFile | MentionKind::CodeSymbol) {
+                    code_match_rank(e, query, &code_pattern, &mut self.matcher, &mut buf)?
                 } else {
-                    raw
+                    let haystack = e.search_text.as_deref().unwrap_or(&e.display);
+                    let raw = pattern.score(
+                        nucleo_matcher::Utf32Str::new(haystack, &mut buf),
+                        &mut self.matcher,
+                    )?;
+                    let boosted = if e.kind == MentionKind::Worker {
+                        // Ceiling division so small scores still receive at least
+                        // a +1 boost; otherwise floor truncation made the +25%
+                        // a no-op for raw scores < 4.
+                        raw.saturating_mul(WORKER_SCORE_NUM)
+                            .div_ceil(WORKER_SCORE_DEN)
+                    } else {
+                        raw
+                    };
+                    MatchRank {
+                        class: legacy_match_class(&e.kind),
+                        score: boosted,
+                    }
                 };
-                Some((boosted, e.clone()))
+                Some(RankedMention {
+                    rank,
+                    entry: e.clone(),
+                })
             })
             .collect();
         scored.sort_by(|a, b| {
-            b.0.cmp(&a.0)
-                .then(a.1.display.len().cmp(&b.1.display.len()))
+            a.rank
+                .class
+                .cmp(&b.rank.class)
+                .then(b.rank.score.cmp(&a.rank.score))
+                .then(stable_tie_key(&a.entry).cmp(&stable_tie_key(&b.entry)))
         });
-        scored.into_iter().take(limit).map(|(_, e)| e).collect()
+        scored
+            .into_iter()
+            .take(limit)
+            .map(|ranked| ranked.entry)
+            .collect()
     }
 }
 
 fn is_graph_uri(uri: &str) -> bool {
     uri.starts_with("graph://file/") || uri.starts_with("graph://symbol/")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MatchRank {
+    class: u8,
+    score: u32,
+}
+
+struct RankedMention {
+    rank: MatchRank,
+    entry: MentionEntry,
+}
+
+fn legacy_match_class(kind: &MentionKind) -> u8 {
+    match kind {
+        MentionKind::Worker | MentionKind::Issue => 4,
+        MentionKind::File | MentionKind::Directory => 5,
+        MentionKind::CodeFile | MentionKind::CodeSymbol => {
+            unreachable!("code rows are classified separately")
+        }
+    }
+}
+
+fn code_match_rank(
+    entry: &MentionEntry,
+    query: &str,
+    pattern: &Pattern,
+    matcher: &mut Matcher,
+    buf: &mut Vec<char>,
+) -> Option<MatchRank> {
+    let path = code_entry_path(entry);
+    match entry.kind {
+        MentionKind::CodeSymbol => {
+            if eq_ignore_ascii_case(&entry.display, query) {
+                return Some(MatchRank {
+                    class: 0,
+                    score: u32::MAX,
+                });
+            }
+
+            if let Some(score) = pattern_score(pattern, matcher, buf, &entry.display)
+                .or_else(|| prefix_score(&entry.display, query))
+            {
+                return Some(MatchRank { class: 2, score });
+            }
+
+            let path = path?;
+            pattern_score(pattern, matcher, buf, path)
+                .or_else(|| path_prefix_score(path, query))
+                .map(|score| MatchRank { class: 3, score })
+        }
+        MentionKind::CodeFile => {
+            let path = path?;
+            if path_segment_exact(path, query) {
+                return Some(MatchRank {
+                    class: 1,
+                    score: u32::MAX,
+                });
+            }
+
+            pattern_score(pattern, matcher, buf, path)
+                .or_else(|| path_prefix_score(path, query))
+                .map(|score| MatchRank { class: 3, score })
+        }
+        MentionKind::File | MentionKind::Directory | MentionKind::Worker | MentionKind::Issue => {
+            None
+        }
+    }
+}
+
+fn pattern_score(
+    pattern: &Pattern,
+    matcher: &mut Matcher,
+    buf: &mut Vec<char>,
+    haystack: &str,
+) -> Option<u32> {
+    buf.clear();
+    pattern.score(nucleo_matcher::Utf32Str::new(haystack, buf), matcher)
+}
+
+fn prefix_score(value: &str, query: &str) -> Option<u32> {
+    value
+        .to_ascii_lowercase()
+        .starts_with(&query.to_ascii_lowercase())
+        .then_some(query.len() as u32)
+}
+
+fn path_prefix_score(path: &str, query: &str) -> Option<u32> {
+    let query = query.to_ascii_lowercase();
+    path_segments_and_stems(path)
+        .any(|segment| segment.to_ascii_lowercase().starts_with(&query))
+        .then_some(query.len() as u32)
+}
+
+fn path_segment_exact(path: &str, query: &str) -> bool {
+    let query = query.to_ascii_lowercase();
+    path_segments_and_stems(path).any(|segment| segment.to_ascii_lowercase() == query)
+}
+
+fn path_segments_and_stems(path: &str) -> impl Iterator<Item = &str> {
+    path.split('/')
+        .filter(|segment| !segment.is_empty())
+        .flat_map(|segment| {
+            let stem = segment.rsplit_once('.').map(|(stem, _)| stem);
+            std::iter::once(segment).chain(stem)
+        })
+}
+
+fn code_entry_path(entry: &MentionEntry) -> Option<&str> {
+    match entry.kind {
+        MentionKind::CodeFile => Some(entry.display.as_str()),
+        MentionKind::CodeSymbol => entry.secondary.as_deref().and_then(symbol_secondary_path),
+        MentionKind::File | MentionKind::Directory | MentionKind::Worker | MentionKind::Issue => {
+            None
+        }
+    }
+}
+
+fn symbol_secondary_path(secondary: &str) -> Option<&str> {
+    secondary.split_whitespace().nth(1).and_then(|location| {
+        let path_end = location.rfind(':')?;
+        Some(&location[..path_end])
+    })
+}
+
+fn eq_ignore_ascii_case(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
+
+fn path_depth(path: &str) -> usize {
+    path.trim_end_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .count()
+}
+
+fn empty_code_kind_rank(kind: &MentionKind) -> u8 {
+    match kind {
+        MentionKind::CodeFile => 0,
+        MentionKind::CodeSymbol => 1,
+        MentionKind::File | MentionKind::Directory | MentionKind::Worker | MentionKind::Issue => 2,
+    }
+}
+
+fn stable_tie_key(entry: &MentionEntry) -> &str {
+    if matches!(entry.kind, MentionKind::CodeFile | MentionKind::CodeSymbol) {
+        entry.uri.as_str()
+    } else {
+        entry.display.as_str()
+    }
 }
 
 impl Default for MentionRegistry {
