@@ -181,6 +181,9 @@ impl McpCallbackServer {
                 .and_then(|v| v.as_u64())
                 .map(|n| n as u32),
             depends_on,
+            external_ref: None,
+            source_system: None,
+            source_repo: None,
         };
 
         match pm.create_issue(params).await {

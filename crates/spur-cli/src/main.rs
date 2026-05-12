@@ -325,6 +325,37 @@ enum SkillsCommands {
 enum PmCommands {
     /// Initialize the beads tracker in this repo (.beads/, .gitignore, [pm.beads]).
     Init,
+    /// Pull issues/PRs from an external PM into beads.
+    Ingest {
+        #[command(subcommand)]
+        source: IngestSource,
+    },
+}
+
+#[derive(Subcommand)]
+enum IngestSource {
+    /// Pull issues and PRs from GitHub.
+    Github {
+        /// Repository in `owner/repo` form. If omitted, falls back to
+        /// `[pm.github].default_repo` then to `gh repo view` in `cwd`.
+        repo: Option<String>,
+        /// Only ingest items updated at or after this RFC 3339 timestamp.
+        #[arg(long, value_name = "ISO8601")]
+        since: Option<String>,
+        /// Prefix used for namespaced labels (`gh:issue`, `gh:pr`, …).
+        #[arg(long, default_value = "gh", value_name = "PREFIX")]
+        label_namespace: String,
+        /// Per-connection GraphQL page size (default 25; see spec §7.3).
+        #[arg(long, default_value_t = 25, value_name = "N")]
+        page_size: u32,
+        /// Fetch but do not apply; report what would have been ingested.
+        #[arg(long)]
+        dry_run: bool,
+        /// Machine-readable output (IngestReport as JSON). Always exits 0
+        /// unless a hard sync error fires.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -387,6 +418,12 @@ enum GcCmd {
         #[arg(long)]
         namespace: Option<String>,
     },
+}
+
+fn parse_rfc3339(s: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+    let dt = chrono::DateTime::parse_from_rfc3339(s)
+        .with_context(|| format!("invalid --since value '{s}': expected RFC 3339"))?;
+    Ok(dt.with_timezone(&chrono::Utc))
 }
 
 fn parse_duration_days(s: &str) -> Result<Duration, String> {
@@ -753,6 +790,34 @@ async fn run() -> Result<()> {
             PmCommands::Init => {
                 require_cli_gate(spur_license::FeatureKey::CLI_CORE_INIT)?;
                 commands::init::run_pm_init(repo_root).await
+            }
+            PmCommands::Ingest { source } => {
+                require_cli_gate(spur_license::FeatureKey::CLI_CORE_INIT)?;
+                match source {
+                    IngestSource::Github {
+                        repo,
+                        since,
+                        label_namespace,
+                        page_size,
+                        dry_run,
+                        json,
+                    } => {
+                        let since_dt = match since.as_deref() {
+                            Some(s) => Some(parse_rfc3339(s)?),
+                            None => None,
+                        };
+                        let args = commands::pm_ingest::IngestGitHubArgs {
+                            repo,
+                            since: since_dt,
+                            label_namespace,
+                            page_size,
+                            dry_run,
+                            json,
+                        };
+                        let code = commands::pm_ingest::run(&repo_root, args).await?;
+                        std::process::exit(code);
+                    }
+                }
             }
         },
         Commands::Tui {

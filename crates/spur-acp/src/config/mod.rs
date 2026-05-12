@@ -759,6 +759,79 @@ pub struct GitHubPmConfig {
     /// Label to auto-add to SPUR-managed issues.
     #[serde(default = "default_auto_label")]
     pub auto_label: String,
+
+    // ── spec §9 ingest fields (all optional; defaults match constants) ──
+    /// Alias for `repo` honored by `spur pm ingest github` when no
+    /// positional `owner/repo` is passed. Kept as a separate key so the
+    /// existing `repo` field (used by the legacy PR service) is not
+    /// repurposed.
+    #[serde(default)]
+    pub default_repo: Option<String>,
+    /// Token resolution preference; overrides the default order from §7.1.
+    /// Empty / absent = use the default fallback chain.
+    #[serde(default)]
+    pub auth_preference: Vec<String>,
+    /// Below this REST budget the governor throttles until the window resets.
+    #[serde(default = "default_rate_limit_floor_rest")]
+    pub rate_limit_floor_rest: u32,
+    /// Below this GraphQL points budget the governor throttles until reset.
+    #[serde(default = "default_rate_limit_floor_graphql_points")]
+    pub rate_limit_floor_graphql_points: u32,
+
+    /// Default ingest options applied when the CLI flags are not given.
+    #[serde(default)]
+    pub ingest: GitHubIngestConfig,
+    /// Phase-2-only persisted token cache; Phase 1 reads this key but ignores it.
+    #[serde(default)]
+    pub cache: GitHubCacheConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitHubIngestConfig {
+    #[serde(default = "default_label_namespace")]
+    pub label_namespace: String,
+    #[serde(default = "default_ingest_page_size")]
+    pub page_size: u32,
+    #[serde(default = "default_auto_label_opt")]
+    pub auto_label: Option<String>,
+}
+
+impl Default for GitHubIngestConfig {
+    fn default() -> Self {
+        Self {
+            label_namespace: default_label_namespace(),
+            page_size: default_ingest_page_size(),
+            auto_label: default_auto_label_opt(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GitHubCacheConfig {
+    /// OS keyring service name. Phase 1 may set this; the keyring backend
+    /// is wired in Phase 2.
+    #[serde(default)]
+    pub keyring_service: Option<String>,
+}
+
+fn default_rate_limit_floor_rest() -> u32 {
+    50
+}
+
+fn default_rate_limit_floor_graphql_points() -> u32 {
+    100
+}
+
+fn default_label_namespace() -> String {
+    "gh".to_string()
+}
+
+fn default_ingest_page_size() -> u32 {
+    25
+}
+
+fn default_auto_label_opt() -> Option<String> {
+    Some("spur-managed".to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
