@@ -291,10 +291,10 @@ fn assemble_blocks_inner(
                             out.push(ContentBlock::Text(TextContent::new(expansion)));
                         }
                     } else {
-                        out.push(ContentBlock::ResourceLink(ResourceLink::new(
-                            r.name.clone(),
-                            r.uri.clone(),
-                        )));
+                        out.push(ContentBlock::Text(TextContent::new(format!(
+                            "MENTION_WARNING {}\nintended_uri:   {}\nfailure_reason: payload_not_in_registry\nreplaced_with:  dropped\n",
+                            r.name, r.uri
+                        ))));
                     }
                 } else {
                     out.push(ContentBlock::ResourceLink(ResourceLink::new(

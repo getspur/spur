@@ -1522,7 +1522,11 @@ impl SessionDetailView {
                                 } => {
                                     if ranges.iter().any(|range| range.uri.starts_with("graph://"))
                                     {
-                                        let mention_registry = self.mention_registry.borrow();
+                                        let mut mention_registry =
+                                            self.mention_registry.borrow_mut();
+                                        mention_registry.retain_code_payloads_for_uris(
+                                            ranges.iter().map(|range| range.uri.as_str()),
+                                        );
                                         blocks = crate::commands::submit_router::assemble_blocks_with_code_mentions(
                                             &text,
                                             &ranges,
