@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use super::code_graph::CodeMentionPayload;
 use super::issue_source::IssueMentionDescriptor;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +38,10 @@ pub trait MentionSource: Send {
     /// Rebuild the candidate list from scratch.
     fn build(&mut self, cwd: &Path) -> anyhow::Result<Vec<MentionEntry>>;
     fn name(&self) -> &'static str;
+
+    fn code_payloads(&self) -> Vec<(String, CodeMentionPayload)> {
+        Vec::new()
+    }
 }
 
 /// Convert an absolute path under cwd into a `MentionEntry`.

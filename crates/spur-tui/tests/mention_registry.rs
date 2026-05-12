@@ -1,5 +1,10 @@
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use spur_acp::SessionId;
-use spur_tui::mentions::{CompletionScope, MentionKind, MentionRegistry, WorkerMentionDescriptor};
+use spur_tui::components::input_bar::InputBar;
+use spur_tui::mentions::{
+    CodeMentionKind, CodeMentionValidationSpec, CompletionScope, MentionKind, MentionRegistry,
+    WorkerMentionDescriptor,
+};
 
 #[test]
 fn file_mentions_index_and_fuzzy_match() {
@@ -154,4 +159,175 @@ fn typed_query_boosts_worker_in_ambiguous_match() {
             .map(|h| (&h.kind, &h.display))
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn code_graph_registry_loads_fixture_files_and_symbols() {
+    let graph_path = graph_fixture_path();
+    let mut reg = MentionRegistry::for_direct_session().with_code_graph(graph_path);
+    let sid = SessionId::new();
+    let tmp = tempfile::tempdir().unwrap();
+
+    let hits = reg.query(CompletionScope::Session(&sid), tmp.path(), "", 50);
+
+    assert_eq!(
+        hits.iter()
+            .filter(|hit| hit.kind == MentionKind::CodeFile)
+            .count(),
+        2
+    );
+    assert_eq!(
+        hits.iter()
+            .filter(|hit| hit.kind == MentionKind::CodeSymbol)
+            .count(),
+        4
+    );
+    assert!(hits.iter().any(|hit| {
+        hit.kind == MentionKind::CodeFile
+            && hit.uri == "graph://file/file-config"
+            && hit.display == "crates/example/src/config.rs"
+    }));
+
+    let symbol = hits
+        .iter()
+        .find(|hit| hit.uri == "graph://symbol/symbol-engine-run-method")
+        .expect("run symbol row");
+    assert_eq!(symbol.display, "run");
+    assert_eq!(
+        symbol.secondary.as_deref(),
+        Some("fn crates/example/src/engine.rs:12-20 impl GraphEngine")
+    );
+}
+
+#[test]
+fn code_graph_lookup_payload_roundtrips_full_symbol_payload() {
+    let graph_path = graph_fixture_path();
+    let mut reg = MentionRegistry::for_direct_session().with_code_graph(graph_path);
+    let sid = SessionId::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let _ = reg.query(
+        CompletionScope::Session(&sid),
+        tmp.path(),
+        "GraphEngine",
+        10,
+    );
+
+    let payload = reg
+        .lookup_code_payload("graph://symbol/symbol-engine-struct")
+        .expect("symbol payload");
+
+    assert_eq!(payload.authoritative.display, "GraphEngine");
+    assert_eq!(payload.authoritative.kind, CodeMentionKind::Symbol);
+    assert_eq!(
+        payload.authoritative.file_path,
+        "crates/example/src/engine.rs"
+    );
+    assert_eq!(
+        payload.extraction_hints.symbol_kind.as_deref(),
+        Some("struct")
+    );
+    assert_eq!(
+        payload.display_meta.enclosing_scope.as_deref(),
+        Some("module engine")
+    );
+    assert_eq!(
+        payload.display_meta.graph_index_version,
+        "fixture-2026-05-11"
+    );
+    assert!(matches!(
+        payload.authoritative.validation,
+        CodeMentionValidationSpec::SymbolRange { .. }
+    ));
+}
+
+#[test]
+fn accepted_code_atom_carries_only_minimum_range_metadata() {
+    let graph_path = graph_fixture_path();
+    let mut reg = MentionRegistry::for_direct_session().with_code_graph(graph_path);
+    let sid = SessionId::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let symbol = reg
+        .query(
+            CompletionScope::Session(&sid),
+            tmp.path(),
+            "GraphEngine",
+            10,
+        )
+        .into_iter()
+        .find(|hit| hit.uri == "graph://symbol/symbol-engine-struct")
+        .expect("symbol row");
+
+    let mut bar = InputBar::new();
+    let atom_text = symbol
+        .atom_text
+        .clone()
+        .unwrap_or_else(|| format!("@{}", symbol.display));
+    bar.insert_atom(atom_text, symbol.uri.clone(), symbol.display.clone());
+    let serialized = serde_json::to_value(bar.protected_ranges()).expect("serialize ranges");
+
+    assert_eq!(bar.text(), "@GraphEngine");
+    assert_eq!(bar.protected_ranges().len(), 1);
+    assert_eq!(bar.protected_ranges()[0].uri, symbol.uri);
+    assert_eq!(bar.protected_ranges()[0].name, "GraphEngine");
+    assert_eq!(
+        serialized,
+        serde_json::json!([{
+            "start": 0,
+            "end": 12,
+            "uri": "graph://symbol/symbol-engine-struct",
+            "name": "GraphEngine"
+        }])
+    );
+}
+
+#[test]
+fn pruning_code_payloads_after_atom_delete_removes_orphans() {
+    let graph_path = graph_fixture_path();
+    let mut reg = MentionRegistry::for_direct_session().with_code_graph(graph_path);
+    let sid = SessionId::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let symbol = reg
+        .query(
+            CompletionScope::Session(&sid),
+            tmp.path(),
+            "GraphEngine",
+            10,
+        )
+        .into_iter()
+        .find(|hit| hit.uri == "graph://symbol/symbol-engine-struct")
+        .expect("symbol row");
+
+    let mut bar = InputBar::new();
+    bar.insert_atom("@GraphEngine", symbol.uri.clone(), symbol.display);
+    assert!(reg.lookup_code_payload(&symbol.uri).is_some());
+
+    let _ = bar.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+    reg.retain_code_payloads_for_uris(
+        bar.protected_ranges()
+            .iter()
+            .map(|range| range.uri.as_str()),
+    );
+
+    assert!(bar.protected_ranges().is_empty());
+    assert!(reg.lookup_code_payload(&symbol.uri).is_none());
+}
+
+#[test]
+fn missing_code_graph_artifact_leaves_existing_sources_available() {
+    let missing = std::path::PathBuf::from("does/not/exist/graph.json");
+    let mut reg = MentionRegistry::for_direct_session().with_code_graph(missing);
+    let sid = SessionId::new();
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("foo.rs"), "// foo").unwrap();
+
+    let hits = reg.query(CompletionScope::Session(&sid), tmp.path(), "foo", 10);
+
+    assert!(hits.iter().any(|hit| hit.kind == MentionKind::File));
+    assert!(!hits
+        .iter()
+        .any(|hit| matches!(hit.kind, MentionKind::CodeFile | MentionKind::CodeSymbol)));
+}
+
+fn graph_fixture_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/graph_index/sample.json")
 }
