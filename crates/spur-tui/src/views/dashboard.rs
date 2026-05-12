@@ -372,8 +372,14 @@ impl DashboardView {
                 .contains(char::is_whitespace)
         {
             // Mention hint
+            let hint_text = self
+                .mention_registry
+                .borrow()
+                .code_graph_hint()
+                .map(|hint| format!(" Tab to select file \u{00b7} {hint} \u{00b7} Esc to dismiss"))
+                .unwrap_or_else(|| " Tab to select file \u{00b7} Esc to dismiss".to_string());
             Paragraph::new(Span::styled(
-                " Tab to select file \u{00b7} Esc to dismiss",
+                hint_text,
                 Style::default().fg(Color::DarkGray),
             ))
         } else if text.is_empty() {

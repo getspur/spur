@@ -794,6 +794,7 @@ async fn accept_loop(
     // so shutdown drains in-flight requests instead of detaching them.
     loop {
         tokio::select! {
+            biased;
             _ = shutdown.cancelled() => return,
             accept = listener.accept() => match accept {
                 Ok((stream, peer)) => {

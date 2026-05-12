@@ -1,6 +1,8 @@
 pub mod languages;
 pub mod tree_sitter;
 
+pub use tree_sitter::extract_rust_worktree;
+
 use crate::{GraphEdge, GraphNode, SourceSpan};
 
 #[derive(Debug, Clone, PartialEq)]

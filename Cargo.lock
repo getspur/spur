@@ -6589,6 +6589,7 @@ dependencies = [
  "spur-context",
  "spur-core",
  "spur-cost",
+ "spur-graph",
  "spur-interactive",
  "spur-license",
  "spur-pm",
