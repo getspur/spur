@@ -186,6 +186,9 @@ impl crate::plan::PmLike for MockPm {
             due_at: None,
             created_at: now,
             updated_at: now,
+            external_ref: None,
+            source_system: None,
+            source_repo: None,
         };
         state.issues.insert(id.clone(), issue);
         Ok(id)
