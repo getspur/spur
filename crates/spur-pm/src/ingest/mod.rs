@@ -17,6 +17,7 @@
 //! process lock being bypassed.
 
 pub mod dep_hints;
+pub mod github;
 pub mod watermark;
 
 use std::collections::HashSet;
