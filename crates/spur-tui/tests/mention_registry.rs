@@ -551,6 +551,47 @@ fn pruning_code_payloads_after_atom_delete_removes_orphans() {
 }
 
 #[test]
+fn cache_rebuild_payload_loss_and_submit_prune_are_observable() {
+    let graph_path = graph_fixture_path();
+    let mut reg = MentionRegistry::for_direct_session().with_code_graph(graph_path);
+    let sid = SessionId::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let hits = reg.query(CompletionScope::Session(&sid), tmp.path(), "Graph", 10);
+    let kept = hits
+        .iter()
+        .find(|hit| hit.uri == "graph://symbol/symbol-engine-struct")
+        .expect("kept symbol row");
+    let orphan_uri = "graph://symbol/symbol-engine-run-method";
+
+    let mut bar = InputBar::new();
+    bar.insert_atom(
+        kept.atom_text
+            .clone()
+            .unwrap_or_else(|| format!("@{}", kept.display)),
+        kept.uri.clone(),
+        kept.display.clone(),
+    );
+    assert!(reg.lookup_code_payload(&kept.uri).is_some());
+    assert!(reg.lookup_code_payload(orphan_uri).is_some());
+
+    reg.clear_cache();
+    assert!(reg.lookup_code_payload(&kept.uri).is_none());
+
+    let _ = reg.query(CompletionScope::Session(&sid), tmp.path(), "Graph", 10);
+    assert!(reg.lookup_code_payload(&kept.uri).is_some());
+    assert!(reg.lookup_code_payload(orphan_uri).is_some());
+
+    reg.retain_code_payloads_for_uris(
+        bar.protected_ranges()
+            .iter()
+            .map(|range| range.uri.as_str()),
+    );
+
+    assert!(reg.lookup_code_payload(&kept.uri).is_some());
+    assert!(reg.lookup_code_payload(orphan_uri).is_none());
+}
+
+#[test]
 fn missing_code_graph_artifact_leaves_existing_sources_available() {
     let missing = std::path::PathBuf::from("does/not/exist/graph.json");
     let mut reg = MentionRegistry::for_direct_session().with_code_graph(missing);
