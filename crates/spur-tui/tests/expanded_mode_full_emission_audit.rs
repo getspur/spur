@@ -167,6 +167,7 @@ fn full_user_repro_with_real_terminal_simulation() {
     {
         let mut ctx = RenderContext {
             mermaid_registry: &registry,
+            mermaid_registry_version: 0,
             picker: None,
             image_cache: &mut cache,
         };
@@ -182,6 +183,7 @@ fn full_user_repro_with_real_terminal_simulation() {
     {
         let mut ctx = RenderContext {
             mermaid_registry: &registry,
+            mermaid_registry_version: 0,
             picker: None,
             image_cache: &mut cache,
         };
@@ -215,6 +217,7 @@ fn full_user_repro_with_real_terminal_simulation() {
     {
         let mut ctx = RenderContext {
             mermaid_registry: &registry,
+            mermaid_registry_version: 0,
             picker: None,
             image_cache: &mut cache,
         };
@@ -251,6 +254,7 @@ fn full_user_repro_with_real_terminal_simulation() {
         {
             let mut ctx = RenderContext {
                 mermaid_registry: &registry,
+                mermaid_registry_version: 0,
                 picker: None,
                 image_cache: &mut cache,
             };

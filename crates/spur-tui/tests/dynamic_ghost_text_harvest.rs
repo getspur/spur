@@ -89,6 +89,7 @@ fn render(
     {
         let mut ctx = RenderContext {
             mermaid_registry: &registry,
+            mermaid_registry_version: 0,
             picker: None,
             image_cache: cache,
         };

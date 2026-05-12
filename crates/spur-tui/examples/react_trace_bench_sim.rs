@@ -83,6 +83,7 @@ impl RenderHarness {
                 .draw(|frame| {
                     let mut ctx = RenderContext {
                         mermaid_registry: registry,
+                        mermaid_registry_version: 0,
                         picker: None,
                         image_cache,
                     };

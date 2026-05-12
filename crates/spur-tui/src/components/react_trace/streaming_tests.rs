@@ -2475,6 +2475,7 @@ fn mixed_full_then_compact_on_same_trace_uses_compact_layout() {
     let mut image_cache = crate::components::image_cache::ImageCache::new();
     let mut ctx = crate::components::react_trace::RenderContext {
         mermaid_registry: &registry,
+        mermaid_registry_version: 0,
         picker: None,
         image_cache: &mut image_cache,
     };
