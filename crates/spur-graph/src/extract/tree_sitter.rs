@@ -417,7 +417,7 @@ fn stable_key(relative_path: &str, fqn: &str, kind: NodeKind) -> String {
     hasher.update([0]);
     hasher.update(fqn.as_bytes());
     hasher.update([0]);
-    hasher.update(format!("{kind:?}").as_bytes());
+    hasher.update(kind.discriminator().as_bytes());
     let digest = hasher.finalize();
     format!(
         "{:016x}",
