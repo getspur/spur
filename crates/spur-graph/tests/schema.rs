@@ -67,6 +67,8 @@ fn node_kind_discriminators_are_stable_contracts() {
     assert_eq!(NodeKind::File.discriminator(), "file");
     assert_eq!(NodeKind::Module.discriminator(), "module");
     assert_eq!(NodeKind::Function.discriminator(), "function");
+    assert_eq!(NodeKind::Class.discriminator(), "class");
+    assert_eq!(NodeKind::Interface.discriminator(), "interface");
     assert_eq!(NodeKind::Method.discriminator(), "method");
     assert_eq!(NodeKind::Struct.discriminator(), "struct");
     assert_eq!(NodeKind::Enum.discriminator(), "enum");

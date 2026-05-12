@@ -145,6 +145,8 @@ pub struct SourceSpan {
 pub enum NodeKind {
     Module,
     Function,
+    Class,
+    Interface,
     Struct,
     Impl,
     Trait,
@@ -155,6 +157,7 @@ pub enum NodeKind {
     Constant,
     TypeAlias,
     Macro,
+    Section,
 }
 
 impl NodeKind {
@@ -163,6 +166,8 @@ impl NodeKind {
             NodeKind::File => "file",
             NodeKind::Module => "module",
             NodeKind::Function => "function",
+            NodeKind::Class => "class",
+            NodeKind::Interface => "interface",
             NodeKind::Method => "method",
             NodeKind::Struct => "struct",
             NodeKind::Enum => "enum",
@@ -172,6 +177,7 @@ impl NodeKind {
             NodeKind::Constant => "constant",
             NodeKind::TypeAlias => "type_alias",
             NodeKind::Macro => "macro",
+            NodeKind::Section => "section",
         }
     }
 }
@@ -187,6 +193,7 @@ pub enum RelationKind {
     References,
     Uses,
     Extends,
+    Links,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

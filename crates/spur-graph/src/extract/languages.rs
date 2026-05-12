@@ -3,11 +3,21 @@ use tree_sitter::{Language, Node};
 use crate::extract::tree_sitter::{CaptureHit, FactBuilder, PendingEdge};
 use crate::{FileId, NodeId, NodeKind, RelationKind};
 
+#[derive(Debug)]
 pub(crate) struct LanguageConfig {
     pub(crate) language: Language,
+    pub(crate) inline_language: Option<Language>,
     pub(crate) queries: &'static [(&'static str, &'static str)],
     pub(crate) definition_kind_map: &'static [(&'static str, NodeKind)],
+    pub(crate) relation_kind_map: Option<&'static [(&'static str, RelationKind)]>,
     pub(crate) is_method: Option<fn(Node<'_>) -> bool>,
+}
+
+pub(crate) struct LanguageDescriptor {
+    pub(crate) matcher: fn(&std::path::Path) -> bool,
+    pub(crate) factory: fn() -> LanguageConfig,
+    pub(crate) label: &'static str,
+    pub(crate) extensions: &'static [&'static str],
 }
 
 #[derive(Debug, Clone)]
@@ -20,6 +30,7 @@ pub(crate) struct DefinitionBinding<'tree> {
 pub(crate) fn rust_config() -> LanguageConfig {
     LanguageConfig {
         language: tree_sitter_rust::LANGUAGE.into(),
+        inline_language: None,
         queries: &[
             ("tags", include_str!("../../queries/rust/tags.scm")),
             (
@@ -36,8 +47,154 @@ pub(crate) fn rust_config() -> LanguageConfig {
             ("definition.trait", NodeKind::Trait),
             ("definition.impl", NodeKind::Impl),
         ],
+        relation_kind_map: None,
         is_method: Some(has_impl_ancestor),
     }
+}
+
+pub(crate) fn python_config() -> LanguageConfig {
+    LanguageConfig {
+        language: tree_sitter_python::LANGUAGE.into(),
+        inline_language: None,
+        queries: &[
+            ("tags", include_str!("../../queries/python/tags.scm")),
+            (
+                "spur-edges",
+                include_str!("../../queries/python/spur-edges.scm"),
+            ),
+        ],
+        definition_kind_map: &[
+            ("definition.function", NodeKind::Function),
+            ("definition.class", NodeKind::Class),
+        ],
+        relation_kind_map: None,
+        is_method: Some(has_class_definition_ancestor),
+    }
+}
+
+fn typescript_config_for(language: Language) -> LanguageConfig {
+    LanguageConfig {
+        language,
+        inline_language: None,
+        queries: &[
+            ("tags", include_str!("../../queries/typescript/tags.scm")),
+            (
+                "spur-edges",
+                include_str!("../../queries/typescript/spur-edges.scm"),
+            ),
+        ],
+        definition_kind_map: &[
+            ("definition.class", NodeKind::Class),
+            ("definition.interface", NodeKind::Interface),
+            ("definition.enum", NodeKind::Enum),
+            ("definition.function", NodeKind::Function),
+            ("definition.method", NodeKind::Method),
+            ("definition.type_alias", NodeKind::TypeAlias),
+        ],
+        relation_kind_map: None,
+        is_method: None,
+    }
+}
+
+pub(crate) fn typescript_config() -> LanguageConfig {
+    typescript_config_for(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+}
+
+pub(crate) fn tsx_config() -> LanguageConfig {
+    typescript_config_for(tree_sitter_typescript::LANGUAGE_TSX.into())
+}
+
+pub(crate) fn markdown_config() -> LanguageConfig {
+    LanguageConfig {
+        language: tree_sitter_md::LANGUAGE.into(),
+        inline_language: Some(tree_sitter_md::INLINE_LANGUAGE.into()),
+        queries: &[
+            ("tags", include_str!("../../queries/markdown/tags.scm")),
+            (
+                "spur-edges",
+                include_str!("../../queries/markdown/spur-edges.scm"),
+            ),
+            (
+                "inline-spur-edges",
+                include_str!("../../queries/markdown/inline-spur-edges.scm"),
+            ),
+        ],
+        definition_kind_map: &[("definition.section", NodeKind::Section)],
+        relation_kind_map: Some(&[("import", RelationKind::Links)]),
+        is_method: None,
+    }
+}
+
+fn markdown_matcher(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+}
+
+fn rust_matcher(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
+}
+
+fn python_matcher(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("py"))
+}
+
+fn typescript_matcher(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("ts"))
+}
+
+fn tsx_matcher(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("tsx"))
+}
+
+pub(crate) fn language_registry() -> &'static [LanguageDescriptor] {
+    &[
+        LanguageDescriptor {
+            matcher: rust_matcher,
+            factory: rust_config,
+            label: "rust",
+            extensions: &["rs"],
+        },
+        LanguageDescriptor {
+            matcher: python_matcher,
+            factory: python_config,
+            label: "python",
+            extensions: &["py"],
+        },
+        LanguageDescriptor {
+            matcher: typescript_matcher,
+            factory: typescript_config,
+            label: "typescript",
+            extensions: &["ts"],
+        },
+        LanguageDescriptor {
+            matcher: tsx_matcher,
+            factory: tsx_config,
+            label: "tsx",
+            extensions: &["tsx"],
+        },
+        LanguageDescriptor {
+            matcher: markdown_matcher,
+            factory: markdown_config,
+            label: "markdown",
+            extensions: &["md"],
+        },
+    ]
+}
+
+pub(crate) fn all_supported_extensions() -> Vec<&'static str> {
+    language_registry()
+        .iter()
+        .flat_map(|descriptor| descriptor.extensions.iter().copied())
+        .collect()
 }
 
 pub(crate) fn emit_definitions<'tree>(
@@ -88,6 +245,7 @@ pub(crate) fn emit_definitions<'tree>(
 }
 
 pub(crate) fn emit_edges(
+    config: &LanguageConfig,
     builder: &mut FactBuilder<'_>,
     file_node_id: NodeId,
     source: &str,
@@ -98,13 +256,14 @@ pub(crate) fn emit_edges(
         match capture.name.as_str() {
             "import" => {
                 let source_id = nearest_parent(file_node_id, definitions, capture.node).node_id;
+                let relation = relation_kind_for_capture(config, "import", RelationKind::Imports);
                 for imported in
                     contained_capture_text(capture.node, source, captures, "import.name")
                 {
                     builder.pending_edges.push(PendingEdge {
                         source: source_id,
                         target_name: imported,
-                        relation: RelationKind::Imports,
+                        relation,
                     });
                 }
             }
@@ -121,6 +280,20 @@ pub(crate) fn emit_edges(
             _ => {}
         }
     }
+}
+
+fn relation_kind_for_capture(
+    config: &LanguageConfig,
+    capture_name: &str,
+    default: RelationKind,
+) -> RelationKind {
+    config
+        .relation_kind_map
+        .and_then(|map| {
+            map.iter()
+                .find_map(|(name, kind)| (*name == capture_name).then_some(*kind))
+        })
+        .unwrap_or(default)
 }
 
 fn definition_kind(
@@ -188,16 +361,42 @@ fn has_impl_ancestor(node: Node<'_>) -> bool {
     parent.kind() == "declaration_list" && grandparent.kind() == "impl_item"
 }
 
+fn has_class_definition_ancestor(node: Node<'_>) -> bool {
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    if let Some(grandparent) = parent.parent() {
+        if parent.kind() == "block" && grandparent.kind() == "class_definition" {
+            return true;
+        }
+    }
+
+    if parent.kind() == "decorated_definition" {
+        let Some(grandparent) = parent.parent() else {
+            return false;
+        };
+        let Some(great_grandparent) = grandparent.parent() else {
+            return false;
+        };
+        return grandparent.kind() == "block" && great_grandparent.kind() == "class_definition";
+    }
+
+    false
+}
+
 fn definition_rank(kind: NodeKind) -> u8 {
     match kind {
         NodeKind::Module => 0,
         NodeKind::Struct => 1,
-        NodeKind::Enum => 2,
-        NodeKind::Trait => 3,
-        NodeKind::Impl => 4,
-        NodeKind::Method => 5,
-        NodeKind::Function => 6,
-        _ => 7,
+        NodeKind::Class => 2,
+        NodeKind::Interface => 3,
+        NodeKind::Enum => 4,
+        NodeKind::Trait => 5,
+        NodeKind::Impl => 6,
+        NodeKind::Method => 7,
+        NodeKind::Function => 8,
+        NodeKind::Section => 9,
+        _ => 10,
     }
 }
 

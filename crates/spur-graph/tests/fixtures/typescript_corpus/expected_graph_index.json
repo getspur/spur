@@ -1,0 +1,225 @@
+{
+  "header": {
+    "graph_index_version": "spur-graph-phase2"
+  },
+  "files": [
+    {
+      "stable_file_id": "2d2b48a66bc8f10c",
+      "file_path": "src/app.tsx"
+    },
+    {
+      "stable_file_id": "f6d556af9c4b3556",
+      "file_path": "src/helpers.ts"
+    }
+  ],
+  "symbols": [
+    {
+      "stable_symbol_id": "feab6bf56b100adb",
+      "file_path": "src/app.tsx",
+      "byte_range": [
+        56,
+        89
+      ],
+      "line_range": [
+        3,
+        5
+      ],
+      "entity_name": "Props",
+      "symbol_kind": "interface",
+      "anchor_hash": "11293272180817486591",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "99edef319286be7b",
+      "file_path": "src/app.tsx",
+      "byte_range": [
+        91,
+        114
+      ],
+      "line_range": [
+        7,
+        7
+      ],
+      "entity_name": "AppResult",
+      "symbol_kind": "type_alias",
+      "anchor_hash": "10135634673480501151",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "1cff349b61600fe6",
+      "file_path": "src/app.tsx",
+      "byte_range": [
+        116,
+        194
+      ],
+      "line_range": [
+        9,
+        14
+      ],
+      "entity_name": "App",
+      "symbol_kind": "class",
+      "anchor_hash": "11904938745570157377",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "e00db2fbdf78c568",
+      "file_path": "src/app.tsx",
+      "byte_range": [
+        145,
+        192
+      ],
+      "line_range": [
+        10,
+        13
+      ],
+      "entity_name": "boot",
+      "symbol_kind": "method",
+      "anchor_hash": "10659050358964838496",
+      "enclosing_scope": "App"
+    },
+    {
+      "stable_symbol_id": "69dd0e06debec97b",
+      "file_path": "src/app.tsx",
+      "byte_range": [
+        196,
+        299
+      ],
+      "line_range": [
+        16,
+        20
+      ],
+      "entity_name": "createApp",
+      "symbol_kind": "function",
+      "anchor_hash": "13736536326302918283",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "6cbd310869555f11",
+      "file_path": "src/app.tsx",
+      "byte_range": [
+        307,
+        324
+      ],
+      "line_range": [
+        22,
+        22
+      ],
+      "entity_name": "helper",
+      "symbol_kind": "function",
+      "anchor_hash": "3363187740877138980",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "8895b963a4287f50",
+      "file_path": "src/app.tsx",
+      "byte_range": [
+        340,
+        400
+      ],
+      "line_range": [
+        24,
+        24
+      ],
+      "entity_name": "Greeting",
+      "symbol_kind": "function",
+      "anchor_hash": "3769049393491808800",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "474a7125ad11abbe",
+      "file_path": "src/helpers.ts",
+      "byte_range": [
+        7,
+        42
+      ],
+      "line_range": [
+        1,
+        3
+      ],
+      "entity_name": "Runner",
+      "symbol_kind": "interface",
+      "anchor_hash": "5553142598626499129",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "599af539e8626e18",
+      "file_path": "src/helpers.ts",
+      "byte_range": [
+        51,
+        79
+      ],
+      "line_range": [
+        5,
+        5
+      ],
+      "entity_name": "Result",
+      "symbol_kind": "type_alias",
+      "anchor_hash": "14058025228395720757",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "7cd0a90929057633",
+      "file_path": "src/helpers.ts",
+      "byte_range": [
+        88,
+        117
+      ],
+      "line_range": [
+        7,
+        10
+      ],
+      "entity_name": "Mode",
+      "symbol_kind": "enum",
+      "anchor_hash": "3498276602201382018",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "e7f18f01998e3c7c",
+      "file_path": "src/helpers.ts",
+      "byte_range": [
+        126,
+        175
+      ],
+      "line_range": [
+        12,
+        14
+      ],
+      "entity_name": "renderThing",
+      "symbol_kind": "function",
+      "anchor_hash": "5948454652154698542",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "8ddb1e9173f68950",
+      "file_path": "src/helpers.ts",
+      "byte_range": [
+        184,
+        257
+      ],
+      "line_range": [
+        16,
+        20
+      ],
+      "entity_name": "Helper",
+      "symbol_kind": "class",
+      "anchor_hash": "18146717976518920707",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "d9a4de1f4314cdd8",
+      "file_path": "src/helpers.ts",
+      "byte_range": [
+        219,
+        255
+      ],
+      "line_range": [
+        17,
+        19
+      ],
+      "entity_name": "run",
+      "symbol_kind": "method",
+      "anchor_hash": "15206326328853749816",
+      "enclosing_scope": "Helper"
+    }
+  ]
+}
