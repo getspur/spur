@@ -261,7 +261,7 @@ impl SessionDetailView {
             auth_error: None,
             completion: crate::components::input_completion::InputCompletionPort::new(),
             mention_registry: std::rc::Rc::new(std::cell::RefCell::new(mention_registry)),
-            cwd,
+            cwd: crate::mentions::code_graph::resolve_worktree_root_from(cwd),
             #[cfg(feature = "markdown")]
             mermaid_registry: std::collections::HashMap::new(),
             #[cfg(feature = "markdown")]
@@ -347,7 +347,7 @@ impl SessionDetailView {
             auth_error: None,
             completion: crate::components::input_completion::InputCompletionPort::new(),
             mention_registry: std::rc::Rc::new(std::cell::RefCell::new(mention_registry)),
-            cwd: std::path::PathBuf::from("."),
+            cwd: crate::mentions::code_graph::resolve_worktree_root(),
             #[cfg(feature = "markdown")]
             mermaid_registry: std::collections::HashMap::new(),
             #[cfg(feature = "markdown")]
@@ -442,7 +442,7 @@ impl SessionDetailView {
             auth_error: None,
             completion: crate::components::input_completion::InputCompletionPort::new(),
             mention_registry: std::rc::Rc::new(std::cell::RefCell::new(mention_registry)),
-            cwd: std::path::PathBuf::from("."),
+            cwd: crate::mentions::code_graph::resolve_worktree_root(),
             #[cfg(feature = "markdown")]
             mermaid_registry: std::collections::HashMap::new(),
             #[cfg(feature = "markdown")]
