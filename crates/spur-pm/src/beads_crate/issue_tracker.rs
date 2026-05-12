@@ -66,6 +66,9 @@ pub(crate) fn br_to_pm_issue(br: beads_rust::model::Issue) -> Issue {
         issue_type: Some(br.issue_type.to_string()),
         blocked_by,
         due_at: br.due_at,
+        source_system: br.source_system,
+        source_repo: br.source_repo,
+        external_ref: br.external_ref,
         created_at: br.created_at,
         updated_at: br.updated_at,
     }
@@ -286,6 +289,12 @@ impl IssueTracker for BeadsCrateAdapter {
         let actor = self.actor();
         self.write(move |s| {
             validate_create_labels(&params.labels)?;
+            if let Some(external_ref) = params.external_ref.as_deref() {
+                if let Some(existing) = s.find_by_external_ref(external_ref)? {
+                    return Ok(existing.id);
+                }
+            }
+
             let now = Utc::now();
             let id = beads_rust::util::generate_id(
                 &params.title,
@@ -322,7 +331,7 @@ impl IssueTracker for BeadsCrateAdapter {
                 estimated_minutes: params.estimate_minutes.and_then(|m| i32::try_from(m).ok()),
                 due_at: None,
                 defer_until: None,
-                external_ref: None,
+                external_ref: params.external_ref,
                 ephemeral: false,
                 content_hash: None,
                 design: None,
@@ -332,8 +341,8 @@ impl IssueTracker for BeadsCrateAdapter {
                 closed_at: None,
                 close_reason: None,
                 closed_by_session: None,
-                source_system: None,
-                source_repo: None,
+                source_system: params.source_system,
+                source_repo: params.source_repo,
                 deleted_at: None,
                 deleted_by: None,
                 delete_reason: None,
@@ -369,6 +378,12 @@ impl IssueTracker for BeadsCrateAdapter {
         .await
     }
 
+    async fn find_by_external_ref(&self, external_ref: &str) -> anyhow::Result<Option<Issue>> {
+        let external_ref = external_ref.to_string();
+        self.read(move |s| Ok(s.find_by_external_ref(&external_ref)?.map(br_to_pm_issue)))
+            .await
+    }
+
     async fn update_issue(&self, id: &str, update: IssueUpdate) -> anyhow::Result<()> {
         let id = id.to_string();
         let actor = self.actor();
@@ -377,7 +392,8 @@ impl IssueTracker for BeadsCrateAdapter {
             let has_field_update = update.status.is_some()
                 || update.priority.is_some()
                 || update.assignee.is_some()
-                || update.body.is_some();
+                || update.body.is_some()
+                || update.external_ref.is_some();
 
             if has_field_update {
                 let mut br_update = beads_rust::storage::sqlite::IssueUpdate::default();
@@ -398,6 +414,9 @@ impl IssueTracker for BeadsCrateAdapter {
                 }
                 if let Some(body) = update.body.as_deref() {
                     br_update.description = Some(Some(body.to_string()));
+                }
+                if let Some(external_ref) = update.external_ref {
+                    br_update.external_ref = Some(external_ref);
                 }
                 s.update_issue(&id, &br_update, &actor)?;
             }
@@ -444,7 +463,7 @@ mod tests {
 
     use crate::adapter::IssueTracker;
     use crate::beads_crate::adapter::{AdapterConfig, BeadsCrateAdapter};
-    use crate::types::{IssueCreate, IssueUpdate, PmEvent};
+    use crate::types::{IssueCreate, IssueFilter, IssueUpdate, PmEvent};
 
     fn minimal_issue(id: &str, title: &str) -> BrIssue {
         let now = Utc::now();
@@ -559,6 +578,127 @@ mod tests {
             fetched.labels,
             vec!["lbl-a".to_string(), "lbl-b".to_string()]
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_issue_round_trips_provenance_fields() {
+        let dir = TempDir::new().unwrap();
+        let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
+            .await
+            .unwrap();
+
+        let id = adapter
+            .create_issue(IssueCreate {
+                title: "Imported issue".into(),
+                source_system: Some("github".into()),
+                source_repo: Some("getspur/spur".into()),
+                external_ref: Some("github/I_kwDOExample123".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let fetched = adapter.get_issue(&id).await.unwrap();
+        assert_eq!(fetched.source_system.as_deref(), Some("github"));
+        assert_eq!(fetched.source_repo.as_deref(), Some("getspur/spur"));
+        assert_eq!(
+            fetched.external_ref.as_deref(),
+            Some("github/I_kwDOExample123")
+        );
+
+        let found = adapter
+            .find_by_external_ref("github/I_kwDOExample123")
+            .await
+            .unwrap()
+            .expect("find by external ref");
+        assert_eq!(found.id, id);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_issue_is_idempotent_for_existing_external_ref() {
+        let dir = TempDir::new().unwrap();
+        let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
+            .await
+            .unwrap();
+
+        let first = adapter
+            .create_issue(IssueCreate {
+                title: "Imported issue".into(),
+                source_system: Some("github".into()),
+                source_repo: Some("getspur/spur".into()),
+                external_ref: Some("github/I_kwDOExample123".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let second = adapter
+            .create_issue(IssueCreate {
+                title: "Imported issue renamed upstream".into(),
+                source_system: Some("github".into()),
+                source_repo: Some("getspur/spur".into()),
+                external_ref: Some("github/I_kwDOExample123".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(second, first);
+
+        let issues = adapter
+            .list_issues(IssueFilter {
+                include_closed: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].title, "Imported issue");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn update_issue_can_set_and_clear_external_ref() {
+        let dir = TempDir::new().unwrap();
+        let adapter = BeadsCrateAdapter::open(dir.path(), AdapterConfig::default())
+            .await
+            .unwrap();
+
+        let id = adapter
+            .create_issue(IssueCreate {
+                title: "Local issue".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        adapter
+            .update_issue(
+                &id,
+                IssueUpdate {
+                    external_ref: Some(Some("github/I_kwDOExample123".into())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let with_ref = adapter.get_issue(&id).await.unwrap();
+        assert_eq!(
+            with_ref.external_ref.as_deref(),
+            Some("github/I_kwDOExample123")
+        );
+
+        adapter
+            .update_issue(
+                &id,
+                IssueUpdate {
+                    external_ref: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let without_ref = adapter.get_issue(&id).await.unwrap();
+        assert_eq!(without_ref.external_ref, None);
     }
 
     #[tokio::test(flavor = "multi_thread")]
