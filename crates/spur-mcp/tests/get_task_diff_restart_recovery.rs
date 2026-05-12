@@ -115,6 +115,7 @@ async fn t_v0d_4_get_task_diff_works_after_restart_for_latest_attempt() {
         task: "Diff recovery".into(),
         depends_on: Vec::new(),
         issue_id: None,
+        issue_title: None,
         context_files: Vec::new(),
     }];
     let feature_gate = common::server_builder::pro_feature_gate();

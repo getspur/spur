@@ -1,10 +1,10 @@
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
-use super::validation::{validate_file, validate_symbol_bytes, FailureReason, ValidationOutcome};
-use super::{
-    CodeMentionKind, CodeMentionPayload, CodeMentionValidationSpec, GraphFileArtifact,
-    GraphSymbolArtifact,
+use spur_graph::{
+    file_id_from_uri, path_in_worktree, symbol_id_from_uri, validate_file, validate_symbol_bytes,
+    CodeMentionKind, CodeMentionPayload, CodeMentionValidationSpec, FailureReason,
+    GraphFileArtifact, GraphSymbolArtifact, ValidationOutcome,
 };
 
 pub const PER_MENTION_CAP_BYTES: usize = 8 * 1024;
@@ -337,30 +337,4 @@ fn file_graph_uri(payload: &CodeMentionPayload) -> String {
         return payload.authoritative.uri.clone();
     }
     format!("graph://file/{}", payload.authoritative.file_path)
-}
-
-fn file_id_from_uri(uri: &str) -> String {
-    uri.strip_prefix("graph://file/").unwrap_or(uri).to_string()
-}
-
-fn symbol_id_from_uri(uri: &str) -> String {
-    uri.strip_prefix("graph://symbol/")
-        .unwrap_or(uri)
-        .to_string()
-}
-
-fn path_in_worktree(worktree_root: &Path, file_path: &str) -> Option<PathBuf> {
-    let relative = Path::new(file_path);
-    if relative.is_absolute()
-        || relative.components().any(|component| {
-            matches!(
-                component,
-                Component::ParentDir | Component::Prefix(_) | Component::RootDir
-            )
-        })
-    {
-        return None;
-    }
-
-    Some(worktree_root.join(relative))
 }

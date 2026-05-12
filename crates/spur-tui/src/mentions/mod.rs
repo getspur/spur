@@ -8,10 +8,10 @@ pub mod registry;
 pub mod worker_source;
 
 pub use code_graph::source::CodeGraphMentionSource;
-pub use code_graph::{
-    CodeMentionKind, CodeMentionPayload, CodeMentionValidationSpec, GraphIndexArtifact,
-};
 pub use entry::{MentionEntry, MentionKind, MentionSource};
 pub use issue_source::{IssueMentionDescriptor, IssueMentionSource};
 pub use registry::{CompletionScope, MentionRegistry};
+pub use spur_graph::{
+    CodeMentionKind, CodeMentionPayload, CodeMentionValidationSpec, GraphIndexArtifact,
+};
 pub use worker_source::{WorkerMentionDescriptor, WorkerMentionSource};

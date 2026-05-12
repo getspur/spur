@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use spur_tui::mentions::code_graph::resolve_worktree_root;
+use spur_graph::resolve_worktree_root;
 
 static CWD_LOCK: Mutex<()> = Mutex::new(());
 

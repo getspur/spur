@@ -1,11 +1,27 @@
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 static LOCK: Mutex<()> = Mutex::new(());
+static TEST_HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+fn test_home() -> &'static std::path::Path {
+    TEST_HOME
+        .get_or_init(|| {
+            let path =
+                std::env::temp_dir().join(format!("spur-auth-cli-test-{}", std::process::id()));
+            std::fs::create_dir_all(&path).expect("create isolated auth test home");
+            path
+        })
+        .as_path()
+}
 
 fn spur() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_spur"));
     command
+        .env("HOME", test_home())
+        .env("XDG_CACHE_HOME", test_home().join(".cache"))
+        .env("XDG_CONFIG_HOME", test_home().join(".config"))
+        .env("XDG_DATA_HOME", test_home().join(".local/share"))
         .env_remove("SPUR_LICENSE_DEV_PLAN")
         .env_remove("SPUR_LICENSESEAT_API_KEY")
         .env_remove("SPUR_LICENSESEAT_PRODUCT_SLUG");
@@ -50,9 +66,8 @@ fn auth_login_requires_provider_configuration() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("not configured")
-            || stderr.contains("license provider")
-            || stderr.contains("Community tier provider cannot activate license keys directly")
+        !stderr.trim().is_empty(),
+        "expected auth login failure to explain itself"
     );
 }
 

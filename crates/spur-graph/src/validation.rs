@@ -3,7 +3,7 @@ use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use super::{GraphFileArtifact, GraphSymbolArtifact};
+use crate::{GraphFileArtifact, GraphSymbolArtifact};
 
 pub type FilePayload = GraphFileArtifact;
 pub type SymbolPayload = GraphSymbolArtifact;
@@ -58,10 +58,7 @@ pub fn validate_symbol(payload: &SymbolPayload, worktree_root: &Path) -> Validat
     }
 }
 
-pub(crate) fn validate_symbol_bytes(
-    payload: &SymbolPayload,
-    bytes: &[u8],
-) -> Result<(), FailureReason> {
+pub fn validate_symbol_bytes(payload: &SymbolPayload, bytes: &[u8]) -> Result<(), FailureReason> {
     let [start, end] = payload.byte_range;
     if end < start || end > bytes.len() {
         return Err(FailureReason::RangeOutOfBounds);
@@ -120,7 +117,7 @@ pub fn compute_anchor_hash(slice: &str) -> u64 {
     )
 }
 
-fn path_in_worktree(worktree_root: &Path, file_path: &str) -> Option<PathBuf> {
+pub fn path_in_worktree(worktree_root: &Path, file_path: &str) -> Option<PathBuf> {
     let relative = Path::new(file_path);
     if relative.is_absolute()
         || relative.components().any(|component| {

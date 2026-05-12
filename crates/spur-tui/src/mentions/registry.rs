@@ -9,11 +9,11 @@ use nucleo_matcher::{
 use spur_acp::SessionId;
 
 use super::code_graph::source::CodeGraphMentionSource;
-use super::code_graph::CodeMentionPayload;
 use super::entry::{MentionEntry, MentionKind, MentionSource};
 use super::file_source::FileMentionSource;
 use super::issue_source::{IssueMentionDescriptor, IssueMentionSource};
 use super::worker_source::{WorkerMentionDescriptor, WorkerMentionSource};
+use spur_graph::CodeMentionPayload;
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
 pub const CODE_GRAPH_INDEX_ENV: &str = "SPUR_CODE_GRAPH_INDEX";
