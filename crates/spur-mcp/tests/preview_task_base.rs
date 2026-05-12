@@ -140,6 +140,9 @@ async fn persist_plan(pm: &MockPm, mut state: PlanState) {
             parent: None,
             assignee: None,
             estimate_minutes: None,
+            external_ref: None,
+            source_system: None,
+            source_repo: None,
             depends_on: Vec::new(),
         })
         .await
@@ -173,6 +176,9 @@ async fn persist_plan(pm: &MockPm, mut state: PlanState) {
                 parent: Some(epic_id.clone()),
                 assignee: None,
                 estimate_minutes: None,
+                external_ref: None,
+                source_system: None,
+                source_repo: None,
                 depends_on,
             })
             .await
