@@ -1,6 +1,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use spur_acp::ContentBlock;
 use spur_acp::SessionId;
+use spur_tui::commands::submit_router::assemble_blocks_with_code_mentions;
 use spur_tui::components::input_bar::InputBar;
+use spur_tui::mentions::code_graph::validation::compute_anchor_hash;
 use spur_tui::mentions::{
     CodeMentionKind, CodeMentionValidationSpec, CompletionScope, IssueMentionDescriptor,
     MentionKind, MentionRegistry, WorkerMentionDescriptor,
@@ -385,6 +388,56 @@ fn code_graph_registry_loads_fixture_files_and_symbols() {
 }
 
 #[test]
+fn code_graph_accept_and_submit_expands_fixture_symbol_end_to_end() {
+    let tmp = tempfile::tempdir().unwrap();
+    let graph_path = valid_config_fixture_copy(tmp.path());
+    let source = config_fixture_source();
+    let source_path = tmp.path().join("crates/example/src/config.rs");
+    std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+    std::fs::write(&source_path, &source).unwrap();
+
+    let mut reg = MentionRegistry::for_direct_session().with_code_graph(graph_path);
+    let sid = SessionId::new();
+    let symbol = reg
+        .query(CompletionScope::Session(&sid), tmp.path(), "Config", 10)
+        .into_iter()
+        .find(|hit| hit.uri == "graph://symbol/symbol-config-struct")
+        .expect("Config symbol row");
+
+    let mut bar = InputBar::new();
+    let atom_text = symbol
+        .atom_text
+        .clone()
+        .unwrap_or_else(|| format!("@{}", symbol.display));
+    bar.insert_atom(atom_text, symbol.uri.clone(), symbol.display);
+
+    let blocks = assemble_blocks_with_code_mentions(
+        &bar.text(),
+        bar.protected_ranges(),
+        &[],
+        tmp.path(),
+        |uri| reg.lookup_code_payload(uri),
+    );
+    let prompt = blocks
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Text(text) => text.text.as_str(),
+            other => panic!("expected text-only code expansion, got {other:?}"),
+        })
+        .collect::<String>();
+
+    assert!(prompt.contains("MENTION Config"), "{prompt}");
+    assert!(prompt.contains("context_header:"), "{prompt}");
+    assert!(prompt.contains("pub struct Config"), "{prompt}");
+    assert!(prompt.contains("pub path: String"), "{prompt}");
+    assert!(prompt.contains("topology_available_via_mcp:"), "{prompt}");
+    assert!(
+        prompt.contains("get_callers(\"graph://symbol/symbol-config-struct\")"),
+        "{prompt}"
+    );
+}
+
+#[test]
 fn code_graph_lookup_payload_roundtrips_full_symbol_payload() {
     let graph_path = graph_fixture_path();
     let mut reg = MentionRegistry::for_direct_session().with_code_graph(graph_path);
@@ -513,6 +566,106 @@ fn missing_code_graph_artifact_leaves_existing_sources_available() {
         .any(|hit| matches!(hit.kind, MentionKind::CodeFile | MentionKind::CodeSymbol)));
 }
 
+#[test]
+fn malformed_code_graph_artifact_leaves_existing_sources_available() {
+    let tmp = tempfile::tempdir().unwrap();
+    let graph_path = tmp.path().join("truncated.json");
+    std::fs::write(&graph_path, r#"{"header":{"graph_index_version":"bad"},"#).unwrap();
+    std::fs::write(tmp.path().join("foo.rs"), "// foo").unwrap();
+    let mut reg = MentionRegistry::for_direct_session().with_code_graph(graph_path);
+    let sid = SessionId::new();
+
+    let hits = reg.query(CompletionScope::Session(&sid), tmp.path(), "foo", 10);
+
+    assert!(hits.iter().any(|hit| hit.kind == MentionKind::File));
+    assert!(!hits
+        .iter()
+        .any(|hit| matches!(hit.kind, MentionKind::CodeFile | MentionKind::CodeSymbol)));
+}
+
+#[test]
+fn duplicate_symbol_ids_keep_first_row_and_payload() {
+    let tmp = tempfile::tempdir().unwrap();
+    let graph_path = write_graph_fixture(
+        tmp.path(),
+        serde_json::json!({
+            "header": { "graph_index_version": "duplicate-fixture" },
+            "files": [],
+            "symbols": [
+                {
+                    "stable_symbol_id": "symbol-dup",
+                    "file_path": "src/first.rs",
+                    "byte_range": [0, 10],
+                    "line_range": [1, 2],
+                    "entity_name": "First",
+                    "symbol_kind": "struct",
+                    "anchor_hash": "1",
+                    "enclosing_scope": "module first"
+                },
+                {
+                    "stable_symbol_id": "symbol-dup",
+                    "file_path": "src/second.rs",
+                    "byte_range": [20, 30],
+                    "line_range": [4, 5],
+                    "entity_name": "Second",
+                    "symbol_kind": "struct",
+                    "anchor_hash": "2",
+                    "enclosing_scope": "module second"
+                }
+            ]
+        }),
+    );
+    let mut reg = MentionRegistry::for_direct_session().with_code_graph(graph_path);
+    let sid = SessionId::new();
+
+    let hits = reg.query(CompletionScope::Session(&sid), tmp.path(), "First", 10);
+    let duplicate_rows: Vec<_> = hits
+        .iter()
+        .filter(|hit| hit.uri == "graph://symbol/symbol-dup")
+        .collect();
+
+    assert_eq!(duplicate_rows.len(), 1, "{:?}", hit_debug(&hits));
+    assert_eq!(duplicate_rows[0].display, "First");
+    let payload = reg
+        .lookup_code_payload("graph://symbol/symbol-dup")
+        .expect("deduplicated payload");
+    assert_eq!(payload.authoritative.file_path, "src/first.rs");
+}
+
+#[test]
+fn reversed_byte_range_artifact_disables_code_graph_rows() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("foo.rs"), "// foo").unwrap();
+    let graph_path = write_graph_fixture(
+        tmp.path(),
+        serde_json::json!({
+            "header": { "graph_index_version": "reversed-fixture" },
+            "files": [],
+            "symbols": [
+                {
+                    "stable_symbol_id": "symbol-broken",
+                    "file_path": "src/broken.rs",
+                    "byte_range": [10, 9],
+                    "line_range": [1, 2],
+                    "entity_name": "Broken",
+                    "symbol_kind": "fn",
+                    "anchor_hash": "1",
+                    "enclosing_scope": null
+                }
+            ]
+        }),
+    );
+    let mut reg = MentionRegistry::for_direct_session().with_code_graph(graph_path);
+    let sid = SessionId::new();
+
+    let hits = reg.query(CompletionScope::Session(&sid), tmp.path(), "foo", 10);
+
+    assert!(hits.iter().any(|hit| hit.kind == MentionKind::File));
+    assert!(!hits
+        .iter()
+        .any(|hit| matches!(hit.kind, MentionKind::CodeFile | MentionKind::CodeSymbol)));
+}
+
 fn graph_fixture_path() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/graph_index/sample.json")
 }
@@ -552,4 +705,46 @@ fn write_graph_fixture(root: &std::path::Path, value: serde_json::Value) -> std:
     )
     .expect("write graph fixture");
     path
+}
+
+fn valid_config_fixture_copy(root: &std::path::Path) -> std::path::PathBuf {
+    let fixture = std::fs::read_to_string(graph_fixture_path()).expect("read graph fixture");
+    let mut value: serde_json::Value = serde_json::from_str(&fixture).expect("parse graph fixture");
+    let source = config_fixture_source();
+    let slice = &source[10..80];
+    let hash = compute_anchor_hash(slice).to_string();
+    let symbols = value
+        .get_mut("symbols")
+        .and_then(serde_json::Value::as_array_mut)
+        .expect("fixture symbols");
+    let config = symbols
+        .iter_mut()
+        .find(|symbol| {
+            symbol
+                .get("stable_symbol_id")
+                .and_then(serde_json::Value::as_str)
+                == Some("symbol-config-struct")
+        })
+        .expect("Config symbol");
+    config["anchor_hash"] = serde_json::Value::String(hash);
+
+    write_graph_fixture(root, value)
+}
+
+fn config_fixture_source() -> String {
+    let source = concat!(
+        "use a::b;\n",
+        "pub struct Config {\n",
+        "    pub path: String,\n",
+        "}\n",
+        "// fixture padding.\n",
+        "pub fn after() {}\n"
+    )
+    .to_string();
+    assert_eq!(source.find("pub struct Config"), Some(10));
+    assert_eq!(
+        &source[10..80],
+        "pub struct Config {\n    pub path: String,\n}\n// fixture padding.\npub fn"
+    );
+    source
 }
