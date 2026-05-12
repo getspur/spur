@@ -157,7 +157,26 @@ pub enum NodeKind {
     Macro,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+impl NodeKind {
+    pub fn discriminator(&self) -> &'static str {
+        match self {
+            NodeKind::File => "file",
+            NodeKind::Module => "module",
+            NodeKind::Function => "function",
+            NodeKind::Method => "method",
+            NodeKind::Struct => "struct",
+            NodeKind::Enum => "enum",
+            NodeKind::Trait => "trait",
+            NodeKind::Impl => "impl",
+            NodeKind::Field => "field",
+            NodeKind::Constant => "constant",
+            NodeKind::TypeAlias => "type_alias",
+            NodeKind::Macro => "macro",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RelationKind {
     Imports,
@@ -173,8 +192,7 @@ pub enum RelationKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Confidence {
-    Exact,
-    Inferred,
+    SyntaxExact,
     Heuristic,
     Unknown,
 }

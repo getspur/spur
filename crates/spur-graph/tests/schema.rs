@@ -19,7 +19,7 @@ fn graph_facts_round_trip_through_json() {
         source_node_id: NodeId(7),
         target_node_id: NodeId(8),
         relation: RelationKind::Calls,
-        confidence: Confidence::Exact,
+        confidence: Confidence::SyntaxExact,
         confidence_score: 1.0,
         evidence_id: EvidenceId(13),
         directed: true,
@@ -40,6 +40,17 @@ fn graph_facts_round_trip_through_json() {
 }
 
 #[test]
+fn syntax_exact_confidence_round_trips_as_snake_case_json() {
+    let encoded = serde_json::to_string(&Confidence::SyntaxExact).unwrap();
+
+    assert_eq!(encoded, "\"syntax_exact\"");
+    assert_eq!(
+        serde_json::from_str::<Confidence>(&encoded).unwrap(),
+        Confidence::SyntaxExact
+    );
+}
+
+#[test]
 fn graph_id_newtypes_are_not_interchangeable_at_runtime() {
     let node_id = NodeId(42);
     let edge_id = EdgeId(42);
@@ -49,4 +60,20 @@ fn graph_id_newtypes_are_not_interchangeable_at_runtime() {
     assert_eq!(node_id.get(), 42);
     assert_eq!(edge_id.get(), 42);
     assert_ne!(format!("{node_id:?}"), format!("{edge_id:?}"));
+}
+
+#[test]
+fn node_kind_discriminators_are_stable_contracts() {
+    assert_eq!(NodeKind::File.discriminator(), "file");
+    assert_eq!(NodeKind::Module.discriminator(), "module");
+    assert_eq!(NodeKind::Function.discriminator(), "function");
+    assert_eq!(NodeKind::Method.discriminator(), "method");
+    assert_eq!(NodeKind::Struct.discriminator(), "struct");
+    assert_eq!(NodeKind::Enum.discriminator(), "enum");
+    assert_eq!(NodeKind::Trait.discriminator(), "trait");
+    assert_eq!(NodeKind::Impl.discriminator(), "impl");
+    assert_eq!(NodeKind::Field.discriminator(), "field");
+    assert_eq!(NodeKind::Constant.discriminator(), "constant");
+    assert_eq!(NodeKind::TypeAlias.discriminator(), "type_alias");
+    assert_eq!(NodeKind::Macro.discriminator(), "macro");
 }
