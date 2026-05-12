@@ -349,6 +349,7 @@ fn plan_with_in_memory_history() -> PlanState {
                 summary: Some("attempt 1 partial summary".into()),
                 feedback: "needs error handling on null input".into(),
                 dispatched_base_oid: None,
+                reuse_prior_worktree: None,
             }],
             last_delegation_id: None,
             dispatched_base_oid: None,

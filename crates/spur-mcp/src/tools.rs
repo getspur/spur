@@ -1011,6 +1011,10 @@ pub fn review_task_def() -> ToolDefinition {
                 "feedback": {
                     "type": "string",
                     "description": "Review notes. Required for all decisions — used as rationale for approve/reject and as retry instruction for request_changes."
+                },
+                "reuse_prior_worktree": {
+                    "type": "boolean",
+                    "description": "When request_changes is the decision, opt in to having the prior rejected attempt's diff pre-applied as uncommitted changes in the next attempt's worktree."
                 }
             },
             "required": ["plan_id", "task_id", "decision", "feedback"]

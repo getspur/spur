@@ -223,6 +223,7 @@ async fn review_approve_releases_plan_lock_before_beads_io() {
             "t1",
             "approve",
             Some("ok"),
+            false,
             Some(sleepy_pm),
             None,
             None,
