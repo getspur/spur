@@ -4,7 +4,10 @@ use spur_acp::ContentBlock;
 use spur_tui::commands::submit_router::assemble_blocks_with_code_mentions;
 use spur_tui::components::input_bar::{ProtectedRange, RangeKind};
 use spur_tui::mentions::code_graph::expansion::{expand, ExpandedMention, ReplacedWith};
-use spur_tui::mentions::code_graph::validation::compute_anchor_hash;
+use spur_tui::mentions::code_graph::validation::{
+    compute_anchor_hash, validate_symbol, ValidationOutcome,
+};
+use spur_tui::mentions::code_graph::GraphSymbolArtifact;
 use spur_tui::mentions::{CodeMentionKind, CodeMentionPayload, CodeMentionValidationSpec};
 
 #[test]
@@ -127,6 +130,63 @@ fn body_exceeding_per_mention_budget_fails_with_warning() {
     assert!(text.contains("failure_reason: body_too_large"), "{text}");
     assert!(text.contains("replaced_with:  file_mention"), "{text}");
     assert!(text.contains("MENTION src/lib.rs"), "{text}");
+}
+
+#[test]
+fn file_shrink_after_validation_reports_file_missing_not_body_too_large() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "pub fn run() {\n    println!(\"run\");\n}\n";
+    write_source(dir.path(), "src/lib.rs", source);
+    let payload = symbol_payload_from_source(
+        "@run",
+        "graph://symbol/symbol-run",
+        "src/lib.rs",
+        source,
+        "pub fn run",
+        "\n",
+        "run",
+        "fn",
+        [1, 3],
+    );
+    let CodeMentionValidationSpec::SymbolRange {
+        path,
+        line_range,
+        byte_range,
+        entity_name,
+        anchor_hash,
+    } = &payload.authoritative.validation
+    else {
+        panic!("expected symbol payload");
+    };
+    let symbol = GraphSymbolArtifact {
+        stable_symbol_id: "symbol-run".to_string(),
+        file_path: path.clone(),
+        byte_range: *byte_range,
+        line_range: *line_range,
+        entity_name: entity_name.clone(),
+        symbol_kind: "fn".to_string(),
+        anchor_hash: anchor_hash.clone(),
+        enclosing_scope: None,
+    };
+
+    assert_eq!(
+        validate_symbol(&symbol, dir.path()),
+        ValidationOutcome::Pass
+    );
+
+    fs::write(dir.path().join("src/lib.rs"), "pub fn").expect("truncate source");
+
+    let ExpandedMention::Warning {
+        text,
+        replaced_with,
+    } = expand(&payload, dir.path())
+    else {
+        panic!("expected warning expansion");
+    };
+
+    assert_eq!(replaced_with, ReplacedWith::FileMention);
+    assert!(text.contains("failure_reason: file_missing"), "{text}");
+    assert!(!text.contains("failure_reason: body_too_large"), "{text}");
 }
 
 #[test]

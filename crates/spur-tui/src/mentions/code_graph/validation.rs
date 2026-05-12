@@ -52,16 +52,26 @@ pub fn validate_symbol(payload: &SymbolPayload, worktree_root: &Path) -> Validat
     let Ok(bytes) = fs::read(&path) else {
         return ValidationOutcome::Fail(FailureReason::FileMissing);
     };
+    match validate_symbol_bytes(payload, &bytes) {
+        Ok(()) => ValidationOutcome::Pass,
+        Err(reason) => ValidationOutcome::Fail(reason),
+    }
+}
+
+pub(crate) fn validate_symbol_bytes(
+    payload: &SymbolPayload,
+    bytes: &[u8],
+) -> Result<(), FailureReason> {
     let [start, end] = payload.byte_range;
     if end < start || end > bytes.len() {
-        return ValidationOutcome::Fail(FailureReason::RangeOutOfBounds);
+        return Err(FailureReason::RangeOutOfBounds);
     }
 
-    let Ok(content) = std::str::from_utf8(&bytes) else {
-        return ValidationOutcome::Fail(FailureReason::Utf8Boundary);
+    let Ok(content) = std::str::from_utf8(bytes) else {
+        return Err(FailureReason::Utf8Boundary);
     };
     if !content.is_char_boundary(start) || !content.is_char_boundary(end) {
-        return ValidationOutcome::Fail(FailureReason::Utf8Boundary);
+        return Err(FailureReason::Utf8Boundary);
     }
 
     let slice = &content[start..end];
@@ -69,17 +79,17 @@ pub fn validate_symbol(payload: &SymbolPayload, worktree_root: &Path) -> Validat
         || payload.entity_name.is_empty()
         || !contains_whole_word(slice.as_bytes(), payload.entity_name.as_bytes())
     {
-        return ValidationOutcome::Fail(FailureReason::NameNotFound);
+        return Err(FailureReason::NameNotFound);
     }
 
     let Ok(expected_hash) = payload.anchor_hash.parse::<u64>() else {
-        return ValidationOutcome::Fail(FailureReason::AnchorHashMismatch);
+        return Err(FailureReason::AnchorHashMismatch);
     };
     if compute_anchor_hash(slice) != expected_hash {
-        return ValidationOutcome::Fail(FailureReason::AnchorHashMismatch);
+        return Err(FailureReason::AnchorHashMismatch);
     }
 
-    ValidationOutcome::Pass
+    Ok(())
 }
 
 /// Computes a stable u64 anchor hash from the first and last non-whitespace
