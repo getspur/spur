@@ -7,6 +7,8 @@ use super::issue_source::IssueMentionDescriptor;
 pub enum MentionKind {
     File,
     Directory,
+    CodeFile,
+    CodeSymbol,
     Worker,
     Issue,
 }
@@ -50,7 +52,10 @@ pub fn entry_for_path(cwd: &Path, abs: &Path) -> Option<MentionEntry> {
     let display = match kind {
         MentionKind::Directory => format!("{}/", rel_str),
         MentionKind::File => rel_str.to_string(),
-        MentionKind::Worker | MentionKind::Issue => {
+        MentionKind::CodeFile
+        | MentionKind::CodeSymbol
+        | MentionKind::Worker
+        | MentionKind::Issue => {
             unreachable!("entry_for_path never builds non-file mentions")
         }
     };
