@@ -121,6 +121,7 @@ pub struct RenderContext<'a> {
         crate::components::mermaid::MermaidId,
         crate::components::mermaid::MermaidState,
     >,
+    pub mermaid_registry_version: u64,
     pub picker: Option<&'a ratatui_image::picker::Picker>,
     pub image_cache: &'a mut crate::components::image_cache::ImageCache,
 }

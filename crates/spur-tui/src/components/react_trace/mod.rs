@@ -54,6 +54,10 @@ pub struct ReactTrace {
     pub(super) next_trace_image_id: u64,
     pub(super) next_trace_image_generation: u64,
     pub(super) anchor: crate::components::react_trace::types::ScrollAnchor,
+    #[cfg(feature = "markdown")]
+    pub(super) last_scroll_at: Option<std::time::Instant>,
+    #[cfg(feature = "markdown")]
+    pub(super) prev_anchor_for_debounce: crate::components::react_trace::types::ScrollAnchor,
     pub(super) tick_counter: u8,
     /// Cached total rendered lines from last render.
     pub(super) last_total_lines: usize,
@@ -225,6 +229,11 @@ impl ReactTrace {
             next_trace_image_id: 0,
             next_trace_image_generation: 0,
             anchor: crate::components::react_trace::types::ScrollAnchor::default(),
+            #[cfg(feature = "markdown")]
+            last_scroll_at: None,
+            #[cfg(feature = "markdown")]
+            prev_anchor_for_debounce: crate::components::react_trace::types::ScrollAnchor::default(
+            ),
             tick_counter: 0,
             last_total_lines: 0,
             last_visible_height: 20,
@@ -304,6 +313,12 @@ impl ReactTrace {
         self.next_trace_image_id = 0;
         self.next_trace_image_generation = 0;
         self.anchor = crate::components::react_trace::types::ScrollAnchor::default();
+        #[cfg(feature = "markdown")]
+        {
+            self.last_scroll_at = None;
+            self.prev_anchor_for_debounce =
+                crate::components::react_trace::types::ScrollAnchor::default();
+        }
         self.last_total_lines = 0;
         self.last_render_width = None;
         self.line_cache = None;
@@ -1754,7 +1769,7 @@ mod virtual_row_tests {
     ///
     /// Chain tested:
     ///   state transition (Pending→Ready in mermaid_registry)
-    ///   → fence_state_hash changes
+    ///   → mermaid_registry_version changes
     ///   → fence_ok=false in render_with_ctx cache check
     ///   → cache rebuilt with new fence states
     ///   → different (more) rows (ImageRows vs text placeholder)
@@ -1765,8 +1780,7 @@ mod virtual_row_tests {
     /// and MermaidState::Ready { image, .. } → FenceRender::Ready(h) (h image rows).
     #[test]
     fn f2_pending_to_ready_cache_invalidation_changes_row_count() {
-        use crate::components::mermaid::{MermaidId, MermaidState};
-        use crate::components::react_trace::render::fence_state_hash;
+        use crate::components::mermaid::MermaidId;
         use std::collections::HashMap;
 
         // ── Step 1: create a trace with a mermaid fence and force-flush. ──
@@ -1780,39 +1794,13 @@ mod virtual_row_tests {
         // Drain so the fence is committed to items (not tail).
         let _ = trace.drain_fence_dispatches(&StateLookup::empty());
 
-        // ── Step 2: build registries for Pending and Ready states. ──
+        // ── Step 2: set up Pending and Ready generation snapshots. ──
         let fence_id = MermaidId(0);
-        let mermaid_code = "graph LR\nA --> B".to_string();
-
-        let mut registry_pending: HashMap<MermaidId, MermaidState> = HashMap::new();
-        registry_pending.insert(
-            fence_id,
-            MermaidState::Pending {
-                code: mermaid_code.clone(),
-            },
-        );
-
-        // Build a minimal 100×60 RGBA image for the Ready state.
-        let img = std::sync::Arc::new(image::DynamicImage::ImageRgba8(image::RgbaImage::new(
-            100, 60,
-        )));
-        let mut registry_ready: HashMap<MermaidId, MermaidState> = HashMap::new();
-        registry_ready.insert(
-            fence_id,
-            MermaidState::Ready {
-                image: img,
-                code: mermaid_code.clone(),
-                rastered_at_bucket: 800,
-                image_generation: 1,
-            },
-        );
-
-        // ── Step 3: assert fence_state_hash changes on state transition. ──
-        let hash_pending = fence_state_hash(&registry_pending);
-        let hash_ready = fence_state_hash(&registry_ready);
+        let version_pending = 0;
+        let version_ready = 1;
         assert_ne!(
-            hash_pending, hash_ready,
-            "F2: Pending→Ready must change fence_state_hash so the cache detects staleness"
+            version_pending, version_ready,
+            "F2: Pending→Ready must bump mermaid_registry_version so the cache detects staleness"
         );
 
         // ── Step 4: render with Pending registry → capture row count. ──
@@ -1871,23 +1859,11 @@ mod virtual_row_tests {
             count_ready
         );
 
-        // ── Step 7: verify the cache's fence_gen field tracks state changes. ──
-        // Populate the cache with the pending fence_gen by calling
-        // build_virtual_rows_for_tests (which populates line_cache indirectly
-        // via the same computation). We inspect line_cache directly:
-        // Since build_virtual_rows_for_tests is a &self method that doesn't
-        // touch line_cache, we instead verify through fence_state_hash + the
-        // VirtualRowCacheEntry's fence_gen field after a real render_with_ctx call.
-        //
-        // We can access line_cache because VirtualRowCacheEntry.fence_gen is
-        // pub(super) and this test is in the react_trace module.
-        //
-        // Simulate what render_with_ctx does: check that if a cache was populated
-        // with hash_pending, it would be recognized as stale when hash_ready is computed.
-        // This is the exact check in render_with_ctx:
-        //   fence_ok = line_cache.fence_gen == fence_state_hash(registry)
-        let simulated_cache_fence_gen = hash_pending;
-        let current_fence_gen = hash_ready;
+        // ── Step 7: verify the cache's fence_gen field tracks version changes. ──
+        // Simulate the exact render_with_ctx freshness check:
+        //   fence_ok = line_cache.fence_gen == ctx.mermaid_registry_version
+        let simulated_cache_fence_gen = version_pending;
+        let current_fence_gen = version_ready;
         let fence_ok = simulated_cache_fence_gen == current_fence_gen;
         assert!(
             !fence_ok,
