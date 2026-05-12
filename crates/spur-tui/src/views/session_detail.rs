@@ -237,7 +237,8 @@ impl SessionDetailView {
             crate::mentions::MentionRegistry::for_brain_session(worker_snapshot)
         } else {
             crate::mentions::MentionRegistry::for_direct_session()
-        };
+        }
+        .with_code_graph_from_env();
         mention_registry.set_issue_snapshot(
             issue_snapshot
                 .iter()
@@ -418,7 +419,8 @@ impl SessionDetailView {
     /// Starts in `LoadState::Retiring`. Transitions via `handle_spur_event`
     /// as milestone events arrive (Tranche 2 Task 5).
     pub fn for_session(session_id: SessionId) -> Self {
-        let mention_registry = crate::mentions::MentionRegistry::for_direct_session();
+        let mention_registry =
+            crate::mentions::MentionRegistry::for_direct_session().with_code_graph_from_env();
         let agent_cfg = std::sync::Arc::new(spur_acp::AgentConfig::with_defaults(""));
         let command_registry =
             crate::commands::CommandRegistry::from_configs(std::slice::from_ref(&*agent_cfg));
