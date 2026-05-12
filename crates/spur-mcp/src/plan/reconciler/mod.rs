@@ -172,6 +172,16 @@ fn unresolved_blocker_issue_ids(
     blockers
 }
 
+fn prior_branch_for_reuse(task: &crate::plan::PlanTaskEntry) -> Option<String> {
+    task.history.last().and_then(|last| {
+        if last.reuse_prior_worktree == Some(true) {
+            last.worker_branch.clone()
+        } else {
+            None
+        }
+    })
+}
+
 async fn projected_plan_for_ready<Fut>(
     hydrated_plan_state: Option<Arc<crate::plan::PlanState>>,
     project: Fut,
@@ -898,7 +908,7 @@ impl Reconciler {
                 agent: task.spec.agent.clone(),
                 task: task_text,
                 context_files: task.spec.context_files.clone(),
-                prior_branch_for_reuse: None,
+                prior_branch_for_reuse: prior_branch_for_reuse(task),
                 respond_to,
                 brain_session_id: dispatch.brain_session_id.clone(),
                 delegation_plan: None,
