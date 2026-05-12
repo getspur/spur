@@ -19,7 +19,7 @@ fn graph_facts_round_trip_through_json() {
         source_node_id: NodeId(7),
         target_node_id: NodeId(8),
         relation: RelationKind::Calls,
-        confidence: Confidence::Exact,
+        confidence: Confidence::SyntaxExact,
         confidence_score: 1.0,
         evidence_id: EvidenceId(13),
         directed: true,

@@ -153,14 +153,15 @@ fn contains(parent: Node<'_>, child: Node<'_>) -> bool {
     parent.start_byte() <= child.start_byte() && child.end_byte() <= parent.end_byte()
 }
 
-fn has_impl_ancestor(mut node: Node<'_>) -> bool {
-    while let Some(parent) = node.parent() {
-        if parent.kind() == "impl_item" {
-            return true;
-        }
-        node = parent;
-    }
-    false
+fn has_impl_ancestor(node: Node<'_>) -> bool {
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    let Some(grandparent) = parent.parent() else {
+        return false;
+    };
+
+    parent.kind() == "declaration_list" && grandparent.kind() == "impl_item"
 }
 
 fn definition_rank(kind: NodeKind) -> u8 {

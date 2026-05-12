@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -31,6 +31,7 @@ pub(crate) struct FactBuilder<'a> {
     next_span: u64,
     pub(crate) pending_edges: Vec<PendingEdge>,
     symbol_index: BTreeMap<String, Vec<NodeId>>,
+    edge_index: HashSet<(NodeId, NodeId, RelationKind)>,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +56,7 @@ impl<'a> FactBuilder<'a> {
             next_span: 1,
             pending_edges: Vec::new(),
             symbol_index: BTreeMap::new(),
+            edge_index: HashSet::new(),
         }
     }
 
@@ -98,11 +100,7 @@ impl<'a> FactBuilder<'a> {
     }
 
     pub(crate) fn add_edge(&mut self, source: NodeId, target: NodeId, relation: RelationKind) {
-        if self.facts.edges.iter().any(|edge| {
-            edge.source_node_id == source
-                && edge.target_node_id == target
-                && edge.relation == relation
-        }) {
+        if !self.edge_index.insert((source, target, relation)) {
             return;
         }
         let edge_id = EdgeId(self.next_edge);
@@ -218,7 +216,7 @@ fn compile_queries(
         match *name {
             "tags" => tags = Some(query),
             "spur-edges" => spur_edges = Some(query),
-            _ => {}
+            name => return Err(anyhow!("unknown Rust tree-sitter query name `{name}`")),
         }
     }
     Ok(CompiledQueries {
