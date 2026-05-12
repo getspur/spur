@@ -55,6 +55,6 @@ query IngestRepo(
         }
       }
     }
-    rateLimit { cost remaining resetAt nodeCount }
   }
+  rateLimit { cost remaining resetAt nodeCount }
 }
