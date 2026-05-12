@@ -90,6 +90,30 @@ fn human_clean_report_snapshot() {
 }
 
 #[test]
+fn human_real_run_with_fetched_nodes_snapshot() {
+    let report = IngestReport {
+        fetched_remote_nodes: 42,
+        dry_run: false,
+        ..clean_report()
+    };
+    let text = format_human_report(&report);
+    assert_eq!(
+        text,
+        "\
+[spur] ingest github@octocat/Hello-World done
+  fetched:    42
+  ingested:   3
+  updated:    1
+  unchanged:  7
+  conflicts:  0
+  deletions:  0
+  dep-hints:  2
+  comments:   5
+"
+    );
+}
+
+#[test]
 fn human_dry_run_report_snapshot() {
     let text = format_human_report(&dry_run_report());
     assert_eq!(
