@@ -1822,6 +1822,7 @@ pub(crate) async fn emit_review_feedback_audit(
     feedback: &str,
     worker_branch: Option<String>,
     summary: Option<String>,
+    reuse_prior_worktree: Option<bool>,
 ) {
     let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
         return;
@@ -1847,7 +1848,7 @@ pub(crate) async fn emit_review_feedback_audit(
         feedback: feedback.to_string(),
         worker_branch,
         summary,
-        reuse_prior_worktree: None,
+        reuse_prior_worktree,
     };
     let body = crate::plan::audit_sentinel::encode_comment(&kind);
     if let Err(e) = adv.add_comment(issue_id, &body).await {
@@ -3488,6 +3489,7 @@ pub async fn review_task(
     task_id: &str,
     decision: &str,
     feedback: Option<&str>,
+    reuse_prior_worktree: bool,
     state: &mut PlanState,
     pm: Option<&spur_pm::PmService>,
     sink: Option<&dyn crate::events::McpEventSink>,
@@ -3664,10 +3666,17 @@ pub async fn review_task(
                 .iter_mut()
                 .find(|t| t.spec.task_id == task_id)
                 .unwrap();
+            let superseded_branch = entry.worker_branch.clone();
+            if reuse_prior_worktree && superseded_branch.is_none() {
+                return Err(
+                    "reuse_prior_worktree=true requires a worker_branch on the rejected attempt"
+                        .to_string(),
+                );
+            }
 
             let current_record = AttemptRecord {
                 attempt: entry.attempt,
-                worker_branch: entry.worker_branch.clone(),
+                worker_branch: superseded_branch.clone(),
                 diff_summary: entry.result.as_ref().and_then(|r| r.diff_summary.clone()),
                 summary: entry
                     .result
@@ -3679,7 +3688,7 @@ pub async fn review_task(
                 // `.take()` moves the value into history and clears entry so the next
                 // attempt starts fresh; T9 will populate it on re-dispatch.
                 dispatched_base_oid: entry.dispatched_base_oid.take(),
-                reuse_prior_worktree: None,
+                reuse_prior_worktree: reuse_prior_worktree.then_some(true),
             };
             entry.history.push(current_record);
             entry.result = None;
@@ -3687,8 +3696,6 @@ pub async fn review_task(
             entry.status = PlanTaskStatus::Pending;
 
             let issue_id_for_audit = entry.spec.issue_id.clone();
-            let superseded_branch: Option<String> =
-                entry.history.last().and_then(|h| h.worker_branch.clone());
             // Capture before result is reset by the lines above (it's already
             // None here, but the summary fallback is computed against `summary`).
             let attempt_summary = entry
@@ -3712,7 +3719,7 @@ pub async fn review_task(
                         feedback: fb.to_string(),
                         worker_branch: superseded_branch.clone(),
                         summary: attempt_summary.clone(),
-                        reuse_prior_worktree: None,
+                        reuse_prior_worktree: reuse_prior_worktree.then_some(true),
                     },
                 );
                 let update = spur_pm::IssueUpdate {
@@ -3936,6 +3943,7 @@ enum PendingAuditEmit {
         feedback: String,
         worker_branch: Option<String>,
         summary: Option<String>,
+        reuse_prior_worktree: Option<bool>,
     },
 }
 
@@ -4006,6 +4014,7 @@ impl PendingAuditEmit {
                 feedback,
                 worker_branch,
                 summary,
+                reuse_prior_worktree,
             } => {
                 if let Some(issue_id) = issue_id {
                     let kind = audit_sentinel::AuditSentinelKind::ReviewFeedback {
@@ -4014,7 +4023,7 @@ impl PendingAuditEmit {
                         feedback,
                         worker_branch,
                         summary,
-                        reuse_prior_worktree: None,
+                        reuse_prior_worktree,
                     };
                     ops.push(PendingBeadsOp {
                         issue_id,
@@ -4087,6 +4096,7 @@ fn apply_decision_and_extract(
     task_id: &str,
     decision: &str,
     feedback: Option<&str>,
+    reuse_prior_worktree: bool,
     state: &mut PlanState,
     pm_closed_status: Option<&str>,
     _delegation_tx: Option<&tokio::sync::mpsc::Sender<crate::tools::DelegationRequest>>,
@@ -4290,10 +4300,17 @@ fn apply_decision_and_extract(
                 .iter_mut()
                 .find(|t| t.spec.task_id == task_id)
                 .unwrap();
+            let superseded_branch = entry.worker_branch.clone();
+            if reuse_prior_worktree && superseded_branch.is_none() {
+                return Err(
+                    "reuse_prior_worktree=true requires a worker_branch on the rejected attempt"
+                        .to_string(),
+                );
+            }
 
             let current_record = AttemptRecord {
                 attempt: entry.attempt,
-                worker_branch: entry.worker_branch.clone(),
+                worker_branch: superseded_branch.clone(),
                 diff_summary: entry.result.as_ref().and_then(|r| r.diff_summary.clone()),
                 summary: entry
                     .result
@@ -4305,7 +4322,7 @@ fn apply_decision_and_extract(
                 // `.take()` moves the value into history and clears entry so the next
                 // attempt starts fresh; T9 will populate it on re-dispatch.
                 dispatched_base_oid: entry.dispatched_base_oid.take(),
-                reuse_prior_worktree: None,
+                reuse_prior_worktree: reuse_prior_worktree.then_some(true),
             };
             entry.history.push(current_record);
             entry.result = None;
@@ -4313,8 +4330,6 @@ fn apply_decision_and_extract(
             entry.status = PlanTaskStatus::Pending;
 
             let issue_id_for_audit = entry.spec.issue_id.clone();
-            let superseded_branch: Option<String> =
-                entry.history.last().and_then(|h| h.worker_branch.clone());
             let attempt_summary = entry
                 .result
                 .as_ref()
@@ -4348,6 +4363,7 @@ fn apply_decision_and_extract(
                     feedback: fb.to_string(),
                     worker_branch: superseded_branch.clone(),
                     summary: attempt_summary,
+                    reuse_prior_worktree: reuse_prior_worktree.then_some(true),
                 });
             }
             warnings.push(
@@ -4406,6 +4422,7 @@ pub async fn handle_review_task(
     task_id: &str,
     decision: &str,
     feedback: Option<&str>,
+    reuse_prior_worktree: bool,
     pm: Option<Arc<dyn PmLike>>,
     sink: Option<&dyn crate::events::McpEventSink>,
     delegation_tx: Option<&tokio::sync::mpsc::Sender<crate::tools::DelegationRequest>>,
@@ -4418,6 +4435,7 @@ pub async fn handle_review_task(
         task_id,
         decision,
         feedback,
+        reuse_prior_worktree,
         pm,
         sink,
         delegation_tx,
@@ -4525,6 +4543,7 @@ pub async fn handle_review_task_with_write_mode(
     task_id: &str,
     decision: &str,
     feedback: Option<&str>,
+    reuse_prior_worktree: bool,
     pm: Option<Arc<dyn PmLike>>,
     sink: Option<&dyn crate::events::McpEventSink>,
     delegation_tx: Option<&tokio::sync::mpsc::Sender<crate::tools::DelegationRequest>>,
@@ -4543,6 +4562,7 @@ pub async fn handle_review_task_with_write_mode(
             task_id,
             decision,
             feedback,
+            reuse_prior_worktree,
             &mut candidate,
             pm_closed_status.as_deref(),
             delegation_tx,
@@ -4626,6 +4646,7 @@ pub async fn handle_review_task_with_write_mode(
                         feedback,
                         worker_branch,
                         summary,
+                        reuse_prior_worktree,
                     } => {
                         emit_review_feedback_audit(
                             Some(pm),
@@ -4637,6 +4658,7 @@ pub async fn handle_review_task_with_write_mode(
                             &feedback,
                             worker_branch,
                             summary,
+                            reuse_prior_worktree,
                         )
                         .await;
                     }
@@ -6481,6 +6503,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn request_changes_reuse_prior_worktree_round_trips_attempt_record_and_sentinel() {
+        use crate::plan::audit_sentinel::AuditSentinelKind;
+
+        let mut task_spec = task("T1", &[]);
+        task_spec.issue_id = Some("bd-1".to_string());
+        let entry = PlanTaskEntry {
+            spec: task_spec,
+            status: PlanTaskStatus::AwaitingReview {
+                summary: Some("looks close".into()),
+            },
+            result: None,
+            worker_branch: Some("spur/worker-1".into()),
+            attempt: 1,
+            history: vec![],
+            last_delegation_id: Some("del-1".into()),
+            dispatched_base_oid: None,
+        };
+        let mut state = PlanState {
+            plan_id: "p1".into(),
+            tasks: vec![entry],
+            brain_session_id: BrainSessionId::new(spur_acp::SessionId("test-brain".into())),
+            base_snapshot_branch: None,
+            base_snapshot_oid: None,
+            merge_state: PlanMergeState::NotStarted,
+            epic_id: Some("bd-epic".into()),
+        };
+
+        let outcome = apply_decision_and_extract(
+            "p1",
+            "T1",
+            "request_changes",
+            Some("please tighten error handling"),
+            true,
+            &mut state,
+            Some("closed"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("request_changes should succeed");
+
+        let entry = &state.tasks[0];
+        assert_eq!(entry.history.len(), 1);
+        assert_eq!(entry.history[0].reuse_prior_worktree, Some(true));
+
+        let review_feedback_emit = outcome
+            .audit_emits
+            .into_iter()
+            .find(|emit| matches!(emit, PendingAuditEmit::ReviewFeedback { .. }))
+            .expect("review feedback audit emit must be present");
+        let ops = review_feedback_emit.into_beads_ops(state.epic_id.as_deref());
+        assert!(!ops.is_empty(), "expected at least one beads op");
+        let comment = ops[0]
+            .update
+            .comment
+            .as_deref()
+            .expect("sentinel comment should be present");
+        let parsed = crate::plan::audit_sentinel::parse_comment(comment)
+            .expect("sentinel prefix expected")
+            .expect("sentinel payload should parse");
+        match parsed {
+            AuditSentinelKind::ReviewFeedback {
+                reuse_prior_worktree,
+                ..
+            } => assert_eq!(reuse_prior_worktree, Some(true)),
+            other => panic!("expected ReviewFeedback sentinel, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn request_changes_reuse_prior_worktree_requires_worker_branch() {
+        let entry = PlanTaskEntry {
+            spec: task("T1", &[]),
+            status: PlanTaskStatus::AwaitingReview {
+                summary: Some("wip".into()),
+            },
+            result: None,
+            worker_branch: None,
+            attempt: 1,
+            history: vec![],
+            last_delegation_id: Some("del-1".into()),
+            dispatched_base_oid: None,
+        };
+        let mut state = PlanState {
+            plan_id: "p1".into(),
+            tasks: vec![entry],
+            brain_session_id: BrainSessionId::new(spur_acp::SessionId("test-brain".into())),
+            base_snapshot_branch: None,
+            base_snapshot_oid: None,
+            merge_state: PlanMergeState::NotStarted,
+            epic_id: None,
+        };
+
+        let err = apply_decision_and_extract(
+            "p1",
+            "T1",
+            "request_changes",
+            Some("retry"),
+            true,
+            &mut state,
+            Some("closed"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .err()
+        .expect("reuse_prior_worktree=true without worker branch must error");
+
+        assert_eq!(
+            err,
+            "reuse_prior_worktree=true requires a worker_branch on the rejected attempt"
+        );
+    }
+
+    #[tokio::test]
     async fn request_changes_at_max_attempts_auto_rejects() {
         use super::*;
         let task_spec = task("T1", &[]);
@@ -6530,6 +6671,7 @@ mod tests {
             "T1",
             "request_changes",
             Some("please try the other approach"),
+            false,
             &mut state,
             None,
             None,
@@ -6668,6 +6810,7 @@ mod tests {
             "T1",
             "request_changes",
             Some("please retry"),
+            false,
             &mut state,
             None,
             None,
