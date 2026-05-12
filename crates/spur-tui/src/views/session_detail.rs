@@ -2381,7 +2381,10 @@ impl SessionDetailView {
         }
 
         let input_height = self.input_bar.required_height(content_area.width);
-        let unsafe_banner_height = u16::from(self.fs_unsafe);
+        let graph_hint = (!self.fs_unsafe)
+            .then(|| self.mention_registry.borrow().code_graph_hint())
+            .flatten();
+        let pre_input_banner_height = u16::from(self.fs_unsafe || graph_hint.is_some());
 
         // Compute workers panel height (dynamic: 0 when no active workers).
         // Suppress on very small terminals to avoid squeezing the trace.
@@ -2401,12 +2404,12 @@ impl SessionDetailView {
         };
 
         let chunks = Layout::vertical([
-            Constraint::Length(1),                    // header
-            Constraint::Min(4),                       // react trace (fills)
-            Constraint::Length(workers_h),            // workers panel
-            Constraint::Length(unsafe_banner_height), // unsafe-fs banner
-            Constraint::Length(input_height),         // input bar
-            Constraint::Length(1),                    // status bar
+            Constraint::Length(1),                       // header
+            Constraint::Min(4),                          // react trace (fills)
+            Constraint::Length(workers_h),               // workers panel
+            Constraint::Length(pre_input_banner_height), // pre-input banner
+            Constraint::Length(input_height),            // input bar
+            Constraint::Length(1),                       // status bar
         ])
         .split(content_area);
 
@@ -2516,6 +2519,12 @@ impl SessionDetailView {
                 Style::default()
                     .fg(token(ctx.theme, "session_detail.unsafe_fs.fg"))
                     .bg(token(ctx.theme, "session_detail.unsafe_fs.bg")),
+            ));
+            frame.render_widget(Paragraph::new(banner), chunks[3]);
+        } else if let Some(hint) = graph_hint {
+            let banner = Line::from(Span::styled(
+                format!(" {hint} "),
+                Style::default().fg(Color::DarkGray),
             ));
             frame.render_widget(Paragraph::new(banner), chunks[3]);
         }
