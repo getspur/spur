@@ -187,6 +187,9 @@ pub async fn update_issue(
         priority,
         assignee,
         body: None,
+        external_ref: None,
+        source_system: None,
+        source_repo: None,
     };
 
     pm.update_issue(id, update)

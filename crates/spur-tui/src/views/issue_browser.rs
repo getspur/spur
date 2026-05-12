@@ -114,6 +114,9 @@ fn detail_event_to_issue(e: &spur_acp::IssueDetailEvent) -> spur_pm::Issue {
         body: e.body.clone(),
         created_at: e.created_at,
         updated_at: e.updated_at,
+        external_ref: None,
+        source_system: None,
+        source_repo: None,
     }
 }
 
@@ -1419,6 +1422,9 @@ mod tests {
             due_at: None,
             created_at: now,
             updated_at: now,
+            external_ref: None,
+            source_system: None,
+            source_repo: None,
         }
     }
 
