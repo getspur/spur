@@ -187,10 +187,10 @@ impl GitHubClient {
 
         let data: IngestRepoData = self.octocrab.graphql(&payload).await.map_err(map_error)?;
 
-        if let Some(repo) = data.repository.as_ref() {
-            if let Some(rate) = repo.rate_limit.as_ref() {
-                self.governor.observe_graphql(rate).await;
-            }
+        // `rateLimit` is a top-level Query field in GitHub's GraphQL schema,
+        // so it's on `IngestRepoData` itself, not on `data.repository`.
+        if let Some(rate) = data.rate_limit.as_ref() {
+            self.governor.observe_graphql(rate).await;
         }
         Ok(data)
     }
