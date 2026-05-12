@@ -267,6 +267,7 @@ pub(crate) async fn reconstruct_historical_attempts(
         worker_branch: Option<String>,
         summary: Option<String>,
         feedback: String,
+        reuse_prior_worktree: Option<bool>,
     }
 
     require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED, feature_gate)
@@ -324,6 +325,7 @@ pub(crate) async fn reconstruct_historical_attempts(
                 feedback,
                 worker_branch,
                 summary,
+                reuse_prior_worktree,
                 ..
             } => {
                 if let Some(record) = attempts_by_delegation.get_mut(&delegation_id) {
@@ -334,6 +336,7 @@ pub(crate) async fn reconstruct_historical_attempts(
                     if record.summary.is_none() {
                         record.summary = summary;
                     }
+                    record.reuse_prior_worktree = reuse_prior_worktree;
                 }
             }
             crate::plan::audit_sentinel::AuditSentinelKind::RetryRequested {
@@ -362,7 +365,7 @@ pub(crate) async fn reconstruct_historical_attempts(
             summary: record.summary,
             feedback: record.feedback,
             dispatched_base_oid: None,
-            reuse_prior_worktree: None,
+            reuse_prior_worktree: record.reuse_prior_worktree,
         })
         .collect();
     history.sort_by_key(|record| record.attempt);
