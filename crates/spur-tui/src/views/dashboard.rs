@@ -154,10 +154,10 @@ impl DashboardView {
             completion: crate::components::input_completion::InputCompletionPort::new(),
             command_registry: crate::commands::CommandRegistry::from_configs(&[]),
             mention_registry: std::rc::Rc::new(std::cell::RefCell::new(
-                crate::mentions::MentionRegistry::new(),
+                crate::mentions::MentionRegistry::new().with_code_graph_from_env(),
             )),
             known_worker_names: HashSet::new(),
-            cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            cwd: spur_graph::resolve_worktree_root(),
             focused_panel: Panel::Log,
             focused_node: None,
             verbose: false,
@@ -260,7 +260,7 @@ impl DashboardView {
     pub fn set_worker_snapshot(&mut self, workers: Vec<crate::mentions::WorkerMentionDescriptor>) {
         self.known_worker_names = workers.iter().map(|d| d.name.clone()).collect();
         self.mention_registry = std::rc::Rc::new(std::cell::RefCell::new(
-            crate::mentions::MentionRegistry::for_brain_session(workers),
+            crate::mentions::MentionRegistry::for_brain_session(workers).with_code_graph_from_env(),
         ));
         self.refresh_mention_issues();
     }
@@ -372,8 +372,14 @@ impl DashboardView {
                 .contains(char::is_whitespace)
         {
             // Mention hint
+            let hint_text = self
+                .mention_registry
+                .borrow()
+                .code_graph_hint()
+                .map(|hint| format!(" Tab to select file \u{00b7} {hint} \u{00b7} Esc to dismiss"))
+                .unwrap_or_else(|| " Tab to select file \u{00b7} Esc to dismiss".to_string());
             Paragraph::new(Span::styled(
-                " Tab to select file \u{00b7} Esc to dismiss",
+                hint_text,
                 Style::default().fg(Color::DarkGray),
             ))
         } else if text.is_empty() {
@@ -1680,6 +1686,19 @@ impl DashboardView {
                                 mut blocks,
                                 interrupt,
                             } => {
+                                if ranges.iter().any(|range| range.uri.starts_with("graph://")) {
+                                    let mut mention_registry = self.mention_registry.borrow_mut();
+                                    mention_registry.retain_code_payloads_for_uris(
+                                        ranges.iter().map(|range| range.uri.as_str()),
+                                    );
+                                    blocks = crate::commands::submit_router::assemble_blocks_with_code_mentions(
+                                        &captured,
+                                        &ranges,
+                                        &pending_images,
+                                        &self.cwd,
+                                        |uri| mention_registry.lookup_code_payload(uri),
+                                    );
+                                }
                                 let _ = crate::mentions::hint::prepend_worker_hint(
                                     &mut blocks,
                                     &ranges,

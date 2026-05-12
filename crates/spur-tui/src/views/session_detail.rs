@@ -237,7 +237,8 @@ impl SessionDetailView {
             crate::mentions::MentionRegistry::for_brain_session(worker_snapshot)
         } else {
             crate::mentions::MentionRegistry::for_direct_session()
-        };
+        }
+        .with_code_graph_from_env();
         mention_registry.set_issue_snapshot(
             issue_snapshot
                 .iter()
@@ -260,7 +261,7 @@ impl SessionDetailView {
             auth_error: None,
             completion: crate::components::input_completion::InputCompletionPort::new(),
             mention_registry: std::rc::Rc::new(std::cell::RefCell::new(mention_registry)),
-            cwd,
+            cwd: spur_graph::resolve_worktree_root_from(cwd),
             #[cfg(feature = "markdown")]
             mermaid_registry: std::collections::HashMap::new(),
             #[cfg(feature = "markdown")]
@@ -346,7 +347,7 @@ impl SessionDetailView {
             auth_error: None,
             completion: crate::components::input_completion::InputCompletionPort::new(),
             mention_registry: std::rc::Rc::new(std::cell::RefCell::new(mention_registry)),
-            cwd: std::path::PathBuf::from("."),
+            cwd: spur_graph::resolve_worktree_root(),
             #[cfg(feature = "markdown")]
             mermaid_registry: std::collections::HashMap::new(),
             #[cfg(feature = "markdown")]
@@ -418,7 +419,8 @@ impl SessionDetailView {
     /// Starts in `LoadState::Retiring`. Transitions via `handle_spur_event`
     /// as milestone events arrive (Tranche 2 Task 5).
     pub fn for_session(session_id: SessionId) -> Self {
-        let mention_registry = crate::mentions::MentionRegistry::for_direct_session();
+        let mention_registry =
+            crate::mentions::MentionRegistry::for_direct_session().with_code_graph_from_env();
         let agent_cfg = std::sync::Arc::new(spur_acp::AgentConfig::with_defaults(""));
         let command_registry =
             crate::commands::CommandRegistry::from_configs(std::slice::from_ref(&*agent_cfg));
@@ -440,7 +442,7 @@ impl SessionDetailView {
             auth_error: None,
             completion: crate::components::input_completion::InputCompletionPort::new(),
             mention_registry: std::rc::Rc::new(std::cell::RefCell::new(mention_registry)),
-            cwd: std::path::PathBuf::from("."),
+            cwd: spur_graph::resolve_worktree_root(),
             #[cfg(feature = "markdown")]
             mermaid_registry: std::collections::HashMap::new(),
             #[cfg(feature = "markdown")]
@@ -1518,6 +1520,21 @@ impl SessionDetailView {
                                     mut blocks,
                                     interrupt,
                                 } => {
+                                    if ranges.iter().any(|range| range.uri.starts_with("graph://"))
+                                    {
+                                        let mut mention_registry =
+                                            self.mention_registry.borrow_mut();
+                                        mention_registry.retain_code_payloads_for_uris(
+                                            ranges.iter().map(|range| range.uri.as_str()),
+                                        );
+                                        blocks = crate::commands::submit_router::assemble_blocks_with_code_mentions(
+                                            &text,
+                                            &ranges,
+                                            &pending_images,
+                                            &self.cwd,
+                                            |uri| mention_registry.lookup_code_payload(uri),
+                                        );
+                                    }
                                     if self.role == "brain" {
                                         let _ = crate::mentions::hint::prepend_worker_hint(
                                             &mut blocks,
@@ -2364,7 +2381,10 @@ impl SessionDetailView {
         }
 
         let input_height = self.input_bar.required_height(content_area.width);
-        let unsafe_banner_height = u16::from(self.fs_unsafe);
+        let graph_hint = (!self.fs_unsafe)
+            .then(|| self.mention_registry.borrow().code_graph_hint())
+            .flatten();
+        let pre_input_banner_height = u16::from(self.fs_unsafe || graph_hint.is_some());
 
         // Compute workers panel height (dynamic: 0 when no active workers).
         // Suppress on very small terminals to avoid squeezing the trace.
@@ -2384,12 +2404,12 @@ impl SessionDetailView {
         };
 
         let chunks = Layout::vertical([
-            Constraint::Length(1),                    // header
-            Constraint::Min(4),                       // react trace (fills)
-            Constraint::Length(workers_h),            // workers panel
-            Constraint::Length(unsafe_banner_height), // unsafe-fs banner
-            Constraint::Length(input_height),         // input bar
-            Constraint::Length(1),                    // status bar
+            Constraint::Length(1),                       // header
+            Constraint::Min(4),                          // react trace (fills)
+            Constraint::Length(workers_h),               // workers panel
+            Constraint::Length(pre_input_banner_height), // pre-input banner
+            Constraint::Length(input_height),            // input bar
+            Constraint::Length(1),                       // status bar
         ])
         .split(content_area);
 
@@ -2499,6 +2519,12 @@ impl SessionDetailView {
                 Style::default()
                     .fg(token(ctx.theme, "session_detail.unsafe_fs.fg"))
                     .bg(token(ctx.theme, "session_detail.unsafe_fs.bg")),
+            ));
+            frame.render_widget(Paragraph::new(banner), chunks[3]);
+        } else if let Some(hint) = graph_hint {
+            let banner = Line::from(Span::styled(
+                format!(" {hint} "),
+                Style::default().fg(Color::DarkGray),
             ));
             frame.render_widget(Paragraph::new(banner), chunks[3]);
         }

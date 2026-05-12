@@ -19,6 +19,7 @@ fn sample_tasks(with_c: bool) -> Vec<PlanTask> {
             task: "Do A.".into(),
             depends_on: Vec::new(),
             issue_id: None,
+            issue_title: None,
             context_files: Vec::new(),
         },
         PlanTask {
@@ -27,6 +28,7 @@ fn sample_tasks(with_c: bool) -> Vec<PlanTask> {
             task: "Do B.".into(),
             depends_on: vec!["a".into()],
             issue_id: Some("bd-42".into()),
+            issue_title: None,
             context_files: Vec::new(),
         },
     ];
@@ -37,6 +39,7 @@ fn sample_tasks(with_c: bool) -> Vec<PlanTask> {
             task: "Do C.".into(),
             depends_on: vec!["a".into(), "b".into()],
             issue_id: None,
+            issue_title: None,
             context_files: Vec::new(),
         });
     }
@@ -121,6 +124,7 @@ fn cycle_produces_error() {
             task: "A".into(),
             depends_on: vec!["b".into()],
             issue_id: None,
+            issue_title: None,
             context_files: Vec::new(),
         },
         PlanTask {
@@ -129,6 +133,7 @@ fn cycle_produces_error() {
             task: "B".into(),
             depends_on: vec!["a".into()],
             issue_id: None,
+            issue_title: None,
             context_files: Vec::new(),
         },
     ];
@@ -185,6 +190,7 @@ async fn review_approve_releases_plan_lock_before_beads_io() {
                 task: "T".into(),
                 depends_on: vec![],
                 issue_id: Some("bd-1".into()),
+                issue_title: None,
                 context_files: vec![],
             },
             status: spur_mcp::plan::PlanTaskStatus::AwaitingReview { summary: None },
@@ -260,6 +266,7 @@ fn tasks_abc() -> Vec<PlanTask> {
             task: "Do A.".into(),
             depends_on: Vec::new(),
             issue_id: None,
+            issue_title: None,
             context_files: Vec::new(),
         },
         PlanTask {
@@ -268,6 +275,7 @@ fn tasks_abc() -> Vec<PlanTask> {
             task: "Do B.".into(),
             depends_on: vec!["a".into()],
             issue_id: None,
+            issue_title: None,
             context_files: Vec::new(),
         },
         PlanTask {
@@ -276,6 +284,7 @@ fn tasks_abc() -> Vec<PlanTask> {
             task: "Do C.".into(),
             depends_on: vec!["b".into()],
             issue_id: None,
+            issue_title: None,
             context_files: Vec::new(),
         },
     ]
@@ -343,6 +352,7 @@ fn build_entries_does_not_overwrite_existing_issue_id() {
         depends_on: Vec::new(),
         // pre-existing source-issue reference
         issue_id: Some("bd-42".into()),
+        issue_title: None,
         context_files: Vec::new(),
     }];
     let mut task_map = HashMap::new();

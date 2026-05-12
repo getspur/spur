@@ -67,6 +67,7 @@ async fn setup_recovery_task(
             task: "Recover this orphan".into(),
             depends_on: Vec::new(),
             issue_id: None,
+            issue_title: None,
             context_files: Vec::new(),
         }],
     )
@@ -151,6 +152,7 @@ async fn recover_orphaned_dispatch_promotes_dispatched_task_to_awaiting_review()
             task: "Recover this orphan".into(),
             depends_on: Vec::new(),
             issue_id: None,
+            issue_title: None,
             context_files: Vec::new(),
         }],
     )

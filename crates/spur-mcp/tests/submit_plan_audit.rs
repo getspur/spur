@@ -29,6 +29,7 @@ fn minimal_tasks() -> Vec<PlanTask> {
             task: "Do T1.".into(),
             depends_on: vec![],
             issue_id: None,
+            issue_title: None,
             context_files: vec![],
         },
         PlanTask {
@@ -37,6 +38,7 @@ fn minimal_tasks() -> Vec<PlanTask> {
             task: "Do T2.".into(),
             depends_on: vec!["t1".into()],
             issue_id: None,
+            issue_title: None,
             context_files: vec![],
         },
     ]

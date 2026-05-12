@@ -21,7 +21,11 @@ fn count_occurrences(contents: &str, needle: &str) -> usize {
 
 #[test]
 fn brain_session_wire_field_literal_in_mcp_server_is_not_policy_key_renamed() {
-    let server = read_workspace_file("crates/spur-mcp/src/server.rs");
+    let server = [
+        read_workspace_file("crates/spur-mcp/src/server/types.rs"),
+        read_workspace_file("crates/spur-mcp/src/server/handlers/delegation_tests.rs"),
+    ]
+    .join("\n");
 
     assert_eq!(
         count_occurrences(&server, "\"core_core_brain_session\""),

@@ -911,6 +911,7 @@ mod topo_tests {
             task: "body".to_string(),
             depends_on: deps.iter().map(|s| s.to_string()).collect(),
             issue_id: None,
+            issue_title: None,
             context_files: Vec::new(),
         }
     }

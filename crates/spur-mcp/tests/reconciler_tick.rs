@@ -126,6 +126,7 @@ fn plan_task(task_id: &str) -> PlanTask {
         task: format!("Do {task_id}."),
         depends_on: Vec::new(),
         issue_id: None,
+        issue_title: None,
         context_files: Vec::new(),
     }
 }
@@ -171,6 +172,7 @@ fn dependent_plan_tasks() -> Vec<PlanTask> {
             task: "Build dependency output.".to_string(),
             depends_on: Vec::new(),
             issue_id: None,
+            issue_title: None,
             context_files: Vec::new(),
         },
         PlanTask {
@@ -179,6 +181,7 @@ fn dependent_plan_tasks() -> Vec<PlanTask> {
             task: "Use dependency output.".to_string(),
             depends_on: vec!["T1".to_string()],
             issue_id: None,
+            issue_title: None,
             context_files: Vec::new(),
         },
     ]

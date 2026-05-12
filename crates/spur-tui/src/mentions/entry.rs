@@ -2,11 +2,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::issue_source::IssueMentionDescriptor;
+use spur_graph::CodeMentionPayload;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MentionKind {
     File,
     Directory,
+    CodeFile,
+    CodeSymbol,
     Worker,
     Issue,
 }
@@ -35,6 +38,10 @@ pub trait MentionSource: Send {
     /// Rebuild the candidate list from scratch.
     fn build(&mut self, cwd: &Path) -> anyhow::Result<Vec<MentionEntry>>;
     fn name(&self) -> &'static str;
+
+    fn code_payloads(&self) -> Vec<(String, CodeMentionPayload)> {
+        Vec::new()
+    }
 }
 
 /// Convert an absolute path under cwd into a `MentionEntry`.
@@ -50,7 +57,10 @@ pub fn entry_for_path(cwd: &Path, abs: &Path) -> Option<MentionEntry> {
     let display = match kind {
         MentionKind::Directory => format!("{}/", rel_str),
         MentionKind::File => rel_str.to_string(),
-        MentionKind::Worker | MentionKind::Issue => {
+        MentionKind::CodeFile
+        | MentionKind::CodeSymbol
+        | MentionKind::Worker
+        | MentionKind::Issue => {
             unreachable!("entry_for_path never builds non-file mentions")
         }
     };
