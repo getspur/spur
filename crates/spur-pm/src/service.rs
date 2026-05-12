@@ -7,6 +7,10 @@ use crate::bv::BvAdapter;
 use crate::github::GitHubAdapter;
 use crate::graph::DependencyGraph;
 use crate::graph_engine::GraphEngineConfig;
+use crate::ingest::github::auth;
+use crate::ingest::github::GitHubSync;
+use crate::ingest::{apply_remote_delta, IngestOptions, IngestReport};
+use crate::sync::{ExternalPmSync, RemoteDelta, SyncResult};
 use crate::types::*;
 
 /// Resolve the beads "closed" status string. Default is `"closed"` — the
@@ -35,6 +39,14 @@ pub struct PmService {
     inner: PmBackendInner,
     bv: Option<BvAdapter>,
     closed_status: String,
+    /// Optional GitHub `ExternalPmSync` for `spur pm ingest github`.
+    /// Populated by `try_new_with_actor` when Beads is the active backend
+    /// AND a GitHub token + repo can be resolved non-interactively. Lives
+    /// alongside `inner` rather than inside `PmBackendInner::Beads` so the
+    /// I-7 invariant (external systems are not peer authorities to Beads)
+    /// stays explicit in the type system — `sync_target("github")` is a
+    /// parallel accessor, not a backend variant.
+    github_sync: Option<Arc<GitHubSync>>,
 }
 
 impl PmService {
@@ -94,7 +106,16 @@ impl PmService {
                 }
             };
             let github = if github_enabled {
-                Self::try_github(github_repo, repo_root).await
+                Self::try_github(github_repo.clone(), repo_root).await
+            } else {
+                None
+            };
+            // `github_sync` is the §8 ingest accessor — distinct from the
+            // legacy `GitHubAdapter` PR-service. Constructed lazily and
+            // silently: any failure leaves it `None` so the CLI can print
+            // a remediation message instead of PmService init bailing out.
+            let github_sync = if github_enabled {
+                Self::try_github_sync(github_repo.clone(), repo_root).await
             } else {
                 None
             };
@@ -105,6 +126,7 @@ impl PmService {
                 },
                 bv,
                 closed_status: resolved_closed,
+                github_sync,
             }));
         }
 
@@ -114,6 +136,7 @@ impl PmService {
                     inner: PmBackendInner::GitHub { adapter: gh },
                     bv: None,
                     closed_status: resolved_closed,
+                    github_sync: None,
                 }));
             }
         }
@@ -128,6 +151,87 @@ impl PmService {
                 tracing::debug!("GitHub PM unavailable: {e}");
                 None
             }
+        }
+    }
+
+    /// Non-interactive `GitHubSync` constructor for the §8 ingest path.
+    ///
+    /// Token resolution: `SPUR_GITHUB_TOKEN` → `gh auth token`. Device flow
+    /// is deliberately skipped here — PmService initialization runs on every
+    /// TUI/CLI startup and must never block on stdin. The CLI subcommand
+    /// re-runs the full [`auth::resolve_token`] chain (which does include
+    /// device flow) when `sync_target` returns `None`, so first-time setup
+    /// still works.
+    ///
+    /// Repo resolution: explicit `repo` arg → `gh repo view --json
+    /// nameWithOwner`. Any failure → `None`; the CLI prints the remediation.
+    async fn try_github_sync(repo: Option<String>, repo_root: &Path) -> Option<Arc<GitHubSync>> {
+        let token = match auth::env_token() {
+            Some(t) => t,
+            None => match auth::gh_cli_token().await {
+                Some(t) => t,
+                None => {
+                    tracing::debug!("GitHub ingest unavailable: no non-interactive token source");
+                    return None;
+                }
+            },
+        };
+        let resolved_repo = match repo {
+            Some(r) if !r.trim().is_empty() => r,
+            _ => match detect_repo_via_gh(repo_root).await {
+                Some(r) => r,
+                None => {
+                    tracing::debug!("GitHub ingest unavailable: no repo configured or detected");
+                    return None;
+                }
+            },
+        };
+        match GitHubSync::from_token(resolved_repo, &token) {
+            Ok(sync) => Some(Arc::new(sync)),
+            Err(e) => {
+                tracing::debug!("GitHub ingest unavailable: client build failed: {e}");
+                None
+            }
+        }
+    }
+
+    /// Look up an external PM sync by source-system tag (`"github"`,
+    /// `"linear"`, …). Gated on Beads being the active backend per I-7;
+    /// returns `None` if the requested system isn't configured.
+    ///
+    /// This is the §8 accessor referenced by the `spur pm ingest …`
+    /// subcommand. `PmBackendInner` is deliberately NOT extended — sync
+    /// targets are auxiliary, not peers of the local source of truth.
+    pub fn sync_target(&self, source_system: &str) -> Option<Arc<dyn ExternalPmSync>> {
+        match (&self.inner, source_system) {
+            (PmBackendInner::Beads { .. }, "github") => self
+                .github_sync
+                .clone()
+                .map(|s| s as Arc<dyn ExternalPmSync>),
+            _ => None,
+        }
+    }
+
+    /// Apply a previously-fetched `RemoteDelta` to the Beads store.
+    ///
+    /// Wrapper around [`crate::ingest::apply_remote_delta`] that hides
+    /// the internal `BeadsCrateAdapter` handle. Returns
+    /// `SyncError::Other("…")` if the active backend isn't Beads —
+    /// the CLI guards this with `sync_target("github").is_some()` so
+    /// the error path is only reachable from misuse.
+    pub async fn apply_remote_delta(
+        &self,
+        sync: &dyn ExternalPmSync,
+        delta: RemoteDelta,
+        opts: &IngestOptions,
+    ) -> SyncResult<IngestReport> {
+        match &self.inner {
+            PmBackendInner::Beads { beads, .. } => {
+                apply_remote_delta(beads, sync, delta, opts).await
+            }
+            PmBackendInner::GitHub { .. } => Err(crate::sync::SyncError::Other(anyhow::anyhow!(
+                "apply_remote_delta requires the beads backend"
+            ))),
         }
     }
 
@@ -237,6 +341,35 @@ impl PmService {
             }
             PmBackendInner::GitHub { .. } => None,
         }
+    }
+}
+
+/// Shell-out to `gh repo view --json nameWithOwner -q .nameWithOwner` from
+/// `repo_root`. Returns the trimmed `owner/name` string on success, `None`
+/// on missing `gh` binary, non-zero exit, or empty stdout.
+async fn detect_repo_via_gh(repo_root: &Path) -> Option<String> {
+    let output = tokio::process::Command::new("gh")
+        .args([
+            "repo",
+            "view",
+            "--json",
+            "nameWithOwner",
+            "-q",
+            ".nameWithOwner",
+        ])
+        .current_dir(repo_root)
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8(output.stdout).ok()?;
+    let trimmed = raw.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
     }
 }
 

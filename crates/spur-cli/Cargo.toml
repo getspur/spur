@@ -47,6 +47,8 @@ file-rotate = "0.8"
 [dev-dependencies]
 tempfile = "3"
 spur-license = { workspace = true, features = ["test-support"] }
+spur-pm = { workspace = true, features = ["test-helpers"] }
 tokio = { workspace = true }
 serde_json = { workspace = true }
+chrono = { workspace = true }
 assert_cmd = "2"

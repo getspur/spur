@@ -5,9 +5,11 @@ pub mod bv;
 pub mod github;
 pub mod graph;
 pub mod graph_engine;
+pub mod ingest;
 pub mod pidfile;
 pub mod poll_cursor;
 pub mod service;
+pub mod sync;
 pub mod test_workspace;
 pub mod types;
 
@@ -17,4 +19,5 @@ pub use bv::BvAdapter;
 pub use github::GitHubAdapter;
 pub use poll_cursor::{PollCursor, POLL_FETCH_LIMIT};
 pub use service::PmService;
+pub use sync::*;
 pub use types::*;

@@ -172,6 +172,9 @@ impl PlanInspectorView {
             body: event.body.clone(),
             created_at: event.created_at,
             updated_at: event.updated_at,
+            external_ref: None,
+            source_system: None,
+            source_repo: None,
         }
     }
 
