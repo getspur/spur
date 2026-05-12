@@ -17,6 +17,10 @@ fn golden_path() -> PathBuf {
         .join("tests/fixtures/sample_corpus/expected_graph_index.json")
 }
 
+fn nested_fn_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/nested_fn_corpus")
+}
+
 #[test]
 fn rust_extractor_matches_sample_corpus_golden_artifact() {
     let root = fixture_root();
@@ -31,6 +35,20 @@ fn rust_extractor_matches_sample_corpus_golden_artifact() {
 
     let expected = fs::read_to_string(golden_path()).expect("read golden artifact");
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn rust_extractor_keeps_nested_functions_inside_methods_as_functions() {
+    let root = nested_fn_fixture_root();
+    let facts = extract_rust_worktree(&root).expect("extract fixture");
+
+    let baz = facts
+        .nodes
+        .iter()
+        .find(|node| node.label == "baz")
+        .expect("nested function is extracted");
+
+    assert_eq!(baz.kind, NodeKind::Function);
 }
 
 #[test]
