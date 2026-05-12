@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use nucleo_matcher::{
@@ -7,6 +8,8 @@ use nucleo_matcher::{
 };
 use spur_acp::SessionId;
 
+use super::code_graph::source::CodeGraphMentionSource;
+use super::code_graph::CodeMentionPayload;
 use super::entry::{MentionEntry, MentionKind, MentionSource};
 use super::file_source::FileMentionSource;
 use super::issue_source::{IssueMentionDescriptor, IssueMentionSource};
@@ -56,6 +59,7 @@ impl From<CompletionScope<'_>> for CompletionScopeKey {
 pub struct MentionRegistry {
     sources: Vec<Box<dyn MentionSource>>,
     cache: HashMap<CompletionScopeKey, CachedIndex>,
+    code_payloads: HashMap<String, CodeMentionPayload>,
     matcher: Matcher,
 }
 
@@ -65,6 +69,7 @@ impl MentionRegistry {
         Self {
             sources: vec![Box::new(FileMentionSource)],
             cache: HashMap::new(),
+            code_payloads: HashMap::new(),
             matcher: Matcher::new(Config::DEFAULT),
         }
     }
@@ -78,8 +83,22 @@ impl MentionRegistry {
                 Box::new(WorkerMentionSource::new(workers)),
             ],
             cache: HashMap::new(),
+            code_payloads: HashMap::new(),
             matcher: Matcher::new(Config::DEFAULT),
         }
+    }
+
+    pub fn with_code_graph(mut self, artifact_path: impl Into<PathBuf>) -> Self {
+        let source: Box<dyn MentionSource> =
+            Box::new(CodeGraphMentionSource::new(artifact_path.into()));
+        let insert_at = self
+            .sources
+            .iter()
+            .position(|source| source.name() != "file")
+            .unwrap_or(self.sources.len());
+        self.sources.insert(insert_at, source);
+        self.clear_cache();
+        self
     }
 
     /// Back-compat alias used by tests and any caller that doesn't
@@ -96,6 +115,17 @@ impl MentionRegistry {
     /// support is added (out of scope for v1).
     pub fn clear_cache(&mut self) {
         self.cache.clear();
+        self.code_payloads.clear();
+    }
+
+    pub fn lookup_code_payload(&self, uri: &str) -> Option<&CodeMentionPayload> {
+        self.code_payloads.get(uri)
+    }
+
+    pub fn retain_code_payloads_for_uris<'a>(&mut self, uris: impl IntoIterator<Item = &'a str>) {
+        let keep: std::collections::HashSet<&str> = uris.into_iter().collect();
+        self.code_payloads
+            .retain(|uri, _| !is_graph_uri(uri) || keep.contains(uri.as_str()));
     }
 
     pub fn set_issue_snapshot(&mut self, issues: Vec<IssueMentionDescriptor>) {
@@ -139,11 +169,14 @@ impl MentionRegistry {
         };
         if needs_rebuild {
             let mut all = Vec::new();
+            let mut code_payloads = HashMap::new();
             for s in &mut self.sources {
                 if let Ok(mut entries) = s.build(cwd) {
                     all.append(&mut entries);
+                    code_payloads.extend(s.code_payloads());
                 }
             }
+            self.code_payloads = code_payloads;
             self.cache.insert(
                 key.clone(),
                 CachedIndex {
@@ -218,6 +251,10 @@ impl MentionRegistry {
     }
 }
 
+fn is_graph_uri(uri: &str) -> bool {
+    uri.starts_with("graph://file/") || uri.starts_with("graph://symbol/")
+}
+
 impl Default for MentionRegistry {
     fn default() -> Self {
         Self::new()
@@ -256,6 +293,7 @@ mod tests {
                 Some("alice"),
             )]))],
             cache: HashMap::new(),
+            code_payloads: HashMap::new(),
             matcher: Matcher::new(Config::DEFAULT),
         };
 
@@ -274,6 +312,7 @@ mod tests {
                 None,
             )]))],
             cache: HashMap::new(),
+            code_payloads: HashMap::new(),
             matcher: Matcher::new(Config::DEFAULT),
         };
 
@@ -297,6 +336,7 @@ mod tests {
                 issue("bd-2", "Deploy Prod", None),
             ]))],
             cache: HashMap::new(),
+            code_payloads: HashMap::new(),
             matcher: Matcher::new(Config::DEFAULT),
         };
 
