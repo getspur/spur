@@ -1108,6 +1108,38 @@ mod tests {
     }
 
     #[test]
+    fn project_attempt_history_preserves_reuse_prior_worktree_true() {
+        let audits = vec![AuditSentinelKind::ReviewFeedback {
+            delegation_id: "del-1".into(),
+            attempt: 1,
+            feedback: "fix edge case".into(),
+            worker_branch: Some("spur/worker-1".into()),
+            summary: Some("partial".into()),
+            reuse_prior_worktree: Some(true),
+        }];
+
+        let history = super::project_attempt_history(&audits);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].reuse_prior_worktree, Some(true));
+    }
+
+    #[test]
+    fn project_attempt_history_preserves_reuse_prior_worktree_none() {
+        let audits = vec![AuditSentinelKind::ReviewFeedback {
+            delegation_id: "del-1".into(),
+            attempt: 1,
+            feedback: "fix edge case".into(),
+            worker_branch: Some("spur/worker-1".into()),
+            summary: Some("partial".into()),
+            reuse_prior_worktree: None,
+        }];
+
+        let history = super::project_attempt_history(&audits);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].reuse_prior_worktree, None);
+    }
+
+    #[test]
     fn project_attempt_history_empty_when_no_review_feedback() {
         let audits = vec![AuditSentinelKind::Dispatch {
             delegation_id: "del-1".into(),
