@@ -82,10 +82,11 @@ impl Governor {
     }
 
     /// Record a REST response's rate-limit headers.
-    pub async fn observe_rest_headers(&self, headers: &HeaderMap) {
-        let remaining = parse_rest_remaining(headers);
-        let reset_at = parse_rest_reset_deadline(headers);
+    pub async fn observe_rest_headers(&self, headers: &HeaderMap) -> SyncResult<()> {
+        let remaining = parse_rest_remaining(headers)?;
+        let reset_at = parse_rest_reset_deadline(headers)?;
         self.observe_rest(remaining, reset_at).await;
+        Ok(())
     }
 
     /// Record a REST response's parsed rate-limit headers.
@@ -195,24 +196,35 @@ impl Governor {
     }
 }
 
-fn parse_rest_remaining(headers: &HeaderMap) -> Option<u32> {
-    headers
-        .get("x-ratelimit-remaining")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse().ok())
+fn parse_rest_remaining(headers: &HeaderMap) -> SyncResult<Option<u32>> {
+    let Some(value) = headers.get("x-ratelimit-remaining") else {
+        return Ok(None);
+    };
+    let raw = value.to_str().map_err(|_| {
+        SyncError::Malformed("x-ratelimit-remaining: non-UTF8 header value".to_string())
+    })?;
+    let parsed = raw.parse::<u32>().map_err(|_| {
+        SyncError::Malformed(format!("x-ratelimit-remaining: unparseable value `{raw}`"))
+    })?;
+    Ok(Some(parsed))
 }
 
-fn parse_rest_reset_deadline(headers: &HeaderMap) -> Option<Instant> {
+fn parse_rest_reset_deadline(headers: &HeaderMap) -> SyncResult<Option<Instant>> {
     let now_instant = Instant::now();
-    let reset_epoch_secs = headers
-        .get("x-ratelimit-reset")?
-        .to_str()
-        .ok()?
-        .parse::<i64>()
-        .ok()?;
+    let Some(value) = headers.get("x-ratelimit-reset") else {
+        return Ok(None);
+    };
+    let raw = value.to_str().map_err(|_| {
+        SyncError::Malformed("x-ratelimit-reset: non-UTF8 header value".to_string())
+    })?;
+    let reset_epoch_secs = raw.parse::<f64>().map(|v| v as i64).map_err(|_| {
+        SyncError::Malformed(format!("x-ratelimit-reset: unparseable value `{raw}`"))
+    })?;
     let now_epoch_secs = Utc::now().timestamp();
     let wait_secs = (reset_epoch_secs - now_epoch_secs).clamp(0, 600);
-    Some(now_instant + std::time::Duration::from_secs(wait_secs as u64))
+    Ok(Some(
+        now_instant + std::time::Duration::from_secs(wait_secs as u64),
+    ))
 }
 
 /// Tagged GitHub client. The Octocrab handle carries the resolved token;
@@ -361,7 +373,9 @@ mod tests {
             (Utc::now().timestamp() + 30).to_string().parse().unwrap(),
         );
 
-        gov.observe_rest_headers(&headers).await;
+        gov.observe_rest_headers(&headers)
+            .await
+            .expect("valid headers");
         let start = Instant::now();
 
         let throttle = tokio::spawn({
@@ -418,7 +432,9 @@ mod tests {
             "x-ratelimit-reset",
             (Utc::now().timestamp() + 60).to_string().parse().unwrap(),
         );
-        gov.observe_rest_headers(&headers).await;
+        gov.observe_rest_headers(&headers)
+            .await
+            .expect("valid headers");
 
         let throttle = tokio::spawn({
             let gov = gov.clone();
@@ -434,7 +450,9 @@ mod tests {
             "x-ratelimit-reset",
             (Utc::now().timestamp() + 60).to_string().parse().unwrap(),
         );
-        gov.observe_rest_headers(&recovered_headers).await;
+        gov.observe_rest_headers(&recovered_headers)
+            .await
+            .expect("valid headers");
 
         tokio::task::yield_now().await;
         assert!(
@@ -442,5 +460,23 @@ mod tests {
             "throttle should wake and complete after budget recovery"
         );
         throttle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rest_header_remaining_malformed_is_error() {
+        let gov = Governor::new(GovernorConfig::default());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-ratelimit-remaining", "not-a-number".parse().unwrap());
+
+        let err = gov
+            .observe_rest_headers(&headers)
+            .await
+            .expect_err("malformed remaining header must error");
+        match err {
+            SyncError::Malformed(msg) => {
+                assert!(msg.contains("x-ratelimit-remaining"), "unexpected: {msg}");
+            }
+            other => panic!("expected SyncError::Malformed, got {other:?}"),
+        }
     }
 }

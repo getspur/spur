@@ -598,11 +598,10 @@ pub async fn apply_remote_delta(
         ..Default::default()
     };
 
-    if opts.dry_run {
-        report.dep_hints_added = delta.nodes.iter().map(|node| node.dep_hints.len()).sum();
-        report.comments_added = delta.nodes.iter().map(|node| node.comments.len()).sum();
-        return Ok(report);
-    }
+    debug_assert!(
+        !opts.dry_run,
+        "apply_remote_delta must not be reached with dry_run=true; CLI intercepts"
+    );
 
     for node in &delta.nodes {
         let outcome = apply_node(beads, source_system, &source_repo, opts, node).await?;
