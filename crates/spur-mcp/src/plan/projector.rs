@@ -101,6 +101,7 @@ pub fn project_attempt_history(audits: &[AuditSentinelKind]) -> Vec<super::Attem
                 feedback,
                 worker_branch,
                 summary,
+                reuse_prior_worktree,
             } => Some(super::AttemptRecord {
                 attempt: *attempt,
                 worker_branch: worker_branch.clone(),
@@ -108,6 +109,7 @@ pub fn project_attempt_history(audits: &[AuditSentinelKind]) -> Vec<super::Attem
                 summary: summary.clone(),
                 feedback: feedback.clone(),
                 dispatched_base_oid: None,
+                reuse_prior_worktree: *reuse_prior_worktree,
             }),
             AuditSentinelKind::RetryRequested {
                 delegation_id: _,
@@ -122,6 +124,7 @@ pub fn project_attempt_history(audits: &[AuditSentinelKind]) -> Vec<super::Attem
                 summary: None,
                 feedback: super::worker_failure_recovery_feedback(error),
                 dispatched_base_oid: None,
+                reuse_prior_worktree: None,
             }),
             _ => None,
         })
@@ -1043,6 +1046,7 @@ mod tests {
                 feedback: "fix".into(),
                 worker_branch: None,
                 summary: None,
+                reuse_prior_worktree: None,
             },
             AuditSentinelKind::Dispatch {
                 delegation_id: "del-middle".into(),
@@ -1079,6 +1083,7 @@ mod tests {
                 feedback: "fix edge case".into(),
                 worker_branch: Some("spur/worker-1".into()),
                 summary: Some("partial".into()),
+                reuse_prior_worktree: None,
             },
             AuditSentinelKind::ReviewFeedback {
                 delegation_id: "del-2".into(),
@@ -1086,6 +1091,7 @@ mod tests {
                 feedback: "also add tests".into(),
                 worker_branch: None,
                 summary: None,
+                reuse_prior_worktree: None,
             },
         ];
 

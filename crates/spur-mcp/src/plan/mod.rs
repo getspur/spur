@@ -124,6 +124,8 @@ pub struct AttemptRecord {
     /// None for legacy attempts dispatched before bd-1dwm Phase 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatched_base_oid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reuse_prior_worktree: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1845,6 +1847,7 @@ pub(crate) async fn emit_review_feedback_audit(
         feedback: feedback.to_string(),
         worker_branch,
         summary,
+        reuse_prior_worktree: None,
     };
     let body = crate::plan::audit_sentinel::encode_comment(&kind);
     if let Err(e) = adv.add_comment(issue_id, &body).await {
@@ -3676,6 +3679,7 @@ pub async fn review_task(
                 // `.take()` moves the value into history and clears entry so the next
                 // attempt starts fresh; T9 will populate it on re-dispatch.
                 dispatched_base_oid: entry.dispatched_base_oid.take(),
+                reuse_prior_worktree: None,
             };
             entry.history.push(current_record);
             entry.result = None;
@@ -3708,6 +3712,7 @@ pub async fn review_task(
                         feedback: fb.to_string(),
                         worker_branch: superseded_branch.clone(),
                         summary: attempt_summary.clone(),
+                        reuse_prior_worktree: None,
                     },
                 );
                 let update = spur_pm::IssueUpdate {
@@ -4009,6 +4014,7 @@ impl PendingAuditEmit {
                         feedback,
                         worker_branch,
                         summary,
+                        reuse_prior_worktree: None,
                     };
                     ops.push(PendingBeadsOp {
                         issue_id,
@@ -4299,6 +4305,7 @@ fn apply_decision_and_extract(
                 // `.take()` moves the value into history and clears entry so the next
                 // attempt starts fresh; T9 will populate it on re-dispatch.
                 dispatched_base_oid: entry.dispatched_base_oid.take(),
+                reuse_prior_worktree: None,
             };
             entry.history.push(current_record);
             entry.result = None;
@@ -5278,6 +5285,7 @@ mod tests {
             summary: Some("did thing".to_string()),
             feedback: "add null check".to_string(),
             dispatched_base_oid: None,
+            reuse_prior_worktree: None,
         }];
         let enriched = super::build_enriched_task(
             "Implement foo",
@@ -5293,6 +5301,22 @@ mod tests {
         assert!(enriched.contains("git show"));
         // Retry-budget marker visible to the worker.
         assert!(enriched.contains("Attempt 2 of 3"));
+    }
+
+    #[test]
+    fn attempt_record_round_trips_reuse_prior_worktree_true() {
+        let record = super::AttemptRecord {
+            attempt: 1,
+            worker_branch: Some("spur/worker-x".to_string()),
+            diff_summary: None,
+            summary: Some("did thing".to_string()),
+            feedback: "add null check".to_string(),
+            dispatched_base_oid: None,
+            reuse_prior_worktree: Some(true),
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        let decoded: super::AttemptRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.reuse_prior_worktree, Some(true));
     }
 
     #[test]
@@ -5317,6 +5341,7 @@ mod tests {
             summary: Some("s".into()),
             feedback: "fb1".into(),
             dispatched_base_oid: None,
+            reuse_prior_worktree: None,
         }];
         let enriched = super::build_enriched_task("Task", &history, "more", 2, super::MAX_ATTEMPTS);
         assert!(!enriched.contains("git show"));
@@ -5331,6 +5356,7 @@ mod tests {
             summary: Some("partial".into()),
             feedback: super::worker_failure_recovery_feedback("worker crashed"),
             dispatched_base_oid: Some("base-oid".into()),
+            reuse_prior_worktree: None,
         }];
 
         let task = super::build_failure_recovery_task(
@@ -5358,6 +5384,7 @@ mod tests {
             summary: None,
             feedback: super::worker_failure_recovery_feedback("Delegation channel closed"),
             dispatched_base_oid: Some("abc123".into()),
+            reuse_prior_worktree: None,
         }];
 
         let task = super::build_failure_recovery_task(
@@ -5400,6 +5427,7 @@ mod tests {
                     "worker failed before producing output",
                 ),
                 dispatched_base_oid: None,
+                reuse_prior_worktree: None,
             }],
             last_delegation_id: Some("del-A".into()),
             dispatched_base_oid: None,
@@ -5435,6 +5463,7 @@ mod tests {
                 summary: Some("partial".into()),
                 feedback: "add the missing test".into(),
                 dispatched_base_oid: None,
+                reuse_prior_worktree: None,
             }],
             last_delegation_id: Some("del-A".into()),
             dispatched_base_oid: None,
@@ -6471,6 +6500,7 @@ mod tests {
                     summary: None,
                     feedback: "fix this".into(),
                     dispatched_base_oid: None,
+                    reuse_prior_worktree: None,
                 },
                 AttemptRecord {
                     attempt: 2,
@@ -6479,6 +6509,7 @@ mod tests {
                     summary: None,
                     feedback: "fix that".into(),
                     dispatched_base_oid: None,
+                    reuse_prior_worktree: None,
                 },
             ],
             last_delegation_id: None,
@@ -6576,6 +6607,7 @@ mod tests {
                 feedback: "fix one".into(),
                 worker_branch: Some("spur/worker-1".into()),
                 summary: Some("partial 1".into()),
+                reuse_prior_worktree: None,
             },
             AuditSentinelKind::Dispatch {
                 delegation_id: "del-2".into(),
@@ -6588,6 +6620,7 @@ mod tests {
                 feedback: "fix two".into(),
                 worker_branch: Some("spur/worker-2".into()),
                 summary: Some("partial 2".into()),
+                reuse_prior_worktree: None,
             },
             AuditSentinelKind::Dispatch {
                 delegation_id: "del-3".into(),
