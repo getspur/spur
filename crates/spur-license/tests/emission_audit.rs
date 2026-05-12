@@ -11,9 +11,34 @@
 //! Any count > 1 for a successful explicit handler call indicates the C9
 //! duplicate-emission defect is still present.
 
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use spur_license::SpurLicense;
+
+static LOCK: Mutex<()> = Mutex::new(());
+static TEST_HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+fn test_home() -> &'static std::path::Path {
+    TEST_HOME
+        .get_or_init(|| {
+            let path = std::env::temp_dir()
+                .join(format!("spur-emission-audit-test-{}", std::process::id()));
+            std::fs::create_dir_all(&path).expect("create isolated emission audit home");
+            path
+        })
+        .as_path()
+}
+
+fn clear_license_env() {
+    std::env::set_var("HOME", test_home());
+    std::env::set_var("XDG_CACHE_HOME", test_home().join(".cache"));
+    std::env::set_var("XDG_CONFIG_HOME", test_home().join(".config"));
+    std::env::set_var("XDG_DATA_HOME", test_home().join(".local/share"));
+    std::env::remove_var("SPUR_LICENSE_DEV_PLAN");
+    std::env::remove_var("SPUR_LICENSESEAT_API_KEY");
+    std::env::remove_var("SPUR_LICENSESEAT_PRODUCT_SLUG");
+}
 
 #[tokio::test]
 #[ignore = "requires live LicenseSeat credentials and a test key"]
@@ -80,6 +105,8 @@ where
 // event-duplication class of bugs has migrated into the disabled path.
 #[tokio::test]
 async fn disabled_provider_emits_no_events_on_explicit_calls() {
+    let _guard = LOCK.lock().unwrap();
+    clear_license_env();
     let license = spur_license::SpurLicense::from_env_or_disabled();
     let mut rx = license.subscribe();
 

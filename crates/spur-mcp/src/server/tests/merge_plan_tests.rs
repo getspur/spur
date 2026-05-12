@@ -90,6 +90,7 @@ async fn setup_persisted_merge_ready_plan(
         task: "Integrate worker branch".into(),
         depends_on: Vec::new(),
         issue_id: None,
+        issue_title: None,
         context_files: Vec::new(),
     }];
     let feature_gate = super::pro_feature_gate();
@@ -292,6 +293,7 @@ async fn setup_persisted_retried_plan(plan_id: &str, clear_cache: bool) -> Persi
         task: "Integrate worker branch".into(),
         depends_on: Vec::new(),
         issue_id: None,
+        issue_title: None,
         context_files: Vec::new(),
     }];
     let feature_gate = super::pro_feature_gate();
@@ -583,6 +585,7 @@ async fn setup_cached_overlay_diff_plan(
             task: "Create foo".into(),
             depends_on: Vec::new(),
             issue_id: None,
+            issue_title: None,
             context_files: Vec::new(),
         },
         PlanTask {
@@ -591,6 +594,7 @@ async fn setup_cached_overlay_diff_plan(
             task: "Create bar".into(),
             depends_on: vec!["task-a".into()],
             issue_id: None,
+            issue_title: None,
             context_files: Vec::new(),
         },
     ];

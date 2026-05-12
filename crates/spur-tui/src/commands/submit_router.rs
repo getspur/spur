@@ -13,6 +13,8 @@
 //! Non-slash text routes to `Send`, assembling blocks by interleaving
 //! `Text` with `ResourceLink`/`Image` blocks from `ranges`.
 
+use std::path::Path;
+
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::Value;
 use spur_acp::{ContentBlock, ResourceLink, SpurAgentCaps, TextContent};
@@ -20,6 +22,8 @@ use spur_acp::{ContentBlock, ResourceLink, SpurAgentCaps, TextContent};
 use crate::action::Action;
 use crate::components::input_bar::{ImageAttachment, ProtectedRange, RangeKind};
 use crate::components::query_source::RetrievalAccept;
+use crate::mentions::code_graph::expansion::{expand, ExpandedMention, PER_PROMPT_CAP_BYTES};
+use spur_graph::CodeMentionPayload;
 
 use super::entry::Dispatch;
 use super::registry::CommandRegistry;
@@ -221,8 +225,35 @@ pub fn assemble_blocks(
     ranges: &[ProtectedRange],
     images: &[ImageAttachment],
 ) -> Vec<ContentBlock> {
+    assemble_blocks_inner(text, ranges, images, None)
+}
+
+type CodeExpansionLookup<'a> = Option<&'a mut dyn FnMut(&str) -> Option<String>>;
+
+pub fn assemble_blocks_with_code_mentions<'a>(
+    text: &str,
+    ranges: &[ProtectedRange],
+    images: &[ImageAttachment],
+    worktree_root: &Path,
+    mut lookup_code_payload: impl FnMut(&str) -> Option<&'a CodeMentionPayload>,
+) -> Vec<ContentBlock> {
+    let mut lookup = |uri: &str| {
+        lookup_code_payload(uri).map(|payload| match expand(payload, worktree_root) {
+            ExpandedMention::Body { text } | ExpandedMention::Warning { text, .. } => text,
+        })
+    };
+    assemble_blocks_inner(text, ranges, images, Some(&mut lookup))
+}
+
+fn assemble_blocks_inner(
+    text: &str,
+    ranges: &[ProtectedRange],
+    images: &[ImageAttachment],
+    mut code_expansion_lookup: CodeExpansionLookup<'_>,
+) -> Vec<ContentBlock> {
     let mut out: Vec<ContentBlock> = Vec::new();
     let mut cursor = 0usize;
+    let mut code_expansion_bytes = 0usize;
     for r in ranges {
         if r.start > cursor {
             out.push(ContentBlock::Text(TextContent::new(
@@ -245,10 +276,32 @@ pub fn assemble_blocks(
                 }
             },
             _ => {
-                out.push(ContentBlock::ResourceLink(ResourceLink::new(
-                    r.name.clone(),
-                    r.uri.clone(),
-                )));
+                if r.uri.starts_with("graph://") {
+                    if let Some(expansion) = code_expansion_lookup
+                        .as_deref_mut()
+                        .and_then(|lookup| lookup(&r.uri))
+                    {
+                        if code_expansion_bytes + expansion.len() > PER_PROMPT_CAP_BYTES {
+                            out.push(ContentBlock::Text(TextContent::new(format!(
+                                "MENTION_OMITTED {} (per-prompt cap)\n",
+                                r.uri
+                            ))));
+                        } else {
+                            code_expansion_bytes += expansion.len();
+                            out.push(ContentBlock::Text(TextContent::new(expansion)));
+                        }
+                    } else {
+                        out.push(ContentBlock::Text(TextContent::new(format!(
+                            "MENTION_WARNING {}\nintended_uri:   {}\nfailure_reason: payload_not_in_registry\nreplaced_with:  dropped\n",
+                            r.name, r.uri
+                        ))));
+                    }
+                } else {
+                    out.push(ContentBlock::ResourceLink(ResourceLink::new(
+                        r.name.clone(),
+                        r.uri.clone(),
+                    )));
+                }
             }
         }
         cursor = r.end;

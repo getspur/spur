@@ -280,6 +280,7 @@ mod tests {
                 task: format!("Do {task_id}."),
                 depends_on: deps.iter().map(|dep| dep.to_string()).collect(),
                 issue_id: Some(format!("bd-{task_id}")),
+                issue_title: None,
                 context_files: Vec::new(),
             },
             status: PlanTaskStatus::Approved { summary: None },

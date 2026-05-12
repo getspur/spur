@@ -29,6 +29,7 @@ async fn create_persisted_plan(
         task: format!("Task for {plan_id}"),
         depends_on: Vec::new(),
         issue_id: None,
+        issue_title: None,
         context_files: Vec::new(),
     }];
     let feature_gate = common::server_builder::pro_feature_gate();
