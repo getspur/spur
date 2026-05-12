@@ -2,12 +2,16 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use spur_acp::ContentBlock;
 use spur_acp::SessionId;
 use spur_graph::validation::compute_anchor_hash;
+use spur_graph::{artifact_from_facts, extract_rust_worktree, write_artifact};
 use spur_tui::commands::submit_router::assemble_blocks_with_code_mentions;
 use spur_tui::components::input_bar::InputBar;
 use spur_tui::mentions::{
     CodeMentionKind, CodeMentionValidationSpec, CompletionScope, IssueMentionDescriptor,
-    MentionKind, MentionRegistry, WorkerMentionDescriptor,
+    MentionKind, MentionRegistry, WorkerMentionDescriptor, CODE_GRAPH_INDEX_ENV,
 };
+use std::sync::Mutex;
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn file_mentions_index_and_fuzzy_match() {
@@ -61,6 +65,58 @@ fn direct_session_excludes_workers() {
     assert!(
         !hits.iter().any(|h| h.kind == MentionKind::Worker),
         "direct session should not surface worker entries"
+    );
+}
+
+#[test]
+fn code_graph_env_missing_records_unobtrusive_hint() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let previous = std::env::var_os(CODE_GRAPH_INDEX_ENV);
+    std::env::remove_var(CODE_GRAPH_INDEX_ENV);
+
+    let reg = MentionRegistry::for_direct_session().with_code_graph_from_env();
+
+    if let Some(previous) = previous {
+        std::env::set_var(CODE_GRAPH_INDEX_ENV, previous);
+    }
+    assert_eq!(
+        reg.code_graph_hint(),
+        Some("Run 'spur graph build' to enable code-graph mentions")
+    );
+}
+
+#[test]
+fn extracted_graph_index_resolves_symbol_payload_through_registry() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("src/lib.rs"),
+        "pub struct Engine;\n\npub fn run() -> Engine {\n    Engine\n}\n",
+    )
+    .unwrap();
+    let artifact_path = dir.path().join(".spur/graph-index.json");
+    let facts = extract_rust_worktree(dir.path()).expect("extract fixture worktree");
+    let artifact = artifact_from_facts(&facts, dir.path()).expect("build artifact");
+    write_artifact(&artifact, &artifact_path).expect("write artifact");
+
+    let mut reg = MentionRegistry::for_direct_session().with_code_graph(&artifact_path);
+    let sid = SessionId::new();
+    let hits = reg.query(CompletionScope::Session(&sid), dir.path(), "Engine", 10);
+    let symbol_uri = hits
+        .iter()
+        .find(|hit| hit.kind == MentionKind::CodeSymbol && hit.display == "Engine")
+        .map(|hit| hit.uri.clone())
+        .expect("Engine symbol mention");
+
+    let payload = reg
+        .lookup_code_payload(&symbol_uri)
+        .expect("symbol payload from registry");
+    assert_eq!(payload.authoritative.display, "Engine");
+    assert_eq!(payload.authoritative.file_path, "src/lib.rs");
+    assert_eq!(
+        payload.extraction_hints.symbol_kind.as_deref(),
+        Some("struct")
     );
 }
 

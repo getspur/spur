@@ -17,6 +17,7 @@ use spur_graph::CodeMentionPayload;
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
 pub const CODE_GRAPH_INDEX_ENV: &str = "SPUR_CODE_GRAPH_INDEX";
+pub const CODE_GRAPH_MISSING_HINT: &str = "Run 'spur graph build' to enable code-graph mentions";
 
 /// Maximum number of worker rows pinned to the top of the empty-query
 /// picker view. See design spec §4.4 / §10.1.
@@ -63,6 +64,7 @@ pub struct MentionRegistry {
     sources: Vec<Box<dyn MentionSource>>,
     cache: HashMap<CompletionScopeKey, CachedIndex>,
     code_payloads: HashMap<String, CodeMentionPayload>,
+    code_graph_hint: Option<&'static str>,
     matcher: Matcher,
 }
 
@@ -73,6 +75,7 @@ impl MentionRegistry {
             sources: vec![Box::new(FileMentionSource)],
             cache: HashMap::new(),
             code_payloads: HashMap::new(),
+            code_graph_hint: None,
             matcher: Matcher::new(Config::DEFAULT),
         }
     }
@@ -87,6 +90,7 @@ impl MentionRegistry {
             ],
             cache: HashMap::new(),
             code_payloads: HashMap::new(),
+            code_graph_hint: None,
             matcher: Matcher::new(Config::DEFAULT),
         }
     }
@@ -100,6 +104,7 @@ impl MentionRegistry {
             .position(|source| source.name() != "file")
             .unwrap_or(self.sources.len());
         self.sources.insert(insert_at, source);
+        self.code_graph_hint = None;
         self.clear_cache();
         self
     }
@@ -113,9 +118,21 @@ impl MentionRegistry {
     /// behavior and avoiding accidental live parsing.
     pub fn with_code_graph_from_env(self) -> Self {
         match std::env::var_os(CODE_GRAPH_INDEX_ENV).filter(|value| !value.is_empty()) {
-            Some(path) => self.with_code_graph(PathBuf::from(path)),
-            None => self,
+            Some(path) => {
+                let path = PathBuf::from(path);
+                if path.is_file() {
+                    self.with_code_graph(path)
+                } else {
+                    self.with_code_graph_hint()
+                }
+            }
+            None => self.with_code_graph_hint(),
         }
+    }
+
+    fn with_code_graph_hint(mut self) -> Self {
+        self.code_graph_hint = Some(CODE_GRAPH_MISSING_HINT);
+        self
     }
 
     /// Back-compat alias used by tests and any caller that doesn't
@@ -137,6 +154,10 @@ impl MentionRegistry {
 
     pub fn lookup_code_payload(&self, uri: &str) -> Option<&CodeMentionPayload> {
         self.code_payloads.get(uri)
+    }
+
+    pub fn code_graph_hint(&self) -> Option<&'static str> {
+        self.code_graph_hint
     }
 
     pub fn retain_code_payloads_for_uris<'a>(&mut self, uris: impl IntoIterator<Item = &'a str>) {
@@ -522,6 +543,7 @@ mod tests {
             )]))],
             cache: HashMap::new(),
             code_payloads: HashMap::new(),
+            code_graph_hint: None,
             matcher: Matcher::new(Config::DEFAULT),
         };
 
@@ -541,6 +563,7 @@ mod tests {
             )]))],
             cache: HashMap::new(),
             code_payloads: HashMap::new(),
+            code_graph_hint: None,
             matcher: Matcher::new(Config::DEFAULT),
         };
 
@@ -565,6 +588,7 @@ mod tests {
             ]))],
             cache: HashMap::new(),
             code_payloads: HashMap::new(),
+            code_graph_hint: None,
             matcher: Matcher::new(Config::DEFAULT),
         };
 
