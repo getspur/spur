@@ -119,6 +119,7 @@ fn wide_char_cursor_desync_simulation() {
     {
         let mut ctx = RenderContext {
             mermaid_registry: &registry,
+            mermaid_registry_version: 0,
             picker: None,
             image_cache: &mut cache,
         };
@@ -140,6 +141,7 @@ fn wide_char_cursor_desync_simulation() {
     {
         let mut ctx = RenderContext {
             mermaid_registry: &registry,
+            mermaid_registry_version: 0,
             picker: None,
             image_cache: &mut cache,
         };
