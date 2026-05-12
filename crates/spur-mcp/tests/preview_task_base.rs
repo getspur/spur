@@ -138,12 +138,8 @@ async fn persist_plan(pm: &MockPm, mut state: PlanState) {
                 labels::PLAN_COMPLETE.to_string(),
             ],
             parent: None,
-            assignee: None,
-            estimate_minutes: None,
-            external_ref: None,
-            source_system: None,
-            source_repo: None,
             depends_on: Vec::new(),
+            ..Default::default()
         })
         .await
         .expect("create mock epic");
@@ -174,12 +170,8 @@ async fn persist_plan(pm: &MockPm, mut state: PlanState) {
                     labels::agent(&entry.spec.agent),
                 ],
                 parent: Some(epic_id.clone()),
-                assignee: None,
-                estimate_minutes: None,
-                external_ref: None,
-                source_system: None,
-                source_repo: None,
                 depends_on,
+                ..Default::default()
             })
             .await
             .expect("create mock task");
