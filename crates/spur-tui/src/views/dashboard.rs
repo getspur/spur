@@ -1680,6 +1680,16 @@ impl DashboardView {
                                 mut blocks,
                                 interrupt,
                             } => {
+                                if ranges.iter().any(|range| range.uri.starts_with("graph://")) {
+                                    let mention_registry = self.mention_registry.borrow();
+                                    blocks = crate::commands::submit_router::assemble_blocks_with_code_mentions(
+                                        &captured,
+                                        &ranges,
+                                        &pending_images,
+                                        &self.cwd,
+                                        |uri| mention_registry.lookup_code_payload(uri),
+                                    );
+                                }
                                 let _ = crate::mentions::hint::prepend_worker_hint(
                                     &mut blocks,
                                     &ranges,

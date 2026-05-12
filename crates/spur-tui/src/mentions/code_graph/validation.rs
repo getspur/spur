@@ -23,6 +23,7 @@ pub enum FailureReason {
     /// valid single identifier for this byte-level predicate.
     NameNotFound,
     FileMissing,
+    BodyTooLarge,
 }
 
 pub fn validate_file(payload: &FilePayload, worktree_root: &Path) -> ValidationOutcome {
