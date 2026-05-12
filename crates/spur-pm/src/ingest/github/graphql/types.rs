@@ -50,8 +50,13 @@ impl IngestRepoVariables {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct IngestRepoData {
     pub repository: Option<RepositoryNode>,
+    // `rateLimit` is a top-level Query field in GitHub's GraphQL schema,
+    // NOT a field on `Repository`. Initial spec placed it under repository
+    // and the API rejected the query.
+    pub rate_limit: Option<RateLimit>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -59,7 +64,6 @@ pub struct IngestRepoData {
 pub struct RepositoryNode {
     pub issues: IssueConnection,
     pub pull_requests: PrConnection,
-    pub rate_limit: Option<RateLimit>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
