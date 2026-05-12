@@ -176,6 +176,48 @@ async fn persist_dispatched_base_oid_label(
     })
 }
 
+async fn preapply_prior_branch_for_reuse(
+    worktrees: &WorktreeManager,
+    worktree_path: &std::path::Path,
+    plan_base_oid: &str,
+    prior_branch: &str,
+) {
+    let diff_output = match worktrees
+        .diff_binary_between_refs(plan_base_oid, prior_branch)
+        .await
+    {
+        Ok(diff) => diff,
+        Err(err) => {
+            tracing::warn!(
+                prior_branch = prior_branch,
+                plan_base_oid = plan_base_oid,
+                error = %err,
+                "pre-apply: git diff failed; leaving worktree at clean computed base"
+            );
+            return;
+        }
+    };
+
+    if let Err(err) = worktrees
+        .apply_patch_3way(worktree_path, &diff_output)
+        .await
+    {
+        tracing::warn!(
+            prior_branch = prior_branch,
+            plan_base_oid = plan_base_oid,
+            error = %err,
+            "pre-apply: git apply --3way failed; scrubbing worktree",
+        );
+        if let Err(scrub_err) = worktrees.scrub_worktree(worktree_path).await {
+            tracing::warn!(
+                prior_branch = prior_branch,
+                error = %scrub_err,
+                "pre-apply: failed to scrub worktree after apply failure"
+            );
+        }
+    }
+}
+
 /// Returns `Ok(WorkerAttemptOutcome)` for any flow that produced a
 /// worker candidate status — success OR worker-reported errors — both
 /// of which are retry-eligible (the human reviewer decides).
@@ -285,6 +327,15 @@ pub(crate) async fn run_one_worker_attempt(
     worktrees
         .update_base_commit(&worker_session, dispatched_base_oid.clone())
         .map_err(|e| AttemptSetupError::WorktreeFailed(format!("update base commit: {e}")))?;
+    if let Some(prior_branch) = ctx.prior_branch_for_reuse.as_deref() {
+        preapply_prior_branch_for_reuse(
+            worktrees,
+            &worktree_info.path,
+            &dispatched_base_oid,
+            prior_branch,
+        )
+        .await;
+    }
     if let Err(e) = persist_dispatched_base_oid_label(
         ctx.pm_service,
         ctx.issue_id.as_deref(),
@@ -851,5 +902,147 @@ mod context_files_wiring_tests {
     fn format_worker_task_is_available_in_orchestrator_module() {
         let out = format_worker_task("t", &["x".into()]);
         assert!(out.contains("## Relevant Files"));
+    }
+}
+
+#[cfg(test)]
+mod prior_branch_preapply_tests {
+    use super::preapply_prior_branch_for_reuse;
+    use spur_worktree::manager::WorktreeManager;
+    use std::path::Path;
+    use std::process::Command;
+
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("run git");
+        if !out.status.success() {
+            panic!(
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn write(path: &Path, body: &str) {
+        std::fs::write(path, body).expect("write file");
+    }
+
+    fn setup_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        git(dir.path(), &["config", "user.email", "t@t"]);
+        git(dir.path(), &["config", "user.name", "t"]);
+        write(&dir.path().join("a.txt"), "base\n");
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "base"]);
+        dir
+    }
+
+    #[tokio::test]
+    async fn happy_path_applies_prior_diff_as_dirty_worktree_edits() {
+        let dir = setup_repo();
+        git(dir.path(), &["checkout", "-q", "-b", "prior"]);
+        write(&dir.path().join("a.txt"), "from-prior\n");
+        write(&dir.path().join("b.txt"), "new-file\n");
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "prior change"]);
+        git(dir.path(), &["checkout", "-q", "main"]);
+
+        let wt_path = dir.path().join("wt");
+        git(
+            dir.path(),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "worker-happy",
+                wt_path.to_str().expect("utf8"),
+                "main",
+            ],
+        );
+        let plan_base = git(dir.path(), &["rev-parse", "main"]);
+
+        let manager = WorktreeManager::new(dir.path().to_path_buf());
+        preapply_prior_branch_for_reuse(&manager, &wt_path, &plan_base, "prior").await;
+
+        let status = git(&wt_path, &["status", "--porcelain"]);
+        assert_ne!(status, "");
+        assert!(status.contains("a.txt"));
+        assert!(status.contains("b.txt"));
+        assert_eq!(
+            std::fs::read_to_string(wt_path.join("a.txt")).expect("read a.txt"),
+            "from-prior\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt_path.join("b.txt")).expect("read b.txt"),
+            "new-file\n"
+        );
+        assert_eq!(git(&wt_path, &["rev-parse", "HEAD"]), plan_base);
+    }
+
+    #[tokio::test]
+    async fn missing_branch_leaves_worktree_clean() {
+        let dir = setup_repo();
+        let wt_path = dir.path().join("wt");
+        git(
+            dir.path(),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "worker-missing",
+                wt_path.to_str().expect("utf8"),
+                "main",
+            ],
+        );
+        let plan_base = git(dir.path(), &["rev-parse", "main"]);
+
+        let manager = WorktreeManager::new(dir.path().to_path_buf());
+        preapply_prior_branch_for_reuse(&manager, &wt_path, &plan_base, "nonexistent").await;
+
+        assert_eq!(git(&wt_path, &["status", "--porcelain"]), "");
+        assert_eq!(git(&wt_path, &["rev-parse", "HEAD"]), plan_base);
+    }
+
+    #[tokio::test]
+    async fn conflict_path_scrubs_partial_apply_state() {
+        let dir = setup_repo();
+        let plan_base = git(dir.path(), &["rev-parse", "main"]);
+
+        git(dir.path(), &["checkout", "-q", "-b", "prior", &plan_base]);
+        write(&dir.path().join("a.txt"), "prior-branch-change\n");
+        git(dir.path(), &["add", "a.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "prior change"]);
+        git(dir.path(), &["checkout", "-q", "main"]);
+
+        let wt_path = dir.path().join("wt");
+        git(
+            dir.path(),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "worker-conflict",
+                wt_path.to_str().expect("utf8"),
+                "main",
+            ],
+        );
+        write(&wt_path.join("a.txt"), "overlay-change\n");
+
+        let manager = WorktreeManager::new(dir.path().to_path_buf());
+        preapply_prior_branch_for_reuse(&manager, &wt_path, &plan_base, "prior").await;
+
+        assert_eq!(git(&wt_path, &["status", "--porcelain"]), "");
+        let body = std::fs::read_to_string(wt_path.join("a.txt")).expect("read a.txt");
+        assert!(!body.contains("<<<<<<<"));
+        assert_eq!(body, "base\n");
     }
 }
