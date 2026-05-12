@@ -50,3 +50,19 @@ fn graph_id_newtypes_are_not_interchangeable_at_runtime() {
     assert_eq!(edge_id.get(), 42);
     assert_ne!(format!("{node_id:?}"), format!("{edge_id:?}"));
 }
+
+#[test]
+fn node_kind_discriminators_are_stable_contracts() {
+    assert_eq!(NodeKind::File.discriminator(), "file");
+    assert_eq!(NodeKind::Module.discriminator(), "module");
+    assert_eq!(NodeKind::Function.discriminator(), "function");
+    assert_eq!(NodeKind::Method.discriminator(), "method");
+    assert_eq!(NodeKind::Struct.discriminator(), "struct");
+    assert_eq!(NodeKind::Enum.discriminator(), "enum");
+    assert_eq!(NodeKind::Trait.discriminator(), "trait");
+    assert_eq!(NodeKind::Impl.discriminator(), "impl");
+    assert_eq!(NodeKind::Field.discriminator(), "field");
+    assert_eq!(NodeKind::Constant.discriminator(), "constant");
+    assert_eq!(NodeKind::TypeAlias.discriminator(), "type_alias");
+    assert_eq!(NodeKind::Macro.discriminator(), "macro");
+}

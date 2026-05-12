@@ -11,7 +11,7 @@ use crate::{
     NodeKind, RelationKind, SourceSpan,
 };
 
-pub const PHASE1_GRAPH_INDEX_VERSION: &str = "spur-graph-phase1-rust";
+pub const PHASE1_GRAPH_INDEX_VERSION: &str = "spur-graph-phase2";
 
 pub fn artifact_from_facts(
     facts: &GraphFacts,
