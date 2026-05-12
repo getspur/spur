@@ -118,6 +118,7 @@ pub(crate) struct WorkerAttemptCtx<'a> {
     pub(crate) agent_config: &'a spur_acp::config::AgentConfig,
     pub(crate) delegation_plan: Option<spur_acp::domain::DelegationPlan>,
     pub(crate) issue_id: Option<String>,
+    pub(crate) prior_branch_for_reuse: Option<String>,
     pub(crate) peer_mailbox: Option<&'a crate::peer_mailbox::PeerMailboxBundle>,
     pub(crate) ack_tx: Option<tokio::sync::mpsc::UnboundedSender<()>>,
     pub(crate) base: Option<BaseSpec>,

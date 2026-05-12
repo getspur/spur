@@ -898,6 +898,7 @@ impl Reconciler {
                 agent: task.spec.agent.clone(),
                 task: task_text,
                 context_files: task.spec.context_files.clone(),
+                prior_branch_for_reuse: None,
                 respond_to,
                 brain_session_id: dispatch.brain_session_id.clone(),
                 delegation_plan: None,
