@@ -6,8 +6,12 @@ use anyhow::{anyhow, Context};
 use sha2::{Digest, Sha256};
 use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
-use crate::discovery::discover_rust_files;
-use crate::extract::languages::{emit_definitions, emit_edges, rust_config};
+use crate::discovery::discover_files;
+use crate::extract::languages::{
+    all_supported_extensions, emit_definitions, emit_edges, language_registry, LanguageConfig,
+    LanguageDescriptor,
+};
+use crate::extract::markdown::extract_markdown_file;
 use crate::extract::GraphFacts;
 use crate::{
     Confidence, EdgeId, EvidenceId, FileId, GraphEdge, GraphNode, NodeId, NodeKind, RelationKind,
@@ -40,9 +44,17 @@ pub(crate) struct CaptureHit<'tree> {
     pub(crate) node: Node<'tree>,
 }
 
-struct CompiledQueries {
-    tags: Query,
-    spur_edges: Query,
+pub(crate) struct CompiledQueries {
+    pub(crate) tags: Query,
+    pub(crate) spur_edges: Option<Query>,
+    pub(crate) inline_spur_edges: Option<Query>,
+}
+
+#[derive(Debug)]
+pub(crate) struct LanguageFileGroup {
+    pub(crate) label: &'static str,
+    pub(crate) config: LanguageConfig,
+    pub(crate) files: Vec<PathBuf>,
 }
 
 impl<'a> FactBuilder<'a> {
@@ -58,6 +70,32 @@ impl<'a> FactBuilder<'a> {
             symbol_index: BTreeMap::new(),
             edge_index: HashSet::new(),
         }
+    }
+
+    pub(crate) fn root(&self) -> &'a Path {
+        self.root
+    }
+
+    pub(crate) fn next_file_id(&mut self) -> u64 {
+        let next = self.next_file;
+        self.next_file += 1;
+        next
+    }
+
+    pub(crate) fn add_file_node(
+        &mut self,
+        relative_path: &str,
+        file_id: FileId,
+        root_node: Node<'_>,
+    ) -> NodeId {
+        self.add_node(
+            relative_path,
+            relative_path.to_string(),
+            relative_path.to_string(),
+            NodeKind::File,
+            file_id,
+            root_node,
+        )
     }
 
     pub(crate) fn add_node(
@@ -112,12 +150,14 @@ impl<'a> FactBuilder<'a> {
             relation,
             confidence: match relation {
                 RelationKind::Contains => Confidence::SyntaxExact,
-                RelationKind::Calls | RelationKind::Imports => Confidence::Heuristic,
+                RelationKind::Calls | RelationKind::Imports | RelationKind::Links => {
+                    Confidence::Heuristic
+                }
                 _ => Confidence::Heuristic,
             },
             confidence_score: match relation {
                 RelationKind::Contains => 1.0,
-                RelationKind::Calls | RelationKind::Imports => 0.8,
+                RelationKind::Calls | RelationKind::Imports | RelationKind::Links => 0.8,
                 _ => 0.5,
             },
             evidence_id: EvidenceId(edge_id.get()),
@@ -132,6 +172,11 @@ impl<'a> FactBuilder<'a> {
                 by_label.insert(label.clone(), *id);
             }
         }
+        for node in &self.facts.nodes {
+            if node.kind == NodeKind::File {
+                by_label.entry(node.label.clone()).or_insert(node.node_id);
+            }
+        }
         let pending = std::mem::take(&mut self.pending_edges);
         for edge in pending {
             if let Some(target) = by_label.get(&edge.target_name).copied() {
@@ -143,37 +188,75 @@ impl<'a> FactBuilder<'a> {
     }
 }
 
-pub fn extract_rust_worktree(root: &Path) -> anyhow::Result<GraphFacts> {
+pub fn build_facts(root: &Path) -> anyhow::Result<(GraphFacts, BTreeMap<&'static str, usize>)> {
     let root = root
         .canonicalize()
         .with_context(|| format!("failed to canonicalize `{}`", root.display()))?;
-    let files = discover_rust_files(&root)?;
-    extract_rust_files(&root, &files)
+    let (groups, file_counts) = discover_language_groups(&root)?;
+    let extract_groups: Vec<_> = groups
+        .into_iter()
+        .map(|group| (group.label, group.config, group.files))
+        .collect();
+    let facts = extract_files(&root, &extract_groups)?;
+    Ok((facts, file_counts))
 }
 
-fn extract_rust_files(root: &Path, files: &[PathBuf]) -> anyhow::Result<GraphFacts> {
-    let config = rust_config();
+fn extract_files(
+    root: &Path,
+    groups: &[(&'static str, LanguageConfig, Vec<PathBuf>)],
+) -> anyhow::Result<GraphFacts> {
     let mut parser = Parser::new();
-    parser
-        .set_language(&config.language)
-        .map_err(|err| anyhow!("failed to configure tree-sitter Rust parser: {err}"))?;
-    let queries = compile_queries(&config)?;
-
     let mut builder = FactBuilder::new(root);
-    for path in files {
-        let source = fs::read_to_string(path)
-            .with_context(|| format!("failed to read Rust source `{}`", path.display()))?;
-        let tree = parser
-            .parse(&source, None)
-            .ok_or_else(|| anyhow!("tree-sitter failed to parse `{}`", path.display()))?;
-        extract_file(
-            &mut builder,
-            &config,
-            path,
-            &source,
-            tree.root_node(),
-            &queries,
-        )?;
+    let mut compiled_queries_cache: HashMap<&'static str, CompiledQueries> = HashMap::new();
+
+    for (label, config, files) in groups {
+        parser.set_language(&config.language).map_err(|err| {
+            anyhow!("failed to configure tree-sitter parser for `{label}`: {err}")
+        })?;
+        if !compiled_queries_cache.contains_key(label) {
+            compiled_queries_cache.insert(*label, compile_queries(config, label)?);
+        }
+        let queries = compiled_queries_cache
+            .get(label)
+            .ok_or_else(|| anyhow!("missing compiled query cache entry for `{label}`"))?;
+        let mut markdown_inline_parser = if *label == "markdown" {
+            let mut parser = Parser::new();
+            if let Some(inline_language) = config.inline_language.as_ref() {
+                parser.set_language(inline_language).map_err(|err| {
+                    anyhow!("failed to configure markdown inline parser for `{label}`: {err}")
+                })?;
+            }
+            Some(parser)
+        } else {
+            None
+        };
+        for path in files {
+            let source = fs::read_to_string(path)
+                .with_context(|| format!("failed to read source `{}`", path.display()))?;
+            let tree = parser
+                .parse(&source, None)
+                .ok_or_else(|| anyhow!("tree-sitter failed to parse `{}`", path.display()))?;
+            if *label == "markdown" {
+                extract_markdown_file(
+                    &mut builder,
+                    config,
+                    path,
+                    &source,
+                    tree.root_node(),
+                    queries,
+                    markdown_inline_parser.as_mut(),
+                )?;
+            } else {
+                extract_file(
+                    &mut builder,
+                    config,
+                    path,
+                    &source,
+                    tree.root_node(),
+                    queries,
+                )?;
+            }
+        }
     }
     builder.resolve_pending_edges();
     Ok(builder.facts)
@@ -187,17 +270,9 @@ fn extract_file(
     root_node: Node<'_>,
     queries: &CompiledQueries,
 ) -> anyhow::Result<()> {
-    let relative_path = relative_path(builder.root, path)?;
-    let file_id = FileId(builder.next_file);
-    builder.next_file += 1;
-    let file_node = builder.add_node(
-        &relative_path,
-        relative_path.clone(),
-        relative_path.clone(),
-        NodeKind::File,
-        file_id,
-        root_node,
-    );
+    let relative_path = relative_path(builder.root(), path)?;
+    let file_id = FileId(builder.next_file_id());
+    let file_node = builder.add_file_node(&relative_path, file_id, root_node);
 
     let tag_captures = run_query(&queries.tags, root_node, source);
     let definitions = emit_definitions(
@@ -209,32 +284,107 @@ fn extract_file(
         source,
         &tag_captures,
     );
-    let edge_captures = run_query(&queries.spur_edges, root_node, source);
-    emit_edges(builder, file_node, source, &definitions, &edge_captures);
+    if let Some(spur_edges) = queries.spur_edges.as_ref() {
+        let edge_captures = run_query(spur_edges, root_node, source);
+        emit_edges(
+            config,
+            builder,
+            file_node,
+            source,
+            &definitions,
+            &edge_captures,
+        );
+    }
     Ok(())
 }
 
 fn compile_queries(
-    config: &crate::extract::languages::LanguageConfig,
+    config: &LanguageConfig,
+    language_label: &str,
 ) -> anyhow::Result<CompiledQueries> {
     let mut tags = None;
     let mut spur_edges = None;
+    let mut inline_spur_edges = None;
     for (name, source) in config.queries {
-        let query = Query::new(&config.language, source)
-            .with_context(|| format!("failed to compile Rust tree-sitter query `{name}`"))?;
         match *name {
-            "tags" => tags = Some(query),
-            "spur-edges" => spur_edges = Some(query),
-            name => return Err(anyhow!("unknown Rust tree-sitter query name `{name}`")),
+            "tags" => {
+                tags = Some(Query::new(&config.language, source).with_context(|| {
+                    format!("failed to compile tree-sitter query `{name}` for `{language_label}`")
+                })?);
+            }
+            "spur-edges" => {
+                spur_edges = Some(Query::new(&config.language, source).with_context(|| {
+                    format!("failed to compile tree-sitter query `{name}` for `{language_label}`")
+                })?);
+            }
+            "inline-spur-edges" => {
+                let inline_language = config.inline_language.as_ref().ok_or_else(|| {
+                    anyhow!(
+                        "query `{name}` declared for `{language_label}` but inline language is not configured"
+                    )
+                })?;
+                inline_spur_edges =
+                    Some(Query::new(inline_language, source).with_context(|| {
+                        format!(
+                        "failed to compile inline tree-sitter query `{name}` for `{language_label}`"
+                    )
+                    })?);
+            }
+            name => {
+                return Err(anyhow!(
+                    "unknown tree-sitter query name `{name}` for `{language_label}`"
+                ));
+            }
         }
     }
     Ok(CompiledQueries {
-        tags: tags.context("missing Rust tags query")?,
-        spur_edges: spur_edges.context("missing Rust SPUR edge query")?,
+        tags: tags.with_context(|| format!("missing `{language_label}` tags query"))?,
+        spur_edges,
+        inline_spur_edges,
     })
 }
 
-fn run_query<'tree>(query: &Query, root_node: Node<'tree>, source: &str) -> Vec<CaptureHit<'tree>> {
+fn discover_language_groups(
+    root: &Path,
+) -> anyhow::Result<(Vec<LanguageFileGroup>, BTreeMap<&'static str, usize>)> {
+    let allowed_extensions = all_supported_extensions();
+    let files = discover_files(root, &allowed_extensions)?;
+    let mut groups: BTreeMap<&'static str, (fn() -> LanguageConfig, Vec<PathBuf>)> =
+        BTreeMap::new();
+    let descriptors: &[LanguageDescriptor] = language_registry();
+    for path in files {
+        let Some(descriptor) = descriptors.iter().find(|d| (d.matcher)(&path)) else {
+            continue;
+        };
+        groups
+            .entry(descriptor.label)
+            .or_insert_with(|| (descriptor.factory, Vec::new()))
+            .1
+            .push(path);
+    }
+
+    let file_counts = groups
+        .iter()
+        .map(|(label, (_, files))| (*label, files.len()))
+        .collect();
+
+    let language_groups = groups
+        .into_iter()
+        .map(|(label, (factory, files))| LanguageFileGroup {
+            label,
+            config: factory(),
+            files,
+        })
+        .collect();
+
+    Ok((language_groups, file_counts))
+}
+
+pub(crate) fn run_query<'tree>(
+    query: &Query,
+    root_node: Node<'tree>,
+    source: &str,
+) -> Vec<CaptureHit<'tree>> {
     let capture_names = query.capture_names();
     let mut cursor = QueryCursor::new();
     let mut captures = cursor.captures(query, root_node, source.as_bytes());
@@ -263,7 +413,7 @@ fn stable_key(relative_path: &str, fqn: &str, kind: NodeKind) -> String {
     )
 }
 
-fn relative_path(root: &Path, path: &Path) -> anyhow::Result<String> {
+pub(crate) fn relative_path(root: &Path, path: &Path) -> anyhow::Result<String> {
     let relative = path
         .strip_prefix(root)
         .with_context(|| format!("`{}` is outside `{}`", path.display(), root.display()))?;

@@ -45,11 +45,15 @@ pub fn artifact_from_facts(
             }),
             NodeKind::Module
             | NodeKind::Function
+            | NodeKind::Class
+            | NodeKind::Interface
             | NodeKind::Struct
             | NodeKind::Impl
             | NodeKind::Trait
             | NodeKind::Enum
-            | NodeKind::Method => {
+            | NodeKind::Method
+            | NodeKind::TypeAlias
+            | NodeKind::Section => {
                 let file_path = file_path_for_span(facts, span).unwrap_or_default();
                 let anchor_hash = anchor_hash(worktree_root, &file_path, span)?;
                 symbols.push(GraphSymbolArtifact {
@@ -117,11 +121,15 @@ fn symbol_kind(kind: NodeKind) -> &'static str {
     match kind {
         NodeKind::Module => "module",
         NodeKind::Function => "function",
+        NodeKind::Class => "class",
+        NodeKind::Interface => "interface",
         NodeKind::Struct => "struct",
         NodeKind::Impl => "impl",
         NodeKind::Trait => "trait",
         NodeKind::Enum => "enum",
         NodeKind::Method => "method",
+        NodeKind::TypeAlias => "type_alias",
+        NodeKind::Section => "section",
         _ => "symbol",
     }
 }

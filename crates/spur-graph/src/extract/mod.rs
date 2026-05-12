@@ -1,7 +1,8 @@
 pub mod languages;
+pub mod markdown;
 pub mod tree_sitter;
 
-pub use tree_sitter::extract_rust_worktree;
+pub use tree_sitter::build_facts;
 
 use crate::{GraphEdge, GraphNode, SourceSpan};
 
