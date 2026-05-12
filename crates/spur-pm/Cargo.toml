@@ -6,6 +6,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+test-helpers = []
+
 [dependencies]
 anyhow = { workspace = true }
 fs2 = "0.4"
