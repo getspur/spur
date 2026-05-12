@@ -23,7 +23,7 @@ use crate::action::Action;
 use crate::components::input_bar::{ImageAttachment, ProtectedRange, RangeKind};
 use crate::components::query_source::RetrievalAccept;
 use crate::mentions::code_graph::expansion::{expand, ExpandedMention, PER_PROMPT_CAP_BYTES};
-use crate::mentions::code_graph::CodeMentionPayload;
+use spur_graph::CodeMentionPayload;
 
 use super::entry::Dispatch;
 use super::registry::CommandRegistry;

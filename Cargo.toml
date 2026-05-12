@@ -15,6 +15,7 @@ members = [
     "crates/spur-bot",
     "crates/spur-cli",
     "crates/spur-context",
+    "crates/spur-graph",
 ]
 [workspace.package]
 version = "1.1.5"
@@ -97,6 +98,7 @@ spur-tui = { path = "crates/spur-tui" }
 spur-interactive = { path = "crates/spur-interactive" }
 spur-bot = { path = "crates/spur-bot" }
 spur-context = { path = "crates/spur-context" }
+spur-graph = { path = "crates/spur-graph" }
 
 # The profile that 'dist' will build with
 [profile.dist]

@@ -1,9 +1,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use spur_acp::ContentBlock;
 use spur_acp::SessionId;
+use spur_graph::validation::compute_anchor_hash;
 use spur_tui::commands::submit_router::assemble_blocks_with_code_mentions;
 use spur_tui::components::input_bar::InputBar;
-use spur_tui::mentions::code_graph::validation::compute_anchor_hash;
 use spur_tui::mentions::{
     CodeMentionKind, CodeMentionValidationSpec, CompletionScope, IssueMentionDescriptor,
     MentionKind, MentionRegistry, WorkerMentionDescriptor,

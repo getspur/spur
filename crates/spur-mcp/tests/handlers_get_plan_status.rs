@@ -28,6 +28,7 @@ fn make_plan_state(plan_id: &str) -> PlanState {
                 task: "do the thing".into(),
                 depends_on: vec![],
                 issue_id: None,
+                issue_title: None,
                 context_files: vec![],
             },
             status: PlanTaskStatus::Approved { summary: None },
