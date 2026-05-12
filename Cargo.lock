@@ -6896,6 +6896,7 @@ dependencies = [
  "clap",
  "directories",
  "file-rotate",
+ "rustls",
  "serde",
  "serde_json",
  "spur-acp",

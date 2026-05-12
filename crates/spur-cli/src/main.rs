@@ -457,6 +457,13 @@ enum BotCommands {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // rustls 0.23 requires an explicit default CryptoProvider before any TLS
+    // handshake. `octocrab` (used by `spur pm ingest github`) pulls in rustls
+    // and would otherwise panic on first network call. `install_default()` is
+    // a no-op if a provider is already installed, so the `.ok()` swallows the
+    // re-install error from any future caller that wired a provider earlier.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {

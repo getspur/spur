@@ -5,7 +5,7 @@
 //! - Resolves `PmService::sync_target("github")`; on `None`, prints the §7.1
 //!   remediation and exits 1 (`NeedsAuth`).
 //! - Calls `sync.fetch_changes_since(opts.since)` then `pm.apply_remote_delta`.
-//! - `--dry-run`: skips `apply_remote_delta`; reports `0` ingested.
+//! - `--dry-run`: skips `apply_remote_delta`; reports fetched remote counts.
 //! - `--json`: writes `IngestReport` as JSON and always exits 0 unless a
 //!   hard `SyncError` fires.
 //! - Default (human) output: progress + summary; non-zero exit iff
@@ -84,10 +84,14 @@ pub fn exit_code_for(result: &Result<IngestReport, SyncError>, json_mode: bool) 
 /// Format an [`IngestReport`] for human (terminal) output.
 pub fn format_human_report(report: &IngestReport) -> String {
     let mut out = String::new();
+    let dry_run_suffix = if report.dry_run { " (dry-run)" } else { "" };
     out.push_str(&format!(
-        "[spur] ingest {}@{} done\n",
-        report.source_system, report.source_repo
+        "[spur] ingest {}@{} done{}\n",
+        report.source_system, report.source_repo, dry_run_suffix
     ));
+    if report.dry_run || report.fetched_remote_nodes > 0 {
+        out.push_str(&format!("  fetched:    {}\n", report.fetched_remote_nodes));
+    }
     out.push_str(&format!("  ingested:   {}\n", report.ingested));
     out.push_str(&format!("  updated:    {}\n", report.updated));
     out.push_str(&format!("  unchanged:  {}\n", report.unchanged));
@@ -161,11 +165,16 @@ pub async fn run_with_sync(
     let result: Result<IngestReport, SyncError> = match fetch_result {
         Ok(delta) => {
             if args.dry_run {
+                let fetched_remote_nodes = delta.nodes.len();
+                let dep_hints_added = delta.nodes.iter().map(|node| node.dep_hints.len()).sum();
+                let comments_added = delta.nodes.iter().map(|node| node.comments.len()).sum();
                 Ok(IngestReport {
                     source_system: sync.source_system().to_string(),
                     source_repo: sync.source_repo().to_string(),
-                    // Dry-run reports zero ingested; the fetch sized the
-                    // remote view but we deliberately do not touch beads.db.
+                    fetched_remote_nodes,
+                    dry_run: true,
+                    dep_hints_added,
+                    comments_added,
                     ..Default::default()
                 })
             } else {

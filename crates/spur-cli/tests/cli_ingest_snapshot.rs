@@ -32,6 +32,8 @@ fn clean_report() -> IngestReport {
         run_id: 0,
         source_system: "github".into(),
         source_repo: "octocat/Hello-World".into(),
+        fetched_remote_nodes: 0,
+        dry_run: false,
         ingested: 3,
         updated: 1,
         unchanged: 7,
@@ -39,6 +41,19 @@ fn clean_report() -> IngestReport {
         deletions: Vec::new(),
         dep_hints_added: 2,
         comments_added: 5,
+    }
+}
+
+fn dry_run_report() -> IngestReport {
+    IngestReport {
+        fetched_remote_nodes: 100,
+        dry_run: true,
+        ingested: 0,
+        updated: 0,
+        unchanged: 0,
+        dep_hints_added: 4,
+        comments_added: 12,
+        ..clean_report()
     }
 }
 
@@ -75,6 +90,25 @@ fn human_clean_report_snapshot() {
 }
 
 #[test]
+fn human_dry_run_report_snapshot() {
+    let text = format_human_report(&dry_run_report());
+    assert_eq!(
+        text,
+        "\
+[spur] ingest github@octocat/Hello-World done (dry-run)
+  fetched:    100
+  ingested:   0
+  updated:    0
+  unchanged:  0
+  conflicts:  0
+  deletions:  0
+  dep-hints:  4
+  comments:   12
+"
+    );
+}
+
+#[test]
 fn human_conflict_report_snapshot() {
     let text = format_human_report(&conflicted_report());
     assert_eq!(
@@ -104,6 +138,8 @@ fn json_clean_report_is_parseable_and_contains_counts() {
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(v["source_system"], "github");
     assert_eq!(v["source_repo"], "octocat/Hello-World");
+    assert!(v.get("fetched_remote_nodes").is_none());
+    assert!(v.get("dry_run").is_none());
     assert_eq!(v["ingested"], 3);
     assert_eq!(v["updated"], 1);
     assert_eq!(v["unchanged"], 7);
@@ -111,6 +147,16 @@ fn json_clean_report_is_parseable_and_contains_counts() {
     assert_eq!(v["comments_added"], 5);
     assert_eq!(v["conflicts"].as_array().unwrap().len(), 0);
     assert_eq!(v["deletions"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn json_dry_run_report_includes_non_default_dry_run_fields() {
+    let json = format_json_report(&dry_run_report()).expect("serialize");
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["fetched_remote_nodes"], 100);
+    assert_eq!(v["dry_run"], true);
+    assert_eq!(v["dep_hints_added"], 4);
+    assert_eq!(v["comments_added"], 12);
 }
 
 #[test]
