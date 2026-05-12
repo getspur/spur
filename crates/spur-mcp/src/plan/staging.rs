@@ -231,6 +231,7 @@ mod tests {
                 task: "test".into(),
                 depends_on: deps.iter().map(|s| s.to_string()).collect(),
                 issue_id: Some(format!("bd-{task_id}")),
+                issue_title: None,
                 context_files: vec![],
             },
             status,

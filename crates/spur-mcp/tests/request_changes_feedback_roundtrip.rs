@@ -63,6 +63,7 @@ async fn request_changes_feedback_survives_reprojection_and_reaches_worker() {
             task: "Implement the feature".into(),
             depends_on: vec![],
             issue_id: None,
+            issue_title: None,
             context_files: vec![],
         }],
     )
@@ -92,6 +93,7 @@ async fn request_changes_feedback_survives_reprojection_and_reaches_worker() {
                 task: "Implement the feature".into(),
                 depends_on: Vec::new(),
                 issue_id: Some(task_issue_id.clone()),
+                issue_title: None,
                 context_files: Vec::new(),
             },
             status: PlanTaskStatus::AwaitingReview {

@@ -95,6 +95,7 @@ fn task_entry(
             task: format!("task {task_id}"),
             depends_on: depends_on.into_iter().map(str::to_string).collect(),
             issue_id: None,
+            issue_title: None,
             context_files: Vec::new(),
         },
         status,

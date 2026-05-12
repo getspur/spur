@@ -265,6 +265,11 @@ enum Commands {
         #[command(subcommand)]
         command: FlagsCommands,
     },
+    /// Build and inspect the code graph index
+    Graph {
+        #[command(subcommand)]
+        command: GraphCommands,
+    },
     /// Garbage-collect outcome blobs
     Gc {
         #[command(subcommand)]
@@ -401,6 +406,22 @@ enum ConfigCommands {
         /// Write to ~/.spur/config.toml instead of repo-local config.
         #[arg(long)]
         global: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum GraphCommands {
+    /// Extract Rust symbols from a worktree and write a graph index artifact.
+    Build {
+        /// Worktree root to extract. Defaults to the current worktree root.
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Output artifact path. Defaults to SPUR_CODE_GRAPH_INDEX or .spur/graph-index.json.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Suppress progress output.
+        #[arg(long)]
+        quiet: bool,
     },
 }
 
@@ -763,6 +784,17 @@ async fn run() -> Result<()> {
             }
         },
         Commands::Flags { command } => commands::flags::run(command).await,
+        Commands::Graph { command } => match command {
+            GraphCommands::Build {
+                root,
+                output,
+                quiet,
+            } => commands::graph::build(commands::graph::GraphBuildOptions {
+                root,
+                output,
+                quiet,
+            }),
+        },
         Commands::Gc {
             cmd:
                 GcCmd::Outcomes {

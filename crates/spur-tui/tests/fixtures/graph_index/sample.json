@@ -1,0 +1,57 @@
+{
+  "header": {
+    "graph_index_version": "fixture-2026-05-11"
+  },
+  "files": [
+    {
+      "stable_file_id": "file-config",
+      "file_path": "crates/example/src/config.rs"
+    },
+    {
+      "stable_file_id": "file-engine",
+      "file_path": "crates/example/src/engine.rs"
+    }
+  ],
+  "symbols": [
+    {
+      "stable_symbol_id": "symbol-config-struct",
+      "file_path": "crates/example/src/config.rs",
+      "byte_range": [10, 80],
+      "line_range": [2, 7],
+      "entity_name": "Config",
+      "symbol_kind": "struct",
+      "anchor_hash": "anchor-config",
+      "enclosing_scope": "module config"
+    },
+    {
+      "stable_symbol_id": "symbol-load-fn",
+      "file_path": "crates/example/src/config.rs",
+      "byte_range": [90, 160],
+      "line_range": [9, 14],
+      "entity_name": "load_config",
+      "symbol_kind": "fn",
+      "anchor_hash": "anchor-load",
+      "enclosing_scope": "module config"
+    },
+    {
+      "stable_symbol_id": "symbol-engine-struct",
+      "file_path": "crates/example/src/engine.rs",
+      "byte_range": [12, 72],
+      "line_range": [3, 8],
+      "entity_name": "GraphEngine",
+      "symbol_kind": "struct",
+      "anchor_hash": "anchor-engine",
+      "enclosing_scope": "module engine"
+    },
+    {
+      "stable_symbol_id": "symbol-engine-run-method",
+      "file_path": "crates/example/src/engine.rs",
+      "byte_range": [110, 220],
+      "line_range": [12, 20],
+      "entity_name": "run",
+      "symbol_kind": "fn",
+      "anchor_hash": "anchor-run",
+      "enclosing_scope": "impl GraphEngine"
+    }
+  ]
+}
