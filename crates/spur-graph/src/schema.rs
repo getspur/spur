@@ -176,7 +176,7 @@ impl NodeKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RelationKind {
     Imports,
@@ -193,8 +193,6 @@ pub enum RelationKind {
 #[serde(rename_all = "snake_case")]
 pub enum Confidence {
     SyntaxExact,
-    Exact,
-    Inferred,
     Heuristic,
     Unknown,
 }
