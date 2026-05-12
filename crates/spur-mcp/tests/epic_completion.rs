@@ -117,6 +117,9 @@ async fn mock_issue(
         parent: None,
         assignee: None,
         estimate_minutes: None,
+        external_ref: None,
+        source_system: None,
+        source_repo: None,
         depends_on,
     })
     .await
