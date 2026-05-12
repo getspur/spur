@@ -65,6 +65,8 @@ struct CachedProtocol {
     /// protocol was built. Compared on every fetch — a mismatch means
     /// the underlying image was replaced and the protocol is stale.
     image_generation: u64,
+    surface_w_px: u32,
+    surface_h_px: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -356,14 +358,20 @@ impl ImageCache {
         picker: &Picker,
     ) -> &'a mut StatefulProtocol {
         match map.entry(id) {
-            Entry::Occupied(o) if o.get().image_generation == image_generation => {
+            Entry::Occupied(o)
+                if o.get().image_generation == image_generation
+                    && o.get().surface_w_px == image.width()
+                    && o.get().surface_h_px == image.height() =>
+            {
                 &mut o.into_mut().proto
             }
             Entry::Occupied(mut o) => {
-                // Generation drift — stale protocol. Rebuild in place.
+                // Generation or display-surface drift — stale protocol. Rebuild in place.
                 *o.get_mut() = CachedProtocol {
                     proto: picker.new_resize_protocol((**image).clone()),
                     image_generation,
+                    surface_w_px: image.width(),
+                    surface_h_px: image.height(),
                 };
                 &mut o.into_mut().proto
             }
@@ -372,6 +380,8 @@ impl ImageCache {
                     .insert(CachedProtocol {
                         proto: picker.new_resize_protocol((**image).clone()),
                         image_generation,
+                        surface_w_px: image.width(),
+                        surface_h_px: image.height(),
                     })
                     .proto
             }
@@ -478,7 +488,10 @@ fn build_display_surface(
     cell_h_px: u16,
     total_rows: u16,
 ) -> DynamicImage {
-    use image::imageops::FilterType;
+    use image::{
+        imageops::{self, FilterType},
+        ImageBuffer, Rgba,
+    };
 
     let target_w = (pane_w_cols as u32)
         .saturating_mul(cell_w_px.max(1) as u32)
@@ -491,20 +504,29 @@ fn build_display_surface(
         return DynamicImage::new_rgba8(target_w, target_h);
     }
 
-    let width_for_height = (source.width() as u64)
-        .saturating_mul(target_h as u64)
-        .checked_div(source.height() as u64)
-        .unwrap_or(0)
-        .max(1) as u32;
-    let surface_w = target_w.min(width_for_height).max(1);
+    let scale_w = target_w as f64 / source.width() as f64;
+    let scale_h = target_h as f64 / source.height() as f64;
+    let scale = scale_w.min(scale_h);
+    let content_w = ((source.width() as f64 * scale).round() as u32)
+        .clamp(1, target_w)
+        .max(1);
+    let content_h = ((source.height() as f64 * scale).round() as u32)
+        .clamp(1, target_h)
+        .max(1);
 
-    source.resize_exact(surface_w, target_h, FilterType::Lanczos3)
+    let resized = source.resize_exact(content_w, content_h, FilterType::Lanczos3);
+    let mut canvas: DynamicImage =
+        ImageBuffer::from_pixel(target_w, target_h, Rgba([0u8, 0, 0, 0])).into();
+    let x = ((target_w - content_w) / 2) as i64;
+    let y = ((target_h - content_h) / 2) as i64;
+    imageops::overlay(&mut canvas, &resized, x, y);
+    canvas
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::RgbaImage;
+    use image::{GenericImageView, Rgba, RgbaImage};
     use ratatui_image::picker::Picker;
 
     fn small_image() -> Arc<DynamicImage> {
@@ -677,6 +699,23 @@ mod tests {
     }
 
     #[test]
+    fn display_surface_letterboxes_width_constrained_sources() {
+        let mut c = ImageCache::new();
+        let img = Arc::new(DynamicImage::ImageRgba8(RgbaImage::from_pixel(
+            1200,
+            400,
+            Rgba([240, 32, 16, 255]),
+        )));
+
+        let surface = c.display_surface(MermaidId(1), &img, 1, 10, 10, 10, 10);
+
+        assert_eq!(surface.width(), 100);
+        assert_eq!(surface.height(), 100);
+        assert_eq!(surface.get_pixel(50, 10), Rgba([0, 0, 0, 0]));
+        assert_ne!(surface.get_pixel(50, 50), Rgba([0, 0, 0, 0]));
+    }
+
+    #[test]
     fn display_surfaces_are_bounded() {
         let mut c = ImageCache::new();
         let img = small_image();
@@ -699,6 +738,24 @@ mod tests {
         }
 
         assert_eq!(c.len(), (MAX_FULL_IMAGE_PROTOCOLS, 0));
+    }
+
+    #[test]
+    fn same_generation_protocol_rebuilds_when_surface_dimensions_change() {
+        let mut c = ImageCache::new();
+        let id = TraceImageId(9);
+        let p = picker();
+        let first = Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(80, 40)));
+        let second = Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(120, 40)));
+
+        c.inline_trace_protocol_mut(id, &first, 1, &p);
+        c.inline_trace_protocol_mut(id, &second, 1, &p);
+
+        let cached = c
+            .inline
+            .get(&ImageCacheKey::Trace(id))
+            .expect("cached protocol");
+        assert_eq!((cached.surface_w_px, cached.surface_h_px), (120, 40));
     }
 
     #[test]
