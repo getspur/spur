@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tracing::debug;
 
@@ -199,6 +200,73 @@ impl WorktreeManager {
         }
     }
 
+    async fn run_git_bytes(&self, args: &[&str], cwd: Option<&Path>) -> Result<Vec<u8>> {
+        let work_dir = cwd.unwrap_or(&self.repo_root);
+        debug!(
+            command = %format!("git {}", args.join(" ")),
+            cwd = %work_dir.display(),
+            "running git command (bytes)"
+        );
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(work_dir)
+            .output()
+            .await
+            .context("failed to execute git command")?;
+        if output.status.success() {
+            Ok(output.stdout)
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            Err(anyhow!(
+                "git {} failed (exit {}): {}",
+                args.first().unwrap_or(&""),
+                output.status.code().unwrap_or(-1),
+                stderr,
+            ))
+        }
+    }
+
+    async fn run_git_with_stdin(&self, args: &[&str], cwd: &Path, stdin: &[u8]) -> Result<String> {
+        debug!(
+            command = %format!("git {}", args.join(" ")),
+            cwd = %cwd.display(),
+            "running git command with stdin"
+        );
+
+        let mut child = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("failed to execute git command")?;
+
+        if let Some(mut child_stdin) = child.stdin.take() {
+            child_stdin
+                .write_all(stdin)
+                .await
+                .context("failed to write stdin to git command")?;
+        }
+
+        let output = child
+            .wait_with_output()
+            .await
+            .context("failed to wait for git command")?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            Err(anyhow!(
+                "git {} failed (exit {}): {}",
+                args.first().unwrap_or(&""),
+                output.status.code().unwrap_or(-1),
+                stderr,
+            ))
+        }
+    }
+
     async fn run_git_with_retry(
         &self,
         args: &[&str],
@@ -259,6 +327,28 @@ impl WorktreeManager {
     pub async fn resolve_head(&self, worktree_path: &Path) -> Result<String> {
         self.run_git(&["rev-parse", "HEAD"], Some(worktree_path))
             .await
+    }
+
+    pub async fn diff_binary_between_refs(
+        &self,
+        base_ref: &str,
+        head_ref: &str,
+    ) -> Result<Vec<u8>> {
+        self.run_git_bytes(&["diff", "--binary", base_ref, head_ref], None)
+            .await
+    }
+
+    pub async fn apply_patch_3way(&self, worktree_path: &Path, patch: &[u8]) -> Result<()> {
+        self.run_git_with_stdin(&["apply", "--3way"], worktree_path, patch)
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn scrub_worktree(&self, worktree_path: &Path) -> Result<()> {
+        self.run_git(&["reset", "--hard", "HEAD"], Some(worktree_path))
+            .await?;
+        self.run_git(&["clean", "-fd"], Some(worktree_path)).await?;
+        Ok(())
     }
 
     /// Create a worktree at an explicit path and branch without registering it
