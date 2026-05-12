@@ -137,6 +137,9 @@ pub struct DelegationRequest {
     pub agent: String,
     pub task: String,
     pub context_files: Vec<String>,
+    /// Optional prior worker branch hint for future branch-reuse flows.
+    /// In-process only (mpsc request path), not persisted/serialized.
+    pub prior_branch_for_reuse: Option<String>,
     /// Oneshot channel for the orchestrator to send the result back.
     pub respond_to: oneshot::Sender<DelegationResult>,
     /// Brain session that originated this request. Threaded through so
