@@ -1153,6 +1153,7 @@ pub(crate) fn build_enriched_task(
     current_feedback: &str,
     new_attempt: u32,
     max_attempts: u32,
+    reuse_active: bool,
 ) -> String {
     let mut out =
         String::with_capacity(original_task.len() + current_feedback.len() + history.len() * 512);
@@ -1181,7 +1182,13 @@ pub(crate) fn build_enriched_task(
     ));
     out.push_str(current_feedback);
     out.push_str("\n\nApply the feedback above.");
-    if any_branch {
+    if reuse_active {
+        if let Some(branch) = history.last().and_then(|r| r.worker_branch.as_deref()) {
+            out.push_str(&format!(
+                " Brain requested rework on top of attempt N-1 (branch `{branch}`). The orchestrator attempted to pre-apply that diff into your worktree as uncommitted changes.\n- Run `git status` first.\n- If you see uncommitted changes: those are attempt N-1's edits. Refine them in place per the feedback above. If you decide the prior approach was fundamentally wrong, run `git checkout HEAD -- . && git clean -fd` to start fresh.\n- If your tree is clean: the pre-apply could not be performed (overlay conflict or branch missing). Refer to `git show {branch}` and adapt the work manually."
+            ));
+        }
+    } else if any_branch {
         out.push_str(
             " You can inspect prior attempts with `git show <branch>` using the branch names listed above.",
         );
@@ -1241,6 +1248,7 @@ pub(crate) fn build_dispatch_task_text(task: &PlanTaskEntry) -> String {
     let Some(last) = task.history.last() else {
         return task.spec.task.clone();
     };
+    let reuse_active = last.reuse_prior_worktree == Some(true) && last.worker_branch.is_some();
     let new_attempt = last.attempt.saturating_add(1);
     match last.kind() {
         AttemptRecordKind::BrainRequestedChanges => build_enriched_task(
@@ -1249,6 +1257,7 @@ pub(crate) fn build_dispatch_task_text(task: &PlanTaskEntry) -> String {
             last.feedback_text(),
             new_attempt,
             MAX_ATTEMPTS,
+            reuse_active,
         ),
         AttemptRecordKind::WorkerFailureRecovery => build_failure_recovery_task(
             &task.spec.task,
@@ -5315,6 +5324,7 @@ mod tests {
             "now also handle empty input",
             2,
             super::MAX_ATTEMPTS,
+            false,
         );
         assert!(enriched.contains("Implement foo"));
         assert!(enriched.contains("Attempt 1"));
@@ -5347,7 +5357,8 @@ mod tests {
         // that forgot to snapshot the current attempt passes), we no longer
         // emit a stray "## Previous Attempts" header. The worker should see
         // only Original + Current Request.
-        let enriched = super::build_enriched_task("Task X", &[], "fb", 1, super::MAX_ATTEMPTS);
+        let enriched =
+            super::build_enriched_task("Task X", &[], "fb", 1, super::MAX_ATTEMPTS, false);
         assert!(enriched.contains("Task X"));
         assert!(enriched.contains("fb"));
         assert!(!enriched.contains("## Previous Attempts"));
@@ -5365,7 +5376,8 @@ mod tests {
             dispatched_base_oid: None,
             reuse_prior_worktree: None,
         }];
-        let enriched = super::build_enriched_task("Task", &history, "more", 2, super::MAX_ATTEMPTS);
+        let enriched =
+            super::build_enriched_task("Task", &history, "more", 2, super::MAX_ATTEMPTS, false);
         assert!(!enriched.contains("git show"));
     }
 
@@ -5496,6 +5508,42 @@ mod tests {
         assert!(task_text.contains("Brain feedback: add the missing test"));
         assert!(task_text.contains("## Current Request"));
         assert!(!task_text.contains("## Recovery context"));
+    }
+
+    #[test]
+    fn reconciler_dispatch_reuse_prompt_guides_git_status_for_preapply_outcomes() {
+        let entry = super::PlanTaskEntry {
+            spec: super::PlanTask {
+                task_id: "T1".into(),
+                agent: "codex".into(),
+                task: "Implement review feedback".into(),
+                depends_on: vec![],
+                issue_id: Some("bd-1".into()),
+                issue_title: None,
+                context_files: vec![],
+            },
+            status: super::PlanTaskStatus::Ready,
+            result: None,
+            worker_branch: None,
+            attempt: 1,
+            history: vec![super::AttemptRecord {
+                attempt: 1,
+                worker_branch: Some("spur/worker-review".into()),
+                diff_summary: None,
+                summary: Some("partial".into()),
+                feedback: "add the missing test".into(),
+                dispatched_base_oid: None,
+                reuse_prior_worktree: Some(true),
+            }],
+            last_delegation_id: Some("del-A".into()),
+            dispatched_base_oid: None,
+        };
+
+        let task_text = super::build_dispatch_task_text(&entry);
+
+        assert!(task_text.contains("Run `git status` first."));
+        assert!(task_text.contains("git checkout HEAD -- . && git clean -fd"));
+        assert!(task_text.contains("Refer to `git show spur/worker-review`"));
     }
 
     #[test]

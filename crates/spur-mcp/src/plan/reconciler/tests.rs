@@ -79,6 +79,52 @@ fn reconciler_dispatch_ctx_can_be_cloned_for_server_startup() {
     assert_eq!(cloned.brain_session_id, ctx.brain_session_id);
 }
 
+#[test]
+fn prior_branch_for_reuse_uses_last_attempt_only_when_reuse_requested() {
+    let task = crate::plan::PlanTaskEntry {
+        spec: crate::plan::PlanTask {
+            task_id: "T1".into(),
+            agent: "codex".into(),
+            task: "Task".into(),
+            depends_on: vec![],
+            issue_id: Some("bd-1".into()),
+            issue_title: None,
+            context_files: vec![],
+        },
+        status: crate::plan::PlanTaskStatus::Ready,
+        result: None,
+        worker_branch: None,
+        attempt: 2,
+        history: vec![
+            crate::plan::AttemptRecord {
+                attempt: 1,
+                worker_branch: Some("spur/worker-old".into()),
+                diff_summary: None,
+                summary: None,
+                feedback: "first".into(),
+                dispatched_base_oid: None,
+                reuse_prior_worktree: None,
+            },
+            crate::plan::AttemptRecord {
+                attempt: 2,
+                worker_branch: Some("spur/worker-reuse".into()),
+                diff_summary: None,
+                summary: None,
+                feedback: "second".into(),
+                dispatched_base_oid: None,
+                reuse_prior_worktree: Some(true),
+            },
+        ],
+        last_delegation_id: None,
+        dispatched_base_oid: None,
+    };
+
+    assert_eq!(
+        super::prior_branch_for_reuse(&task),
+        Some("spur/worker-reuse".into())
+    );
+}
+
 fn summary(id: &str, status: &str) -> spur_pm::IssueSummary {
     spur_pm::IssueSummary {
         id: id.into(),
