@@ -76,6 +76,10 @@ pub struct IngestReport {
     pub run_id: i64,
     pub source_system: String,
     pub source_repo: String,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub fetched_remote_nodes: usize,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
     pub ingested: usize,
     pub updated: usize,
     pub unchanged: usize,
@@ -83,6 +87,14 @@ pub struct IngestReport {
     pub deletions: Vec<RemoteRef>,
     pub dep_hints_added: usize,
     pub comments_added: usize,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 // ─── Field set + conflict detector (§5.4) ──────────────────────────────
@@ -581,10 +593,14 @@ pub async fn apply_remote_delta(
     let mut report = IngestReport {
         source_system: source_system.to_string(),
         source_repo: source_repo.clone(),
+        fetched_remote_nodes: delta.nodes.len(),
+        dry_run: opts.dry_run,
         ..Default::default()
     };
 
     if opts.dry_run {
+        report.dep_hints_added = delta.nodes.iter().map(|node| node.dep_hints.len()).sum();
+        report.comments_added = delta.nodes.iter().map(|node| node.comments.len()).sum();
         return Ok(report);
     }
 

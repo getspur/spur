@@ -214,6 +214,8 @@ async fn case01_fresh_repo_creates_issues_with_sentinels() {
     let report = apply_remote_delta(&beads, &mock, delta, &test_opts())
         .await
         .unwrap();
+    assert_eq!(report.fetched_remote_nodes, 3);
+    assert!(!report.dry_run);
     assert_eq!(report.ingested, 3);
     assert_eq!(report.updated, 0);
     assert_eq!(report.unchanged, 0);
