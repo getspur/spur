@@ -83,6 +83,7 @@ async fn approve_does_not_enqueue_new_dispatches() {
         "t0",
         "approve",
         None,
+        false,
         None,
         None,
         Some(&dtx),

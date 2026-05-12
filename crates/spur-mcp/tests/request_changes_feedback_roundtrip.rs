@@ -120,6 +120,7 @@ async fn request_changes_feedback_survives_reprojection_and_reaches_worker() {
         "t1",
         "request_changes",
         Some("fix the edge case with null inputs"),
+        false,
         Some(pm_arc),
         None,
         None,

@@ -1436,6 +1436,7 @@ impl McpCallbackServer {
             .to_string();
         let decision = args["decision"].as_str().ok_or("missing decision")?;
         let feedback = args["feedback"].as_str();
+        let reuse_prior_worktree = args["reuse_prior_worktree"].as_bool().unwrap_or(false);
 
         let plan_arc = self.load_or_project_plan(&plan_id).await?;
 
@@ -1459,6 +1460,7 @@ impl McpCallbackServer {
             &task_id,
             decision,
             feedback,
+            reuse_prior_worktree,
             pm_arc,
             sink,
             Some(&self.delegation_tx),
