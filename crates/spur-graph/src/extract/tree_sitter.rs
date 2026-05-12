@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
 use crate::discovery::discover_rust_files;
-use crate::extract::languages::{emit_rust_definitions, emit_rust_edges, rust_config};
+use crate::extract::languages::{emit_definitions, emit_edges, rust_config};
 use crate::extract::GraphFacts;
 use crate::{
     Confidence, EdgeId, EvidenceId, FileId, GraphEdge, GraphNode, NodeId, NodeKind, RelationKind,
@@ -166,7 +166,14 @@ fn extract_rust_files(root: &Path, files: &[PathBuf]) -> anyhow::Result<GraphFac
         let tree = parser
             .parse(&source, None)
             .ok_or_else(|| anyhow!("tree-sitter failed to parse `{}`", path.display()))?;
-        extract_file(&mut builder, path, &source, tree.root_node(), &queries)?;
+        extract_file(
+            &mut builder,
+            &config,
+            path,
+            &source,
+            tree.root_node(),
+            &queries,
+        )?;
     }
     builder.resolve_pending_edges();
     Ok(builder.facts)
@@ -174,6 +181,7 @@ fn extract_rust_files(root: &Path, files: &[PathBuf]) -> anyhow::Result<GraphFac
 
 fn extract_file(
     builder: &mut FactBuilder<'_>,
+    config: &crate::extract::languages::LanguageConfig,
     path: &Path,
     source: &str,
     root_node: Node<'_>,
@@ -192,7 +200,8 @@ fn extract_file(
     );
 
     let tag_captures = run_query(&queries.tags, root_node, source);
-    let definitions = emit_rust_definitions(
+    let definitions = emit_definitions(
+        config,
         builder,
         &relative_path,
         file_id,
@@ -201,7 +210,7 @@ fn extract_file(
         &tag_captures,
     );
     let edge_captures = run_query(&queries.spur_edges, root_node, source);
-    emit_rust_edges(builder, file_node, source, &definitions, &edge_captures);
+    emit_edges(builder, file_node, source, &definitions, &edge_captures);
     Ok(())
 }
 
