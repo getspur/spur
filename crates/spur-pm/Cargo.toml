@@ -35,4 +35,5 @@ secrecy = "=0.10.3"
 
 [dev-dependencies]
 proptest = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
