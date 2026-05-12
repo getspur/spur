@@ -187,11 +187,16 @@ pub struct RemoteComment {
 pub struct DepHint {
     pub kind: DepHintKind,
     pub remote_keyword: String,          // verbatim, e.g. "Closes"
-    pub remote_ref: String,              // "owner/repo#42" or "#42"
-    pub resolved_beads_id: Option<String>,
+    pub remote_ref: String,              // canonical form, "owner/repo#42"
+    pub remote_node_id: Option<String>,  // when GraphQL gave us the resolved node_id
     pub raw_span: String,                // exact source text
     pub source: DepHintSource,
 }
+
+// Note: there is no `resolved_beads_id` field on DepHint itself. Hint
+// comments are append-only sentinels; local resolution to a beads_id
+// is computed at read time via `BeadsAdvanced::list_dep_hints`, which
+// returns `Vec<ResolvedDepHint>` (DepHint + live lookup). See §5.6.
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum DepHintKind {
@@ -340,6 +345,16 @@ pub struct IssueUpdate {
 
 This preserves invariant I-1 literally. One file, one write lock, one set of backups, one consistent crash boundary. The cost paid: an extra `list_comments` per issue during ingest (~sub-ms each in WAL mode). The cost not paid: a two-store consistency problem.
 
+### 4.0 Sentinel-comment pattern: consistent with existing conventions
+
+A reviewer can reasonably ask: "Isn't storing structured key-value records inside the `comments` column a hidden schemaless store, violating I-1 in spirit even if it preserves it in letter?" Three reasons this is not a novel co-option:
+
+1. **The pattern already exists.** The Spur codebase uses `spur-audit v1` comments to record brain decisions (approvals, rejections, completions) and `spur-signal v1` comments for worker→brain communication (scope drift, blocked, risk). Those sentinels are documented in `AGENTS.md` and load-bearing for retry, review, and lineage. `spur-sync v1` is consistent with that idiom, not a departure.
+2. **`BeadsAdvanced::list_comments` + `add_comment` are first-class trait methods**, designed for exactly this kind of structured per-issue annotation. Reading and appending sentinels is a supported API, not a workaround.
+3. **The append-only audit trail is a feature, not a bug.** Every state transition leaves a record. Lineage of "when did we first see this remote node, and what version each time?" comes for free. The Phase 2 column migration in §4.5 preserves these audit comments after switching reads to columns.
+
+What stays true: the read path *is* an N+1 scan today. That's a real cost, captured as R-4 in §13 with a tight (<500ms-for-1k-issues) acceptance gate. If we miss the gate in practice, §4.5 fast-tracks. Until then, **the column-vs-comment choice is a performance trade with a fallback, not a correctness compromise.**
+
 ### 4.1 Per-issue sync watermark — `spur-sync v1` sentinel comment
 
 Body format (one comment per ingested issue per ingest run; append-only):
@@ -487,58 +502,97 @@ pub async fn apply_remote_delta(
 
 ### 5.2 Apply sequence (per node)
 
+> **Concurrency contract:** the entire apply loop runs under an **exclusive process-level lock** `.beads/.spur-ingest.lock` (separate from beads's `.write.lock`; held for the duration of the whole run, not per-node). A second concurrent `spur pm ingest` against the same `.beads/` fails fast with "another ingest run is in progress (pid=N)" rather than racing on watermark reads. The per-node `adapter.write` closure additionally **re-reads the watermark inside the closure** as defense-in-depth — if the lock were ever bypassed, the in-closure re-read still catches the staleness before the write commits.
+
 ```
+acquire .beads/.spur-ingest.lock (exclusive, blocking with 30s timeout)
+if fail: exit with "another ingest run is in progress (pid=N)"
+
 For each node in delta.nodes:
-  existing = pm.find_by_external_ref("github:" + node.remote_id).await?
-  watermark = if existing { read_latest_sync_comment(existing.id)? } else { None }
+  # Cheap-path preview (read-only, no lock acquired beyond beads's
+  # routine read snapshot). Lets us skip the write lock entirely for
+  # unchanged nodes — the cheap-path is advisory; the in-closure re-read
+  # is the source of truth.
+  preview_existing = pm.find_by_external_ref("github:" + node.remote_id).await?
+  if let Some(e) = preview_existing:
+    preview_wm = read_latest_sync_comment(e.id)?
+    if preview_wm.last_synced_remote_updated_at == node.updated_at
+        AND (node.etag.is_none() || preview_wm.remote_etag == node.etag):
+      report.unchanged += 1; continue
 
-  NEW BRANCH (existing is None):
-    a. create = mapping::to_issue_create(node, opts)
-         external_ref  = "github:<remote_id>"
-         source_system = "github"
-         source_repo   = "<owner>/<repo>"
-    b. beads_id = pm.create_issue(create).await?   (idempotent on external_ref)
-    c. write_sync_sentinel(beads_id, node, state=Active, now=Utc::now())
-    d. apply_dep_hints(beads_id, node.dep_hints)
-    e. import_comments(beads_id, node.comments)
-    f. report.ingested += 1
+  # Mutating path: every read is re-done inside adapter.write so that
+  # the watermark seen at decision time is the watermark held under the
+  # write lock. Defense in depth in case the process lock is bypassed.
+  adapter.write(|s| {
+    existing = s.find_by_external_ref("github:" + node.remote_id)?
+    watermark = match existing {
+      Some(e) => parse_latest_sync_comment(s.list_comments(e.id)?),
+      None    => None,
+    };
 
-  EXISTING BRANCH (existing is Some, watermark is Some):
-    a. Cheap path: if watermark.last_synced_remote_updated_at == node.updated_at
-         AND (node.etag.is_none() || watermark.remote_etag == node.etag):
-           report.unchanged += 1; continue
-    b. diff = mapping::diff_against_local(existing, node)
-    c. if diff.is_empty():
-         # remote updated_at moved but mapped fields didn't (e.g. someone reacted).
-         # Still refresh the sentinel so the next sync can short-circuit.
-         write_sync_sentinel(existing.id, node, state=watermark.state, now=Utc::now())
-         report.unchanged += 1; continue
-    d. # Conflict detection — see §5.4.
-       if is_three_way_conflict(existing, watermark, node):
-           report.conflicts.push(make_conflict(existing, watermark, node))
-           continue
-    e. pm.update_issue(existing.id, diff.to_issue_update()).await?
-    f. write_sync_sentinel(existing.id, node, state=Active, now=Utc::now())
-    g. apply_new_dep_hints(existing.id, node.dep_hints)
-    h. import_new_comments(existing.id, node.comments)
-    i. report.updated += 1
+    if existing.is_none() {                            # NEW
+      create = mapping::to_issue_create(node, opts)
+                  with external_ref  = "github:<remote_id>"
+                       source_system = "github"
+                       source_repo   = "<owner>/<repo>"
+      beads_id = s.create_issue(create)?  # idempotent on external_ref
+      write_sync_sentinel(s, beads_id, node, state=Active, now=Utc::now())
+      apply_dep_hints(s, beads_id, node.dep_hints)
+      import_comments(s, beads_id, node.comments)
+      report.ingested += 1
+    }
+    else if watermark.is_some() {                      # EXISTING WITH WM
+      let wm = watermark.unwrap();
+      diff = mapping::diff_against_local(existing.unwrap(), node)
+      if diff.is_empty() {
+        # remote.updated_at moved but mapped fields didn't (e.g. a
+        # reaction). Still refresh the sentinel so the next sync can
+        # short-circuit on the cheap path.
+        write_sync_sentinel(s, existing.id, node, state=wm.state, now)
+        report.unchanged += 1
+      } else if is_field_level_conflict(&diff, &existing, &wm, node) {  # §5.4
+        report.conflicts.push(make_conflict(existing, wm, node, diff))
+        # Do not write. Beads + watermark untouched.
+      } else {
+        s.update_issue(existing.id, diff.to_issue_update())?
+        write_sync_sentinel(s, existing.id, node, state=Active, now)
+        apply_new_dep_hints(s, existing.id, node.dep_hints)
+        import_new_comments(s, existing.id, node.comments)
+        report.updated += 1
+      }
+    }
+    else {                                             # EXISTING WITHOUT WM
+      # Issue created by ingest in a prior version, or by a manual
+      # `bd` op with the same external_ref. We have no prior reference
+      # point, so we cannot detect conflict here. Adopt the remote as
+      # baseline; record the first sentinel.
+      diff = mapping::diff_against_local(existing.unwrap(), node)
+      if !diff.is_empty() {
+        s.update_issue(existing.id, diff.to_issue_update())?
+        report.updated += 1
+      } else {
+        report.unchanged += 1
+      }
+      write_sync_sentinel(s, existing.id, node, state=Active, now)
+      apply_dep_hints(s, existing.id, node.dep_hints)
+      import_new_comments(s, existing.id, node.comments)
+    }
 
-  EXISTING WITHOUT WATERMARK (recovery branch):
-    # Issue created by ingest in a prior version, or by a manual `bd` op
-    # with the same external_ref. Treat the current remote view as the
-    # baseline — no conflict because we have no prior reference point.
-    a. diff = mapping::diff_against_local(existing, node)
-    b. if !diff.is_empty(): pm.update_issue(...)
-    c. write_sync_sentinel(existing.id, node, state=Active, now=Utc::now())
-    d. import_new_comments(existing.id, node.comments)
-    e. report.updated += 1   (or unchanged += 1 if diff empty)
+    Ok(())
+  })?
 
 For each ref in delta.deletions:
-  existing = pm.find_by_external_ref("github:" + ref.remote_id).await?
-  if existing.is_some():
-    write_sync_sentinel(existing.id, /* etag */ None, state=Disconnected, now)
-    adv.add_comment(existing.id, "spur-audit v1\nkind:disconnected\n...")
-    report.deletions.push(ref)
+  adapter.write(|s| {
+    existing = s.find_by_external_ref("github:" + ref.remote_id)?
+    if let Some(e) = existing {
+      write_sync_sentinel(s, e.id, /*etag*/ None, state=Disconnected, now)
+      s.add_comment(e.id, "spur-audit v1\nkind:disconnected\n...")
+      report.deletions.push(ref)
+    }
+    Ok(())
+  })?
+
+release .beads/.spur-ingest.lock
 ```
 
 `write_sync_sentinel` is a thin helper over `BeadsAdvanced::add_comment` that formats the `spur-sync v1` body per §4.1.
@@ -558,26 +612,53 @@ for rc in node.comments:
 
 For an issue with N existing Beads comments and M new remote comments, this is one `list_comments` call plus M inserts. Bounded scan; acceptable for Phase 1.
 
-### 5.4 Conflict detection — three-way merge
+### 5.4 Conflict detection — field-level three-way merge
 
-Implemented in `ingest::watermark::is_three_way_conflict`. Conflict iff **both** sides moved since the last successful sync:
+A naive timestamps-only detector (`remote.updated_at > watermark.last_synced_remote_updated_at && local.updated_at > watermark.last_synced_at`) is wrong: GitHub bumps `Issue.updated_at` for unrelated activity (added comments, reactions, label edits by bots) and Beads bumps `Issue.updated_at` for any column change. Two disjoint edits — local priority bump + remote comment add — would falsely conflict and the remote comment would be silently dropped.
+
+Phase 1 detects conflict at **field level**, by intersecting the mutated-fields sets on both sides:
 
 ```rust
-fn is_three_way_conflict(
+/// Returns true iff local and remote both mutated the SAME mapped field
+/// since the last successful sync. Disjoint mutations are not conflicts.
+fn is_field_level_conflict(
+    diff: &MappedDiff,
     local: &Issue,
     watermark: &SyncWatermark,
     remote: &RemoteNode,
 ) -> bool {
-    let remote_moved = remote.updated_at > watermark.last_synced_remote_updated_at
-        || remote.etag.as_deref() != watermark.last_synced_etag.as_deref();
-    let local_moved = local.updated_at > watermark.last_synced_at;
-    remote_moved && local_moved
+    // Fields the remote changed (computed by diff_against_local):
+    let remote_changed: FieldSet = diff.remote_changed_fields();
+
+    // Fields the local moved since last sync. Phase 1 conservatively
+    // marks the whole "user-mutable" field set as local-changed when
+    // local.updated_at > watermark.last_synced_at, because Beads does
+    // not record per-field change timestamps. Refined in Phase 2 once
+    // beads_rust exposes per-field history (or we add a sentinel-based
+    // local change log).
+    let local_might_have_changed_any_field =
+        local.updated_at > watermark.last_synced_at;
+    if !local_might_have_changed_any_field {
+        return false;  // remote-only changes: take remote, no conflict.
+    }
+    let local_changed: FieldSet = FieldSet::user_mutable();
+
+    !remote_changed.intersection(&local_changed).is_empty()
 }
 ```
 
-When both moved, return `RemoteConflict { ... }` from §2 and **do not write**. Phase 1 surfaces conflicts in `IngestReport.conflicts` and prints a counted line; conflict resolution UX (TUI / brain decision flow) lands in Phase 2. The Beads issue and the local watermark are preserved as-is.
+`FieldSet` enumerates the mapped fields the diff can touch (`title`, `description`, `status`, `priority`, `assignee`, `labels`). `MappedDiff::remote_changed_fields()` is computed during `mapping::diff_against_local` (a small extension over what diff already produces).
 
-When only the remote moved, the cheap-path check in §5.2 step (a) already short-circuited, OR the diff is non-empty and we update. When only the local moved, the diff is non-empty and we update — the remote is the authoritative view of the upstream side.
+Phase 1 behavior:
+
+- **Disjoint mutations** (e.g., remote adds a comment, local bumps priority) → not a conflict. Apply remote-side updates; preserve local field. Both `update_issue` and `import_comments` proceed.
+- **Same-field collision** (e.g., both sides edited `title`) → `RemoteConflict { fields: ["title"], ... }`. Skip the write. Beads + watermark untouched. Report counted.
+- **Remote-only changes** → apply (cheap path or normal update).
+- **Local-only changes** → diff is empty on the remote side; we still refresh the sentinel so the next sync short-circuits, but no Beads write occurs.
+
+Phase 2 refinement: with per-field local change tracking, `local_changed` becomes a real subset instead of "all user-mutable fields when updated_at moved." This narrows the false-conflict surface further — important once push direction (`push_mutations`) is wired and human edits are common.
+
+When a conflict is surfaced, the Beads issue and the local watermark are preserved as-is. Conflict resolution UX (TUI / brain decision flow) lands in Phase 2.
 
 ### 5.5 Locking & transaction discipline
 
@@ -602,28 +683,51 @@ Every per-node update is one BEGIN/COMMIT in `beads_rust`. If the process crashe
 
 ### 5.6 Dependency hints
 
-`dep_hints::extract(body, timeline) -> Vec<DepHint>` runs after the node is materialized in Beads. Hints are persisted as structured comments with sentinel `spur-dep-hint v1`:
+`dep_hints::extract(body, timeline) -> Vec<DepHint>` runs after the node is materialized in Beads. Hints are persisted as **immutable** structured comments with sentinel `spur-dep-hint v1`:
 
 ```
 spur-dep-hint v1
-kind:        closes
+kind:           closes
 remote_keyword: Closes
-remote_ref:  #42
-resolved_beads_id: bd-XYZ           # or "unresolved"
-raw_span:    Closes #42
-source:      body
-remote_node: <node_id of the issue/PR containing the hint>
+remote_ref:     owner/repo#42          # canonical form, see below
+remote_node:    I_kwDO...              # source issue/PR node_id (containing the hint)
+source:         body | timeline_item
+raw_span:       Closes #42
 ```
 
-`resolved_beads_id` resolution at write time:
+**Note: no `resolved_beads_id` field.** Resolution to a local `beads_id` is deferred to **read time**, not write time, for three reasons:
 
-- **Full node-id refs** (e.g., the GraphQL timeline already gives us `I_kwDO…`): direct lookup via `find_by_external_ref("github:" + node_id)`.
-- **Numeric refs** (e.g., `Closes #42` in body text): two-step lookup. First check for a recently-ingested node in the current batch with `remote_number = 42` AND `source_repo = <current>`. If miss, fall back to a `list_issues` filter scanning `external_ref LIKE "github:%"` within this `source_repo`. If still unresolved, write `unresolved`.
-- **Cross-repo refs** (e.g., `owner2/repo2#7`): same as numeric, scoped to that `source_repo` instead. May resolve to nothing if we've never ingested that repo.
+1. The append-only sentinel comment cannot be mutated later — `BeadsAdvanced` exposes `add_comment` but no `update_comment` or `remove_comment`. A write-time resolution that needs to be updated later (because a referenced node lands afterwards in the same batch, or in a future ingest run) cannot fix itself without appending a second hint comment, which would duplicate the hint in every UI that lists them.
+2. The `external_ref` UNIQUE partial index makes a live lookup cheap: `find_by_external_ref("github:" + remote_node_id)` is O(log N) on a B-tree, executed at most once per hint per query.
+3. The set of "resolvable" hints grows over time as more repos are ingested. A hint written today as `unresolved` may resolve next month; deferring resolution lets that happen automatically with no migration.
 
-A final re-resolution pass at the end of `apply_remote_delta` re-walks `unresolved` hints once all nodes are in place — this catches the case where issue A's hint points to issue B that was ingested later in the same batch.
+**Canonical `remote_ref` form.** The extractor normalizes all refs to `<owner>/<repo>#<number>`:
+- Cross-repo refs (`owner2/repo2#7`) → preserved as written.
+- Bare numeric refs (`#42` in body text) → expanded to `<current source_repo>#42`.
+- Refs sourced from `timelineItems` (already-resolved by GitHub) include both the canonical form AND the source node_id (preferred when present).
 
-Hints **never** mutate the local DAG. They are queryable via `BeadsAdvanced::list_comments` filtered to the `spur-dep-hint v1` sentinel. The brain decides whether to call `IssueTracker::add_dependency`.
+**Resolution at read time.** New `BeadsAdvanced` helper (lands with the dep-hints PR):
+
+```rust
+pub struct ResolvedDepHint {
+    pub hint: DepHint,                       // parsed from the sentinel
+    pub resolved_beads_id: Option<String>,   // live lookup; None if unresolvable
+}
+
+#[async_trait]
+impl BeadsAdvanced for BeadsCrateAdapter {
+    /// List dep hints on an issue, with live resolution against the
+    /// current external_ref index. Reads only; never mutates.
+    async fn list_dep_hints(&self, beads_id: &str)
+        -> Result<Vec<ResolvedDepHint>>;
+}
+```
+
+`list_dep_hints` scans the issue's comments for `spur-dep-hint v1` bodies, parses each, and for every hint attempts:
+- If `remote_node_id` is present: `find_by_external_ref("github:" + node_id)` → resolved.
+- Else: derive `(source_repo, number)` from `remote_ref`, then `list_issues(filter { source_repo, external_ref LIKE "github:%" })` and walk results checking the number. Phase 1 accepts that this is the slow path; Phase 2 can add an indexed `(source_repo, remote_number)` lookup helper.
+
+Hints **never** mutate the local DAG. The brain consumes `list_dep_hints` and decides whether to call `IssueTracker::add_dependency`. The grep gate from A-8 verifies no automated edge creation.
 
 ## 6. Failure model and `SyncError` mapping
 
@@ -687,12 +791,23 @@ R-7.2.2 GraphQL execution. Wraps `octocrab.graphql::<T>(query)` so the client re
 
 ### 7.3 GraphQL ingest query
 
+GitHub GraphQL **connection cursors are connection-specific** opaque strings — an `endCursor` returned by `issues` cannot be passed to `pullRequests`. The query takes a separate `$issueCursor` and `$prCursor`, and the two connections paginate independently on the client side.
+
 `ingest/github/graphql/ingest_repo.graphql`:
 
 ```graphql
-query IngestRepo($owner: String!, $repo: String!, $cursor: String, $pageSize: Int!) {
+query IngestRepo(
+  $owner: String!,
+  $repo: String!,
+  $issueCursor: String,
+  $prCursor: String,
+  $issuePageSize: Int!,
+  $prPageSize: Int!,
+  $commentsFirst: Int!,
+  $timelineFirst: Int!,
+) {
   repository(owner: $owner, name: $repo) {
-    issues(first: $pageSize, after: $cursor,
+    issues(first: $issuePageSize, after: $issueCursor,
            orderBy: {field: UPDATED_AT, direction: DESC}) {
       pageInfo { hasNextPage endCursor }
       nodes {
@@ -700,12 +815,12 @@ query IngestRepo($owner: String!, $repo: String!, $cursor: String, $pageSize: In
         createdAt updatedAt
         author { login }
         assignees(first: 10) { nodes { login } }
-        labels(first: 50)    { nodes { name } }
-        comments(first: 100) {
+        labels(first: 30)    { nodes { name } }
+        comments(first: $commentsFirst) {
           pageInfo { hasNextPage endCursor }
           nodes { id author { login } body createdAt updatedAt }
         }
-        timelineItems(first: 50,
+        timelineItems(first: $timelineFirst,
             itemTypes: [CROSS_REFERENCED_EVENT, CLOSED_EVENT]) {
           nodes {
             __typename
@@ -720,7 +835,7 @@ query IngestRepo($owner: String!, $repo: String!, $cursor: String, $pageSize: In
         }
       }
     }
-    pullRequests(first: $pageSize, after: $cursor,
+    pullRequests(first: $prPageSize, after: $prCursor,
                  orderBy: {field: UPDATED_AT, direction: DESC}) {
       pageInfo { hasNextPage endCursor }
       nodes {
@@ -728,8 +843,8 @@ query IngestRepo($owner: String!, $repo: String!, $cursor: String, $pageSize: In
         createdAt updatedAt
         author { login }
         assignees(first: 10) { nodes { login } }
-        labels(first: 50)    { nodes { name } }
-        comments(first: 100) {
+        labels(first: 30)    { nodes { name } }
+        comments(first: $commentsFirst) {
           pageInfo { hasNextPage endCursor }
           nodes { id author { login } body createdAt updatedAt }
         }
@@ -745,11 +860,15 @@ query IngestRepo($owner: String!, $repo: String!, $cursor: String, $pageSize: In
 
 Pagination strategy:
 
-P-1. Issues and PRs paginate independently. The client runs them as two cursored loops.
-P-2. `pageSize` starts at 50. If `rateLimit.cost` for a page exceeds `floor` (configurable, default 5% of remaining), halve and retry on the next iteration. If a single page costs >2% of the per-minute cap, halve permanently for this run.
-P-3. Inner connections (`comments(first: 100)`, `timelineItems(first: 50)`) on an outer node that reports `hasNextPage=true` trigger a follow-up `IngestNodeExtras($id)` query (defined alongside `ingest_repo.graphql`) to drain the remaining pages. Phase 1: accept truncation at 100 comments per node and emit a warning; the follow-up query lands when someone has a real repo that exceeds the limit.
+P-1. **Independent cursors.** Issues and PRs paginate as two separate cursored loops. The query is called with one cursor advancing per call; the other connection still re-fetches its first page each call but the client discards it (cheap because GitHub deduplicates work for identical sub-queries and the inner node counts dominate cost). When the issues loop completes, subsequent calls pass `$issuePageSize: 0`; same trick for PRs.
 
-`graphql_client::GraphQLQuery` generates the Rust types into `ingest/github/graphql/types.rs`.
+P-2. **Cost-aware default page sizes.** Defaults: `$issuePageSize = 25`, `$prPageSize = 25`, `$commentsFirst = 30`, `$timelineFirst = 20`. A single page now requests `25 × (10 + 30 + 30 + 20) ≈ 2,250` nodes per connection, ~45 rate-limit points per call (GitHub bills roughly 1 point per 100 nodes). That sits well under the 5% floor of 250 points/hour budget.
+
+P-3. **Adaptive shrink.** The client observes `rateLimit.cost` on every response. If a page's cost exceeds the configurable floor (default `rate_limit_floor_graphql_points = 100`, see §9), halve `*PageSize` on the next iteration. If even `*PageSize = 1` busts budget, abort cleanly with `SyncError::RateLimited` and let the user re-run with `--since` to narrow.
+
+P-4. **Inner-connection truncation.** Nodes with `comments.pageInfo.hasNextPage = true` or `timelineItems.pageInfo.hasNextPage = true` trigger a follow-up `IngestNodeExtras($id, $commentsCursor, $timelineCursor)` query (defined alongside `ingest_repo.graphql`) to drain the remaining pages. Phase 1: emit a warning if any node exceeds the per-page limits; the follow-up query lands as a small in-Phase-1 PR if smoke tests hit truncation, otherwise defers to Phase 2.
+
+`graphql_client::GraphQLQuery` generates the Rust types into `ingest/github/graphql/types.rs`. The `#[derive(GraphQLQuery)]` macro consumes the `.graphql` file at compile time; the two connection cursors map to two `Option<String>` fields on the generated `Variables` struct, which the client populates from the issues and PR pagination loops.
 
 ### 7.4 `mapping.rs`
 
@@ -840,7 +959,7 @@ E-2. Timeline extractor: walks `timelineItems.nodes`:
 
 Timeline extraction is preferred over body extraction when both produce a hint for the same `(remote_id, kind)` pair — it's GitHub's already-resolved view. Deduplicate at the end of extraction by `(remote_ref, kind)`.
 
-Resolution of `remote_ref → resolved_beads_id` happens at apply time (§5.6), not in this module.
+This module emits `DepHint` records only — it never resolves `remote_ref` to a `beads_id`. Resolution is deferred to read time via `BeadsAdvanced::list_dep_hints`, per §5.6.
 
 ## 8. CLI surface — `crates/spur/src/cli/`
 
@@ -850,7 +969,7 @@ New subcommand:
 spur pm ingest github <owner>/<repo>
     [--since <iso8601>]
     [--label-namespace <prefix>]      # default "gh"
-    [--page-size <N>]                 # default 50
+    [--page-size <N>]                 # default 25 (see §7.3 P-2 for cost math)
     [--dry-run]
     [--json]                          # machine-readable report
 
@@ -897,7 +1016,7 @@ rate_limit_floor_graphql_points = 100
 # Default ingest options.
 [pm.github.ingest]
 label_namespace = "gh"
-page_size = 50
+page_size = 25
 auto_label = "spur-managed"
 
 # Persisted token cache (Phase 2 wires this; Phase 1 may set it but ignores).
@@ -919,14 +1038,18 @@ T-2 **Unit — dep_hints (`dep_hints_test.rs`):** fixture bodies covering each p
 T-3 **Unit — watermark (`watermark_test.rs`):** round-trip a `spur-sync v1` sentinel through `format_sync_sentinel` → `parse_sync_sentinel`. Cases: every state value, every optional field present/absent, malformed bodies returning `Err` cleanly, oldest-vs-newest selection across multiple sentinels on the same issue. Plus the marker parser from §4.2: extract marker from various leading-line shapes, reject lookalikes inside body text.
 
 T-4 **Integration — apply_remote_delta (`apply_test.rs`):** in-memory `MockSync` returning a scripted `RemoteDelta`. Tests use a tempdir-backed `BeadsCrateAdapter`. Cases:
-   - Fresh repo: 0 existing issues → N created, each with a `spur-sync v1` sentinel.
-   - Re-ingest unchanged: cheap-path short-circuit hits; `unchanged == N`.
-   - Re-ingest with mutated remote: titles/labels/state change → updated with correct diffs; new sentinel appended.
-   - Re-ingest with deletions: simulated 404 surfaces as `Gone` → sentinel `state: disconnected`.
-   - Conflict: local mutated since last sync, remote also mutated → `RemoteConflict` returned, Beads issue and sentinel untouched.
-   - Idempotency under partial-batch crash: simulate by aborting after writing N/2 nodes; re-run, verify the remaining N/2 land cleanly and no duplicates appear (relies on `external_ref` UNIQUE index).
-   - Comment dedup: import the same RemoteComment twice in two separate runs; second run is a no-op via §4.2 marker scan.
-   - Recovery branch: pre-create an issue manually with the right `external_ref` but no sentinel; first ingest must adopt it and produce the first sentinel without conflict.
+   - **Fresh repo:** 0 existing issues → N created, each with a `spur-sync v1` sentinel.
+   - **Re-ingest unchanged:** cheap-path short-circuit hits; `unchanged == N`.
+   - **Re-ingest with mutated remote:** titles/labels/state change → updated with correct diffs; new sentinel appended.
+   - **Re-ingest with deletions:** simulated 404 surfaces as `Gone` → sentinel `state: disconnected`.
+   - **Disjoint conflict (regression for the timestamps-only bug):** local edits `priority`, remote adds a comment (bumping `updated_at` but not touching mapped fields). Field-level detector in §5.4 must classify as **not a conflict** and the new remote comment must land via `import_comments`. The previous timestamps-only logic would have flagged this and dropped the comment.
+   - **Same-field conflict:** both sides edit `title` since last sync → `RemoteConflict { fields: ["title"], ... }` returned; Beads issue and sentinel untouched.
+   - **Idempotency under partial-batch crash:** simulate by aborting after writing N/2 nodes; re-run, verify the remaining N/2 land cleanly and no duplicates appear (relies on `external_ref` UNIQUE index + the in-closure watermark re-read).
+   - **Concurrent ingest runs (regression for the TOCTOU bug):** spawn two `apply_remote_delta` invocations against the same tempdir at the same time. The second must fail fast with "another ingest run is in progress" rather than racing on watermark reads. After the first completes, the second can be re-run and lands cleanly.
+   - **Comment dedup:** import the same RemoteComment twice in two separate runs; second run is a no-op via §4.2 marker scan.
+   - **Manual marker removal:** seed a Beads issue with an imported comment whose `<!-- spur-import gh:IC_… -->` first line has been manually stripped (simulating a human edit). Re-ingest the same `RemoteDelta`. Verify the system imports the comment again **without panicking or corrupting Beads** — the imported comment appears twice (documented limitation; the marker is fragile by design because we chose comments over a sidecar table). The test pins the failure mode as "duplicate, never corrupt."
+   - **Recovery branch:** pre-create an issue manually with the right `external_ref` but no sentinel; first ingest must adopt it and produce the first sentinel without conflict.
+   - **Single-store invariant (A-9):** after the run completes, assert the `.beads/` directory contents against the allowlist from A-9. Fail if any unexpected filename appears.
 
 T-5 **Integration — auth (`auth_test.rs`):** mock `gh` binary via `PATH` prepending a shell script that prints a known token to stdout and a warning to stderr. Verify `resolve_token` returns the token cleanly.
 
@@ -948,7 +1071,13 @@ A-5. Dep hints appear as `spur-dep-hint v1` sentinel comments queryable via `Bea
 A-6. Re-running ingest after a Beads-side title change without a corresponding remote-side change does *not* overwrite the local title (three-way merge per §5.4: local-moved-only → update is dropped). The reverse (remote-moved-only) takes remote. Both-moved → conflict, counted in `IngestReport.conflicts`, Beads untouched.
 A-7. No clippy warnings on touched files.
 A-8. No code path turns a `DepHint` into an `add_dependency` call — verified by a grep gate in CI.
-A-9. **Single-store invariant:** `.beads/` contains exactly the files `beads_rust` already manages — no `external_links.db`, no separate write lock. Verified by a `ls .beads/` check in T-4.
+A-9. **Single-store invariant.** After a full ingest run, `.beads/` contains only:
+   - `beads.db` (plus `beads.db-wal`, `beads.db-shm` from SQLite WAL mode)
+   - `.write.lock` (beads_rust's existing write lock)
+   - `.spur-ingest.lock` (the new ingest-run flock from §5.2; released after the run completes, so absence is expected when no run is in flight)
+   - any other files `beads_rust` itself creates upstream
+
+   Specifically: **no `external_links.db`, no separate sync database, no per-repo ingest cache files.** Verified by an integration test that asserts the exact filename set against an allowlist (not a raw `ls`); the test fails if any unexpected filename appears, which catches a regression that accidentally re-introduces a sidecar.
 
 ## 12. Sequencing — implementation order
 
@@ -974,7 +1103,7 @@ R-2. **GraphQL cost spikes on large repos.** A `pullRequests(first: 50)` query o
 
 R-3. **Comment / timeline truncation at 100 items per node.** Phase 1 accepts truncation with a warning. Mitigation: §7.3 P-3 follow-up `IngestNodeExtras` query, deferred. Real-world impact small for typical OSS issues.
 
-R-4. **Watermark scan cost.** Phase 1 reads watermarks by scanning all comments per issue and filtering for `spur-sync v1`. For an issue with 200 comments this is fine; for a pathological 10k-comment thread it isn't. Mitigation: §4.5 future column migration. Acceptance: measure on `octocat/Hello-World` and a moderately-busy upstream (e.g. ~50-comment issues) — if ingest of 1k issues exceeds 30s of wall time *purely on watermark reads* with WAL mode, fast-track §4.5. Otherwise accept.
+R-4. **Watermark scan cost.** Phase 1 reads watermarks by scanning all comments per issue and filtering for `spur-sync v1`. For an issue with 200 comments this is fine; for a pathological 10k-comment thread it isn't. Mitigation: §4.5 future column migration. Acceptance: measure on `octocat/Hello-World` and a moderately-busy upstream (e.g. ~50-comment issues). With SQLite in WAL mode and N issues averaging C comments each, watermark reads should complete in **<500ms wall time per 1k issues** (≈0.5ms per issue). If we miss this gate, fast-track §4.5. The previous "30s for 1k issues" gate was a typo for "30s for 1M issues" and undersold the bar; this corrects it.
 
 R-5. **Dep hint regex misfires.** Body parsing is heuristic; fenced code blocks aren't excluded in Phase 1. Mitigation: hints are never edges (I-8); brain has final say. Accept the false-positive risk in exchange for never blocking the DAG on misparses.
 
