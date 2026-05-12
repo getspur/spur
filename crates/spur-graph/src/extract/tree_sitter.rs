@@ -1,13 +1,13 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context};
 use sha2::{Digest, Sha256};
-use tree_sitter::{Node, Parser};
+use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
 use crate::discovery::discover_rust_files;
-use crate::extract::languages::rust_language;
+use crate::extract::languages::{emit_definitions, emit_edges, rust_config};
 use crate::extract::GraphFacts;
 use crate::{
     Confidence, EdgeId, EvidenceId, FileId, GraphEdge, GraphNode, NodeId, NodeKind, RelationKind,
@@ -15,22 +15,34 @@ use crate::{
 };
 
 #[derive(Debug, Clone)]
-struct PendingEdge {
-    source: NodeId,
-    target_name: String,
-    relation: RelationKind,
+pub(crate) struct PendingEdge {
+    pub(crate) source: NodeId,
+    pub(crate) target_name: String,
+    pub(crate) relation: RelationKind,
 }
 
 #[derive(Debug)]
-struct FactBuilder<'a> {
+pub(crate) struct FactBuilder<'a> {
     root: &'a Path,
     facts: GraphFacts,
     next_node: u64,
     next_edge: u64,
     next_file: u64,
     next_span: u64,
-    pending_edges: Vec<PendingEdge>,
+    pub(crate) pending_edges: Vec<PendingEdge>,
     symbol_index: BTreeMap<String, Vec<NodeId>>,
+    edge_index: HashSet<(NodeId, NodeId, RelationKind)>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CaptureHit<'tree> {
+    pub(crate) name: String,
+    pub(crate) node: Node<'tree>,
+}
+
+struct CompiledQueries {
+    tags: Query,
+    spur_edges: Query,
 }
 
 impl<'a> FactBuilder<'a> {
@@ -44,10 +56,11 @@ impl<'a> FactBuilder<'a> {
             next_span: 1,
             pending_edges: Vec::new(),
             symbol_index: BTreeMap::new(),
+            edge_index: HashSet::new(),
         }
     }
 
-    fn add_node(
+    pub(crate) fn add_node(
         &mut self,
         relative_path: &str,
         label: String,
@@ -86,12 +99,8 @@ impl<'a> FactBuilder<'a> {
         node_id
     }
 
-    fn add_edge(&mut self, source: NodeId, target: NodeId, relation: RelationKind) {
-        if self.facts.edges.iter().any(|edge| {
-            edge.source_node_id == source
-                && edge.target_node_id == target
-                && edge.relation == relation
-        }) {
+    pub(crate) fn add_edge(&mut self, source: NodeId, target: NodeId, relation: RelationKind) {
+        if !self.edge_index.insert((source, target, relation)) {
             return;
         }
         let edge_id = EdgeId(self.next_edge);
@@ -101,7 +110,11 @@ impl<'a> FactBuilder<'a> {
             source_node_id: source,
             target_node_id: target,
             relation,
-            confidence: Confidence::Heuristic,
+            confidence: match relation {
+                RelationKind::Contains => Confidence::SyntaxExact,
+                RelationKind::Calls | RelationKind::Imports => Confidence::Heuristic,
+                _ => Confidence::Heuristic,
+            },
             confidence_score: match relation {
                 RelationKind::Contains => 1.0,
                 RelationKind::Calls | RelationKind::Imports => 0.8,
@@ -139,11 +152,12 @@ pub fn extract_rust_worktree(root: &Path) -> anyhow::Result<GraphFacts> {
 }
 
 fn extract_rust_files(root: &Path, files: &[PathBuf]) -> anyhow::Result<GraphFacts> {
+    let config = rust_config();
     let mut parser = Parser::new();
-    let language = rust_language();
     parser
-        .set_language(&language)
+        .set_language(&config.language)
         .map_err(|err| anyhow!("failed to configure tree-sitter Rust parser: {err}"))?;
+    let queries = compile_queries(&config)?;
 
     let mut builder = FactBuilder::new(root);
     for path in files {
@@ -152,7 +166,14 @@ fn extract_rust_files(root: &Path, files: &[PathBuf]) -> anyhow::Result<GraphFac
         let tree = parser
             .parse(&source, None)
             .ok_or_else(|| anyhow!("tree-sitter failed to parse `{}`", path.display()))?;
-        extract_file(&mut builder, path, &source, tree.root_node())?;
+        extract_file(
+            &mut builder,
+            &config,
+            path,
+            &source,
+            tree.root_node(),
+            &queries,
+        )?;
     }
     builder.resolve_pending_edges();
     Ok(builder.facts)
@@ -160,9 +181,11 @@ fn extract_rust_files(root: &Path, files: &[PathBuf]) -> anyhow::Result<GraphFac
 
 fn extract_file(
     builder: &mut FactBuilder<'_>,
+    config: &crate::extract::languages::LanguageConfig,
     path: &Path,
     source: &str,
     root_node: Node<'_>,
+    queries: &CompiledQueries,
 ) -> anyhow::Result<()> {
     let relative_path = relative_path(builder.root, path)?;
     let file_id = FileId(builder.next_file);
@@ -175,240 +198,55 @@ fn extract_file(
         file_id,
         root_node,
     );
-    walk_items(
+
+    let tag_captures = run_query(&queries.tags, root_node, source);
+    let definitions = emit_definitions(
+        config,
         builder,
-        source,
         &relative_path,
         file_id,
         file_node,
-        None,
-        "",
-        root_node,
+        source,
+        &tag_captures,
     );
+    let edge_captures = run_query(&queries.spur_edges, root_node, source);
+    emit_edges(builder, file_node, source, &definitions, &edge_captures);
     Ok(())
 }
 
-fn walk_items(
-    builder: &mut FactBuilder<'_>,
-    source: &str,
-    relative_path: &str,
-    file_id: FileId,
-    parent_id: NodeId,
-    enclosing_scope: Option<String>,
-    fqn_prefix: &str,
-    node: Node<'_>,
-) {
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        match child.kind() {
-            "mod_item" => {
-                if let Some(name) = named_child_text(child, "name", source) {
-                    let fqn = scoped_name(fqn_prefix, &name);
-                    let module_id = builder.add_node(
-                        relative_path,
-                        name.clone(),
-                        fqn.clone(),
-                        NodeKind::Module,
-                        file_id,
-                        child,
-                    );
-                    builder.add_edge(parent_id, module_id, RelationKind::Contains);
-                    walk_items(
-                        builder,
-                        source,
-                        relative_path,
-                        file_id,
-                        module_id,
-                        Some(name),
-                        &fqn,
-                        child,
-                    );
-                }
-            }
-            "function_item" => {
-                if let Some(name) = named_child_text(child, "name", source) {
-                    let fqn = scoped_name(fqn_prefix, &name);
-                    let kind = if enclosing_scope
-                        .as_deref()
-                        .is_some_and(|scope| scope.starts_with("impl "))
-                    {
-                        NodeKind::Method
-                    } else {
-                        NodeKind::Function
-                    };
-                    let function_id =
-                        builder.add_node(relative_path, name, fqn, kind, file_id, child);
-                    builder.add_edge(parent_id, function_id, RelationKind::Contains);
-                    collect_calls(builder, source, function_id, child);
-                }
-            }
-            "struct_item" => add_named_symbol(
-                builder,
-                source,
-                relative_path,
-                file_id,
-                parent_id,
-                fqn_prefix,
-                child,
-                NodeKind::Struct,
-            ),
-            "enum_item" => add_named_symbol(
-                builder,
-                source,
-                relative_path,
-                file_id,
-                parent_id,
-                fqn_prefix,
-                child,
-                NodeKind::Enum,
-            ),
-            "trait_item" => add_named_symbol(
-                builder,
-                source,
-                relative_path,
-                file_id,
-                parent_id,
-                fqn_prefix,
-                child,
-                NodeKind::Trait,
-            ),
-            "impl_item" => {
-                let type_name = named_child_text(child, "type", source)
-                    .or_else(|| impl_type_from_text(child_text(child, source)))
-                    .unwrap_or_else(|| "unknown".to_string());
-                let label = type_name;
-                let impl_scope = format!("impl {label}");
-                let fqn = scoped_name(fqn_prefix, &label);
-                let impl_id = builder.add_node(
-                    relative_path,
-                    label.clone(),
-                    fqn.clone(),
-                    NodeKind::Impl,
-                    file_id,
-                    child,
-                );
-                builder.add_edge(parent_id, impl_id, RelationKind::Contains);
-                walk_items(
-                    builder,
-                    source,
-                    relative_path,
-                    file_id,
-                    impl_id,
-                    Some(impl_scope),
-                    &fqn,
-                    child,
-                );
-            }
-            "use_declaration" => {
-                for imported in imported_names(child_text(child, source)) {
-                    builder.pending_edges.push(PendingEdge {
-                        source: parent_id,
-                        target_name: imported,
-                        relation: RelationKind::Imports,
-                    });
-                }
-            }
-            _ => walk_items(
-                builder,
-                source,
-                relative_path,
-                file_id,
-                parent_id,
-                enclosing_scope.clone(),
-                fqn_prefix,
-                child,
-            ),
+fn compile_queries(
+    config: &crate::extract::languages::LanguageConfig,
+) -> anyhow::Result<CompiledQueries> {
+    let mut tags = None;
+    let mut spur_edges = None;
+    for (name, source) in config.queries {
+        let query = Query::new(&config.language, source)
+            .with_context(|| format!("failed to compile Rust tree-sitter query `{name}`"))?;
+        match *name {
+            "tags" => tags = Some(query),
+            "spur-edges" => spur_edges = Some(query),
+            name => return Err(anyhow!("unknown Rust tree-sitter query name `{name}`")),
         }
     }
+    Ok(CompiledQueries {
+        tags: tags.context("missing Rust tags query")?,
+        spur_edges: spur_edges.context("missing Rust SPUR edge query")?,
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn add_named_symbol(
-    builder: &mut FactBuilder<'_>,
-    source: &str,
-    relative_path: &str,
-    file_id: FileId,
-    parent_id: NodeId,
-    fqn_prefix: &str,
-    node: Node<'_>,
-    kind: NodeKind,
-) {
-    if let Some(name) = named_child_text(node, "name", source) {
-        let fqn = scoped_name(fqn_prefix, &name);
-        let symbol_id = builder.add_node(relative_path, name, fqn, kind, file_id, node);
-        builder.add_edge(parent_id, symbol_id, RelationKind::Contains);
+fn run_query<'tree>(query: &Query, root_node: Node<'tree>, source: &str) -> Vec<CaptureHit<'tree>> {
+    let capture_names = query.capture_names();
+    let mut cursor = QueryCursor::new();
+    let mut captures = cursor.captures(query, root_node, source.as_bytes());
+    let mut hits = Vec::new();
+    while let Some((query_match, capture_index)) = captures.next() {
+        let capture = query_match.captures[*capture_index];
+        hits.push(CaptureHit {
+            name: capture_names[capture.index as usize].to_string(),
+            node: capture.node,
+        });
     }
-}
-
-fn collect_calls(builder: &mut FactBuilder<'_>, source: &str, function_id: NodeId, node: Node<'_>) {
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        if child.kind() == "call_expression" {
-            if let Some(function) = child.child_by_field_name("function") {
-                let callee = terminal_symbol_name(child_text(function, source));
-                if !callee.is_empty() {
-                    builder.pending_edges.push(PendingEdge {
-                        source: function_id,
-                        target_name: callee,
-                        relation: RelationKind::Calls,
-                    });
-                }
-            }
-        }
-        collect_calls(builder, source, function_id, child);
-    }
-}
-
-fn named_child_text(node: Node<'_>, field_name: &str, source: &str) -> Option<String> {
-    node.child_by_field_name(field_name)
-        .map(|child| child_text(child, source).trim().to_string())
-        .filter(|text| !text.is_empty())
-}
-
-fn child_text<'a>(node: Node<'_>, source: &'a str) -> &'a str {
-    &source[node.start_byte()..node.end_byte()]
-}
-
-fn imported_names(text: &str) -> Vec<String> {
-    text.trim()
-        .trim_start_matches("use")
-        .trim_end_matches(';')
-        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
-        .filter(|part| !part.is_empty())
-        .filter(|part| !matches!(*part, "crate" | "self" | "super" | "pub" | "as"))
-        .map(ToString::to_string)
-        .collect()
-}
-
-fn terminal_symbol_name(text: &str) -> String {
-    text.rsplit(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
-        .find(|part| !part.is_empty())
-        .unwrap_or("")
-        .to_string()
-}
-
-fn impl_type_from_text(text: &str) -> Option<String> {
-    let after_impl = text.trim_start().strip_prefix("impl")?.trim_start();
-    let type_part = after_impl
-        .split('{')
-        .next()
-        .unwrap_or(after_impl)
-        .split_whitespace()
-        .last()?;
-    Some(
-        type_part
-            .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
-            .to_string(),
-    )
-    .filter(|text| !text.is_empty())
-}
-
-fn scoped_name(prefix: &str, name: &str) -> String {
-    if prefix.is_empty() {
-        name.to_string()
-    } else {
-        format!("{prefix}::{name}")
-    }
+    hits
 }
 
 fn stable_key(relative_path: &str, fqn: &str, kind: NodeKind) -> String {
@@ -417,7 +255,7 @@ fn stable_key(relative_path: &str, fqn: &str, kind: NodeKind) -> String {
     hasher.update([0]);
     hasher.update(fqn.as_bytes());
     hasher.update([0]);
-    hasher.update(format!("{kind:?}").as_bytes());
+    hasher.update(kind.discriminator().as_bytes());
     let digest = hasher.finalize();
     format!(
         "{:016x}",
