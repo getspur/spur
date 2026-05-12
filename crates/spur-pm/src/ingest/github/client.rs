@@ -90,29 +90,49 @@ impl Governor {
 
     /// Record a REST response's parsed rate-limit headers.
     pub async fn observe_rest(&self, remaining: Option<u32>, reset_at: Option<Instant>) {
-        let mut s = self.inner.state.lock().await;
-        if let Some(r) = remaining {
-            s.rest_remaining = Some(r);
+        {
+            let mut s = self.inner.state.lock().await;
+            if let Some(r) = remaining {
+                s.rest_remaining = Some(r);
+            }
+            if let Some(rt) = reset_at.or_else(|| {
+                // §7.2 R-7.2.1: REST throttling must still sleep conservatively
+                // when GitHub omits or malforms x-ratelimit-reset.
+                remaining.map(|_| Instant::now() + std::time::Duration::from_secs(600))
+            }) {
+                s.rest_reset_at = Some(rt);
+            }
         }
-        if let Some(rt) = reset_at.or_else(|| {
-            // §7.2 R-7.2.1: REST throttling must still sleep conservatively
-            // when GitHub omits or malforms x-ratelimit-reset.
-            remaining.map(|_| Instant::now() + std::time::Duration::from_secs(600))
-        }) {
-            s.rest_reset_at = Some(rt);
-        }
+        self.inner.wake.notify_waiters();
     }
 
     /// Record a GraphQL response's `rateLimit` block.
     pub async fn observe_graphql(&self, rate: &RateLimit) {
-        let mut s = self.inner.state.lock().await;
-        s.graphql_remaining = Some(rate.remaining);
-        s.graphql_reset_at = Some(rate.reset_at);
+        {
+            let mut s = self.inner.state.lock().await;
+            s.graphql_remaining = Some(rate.remaining);
+            s.graphql_reset_at = Some(rate.reset_at);
+        }
+        self.inner.wake.notify_waiters();
     }
 
     /// Block (asynchronously) if the next request would push us below the
     /// configured floor. Returns immediately if there is budget available.
     pub async fn throttle_rest(&self) {
+        for _ in 0..8 {
+            let snapshot = { *self.inner.state.lock().await };
+            if let (Some(remaining), Some(reset_at)) =
+                (snapshot.rest_remaining, snapshot.rest_reset_at)
+            {
+                if remaining < self.inner.config.rest_floor {
+                    self.sleep_until_instant(reset_at).await;
+                    continue;
+                }
+            }
+            return;
+        }
+
+        // Avoid a pathological notify loop by doing one final check and sleep.
         let snapshot = { *self.inner.state.lock().await };
         if let (Some(remaining), Some(reset_at)) = (snapshot.rest_remaining, snapshot.rest_reset_at)
         {
@@ -123,6 +143,20 @@ impl Governor {
     }
 
     pub async fn throttle_graphql(&self) {
+        for _ in 0..8 {
+            let snapshot = { *self.inner.state.lock().await };
+            if let (Some(remaining), Some(reset_at)) =
+                (snapshot.graphql_remaining, snapshot.graphql_reset_at)
+            {
+                if remaining < self.inner.config.graphql_floor {
+                    self.sleep_until(reset_at).await;
+                    continue;
+                }
+            }
+            return;
+        }
+
+        // Avoid a pathological notify loop by doing one final check and sleep.
         let snapshot = { *self.inner.state.lock().await };
         if let (Some(remaining), Some(reset_at)) =
             (snapshot.graphql_remaining, snapshot.graphql_reset_at)
@@ -137,12 +171,13 @@ impl Governor {
     /// Concurrent callers share the wake — the first one to come out of
     /// `sleep_until` notifies the rest.
     async fn sleep_until(&self, reset_at: DateTime<Utc>) {
+        let now_instant = Instant::now();
         let now_utc = Utc::now();
         let wait = (reset_at - now_utc).num_seconds().max(0) as u64;
         if wait == 0 {
             return;
         }
-        let deadline = Instant::now() + std::time::Duration::from_secs(wait);
+        let deadline = now_instant + std::time::Duration::from_secs(wait);
         self.sleep_until_instant(deadline).await;
     }
 
@@ -168,6 +203,7 @@ fn parse_rest_remaining(headers: &HeaderMap) -> Option<u32> {
 }
 
 fn parse_rest_reset_deadline(headers: &HeaderMap) -> Option<Instant> {
+    let now_instant = Instant::now();
     let reset_epoch_secs = headers
         .get("x-ratelimit-reset")?
         .to_str()
@@ -176,7 +212,7 @@ fn parse_rest_reset_deadline(headers: &HeaderMap) -> Option<Instant> {
         .ok()?;
     let now_epoch_secs = Utc::now().timestamp();
     let wait_secs = (reset_epoch_secs - now_epoch_secs).clamp(0, 600);
-    Some(Instant::now() + std::time::Duration::from_secs(wait_secs as u64))
+    Some(now_instant + std::time::Duration::from_secs(wait_secs as u64))
 }
 
 /// Tagged GitHub client. The Octocrab handle carries the resolved token;
@@ -326,6 +362,7 @@ mod tests {
         );
 
         gov.observe_rest_headers(&headers).await;
+        let start = Instant::now();
 
         let throttle = tokio::spawn({
             let gov = gov.clone();
@@ -341,6 +378,11 @@ mod tests {
 
         tokio::time::advance(std::time::Duration::from_secs(1)).await;
         throttle.await.unwrap();
+        let elapsed = Instant::now().duration_since(start);
+        assert!(
+            elapsed >= std::time::Duration::from_secs(29),
+            "expected ~30s sleep, got {elapsed:?}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -362,5 +404,43 @@ mod tests {
             elapsed < std::time::Duration::from_secs(1),
             "expected immediate return, got {elapsed:?}"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn governor_wakes_when_budget_recovers() {
+        let gov = Governor::new(GovernorConfig {
+            rest_floor: 50,
+            graphql_floor: 100,
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert("x-ratelimit-remaining", "0".parse().unwrap());
+        headers.insert(
+            "x-ratelimit-reset",
+            (Utc::now().timestamp() + 60).to_string().parse().unwrap(),
+        );
+        gov.observe_rest_headers(&headers).await;
+
+        let throttle = tokio::spawn({
+            let gov = gov.clone();
+            async move { gov.throttle_rest().await }
+        });
+
+        tokio::task::yield_now().await;
+        assert!(!throttle.is_finished(), "throttle should park initially");
+
+        let mut recovered_headers = HeaderMap::new();
+        recovered_headers.insert("x-ratelimit-remaining", "5000".parse().unwrap());
+        recovered_headers.insert(
+            "x-ratelimit-reset",
+            (Utc::now().timestamp() + 60).to_string().parse().unwrap(),
+        );
+        gov.observe_rest_headers(&recovered_headers).await;
+
+        tokio::task::yield_now().await;
+        assert!(
+            throttle.is_finished(),
+            "throttle should wake and complete after budget recovery"
+        );
+        throttle.await.unwrap();
     }
 }
