@@ -102,7 +102,7 @@ pub struct DepHint {
     pub source: DepHintSource,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DepHintKind {
     Closes,
     Fixes,
@@ -113,7 +113,7 @@ pub enum DepHintKind {
     TaskList,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DepHintSource {
     Body,
     TimelineItem,

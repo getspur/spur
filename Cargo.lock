@@ -6783,6 +6783,8 @@ dependencies = [
  "fs2",
  "libc",
  "petgraph",
+ "proptest",
+ "regex",
  "rusqlite",
  "semver",
  "serde",

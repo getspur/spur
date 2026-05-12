@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::sync::DepHint;
 use crate::types::IssueSummary;
 
 // ─── Filter & input types ─────────────────────────────────────────────
@@ -51,6 +52,16 @@ pub struct DependencyCycle {
     pub issues: Vec<String>,
 }
 
+/// A dep hint parsed from a `spur-dep-hint v1` sentinel, with a
+/// live-resolved local `beads_id` if the referenced remote node has
+/// already been ingested. Read-only; the brain consumes these and
+/// decides whether to call `IssueTracker::add_dependency`.
+#[derive(Debug, Clone)]
+pub struct ResolvedDepHint {
+    pub hint: DepHint,
+    pub resolved_beads_id: Option<String>,
+}
+
 // ─── Trait ────────────────────────────────────────────────────────────
 
 #[async_trait]
@@ -64,6 +75,15 @@ pub trait BeadsAdvanced: Send + Sync {
     async fn remove_dependency(&self, issue_id: &str, depends_on_id: &str) -> anyhow::Result<()>;
 
     async fn dep_cycles(&self) -> anyhow::Result<Vec<DependencyCycle>>;
+
+    /// List dep-hint sentinels on an issue, with live resolution
+    /// against the current `external_ref` index (§5.6). Read-only;
+    /// never mutates. The default impl returns an empty vec so
+    /// non-Beads backends compile; Beads-backed implementations
+    /// override with the real read.
+    async fn list_dep_hints(&self, _issue_id: &str) -> anyhow::Result<Vec<ResolvedDepHint>> {
+        Ok(Vec::new())
+    }
 }
 
 // ─── Unit tests for type serialization ────────────────────────────────

@@ -2,9 +2,12 @@ use std::str::FromStr;
 
 use async_trait::async_trait;
 
-use crate::advanced::{BeadsAdvanced, Comment, CommentId, DependencyCycle, ReadyFilter};
+use crate::advanced::{
+    BeadsAdvanced, Comment, CommentId, DependencyCycle, ReadyFilter, ResolvedDepHint,
+};
 use crate::beads_crate::adapter::BeadsCrateAdapter;
 use crate::beads_crate::issue_tracker::br_to_pm_summary;
+use crate::ingest::{dep_hints, watermark};
 use crate::types::IssueSummary;
 
 impl BeadsCrateAdapter {
@@ -121,6 +124,37 @@ impl BeadsAdvanced for BeadsCrateAdapter {
                 .into_iter()
                 .map(|issues| DependencyCycle { issues })
                 .collect())
+        })
+        .await
+    }
+
+    async fn list_dep_hints(&self, issue_id: &str) -> anyhow::Result<Vec<ResolvedDepHint>> {
+        let issue_id = issue_id.to_string();
+        self.read(move |s| {
+            let raw = s.get_comments(&issue_id)?;
+            let mut out = Vec::new();
+            for c in raw {
+                if !c.body.starts_with(watermark::DEP_HINT_SENTINEL_HEADER) {
+                    continue;
+                }
+                let Some(hint) = dep_hints::parse_dep_hint_sentinel(&c.body) else {
+                    continue;
+                };
+                let resolved = if let Some(node_id) = hint.remote_node_id.as_deref() {
+                    // Live lookup against the current external_ref index.
+                    let key = format!("github:{node_id}");
+                    s.find_by_external_ref(&key)?.map(|i| i.id)
+                } else {
+                    // Phase 1: slow-path (source_repo, remote_number) lookup
+                    // is not yet wired — leave unresolved.
+                    None
+                };
+                out.push(ResolvedDepHint {
+                    hint,
+                    resolved_beads_id: resolved,
+                });
+            }
+            Ok(out)
         })
         .await
     }
