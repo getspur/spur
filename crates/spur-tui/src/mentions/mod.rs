@@ -1,3 +1,4 @@
+pub mod code_graph;
 pub mod entry;
 pub mod file_source;
 pub(crate) mod hint;

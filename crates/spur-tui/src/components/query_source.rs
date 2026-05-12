@@ -502,6 +502,8 @@ impl QuerySource for MentionQuerySource {
                 let icon = match m.kind {
                     MentionKind::Directory => "\u{1F4C1}", // 📁
                     MentionKind::File => "\u{1F4C4}",      // 📄
+                    MentionKind::CodeFile => "\u{1F5CE}",  // 🗎
+                    MentionKind::CodeSymbol => "\u{0192}", // ƒ
                     MentionKind::Worker => "\u{1F916}",    // 🤖
                     MentionKind::Issue => "\u{1F39F}",     // 🎟
                 };
