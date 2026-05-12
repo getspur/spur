@@ -40,6 +40,12 @@ pub struct Issue {
     pub blocked_by: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub due_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_system: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_ref: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -105,6 +111,12 @@ pub struct IssueCreate {
     /// Issue IDs this new issue depends on (blocking dependencies).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_system: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -120,6 +132,15 @@ pub struct IssueUpdate {
     /// (bd-2m2u Phase 2c — required by `ModifyTaskSpec`.)
     #[serde(default)]
     pub body: Option<String>,
+    /// Some(Some(value)) = set, Some(None) = clear, None = no change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_system: Option<Option<String>>,
+    /// Some(Some(value)) = set, Some(None) = clear, None = no change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_repo: Option<Option<String>>,
+    /// Some(Some(value)) = set, Some(None) = clear, None = no change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_ref: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

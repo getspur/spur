@@ -6,6 +6,9 @@ use crate::types::{Issue, IssueCreate, IssueFilter, IssueSummary, IssueUpdate, P
 pub trait IssueTracker: Send + Sync {
     async fn get_issue(&self, id: &str) -> anyhow::Result<Issue>;
     async fn list_issues(&self, filter: IssueFilter) -> anyhow::Result<Vec<IssueSummary>>;
+    async fn find_by_external_ref(&self, _external_ref: &str) -> anyhow::Result<Option<Issue>> {
+        Ok(None)
+    }
     /// Create a new issue. Returns the new issue ID.
     async fn create_issue(&self, params: IssueCreate) -> anyhow::Result<String>;
     async fn update_issue(&self, id: &str, update: IssueUpdate) -> anyhow::Result<()>;
