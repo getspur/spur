@@ -7,6 +7,10 @@ pub mod issue_source;
 pub mod registry;
 pub mod worker_source;
 
+pub use code_graph::source::CodeGraphMentionSource;
+pub use code_graph::{
+    CodeMentionKind, CodeMentionPayload, CodeMentionValidationSpec, GraphIndexArtifact,
+};
 pub use entry::{MentionEntry, MentionKind, MentionSource};
 pub use issue_source::{IssueMentionDescriptor, IssueMentionSource};
 pub use registry::{CompletionScope, MentionRegistry};
