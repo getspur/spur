@@ -1,0 +1,60 @@
+query IngestRepo(
+  $owner: String!,
+  $repo: String!,
+  $issueCursor: String,
+  $prCursor: String,
+  $issuePageSize: Int!,
+  $prPageSize: Int!,
+  $commentsFirst: Int!,
+  $timelineFirst: Int!,
+) {
+  repository(owner: $owner, name: $repo) {
+    issues(first: $issuePageSize, after: $issueCursor,
+           orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        id number title body url state stateReason
+        createdAt updatedAt
+        author { login }
+        assignees(first: 10) { nodes { login } }
+        labels(first: 30)    { nodes { name } }
+        comments(first: $commentsFirst) {
+          pageInfo { hasNextPage endCursor }
+          nodes { id author { login } body createdAt updatedAt }
+        }
+        timelineItems(first: $timelineFirst,
+            itemTypes: [CROSS_REFERENCED_EVENT, CLOSED_EVENT]) {
+          nodes {
+            __typename
+            ... on CrossReferencedEvent {
+              source { __typename
+                ... on Issue       { id number repository { nameWithOwner } }
+                ... on PullRequest { id number repository { nameWithOwner } }
+              }
+            }
+            ... on ClosedEvent { stateReason }
+          }
+        }
+      }
+    }
+    pullRequests(first: $prPageSize, after: $prCursor,
+                 orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        id number title body url state isDraft
+        createdAt updatedAt
+        author { login }
+        assignees(first: 10) { nodes { login } }
+        labels(first: 30)    { nodes { name } }
+        comments(first: $commentsFirst) {
+          pageInfo { hasNextPage endCursor }
+          nodes { id author { login } body createdAt updatedAt }
+        }
+        closingIssuesReferences(first: 10) {
+          nodes { id number repository { nameWithOwner } }
+        }
+      }
+    }
+    rateLimit { cost remaining resetAt nodeCount }
+  }
+}

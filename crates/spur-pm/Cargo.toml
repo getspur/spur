@@ -28,7 +28,11 @@ petgraph = { workspace = true }
 regex = { workspace = true }
 semver = "1"
 tempfile = "3"
+# GitHub adapter (Phase 1 ingest). Pinned exact per docs/architecture/spur-pm-github-ingest.md.
+octocrab = "=0.50.0"
+http = "1"
+secrecy = "=0.10.3"
 
 [dev-dependencies]
 proptest = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
