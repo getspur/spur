@@ -246,6 +246,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn source_system_is_github() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         // Octocrab's hyper client wants a tokio reactor at construction time.
         let sync = GitHubSync::from_token("getspur/spur", "ghp_dummy_token").unwrap();
         assert_eq!(sync.source_system(), "github");

@@ -1,0 +1,193 @@
+{
+  "header": {
+    "graph_index_version": "spur-graph-phase2"
+  },
+  "files": [
+    {
+      "stable_file_id": "877fee75ea3fa7b2",
+      "file_path": "src/lib.rs"
+    },
+    {
+      "stable_file_id": "cb1b9065a9ab821a",
+      "file_path": "src/utils.rs"
+    }
+  ],
+  "symbols": [
+    {
+      "stable_symbol_id": "0b20a39dde258f39",
+      "file_path": "src/lib.rs",
+      "byte_range": [
+        37,
+        91
+      ],
+      "line_range": [
+        3,
+        7
+      ],
+      "entity_name": "inline",
+      "symbol_kind": "module",
+      "anchor_hash": "7371619673309304903",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "a64d268f10d3d463",
+      "file_path": "src/lib.rs",
+      "byte_range": [
+        54,
+        89
+      ],
+      "line_range": [
+        4,
+        6
+      ],
+      "entity_name": "Mode",
+      "symbol_kind": "enum",
+      "anchor_hash": "9722627701547306242",
+      "enclosing_scope": "inline"
+    },
+    {
+      "stable_symbol_id": "5279eb0914203d15",
+      "file_path": "src/lib.rs",
+      "byte_range": [
+        93,
+        131
+      ],
+      "line_range": [
+        9,
+        11
+      ],
+      "entity_name": "App",
+      "symbol_kind": "struct",
+      "anchor_hash": "563938687619549275",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "8a993b790d62b14e",
+      "file_path": "src/lib.rs",
+      "byte_range": [
+        133,
+        193
+      ],
+      "line_range": [
+        13,
+        17
+      ],
+      "entity_name": "App",
+      "symbol_kind": "impl",
+      "anchor_hash": "2471580899387477303",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "de10f39e81326ee4",
+      "file_path": "src/lib.rs",
+      "byte_range": [
+        148,
+        191
+      ],
+      "line_range": [
+        14,
+        16
+      ],
+      "entity_name": "run",
+      "symbol_kind": "method",
+      "anchor_hash": "17079285877154097774",
+      "enclosing_scope": "impl App"
+    },
+    {
+      "stable_symbol_id": "a3e0da93b74977ac",
+      "file_path": "src/lib.rs",
+      "byte_range": [
+        195,
+        234
+      ],
+      "line_range": [
+        19,
+        21
+      ],
+      "entity_name": "Runner",
+      "symbol_kind": "trait",
+      "anchor_hash": "7153298637521954677",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "f7f046e5530ee871",
+      "file_path": "src/lib.rs",
+      "byte_range": [
+        236,
+        292
+      ],
+      "line_range": [
+        23,
+        25
+      ],
+      "entity_name": "build_app",
+      "symbol_kind": "function",
+      "anchor_hash": "15345460006701141755",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "613cc9d9157169df",
+      "file_path": "src/utils.rs",
+      "byte_range": [
+        0,
+        18
+      ],
+      "line_range": [
+        1,
+        1
+      ],
+      "entity_name": "Helper",
+      "symbol_kind": "struct",
+      "anchor_hash": "8684135188924659021",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "ca09184f538bf4aa",
+      "file_path": "src/utils.rs",
+      "byte_range": [
+        20,
+        38
+      ],
+      "line_range": [
+        3,
+        3
+      ],
+      "entity_name": "helper",
+      "symbol_kind": "function",
+      "anchor_hash": "7704067935663422720",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "2c723cc4a67e5ca6",
+      "file_path": "src/utils.rs",
+      "byte_range": [
+        40,
+        120
+      ],
+      "line_range": [
+        5,
+        9
+      ],
+      "entity_name": "Helper",
+      "symbol_kind": "impl",
+      "anchor_hash": "10216047625779056650",
+      "enclosing_scope": null
+    },
+    {
+      "stable_symbol_id": "799db474baededf1",
+      "file_path": "src/utils.rs",
+      "byte_range": [
+        58,
+        118
+      ],
+      "line_range": [
+        6,
+        8
+      ],
+      "entity_name": "label",
+      "symbol_kind": "method",
+      "anchor_hash": "3395325927772554561",
+      "enclosing_scope": "impl Helper"
+    }
+  ]
+}
