@@ -2,8 +2,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use spur_acp::SessionId;
 use spur_tui::components::input_bar::InputBar;
 use spur_tui::mentions::{
-    CodeMentionKind, CodeMentionValidationSpec, CompletionScope, MentionKind, MentionRegistry,
-    WorkerMentionDescriptor,
+    CodeMentionKind, CodeMentionValidationSpec, CompletionScope, IssueMentionDescriptor,
+    MentionKind, MentionRegistry, WorkerMentionDescriptor,
 };
 
 #[test]
@@ -158,6 +158,191 @@ fn typed_query_boosts_worker_in_ambiguous_match() {
         hits.iter()
             .map(|h| (&h.kind, &h.display))
             .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn ranking_exact_symbol_outranks_exact_file_basename() {
+    let graph_path = graph_fixture_path();
+    let mut reg = MentionRegistry::for_direct_session().with_code_graph(graph_path);
+    let sid = SessionId::new();
+    let tmp = tempfile::tempdir().unwrap();
+
+    let hits = reg.query(CompletionScope::Session(&sid), tmp.path(), "config", 10);
+    let symbol_idx = hit_position(&hits, "graph://symbol/symbol-config-struct");
+    let file_idx = hit_position(&hits, "graph://file/file-config");
+
+    assert!(
+        symbol_idx < file_idx,
+        "expected exact symbol Config before exact basename config.rs, got {:?}",
+        hit_debug(&hits)
+    );
+}
+
+#[test]
+fn ranking_exact_file_basename_outranks_fuzzy_symbol() {
+    let graph_path = graph_fixture_path();
+    let mut reg = MentionRegistry::for_direct_session().with_code_graph(graph_path);
+    let sid = SessionId::new();
+    let tmp = tempfile::tempdir().unwrap();
+
+    let hits = reg.query(CompletionScope::Session(&sid), tmp.path(), "engine", 10);
+    let file_idx = hit_position(&hits, "graph://file/file-engine");
+    let symbol_idx = hit_position(&hits, "graph://symbol/symbol-engine-struct");
+
+    assert!(
+        file_idx < symbol_idx,
+        "expected exact basename engine.rs before fuzzy symbol GraphEngine, got {:?}",
+        hit_debug(&hits)
+    );
+}
+
+#[test]
+fn ranking_fuzzy_symbol_outranks_fuzzy_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let graph_path = write_graph_fixture(
+        tmp.path(),
+        serde_json::json!({
+            "header": { "graph_index_version": "ranking-fixture" },
+            "files": [
+                {
+                    "stable_file_id": "file-graph-engine",
+                    "file_path": "crates/example/src/graph_engine.rs"
+                }
+            ],
+            "symbols": [
+                {
+                    "stable_symbol_id": "symbol-graph-engine",
+                    "file_path": "crates/example/src/lib.rs",
+                    "byte_range": [0, 20],
+                    "line_range": [1, 3],
+                    "entity_name": "GraphEngine",
+                    "symbol_kind": "struct",
+                    "anchor_hash": "anchor-graph-engine",
+                    "enclosing_scope": "module lib"
+                }
+            ]
+        }),
+    );
+    let mut reg = MentionRegistry::for_direct_session().with_code_graph(graph_path);
+    let sid = SessionId::new();
+
+    let hits = reg.query(CompletionScope::Session(&sid), tmp.path(), "GraEng", 10);
+    let symbol_idx = hit_position(&hits, "graph://symbol/symbol-graph-engine");
+    let file_idx = hit_position(&hits, "graph://file/file-graph-engine");
+
+    assert!(
+        symbol_idx < file_idx,
+        "expected fuzzy symbol GraphEngine before fuzzy path graph_engine.rs, got {:?}",
+        hit_debug(&hits)
+    );
+}
+
+#[test]
+fn ranking_collision_co_shows_symbol_and_file_unambiguously() {
+    let graph_path = graph_fixture_path();
+    let mut reg = MentionRegistry::for_direct_session().with_code_graph(graph_path);
+    let sid = SessionId::new();
+    let tmp = tempfile::tempdir().unwrap();
+
+    let hits = reg.query(CompletionScope::Session(&sid), tmp.path(), "Co", 10);
+    let symbol_idx = hit_position(&hits, "graph://symbol/symbol-config-struct");
+    let file_idx = hit_position(&hits, "graph://file/file-config");
+
+    assert!(
+        symbol_idx < file_idx,
+        "expected Config before config.rs for collision query, got {:?}",
+        hit_debug(&hits)
+    );
+    let file = hits
+        .iter()
+        .find(|hit| hit.uri == "graph://file/file-config")
+        .expect("config.rs file row");
+    assert_eq!(file.display, "crates/example/src/config.rs");
+    assert_eq!(file.tag.as_deref(), Some("file"));
+    let symbol = hits
+        .iter()
+        .find(|hit| hit.uri == "graph://symbol/symbol-config-struct")
+        .expect("Config symbol row");
+    assert_eq!(symbol.display, "Config");
+    assert_eq!(symbol.tag.as_deref(), Some("symbol:struct"));
+}
+
+#[test]
+fn empty_query_bounds_code_graph_rows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let files: Vec<_> = (0..4)
+        .map(|idx| {
+            serde_json::json!({
+                "stable_file_id": format!("file-{idx:02}"),
+                "file_path": format!("crates/example/src/file_{idx:02}.rs")
+            })
+        })
+        .collect();
+    let symbols: Vec<_> = (0..30)
+        .map(|idx| {
+            serde_json::json!({
+                "stable_symbol_id": format!("symbol-{idx:02}"),
+                "file_path": "crates/example/src/lib.rs",
+                "byte_range": [idx, idx + 1],
+                "line_range": [idx + 1, idx + 1],
+                "entity_name": format!("Symbol{idx:02}"),
+                "symbol_kind": "fn",
+                "anchor_hash": format!("anchor-{idx:02}"),
+                "enclosing_scope": "module lib"
+            })
+        })
+        .collect();
+    let graph_path = write_graph_fixture(
+        tmp.path(),
+        serde_json::json!({
+            "header": { "graph_index_version": "large-empty-fixture" },
+            "files": files,
+            "symbols": symbols
+        }),
+    );
+    let mut reg = MentionRegistry::for_direct_session().with_code_graph(graph_path);
+    let sid = SessionId::new();
+
+    let hits = reg.query(CompletionScope::Session(&sid), tmp.path(), "", 20);
+    let code_rows = hits
+        .iter()
+        .filter(|hit| matches!(hit.kind, MentionKind::CodeFile | MentionKind::CodeSymbol))
+        .count();
+
+    assert!(
+        code_rows <= 8,
+        "empty @ should not flood with code rows, got {code_rows}: {:?}",
+        hit_debug(&hits)
+    );
+}
+
+#[test]
+fn worker_and_issue_rows_remain_visible_for_matching_typed_queries() {
+    let graph_path = graph_fixture_path();
+    let mut reg = MentionRegistry::for_brain_session(vec![WorkerMentionDescriptor {
+        name: "codex".into(),
+        description: Some("Writes patches".into()),
+        tier: Some("generalist".into()),
+    }])
+    .with_code_graph(graph_path);
+    reg.set_issue_snapshot(vec![issue("bd-7", "Coordinate codex work", Some("alice"))]);
+    let sid = SessionId::new();
+    let tmp = tempfile::tempdir().unwrap();
+
+    let hits = reg.query(CompletionScope::Session(&sid), tmp.path(), "codex", 20);
+
+    assert!(
+        hits.iter()
+            .any(|hit| hit.kind == MentionKind::Worker && hit.display == "worker:codex"),
+        "expected matching worker row, got {:?}",
+        hit_debug(&hits)
+    );
+    assert!(
+        hits.iter()
+            .any(|hit| hit.kind == MentionKind::Issue && hit.uri == "issue://beads/bd-7"),
+        "expected matching issue row, got {:?}",
+        hit_debug(&hits)
     );
 }
 
@@ -330,4 +515,41 @@ fn missing_code_graph_artifact_leaves_existing_sources_available() {
 
 fn graph_fixture_path() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/graph_index/sample.json")
+}
+
+fn issue(id: &str, title: &str, assignee: Option<&str>) -> IssueMentionDescriptor {
+    IssueMentionDescriptor {
+        id: id.to_string(),
+        title: title.to_string(),
+        source: spur_pm::PmSource::Beads,
+        status: "open".to_string(),
+        assignee: assignee.map(str::to_string),
+        priority: None,
+        issue_type: Some("task".to_string()),
+        labels: vec!["mentions".to_string()],
+        url: format!("https://example.test/{id}"),
+        description: None,
+    }
+}
+
+fn hit_position(hits: &[spur_tui::mentions::MentionEntry], uri: &str) -> usize {
+    hits.iter()
+        .position(|hit| hit.uri == uri)
+        .unwrap_or_else(|| panic!("missing {uri}; hits: {:?}", hit_debug(hits)))
+}
+
+fn hit_debug(hits: &[spur_tui::mentions::MentionEntry]) -> Vec<(&MentionKind, &str, &str)> {
+    hits.iter()
+        .map(|hit| (&hit.kind, hit.display.as_str(), hit.uri.as_str()))
+        .collect()
+}
+
+fn write_graph_fixture(root: &std::path::Path, value: serde_json::Value) -> std::path::PathBuf {
+    let path = root.join("graph.json");
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&value).expect("serialize graph fixture"),
+    )
+    .expect("write graph fixture");
+    path
 }
