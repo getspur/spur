@@ -325,6 +325,37 @@ fn prompt_assembly_omits_excess_code_mentions_after_prompt_cap() {
     );
 }
 
+#[test]
+fn prompt_assembly_warns_when_code_payload_missing_from_registry() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let text = "@Missing";
+    let ranges = [ProtectedRange {
+        start: 0,
+        end: text.len(),
+        kind: RangeKind::Atom,
+        uri: "graph://symbol/missing".to_string(),
+        name: "Missing".to_string(),
+    }];
+
+    let blocks = assemble_blocks_with_code_mentions(text, &ranges, &[], dir.path(), |_| None);
+
+    assert_eq!(blocks.len(), 1, "{blocks:?}");
+    let ContentBlock::Text(text) = &blocks[0] else {
+        panic!("expected synthetic warning text block, got {:?}", blocks[0]);
+    };
+    assert!(text.text.contains("MENTION_WARNING Missing"), "{text:?}");
+    assert!(
+        text.text.contains("intended_uri:   graph://symbol/missing"),
+        "{text:?}"
+    );
+    assert!(
+        text.text
+            .contains("failure_reason: payload_not_in_registry"),
+        "{text:?}"
+    );
+    assert!(text.text.contains("replaced_with:  dropped"), "{text:?}");
+}
+
 fn write_source(root: &std::path::Path, relative: &str, source: &str) {
     let path = root.join(relative);
     fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
