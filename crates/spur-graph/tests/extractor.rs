@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
-use spur_graph::extract::tree_sitter::extract_rust_worktree;
+use spur_graph::build_facts;
 use spur_graph::graph::petgraph_builder::build_petgraph;
 use spur_graph::load_artifact;
 use spur_graph::store::json::{artifact_from_facts, write_artifact};
@@ -21,10 +21,45 @@ fn nested_fn_fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/nested_fn_corpus")
 }
 
+fn python_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/python_corpus")
+}
+
+fn python_golden_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/python_corpus/expected_graph_index.json")
+}
+
+fn python_nested_fn_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/python_nested_fn_corpus")
+}
+
+fn python_decorated_method_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/python_decorated_method_corpus")
+}
+
+fn typescript_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typescript_corpus")
+}
+
+fn typescript_golden_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/typescript_corpus/expected_graph_index.json")
+}
+
+fn markdown_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/markdown_corpus")
+}
+
+fn markdown_golden_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/markdown_corpus/expected_graph_index.json")
+}
+
 #[test]
 fn rust_extractor_matches_sample_corpus_golden_artifact() {
     let root = fixture_root();
-    let facts = extract_rust_worktree(&root).expect("extract fixture");
+    let facts = build_facts(&root).expect("extract fixture").0;
     let artifact = artifact_from_facts(&facts, &root).expect("artifact");
     let actual = serde_json::to_string_pretty(&artifact).expect("encode artifact");
     let actual = format!("{actual}\n");
@@ -38,9 +73,85 @@ fn rust_extractor_matches_sample_corpus_golden_artifact() {
 }
 
 #[test]
+fn python_extractor_matches_sample_corpus_golden_artifact() {
+    let root = python_fixture_root();
+    let facts = build_facts(&root).expect("extract fixture").0;
+    let artifact = artifact_from_facts(&facts, &root).expect("artifact");
+    let actual = serde_json::to_string_pretty(&artifact).expect("encode artifact");
+    let actual = format!("{actual}\n");
+
+    if std::env::var_os("SPUR_GRAPH_BLESS").is_some() {
+        fs::write(python_golden_path(), &actual).expect("write golden artifact");
+    }
+
+    let expected = fs::read_to_string(python_golden_path()).expect("read golden artifact");
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn typescript_extractor_matches_typescript_corpus_golden_artifact() {
+    let root = typescript_fixture_root();
+    let facts = build_facts(&root).expect("extract fixture").0;
+    let artifact = artifact_from_facts(&facts, &root).expect("artifact");
+    let actual = serde_json::to_string_pretty(&artifact).expect("encode artifact");
+    let actual = format!("{actual}\n");
+
+    if std::env::var_os("SPUR_GRAPH_BLESS").is_some() {
+        fs::write(typescript_golden_path(), &actual).expect("write golden artifact");
+    }
+
+    let expected = fs::read_to_string(typescript_golden_path()).expect("read golden artifact");
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn markdown_extractor_matches_corpus_golden_artifact() {
+    let root = markdown_fixture_root();
+    let facts = build_facts(&root).expect("extract fixture").0;
+    let artifact = artifact_from_facts(&facts, &root).expect("artifact");
+    let actual = serde_json::to_string_pretty(&artifact).expect("encode artifact");
+    let actual = format!("{actual}\n");
+
+    if std::env::var_os("SPUR_GRAPH_BLESS").is_some() {
+        fs::write(markdown_golden_path(), &actual).expect("write golden artifact");
+    }
+
+    let expected = fs::read_to_string(markdown_golden_path()).expect("read golden artifact");
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn markdown_extractor_builds_section_hierarchy_and_link_edges() {
+    let root = markdown_fixture_root();
+    let facts = build_facts(&root).expect("extract fixture").0;
+
+    assert!(facts
+        .nodes
+        .iter()
+        .any(|node| node.kind == NodeKind::Section && node.label == "Overview"));
+    assert!(facts
+        .nodes
+        .iter()
+        .any(|node| node.kind == NodeKind::Section && node.label == "Details"));
+    assert!(facts
+        .nodes
+        .iter()
+        .any(|node| node.kind == NodeKind::Section && node.label == "Appendix"));
+
+    assert!(facts
+        .edges
+        .iter()
+        .any(|edge| edge.relation == RelationKind::Contains));
+    assert!(facts
+        .edges
+        .iter()
+        .any(|edge| edge.relation == RelationKind::Links));
+}
+
+#[test]
 fn rust_extractor_keeps_nested_functions_inside_methods_as_functions() {
     let root = nested_fn_fixture_root();
-    let facts = extract_rust_worktree(&root).expect("extract fixture");
+    let facts = build_facts(&root).expect("extract fixture").0;
 
     let baz = facts
         .nodes
@@ -52,9 +163,60 @@ fn rust_extractor_keeps_nested_functions_inside_methods_as_functions() {
 }
 
 #[test]
+fn python_extractor_keeps_nested_functions_inside_methods_as_functions() {
+    let root = python_nested_fn_fixture_root();
+    let facts = build_facts(&root).expect("extract fixture").0;
+
+    let outer = facts
+        .nodes
+        .iter()
+        .find(|node| node.label == "outer")
+        .expect("method is extracted");
+    let inner = facts
+        .nodes
+        .iter()
+        .find(|node| node.label == "inner")
+        .expect("nested function is extracted");
+
+    assert_eq!(outer.kind, NodeKind::Method);
+    assert_eq!(inner.kind, NodeKind::Function);
+}
+
+#[test]
+fn python_extractor_classifies_decorated_methods_as_methods() {
+    let root = python_decorated_method_fixture_root();
+    let facts = build_facts(&root).expect("extract fixture").0;
+    let artifact = artifact_from_facts(&facts, &root).expect("artifact");
+
+    for method_name in ["name", "helper", "from_str"] {
+        let method_node = facts
+            .nodes
+            .iter()
+            .find(|node| node.label == method_name)
+            .unwrap_or_else(|| panic!("expected method node: {method_name}"));
+        let method_symbol = artifact
+            .symbols
+            .iter()
+            .find(|symbol| symbol.entity_name == method_name)
+            .unwrap_or_else(|| panic!("expected symbol: {method_name}"));
+
+        assert_eq!(
+            method_node.kind,
+            NodeKind::Method,
+            "node kind for {method_name}"
+        );
+        assert_eq!(
+            method_symbol.enclosing_scope.as_deref(),
+            Some("Foo"),
+            "enclosing scope for {method_name}"
+        );
+    }
+}
+
+#[test]
 fn rust_extractor_finds_expected_nodes_edges_and_spans() {
     let root = fixture_root();
-    let facts = extract_rust_worktree(&root).expect("extract fixture");
+    let facts = build_facts(&root).expect("extract fixture").0;
 
     let labels: BTreeSet<_> = facts.nodes.iter().map(|node| node.label.as_str()).collect();
     assert!(labels.contains("src/lib.rs"));
@@ -128,10 +290,93 @@ fn rust_extractor_finds_expected_nodes_edges_and_spans() {
 }
 
 #[test]
+fn typescript_extractor_finds_expected_nodes_and_edges() {
+    let root = typescript_fixture_root();
+    let facts = build_facts(&root).expect("extract fixture").0;
+    let node_labels_by_id: std::collections::HashMap<_, _> = facts
+        .nodes
+        .iter()
+        .map(|node| (node.node_id, node.label.as_str()))
+        .collect();
+
+    let labels: BTreeSet<_> = facts.nodes.iter().map(|node| node.label.as_str()).collect();
+    assert!(labels.contains("src/helpers.ts"));
+    assert!(labels.contains("src/app.tsx"));
+    assert!(labels.contains("Helper"));
+    assert!(labels.contains("App"));
+    assert!(labels.contains("Runner"));
+    assert!(labels.contains("Mode"));
+    assert!(labels.contains("renderThing"));
+    assert!(labels.contains("createApp"));
+    assert!(labels.contains("Result"));
+    assert!(labels.contains("AppResult"));
+    assert!(labels.contains("boot"));
+    assert!(labels.contains("run"));
+    assert!(labels.contains("Greeting"));
+    assert!(labels.contains("helper"));
+
+    assert!(facts
+        .nodes
+        .iter()
+        .any(|node| node.kind == NodeKind::Class && node.label == "Helper"));
+    assert!(facts
+        .nodes
+        .iter()
+        .any(|node| node.kind == NodeKind::Class && node.label == "App"));
+    assert!(facts
+        .nodes
+        .iter()
+        .any(|node| node.kind == NodeKind::Interface && node.label == "Runner"));
+    assert!(facts
+        .nodes
+        .iter()
+        .any(|node| node.kind == NodeKind::TypeAlias && node.label == "Result"));
+    assert!(facts
+        .nodes
+        .iter()
+        .any(|node| node.kind == NodeKind::TypeAlias && node.label == "AppResult"));
+
+    let imports_edges = facts
+        .edges
+        .iter()
+        .filter(|edge| edge.relation == RelationKind::Imports)
+        .count();
+    let calls_edges = facts
+        .edges
+        .iter()
+        .filter(|edge| edge.relation == RelationKind::Calls)
+        .count();
+
+    assert_eq!(imports_edges, 3, "imports edges: {imports_edges}");
+    assert!(calls_edges >= 2, "calls edges: {calls_edges}");
+
+    let app_file_id = facts
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::File && node.label == "src/app.tsx")
+        .expect("app.tsx file node")
+        .node_id;
+    let app_import_targets: BTreeSet<_> = facts
+        .edges
+        .iter()
+        .filter(|edge| edge.relation == RelationKind::Imports && edge.source_node_id == app_file_id)
+        .map(|edge| {
+            *node_labels_by_id
+                .get(&edge.target_node_id)
+                .expect("import target node exists")
+        })
+        .collect();
+    assert_eq!(
+        app_import_targets,
+        BTreeSet::from(["Helper", "Mode", "renderThing"])
+    );
+}
+
+#[test]
 fn rust_extractor_stable_keys_are_deterministic_across_runs() {
     let root = fixture_root();
-    let first = extract_rust_worktree(&root).expect("first extract");
-    let second = extract_rust_worktree(&root).expect("second extract");
+    let first = build_facts(&root).expect("first extract").0;
+    let second = build_facts(&root).expect("second extract").0;
 
     let first_keys: Vec<_> = first
         .nodes
@@ -150,7 +395,7 @@ fn rust_extractor_stable_keys_are_deterministic_across_runs() {
 #[test]
 fn rust_extractor_tags_edge_confidence_by_relation_semantics() {
     let root = fixture_root();
-    let facts = extract_rust_worktree(&root).expect("extract fixture");
+    let facts = build_facts(&root).expect("extract fixture").0;
 
     let contains_edge = facts
         .edges
@@ -179,7 +424,7 @@ fn rust_extractor_tags_edge_confidence_by_relation_semantics() {
 #[test]
 fn petgraph_builder_preserves_typed_fact_counts() {
     let root = fixture_root();
-    let facts = extract_rust_worktree(&root).expect("extract fixture");
+    let facts = build_facts(&root).expect("extract fixture").0;
     let graph = build_petgraph(&facts).expect("build petgraph");
 
     assert_eq!(graph.node_count(), facts.nodes.len());
@@ -189,7 +434,7 @@ fn petgraph_builder_preserves_typed_fact_counts() {
 #[test]
 fn artifact_writer_round_trips_through_existing_reader() {
     let root = fixture_root();
-    let facts = extract_rust_worktree(&root).expect("extract fixture");
+    let facts = build_facts(&root).expect("extract fixture").0;
     let artifact = artifact_from_facts(&facts, &root).expect("artifact");
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("graph_index.json");

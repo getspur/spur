@@ -2,9 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 
-use spur_graph::{
-    artifact_from_facts, extract_rust_worktree, resolve_worktree_root_from, write_artifact,
-};
+use spur_graph::{artifact_from_facts, build_facts, resolve_worktree_root_from, write_artifact};
 
 pub const DEFAULT_GRAPH_INDEX_PATH: &str = ".spur/graph-index.json";
 
@@ -32,15 +30,21 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
         println!("[spur] Building code graph index for {}", root.display());
     }
 
-    let facts = extract_rust_worktree(&root)?;
+    let (facts, file_counts) = build_facts(&root)?;
     let artifact = artifact_from_facts(&facts, &root)?;
     write_artifact(&artifact, &output)?;
+    let language_summary = file_counts
+        .iter()
+        .map(|(language, count)| format!("{language}:{count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
 
     println!(
-        "[spur] Graph index built: files: {}, nodes: {}, edges: {}, output: {}",
+        "[spur] Graph index built: files: {}, nodes: {}, edges: {}, by-language: [{}], output: {}",
         artifact.files.len(),
         facts.nodes.len(),
         facts.edges.len(),
+        language_summary,
         output.display()
     );
     Ok(())
