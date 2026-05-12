@@ -16,6 +16,7 @@ use super::issue_source::{IssueMentionDescriptor, IssueMentionSource};
 use super::worker_source::{WorkerMentionDescriptor, WorkerMentionSource};
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
+pub const CODE_GRAPH_INDEX_ENV: &str = "SPUR_CODE_GRAPH_INDEX";
 
 /// Maximum number of worker rows pinned to the top of the empty-query
 /// picker view. See design spec §4.4 / §10.1.
@@ -101,6 +102,20 @@ impl MentionRegistry {
         self.sources.insert(insert_at, source);
         self.clear_cache();
         self
+    }
+
+    /// Opt-in runtime code-graph source registration.
+    ///
+    /// SPUR intentionally uses an environment variable instead of a persisted
+    /// config field for v1 so the TUI only consumes an explicit local artifact
+    /// path when the user launches it with `SPUR_CODE_GRAPH_INDEX=<path>`.
+    /// Unset or empty means "do not load", preserving the §9.2 empty-source
+    /// behavior and avoiding accidental live parsing.
+    pub fn with_code_graph_from_env(self) -> Self {
+        match std::env::var_os(CODE_GRAPH_INDEX_ENV).filter(|value| !value.is_empty()) {
+            Some(path) => self.with_code_graph(PathBuf::from(path)),
+            None => self,
+        }
     }
 
     /// Back-compat alias used by tests and any caller that doesn't

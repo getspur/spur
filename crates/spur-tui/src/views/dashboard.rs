@@ -154,7 +154,7 @@ impl DashboardView {
             completion: crate::components::input_completion::InputCompletionPort::new(),
             command_registry: crate::commands::CommandRegistry::from_configs(&[]),
             mention_registry: std::rc::Rc::new(std::cell::RefCell::new(
-                crate::mentions::MentionRegistry::new(),
+                crate::mentions::MentionRegistry::new().with_code_graph_from_env(),
             )),
             known_worker_names: HashSet::new(),
             cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
@@ -260,7 +260,7 @@ impl DashboardView {
     pub fn set_worker_snapshot(&mut self, workers: Vec<crate::mentions::WorkerMentionDescriptor>) {
         self.known_worker_names = workers.iter().map(|d| d.name.clone()).collect();
         self.mention_registry = std::rc::Rc::new(std::cell::RefCell::new(
-            crate::mentions::MentionRegistry::for_brain_session(workers),
+            crate::mentions::MentionRegistry::for_brain_session(workers).with_code_graph_from_env(),
         ));
         self.refresh_mention_issues();
     }
