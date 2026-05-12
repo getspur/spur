@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::PathBuf;
 
 use spur_graph::extract::tree_sitter::extract_rust_worktree;
@@ -9,6 +10,27 @@ use spur_graph::{Confidence, NodeKind, RelationKind};
 
 fn fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_corpus")
+}
+
+fn golden_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/sample_corpus/expected_graph_index.json")
+}
+
+#[test]
+fn rust_extractor_matches_sample_corpus_golden_artifact() {
+    let root = fixture_root();
+    let facts = extract_rust_worktree(&root).expect("extract fixture");
+    let artifact = artifact_from_facts(&facts, &root).expect("artifact");
+    let actual = serde_json::to_string_pretty(&artifact).expect("encode artifact");
+    let actual = format!("{actual}\n");
+
+    if std::env::var_os("SPUR_GRAPH_BLESS").is_some() {
+        fs::write(golden_path(), &actual).expect("write golden artifact");
+    }
+
+    let expected = fs::read_to_string(golden_path()).expect("read golden artifact");
+    assert_eq!(actual, expected);
 }
 
 #[test]
