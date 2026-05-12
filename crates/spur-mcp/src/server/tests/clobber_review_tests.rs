@@ -68,6 +68,7 @@ fn task_entry(
             task: format!("task {task_id}"),
             depends_on: Vec::new(),
             issue_id: None,
+            issue_title: None,
             context_files: Vec::new(),
         },
         status,

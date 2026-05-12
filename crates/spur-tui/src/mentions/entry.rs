@@ -1,8 +1,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use super::code_graph::CodeMentionPayload;
 use super::issue_source::IssueMentionDescriptor;
+use spur_graph::CodeMentionPayload;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MentionKind {

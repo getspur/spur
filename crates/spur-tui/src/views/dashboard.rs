@@ -157,7 +157,7 @@ impl DashboardView {
                 crate::mentions::MentionRegistry::new().with_code_graph_from_env(),
             )),
             known_worker_names: HashSet::new(),
-            cwd: crate::mentions::code_graph::resolve_worktree_root(),
+            cwd: spur_graph::resolve_worktree_root(),
             focused_panel: Panel::Log,
             focused_node: None,
             verbose: false,

@@ -6677,6 +6677,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "spur-graph"
+version = "1.1.5"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "spur-interactive"
 version = "1.1.5"
 dependencies = [
@@ -6827,6 +6840,7 @@ dependencies = [
  "spur-context",
  "spur-core",
  "spur-cost",
+ "spur-graph",
  "spur-license",
  "spur-pm",
  "tempfile",

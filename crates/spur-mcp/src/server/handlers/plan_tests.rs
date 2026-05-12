@@ -86,6 +86,7 @@ mod plan_truncate_and_restart_tests {
                 task: format!("task {task_id}"),
                 depends_on: deps.iter().map(|dep| dep.to_string()).collect(),
                 issue_id: Some(format!("bd-{task_id}")),
+                issue_title: None,
                 context_files: Vec::new(),
             },
             status,
@@ -995,6 +996,7 @@ mod reconciler_fast_forward_tests {
                     task: "Task".into(),
                     depends_on: Vec::new(),
                     issue_id: Some("bd-1".into()),
+                    issue_title: None,
                     context_files: Vec::new(),
                 },
                 status: crate::plan::PlanTaskStatus::Ready,
@@ -1034,6 +1036,7 @@ mod reconciler_fast_forward_tests {
             task: "Task".into(),
             depends_on: Vec::new(),
             issue_id: None,
+            issue_title: None,
             context_files: Vec::new(),
         }];
         let feature_gate = super::pro_feature_gate();
@@ -1118,6 +1121,7 @@ mod reconciler_fast_forward_tests {
                     task: "Task".into(),
                     depends_on: Vec::new(),
                     issue_id: Some("bd-1".into()),
+                    issue_title: None,
                     context_files: Vec::new(),
                 },
                 status: crate::plan::PlanTaskStatus::Ready,
@@ -1144,6 +1148,7 @@ mod reconciler_fast_forward_tests {
                         task: "Task".into(),
                         depends_on: Vec::new(),
                         issue_id: Some("bd-1".into()),
+                        issue_title: None,
                         context_files: Vec::new(),
                     },
                     status: crate::plan::PlanTaskStatus::Ready,
@@ -1161,6 +1166,7 @@ mod reconciler_fast_forward_tests {
                         task: "Task 2".into(),
                         depends_on: Vec::new(),
                         issue_id: Some("bd-2".into()),
+                        issue_title: None,
                         context_files: Vec::new(),
                     },
                     status: crate::plan::PlanTaskStatus::Pending,
@@ -1201,6 +1207,7 @@ mod reconciler_fast_forward_tests {
             task: "Task".into(),
             depends_on: Vec::new(),
             issue_id: None,
+            issue_title: None,
             context_files: Vec::new(),
         }];
         let feature_gate = super::pro_feature_gate();
@@ -1257,6 +1264,7 @@ mod reconciler_fast_forward_tests {
             task: "Task".into(),
             depends_on: Vec::new(),
             issue_id: None,
+            issue_title: None,
             context_files: Vec::new(),
         }];
         let feature_gate = super::pro_feature_gate();

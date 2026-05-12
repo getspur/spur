@@ -4844,6 +4844,7 @@ mod tests {
             task: "test task".into(),
             depends_on: deps.iter().map(|s| s.to_string()).collect(),
             issue_id: None,
+            issue_title: None,
             context_files: vec![],
         }
     }
@@ -4928,6 +4929,7 @@ mod tests {
                 task: "do".into(),
                 depends_on: vec![],
                 issue_id: None,
+                issue_title: None,
                 context_files: vec![],
             },
             status: super::PlanTaskStatus::Approved { summary: None },
@@ -5021,6 +5023,7 @@ mod tests {
             task: "test task".into(),
             depends_on: deps.iter().map(|s| s.to_string()).collect(),
             issue_id: None,
+            issue_title: None,
             context_files: files.iter().map(|s| s.to_string()).collect(),
         }
     }
@@ -5381,6 +5384,7 @@ mod tests {
                 task: "Implement worker retry".into(),
                 depends_on: vec![],
                 issue_id: Some("bd-1".into()),
+                issue_title: None,
                 context_files: vec![],
             },
             status: super::PlanTaskStatus::Ready,
@@ -5417,6 +5421,7 @@ mod tests {
                 task: "Implement review feedback".into(),
                 depends_on: vec![],
                 issue_id: Some("bd-1".into()),
+                issue_title: None,
                 context_files: vec![],
             },
             status: super::PlanTaskStatus::Ready,
@@ -5896,6 +5901,7 @@ mod tests {
                 task: "a".to_string(),
                 depends_on: vec![],
                 issue_id: None,
+                issue_title: None,
                 context_files: vec![],
             },
             super::PlanTask {
@@ -5904,6 +5910,7 @@ mod tests {
                 task: "b".to_string(),
                 depends_on: vec!["A".to_string()],
                 issue_id: None,
+                issue_title: None,
                 context_files: vec![],
             },
             super::PlanTask {
@@ -5912,6 +5919,7 @@ mod tests {
                 task: "c".to_string(),
                 depends_on: vec!["B".to_string()],
                 issue_id: None,
+                issue_title: None,
                 context_files: vec![],
             },
         ];
@@ -6339,6 +6347,7 @@ mod tests {
                     task: "T".into(),
                     depends_on: vec![],
                     issue_id: None,
+                    issue_title: None,
                     context_files: vec![],
                 },
                 status: PlanTaskStatus::Approved { summary: None },
@@ -6356,6 +6365,7 @@ mod tests {
                     task: "T".into(),
                     depends_on: vec!["dep".into()],
                     issue_id: None,
+                    issue_title: None,
                     context_files: vec![],
                 },
                 status: PlanTaskStatus::EscalatedToBrain {
@@ -6799,6 +6809,7 @@ mod tests {
                     task: "ship it".into(),
                     depends_on: vec![],
                     issue_id: None,
+                    issue_title: None,
                     context_files: vec![],
                 },
                 status: super::PlanTaskStatus::Approved { summary: None },
@@ -6837,6 +6848,7 @@ mod tests {
                     task: "ship it".into(),
                     depends_on: vec![],
                     issue_id: None,
+                    issue_title: None,
                     context_files: vec![],
                 },
                 status: super::PlanTaskStatus::Approved { summary: None },
@@ -7261,6 +7273,7 @@ mod tests {
                 task: "Do T1".into(),
                 depends_on: Vec::new(),
                 issue_id: Some("bd-1".into()),
+                issue_title: None,
                 context_files: Vec::new(),
             },
             status: PlanTaskStatus::AwaitingReview { summary: None },

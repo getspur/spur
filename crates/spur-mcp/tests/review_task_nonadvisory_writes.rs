@@ -227,6 +227,7 @@ fn awaiting_review_plan() -> Arc<AsyncMutex<PlanState>> {
                 task: "Do the thing".into(),
                 depends_on: vec![],
                 issue_id: Some("bd-1".into()),
+                issue_title: None,
                 context_files: vec![],
             },
             status: PlanTaskStatus::AwaitingReview {

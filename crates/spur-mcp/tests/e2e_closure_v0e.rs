@@ -503,6 +503,7 @@ async fn t_v0e_1_no_persisted_direct_dispatch() {
                 task: "Review task".into(),
                 depends_on: vec![],
                 issue_id: Some(task_a_id.clone()),
+                issue_title: None,
                 context_files: vec![],
             },
             status: PlanTaskStatus::AwaitingReview { summary: None },
