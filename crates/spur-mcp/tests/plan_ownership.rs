@@ -57,6 +57,7 @@ fn one_task() -> Vec<PlanTask> {
         task: "Task".into(),
         depends_on: vec![],
         issue_id: None,
+        issue_title: None,
         context_files: vec![],
     }]
 }

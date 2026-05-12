@@ -86,6 +86,7 @@ async fn build_single_task_plan(pm: &PmService, plan_id: &str) -> String {
         task: "Signal watcher task".into(),
         depends_on: vec![],
         issue_id: None,
+        issue_title: None,
         context_files: vec![],
     }];
     let subgraph = spur_mcp::build_epic_subgraph(

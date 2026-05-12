@@ -284,6 +284,7 @@ mod tests {
                 task: "task body".into(),
                 depends_on: Vec::new(),
                 issue_id: Some(task_id.to_string()),
+                issue_title: None,
                 context_files: Vec::new(),
             },
             status: super::super::PlanTaskStatus::Pending,

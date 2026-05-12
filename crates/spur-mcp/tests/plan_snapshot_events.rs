@@ -282,6 +282,7 @@ async fn recover_persisted_plans_skips_unowned_legacy_plan() {
         task: "Do something".into(),
         depends_on: Vec::new(),
         issue_id: None,
+        issue_title: None,
         context_files: Vec::new(),
     }];
     let subgraph = spur_mcp::build_epic_subgraph(
