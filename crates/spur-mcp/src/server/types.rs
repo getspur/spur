@@ -583,6 +583,7 @@ pub fn parse_parallel_tasks(
             agent: task.agent,
             task: task.task,
             context_files: task.context_files.unwrap_or_default(),
+            prior_branch_for_reuse: None,
             respond_to: tx,
             brain_session_id: brain_session_id.clone(),
             delegation_plan: task.delegation_plan,

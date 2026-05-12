@@ -364,6 +364,7 @@ impl McpCallbackServer {
             agent: parsed.agent.clone(),
             task: parsed.task,
             context_files: parsed.context_files.unwrap_or_default(),
+            prior_branch_for_reuse: None,
             respond_to: tx,
             brain_session_id: self.brain_session_id().clone(),
             delegation_plan: parsed.delegation_plan,
