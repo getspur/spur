@@ -8,6 +8,8 @@ use ratatui::{
 
 #[cfg(feature = "markdown")]
 use ratatui::style::Modifier;
+#[cfg(feature = "markdown")]
+use std::time::Duration;
 
 use crate::components::line_wrap::wrap_line_to_width;
 use crate::theme::{resolve_token, ColorDepth, Theme};
@@ -20,6 +22,9 @@ fn token_color(theme: &Theme, name: &str) -> Color {
 use super::types::{InlineImageSource, RenderContext, Segment, VirtualRow};
 use super::ReactTrace;
 use crate::components::spinner;
+
+#[cfg(feature = "markdown")]
+const SCROLL_DEBOUNCE: Duration = Duration::from_millis(100);
 
 /// Cached wrapped body lines for the external pane render path
 /// (DetailPane Stream tab). Independent from the full-render caches.
@@ -103,43 +108,6 @@ pub(crate) fn resolve_anchor(
             row_start + clamped
         }
     }
-}
-
-/// Hash of the mermaid registry's per-fence state. Replaces the
-/// `registry.len()` cache key, which missed Pending/Rendering/Ready/Error
-/// transitions when registry size stayed constant.
-///
-/// Sorts by MermaidId so iteration order doesn't affect the hash.
-/// For Ready state, includes image dimensions because they affect
-/// ImageRow height.
-#[cfg(feature = "markdown")]
-pub(crate) fn fence_state_hash(
-    registry: &std::collections::HashMap<
-        crate::components::mermaid::MermaidId,
-        crate::components::mermaid::MermaidState,
-    >,
-) -> u64 {
-    use crate::components::mermaid::MermaidState;
-    use std::hash::{Hash, Hasher};
-
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    let mut entries: Vec<_> = registry.iter().collect();
-    entries.sort_by_key(|(id, _)| id.0);
-    for (id, state) in entries {
-        id.0.hash(&mut h);
-        std::mem::discriminant(state).hash(&mut h);
-        match state {
-            MermaidState::Ready { image, .. } => {
-                image.width().hash(&mut h);
-                image.height().hash(&mut h);
-            }
-            MermaidState::ReadyText { text, .. } => {
-                text.hash(&mut h);
-            }
-            _ => {}
-        }
-    }
-    h.finish()
 }
 
 /// Group contiguous virtual rows into render batches. Only rows in
@@ -325,6 +293,7 @@ fn render_inline_image(
     total_rows: u16,
     first_row_within: u16,
     run_len: u16,
+    is_scrolling: bool,
     ctx: &mut RenderContext<'_>,
     trace_images: &std::collections::HashMap<
         crate::components::react_trace::types::TraceImageId,
@@ -342,6 +311,10 @@ fn render_inline_image(
     let (cell_w_px, cell_h_px) = picker.font_size();
     let cell_w_px = cell_w_px.max(1);
     let cell_h_px = cell_h_px.max(1);
+
+    if partial && is_scrolling {
+        return false;
+    }
 
     let proto = match source {
         InlineImageSource::Mermaid(id) => {
@@ -780,8 +753,15 @@ impl ReactTrace {
 
         let effective_width = inner.width;
         let visible_height = inner.height as usize;
+        if self.anchor != self.prev_anchor_for_debounce {
+            self.last_scroll_at = Some(std::time::Instant::now());
+        }
+        self.prev_anchor_for_debounce = self.anchor;
+        let is_scrolling = self
+            .last_scroll_at
+            .is_some_and(|last_scroll_at| last_scroll_at.elapsed() < SCROLL_DEBOUNCE);
 
-        let fence_gen = fence_state_hash(ctx.mermaid_registry);
+        let fence_gen = ctx.mermaid_registry_version;
 
         // Cache check: rebuild only when generation, width, or fence state changed.
         // Incremental path: if only the tail entries are dirty, truncate and
@@ -940,6 +920,7 @@ impl ReactTrace {
                         total_rows,
                         first_row_within,
                         run_len,
+                        is_scrolling,
                         ctx,
                         &self.inline_images,
                     );
@@ -999,54 +980,6 @@ impl ReactTrace {
             self.build_virtual_rows(0, effective_width, states, None);
         let end = (offset + visible_height).min(rows.len());
         segment_visible_rows(&rows, offset, end)
-    }
-}
-
-#[cfg(all(test, feature = "markdown"))]
-mod fence_state_hash_tests {
-    use super::*;
-    use crate::components::mermaid::{MermaidId, MermaidState};
-    use std::collections::HashMap;
-
-    #[test]
-    fn empty_registry_has_stable_hash() {
-        let r: HashMap<MermaidId, MermaidState> = HashMap::new();
-        let a = fence_state_hash(&r);
-        let b = fence_state_hash(&r);
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn pending_to_error_changes_hash() {
-        let mut r: HashMap<MermaidId, MermaidState> = HashMap::new();
-        r.insert(MermaidId(0), MermaidState::Pending { code: "g{}".into() });
-        let h1 = fence_state_hash(&r);
-        r.insert(
-            MermaidId(0),
-            MermaidState::Error {
-                message: "boom".into(),
-            },
-        );
-        let h2 = fence_state_hash(&r);
-        assert_ne!(
-            h1, h2,
-            "Pending→Error must change fence_state_hash so cache invalidates"
-        );
-    }
-
-    #[test]
-    fn order_independent() {
-        let mut a: HashMap<MermaidId, MermaidState> = HashMap::new();
-        a.insert(MermaidId(0), MermaidState::Pending { code: "x".into() });
-        a.insert(MermaidId(1), MermaidState::Rendering);
-        let mut b: HashMap<MermaidId, MermaidState> = HashMap::new();
-        b.insert(MermaidId(1), MermaidState::Rendering);
-        b.insert(MermaidId(0), MermaidState::Pending { code: "x".into() });
-        assert_eq!(
-            fence_state_hash(&a),
-            fence_state_hash(&b),
-            "iteration order must not affect hash (must sort by id)"
-        );
     }
 }
 
@@ -1167,6 +1100,7 @@ mod copy_friendly_border_tests {
         let mut image_cache = crate::components::image_cache::ImageCache::new();
         let mut ctx = RenderContext {
             mermaid_registry: &registry,
+            mermaid_registry_version: 0,
             picker: None,
             image_cache: &mut image_cache,
         };
@@ -1299,6 +1233,7 @@ mod scroll_indicator_tests {
         let mut image_cache = crate::components::image_cache::ImageCache::new();
         let mut ctx = RenderContext {
             mermaid_registry: &registry,
+            mermaid_registry_version: 0,
             picker: None,
             image_cache: &mut image_cache,
         };
@@ -1328,6 +1263,7 @@ mod scroll_indicator_tests {
         let mut image_cache = crate::components::image_cache::ImageCache::new();
         let mut ctx = RenderContext {
             mermaid_registry: &registry,
+            mermaid_registry_version: 0,
             picker: None,
             image_cache: &mut image_cache,
         };
@@ -1773,7 +1709,7 @@ mod inline_image_visual_smoke_tests {
     use image::{DynamicImage, Rgba, RgbaImage};
     use ratatui::{backend::TestBackend, buffer::Buffer, layout::Rect, style::Color, Terminal};
     use ratatui_image::picker::Picker;
-    use std::{collections::HashMap, path::PathBuf, sync::Arc};
+    use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
     #[derive(Debug, Clone, Copy)]
     struct ColoredArea {
@@ -1823,6 +1759,7 @@ mod inline_image_visual_smoke_tests {
         let picker = Picker::halfblocks();
         let mut ctx = RenderContext {
             mermaid_registry: &registry,
+            mermaid_registry_version: 0,
             picker: Some(&picker),
             image_cache,
         };
@@ -2029,6 +1966,8 @@ mod inline_image_visual_smoke_tests {
             entry_idx: 0,
             row_within_entry: 1 + half_row_within as usize,
         };
+        let _debounced = render_trace(&mut trace, &mut image_cache, 80, 20);
+        std::thread::sleep(SCROLL_DEBOUNCE + Duration::from_millis(50));
         let partial = render_trace(&mut trace, &mut image_cache, 80, 20);
         let partial_blue = colored_area(&partial, 80, 20, bluish);
         let actual = row_average_rgb(&partial, 1, partial_blue.min_x, partial_blue.max_x);
@@ -2038,6 +1977,60 @@ mod inline_image_visual_smoke_tests {
             partial_blue.max_x - partial_blue.min_x,
             blue.max_x - blue.min_x,
             "slice width should match the full image width",
+        );
+    }
+
+    #[test]
+    fn active_scroll_suppresses_partial_slice_protocols_until_settle() {
+        let mut trace = trace_with_image(vertical_gradient(80, 400));
+        let mut image_cache = ImageCache::new();
+
+        for row in 1..=20 {
+            trace.anchor = ScrollAnchor::Row {
+                entry_idx: 0,
+                row_within_entry: row,
+            };
+            let _buf = render_trace(&mut trace, &mut image_cache, 80, 20);
+        }
+
+        assert_eq!(
+            image_cache.len(),
+            (0, 0),
+            "active scrolling should render partial cards without building per-scroll slice protocols",
+        );
+
+        std::thread::sleep(Duration::from_millis(150));
+        let _buf = render_trace(&mut trace, &mut image_cache, 80, 20);
+
+        assert_eq!(
+            image_cache.len(),
+            (1, 0),
+            "settled partial viewport should build the real slice protocol",
+        );
+    }
+
+    #[test]
+    fn full_visible_image_protocol_is_not_debounced() {
+        let mut trace = trace_with_image(solid_image(80, 80, [255, 0, 0, 255]));
+        let mut image_cache = ImageCache::new();
+
+        let _buf = render_trace(&mut trace, &mut image_cache, 80, 70);
+        assert_eq!(
+            image_cache.len(),
+            (1, 0),
+            "fully visible image should build a full protocol immediately",
+        );
+
+        trace.anchor = ScrollAnchor::Row {
+            entry_idx: 0,
+            row_within_entry: 0,
+        };
+        let _buf = render_trace(&mut trace, &mut image_cache, 80, 70);
+
+        assert_eq!(
+            image_cache.len(),
+            (1, 0),
+            "anchor motion that leaves the image fully visible should keep using the full protocol cache",
         );
     }
 
@@ -2099,7 +2092,50 @@ mod cache_key_tests {
 
     #[test]
     fn cache_miss_when_fence_gen_changes() {
-        // Same shape as width — covered by integration.
+        use crate::components::image_cache::ImageCache;
+        use crate::components::react_trace::RenderContext;
+        use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+        use std::collections::HashMap;
+
+        let mut trace = ReactTrace::new_for_tests();
+        trace.append_message("plain text", "claude", "10:00".to_string());
+        let registry = HashMap::new();
+        let mut image_cache = ImageCache::new();
+
+        {
+            let mut ctx = RenderContext {
+                mermaid_registry: &registry,
+                mermaid_registry_version: 0,
+                picker: None,
+                image_cache: &mut image_cache,
+            };
+            let mut term = Terminal::new(TestBackend::new(40, 10)).unwrap();
+            term.draw(|f| {
+                trace.render_with_ctx_focused(f, Rect::new(0, 0, 40, 10), &mut ctx, None, true)
+            })
+            .unwrap();
+        }
+        assert_eq!(trace.line_cache.as_ref().unwrap().fence_gen, 0);
+
+        {
+            let mut ctx = RenderContext {
+                mermaid_registry: &registry,
+                mermaid_registry_version: 1,
+                picker: None,
+                image_cache: &mut image_cache,
+            };
+            let mut term = Terminal::new(TestBackend::new(40, 10)).unwrap();
+            term.draw(|f| {
+                trace.render_with_ctx_focused(f, Rect::new(0, 0, 40, 10), &mut ctx, None, true)
+            })
+            .unwrap();
+        }
+
+        assert_eq!(
+            trace.line_cache.as_ref().unwrap().fence_gen,
+            1,
+            "VirtualRow cache must rebuild and snapshot the new registry version",
+        );
     }
 
     #[test]

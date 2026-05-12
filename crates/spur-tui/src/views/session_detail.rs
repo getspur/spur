@@ -94,6 +94,8 @@ pub struct SessionDetailView {
         crate::components::mermaid::MermaidId,
         crate::components::mermaid::MermaidState,
     >,
+    #[cfg(feature = "markdown")]
+    pub(crate) mermaid_registry_version: u64,
     /// Owns rendered protocols for diagrams in `mermaid_registry`. Sibling
     /// of the registry so we can split-borrow during render.
     #[cfg(feature = "markdown")]
@@ -262,6 +264,8 @@ impl SessionDetailView {
             #[cfg(feature = "markdown")]
             mermaid_registry: std::collections::HashMap::new(),
             #[cfg(feature = "markdown")]
+            mermaid_registry_version: 0,
+            #[cfg(feature = "markdown")]
             image_cache: crate::components::image_cache::ImageCache::new(),
             #[cfg(feature = "markdown")]
             in_flight_renders: std::collections::HashSet::new(),
@@ -346,6 +350,8 @@ impl SessionDetailView {
             #[cfg(feature = "markdown")]
             mermaid_registry: std::collections::HashMap::new(),
             #[cfg(feature = "markdown")]
+            mermaid_registry_version: 0,
+            #[cfg(feature = "markdown")]
             image_cache: crate::components::image_cache::ImageCache::new(),
             #[cfg(feature = "markdown")]
             in_flight_renders: std::collections::HashSet::new(),
@@ -386,6 +392,27 @@ impl SessionDetailView {
             .set_issue_snapshot(descriptors);
     }
 
+    #[cfg(feature = "markdown")]
+    fn bump_mermaid_registry_version(&mut self) {
+        self.mermaid_registry_version = self.mermaid_registry_version.wrapping_add(1);
+    }
+
+    #[cfg(feature = "markdown")]
+    pub(crate) fn mermaid_registry_insert(
+        &mut self,
+        id: crate::components::mermaid::MermaidId,
+        state: crate::components::mermaid::MermaidState,
+    ) -> Option<crate::components::mermaid::MermaidState> {
+        self.bump_mermaid_registry_version();
+        self.mermaid_registry.insert(id, state)
+    }
+
+    #[cfg(feature = "markdown")]
+    pub(crate) fn mermaid_registry_clear(&mut self) {
+        self.bump_mermaid_registry_version();
+        self.mermaid_registry.clear();
+    }
+
     /// Construct a pre-ready `SessionDetailView` for a session that has been
     /// navigated to optimistically (before the resume pipeline completes).
     /// Starts in `LoadState::Retiring`. Transitions via `handle_spur_event`
@@ -416,6 +443,8 @@ impl SessionDetailView {
             cwd: std::path::PathBuf::from("."),
             #[cfg(feature = "markdown")]
             mermaid_registry: std::collections::HashMap::new(),
+            #[cfg(feature = "markdown")]
+            mermaid_registry_version: 0,
             #[cfg(feature = "markdown")]
             image_cache: crate::components::image_cache::ImageCache::new(),
             #[cfg(feature = "markdown")]
@@ -542,7 +571,7 @@ impl SessionDetailView {
         #[cfg(feature = "markdown")]
         {
             self.invalidate_inline_protocols();
-            self.mermaid_registry.clear();
+            self.mermaid_registry_clear();
             self.pending_fence_actions.clear();
         }
         self.completion.reset();
@@ -1145,7 +1174,7 @@ impl SessionDetailView {
             },
             Err(message) => MermaidState::Error { message },
         };
-        self.mermaid_registry.insert(ref_id, state);
+        self.mermaid_registry_insert(ref_id, state);
 
         // Mark every markdown stream dirty so the next tick's maybe_flush
         // rebuilds placeholders — transitions Pending→Ready (📊) or →Error (⚠).
@@ -1930,7 +1959,7 @@ impl View for SessionDetailView {
                             pending: &pending_ids,
                         };
                         for (_entry_idx, fence) in self.react_trace.force_flush_all(&states) {
-                            self.mermaid_registry.insert(
+                            self.mermaid_registry_insert(
                                 fence.id,
                                 crate::components::mermaid::MermaidState::Pending {
                                     code: fence.code.clone(),
@@ -2127,7 +2156,7 @@ impl View for SessionDetailView {
             };
 
             for (_entry_idx, fence) in self.react_trace.drain_fence_dispatches(&states) {
-                self.mermaid_registry.insert(
+                self.mermaid_registry_insert(
                     fence.id,
                     crate::components::mermaid::MermaidState::Pending {
                         code: fence.code.clone(),
@@ -2418,6 +2447,7 @@ impl SessionDetailView {
         {
             let mut rt_ctx = crate::components::react_trace::RenderContext {
                 mermaid_registry: &self.mermaid_registry,
+                mermaid_registry_version: self.mermaid_registry_version,
                 picker: self.render_picker.as_ref(),
                 image_cache: &mut self.image_cache,
             };
@@ -3091,6 +3121,18 @@ mod maybe_request_rerasters_tests {
             }
             _ => panic!("expected MermaidRenderRequest"),
         }
+    }
+
+    #[test]
+    fn mermaid_registry_version_bumps_on_insert_and_clear() {
+        let mut view = SessionDetailView::new_for_tests();
+        let start = view.mermaid_registry_version;
+
+        view.mermaid_registry_insert(MermaidId(42), MermaidState::Pending { code: "g".into() });
+        assert_eq!(view.mermaid_registry_version, start + 1);
+
+        view.mermaid_registry_clear();
+        assert_eq!(view.mermaid_registry_version, start + 2);
     }
 
     #[test]

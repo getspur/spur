@@ -543,6 +543,7 @@ fn dashboard_compact_long_acp_stream_simulation() {
             {
                 let mut ctx = RenderContext {
                     mermaid_registry: &registry,
+                    mermaid_registry_version: 0,
                     picker: None,
                     image_cache: &mut cache,
                 };
