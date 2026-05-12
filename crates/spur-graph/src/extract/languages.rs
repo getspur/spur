@@ -6,6 +6,8 @@ use crate::{FileId, NodeId, NodeKind, RelationKind};
 pub(crate) struct LanguageConfig {
     pub(crate) language: Language,
     pub(crate) queries: &'static [(&'static str, &'static str)],
+    pub(crate) definition_kind_map: &'static [(&'static str, NodeKind)],
+    pub(crate) is_method: Option<fn(Node<'_>) -> bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -25,10 +27,21 @@ pub(crate) fn rust_config() -> LanguageConfig {
                 include_str!("../../queries/rust/spur-edges.scm"),
             ),
         ],
+        definition_kind_map: &[
+            ("definition.module", NodeKind::Module),
+            ("definition.function", NodeKind::Function),
+            ("definition.method", NodeKind::Method),
+            ("definition.struct", NodeKind::Struct),
+            ("definition.enum", NodeKind::Enum),
+            ("definition.trait", NodeKind::Trait),
+            ("definition.impl", NodeKind::Impl),
+        ],
+        is_method: Some(has_impl_ancestor),
     }
 }
 
-pub(crate) fn emit_rust_definitions<'tree>(
+pub(crate) fn emit_definitions<'tree>(
+    config: &LanguageConfig,
     builder: &mut FactBuilder<'_>,
     relative_path: &str,
     file_id: FileId,
@@ -39,13 +52,19 @@ pub(crate) fn emit_rust_definitions<'tree>(
     let mut definitions: Vec<_> = captures
         .iter()
         .filter_map(|capture| {
-            rust_definition_kind(capture.name.as_str(), capture.node)
-                .map(|kind| (kind, capture.node))
+            definition_kind(config, capture.name.as_str(), capture.node).map(|kind| {
+                (
+                    kind,
+                    capture.node,
+                    definition_name(capture.node, source, captures),
+                )
+            })
         })
         .collect();
 
-    definitions
-        .sort_by_key(|(kind, node)| (node.start_byte(), node.end_byte(), definition_rank(*kind)));
+    definitions.sort_by_key(|(kind, node, _)| {
+        (node.start_byte(), node.end_byte(), definition_rank(*kind))
+    });
     definitions.dedup_by(|left, right| {
         left.1.start_byte() == right.1.start_byte()
             && left.1.end_byte() == right.1.end_byte()
@@ -53,8 +72,10 @@ pub(crate) fn emit_rust_definitions<'tree>(
     });
 
     let mut bindings: Vec<DefinitionBinding<'tree>> = Vec::new();
-    for (kind, node) in definitions {
-        let Some(label) = rust_definition_label(kind, node, source) else {
+    for (kind, node, label) in definitions {
+        // Language adapters must provide an inner @name capture for every definition.
+        // If a grammar edge case lacks one, skip it until the query is extended.
+        let Some(label) = label else {
             continue;
         };
         let parent = nearest_parent(file_node_id, &bindings, node);
@@ -66,7 +87,7 @@ pub(crate) fn emit_rust_definitions<'tree>(
     bindings
 }
 
-pub(crate) fn emit_rust_edges(
+pub(crate) fn emit_edges(
     builder: &mut FactBuilder<'_>,
     file_node_id: NodeId,
     source: &str,
@@ -75,9 +96,11 @@ pub(crate) fn emit_rust_edges(
 ) {
     for capture in captures {
         match capture.name.as_str() {
-            "import.use_declaration" => {
+            "import" => {
                 let source_id = nearest_parent(file_node_id, definitions, capture.node).node_id;
-                for imported in imported_names(child_text(capture.node, source)) {
+                for imported in
+                    contained_capture_text(capture.node, source, captures, "import.name")
+                {
                     builder.pending_edges.push(PendingEdge {
                         source: source_id,
                         target_name: imported,
@@ -85,17 +108,14 @@ pub(crate) fn emit_rust_edges(
                     });
                 }
             }
-            "call.call_expression" => {
+            "call" => {
                 let source_id = nearest_parent(file_node_id, definitions, capture.node).node_id;
-                if let Some(function) = capture.node.child_by_field_name("function") {
-                    let callee = terminal_symbol_name(child_text(function, source));
-                    if !callee.is_empty() {
-                        builder.pending_edges.push(PendingEdge {
-                            source: source_id,
-                            target_name: callee,
-                            relation: RelationKind::Calls,
-                        });
-                    }
+                for callee in contained_capture_text(capture.node, source, captures, "call.name") {
+                    builder.pending_edges.push(PendingEdge {
+                        source: source_id,
+                        target_name: callee,
+                        relation: RelationKind::Calls,
+                    });
                 }
             }
             _ => {}
@@ -103,25 +123,29 @@ pub(crate) fn emit_rust_edges(
     }
 }
 
-fn rust_definition_kind(capture_name: &str, node: Node<'_>) -> Option<NodeKind> {
-    match capture_name {
-        "definition.module" => Some(NodeKind::Module),
-        "definition.function" if !has_impl_ancestor(node) => Some(NodeKind::Function),
-        "definition.method" | "definition.function" => Some(NodeKind::Method),
-        "definition.struct" => Some(NodeKind::Struct),
-        "definition.enum" => Some(NodeKind::Enum),
-        "definition.trait" => Some(NodeKind::Trait),
-        "definition.impl" => Some(NodeKind::Impl),
-        _ => None,
+fn definition_kind(
+    config: &LanguageConfig,
+    capture_name: &str,
+    node: Node<'_>,
+) -> Option<NodeKind> {
+    let mut kind = config
+        .definition_kind_map
+        .iter()
+        .find_map(|(name, kind)| (*name == capture_name).then_some(*kind))?;
+    if kind == NodeKind::Function && config.is_method.is_some_and(|is_method| is_method(node)) {
+        kind = NodeKind::Method;
     }
+    Some(kind)
 }
 
-fn rust_definition_label(kind: NodeKind, node: Node<'_>, source: &str) -> Option<String> {
-    if kind == NodeKind::Impl {
-        return named_child_text(node, "type", source)
-            .or_else(|| impl_type_from_text(child_text(node, source)));
-    }
-    named_child_text(node, "name", source)
+fn definition_name(
+    definition_node: Node<'_>,
+    source: &str,
+    captures: &[CaptureHit<'_>],
+) -> Option<String> {
+    contained_capture_text(definition_node, source, captures, "name")
+        .into_iter()
+        .next()
 }
 
 fn nearest_parent<'a, 'tree>(
@@ -177,48 +201,22 @@ fn definition_rank(kind: NodeKind) -> u8 {
     }
 }
 
-fn named_child_text(node: Node<'_>, field_name: &str, source: &str) -> Option<String> {
-    node.child_by_field_name(field_name)
-        .map(|child| child_text(child, source).trim().to_string())
+fn contained_capture_text(
+    parent: Node<'_>,
+    source: &str,
+    captures: &[CaptureHit<'_>],
+    capture_name: &str,
+) -> Vec<String> {
+    captures
+        .iter()
+        .filter(|capture| capture.name == capture_name && contains(parent, capture.node))
+        .map(|capture| child_text(capture.node, source).trim().to_string())
         .filter(|text| !text.is_empty())
+        .collect()
 }
 
 fn child_text<'a>(node: Node<'_>, source: &'a str) -> &'a str {
     &source[node.start_byte()..node.end_byte()]
-}
-
-fn imported_names(text: &str) -> Vec<String> {
-    text.trim()
-        .trim_start_matches("use")
-        .trim_end_matches(';')
-        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
-        .filter(|part| !part.is_empty())
-        .filter(|part| !matches!(*part, "crate" | "self" | "super" | "pub" | "as"))
-        .map(ToString::to_string)
-        .collect()
-}
-
-fn terminal_symbol_name(text: &str) -> String {
-    text.rsplit(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
-        .find(|part| !part.is_empty())
-        .unwrap_or("")
-        .to_string()
-}
-
-fn impl_type_from_text(text: &str) -> Option<String> {
-    let after_impl = text.trim_start().strip_prefix("impl")?.trim_start();
-    let type_part = after_impl
-        .split('{')
-        .next()
-        .unwrap_or(after_impl)
-        .split_whitespace()
-        .last()?;
-    Some(
-        type_part
-            .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
-            .to_string(),
-    )
-    .filter(|text| !text.is_empty())
 }
 
 fn scoped_name(prefix: &str, name: &str) -> String {
