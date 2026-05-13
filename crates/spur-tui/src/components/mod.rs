@@ -30,6 +30,7 @@ pub mod palette;
 pub mod palette_overlay;
 pub mod palette_sources;
 pub(crate) mod paste_burst;
+pub mod picker_popover;
 pub mod picker_shell;
 pub mod plan_pulse;
 pub mod plan_stage_board;

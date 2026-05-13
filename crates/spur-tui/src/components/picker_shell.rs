@@ -11,12 +11,13 @@ use ratatui::{
 };
 
 use crate::components::mini_input::MiniInput;
+use crate::components::picker_popover::PickerPopover;
 use crate::components::query_source::{
     QueryMode, QuerySource, RetrievalAccept, RetrievalPreview, RetrievalRow,
 };
 use crate::theme::{resolve_token, ColorDepth, Theme};
 
-fn token(theme: &Theme, name: &str) -> Color {
+pub(crate) fn token(theme: &Theme, name: &str) -> Color {
     resolve_token(theme, name, ColorDepth::Truecolor)
 }
 
@@ -333,13 +334,24 @@ impl PickerShell {
     pub fn render(&mut self, frame: &mut Frame, anchor: Rect, container: Rect, theme: &Theme) {
         let query_mode_owned = self.source.query_mode() == QueryMode::OwnedByShell;
         self.update_active_preview();
-        let show_preview = self.active_preview.is_some() && container.width >= MIN_PREVIEW_WIDTH;
+        let has_issue_preview = matches!(
+            self.active_preview.as_ref(),
+            Some((_, RetrievalPreview::Text { .. }))
+        );
+        let has_code_preview = matches!(
+            self.active_preview.as_ref(),
+            Some((
+                _,
+                RetrievalPreview::CodeSymbol(_) | RetrievalPreview::CodeFile(_)
+            ))
+        );
+        let show_inline_preview = has_issue_preview && container.width >= MIN_PREVIEW_WIDTH;
         let list_rows = self.rows.len().clamp(1, 8) as u16;
         let query_rows = if query_mode_owned { 1 } else { 0 };
         let preview_rows = self
             .active_preview
             .as_ref()
-            .filter(|_| show_preview)
+            .filter(|_| show_inline_preview)
             .map(|(_, preview)| match preview {
                 RetrievalPreview::Text { lines, .. } => {
                     lines.len().saturating_add(1).clamp(3, 8) as u16
@@ -350,17 +362,26 @@ impl PickerShell {
         let inner_rows = (list_rows + query_rows).max(preview_rows);
         let popup_height = inner_rows + 2; // +2 for block border
 
-        let popup_width = if show_preview {
+        let popup_width = if show_inline_preview {
             (container.width.saturating_mul(2) / 3).clamp(80, container.width.saturating_sub(2))
+        } else if has_code_preview {
+            (container.width / 2).clamp(40, 60)
         } else {
             (container.width / 2).clamp(30, container.width)
         };
-        let layout = compute_picker_layout(
-            container,
-            anchor,
-            (popup_width, popup_height),
-            None, // Preserve existing geometry; popover lands in a follow-up task.
-        );
+        let popover_size = if has_code_preview {
+            let width = 80u16.min(
+                container
+                    .width
+                    .saturating_sub(popup_width.saturating_add(3)),
+            );
+            let height = 18u16.min(container.height.saturating_sub(2));
+            (width > 0 && height > 0).then_some((width, height))
+        } else {
+            None
+        };
+        let layout =
+            compute_picker_layout(container, anchor, (popup_width, popup_height), popover_size);
         let popup_area = layout.picker_rect;
 
         frame.render_widget(Clear, popup_area);
@@ -382,7 +403,7 @@ impl PickerShell {
         }
 
         let mut cursor_cell: Option<(u16, u16)> = None;
-        let (list_column, preview_area) = if show_preview {
+        let (list_column, preview_area) = if show_inline_preview {
             let available = inner.width.saturating_sub(1);
             let list_width = available / 2;
             let preview_width = available.saturating_sub(list_width);
@@ -434,6 +455,15 @@ impl PickerShell {
         if let Some((cx, cy)) = cursor_cell {
             if cx < popup_area.x + popup_area.width && cy < popup_area.y + popup_area.height {
                 frame.set_cursor_position((cx, cy));
+            }
+        }
+
+        if has_code_preview && !matches!(layout.popover_anchor, PopoverAnchor::Suppressed) {
+            if let (Some((_, preview)), Some(popover_rect)) =
+                (self.active_preview.as_ref(), layout.popover_rect)
+            {
+                frame.render_widget(Clear, popover_rect);
+                PickerPopover { preview, theme }.render(frame, popover_rect);
             }
         }
     }
@@ -584,7 +614,7 @@ fn truncate_preview_lines(
     out
 }
 
-fn truncate_preview_lines_to_fit(
+pub(crate) fn truncate_preview_lines_to_fit(
     lines: Vec<Line<'static>>,
     max_rows: usize,
     max_width: usize,
