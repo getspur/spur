@@ -111,22 +111,25 @@ impl MentionRegistry {
 
     /// Opt-in runtime code-graph source registration.
     ///
-    /// SPUR intentionally uses an environment variable instead of a persisted
-    /// config field for v1 so the TUI only consumes an explicit local artifact
-    /// path when the user launches it with `SPUR_CODE_GRAPH_INDEX=<path>`.
-    /// Unset or empty means "do not load", preserving the §9.2 empty-source
-    /// behavior and avoiding accidental live parsing.
+    /// Resolution order:
+    /// 1. `SPUR_CODE_GRAPH_INDEX=<path>` env var, if set and non-empty.
+    /// 2. `<worktree_root>/.spur/graph-index.json` — the path `spur graph build`
+    ///    writes by default. This makes the TUI work out of the box once a
+    ///    user has built the index.
     pub fn with_code_graph_from_env(self) -> Self {
-        match std::env::var_os(CODE_GRAPH_INDEX_ENV).filter(|value| !value.is_empty()) {
-            Some(path) => {
-                let path = PathBuf::from(path);
-                if path.is_file() {
-                    self.with_code_graph(path)
-                } else {
-                    self.with_code_graph_hint()
-                }
-            }
-            None => self.with_code_graph_hint(),
+        if let Some(path) = std::env::var_os(CODE_GRAPH_INDEX_ENV).filter(|v| !v.is_empty()) {
+            let path = PathBuf::from(path);
+            return if path.is_file() {
+                self.with_code_graph(path)
+            } else {
+                self.with_code_graph_hint()
+            };
+        }
+        let default_path = spur_graph::resolve_worktree_root().join(".spur/graph-index.json");
+        if default_path.is_file() {
+            self.with_code_graph(default_path)
+        } else {
+            self.with_code_graph_hint()
         }
     }
 

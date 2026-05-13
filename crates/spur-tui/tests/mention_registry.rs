@@ -71,13 +71,23 @@ fn direct_session_excludes_workers() {
 #[test]
 fn code_graph_env_missing_records_unobtrusive_hint() {
     let _guard = ENV_LOCK.lock().unwrap();
-    let previous = std::env::var_os(CODE_GRAPH_INDEX_ENV);
+    let previous_env = std::env::var_os(CODE_GRAPH_INDEX_ENV);
+    let previous_cwd = std::env::current_dir().ok();
     std::env::remove_var(CODE_GRAPH_INDEX_ENV);
+
+    // Chdir into a tempdir so the worktree-root fallback resolves to a
+    // directory without `.spur/graph-index.json`, exercising the
+    // "no artifact discoverable" branch.
+    let tmp = tempfile::tempdir().unwrap();
+    std::env::set_current_dir(tmp.path()).unwrap();
 
     let reg = MentionRegistry::for_direct_session().with_code_graph_from_env();
 
-    if let Some(previous) = previous {
-        std::env::set_var(CODE_GRAPH_INDEX_ENV, previous);
+    if let Some(previous_cwd) = previous_cwd {
+        let _ = std::env::set_current_dir(previous_cwd);
+    }
+    if let Some(previous_env) = previous_env {
+        std::env::set_var(CODE_GRAPH_INDEX_ENV, previous_env);
     }
     assert_eq!(
         reg.code_graph_hint(),
