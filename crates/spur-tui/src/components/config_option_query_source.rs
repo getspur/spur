@@ -73,6 +73,8 @@ impl QuerySource for ConfigOptionQuerySource {
                 secondary: c.description.clone().unwrap_or_default(),
                 tag: c.value.clone(),
                 atoms: Vec::new(),
+                selectable: true,
+                dimmed: false,
             })
             .collect();
         self.last_picked = picked;
