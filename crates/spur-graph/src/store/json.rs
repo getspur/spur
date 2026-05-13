@@ -55,7 +55,7 @@ pub fn artifact_from_facts(
             | NodeKind::TypeAlias
             | NodeKind::Section => {
                 let file_path = file_path_for_span(facts, span).unwrap_or_default();
-                let anchor_hash = anchor_hash(worktree_root, &file_path, span)?;
+                let anchor_hash = anchor_hash(worktree_root, &file_path, span);
                 symbols.push(GraphSymbolArtifact {
                     stable_symbol_id: node.stable_key.clone(),
                     file_path,
@@ -106,15 +106,36 @@ fn file_path_for_span(facts: &GraphFacts, span: &SourceSpan) -> Option<String> {
         .map(|node| node.label.clone())
 }
 
-fn anchor_hash(root: &Path, file_path: &str, span: &SourceSpan) -> anyhow::Result<String> {
-    let content = fs::read_to_string(root.join(file_path))
-        .with_context(|| format!("failed to read source for `{file_path}`"))?;
+fn anchor_hash(root: &Path, file_path: &str, span: &SourceSpan) -> String {
+    let full_path = root.join(file_path);
+    let content = match fs::read_to_string(&full_path) {
+        Ok(content) => content,
+        Err(error) => {
+            tracing::warn!(
+                file_path,
+                full_path = %full_path.display(),
+                error = %error,
+                "spur-graph anchor hash fallback to sentinel: source read failed"
+            );
+            return "0".to_string();
+        }
+    };
     let start = span.start_byte as usize;
     let end = span.end_byte as usize;
-    let slice = content
-        .get(start..end)
-        .with_context(|| format!("invalid UTF-8 boundary for `{file_path}` span {start}..{end}"))?;
-    Ok(compute_anchor_hash(slice).to_string())
+    let slice = match content.get(start..end) {
+        Some(slice) => slice,
+        None => {
+            tracing::warn!(
+                file_path,
+                full_path = %full_path.display(),
+                span_start = start,
+                span_end = end,
+                "spur-graph anchor hash fallback to sentinel: UTF-8 boundary mismatch"
+            );
+            return "0".to_string();
+        }
+    };
+    compute_anchor_hash(slice).to_string()
 }
 
 fn symbol_kind(kind: NodeKind) -> &'static str {

@@ -167,8 +167,17 @@ impl<'a> FactBuilder<'a> {
 
     fn resolve_pending_edges(&mut self) {
         let mut by_label: HashMap<String, NodeId> = HashMap::new();
+        let mut ambiguous_labels: HashSet<String> = HashSet::new();
         for (label, ids) in &self.symbol_index {
             if let Some(id) = ids.first() {
+                if ids.len() > 1 {
+                    tracing::warn!(
+                        label = %label,
+                        candidates = ids.len(),
+                        "spur-graph: ambiguous symbol; edges to this label resolve to first occurrence only"
+                    );
+                    ambiguous_labels.insert(label.clone());
+                }
                 by_label.insert(label.clone(), *id);
             }
         }
@@ -178,12 +187,22 @@ impl<'a> FactBuilder<'a> {
             }
         }
         let pending = std::mem::take(&mut self.pending_edges);
+        let mut ambiguous_hits = 0usize;
         for edge in pending {
             if let Some(target) = by_label.get(&edge.target_name).copied() {
+                if ambiguous_labels.contains(&edge.target_name) {
+                    ambiguous_hits += 1;
+                }
                 if target != edge.source {
                     self.add_edge(edge.source, target, edge.relation);
                 }
             }
+        }
+        if ambiguous_hits > 0 {
+            tracing::warn!(
+                "spur-graph: {} pending edges hit ambiguous symbol labels",
+                ambiguous_hits
+            );
         }
     }
 }

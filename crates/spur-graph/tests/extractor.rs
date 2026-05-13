@@ -468,6 +468,49 @@ fn build_skips_files_with_invalid_utf8_and_continues() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn discover_files_skips_unreadable_entries_and_continues() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(root.join("src/good.rs"), b"pub fn ok() {}\n" as &[u8]).expect("write good.rs");
+    symlink("/nonexistent/target.rs", root.join("src/broken_link.rs"))
+        .expect("create broken symlink");
+
+    let (facts, _) = build_facts(root).expect("build must continue after walker errors");
+
+    assert!(
+        facts.nodes.iter().any(|node| node.label == "ok"),
+        "ok should be extracted from readable file"
+    );
+}
+
+#[test]
+fn artifact_uses_sentinel_anchor_when_source_drifts_after_extraction() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(root.join("src/lib.rs"), "pub fn run() {}\n").expect("write lib.rs");
+
+    let facts = build_facts(root).expect("build facts").0;
+
+    fs::write(root.join("src/lib.rs"), "pub fn").expect("truncate lib.rs");
+
+    let artifact = artifact_from_facts(&facts, root).expect("artifact should still serialize");
+    let run_symbol = artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.entity_name == "run")
+        .expect("run symbol should still exist");
+
+    assert_eq!(run_symbol.anchor_hash, "0");
+}
+
 #[test]
 fn artifact_writer_round_trips_through_existing_reader() {
     let root = fixture_root();
@@ -486,4 +529,51 @@ fn artifact_writer_round_trips_through_existing_reader() {
             && symbol.symbol_kind == "method"
             && symbol.enclosing_scope.as_deref() == Some("impl App")
     }));
+}
+
+#[test]
+fn resolve_pending_edges_surfaces_ambiguous_labels() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        "pub fn process() {}\n\
+         pub mod inner {\n\
+             pub fn process() {}\n\
+         }\n",
+    )
+    .expect("write lib.rs");
+    fs::write(
+        root.join("src/caller.rs"),
+        "use crate::process;\n\
+         pub fn call() { process(); }\n",
+    )
+    .expect("write caller.rs");
+
+    let facts = build_facts(root).expect("extract fixture").0;
+
+    let process_nodes = facts
+        .nodes
+        .iter()
+        .filter(|node| node.label == "process")
+        .count();
+    assert_eq!(process_nodes, 2, "fixture must contain ambiguous label");
+
+    let labels_by_id: std::collections::HashMap<_, _> = facts
+        .nodes
+        .iter()
+        .map(|node| (node.node_id, node.label.as_str()))
+        .collect();
+    let process_calls = facts
+        .edges
+        .iter()
+        .filter(|edge| edge.relation == RelationKind::Calls)
+        .filter(|edge| labels_by_id.get(&edge.target_node_id) == Some(&"process"))
+        .count();
+    assert!(
+        process_calls <= 1,
+        "calls to ambiguous `process` should resolve to at most one target"
+    );
 }
