@@ -372,74 +372,77 @@ fn issue_preview_for_descriptor(
     descriptor: &crate::mentions::IssueMentionDescriptor,
 ) -> RetrievalPreview {
     let mut lines = Vec::new();
-    lines.push(Line::from(vec![
-        Span::raw(descriptor.id.clone()),
-        Span::raw("  "),
-        Span::styled(
-            descriptor.source.to_string(),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]));
-
-    let title = crate::mentions::issue_source::sanitize_single_line(&descriptor.title);
-    if !title.trim().is_empty() {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            title,
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
-    }
-
-    lines.push(Line::raw(""));
-    lines.push(labeled_preview_line(
-        "Status:",
+    let pill_style = Style::default().fg(Color::DarkGray);
+    let separator = Span::styled(" · ", pill_style);
+    let pills = vec![
+        descriptor.id.clone(),
+        descriptor.source.to_string(),
         required_preview_value(&descriptor.status),
-    ));
-    lines.push(labeled_preview_line(
-        "Type:",
-        optional_preview_value(descriptor.issue_type.as_deref()),
-    ));
-    lines.push(labeled_preview_line(
-        "Priority:",
+        descriptor
+            .issue_type
+            .as_deref()
+            .map(required_preview_value)
+            .unwrap_or_else(|| "-".to_string()),
         descriptor
             .priority
             .map(|priority| format!("P{priority}"))
             .unwrap_or_else(|| "-".to_string()),
-    ));
-    lines.push(labeled_preview_line(
-        "Assignee:",
-        optional_preview_value(descriptor.assignee.as_deref()),
-    ));
+        descriptor
+            .assignee
+            .as_deref()
+            .map(required_preview_value)
+            .unwrap_or_else(|| "-".to_string()),
+    ];
+    let mut pill_spans = Vec::new();
+    for (idx, pill) in pills.into_iter().enumerate() {
+        if idx > 0 {
+            pill_spans.push(separator.clone());
+        }
+        pill_spans.push(Span::styled(pill, pill_style));
+    }
+    lines.push(Line::from(pill_spans));
+
+    let title = crate::mentions::issue_source::sanitize_single_line(&descriptor.title);
+    lines.push(Line::from(Span::styled(
+        title,
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
 
     if !descriptor.labels.is_empty() {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            "Labels:",
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
         lines.push(labels_preview_line(&descriptor.labels));
     }
+
+    lines.push(Line::from(Span::styled("─".repeat(78), pill_style)));
 
     if let Some(desc) = descriptor
         .description
         .as_deref()
         .filter(|d| !d.trim().is_empty())
     {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            "Description:",
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
-        let sanitized = crate::mentions::issue_source::sanitize_single_line(desc);
-        if sanitized.len() > 280 {
-            lines.push(Line::raw(format!("{}…", &sanitized[..279])));
-        } else {
-            lines.push(Line::raw(sanitized));
+        let mut sanitized = crate::mentions::issue_source::sanitize_multi_line(desc);
+        if sanitized.chars().count() > 2000 {
+            sanitized = sanitized.chars().take(1999).collect::<String>();
+            sanitized.push('…');
+        }
+        for body_line in sanitized.split('\n') {
+            if body_line.is_empty() {
+                lines.push(Line::raw(""));
+            } else {
+                lines.push(Line::raw(body_line.to_string()));
+            }
         }
     }
 
-    lines.push(Line::raw(""));
-    lines.push(url_preview_line(&descriptor.url));
+    let url = descriptor.url.trim();
+    if !url.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            url.to_string(),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::UNDERLINED),
+        )));
+    }
 
     RetrievalPreview::Text {
         title: descriptor.id.clone(),
@@ -456,56 +459,28 @@ fn required_preview_value(value: &str) -> String {
     }
 }
 
-fn optional_preview_value(value: Option<&str>) -> String {
-    value
-        .map(required_preview_value)
-        .unwrap_or_else(|| "-".to_string())
-}
-
-fn labeled_preview_line(label: &'static str, value: String) -> Line<'static> {
-    Line::from(vec![Span::raw(label), Span::raw(" "), Span::raw(value)])
-}
-
 fn labels_preview_line(labels: &[String]) -> Line<'static> {
     const LABEL_PREVIEW_LIMIT: usize = 6;
+    let style = Style::default().fg(Color::DarkGray);
 
     let mut spans = Vec::new();
     for (idx, label) in labels.iter().take(LABEL_PREVIEW_LIMIT).enumerate() {
         if idx > 0 {
-            spans.push(Span::raw(", "));
+            spans.push(Span::styled(" · ", style));
         }
-        spans.push(Span::raw(label.clone()));
+        spans.push(Span::styled(label.clone(), style));
     }
     let remaining = labels.len().saturating_sub(LABEL_PREVIEW_LIMIT);
     if remaining > 0 {
         if !spans.is_empty() {
-            spans.push(Span::raw(", "));
+            spans.push(Span::styled(" · ", style));
         }
         spans.push(Span::styled(
             format!("+{remaining} more"),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
+            style.add_modifier(Modifier::DIM),
         ));
     }
     Line::from(spans)
-}
-
-fn url_preview_line(url: &str) -> Line<'static> {
-    let url = url.trim();
-    if url.is_empty() {
-        Line::raw("URL: -")
-    } else {
-        Line::from(vec![
-            Span::raw("URL: "),
-            Span::styled(
-                url.to_string(),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::UNDERLINED),
-            ),
-        ])
-    }
 }
 
 impl QuerySource for MentionQuerySource {
@@ -1234,7 +1209,7 @@ mod tests {
                 issue_type: Some("task".to_string()),
                 labels: vec!["mentions".to_string(), "preview".to_string()],
                 url: "https://example.test/bd-42".to_string(),
-                description: None,
+                description: Some("first paragraph line\n\nsecond paragraph line".to_string()),
             }]);
         let mut src = MentionQuerySource::new(
             Rc::clone(&registry),
@@ -1260,11 +1235,15 @@ mod tests {
         };
         assert_eq!(title, "bd-42");
         let text = preview_text(&preview);
+        assert!(
+            text.contains("bd-42 · beads · open · task · P2 · alice"),
+            "{text}"
+        );
         assert!(text.contains(full_title), "{text}");
-        assert!(text.contains("Labels:"), "{text}");
-        assert!(text.contains("mentions"), "{text}");
-        assert!(text.contains("preview"), "{text}");
-        assert!(text.contains("URL: https://example.test/bd-42"), "{text}");
+        assert!(text.contains("mentions · preview"), "{text}");
+        assert!(text.contains("first paragraph line"), "{text}");
+        assert!(text.contains("second paragraph line"), "{text}");
+        assert!(text.contains("https://example.test/bd-42"), "{text}");
     }
 
     #[test]
@@ -1285,7 +1264,7 @@ mod tests {
             .expect("labels value line");
         assert_eq!(
             labels_line,
-            "label-1, label-2, label-3, label-4, label-5, label-6, +4 more"
+            "label-1 · label-2 · label-3 · label-4 · label-5 · label-6 · +4 more"
         );
     }
 
