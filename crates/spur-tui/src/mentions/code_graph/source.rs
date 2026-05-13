@@ -75,6 +75,7 @@ fn entries_and_payloads(
             file_payload(&file, &uri, &display, &graph_index_version),
         ));
         entries.push(MentionEntry {
+            section_header: None,
             kind: MentionKind::CodeFile,
             uri,
             display,
@@ -95,6 +96,7 @@ fn entries_and_payloads(
             symbol_payload(&symbol, &uri, &display, &graph_index_version),
         ));
         entries.push(MentionEntry {
+            section_header: None,
             kind: MentionKind::CodeSymbol,
             uri,
             display,
