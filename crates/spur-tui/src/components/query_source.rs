@@ -9,7 +9,6 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
-use std::path::Path;
 
 /// Where the popup's query string lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -606,13 +605,24 @@ impl QuerySource for MentionQuerySource {
                     u32::try_from(hint_range[0]).unwrap_or(1),
                     u32::try_from(hint_range[1]).unwrap_or(1),
                 ];
-                let joined_path = self.cwd.join(&payload.authoritative.file_path);
-                let snippet = crate::components::snippet::read_snippet(
-                    Path::new(&joined_path),
-                    line_range,
-                    12,
-                    65_536,
-                );
+                let Some(joined_path) = crate::components::snippet::resolve_workspace_path(
+                    &self.cwd,
+                    &payload.authoritative.file_path,
+                ) else {
+                    return Some(RetrievalPreview::CodeSymbol(CodeSymbolPreview {
+                        entity_name,
+                        symbol_kind,
+                        file_path: payload.authoritative.file_path,
+                        line_range,
+                        enclosing_scope: payload.display_meta.enclosing_scope,
+                        graph_index_version: payload.display_meta.graph_index_version,
+                        snippet: crate::components::snippet::SnippetState::Failed(
+                            "path outside workspace".to_string(),
+                        ),
+                    }));
+                };
+                let snippet =
+                    crate::components::snippet::read_snippet(&joined_path, line_range, 12, 65_536);
                 Some(RetrievalPreview::CodeSymbol(CodeSymbolPreview {
                     entity_name,
                     symbol_kind,
@@ -629,6 +639,10 @@ impl QuerySource for MentionQuerySource {
                     .borrow()
                     .lookup_code_payload(&hit.uri)?
                     .clone();
+                let _ = crate::components::snippet::resolve_workspace_path(
+                    &self.cwd,
+                    &payload.authoritative.file_path,
+                );
                 Some(RetrievalPreview::CodeFile(CodeFilePreview {
                     file_path: payload.authoritative.file_path,
                     graph_index_version: payload.display_meta.graph_index_version,
