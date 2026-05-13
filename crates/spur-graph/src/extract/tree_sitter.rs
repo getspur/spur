@@ -112,7 +112,7 @@ impl<'a> FactBuilder<'a> {
         let span_id = SpanId(self.next_span);
         self.next_span += 1;
         let range = node.range();
-        let stable_key = stable_key(relative_path, &fqn, kind);
+        let stable_key = stable_key(relative_path, &fqn, kind, range.start_byte);
 
         self.facts.spans.push(SourceSpan {
             span_id,
@@ -218,6 +218,18 @@ pub fn build_facts(root: &Path) -> anyhow::Result<(GraphFacts, BTreeMap<&'static
         .collect();
     let facts = extract_files(&root, &extract_groups)?;
     Ok((facts, file_counts))
+}
+
+pub fn build_facts_for_paths(root: &Path, files: &[PathBuf]) -> anyhow::Result<GraphFacts> {
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize `{}`", root.display()))?;
+    let groups = language_groups_for_paths(&root, files)?;
+    let extract_groups: Vec<_> = groups
+        .into_iter()
+        .map(|group| (group.label, group.config, group.files))
+        .collect();
+    extract_files(&root, &extract_groups)
 }
 
 fn extract_files(
@@ -419,6 +431,42 @@ fn discover_language_groups(
     Ok((language_groups, file_counts))
 }
 
+fn language_groups_for_paths(
+    root: &Path,
+    files: &[PathBuf],
+) -> anyhow::Result<Vec<LanguageFileGroup>> {
+    let mut groups: BTreeMap<&'static str, (fn() -> LanguageConfig, Vec<PathBuf>)> =
+        BTreeMap::new();
+    let descriptors: &[LanguageDescriptor] = language_registry();
+    for path in files {
+        let full_path = if path.is_absolute() {
+            path.clone()
+        } else {
+            root.join(path)
+        };
+        if !full_path.is_file() {
+            continue;
+        }
+        let Some(descriptor) = descriptors.iter().find(|d| (d.matcher)(&full_path)) else {
+            continue;
+        };
+        groups
+            .entry(descriptor.label)
+            .or_insert_with(|| (descriptor.factory, Vec::new()))
+            .1
+            .push(full_path);
+    }
+
+    Ok(groups
+        .into_iter()
+        .map(|(label, (factory, files))| LanguageFileGroup {
+            label,
+            config: factory(),
+            files,
+        })
+        .collect())
+}
+
 pub(crate) fn run_query<'tree>(
     query: &Query,
     root_node: Node<'tree>,
@@ -438,13 +486,15 @@ pub(crate) fn run_query<'tree>(
     hits
 }
 
-fn stable_key(relative_path: &str, fqn: &str, kind: NodeKind) -> String {
+fn stable_key(relative_path: &str, fqn: &str, kind: NodeKind, start_byte: usize) -> String {
     let mut hasher = Sha256::new();
     hasher.update(relative_path.as_bytes());
     hasher.update([0]);
     hasher.update(fqn.as_bytes());
     hasher.update([0]);
     hasher.update(kind.discriminator().as_bytes());
+    hasher.update([0]);
+    hasher.update(start_byte.to_le_bytes());
     let digest = hasher.finalize();
     format!(
         "{:016x}",
