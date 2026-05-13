@@ -611,7 +611,7 @@ mod session_attach_guard_transfer_tests {
                     } = ev.body
                     {
                         assert_eq!(session, SessionId("spur-session-cache".to_string()));
-                        assert!(caps.supports_set_config_option());
+                        assert!(caps.is_some_and(|caps| caps.supports_set_config_option()));
                         assert_eq!(config_options.len(), 2);
                         found = true;
                     }
@@ -657,7 +657,7 @@ mod session_attach_guard_transfer_tests {
                     } = ev.body
                     {
                         assert_eq!(session, SessionId("spur-session-cache".to_string()));
-                        assert!(caps.supports_set_model());
+                        assert!(caps.is_some_and(|caps| caps.supports_set_model()));
                         assert!(config_options.is_empty());
                         found_models_only = true;
                     }
@@ -671,6 +671,50 @@ mod session_attach_guard_transfer_tests {
         );
 
         // Idempotent abort of the dummy delegation_handle so Drop is clean.
+        brain.delegation_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn replace_session_config_options_emits_none_caps_for_resumed_session() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = SpurConfig::default();
+        config.cost.db_path = tmp.path().join("cost.db").display().to_string();
+        let orchestrator = Orchestrator::new(tmp.path().to_path_buf(), config, None).unwrap();
+        let mut event_rx = orchestrator.event_tx.subscribe();
+
+        let mut brain = fixture_brain_session("spur-session-resumed");
+        brain.spur_agent_caps = None;
+        let next = vec![fixture_select_option(
+            "model",
+            "gpt-5-codex",
+            &[("gpt-5-codex", "GPT-5 Codex"), ("gpt-5", "GPT-5")],
+        )];
+
+        orchestrator.replace_session_config_options(&mut brain, next.clone());
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut found = false;
+        while tokio::time::Instant::now() < deadline && !found {
+            let remaining = deadline - tokio::time::Instant::now();
+            match tokio::time::timeout(remaining, event_rx.recv()).await {
+                Ok(Ok(ev)) => {
+                    if let SpurEventBody::CommandRegistryDirty {
+                        session,
+                        caps,
+                        config_options,
+                    } = ev.body
+                    {
+                        assert_eq!(session, SessionId("spur-session-resumed".to_string()));
+                        assert!(caps.is_none());
+                        assert_eq!(config_options, next);
+                        found = true;
+                    }
+                }
+                _ => break,
+            }
+        }
+        assert!(found, "expected CommandRegistryDirty event with caps=None");
+
         brain.delegation_handle.abort();
     }
 
@@ -1580,9 +1624,7 @@ impl Orchestrator {
             // session creation onward.
             self.emit(SpurEvent::now(SpurEventBody::CommandRegistryDirty {
                 session: session_id.clone(),
-                caps: spur_agent_caps
-                    .clone()
-                    .expect("spur_agent_caps populated before command-registry emit"),
+                caps: spur_agent_caps.clone(),
                 config_options: config_options.clone(),
             }));
         }
