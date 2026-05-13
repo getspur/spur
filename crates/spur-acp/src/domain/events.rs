@@ -722,6 +722,7 @@ pub enum SpurEventBody {
     /// `session/update.ConfigOptionUpdate` notification from the agent.
     CommandRegistryDirty {
         session: SessionId,
+        caps: Arc<crate::SpurAgentCaps>,
         config_options: Vec<SessionConfigOption>,
     },
     DelegationRequested {
