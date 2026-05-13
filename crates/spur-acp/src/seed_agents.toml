@@ -39,7 +39,7 @@ args = ["--trust-all-tools"]
 [[agents.entries]]
 name = "claude-code"
 command = "npx"
-args = ["--yes", "@agentclientprotocol/claude-agent-acp@0.26.0"]
+args = ["--yes", "@agentclientprotocol/claude-agent-acp@0.33.1"]
 transport = "acp"
 kind = "claude-code-acp"
 role = "both"
@@ -80,7 +80,7 @@ dispatch = "prompt_text"
 [[agents.entries]]
 name = "codex"
 command = "npx"
-args = ["--yes", "@zed-industries/codex-acp@0.11.1"]
+args = ["--yes", "@zed-industries/codex-acp@0.14.0"]
 transport = "acp"
 kind = "codex-acp"
 role = "both"
