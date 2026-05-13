@@ -158,7 +158,10 @@ pub(super) async fn refresh_pm_state(
 }
 
 /// Convert spur_pm::Issue to the spur_acp mirror type for event bus transmission.
-pub(super) fn issue_to_detail_event(issue: &spur_pm::Issue) -> spur_acp::IssueDetailEvent {
+pub(super) fn issue_to_detail_event(
+    issue: &spur_pm::Issue,
+    comments: Vec<spur_pm::Comment>,
+) -> spur_acp::IssueDetailEvent {
     spur_acp::IssueDetailEvent {
         id: issue.id.clone(),
         source: issue.source.to_string(),
@@ -172,6 +175,7 @@ pub(super) fn issue_to_detail_event(issue: &spur_pm::Issue) -> spur_acp::IssueDe
         issue_type: issue.issue_type.clone(),
         blocked_by: issue.blocked_by.clone(),
         due_at: issue.due_at,
+        comments,
         created_at: issue.created_at,
         updated_at: issue.updated_at,
     }
