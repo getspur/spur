@@ -116,6 +116,13 @@ pub trait QuerySource {
     /// Where the query lives.
     fn query_mode(&self) -> QueryMode;
 
+    /// Whether InputBar-driven query updates should be debounced at the
+    /// trigger boundary. This is a policy hint only; timing stays outside the
+    /// source.
+    fn should_debounce_input_bar_updates(&self) -> bool {
+        false
+    }
+
     /// Filter+rank using the given query. Implementors MUST reuse any
     /// internal matcher state across calls; constructing a fresh
     /// `nucleo::Matcher` per call is forbidden for hot-path reasons
@@ -497,6 +504,10 @@ impl QuerySource for MentionQuerySource {
 
     fn query_mode(&self) -> QueryMode {
         QueryMode::ReadFromInputBar
+    }
+
+    fn should_debounce_input_bar_updates(&self) -> bool {
+        true
     }
 
     fn refresh(&mut self, query: &str) -> Vec<RetrievalRow> {
