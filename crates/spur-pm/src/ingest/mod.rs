@@ -913,7 +913,26 @@ fn create_issue_in_place(
         }
     }
     let now = Utc::now();
-    let id = beads_rust::util::generate_id(title, Some(body), Some("spur"), now);
+    // Size the ID hash based on the current row count + this batch so the
+    // birthday-paradox collision probability stays under ~25% even after
+    // bulk ingest. The base `generate_id` helper passes issue_count=0 and
+    // a no-op exists check, which forces minimum hash length (3 chars =
+    // 46,656 buckets); thousands of GitHub issues collide almost
+    // immediately under that. We pass the real row count and a real
+    // existence check so IdGenerator can grow the hash and retry nonces.
+    let current_count = s.count_issues().unwrap_or(0);
+    let id = beads_rust::util::id::IdGenerator::with_defaults().generate(
+        title,
+        Some(body),
+        Some("spur"),
+        now,
+        current_count.saturating_add(1),
+        |candidate| {
+            s.get_issue(candidate)
+                .map(|opt| opt.is_some())
+                .unwrap_or(false)
+        },
+    );
     let issue = beads_rust::model::Issue {
         id: id.clone(),
         title: title.to_string(),
