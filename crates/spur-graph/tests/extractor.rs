@@ -1,11 +1,15 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
+use std::thread::sleep;
+use std::time::Duration;
 
 use spur_graph::build_facts;
 use spur_graph::graph::petgraph_builder::build_petgraph;
 use spur_graph::load_artifact;
-use spur_graph::store::json::{artifact_from_facts, write_artifact};
+use spur_graph::store::json::{
+    artifact_from_facts, artifact_from_facts_incremental, write_artifact, BuildMode,
+};
 use spur_graph::{Confidence, NodeKind, RelationKind};
 
 fn fixture_root() -> PathBuf {
@@ -56,11 +60,22 @@ fn markdown_golden_path() -> PathBuf {
         .join("tests/fixtures/markdown_corpus/expected_graph_index.json")
 }
 
+fn normalize_for_golden(
+    mut artifact: spur_graph::GraphIndexArtifact,
+) -> spur_graph::GraphIndexArtifact {
+    artifact.manifest_version = "<normalized>".to_string();
+    for entry in &mut artifact.file_manifests {
+        entry.mtime_nanos = 0;
+        entry.size_bytes = 0;
+    }
+    artifact
+}
+
 #[test]
 fn rust_extractor_matches_sample_corpus_golden_artifact() {
     let root = fixture_root();
     let facts = build_facts(&root).expect("extract fixture").0;
-    let artifact = artifact_from_facts(&facts, &root).expect("artifact");
+    let artifact = normalize_for_golden(artifact_from_facts(&facts, &root).expect("artifact"));
     let actual = serde_json::to_string_pretty(&artifact).expect("encode artifact");
     let actual = format!("{actual}\n");
 
@@ -76,7 +91,7 @@ fn rust_extractor_matches_sample_corpus_golden_artifact() {
 fn python_extractor_matches_sample_corpus_golden_artifact() {
     let root = python_fixture_root();
     let facts = build_facts(&root).expect("extract fixture").0;
-    let artifact = artifact_from_facts(&facts, &root).expect("artifact");
+    let artifact = normalize_for_golden(artifact_from_facts(&facts, &root).expect("artifact"));
     let actual = serde_json::to_string_pretty(&artifact).expect("encode artifact");
     let actual = format!("{actual}\n");
 
@@ -92,7 +107,7 @@ fn python_extractor_matches_sample_corpus_golden_artifact() {
 fn typescript_extractor_matches_typescript_corpus_golden_artifact() {
     let root = typescript_fixture_root();
     let facts = build_facts(&root).expect("extract fixture").0;
-    let artifact = artifact_from_facts(&facts, &root).expect("artifact");
+    let artifact = normalize_for_golden(artifact_from_facts(&facts, &root).expect("artifact"));
     let actual = serde_json::to_string_pretty(&artifact).expect("encode artifact");
     let actual = format!("{actual}\n");
 
@@ -108,7 +123,7 @@ fn typescript_extractor_matches_typescript_corpus_golden_artifact() {
 fn markdown_extractor_matches_corpus_golden_artifact() {
     let root = markdown_fixture_root();
     let facts = build_facts(&root).expect("extract fixture").0;
-    let artifact = artifact_from_facts(&facts, &root).expect("artifact");
+    let artifact = normalize_for_golden(artifact_from_facts(&facts, &root).expect("artifact"));
     let actual = serde_json::to_string_pretty(&artifact).expect("encode artifact");
     let actual = format!("{actual}\n");
 
@@ -393,6 +408,80 @@ fn rust_extractor_stable_keys_are_deterministic_across_runs() {
 }
 
 #[test]
+fn rust_extractor_distinguishes_trait_impls_of_same_self_type() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        r#"
+trait Foo { fn f(&self); }
+trait Baz { fn b(&self); }
+struct Bar;
+impl Foo for Bar { fn f(&self) {} }
+impl Baz for Bar { fn b(&self) {} }
+"#,
+    )
+    .expect("write lib.rs");
+
+    let facts = build_facts(root).expect("extract").0;
+    let impl_nodes: Vec<_> = facts
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::Impl)
+        .collect();
+
+    assert!(
+        impl_nodes.iter().any(|node| node.label == "Foo for Bar"),
+        "expected trait impl label `Foo for Bar`"
+    );
+    assert!(
+        impl_nodes.iter().any(|node| node.label == "Baz for Bar"),
+        "expected trait impl label `Baz for Bar`"
+    );
+
+    let keys: BTreeSet<_> = impl_nodes
+        .iter()
+        .map(|node| node.stable_key.clone())
+        .collect();
+    assert_eq!(keys.len(), 2, "trait impls must have distinct stable keys");
+}
+
+#[test]
+fn rust_extractor_distinguishes_multiple_inherent_impls_in_one_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/lib.rs"),
+        r#"
+struct Bar;
+impl Bar { fn a(&self) {} }
+impl Bar { fn b(&self) {} }
+"#,
+    )
+    .expect("write lib.rs");
+
+    let facts = build_facts(root).expect("extract").0;
+    let impl_nodes: Vec<_> = facts
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::Impl && node.label == "Bar")
+        .collect();
+    assert_eq!(impl_nodes.len(), 2, "expected two inherent impl nodes");
+
+    let keys: BTreeSet<_> = impl_nodes
+        .iter()
+        .map(|node| node.stable_key.clone())
+        .collect();
+    assert_eq!(
+        keys.len(),
+        2,
+        "inherent impls for same type in one file must have distinct stable keys"
+    );
+}
+
+#[test]
 fn rust_extractor_tags_edge_confidence_by_relation_semantics() {
     let root = fixture_root();
     let facts = build_facts(&root).expect("extract fixture").0;
@@ -576,4 +665,98 @@ fn resolve_pending_edges_surfaces_ambiguous_labels() {
         process_calls <= 1,
         "calls to ambiguous `process` should resolve to at most one target"
     );
+}
+
+#[test]
+fn incremental_round_trip_noop_matches_full_artifact() {
+    let root = fixture_root();
+    let full = artifact_from_facts(&build_facts(&root).expect("extract").0, &root).expect("full");
+    let (next, mode) = artifact_from_facts_incremental(&full, &root).expect("incremental");
+    assert_eq!(mode, BuildMode::Incremental);
+    assert_eq!(next, full);
+}
+
+#[test]
+fn incremental_modify_one_file_replaces_only_that_bucket() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(root.join("src/a.rs"), "pub fn alpha() {}\n").expect("write a.rs");
+    fs::write(root.join("src/b.rs"), "pub fn beta() {}\n").expect("write b.rs");
+
+    let full = artifact_from_facts(&build_facts(root).expect("extract").0, root).expect("full");
+    let before_a = full
+        .symbols
+        .iter()
+        .filter(|s| s.file_path == "src/a.rs")
+        .cloned()
+        .collect::<Vec<_>>();
+    let before_b = full
+        .symbols
+        .iter()
+        .filter(|s| s.file_path == "src/b.rs")
+        .cloned()
+        .collect::<Vec<_>>();
+
+    sleep(Duration::from_millis(5));
+    fs::write(root.join("src/a.rs"), "pub fn alpha2() {}\n").expect("rewrite a.rs");
+
+    let (next, mode) = artifact_from_facts_incremental(&full, root).expect("incremental");
+    assert_eq!(mode, BuildMode::Incremental);
+    let after_a = next
+        .symbols
+        .iter()
+        .filter(|s| s.file_path == "src/a.rs")
+        .cloned()
+        .collect::<Vec<_>>();
+    let after_b = next
+        .symbols
+        .iter()
+        .filter(|s| s.file_path == "src/b.rs")
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_ne!(after_a, before_a);
+    assert_eq!(after_b, before_b);
+}
+
+#[test]
+fn incremental_delete_file_drops_bucket_and_preserves_others() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(root.join("src/a.rs"), "pub fn alpha() {}\n").expect("write a.rs");
+    fs::write(root.join("src/b.rs"), "pub fn beta() {}\n").expect("write b.rs");
+
+    let full = artifact_from_facts(&build_facts(root).expect("extract").0, root).expect("full");
+    let before_b = full
+        .symbols
+        .iter()
+        .filter(|s| s.file_path == "src/b.rs")
+        .cloned()
+        .collect::<Vec<_>>();
+
+    fs::remove_file(root.join("src/a.rs")).expect("delete a.rs");
+    let (next, mode) = artifact_from_facts_incremental(&full, root).expect("incremental");
+    assert_eq!(mode, BuildMode::Incremental);
+    assert!(!next.files.iter().any(|f| f.file_path == "src/a.rs"));
+    assert!(!next.symbols.iter().any(|s| s.file_path == "src/a.rs"));
+    let after_b = next
+        .symbols
+        .iter()
+        .filter(|s| s.file_path == "src/b.rs")
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(after_b, before_b);
+}
+
+#[test]
+fn incremental_manifest_mismatch_falls_back_to_full() {
+    let root = fixture_root();
+    let mut full =
+        artifact_from_facts(&build_facts(&root).expect("extract").0, &root).expect("full");
+    full.manifest_version = "stale-manifest".to_string();
+
+    let (next, mode) = artifact_from_facts_incremental(&full, &root).expect("incremental");
+    assert_eq!(mode, BuildMode::Full);
+    assert_ne!(next.manifest_version, "stale-manifest");
 }

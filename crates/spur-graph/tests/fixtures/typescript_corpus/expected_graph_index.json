@@ -2,19 +2,53 @@
   "header": {
     "graph_index_version": "spur-graph-phase2"
   },
+  "manifest_version": "<normalized>",
+  "file_manifests": [
+    {
+      "stable_file_id": "f6656417814146db",
+      "path": "src/app.tsx",
+      "mtime_nanos": 0,
+      "size_bytes": 0,
+      "node_ids": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ]
+    },
+    {
+      "stable_file_id": "3c6471780d9e8578",
+      "path": "src/helpers.ts",
+      "mtime_nanos": 0,
+      "size_bytes": 0,
+      "node_ids": [
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15
+      ]
+    }
+  ],
   "files": [
     {
-      "stable_file_id": "2d2b48a66bc8f10c",
+      "stable_file_id": "f6656417814146db",
       "file_path": "src/app.tsx"
     },
     {
-      "stable_file_id": "f6d556af9c4b3556",
+      "stable_file_id": "3c6471780d9e8578",
       "file_path": "src/helpers.ts"
     }
   ],
   "symbols": [
     {
-      "stable_symbol_id": "feab6bf56b100adb",
+      "stable_symbol_id": "9f1ef0ea170a1dc1",
       "file_path": "src/app.tsx",
       "byte_range": [
         56,
@@ -30,7 +64,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "99edef319286be7b",
+      "stable_symbol_id": "dc63618227586534",
       "file_path": "src/app.tsx",
       "byte_range": [
         91,
@@ -46,7 +80,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "1cff349b61600fe6",
+      "stable_symbol_id": "b157cefaf7fe3c8c",
       "file_path": "src/app.tsx",
       "byte_range": [
         116,
@@ -62,7 +96,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "e00db2fbdf78c568",
+      "stable_symbol_id": "88c2887e42a7e154",
       "file_path": "src/app.tsx",
       "byte_range": [
         145,
@@ -78,7 +112,7 @@
       "enclosing_scope": "App"
     },
     {
-      "stable_symbol_id": "69dd0e06debec97b",
+      "stable_symbol_id": "925e9bcc2a4a5ecd",
       "file_path": "src/app.tsx",
       "byte_range": [
         196,
@@ -94,7 +128,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "6cbd310869555f11",
+      "stable_symbol_id": "06b57d27bc6da2d7",
       "file_path": "src/app.tsx",
       "byte_range": [
         307,
@@ -110,7 +144,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "8895b963a4287f50",
+      "stable_symbol_id": "b7935e272e1df724",
       "file_path": "src/app.tsx",
       "byte_range": [
         340,
@@ -126,7 +160,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "474a7125ad11abbe",
+      "stable_symbol_id": "a643b3bc176ed041",
       "file_path": "src/helpers.ts",
       "byte_range": [
         7,
@@ -142,7 +176,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "599af539e8626e18",
+      "stable_symbol_id": "45524754defdd6f8",
       "file_path": "src/helpers.ts",
       "byte_range": [
         51,
@@ -158,7 +192,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "7cd0a90929057633",
+      "stable_symbol_id": "ba77b7195f718134",
       "file_path": "src/helpers.ts",
       "byte_range": [
         88,
@@ -174,7 +208,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "e7f18f01998e3c7c",
+      "stable_symbol_id": "02775bcca5346806",
       "file_path": "src/helpers.ts",
       "byte_range": [
         126,
@@ -190,7 +224,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "8ddb1e9173f68950",
+      "stable_symbol_id": "9156eac9b8c3b2ba",
       "file_path": "src/helpers.ts",
       "byte_range": [
         184,
@@ -206,7 +240,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "d9a4de1f4314cdd8",
+      "stable_symbol_id": "8070bc0cbf8984f8",
       "file_path": "src/helpers.ts",
       "byte_range": [
         219,

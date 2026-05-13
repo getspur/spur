@@ -2,7 +2,10 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 
-use spur_graph::{artifact_from_facts, build_facts, resolve_worktree_root_from, write_artifact};
+use spur_graph::{
+    artifact_from_facts, artifact_from_facts_incremental, build_facts, load_artifact,
+    resolve_worktree_root_from, write_artifact, BuildMode,
+};
 
 pub const DEFAULT_GRAPH_INDEX_PATH: &str = ".spur/graph-index.json";
 
@@ -30,8 +33,51 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
         println!("[spur] Building code graph index for {}", root.display());
     }
 
-    let (facts, file_counts) = build_facts(&root)?;
-    let artifact = artifact_from_facts(&facts, &root)?;
+    let mut mode = BuildMode::Full;
+    let (artifact, file_counts, node_count, edge_count) = if output.is_file() {
+        match load_artifact(&output) {
+            Ok(prev) => match artifact_from_facts_incremental(&prev, &root) {
+                Ok((artifact, build_mode)) => {
+                    mode = build_mode;
+                    let language_counts = language_counts_from_artifact(&root, &artifact);
+                    (
+                        artifact.clone(),
+                        language_counts,
+                        artifact.symbols.len() + artifact.files.len(),
+                        0,
+                    )
+                }
+                Err(error) => {
+                    tracing::info!(error = %error, "spur-graph: incremental rebuild failed; falling back to full");
+                    let (facts, file_counts) = build_facts(&root)?;
+                    (
+                        artifact_from_facts(&facts, &root)?,
+                        file_counts,
+                        facts.nodes.len(),
+                        facts.edges.len(),
+                    )
+                }
+            },
+            Err(error) => {
+                tracing::info!(error = %error, "spur-graph: failed to load previous artifact; falling back to full");
+                let (facts, file_counts) = build_facts(&root)?;
+                (
+                    artifact_from_facts(&facts, &root)?,
+                    file_counts,
+                    facts.nodes.len(),
+                    facts.edges.len(),
+                )
+            }
+        }
+    } else {
+        let (facts, file_counts) = build_facts(&root)?;
+        (
+            artifact_from_facts(&facts, &root)?,
+            file_counts,
+            facts.nodes.len(),
+            facts.edges.len(),
+        )
+    };
     write_artifact(&artifact, &output)?;
     let language_summary = file_counts
         .iter()
@@ -40,12 +86,36 @@ pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
         .join(", ");
 
     println!(
-        "[spur] Graph index built: files: {}, nodes: {}, edges: {}, by-language: [{}], output: {}",
+        "[spur] Graph index built: mode: {:?}, files: {}, nodes: {}, edges: {}, by-language: [{}], output: {}",
+        mode,
         artifact.files.len(),
-        facts.nodes.len(),
-        facts.edges.len(),
+        node_count,
+        edge_count,
         language_summary,
         output.display()
     );
     Ok(())
+}
+
+fn language_counts_from_artifact(
+    root: &std::path::Path,
+    artifact: &spur_graph::GraphIndexArtifact,
+) -> std::collections::BTreeMap<&'static str, usize> {
+    let mut counts = std::collections::BTreeMap::new();
+    for file in &artifact.files {
+        let full = root.join(&file.file_path);
+        let Some(ext) = full.extension().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let label = match ext.to_ascii_lowercase().as_str() {
+            "rs" => "rust",
+            "py" => "python",
+            "ts" => "typescript",
+            "tsx" => "tsx",
+            "md" => "markdown",
+            _ => continue,
+        };
+        *counts.entry(label).or_insert(0) += 1;
+    }
+    counts
 }

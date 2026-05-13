@@ -14,7 +14,12 @@
   name: (type_identifier) @name) @definition.trait
 
 (impl_item
-  type: (_) @name) @definition.impl
+  trait: (_) @impl.trait
+  type: ((_) @impl.self @name)) @definition.impl
+
+(impl_item
+  !trait
+  type: ((_) @impl.self @name)) @definition.impl
 
 (impl_item
   body: (declaration_list

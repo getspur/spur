@@ -2,19 +2,51 @@
   "header": {
     "graph_index_version": "spur-graph-phase2"
   },
+  "manifest_version": "<normalized>",
+  "file_manifests": [
+    {
+      "stable_file_id": "b4bf8362c80d42ea",
+      "path": "src/lib.rs",
+      "mtime_nanos": 0,
+      "size_bytes": 0,
+      "node_ids": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ]
+    },
+    {
+      "stable_file_id": "b481045ec43d18b4",
+      "path": "src/utils.rs",
+      "mtime_nanos": 0,
+      "size_bytes": 0,
+      "node_ids": [
+        9,
+        10,
+        11,
+        12,
+        13
+      ]
+    }
+  ],
   "files": [
     {
-      "stable_file_id": "877fee75ea3fa7b2",
+      "stable_file_id": "b4bf8362c80d42ea",
       "file_path": "src/lib.rs"
     },
     {
-      "stable_file_id": "cb1b9065a9ab821a",
+      "stable_file_id": "b481045ec43d18b4",
       "file_path": "src/utils.rs"
     }
   ],
   "symbols": [
     {
-      "stable_symbol_id": "0b20a39dde258f39",
+      "stable_symbol_id": "c7e33b75e565d730",
       "file_path": "src/lib.rs",
       "byte_range": [
         37,
@@ -30,7 +62,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "a64d268f10d3d463",
+      "stable_symbol_id": "51e4143c6a874467",
       "file_path": "src/lib.rs",
       "byte_range": [
         54,
@@ -46,7 +78,7 @@
       "enclosing_scope": "inline"
     },
     {
-      "stable_symbol_id": "5279eb0914203d15",
+      "stable_symbol_id": "9ce57cf00efb9967",
       "file_path": "src/lib.rs",
       "byte_range": [
         93,
@@ -62,7 +94,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "8a993b790d62b14e",
+      "stable_symbol_id": "be1aa2b3e0311fc2",
       "file_path": "src/lib.rs",
       "byte_range": [
         133,
@@ -78,7 +110,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "de10f39e81326ee4",
+      "stable_symbol_id": "2583eb4312998eb1",
       "file_path": "src/lib.rs",
       "byte_range": [
         148,
@@ -94,7 +126,7 @@
       "enclosing_scope": "impl App"
     },
     {
-      "stable_symbol_id": "a3e0da93b74977ac",
+      "stable_symbol_id": "becef4d216986a2a",
       "file_path": "src/lib.rs",
       "byte_range": [
         195,
@@ -110,7 +142,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "f7f046e5530ee871",
+      "stable_symbol_id": "3842b4dc4be739d2",
       "file_path": "src/lib.rs",
       "byte_range": [
         236,
@@ -126,7 +158,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "613cc9d9157169df",
+      "stable_symbol_id": "8adf4fe25a85c876",
       "file_path": "src/utils.rs",
       "byte_range": [
         0,
@@ -142,7 +174,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "ca09184f538bf4aa",
+      "stable_symbol_id": "6a2e722ded1d0d94",
       "file_path": "src/utils.rs",
       "byte_range": [
         20,
@@ -158,7 +190,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "2c723cc4a67e5ca6",
+      "stable_symbol_id": "3c12493bdaca1457",
       "file_path": "src/utils.rs",
       "byte_range": [
         40,
@@ -174,7 +206,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "799db474baededf1",
+      "stable_symbol_id": "1dd835e82e96296c",
       "file_path": "src/utils.rs",
       "byte_range": [
         58,
