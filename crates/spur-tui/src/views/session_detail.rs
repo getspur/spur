@@ -811,9 +811,16 @@ impl SessionDetailView {
     /// advertised slash entries from the cached `config_options` and stores
     /// the snapshot so the popup's slash-arg picker can fetch live choices
     /// via `CompletionEnv.session_config_options`.
-    pub fn apply_advertised_commands(&mut self, options: &[spur_acp::SessionConfigOption]) {
+    pub fn apply_advertised_commands(
+        &mut self,
+        caps: &spur_acp::SpurAgentCaps,
+        options: &[spur_acp::SessionConfigOption],
+    ) {
         let handle = self.agent_handle_for_commands();
-        let entries = crate::commands::advertised::AdvertisedSource::entries(&handle, options);
+        let entries =
+            crate::commands::advertised::AdvertisedSource::entries_from_caps(&handle, caps);
+        // TODO(adapter-models-picker): synthesized /model entries from models-only caps do not
+        // yet provide picker candidates from `SessionModelState.available_models`.
         self.command_registry
             .set_advertised_commands(&handle, entries);
         self.session_config_options = options.to_vec();
@@ -826,6 +833,10 @@ impl SessionDetailView {
     /// `SpurAgentCaps`. `None` is treated as permissive on read paths.
     pub fn set_spur_agent_caps(&mut self, caps: Option<std::sync::Arc<spur_acp::SpurAgentCaps>>) {
         self.spur_agent_caps = caps;
+    }
+
+    pub(crate) fn spur_agent_caps_cloned(&self) -> Option<std::sync::Arc<spur_acp::SpurAgentCaps>> {
+        self.spur_agent_caps.clone()
     }
 
     /// Slash-command popup view: the merged registry filtered by the
@@ -2138,12 +2149,13 @@ impl View for SessionDetailView {
 
             SpurEventBody::CommandRegistryDirty {
                 session,
+                caps,
                 config_options,
             } => {
                 if session.0 != self.session_id.0 {
                     return;
                 }
-                self.apply_advertised_commands(config_options);
+                self.apply_advertised_commands(caps, config_options);
             }
 
             // All other event types are not relevant to this session view.

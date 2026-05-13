@@ -4,8 +4,8 @@
 //! `session_config_options` snapshot.
 
 use spur_acp::{
-    SessionConfigId, SessionConfigOption, SessionConfigSelectOption, SessionId, SpurEvent,
-    SpurEventBody,
+    AgentKind, SessionConfigId, SessionConfigOption, SessionConfigSelectOption, SessionId,
+    SpurAgentCaps, SpurEvent, SpurEventBody,
 };
 use spur_tui::commands::CommandSource;
 use spur_tui::views::{session_detail::SessionDetailView, View};
@@ -21,6 +21,17 @@ fn select_option(config_id: &str, current: &str, choices: &[(&str, &str)]) -> Se
         current.to_string(),
         select_choices,
     )
+}
+
+fn caps_with_options(options: Vec<SessionConfigOption>) -> std::sync::Arc<SpurAgentCaps> {
+    let init = agent_client_protocol::schema::InitializeResponse::new(
+        agent_client_protocol::schema::ProtocolVersion::LATEST,
+    );
+    let mut new = agent_client_protocol::schema::NewSessionResponse::new(
+        agent_client_protocol::schema::SessionId::new("acp-session"),
+    );
+    new.config_options = Some(options);
+    std::sync::Arc::new(SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp))
 }
 
 #[test]
@@ -51,6 +62,7 @@ fn command_registry_dirty_populates_advertised_entry_and_caches_options() {
     );
     let event = SpurEvent::now(SpurEventBody::CommandRegistryDirty {
         session: session.clone(),
+        caps: caps_with_options(vec![model_opt.clone()]),
         config_options: vec![model_opt.clone()],
     });
 
@@ -97,6 +109,7 @@ fn command_registry_dirty_for_other_session_is_ignored() {
     let model_opt = select_option("model", "gpt-5", &[("gpt-5", "GPT-5")]);
     let event = SpurEvent::now(SpurEventBody::CommandRegistryDirty {
         session: SessionId::new(),
+        caps: caps_with_options(vec![model_opt.clone()]),
         config_options: vec![model_opt],
     });
 
