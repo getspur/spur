@@ -231,12 +231,25 @@ fn extract_files(
             None
         };
         for path in files {
-            let source = fs::read_to_string(path)
-                .with_context(|| format!("failed to read source `{}`", path.display()))?;
-            let tree = parser
-                .parse(&source, None)
-                .ok_or_else(|| anyhow!("tree-sitter failed to parse `{}`", path.display()))?;
-            if *label == "markdown" {
+            let source = match fs::read_to_string(path) {
+                Ok(source) => source,
+                Err(err) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %err,
+                        "spur-graph: skipping file (read failed)"
+                    );
+                    continue;
+                }
+            };
+            let Some(tree) = parser.parse(&source, None) else {
+                tracing::warn!(
+                    path = %path.display(),
+                    "spur-graph: skipping file (tree-sitter parse failed)"
+                );
+                continue;
+            };
+            let result = if *label == "markdown" {
                 extract_markdown_file(
                     &mut builder,
                     config,
@@ -245,7 +258,7 @@ fn extract_files(
                     tree.root_node(),
                     queries,
                     markdown_inline_parser.as_mut(),
-                )?;
+                )
             } else {
                 extract_file(
                     &mut builder,
@@ -254,7 +267,14 @@ fn extract_files(
                     &source,
                     tree.root_node(),
                     queries,
-                )?;
+                )
+            };
+            if let Err(err) = result {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "spur-graph: skipping file (extraction failed)"
+                );
             }
         }
     }
