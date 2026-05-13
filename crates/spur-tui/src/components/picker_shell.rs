@@ -143,9 +143,7 @@ impl PickerShell {
     pub fn open(mut source: Box<dyn QuerySource>) -> Self {
         let rows = source.refresh("");
         let mut list_state = ListState::default();
-        if !rows.is_empty() {
-            list_state.select(Some(0));
-        }
+        list_state.select(first_selectable_index(&rows));
         Self {
             source,
             query: MiniInput::new(),
@@ -171,9 +169,7 @@ impl PickerShell {
                 shell.query.paste(query);
                 shell.rows = shell.source.refresh(shell.query.text());
                 shell.active_preview = None;
-                if !shell.rows.is_empty() {
-                    shell.list_state.select(Some(0));
-                }
+                shell.list_state.select(first_selectable_index(&shell.rows));
             }
         }
         shell
@@ -205,6 +201,11 @@ impl PickerShell {
         self.source.title()
     }
 
+    #[cfg(test)]
+    pub fn set_selected_index_for_test(&mut self, idx: Option<usize>) {
+        self.list_state.select(idx);
+    }
+
     // ── Key handling ───────────────────────────────────────────────────
 
     pub fn handle_key(&mut self, key: KeyEvent) -> PickerAction {
@@ -216,6 +217,22 @@ impl PickerShell {
             }
             KeyCode::Down => {
                 self.select_next();
+                PickerAction::None
+            }
+            KeyCode::PageUp if self.source.query_mode() == QueryMode::ReadFromInputBar => {
+                self.select_prev_page();
+                PickerAction::None
+            }
+            KeyCode::PageDown if self.source.query_mode() == QueryMode::ReadFromInputBar => {
+                self.select_next_page();
+                PickerAction::None
+            }
+            KeyCode::Home if self.source.query_mode() == QueryMode::ReadFromInputBar => {
+                self.select_first();
+                PickerAction::None
+            }
+            KeyCode::End if self.source.query_mode() == QueryMode::ReadFromInputBar => {
+                self.select_last();
                 PickerAction::None
             }
             KeyCode::Tab | KeyCode::Enter => self.accept_selected(),
@@ -260,15 +277,12 @@ impl PickerShell {
     }
 
     fn select_prev(&mut self) {
-        if self.rows.is_empty() {
+        if self.rows.is_empty() || !self.rows.iter().any(|r| r.selectable) {
             self.active_preview = None;
+            self.list_state.select(None);
             return;
         }
-        let len = self.rows.len();
-        let i = self
-            .list_state
-            .selected()
-            .map_or(0, |i| (i + len - 1) % len);
+        let i = prev_selectable_index(&self.rows, self.list_state.selected());
         if self.list_state.selected() != Some(i) {
             self.active_preview = None;
         }
@@ -276,24 +290,47 @@ impl PickerShell {
     }
 
     fn select_next(&mut self) {
-        if self.rows.is_empty() {
+        if self.rows.is_empty() || !self.rows.iter().any(|r| r.selectable) {
             self.active_preview = None;
+            self.list_state.select(None);
             return;
         }
-        let i = self
-            .list_state
-            .selected()
-            .map_or(0, |i| (i + 1) % self.rows.len());
+        let i = next_selectable_index(&self.rows, self.list_state.selected());
         if self.list_state.selected() != Some(i) {
             self.active_preview = None;
         }
         self.list_state.select(Some(i));
     }
 
+    fn select_prev_page(&mut self) {
+        for _ in 0..5 {
+            self.select_prev();
+        }
+    }
+
+    fn select_next_page(&mut self) {
+        for _ in 0..5 {
+            self.select_next();
+        }
+    }
+
+    fn select_first(&mut self) {
+        self.list_state.select(first_selectable_index(&self.rows));
+        self.active_preview = None;
+    }
+
+    fn select_last(&mut self) {
+        self.list_state.select(last_selectable_index(&self.rows));
+        self.active_preview = None;
+    }
+
     fn accept_selected(&self) -> PickerAction {
         let Some(idx) = self.list_state.selected() else {
             return PickerAction::Cancel;
         };
+        if self.rows.get(idx).is_some_and(|row| !row.selectable) {
+            return PickerAction::None;
+        }
         match self.source.accept(idx) {
             Some(a) => PickerAction::Accept(a),
             None => PickerAction::Cancel,
@@ -305,8 +342,7 @@ impl PickerShell {
     fn refilter(&mut self) {
         self.active_preview = None;
         self.rows = self.source.refresh(self.query.text());
-        self.list_state
-            .select(if self.rows.is_empty() { None } else { Some(0) });
+        self.list_state.select(first_selectable_index(&self.rows));
     }
 
     /// For mention/slash (`QueryMode::ReadFromInputBar`). Called by the
@@ -496,12 +532,14 @@ impl PickerShell {
                 let mut spans = Vec::with_capacity(4);
                 // Primary with atom-span styling.
                 if r.atoms.is_empty() {
-                    spans.push(Span::styled(
-                        r.primary.clone(),
+                    let base_style = if r.dimmed {
+                        Style::default().fg(token(theme, "picker.hint.fg"))
+                    } else {
                         Style::default()
                             .fg(token(theme, "picker.row.fg"))
-                            .add_modifier(Modifier::BOLD),
-                    ));
+                            .add_modifier(Modifier::BOLD)
+                    };
+                    spans.push(Span::styled(r.primary.clone(), base_style));
                 } else {
                     let mut cursor = 0usize;
                     for &(a, b) in &r.atoms {
@@ -537,7 +575,11 @@ impl PickerShell {
                     spans.push(Span::raw("  "));
                     spans.push(Span::styled(
                         r.secondary.clone(),
-                        Style::default().fg(token(theme, "picker.row.fg")),
+                        if r.dimmed {
+                            Style::default().fg(token(theme, "picker.hint.fg"))
+                        } else {
+                            Style::default().fg(token(theme, "picker.row.fg"))
+                        },
                     ));
                 }
                 if !r.tag.is_empty() {
@@ -588,6 +630,38 @@ impl PickerShell {
             .wrap(Wrap { trim: false });
         frame.render_widget(paragraph, area);
     }
+}
+
+fn first_selectable_index(rows: &[RetrievalRow]) -> Option<usize> {
+    rows.iter().position(|row| row.selectable)
+}
+
+fn last_selectable_index(rows: &[RetrievalRow]) -> Option<usize> {
+    rows.iter().rposition(|row| row.selectable)
+}
+
+fn next_selectable_index(rows: &[RetrievalRow], selected: Option<usize>) -> usize {
+    let len = rows.len();
+    let start = selected.unwrap_or(0);
+    for step in 1..=len {
+        let idx = (start + step) % len;
+        if rows[idx].selectable {
+            return idx;
+        }
+    }
+    start
+}
+
+fn prev_selectable_index(rows: &[RetrievalRow], selected: Option<usize>) -> usize {
+    let len = rows.len();
+    let start = selected.unwrap_or(0);
+    for step in 1..=len {
+        let idx = (start + len - (step % len)) % len;
+        if rows[idx].selectable {
+            return idx;
+        }
+    }
+    start
 }
 
 fn truncate_preview_lines(
@@ -751,6 +825,8 @@ mod tests {
                 secondary: "open · alice".to_string(),
                 tag: "P2".to_string(),
                 atoms: Vec::new(),
+                selectable: true,
+                dimmed: false,
             }]
         }
 
@@ -783,6 +859,8 @@ mod tests {
                 secondary: String::new(),
                 tag: String::new(),
                 atoms: Vec::new(),
+                selectable: true,
+                dimmed: false,
             }]
         }
 
@@ -811,12 +889,16 @@ mod tests {
                     secondary: String::new(),
                     tag: String::new(),
                     atoms: Vec::new(),
+                    selectable: true,
+                    dimmed: false,
                 },
                 RetrievalRow {
                     primary: "bd-2 Second".to_string(),
                     secondary: String::new(),
                     tag: String::new(),
                     atoms: Vec::new(),
+                    selectable: true,
+                    dimmed: false,
                 },
             ]
         }
@@ -831,6 +913,63 @@ mod tests {
                 title: format!("bd-{}", row_idx + 1),
                 lines: vec![Line::raw(format!("preview {}", row_idx + 1))],
             })
+        }
+    }
+
+    struct MentionSectionSource;
+
+    impl QuerySource for MentionSectionSource {
+        fn title(&self) -> &str {
+            "Mentions · @"
+        }
+
+        fn query_mode(&self) -> QueryMode {
+            QueryMode::ReadFromInputBar
+        }
+
+        fn refresh(&mut self, query: &str) -> Vec<RetrievalRow> {
+            if !query.is_empty() {
+                return vec![
+                    content_row("🤖 @worker:alpha"),
+                    content_row("📄 @src/lib.rs"),
+                ];
+            }
+            vec![
+                header_row("── Workers ──"),
+                content_row("🤖 @worker:alpha"),
+                header_row("── Files ──"),
+                content_row("📄 @src/lib.rs"),
+                header_row("── Issues ──"),
+                content_row("🎟 bd-12 Build picker"),
+                header_row("── Code ──"),
+                content_row("🗎 @src/main.rs"),
+            ]
+        }
+
+        fn accept(&self, _row_idx: usize) -> Option<RetrievalAccept> {
+            None
+        }
+    }
+
+    fn header_row(primary: &str) -> RetrievalRow {
+        RetrievalRow {
+            primary: primary.to_string(),
+            secondary: String::new(),
+            tag: String::new(),
+            atoms: Vec::new(),
+            selectable: false,
+            dimmed: true,
+        }
+    }
+
+    fn content_row(primary: &str) -> RetrievalRow {
+        RetrievalRow {
+            primary: primary.to_string(),
+            secondary: String::new(),
+            tag: String::new(),
+            atoms: Vec::new(),
+            selectable: true,
+            dimmed: false,
         }
     }
 
@@ -1059,5 +1198,44 @@ mod tests {
         let layout = compute_picker_layout(container, anchor, (30, 8), Some((35, 6)));
         assert_eq!(layout.popover_anchor, PopoverAnchor::Above);
         assert_eq!(layout.popover_rect, Some(Rect::new(3, 15, 35, 6)));
+    }
+
+    #[test]
+    fn mention_headers_render_in_order_and_navigation_skips_them() {
+        let mut shell = PickerShell::open(Box::new(MentionSectionSource));
+        assert_eq!(
+            shell.row_primaries(),
+            vec![
+                "── Workers ──",
+                "🤖 @worker:alpha",
+                "── Files ──",
+                "📄 @src/lib.rs",
+                "── Issues ──",
+                "🎟 bd-12 Build picker",
+                "── Code ──",
+                "🗎 @src/main.rs",
+            ]
+        );
+        assert_eq!(shell.selected_index(), Some(1));
+
+        shell.handle_key(key(KeyCode::Down));
+        assert_eq!(shell.selected_index(), Some(3));
+        shell.handle_key(key(KeyCode::Down));
+        assert_eq!(shell.selected_index(), Some(5));
+        shell.handle_key(key(KeyCode::Up));
+        assert_eq!(shell.selected_index(), Some(3));
+    }
+
+    #[test]
+    fn mention_header_accept_is_noop_and_typed_query_has_no_headers() {
+        let mut shell = PickerShell::open(Box::new(MentionSectionSource));
+        shell.set_selected_index_for_test(Some(0));
+        assert!(matches!(
+            shell.handle_key(key(KeyCode::Enter)),
+            PickerAction::None
+        ));
+
+        shell.set_query_from_input_bar("wo");
+        assert!(shell.row_primaries().iter().all(|row| !row.contains("──")));
     }
 }
