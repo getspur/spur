@@ -62,7 +62,7 @@ fn init_tracing(
                 // Silence config-hygiene lints emitted on every invocation;
                 // they fire from spur_acp::registry's lint pass and aren't
                 // actionable from a user-facing subcommand.
-                "warn,spur_acp::agents::defaults=warn,spur_acp::registry=error"
+                "warn,spur_acp::agents::defaults=warn,spur_acp::registry=error,spur_pm::ingest=info"
             })
         });
         tracing_subscriber::fmt()

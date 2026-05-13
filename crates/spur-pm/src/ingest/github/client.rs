@@ -150,6 +150,13 @@ impl Governor {
                 (snapshot.graphql_remaining, snapshot.graphql_reset_at)
             {
                 if remaining < self.inner.config.graphql_floor {
+                    let wait_s = (reset_at - Utc::now()).num_seconds().max(0);
+                    tracing::info!(
+                        remaining,
+                        floor = self.inner.config.graphql_floor,
+                        wait_s,
+                        "ingest: GraphQL rate-limit floor hit, parking until reset"
+                    );
                     self.sleep_until(reset_at).await;
                     continue;
                 }

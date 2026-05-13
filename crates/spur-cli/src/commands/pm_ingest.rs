@@ -159,6 +159,15 @@ pub async fn run_with_sync(
     mut stderr: impl Write,
 ) -> i32 {
     let opts = ingest_options_from(args);
+    if !args.json {
+        let _ = writeln!(
+            stderr,
+            "[spur] ingest {}@{}: fetching from GitHub… (page size {})",
+            sync.source_system(),
+            sync.source_repo(),
+            args.page_size,
+        );
+    }
     // §8: --dry-run skips apply but still calls fetch_changes_since.
     let fetch_result = sync.fetch_changes_since(opts.since).await;
 
