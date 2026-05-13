@@ -832,7 +832,9 @@ pub(crate) fn apply_session_update(
             // model/effort, or codex emits the post-load snapshot). Rebuild
             // synthesized advertised commands and refresh the cached
             // snapshot so any open SlashArg picker shows live choices.
-            state.apply_advertised_commands(&u.config_options);
+            if let Some(caps) = state.spur_agent_caps_cloned() {
+                state.apply_advertised_commands(&caps, &u.config_options);
+            }
         }
         UsageUpdate(u) => {
             state.context_used = Some(u.used);
