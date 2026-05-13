@@ -47,6 +47,8 @@ pub struct IssueMentionSource {
 }
 
 impl IssueMentionSource {
+    /// Callers must provide snapshot rows in most-recent-first order.
+    /// Empty-query `@` preserves this order inside the registry's ISSUE_CAP.
     pub fn new(snapshot: Vec<IssueMentionDescriptor>) -> Self {
         Self {
             snapshot: snapshot.into_iter().map(Arc::new).collect(),

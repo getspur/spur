@@ -164,6 +164,8 @@ impl MentionRegistry {
     }
 
     pub fn set_issue_snapshot(&mut self, issues: Vec<IssueMentionDescriptor>) {
+        // Ordering invariant: callers must pass issues newest-first.
+        // Empty-query `@` preserves that order within the ISSUE_CAP slice.
         if let Some(source) = self
             .sources
             .iter_mut()
@@ -311,7 +313,8 @@ impl MentionRegistry {
                 })
             })
             .collect();
-        scored.sort_by(typed_query_cmp);
+        let max_rank = scored.iter().map(|mention| mention.rank).max().unwrap_or(0);
+        scored.sort_by(|a, b| typed_query_cmp(a, b, max_rank));
         scored
             .into_iter()
             .take(limit)
@@ -488,23 +491,21 @@ fn tier_rank(kind: &MentionKind) -> u8 {
     }
 }
 
-fn scores_within_window(a: u32, b: u32) -> bool {
-    let max_score = a.max(b);
-    if max_score == 0 {
-        return true;
+fn score_bucket(score: u32, global_max: u32) -> u32 {
+    if global_max == 0 {
+        return 0;
     }
-    a.abs_diff(b).saturating_mul(100) <= max_score.saturating_mul(10)
+    let bucket_width = global_max.saturating_div(10).max(1);
+    score.saturating_div(bucket_width)
 }
 
-fn typed_query_cmp(a: &RankedMention, b: &RankedMention) -> std::cmp::Ordering {
-    if scores_within_window(a.rank, b.rank) {
-        let tier_cmp = tier_rank(&a.entry.kind).cmp(&tier_rank(&b.entry.kind));
-        if tier_cmp != std::cmp::Ordering::Equal {
-            return tier_cmp;
-        }
-    }
-    b.rank
-        .cmp(&a.rank)
+fn typed_query_cmp(a: &RankedMention, b: &RankedMention, max_rank: u32) -> std::cmp::Ordering {
+    // Transitive comparator: bucket rank (desc), then tier rank (asc), then stable key.
+    let bucket_a = score_bucket(a.rank, max_rank);
+    let bucket_b = score_bucket(b.rank, max_rank);
+    bucket_b
+        .cmp(&bucket_a)
+        .then(tier_rank(&a.entry.kind).cmp(&tier_rank(&b.entry.kind)))
         .then(stable_tie_key(&a.entry).cmp(&stable_tie_key(&b.entry)))
 }
 
@@ -776,26 +777,113 @@ mod tests {
 
         let results = registry.query(CompletionScope::PreSession, Path::new("."), "abc", 10);
         assert_eq!(results.len(), 2);
+        // For `abc` vs `abcd` / `abce`, both rows score in the same bucket;
+        // tier rank is the deciding key, so File beats Worker.
         assert_eq!(results[0].kind, MentionKind::File);
     }
 
     #[test]
-    fn typed_query_raw_score_beats_tier_outside_window() {
+    fn typed_query_higher_bucket_beats_lower_bucket_even_if_tier_is_worse() {
         let mut registry = test_registry(vec![Box::new(StaticSource {
             name: "mixed",
             entries: vec![
-                mention(MentionKind::File, 1, "a.rs".into()),
-                mention(MentionKind::CodeSymbol, 2, "verySpecificNeedle".into()),
+                mention(MentionKind::File, 1, "needle-notes.md".into()),
+                mention(MentionKind::CodeSymbol, 2, "needle".into()),
             ],
         })]);
 
-        let results = registry.query(
-            CompletionScope::PreSession,
-            Path::new("."),
-            "verySpecificNeedle",
-            10,
-        );
-        assert_eq!(results.len(), 1);
+        let results = registry.query(CompletionScope::PreSession, Path::new("."), "needle", 10);
+        assert_eq!(results.len(), 2);
+        // Invariant under test: score bucket is the primary key. The exact
+        // code-symbol hit is in a higher bucket than the weak file prefix hit.
         assert_eq!(results[0].kind, MentionKind::CodeSymbol);
+    }
+
+    #[test]
+    fn empty_query_keeps_most_recent_issues_first() {
+        let mut registry = test_registry(vec![Box::new(IssueMentionSource::new(vec![
+            issue("bd-5", "Issue 5", None),
+            issue("bd-4", "Issue 4", None),
+            issue("bd-3", "Issue 3", None),
+            issue("bd-2", "Issue 2", None),
+            issue("bd-1", "Issue 1", None),
+        ]))]);
+
+        let results = registry.query(CompletionScope::PreSession, Path::new("."), "", 128);
+        let issues: Vec<&MentionEntry> = results
+            .iter()
+            .filter(|entry| entry.kind == MentionKind::Issue)
+            .collect();
+
+        assert_eq!(issues.len(), 3);
+        assert_eq!(issue_id(issues[0]), "bd-5");
+        assert_eq!(issue_id(issues[1]), "bd-4");
+        assert_eq!(issue_id(issues[2]), "bd-3");
+    }
+
+    #[test]
+    fn comparator_is_strict_weak_ordering() {
+        let base = vec![
+            RankedMention {
+                rank: 95,
+                entry: mention(MentionKind::Worker, 1, "worker-a".into()),
+            },
+            RankedMention {
+                rank: 100,
+                entry: mention(MentionKind::CodeSymbol, 2, "code-b".into()),
+            },
+            RankedMention {
+                rank: 86,
+                entry: mention(MentionKind::File, 3, "file-c".into()),
+            },
+            RankedMention {
+                rank: 88,
+                entry: mention(MentionKind::Issue, 4, "issue-d".into()),
+            },
+            RankedMention {
+                rank: 45,
+                entry: mention(MentionKind::File, 5, "file-e".into()),
+            },
+            RankedMention {
+                rank: 0,
+                entry: mention(MentionKind::Worker, 6, "worker-f".into()),
+            },
+        ];
+        let max_rank = base.iter().map(|mention| mention.rank).max().unwrap_or(0);
+
+        for a in &base {
+            assert_eq!(typed_query_cmp(a, a, max_rank), std::cmp::Ordering::Equal);
+        }
+        for a in &base {
+            for b in &base {
+                let ab = typed_query_cmp(a, b, max_rank);
+                let ba = typed_query_cmp(b, a, max_rank);
+                assert_eq!(ab, ba.reverse());
+            }
+        }
+        for a in &base {
+            for b in &base {
+                for c in &base {
+                    if typed_query_cmp(a, b, max_rank) == std::cmp::Ordering::Less
+                        && typed_query_cmp(b, c, max_rank) == std::cmp::Ordering::Less
+                    {
+                        assert_eq!(typed_query_cmp(a, c, max_rank), std::cmp::Ordering::Less);
+                    }
+                }
+            }
+        }
+
+        let mut expected = base.clone();
+        expected.sort_by(|a, b| typed_query_cmp(a, b, max_rank));
+        let expected_ids: Vec<String> =
+            expected.iter().map(|item| item.entry.uri.clone()).collect();
+
+        for shift in 0..base.len() {
+            let mut shuffled = base.clone();
+            shuffled.rotate_left(shift);
+            shuffled.sort_by(|a, b| typed_query_cmp(a, b, max_rank));
+            let ids: Vec<String> = shuffled.iter().map(|item| item.entry.uri.clone()).collect();
+            assert_eq!(ids, expected_ids);
+        }
     }
 }
