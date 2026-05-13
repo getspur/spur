@@ -56,6 +56,11 @@ pub(crate) trait DataQueryProvider: Send + Sync + 'static {
 
     fn issue_graph_available(&self) -> bool;
 
+    fn list_comments<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<spur_pm::Comment>>> + Send + 'a>>;
+
     fn issue_subgraph_json<'a>(
         &'a self,
         id: &'a str,
@@ -72,6 +77,18 @@ impl DataQueryProvider for spur_pm::PmService {
 
     fn issue_graph_available(&self) -> bool {
         self.issue_graph_available()
+    }
+
+    fn list_comments<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<spur_pm::Comment>>> + Send + 'a>> {
+        Box::pin(async move {
+            match self.advanced() {
+                Some(advanced) => advanced.list_comments(id).await,
+                None => Ok(Vec::new()),
+            }
+        })
     }
 
     fn issue_subgraph_json<'a>(
@@ -225,9 +242,21 @@ async fn handle_get_issue_detail<P: DataQueryProvider + ?Sized>(
 
     match pm.get_issue(&id).await {
         Ok(issue) => {
+            let mut comments = match pm.list_comments(&id).await {
+                Ok(comments) => comments,
+                Err(error) => {
+                    tracing::warn!(
+                        issue_id = %id,
+                        error = %error,
+                        "failed to load issue comments; continuing with empty comments"
+                    );
+                    Vec::new()
+                }
+            };
+            comments.sort_by_key(|comment| comment.created_at);
             funnel.emit(SpurEventBody::IssueDetailFetched {
                 requested_id: id,
-                issue: issue_to_detail_event(&issue),
+                issue: issue_to_detail_event(&issue, comments),
             });
             true
         }
@@ -244,7 +273,10 @@ async fn handle_get_issue_detail<P: DataQueryProvider + ?Sized>(
 
 // TODO: Extract this alongside the orchestrator copy once there is a shared
 // event-conversion module that can be used by both spur-core and spur-interactive.
-fn issue_to_detail_event(issue: &spur_pm::Issue) -> spur_acp::IssueDetailEvent {
+fn issue_to_detail_event(
+    issue: &spur_pm::Issue,
+    comments: Vec<spur_pm::Comment>,
+) -> spur_acp::IssueDetailEvent {
     spur_acp::IssueDetailEvent {
         id: issue.id.clone(),
         source: issue.source.to_string(),
@@ -258,6 +290,7 @@ fn issue_to_detail_event(issue: &spur_pm::Issue) -> spur_acp::IssueDetailEvent {
         issue_type: issue.issue_type.clone(),
         blocked_by: issue.blocked_by.clone(),
         due_at: issue.due_at,
+        comments,
         created_at: issue.created_at,
         updated_at: issue.updated_at,
     }
@@ -429,6 +462,14 @@ mod tests {
 
         fn issue_graph_available(&self) -> bool {
             self.analyzer_available
+        }
+
+        fn list_comments<'a>(
+            &'a self,
+            _id: &'a str,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<spur_pm::Comment>>> + Send + 'a>>
+        {
+            Box::pin(async move { Ok(Vec::new()) })
         }
 
         fn issue_subgraph_json<'a>(
