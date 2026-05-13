@@ -23,12 +23,16 @@ impl PickerPopover<'_> {
         }
         match self.preview {
             RetrievalPreview::Text { title, lines } => {
-                let block = Block::default().borders(Borders::LEFT).title(Span::styled(
-                    format!(" {title} "),
-                    Style::default().fg(token(self.theme, "picker.match.fg")),
-                ));
-                let body_rows = area.height.saturating_sub(1) as usize;
-                let body_width = area.width.saturating_sub(1) as usize;
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(token(self.theme, "picker.match.fg")))
+                    .title(Span::styled(
+                        format!(" {title} "),
+                        Style::default().fg(token(self.theme, "picker.match.fg")),
+                    ));
+                let inner = block.inner(area);
+                let body_rows = inner.height as usize;
+                let body_width = inner.width as usize;
                 let lines =
                     truncate_preview_lines_to_fit(lines.clone(), body_rows, body_width, self.theme);
                 frame.render_widget(
@@ -256,6 +260,29 @@ mod tests {
         assert!(text.contains("ƒ handle_key"), "{text}");
         assert!(text.contains("kind fn  lines 117-167"), "{text}");
         assert!(text.contains("pub fn handle_key"), "{text}");
+    }
+
+    #[test]
+    fn renders_text_preview() {
+        let preview = RetrievalPreview::Text {
+            title: "bd-1234".to_string(),
+            lines: vec![Line::raw("Issue title here")],
+        };
+        let backend = TestBackend::new(80, 10);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                PickerPopover {
+                    preview: &preview,
+                    theme: crate::theme::fallback_theme(),
+                }
+                .render(f, Rect::new(0, 0, 80, 10));
+            })
+            .expect("draw");
+
+        let text = buffer_text(terminal.backend().buffer(), 80, 10);
+        assert!(text.contains(" bd-1234 "), "{text}");
+        assert!(text.contains("Issue title here"), "{text}");
     }
 
     #[test]
