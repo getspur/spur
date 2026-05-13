@@ -2190,6 +2190,7 @@ impl View for SessionDetailView {
 
     fn tick(&mut self) {
         self.react_trace.tick();
+        let _ = self.completion.poll_updates();
         if matches!(
             self.input_bar.tick(),
             crate::components::input_bar::TickOutcome::FlushedPaste
