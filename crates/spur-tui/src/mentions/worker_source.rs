@@ -37,6 +37,7 @@ impl MentionSource for WorkerMentionSource {
             .snapshot
             .iter()
             .map(|d| MentionEntry {
+                section_header: None,
                 kind: MentionKind::Worker,
                 uri: format!("worker://{}", d.name),
                 display: format!("worker:{}", d.name),

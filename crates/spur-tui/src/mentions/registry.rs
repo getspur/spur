@@ -21,16 +21,10 @@ pub const CODE_GRAPH_MISSING_HINT: &str = "Run 'spur graph build' to enable code
 
 /// Maximum number of worker rows pinned to the top of the empty-query
 /// picker view. See design spec §4.4 / §10.1.
-pub(super) const WORKER_PIN_CAP: usize = 6;
-
-/// Multiplicative boost numerator for worker entries in the typed-query
-/// branch. With `WORKER_SCORE_DEN = 4` this yields a +25 % bias, enough
-/// to surface workers above tied file matches without overriding strong
-/// file-specific matches. Empirically validated; see design spec §10.1.
-pub(super) const WORKER_SCORE_NUM: u32 = 5;
-pub(super) const WORKER_SCORE_DEN: u32 = 4;
-
-const EMPTY_CODE_GRAPH_CAP: usize = 8;
+pub(super) const WORKER_PIN_CAP: usize = 4;
+const FILE_CAP: usize = 6;
+const ISSUE_CAP: usize = 3;
+const CODE_CAP: usize = 3;
 
 struct CachedIndex {
     entries: Vec<MentionEntry>,
@@ -229,13 +223,6 @@ impl MentionRegistry {
         let entries = &self.cache[&key].entries;
 
         if query.is_empty() {
-            // Empty-query branch: pin up to WORKER_PIN_CAP workers, then
-            // fill remaining slots with issue rows, regular file rows, and a
-            // bounded code-graph sample. Code symbols are intentionally capped
-            // so an empty `@` never becomes a full symbol-table dump.
-            // perf: two alloc+sort passes over cached entries on every
-            // empty-query call. Acceptable at expected index scale (≤10k);
-            // revisit if profiling shows picker latency.
             let mut workers: Vec<MentionEntry> = entries
                 .iter()
                 .filter(|e| e.kind == MentionKind::Worker)
@@ -247,24 +234,8 @@ impl MentionRegistry {
                     .cmp(&b.display.len())
                     .then(a.display.cmp(&b.display))
             });
-            workers.truncate(WORKER_PIN_CAP.min(limit));
+            workers.truncate(WORKER_PIN_CAP);
 
-            let remaining = limit.saturating_sub(workers.len());
-            let mut issues: Vec<MentionEntry> = entries
-                .iter()
-                .filter(|e| e.kind == MentionKind::Issue)
-                .cloned()
-                .collect();
-            issues.sort_by(|a, b| {
-                a.display
-                    .len()
-                    .cmp(&b.display.len())
-                    .then(a.display.cmp(&b.display))
-                    .then(a.uri.cmp(&b.uri))
-            });
-            issues.truncate(remaining);
-
-            let remaining = remaining.saturating_sub(issues.len());
             let mut files: Vec<MentionEntry> = entries
                 .iter()
                 .filter(|e| matches!(e.kind, MentionKind::File | MentionKind::Directory))
@@ -277,10 +248,23 @@ impl MentionRegistry {
                     .then(a.display.cmp(&b.display))
                     .then(a.uri.cmp(&b.uri))
             });
-            files.truncate(remaining);
+            files.truncate(FILE_CAP);
 
-            let remaining = remaining.saturating_sub(files.len());
-            let code_cap = EMPTY_CODE_GRAPH_CAP.min(remaining);
+            let mut issues: Vec<(usize, MentionEntry)> = entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.kind == MentionKind::Issue)
+                .map(|(index, e)| (index, e.clone()))
+                .collect();
+            issues.sort_by(|(idx_a, a), (idx_b, b)| {
+                idx_a
+                    .cmp(idx_b)
+                    .then(issue_id(a).cmp(issue_id(b)))
+                    .then(a.uri.cmp(&b.uri))
+            });
+            issues.truncate(ISSUE_CAP);
+            let issues: Vec<MentionEntry> = issues.into_iter().map(|(_, entry)| entry).collect();
+
             let mut code_graph: Vec<MentionEntry> = entries
                 .iter()
                 .filter(|e| matches!(e.kind, MentionKind::CodeFile | MentionKind::CodeSymbol))
@@ -294,15 +278,17 @@ impl MentionRegistry {
                     .then(a.display.cmp(&b.display))
                     .then(a.uri.cmp(&b.uri))
             });
-            code_graph.truncate(code_cap);
+            code_graph.truncate(CODE_CAP);
 
-            workers.extend(issues);
-            workers.extend(files);
-            workers.extend(code_graph);
-            return workers;
+            let mut rows = Vec::new();
+            append_section_rows(&mut rows, "Workers", &workers);
+            append_section_rows(&mut rows, "Files", &files);
+            append_section_rows(&mut rows, "Issues", &issues);
+            append_section_rows(&mut rows, "Code", &code_graph);
+            rows.truncate(limit);
+            return rows;
         }
 
-        // Typed-query branch: nucleo score with a +25 % boost for workers.
         let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
         let code_pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
         let mut buf = Vec::new();
@@ -314,23 +300,10 @@ impl MentionRegistry {
                     code_match_rank(e, query, &code_pattern, &mut self.matcher, &mut buf)?
                 } else {
                     let haystack = e.search_text.as_deref().unwrap_or(&e.display);
-                    let raw = pattern.score(
+                    pattern.score(
                         nucleo_matcher::Utf32Str::new(haystack, &mut buf),
                         &mut self.matcher,
-                    )?;
-                    let boosted = if e.kind == MentionKind::Worker {
-                        // Ceiling division so small scores still receive at least
-                        // a +1 boost; otherwise floor truncation made the +25%
-                        // a no-op for raw scores < 4.
-                        raw.saturating_mul(WORKER_SCORE_NUM)
-                            .div_ceil(WORKER_SCORE_DEN)
-                    } else {
-                        raw
-                    };
-                    MatchRank {
-                        class: legacy_match_class(&e.kind),
-                        score: boosted,
-                    }
+                    )?
                 };
                 Some(RankedMention {
                     rank,
@@ -338,13 +311,7 @@ impl MentionRegistry {
                 })
             })
             .collect();
-        scored.sort_by(|a, b| {
-            a.rank
-                .class
-                .cmp(&b.rank.class)
-                .then(b.rank.score.cmp(&a.rank.score))
-                .then(stable_tie_key(&a.entry).cmp(&stable_tie_key(&b.entry)))
-        });
+        scored.sort_by(typed_query_cmp);
         scored
             .into_iter()
             .take(limit)
@@ -357,25 +324,10 @@ fn is_graph_uri(uri: &str) -> bool {
     uri.starts_with("graph://file/") || uri.starts_with("graph://symbol/")
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MatchRank {
-    class: u8,
-    score: u32,
-}
-
+#[derive(Debug, Clone)]
 struct RankedMention {
-    rank: MatchRank,
+    rank: u32,
     entry: MentionEntry,
-}
-
-fn legacy_match_class(kind: &MentionKind) -> u8 {
-    match kind {
-        MentionKind::Worker | MentionKind::Issue => 4,
-        MentionKind::File | MentionKind::Directory => 5,
-        MentionKind::CodeFile | MentionKind::CodeSymbol => {
-            unreachable!("code rows are classified separately")
-        }
-    }
 }
 
 fn code_match_rank(
@@ -384,40 +336,30 @@ fn code_match_rank(
     pattern: &Pattern,
     matcher: &mut Matcher,
     buf: &mut Vec<char>,
-) -> Option<MatchRank> {
+) -> Option<u32> {
     let path = code_entry_path(entry);
     match entry.kind {
         MentionKind::CodeSymbol => {
             if eq_ignore_ascii_case(&entry.display, query) {
-                return Some(MatchRank {
-                    class: 0,
-                    score: u32::MAX,
-                });
+                return Some(u32::MAX);
             }
 
             if let Some(score) = pattern_score(pattern, matcher, buf, &entry.display)
                 .or_else(|| prefix_score(&entry.display, query))
             {
-                return Some(MatchRank { class: 2, score });
+                return Some(score);
             }
 
             let path = path?;
-            pattern_score(pattern, matcher, buf, path)
-                .or_else(|| path_prefix_score(path, query))
-                .map(|score| MatchRank { class: 3, score })
+            pattern_score(pattern, matcher, buf, path).or_else(|| path_prefix_score(path, query))
         }
         MentionKind::CodeFile => {
             let path = path?;
             if path_segment_exact(path, query) {
-                return Some(MatchRank {
-                    class: 1,
-                    score: u32::MAX,
-                });
+                return Some(u32::MAX);
             }
 
-            pattern_score(pattern, matcher, buf, path)
-                .or_else(|| path_prefix_score(path, query))
-                .map(|score| MatchRank { class: 3, score })
+            pattern_score(pattern, matcher, buf, path).or_else(|| path_prefix_score(path, query))
         }
         MentionKind::File | MentionKind::Directory | MentionKind::Worker | MentionKind::Issue => {
             None
@@ -507,6 +449,65 @@ fn stable_tie_key(entry: &MentionEntry) -> &str {
     }
 }
 
+fn append_section_rows(
+    rows: &mut Vec<MentionEntry>,
+    header: &'static str,
+    section: &[MentionEntry],
+) {
+    if section.is_empty() {
+        return;
+    }
+    rows.push(MentionEntry {
+        section_header: Some(header),
+        kind: MentionKind::File,
+        uri: String::new(),
+        display: format!("── {header} ──"),
+        secondary: None,
+        tag: None,
+        search_text: None,
+        atom_text: None,
+        issue_preview: None,
+    });
+    rows.extend(section.iter().cloned());
+}
+
+fn issue_id(entry: &MentionEntry) -> &str {
+    entry
+        .issue_preview
+        .as_ref()
+        .map(|issue| issue.id.as_str())
+        .unwrap_or(entry.display.as_str())
+}
+
+fn tier_rank(kind: &MentionKind) -> u8 {
+    match kind {
+        MentionKind::File | MentionKind::Directory => 0,
+        MentionKind::Worker => 1,
+        MentionKind::Issue => 2,
+        MentionKind::CodeFile | MentionKind::CodeSymbol => 3,
+    }
+}
+
+fn scores_within_window(a: u32, b: u32) -> bool {
+    let max_score = a.max(b);
+    if max_score == 0 {
+        return true;
+    }
+    a.abs_diff(b).saturating_mul(100) <= max_score.saturating_mul(10)
+}
+
+fn typed_query_cmp(a: &RankedMention, b: &RankedMention) -> std::cmp::Ordering {
+    if scores_within_window(a.rank, b.rank) {
+        let tier_cmp = tier_rank(&a.entry.kind).cmp(&tier_rank(&b.entry.kind));
+        if tier_cmp != std::cmp::Ordering::Equal {
+            return tier_cmp;
+        }
+    }
+    b.rank
+        .cmp(&a.rank)
+        .then(stable_tie_key(&a.entry).cmp(&stable_tie_key(&b.entry)))
+}
+
 impl Default for MentionRegistry {
     fn default() -> Self {
         Self::new()
@@ -518,7 +519,10 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::mentions::{IssueMentionDescriptor, IssueMentionSource};
+    use crate::mentions::{
+        IssueMentionDescriptor, IssueMentionSource, MentionKind, MentionSource,
+        WorkerMentionDescriptor, WorkerMentionSource,
+    };
     use spur_pm::PmSource;
 
     fn issue(id: &str, title: &str, assignee: Option<&str>) -> IssueMentionDescriptor {
@@ -599,5 +603,199 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].display, "bd-2 Deploy Prod");
+    }
+
+    struct StaticSource {
+        name: &'static str,
+        entries: Vec<MentionEntry>,
+    }
+
+    impl MentionSource for StaticSource {
+        fn build(&mut self, _cwd: &Path) -> anyhow::Result<Vec<MentionEntry>> {
+            Ok(self.entries.clone())
+        }
+
+        fn name(&self) -> &'static str {
+            self.name
+        }
+    }
+
+    fn mention(kind: MentionKind, id: usize, display: String) -> MentionEntry {
+        MentionEntry {
+            section_header: None,
+            kind,
+            uri: format!("test://{id}"),
+            display,
+            secondary: None,
+            tag: None,
+            search_text: None,
+            atom_text: None,
+            issue_preview: None,
+        }
+    }
+
+    fn test_registry(sources: Vec<Box<dyn MentionSource>>) -> MentionRegistry {
+        MentionRegistry {
+            sources,
+            cache: HashMap::new(),
+            code_payloads: HashMap::new(),
+            code_graph_hint: None,
+            matcher: Matcher::new(Config::DEFAULT),
+        }
+    }
+
+    #[test]
+    fn empty_query_caps_each_kind() {
+        let workers = (0..10)
+            .map(|i| WorkerMentionDescriptor {
+                name: format!("worker-{i}"),
+                description: None,
+                tier: None,
+            })
+            .collect::<Vec<_>>();
+        let files = (0..12)
+            .map(|i| mention(MentionKind::File, i, format!("src/path-{i}.rs")))
+            .collect::<Vec<_>>();
+        let issues = (0..8)
+            .map(|i| issue(&format!("bd-{i}"), &format!("Issue {i}"), None))
+            .collect::<Vec<_>>();
+        let code_files = (0..6)
+            .map(|i| mention(MentionKind::CodeFile, 100 + i, format!("src/code-{i}.rs")))
+            .collect::<Vec<_>>();
+        let code_symbols = (0..6)
+            .map(|i| mention(MentionKind::CodeSymbol, 200 + i, format!("symbol_{i}")))
+            .collect::<Vec<_>>();
+
+        let mut registry = test_registry(vec![
+            Box::new(WorkerMentionSource::new(workers)),
+            Box::new(StaticSource {
+                name: "file",
+                entries: files,
+            }),
+            Box::new(IssueMentionSource::new(issues)),
+            Box::new(StaticSource {
+                name: "code",
+                entries: code_files.into_iter().chain(code_symbols).collect(),
+            }),
+        ]);
+
+        let results = registry.query(CompletionScope::PreSession, Path::new("."), "", 128);
+        let content: Vec<&MentionEntry> = results
+            .iter()
+            .filter(|entry| entry.section_header.is_none())
+            .collect();
+
+        assert_eq!(content.len(), 16);
+        assert_eq!(
+            content
+                .iter()
+                .filter(|e| e.kind == MentionKind::Worker)
+                .count(),
+            4
+        );
+        assert_eq!(
+            content
+                .iter()
+                .filter(|e| e.kind == MentionKind::File)
+                .count(),
+            6
+        );
+        assert_eq!(
+            content
+                .iter()
+                .filter(|e| e.kind == MentionKind::Issue)
+                .count(),
+            3
+        );
+        assert_eq!(
+            content
+                .iter()
+                .filter(|e| matches!(e.kind, MentionKind::CodeFile | MentionKind::CodeSymbol))
+                .count(),
+            3
+        );
+        assert!(content[..4].iter().all(|e| e.kind == MentionKind::Worker));
+        assert!(content[4..10].iter().all(|e| e.kind == MentionKind::File));
+        assert!(content[10..13].iter().all(|e| e.kind == MentionKind::Issue));
+        assert!(content[13..16]
+            .iter()
+            .all(|e| matches!(e.kind, MentionKind::CodeFile | MentionKind::CodeSymbol)));
+    }
+
+    #[test]
+    fn empty_query_emits_section_headers_in_order() {
+        let mut registry = test_registry(vec![
+            Box::new(WorkerMentionSource::new(vec![WorkerMentionDescriptor {
+                name: "alpha".into(),
+                description: None,
+                tier: None,
+            }])),
+            Box::new(StaticSource {
+                name: "file",
+                entries: vec![mention(MentionKind::File, 1, "src/main.rs".into())],
+            }),
+            Box::new(IssueMentionSource::new(vec![issue("bd-1", "Issue", None)])),
+            Box::new(StaticSource {
+                name: "code",
+                entries: vec![mention(MentionKind::CodeFile, 2, "src/lib.rs".into())],
+            }),
+        ]);
+
+        let results = registry.query(CompletionScope::PreSession, Path::new("."), "", 128);
+        let headers = results
+            .iter()
+            .filter_map(|entry| entry.section_header)
+            .collect::<Vec<_>>();
+        assert_eq!(headers, vec!["Workers", "Files", "Issues", "Code"]);
+
+        let mut workers_only = test_registry(vec![Box::new(WorkerMentionSource::new(vec![
+            WorkerMentionDescriptor {
+                name: "alpha".into(),
+                description: None,
+                tier: None,
+            },
+        ]))]);
+        let workers_only_results =
+            workers_only.query(CompletionScope::PreSession, Path::new("."), "", 128);
+        let workers_only_headers = workers_only_results
+            .iter()
+            .filter_map(|entry| entry.section_header)
+            .collect::<Vec<_>>();
+        assert_eq!(workers_only_headers, vec!["Workers"]);
+    }
+
+    #[test]
+    fn typed_query_tier_breaks_within_window() {
+        let mut registry = test_registry(vec![Box::new(StaticSource {
+            name: "mixed",
+            entries: vec![
+                mention(MentionKind::Worker, 1, "abcd".into()),
+                mention(MentionKind::File, 2, "abce".into()),
+            ],
+        })]);
+
+        let results = registry.query(CompletionScope::PreSession, Path::new("."), "abc", 10);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].kind, MentionKind::File);
+    }
+
+    #[test]
+    fn typed_query_raw_score_beats_tier_outside_window() {
+        let mut registry = test_registry(vec![Box::new(StaticSource {
+            name: "mixed",
+            entries: vec![
+                mention(MentionKind::File, 1, "a.rs".into()),
+                mention(MentionKind::CodeSymbol, 2, "verySpecificNeedle".into()),
+            ],
+        })]);
+
+        let results = registry.query(
+            CompletionScope::PreSession,
+            Path::new("."),
+            "verySpecificNeedle",
+            10,
+        );
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].kind, MentionKind::CodeSymbol);
     }
 }
