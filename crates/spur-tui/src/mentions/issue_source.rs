@@ -145,6 +145,25 @@ pub(crate) fn sanitize_single_line(value: &str) -> String {
     out
 }
 
+pub(crate) fn sanitize_multi_line(value: &str) -> String {
+    let normalized = value.replace("\r\n", "\n").replace('\r', "\n");
+    let mut out_lines = Vec::new();
+    let mut current = String::new();
+    for ch in normalized.chars() {
+        match ch {
+            '\n' => {
+                out_lines.push(current.trim_end().to_string());
+                current.clear();
+            }
+            '\t' => {}
+            _ if ch.is_control() => {}
+            _ => current.push(ch),
+        }
+    }
+    out_lines.push(current.trim_end().to_string());
+    out_lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
