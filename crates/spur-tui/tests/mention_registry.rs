@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use spur_acp::ContentBlock;
 use spur_acp::SessionId;
 use spur_graph::validation::compute_anchor_hash;
-use spur_graph::{artifact_from_facts, extract_rust_worktree, write_artifact};
+use spur_graph::{artifact_from_facts, build_facts, write_artifact};
 use spur_tui::commands::submit_router::assemble_blocks_with_code_mentions;
 use spur_tui::components::input_bar::InputBar;
 use spur_tui::mentions::{
@@ -96,7 +96,7 @@ fn extracted_graph_index_resolves_symbol_payload_through_registry() {
     )
     .unwrap();
     let artifact_path = dir.path().join(".spur/graph-index.json");
-    let facts = extract_rust_worktree(dir.path()).expect("extract fixture worktree");
+    let facts = build_facts(dir.path()).expect("extract fixture worktree").0;
     let artifact = artifact_from_facts(&facts, dir.path()).expect("build artifact");
     write_artifact(&artifact, &artifact_path).expect("write artifact");
 
@@ -484,8 +484,7 @@ fn code_graph_accept_and_submit_expands_fixture_symbol_end_to_end() {
 
     assert!(prompt.contains("MENTION Config"), "{prompt}");
     assert!(prompt.contains("context_header:"), "{prompt}");
-    assert!(prompt.contains("pub struct Config"), "{prompt}");
-    assert!(prompt.contains("pub path: String"), "{prompt}");
+    assert!(!prompt.contains("source:\n"), "{prompt}");
     assert!(prompt.contains("topology_available_via_mcp:"), "{prompt}");
     assert!(
         prompt.contains("get_callers(\"graph://symbol/symbol-config-struct\")"),
