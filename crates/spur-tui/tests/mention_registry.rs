@@ -69,25 +69,24 @@ fn direct_session_excludes_workers() {
 }
 
 #[test]
-fn code_graph_env_missing_records_unobtrusive_hint() {
+fn code_graph_no_artifact_records_unobtrusive_hint() {
     let _guard = ENV_LOCK.lock().unwrap();
     let previous_env = std::env::var_os(CODE_GRAPH_INDEX_ENV);
-    let previous_cwd = std::env::current_dir().ok();
-    std::env::remove_var(CODE_GRAPH_INDEX_ENV);
 
-    // Chdir into a tempdir so the worktree-root fallback resolves to a
-    // directory without `.spur/graph-index.json`, exercising the
-    // "no artifact discoverable" branch.
-    let tmp = tempfile::tempdir().unwrap();
-    std::env::set_current_dir(tmp.path()).unwrap();
+    // Point env var at a deliberately nonexistent path. Both the env-var
+    // branch and the worktree-root fallback funnel through the same
+    // `with_code_graph_hint()` call when `.is_file()` returns false, so
+    // exercising either is sufficient. Using env-set avoids mutating the
+    // process-global CWD, which other tests in this file read without
+    // ENV_LOCK (see typed_query_boosts_worker_in_ambiguous_match).
+    let bogus = std::path::PathBuf::from("/nonexistent/spur/graph-index.json");
+    std::env::set_var(CODE_GRAPH_INDEX_ENV, &bogus);
 
     let reg = MentionRegistry::for_direct_session().with_code_graph_from_env();
 
-    if let Some(previous_cwd) = previous_cwd {
-        let _ = std::env::set_current_dir(previous_cwd);
-    }
-    if let Some(previous_env) = previous_env {
-        std::env::set_var(CODE_GRAPH_INDEX_ENV, previous_env);
+    match previous_env {
+        Some(previous) => std::env::set_var(CODE_GRAPH_INDEX_ENV, previous),
+        None => std::env::remove_var(CODE_GRAPH_INDEX_ENV),
     }
     assert_eq!(
         reg.code_graph_hint(),
