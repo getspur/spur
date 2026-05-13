@@ -77,6 +77,8 @@ impl QuerySource for CommandInputQuerySource {
             secondary,
             tag: String::new(),
             atoms: Vec::new(),
+            selectable: true,
+            dimmed: false,
         }]
     }
 

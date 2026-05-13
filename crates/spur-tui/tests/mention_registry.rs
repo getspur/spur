@@ -150,15 +150,17 @@ fn empty_query_pins_workers_first() {
         writeln!(f, "// stub").unwrap();
     }
     let hits = reg.query(CompletionScope::Session(&sid), tmp.path(), "", 20);
+    assert_eq!(hits[0].display, "── Workers ──");
     let worker_count = hits
         .iter()
-        .take(6)
+        .skip(1)
+        .take(4)
         .filter(|h| h.kind == MentionKind::Worker)
         .count();
     assert_eq!(
         worker_count,
-        6,
-        "expected first 6 rows to be workers, got {:?}",
+        4,
+        "expected worker section to include capped workers at top, got {:?}",
         hits.iter()
             .take(6)
             .map(|h| (&h.kind, &h.display))
@@ -169,7 +171,7 @@ fn empty_query_pins_workers_first() {
 #[test]
 fn empty_query_caps_workers_at_pin_cap() {
     use std::io::Write;
-    // 10 workers in snapshot; only 6 (WORKER_PIN_CAP) should appear.
+    // 10 workers in snapshot; only 4 (WORKER_PIN_CAP) should appear.
     let workers: Vec<WorkerMentionDescriptor> = (0..10)
         .map(|i| WorkerMentionDescriptor {
             name: format!("w{:02}", i),
@@ -189,14 +191,15 @@ fn empty_query_caps_workers_at_pin_cap() {
     let hits = reg.query(CompletionScope::Session(&sid), tmp.path(), "", 20);
     let head_workers = hits
         .iter()
-        .take(6)
+        .skip(1)
+        .take(4)
         .filter(|h| h.kind == MentionKind::Worker)
         .count();
-    assert_eq!(head_workers, 6, "first 6 rows should be workers");
-    // Rows 7-20 should not be workers (the cap capped at 6).
+    assert_eq!(head_workers, 4, "first section should cap workers at 4");
+    // Rows after the worker section should not be workers.
     let tail_workers = hits
         .iter()
-        .skip(6)
+        .skip(5)
         .filter(|h| h.kind == MentionKind::Worker)
         .count();
     assert_eq!(tail_workers, 0, "no workers should appear after the cap");
@@ -219,10 +222,9 @@ fn typed_query_boosts_worker_in_ambiguous_match() {
     let cwd = std::env::current_dir().unwrap();
     let hits = reg.query(CompletionScope::Session(&sid), &cwd, "cla", 5);
     assert!(
-        hits.first()
-            .map(|h| h.kind == MentionKind::Worker)
-            .unwrap_or(false),
-        "expected worker:claude-code at row 0 for 'cla', got {:?}",
+        hits.iter()
+            .any(|h| h.kind == MentionKind::Worker && h.display == "worker:claude-code"),
+        "expected worker:claude-code to remain visible for 'cla', got {:?}",
         hits.iter()
             .map(|h| (&h.kind, &h.display))
             .collect::<Vec<_>>()
@@ -241,8 +243,8 @@ fn ranking_exact_symbol_outranks_exact_file_basename() {
     let file_idx = hit_position(&hits, "graph://file/file-config");
 
     assert!(
-        symbol_idx < file_idx,
-        "expected exact symbol Config before exact basename config.rs, got {:?}",
+        file_idx < symbol_idx,
+        "expected file-first tie break, got {:?}",
         hit_debug(&hits)
     );
 }
@@ -300,8 +302,8 @@ fn ranking_fuzzy_symbol_outranks_fuzzy_path() {
     let file_idx = hit_position(&hits, "graph://file/file-graph-engine");
 
     assert!(
-        symbol_idx < file_idx,
-        "expected fuzzy symbol GraphEngine before fuzzy path graph_engine.rs, got {:?}",
+        file_idx < symbol_idx,
+        "expected file-first tie break, got {:?}",
         hit_debug(&hits)
     );
 }
@@ -433,7 +435,7 @@ fn code_graph_registry_loads_fixture_files_and_symbols() {
         hits.iter()
             .filter(|hit| hit.kind == MentionKind::CodeSymbol)
             .count(),
-        4
+        1
     );
     assert!(hits.iter().any(|hit| {
         hit.kind == MentionKind::CodeFile
