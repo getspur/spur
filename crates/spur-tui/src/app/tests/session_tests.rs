@@ -495,7 +495,7 @@ mod brain_retired_tests {
         }));
         app.handle_spur_event(wrap(SpurEventBody::CommandRegistryDirty {
             session: session.clone(),
-            caps: caps_with_effort(),
+            caps: Some(caps_with_effort()),
             config_options: vec![effort_config_option()],
         }));
 

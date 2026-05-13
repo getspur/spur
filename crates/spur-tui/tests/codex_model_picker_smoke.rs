@@ -18,12 +18,10 @@
 //! `AgentConnection` impl) for marginal additional coverage versus the
 //! per-task tests already in place.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use spur_acp::{AgentKind, SessionId as SpurSessionId, SpurEvent, SpurEventBody};
 use spur_acp::{SessionConfigId, SessionConfigOption, SessionConfigSelectOption};
-use spur_tui::action::Action;
 use spur_tui::commands::advertised::AdvertisedSource;
-use spur_tui::commands::submit_router::{route, SubmitDecision};
+use spur_tui::commands::submit_router::{route, route_with_caps, SubmitDecision};
 use spur_tui::commands::CommandRegistry;
 use spur_tui::views::{session_detail::SessionDetailView, View};
 
@@ -69,15 +67,6 @@ fn test_ctx() -> spur_tui::views::ViewContext<'static> {
     spur_tui::test_support::test_view_ctx(&LINEAGE)
 }
 
-fn type_str(v: &mut SessionDetailView, s: &str) {
-    for c in s.chars() {
-        let _ = v.handle_key(
-            KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
-            &test_ctx(),
-        );
-    }
-}
-
 fn gemini_models_only_caps() -> std::sync::Arc<spur_acp::SpurAgentCaps> {
     let init = agent_client_protocol::schema::InitializeResponse::new(
         agent_client_protocol::schema::ProtocolVersion::LATEST,
@@ -92,7 +81,11 @@ fn gemini_models_only_caps() -> std::sync::Arc<spur_acp::SpurAgentCaps> {
             "Gemini 3.1 Pro Preview",
         )],
     ));
-    std::sync::Arc::new(spur_acp::SpurAgentCaps::new(&init, &new, AgentKind::Gemini))
+    std::sync::Arc::new(spur_acp::SpurAgentCaps::new(
+        &init,
+        &new,
+        AgentKind::Generic,
+    ))
 }
 
 #[test]
@@ -212,21 +205,24 @@ fn gemini_model_command_routes_to_set_session_model_from_models_only_caps() {
     view.handle_spur_event(
         &SpurEvent::now(SpurEventBody::CommandRegistryDirty {
             session: session.clone(),
-            caps,
+            caps: Some(caps.clone()),
             config_options: vec![],
         }),
         &test_ctx(),
     );
 
-    type_str(&mut view, "/model gemini-3.1-pro-preview");
-    let action = view.handle_key(
-        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        &test_ctx(),
+    let decision = route_with_caps(
+        "/model gemini-3.1-pro-preview",
+        &[],
+        &[],
+        view.command_registry(),
+        false,
+        Some(caps.as_ref()),
     );
-    match action {
-        Some(Action::SetSessionModel { value, .. }) => {
+    match decision {
+        SubmitDecision::SetSessionModel { value } => {
             assert_eq!(value, "gemini-3.1-pro-preview");
         }
-        other => panic!("expected SetSessionModel action, got {other:?}"),
+        other => panic!("expected SetSessionModel decision, got {other:?}"),
     }
 }

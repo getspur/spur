@@ -722,7 +722,8 @@ pub enum SpurEventBody {
     /// `session/update.ConfigOptionUpdate` notification from the agent.
     CommandRegistryDirty {
         session: SessionId,
-        caps: Arc<crate::SpurAgentCaps>,
+        #[serde(default)]
+        caps: Option<Arc<crate::SpurAgentCaps>>,
         config_options: Vec<SessionConfigOption>,
     },
     DelegationRequested {
@@ -1321,6 +1322,51 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         let decoded: SpurEventBody = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn command_registry_dirty_deserializes_without_caps_for_backward_compat() {
+        let old_shape = r#"{"CommandRegistryDirty":{"session":"sid","config_options":[]}}"#;
+        let decoded: SpurEventBody = serde_json::from_str(old_shape).unwrap();
+        match decoded {
+            SpurEventBody::CommandRegistryDirty {
+                session,
+                caps,
+                config_options,
+            } => {
+                assert_eq!(session, SessionId("sid".to_string()));
+                assert!(caps.is_none());
+                assert!(config_options.is_empty());
+            }
+            other => panic!("expected CommandRegistryDirty, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn command_registry_dirty_roundtrips_with_some_caps() {
+        let init = agent_client_protocol::schema::InitializeResponse::new(
+            agent_client_protocol::schema::ProtocolVersion::LATEST,
+        );
+        let new = agent_client_protocol::schema::NewSessionResponse::new(
+            agent_client_protocol::schema::SessionId::new("acp-sid"),
+        );
+        let body = SpurEventBody::CommandRegistryDirty {
+            session: SessionId("sid".to_string()),
+            caps: Some(Arc::new(crate::SpurAgentCaps::new(
+                &init,
+                &new,
+                crate::AgentKind::CodexAcp,
+            ))),
+            config_options: Vec::new(),
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        let back: SpurEventBody = serde_json::from_str(&json).unwrap();
+        match back {
+            SpurEventBody::CommandRegistryDirty { caps, .. } => {
+                assert!(caps.is_some());
+            }
+            other => panic!("expected CommandRegistryDirty, got {other:?}"),
+        }
     }
 }
 
