@@ -1,6 +1,23 @@
 use super::McpCallbackServer;
 use super::*;
 
+fn issue_to_summary_event(
+    issue: &spur_pm::Issue,
+    source: &str,
+) -> spur_acp::domain::events::IssueSummaryEvent {
+    spur_acp::domain::events::IssueSummaryEvent {
+        id: issue.id.clone(),
+        source: source.to_string(),
+        title: issue.title.clone(),
+        status: issue.status.clone(),
+        labels: issue.labels.clone(),
+        priority: issue.priority,
+        issue_type: issue.issue_type.clone(),
+        assignee: issue.assignee.clone(),
+        description: Some(issue.body.clone()).filter(|body| !body.trim().is_empty()),
+    }
+}
+
 impl McpCallbackServer {
     pub(crate) async fn handle_get_issue(&self, id: Value, args: Value) -> JsonRpcResponse {
         let pm = match self.pm_service.as_ref() {
@@ -187,15 +204,43 @@ impl McpCallbackServer {
         };
 
         match pm.create_issue(params).await {
-            Ok(issue_id) => JsonRpcResponse::success(
-                id,
-                json!({
-                    "content": [{
-                        "type": "text",
-                        "text": format!("Issue created: {issue_id}")
-                    }]
-                }),
-            ),
+            Ok(issue_id) => {
+                let response = JsonRpcResponse::success(
+                    id,
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!("Issue created: {issue_id}")
+                        }]
+                    }),
+                );
+
+                if let Some(sink) = self.event_sink.as_deref() {
+                    match pm.get_issue(&issue_id).await {
+                        Ok(issue) => {
+                            let issue = issue_to_summary_event(&issue, pm.source_str());
+                            if sink
+                                .try_emit(spur_acp::SpurEventBody::IssueCreated { issue })
+                                .is_err()
+                            {
+                                tracing::warn!(
+                                    issue_id = %issue_id,
+                                    "dropping IssueCreated event because broadcast sink is full"
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                issue_id = %issue_id,
+                                %error,
+                                "created issue event not emitted because fetching issue failed"
+                            );
+                        }
+                    }
+                }
+
+                response
+            }
             Err(e) => JsonRpcResponse::internal_error(id, format!("create_issue failed: {e}")),
         }
     }
