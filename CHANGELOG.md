@@ -164,6 +164,15 @@
   wire-up was also missing in production, so the entire subsystem (62
   tests, bd-cpf.1–7 hardening) was inert. (bd-arch.21)
 
+## v1.1.7 — 2026-05-13
+
+Spur 1.1.7 makes everyday agent-switching and navigation feel right. Changing models works everywhere, the picker puts what you actually want at the top, and the code graph is there when you need it without any setup.
+
+- **`/model` now works on every supported agent.** Switching models in Gemini CLI and Kimi CLI was broken before — both now behave like Codex, Claude Code, and OpenCode. Pick a model, get that model.
+- **Status bar reflects the model you're actually on.** After a `/model` switch, the label updates live instead of showing the old name until you restart the session.
+- **Smarter `@mention` picker.** Files no longer get buried under issues and workers. Results are grouped under clear section headers and ordered so the thing you're most likely reaching for is at the top.
+- **Code graph just works.** Spur now auto-discovers the project's code graph at the worktree root — no environment variable to set, no "run `spur graph build`" hint when the graph is already there. Rebuilds are also faster and symbol names stay stable across runs, so jumping between files is more reliable.
+
 ## v0.4.5 — 2026-04-19
 
 Spur 0.4.5 focuses on getting around faster and trusting what you see. A new universal palette (Ctrl+K) jumps you between sessions, workers, traces, and commands from anywhere. The `@mention` and `/slash` pickers now share one consistent interface. Agent output renders markdown and mermaid diagrams inline, and streaming stays smooth under bursty traffic.
