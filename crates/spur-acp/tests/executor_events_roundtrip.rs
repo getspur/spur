@@ -2,9 +2,9 @@
 
 use chrono::{TimeZone, Utc};
 use spur_acp::{
-    PlanLifecycleEvent, PlanLoadWarningEvent, PlanOwnerStateEvent, PlanSummaryCountsEvent,
-    PlanSummaryEvent, ReviewDecision, ReviewKind, ReviewPayload, Role, SessionId, SpurEvent,
-    SpurEventBody,
+    IssueSummaryEvent, PlanLifecycleEvent, PlanLoadWarningEvent, PlanOwnerStateEvent,
+    PlanSummaryCountsEvent, PlanSummaryEvent, ReviewDecision, ReviewKind, ReviewPayload, Role,
+    SessionId, SpurEvent, SpurEventBody,
 };
 
 #[test]
@@ -150,6 +150,39 @@ fn worker_notification_roundtrips() {
     ));
     assert!(json.contains("WorkerNotification"));
     assert!(json.contains("thinking..."));
+}
+
+#[test]
+fn issue_updated_roundtrips() {
+    let ev = SpurEvent::now(SpurEventBody::IssueUpdated {
+        source: "beads".into(),
+        id: "BEADS-123".into(),
+        status: Some("in_progress".into()),
+        assignee: Some("alice".into()),
+    });
+    let json = serde_json::to_string(&ev).unwrap();
+    let round: SpurEvent = serde_json::from_str(&json).unwrap();
+    assert!(matches!(round.body, SpurEventBody::IssueUpdated { .. }));
+}
+
+#[test]
+fn issue_created_roundtrips() {
+    let ev = SpurEvent::now(SpurEventBody::IssueCreated {
+        issue: IssueSummaryEvent {
+            id: "BEADS-124".into(),
+            source: "beads".into(),
+            title: "Add issue-created ACP event".into(),
+            status: "open".into(),
+            labels: vec!["feature".into()],
+            priority: Some(2),
+            issue_type: Some("task".into()),
+            assignee: Some("alice".into()),
+            description: Some("Track one created issue on ACP stream".into()),
+        },
+    });
+    let json = serde_json::to_string(&ev).unwrap();
+    let round: SpurEvent = serde_json::from_str(&json).unwrap();
+    assert!(matches!(round.body, SpurEventBody::IssueCreated { .. }));
 }
 
 #[test]

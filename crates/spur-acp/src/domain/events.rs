@@ -815,6 +815,11 @@ pub enum SpurEventBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         assignee: Option<String>,
     },
+    /// Emitted when one issue is newly created.
+    /// Shape mirrors one element of `IssuesLoaded.issues`.
+    IssueCreated {
+        issue: IssueSummaryEvent,
+    },
     /// Emitted once at session start with all tracked issues.
     IssuesLoaded {
         issues: Vec<IssueSummaryEvent>,
