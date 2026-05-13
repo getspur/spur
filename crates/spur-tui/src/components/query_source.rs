@@ -541,15 +541,25 @@ impl QuerySource for MentionQuerySource {
                     .clone()
                     .map(|t| format!("\u{27E8}{}\u{27E9}", t)) // ⟨tier⟩
                     .unwrap_or_default();
-                let primary = if m.kind == MentionKind::Issue {
+                let primary = if m.section_header.is_some() {
+                    m.display.clone()
+                } else if m.kind == MentionKind::Issue {
                     format!("{} {}", icon, m.display)
                 } else {
                     format!("{} @{}", icon, m.display)
                 };
                 RetrievalRow {
                     primary,
-                    secondary: m.secondary.clone().unwrap_or_default(),
-                    tag: tag_render,
+                    secondary: if m.section_header.is_some() {
+                        String::new()
+                    } else {
+                        m.secondary.clone().unwrap_or_default()
+                    },
+                    tag: if m.section_header.is_some() {
+                        String::new()
+                    } else {
+                        tag_render
+                    },
                     atoms: Vec::new(),
                     selectable: m.section_header.is_none(),
                     dimmed: m.section_header.is_some(),

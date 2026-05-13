@@ -36,6 +36,22 @@ pub struct MentionEntry {
     pub issue_preview: Option<Arc<IssueMentionDescriptor>>,
 }
 
+impl Default for MentionEntry {
+    fn default() -> Self {
+        Self {
+            section_header: None,
+            kind: MentionKind::File,
+            uri: String::new(),
+            display: String::new(),
+            secondary: None,
+            tag: None,
+            search_text: None,
+            atom_text: None,
+            issue_preview: None,
+        }
+    }
+}
+
 pub trait MentionSource: Send {
     /// Rebuild the candidate list from scratch.
     fn build(&mut self, cwd: &Path) -> anyhow::Result<Vec<MentionEntry>>;
