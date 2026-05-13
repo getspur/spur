@@ -18,10 +18,12 @@
 //! `AgentConnection` impl) for marginal additional coverage versus the
 //! per-task tests already in place.
 
+use spur_acp::{AgentKind, SessionId as SpurSessionId, SpurEvent, SpurEventBody};
 use spur_acp::{SessionConfigId, SessionConfigOption, SessionConfigSelectOption};
 use spur_tui::commands::advertised::AdvertisedSource;
-use spur_tui::commands::submit_router::{route, SubmitDecision};
+use spur_tui::commands::submit_router::{route, route_with_caps, SubmitDecision};
 use spur_tui::commands::CommandRegistry;
+use spur_tui::views::{session_detail::SessionDetailView, View};
 
 const HANDLE: &str = "codex";
 
@@ -57,6 +59,33 @@ fn snapshot_with_three_choices_each() -> Vec<SessionConfigOption> {
             &[("low", "Low"), ("medium", "Medium"), ("high", "High")],
         ),
     ]
+}
+
+fn test_ctx() -> spur_tui::views::ViewContext<'static> {
+    static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
+        std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
+    spur_tui::test_support::test_view_ctx(&LINEAGE)
+}
+
+fn gemini_models_only_caps() -> std::sync::Arc<spur_acp::SpurAgentCaps> {
+    let init = agent_client_protocol::schema::InitializeResponse::new(
+        agent_client_protocol::schema::ProtocolVersion::LATEST,
+    );
+    let new = agent_client_protocol::schema::NewSessionResponse::new(
+        agent_client_protocol::schema::SessionId::new("gemini-acp"),
+    )
+    .models(agent_client_protocol::schema::SessionModelState::new(
+        agent_client_protocol::schema::ModelId::new("gemini-3.1-pro-preview"),
+        vec![agent_client_protocol::schema::ModelInfo::new(
+            agent_client_protocol::schema::ModelId::new("gemini-3.1-pro-preview"),
+            "Gemini 3.1 Pro Preview",
+        )],
+    ));
+    std::sync::Arc::new(spur_acp::SpurAgentCaps::new(
+        &init,
+        &new,
+        AgentKind::Generic,
+    ))
 }
 
 #[test]
@@ -155,5 +184,45 @@ fn codex_model_picker_end_to_end() {
             assert_eq!(value, "o3");
         }
         other => panic!("expected SetSessionConfigOption after refresh, got {other:?}"),
+    }
+}
+
+#[test]
+fn gemini_model_command_routes_to_set_session_model_from_models_only_caps() {
+    let tmp = tempfile::tempdir().unwrap();
+    let session = SpurSessionId::new();
+    let mut view = SessionDetailView::new(
+        session.clone(),
+        "gemini".into(),
+        "brain".into(),
+        tmp.path().to_path_buf(),
+        spur_tui::test_support::default_agent_config("gemini"),
+        Vec::new(),
+    );
+
+    let caps = gemini_models_only_caps();
+    view.set_spur_agent_caps(Some(caps.clone()));
+    view.handle_spur_event(
+        &SpurEvent::now(SpurEventBody::CommandRegistryDirty {
+            session: session.clone(),
+            caps: Some(caps.clone()),
+            config_options: vec![],
+        }),
+        &test_ctx(),
+    );
+
+    let decision = route_with_caps(
+        "/model gemini-3.1-pro-preview",
+        &[],
+        &[],
+        view.command_registry(),
+        false,
+        Some(caps.as_ref()),
+    );
+    match decision {
+        SubmitDecision::SetSessionModel { value } => {
+            assert_eq!(value, "gemini-3.1-pro-preview");
+        }
+        other => panic!("expected SetSessionModel decision, got {other:?}"),
     }
 }
