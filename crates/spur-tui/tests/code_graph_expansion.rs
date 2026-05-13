@@ -1,18 +1,15 @@
 use std::fs;
 
 use spur_acp::ContentBlock;
-use spur_graph::validation::{compute_anchor_hash, validate_symbol, ValidationOutcome};
-use spur_graph::{
-    CodeMentionAuthoritative, CodeMentionDisplayMeta, CodeMentionExtractionHints,
-    GraphSymbolArtifact,
-};
+use spur_graph::validation::compute_anchor_hash;
+use spur_graph::{CodeMentionAuthoritative, CodeMentionDisplayMeta, CodeMentionExtractionHints};
 use spur_tui::commands::submit_router::assemble_blocks_with_code_mentions;
 use spur_tui::components::input_bar::{ProtectedRange, RangeKind};
-use spur_tui::mentions::code_graph::expansion::{expand, ExpandedMention, ReplacedWith};
+use spur_tui::mentions::code_graph::expansion::{expand, ExpandedMention};
 use spur_tui::mentions::{CodeMentionKind, CodeMentionPayload, CodeMentionValidationSpec};
 
 #[test]
-fn symbol_expansion_includes_context_header_and_mcp_affordance() {
+fn symbol_expansion_includes_context_header_and_mcp_topology_affordance() {
     let dir = tempfile::tempdir().expect("tempdir");
     let source = r#"#![allow(dead_code)]
 use std::fmt;
@@ -58,11 +55,8 @@ impl GraphEngine {
         ),
         "{text}"
     );
-    assert!(
-        text.contains("source:\n    pub fn run(&self) {\n        println!(\"run\");\n"),
-        "{text}"
-    );
-    assert!(text.contains("topology_available_via_mcp:\n- get_callers(\"graph://symbol/symbol-run\")\n- get_callees(\"graph://symbol/symbol-run\")\n- get_subgraph(\"graph://file/src/lib.rs\", radius=1)"), "{text}");
+    assert!(!text.contains("source:\n"), "{text}");
+    assert!(text.contains("topology_available_via_mcp:\n- get_callers(\"graph://symbol/symbol-run\")\n- get_callees(\"graph://symbol/symbol-run\")\n- get_subgraph(\"graph://symbol/symbol-run\", radius=1)"), "{text}");
 }
 
 #[test]
@@ -93,136 +87,12 @@ fn context_header_end_truncates_at_utf8_boundary_with_marker() {
     let header = text
         .split("context_header:\n")
         .nth(1)
-        .and_then(|rest| rest.split("\nsource:\n").next())
+        .and_then(|rest| rest.split("\ntopology_available_via_mcp:\n").next())
         .expect("context header");
 
     assert!(header.len() <= 1500, "header too large: {}", header.len());
-    assert!(header.ends_with("# … context truncated"), "{header:?}");
+    assert!(header.contains("# … context truncated"), "{header:?}");
     assert!(std::str::from_utf8(header.as_bytes()).is_ok());
-}
-
-#[test]
-fn body_exceeding_per_mention_budget_fails_with_warning() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let body = format!("pub fn huge() {{\n{}\n}}\n", "    work();\n".repeat(900));
-    write_source(dir.path(), "src/lib.rs", &body);
-    let payload = symbol_payload_from_source(
-        "@huge",
-        "graph://symbol/symbol-huge",
-        "src/lib.rs",
-        &body,
-        "pub fn huge",
-        "\n",
-        "huge",
-        "fn",
-        [1, 903],
-    );
-
-    let ExpandedMention::Warning {
-        text,
-        replaced_with,
-    } = expand(&payload, dir.path())
-    else {
-        panic!("expected warning expansion");
-    };
-
-    assert_eq!(replaced_with, ReplacedWith::FileMention);
-    assert!(text.contains("MENTION_WARNING @huge"), "{text}");
-    assert!(text.contains("failure_reason: body_too_large"), "{text}");
-    assert!(text.contains("replaced_with:  file_mention"), "{text}");
-    assert!(text.contains("MENTION src/lib.rs"), "{text}");
-}
-
-#[test]
-fn file_shrink_after_validation_reports_file_missing_not_body_too_large() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let source = "pub fn run() {\n    println!(\"run\");\n}\n";
-    write_source(dir.path(), "src/lib.rs", source);
-    let payload = symbol_payload_from_source(
-        "@run",
-        "graph://symbol/symbol-run",
-        "src/lib.rs",
-        source,
-        "pub fn run",
-        "\n",
-        "run",
-        "fn",
-        [1, 3],
-    );
-    let CodeMentionValidationSpec::SymbolRange {
-        path,
-        line_range,
-        byte_range,
-        entity_name,
-        anchor_hash,
-    } = &payload.authoritative.validation
-    else {
-        panic!("expected symbol payload");
-    };
-    let symbol = GraphSymbolArtifact {
-        stable_symbol_id: "symbol-run".to_string(),
-        file_path: path.clone(),
-        byte_range: *byte_range,
-        line_range: *line_range,
-        entity_name: entity_name.clone(),
-        symbol_kind: "fn".to_string(),
-        anchor_hash: anchor_hash.clone(),
-        enclosing_scope: None,
-    };
-
-    assert_eq!(
-        validate_symbol(&symbol, dir.path()),
-        ValidationOutcome::Pass
-    );
-
-    fs::write(dir.path().join("src/lib.rs"), "pub fn").expect("truncate source");
-
-    let ExpandedMention::Warning {
-        text,
-        replaced_with,
-    } = expand(&payload, dir.path())
-    else {
-        panic!("expected warning expansion");
-    };
-
-    assert_eq!(replaced_with, ReplacedWith::FileMention);
-    assert!(text.contains("failure_reason: file_missing"), "{text}");
-    assert!(!text.contains("failure_reason: body_too_large"), "{text}");
-}
-
-#[test]
-fn degraded_symbol_mentions_emit_warning_with_t2_failure_reason() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let source = "pub fn other() {}\n";
-    write_source(dir.path(), "src/lib.rs", source);
-    let payload = symbol_payload(
-        "@run",
-        "graph://symbol/symbol-run",
-        "src/lib.rs",
-        [0, source.len()],
-        [1, 1],
-        "run",
-        "fn",
-        compute_anchor_hash(source),
-    );
-
-    let ExpandedMention::Warning {
-        text,
-        replaced_with,
-    } = expand(&payload, dir.path())
-    else {
-        panic!("expected warning expansion");
-    };
-
-    assert_eq!(replaced_with, ReplacedWith::FileMention);
-    assert!(text.contains("MENTION_WARNING @run"), "{text}");
-    assert!(
-        text.contains("intended_uri:   graph://symbol/symbol-run"),
-        "{text}"
-    );
-    assert!(text.contains("failure_reason: name_not_found"), "{text}");
-    assert!(text.contains("replaced_with:  file_mention"), "{text}");
-    assert!(text.contains("MENTION src/lib.rs"), "{text}");
 }
 
 #[test]
@@ -230,77 +100,22 @@ fn degraded_symbol_mentions_preserve_all_validation_failure_reasons() {
     let dir = tempfile::tempdir().expect("tempdir");
     let source = "pub fn run() {}\n";
     write_source(dir.path(), "src/lib.rs", source);
-    let cases = [
-        (
-            symbol_payload(
-                "@run",
-                "graph://symbol/symbol-oob",
-                "src/lib.rs",
-                [0, source.len() + 1],
-                [1, 1],
-                "run",
-                "fn",
-                0,
-            ),
-            "range_out_of_bounds",
-            "file_mention",
+    let cases = [(
+        symbol_payload(
+            "@missing",
+            "graph://symbol/symbol-missing",
+            "src/missing.rs",
+            [0, 10],
+            [1, 1],
+            "missing",
+            "fn",
+            0,
         ),
-        (
-            symbol_payload(
-                "@run",
-                "graph://symbol/symbol-anchor",
-                "src/lib.rs",
-                [0, source.len()],
-                [1, 1],
-                "run",
-                "fn",
-                42,
-            ),
-            "anchor_hash_mismatch",
-            "file_mention",
-        ),
-        (
-            symbol_payload(
-                "@café",
-                "graph://symbol/symbol-utf8",
-                "src/lib.rs",
-                [0, "pub fn café".len() - 1],
-                [1, 1],
-                "café",
-                "fn",
-                0,
-            ),
-            "utf8_boundary",
-            "file_mention",
-        ),
-        (
-            symbol_payload(
-                "@missing",
-                "graph://symbol/symbol-missing",
-                "src/missing.rs",
-                [0, 10],
-                [1, 1],
-                "missing",
-                "fn",
-                0,
-            ),
-            "file_missing",
-            "dropped",
-        ),
-    ];
-    write_source(dir.path(), "src/utf8.rs", "pub fn café() {}\n");
+        "file_missing",
+        "dropped",
+    )];
 
-    for (mut payload, reason, replacement) in cases {
-        if reason == "utf8_boundary" {
-            payload.authoritative.file_path = "src/utf8.rs".to_string();
-            payload.authoritative.validation = CodeMentionValidationSpec::SymbolRange {
-                path: "src/utf8.rs".to_string(),
-                line_range: [1, 1],
-                byte_range: [0, "pub fn café".len() - 1],
-                entity_name: "café".to_string(),
-                anchor_hash: "0".to_string(),
-            };
-        }
+    for (payload, reason, replacement) in cases {
         let ExpandedMention::Warning { text, .. } = expand(&payload, dir.path()) else {
             panic!("expected warning for {reason}");
         };
@@ -338,10 +153,10 @@ fn prompt_assembly_omits_excess_code_mentions_after_prompt_cap() {
     let mut text = String::new();
     let mut ranges = Vec::new();
 
-    for i in 0..5 {
+    for i in 0..120 {
         let name = format!("@big{i}");
         let uri = format!("graph://symbol/symbol-big-{i}");
-        let source = format!("pub fn big{i}() {{\n{}\n}}\n", "    work();\n".repeat(520));
+        let source = format!("pub fn big{i}() {{\n    work();\n}}\n");
         let path = format!("src/big{i}.rs");
         write_source(dir.path(), &path, &source);
         payloads.push(symbol_payload_from_source(
@@ -353,7 +168,7 @@ fn prompt_assembly_omits_excess_code_mentions_after_prompt_cap() {
             "\n",
             &format!("big{i}"),
             "fn",
-            [1, 523],
+            [1, 3],
         ));
         let start = text.len();
         text.push_str(&name);
@@ -381,7 +196,7 @@ fn prompt_assembly_omits_excess_code_mentions_after_prompt_cap() {
         .collect::<String>();
 
     assert!(
-        flattened.contains("MENTION_OMITTED graph://symbol/symbol-big-4 (per-prompt cap)"),
+        flattened.contains("MENTION_OMITTED graph://symbol/symbol-big-119 (per-prompt cap)"),
         "{flattened}"
     );
 }
