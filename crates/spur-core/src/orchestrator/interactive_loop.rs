@@ -843,6 +843,21 @@ impl Orchestrator {
                             let pm_call_started = std::time::Instant::now();
                             match pm.get_issue(&id).await {
                                 Ok(issue) => {
+                                    let mut comments = match pm.advanced() {
+                                        Some(advanced) => match advanced.list_comments(&id).await {
+                                            Ok(comments) => comments,
+                                            Err(error) => {
+                                                tracing::warn!(
+                                                    issue_id = %id,
+                                                    error = %error,
+                                                    "failed to load issue comments; continuing with empty comments"
+                                                );
+                                                Vec::new()
+                                            }
+                                        },
+                                        None => Vec::new(),
+                                    };
+                                    comments.sort_by_key(|comment| comment.created_at);
                                     let pm_get_issue_ms =
                                         pm_call_started.elapsed().as_millis() as u64;
                                     tracing::info!(
@@ -855,7 +870,7 @@ impl Orchestrator {
                                     );
                                     self.funnel.emit(SpurEventBody::IssueDetailFetched {
                                         requested_id: id,
-                                        issue: issue_to_detail_event(&issue),
+                                        issue: issue_to_detail_event(&issue, comments),
                                     });
                                 }
                                 Err(e) => {
