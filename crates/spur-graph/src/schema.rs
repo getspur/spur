@@ -72,6 +72,10 @@ pub struct CodeMentionDisplayMeta {
 #[serde(deny_unknown_fields)]
 pub struct GraphIndexArtifact {
     pub header: GraphIndexHeader,
+    #[serde(default)]
+    pub manifest_version: String,
+    #[serde(default)]
+    pub file_manifests: Vec<GraphFileManifestEntry>,
     pub files: Vec<GraphFileArtifact>,
     pub symbols: Vec<GraphSymbolArtifact>,
     #[serde(default, skip)]
@@ -89,6 +93,16 @@ pub struct GraphIndexHeader {
 pub struct GraphFileArtifact {
     pub stable_file_id: String,
     pub file_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphFileManifestEntry {
+    pub stable_file_id: String,
+    pub path: String,
+    pub mtime_nanos: u128,
+    pub size_bytes: u64,
+    pub node_ids: Vec<NodeId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

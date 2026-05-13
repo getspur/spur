@@ -2,23 +2,61 @@
   "header": {
     "graph_index_version": "spur-graph-phase2"
   },
+  "manifest_version": "<normalized>",
+  "file_manifests": [
+    {
+      "stable_file_id": "a759aff8ae5419e0",
+      "path": "api.md",
+      "mtime_nanos": 0,
+      "size_bytes": 0,
+      "node_ids": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "stable_file_id": "91079949255a448a",
+      "path": "guide.md",
+      "mtime_nanos": 0,
+      "size_bytes": 0,
+      "node_ids": [
+        4,
+        5,
+        6,
+        7
+      ]
+    },
+    {
+      "stable_file_id": "57b2b40fcba2e8ed",
+      "path": "index.md",
+      "mtime_nanos": 0,
+      "size_bytes": 0,
+      "node_ids": [
+        8,
+        9,
+        10,
+        11
+      ]
+    }
+  ],
   "files": [
     {
-      "stable_file_id": "a6b7513e1e31fa05",
+      "stable_file_id": "a759aff8ae5419e0",
       "file_path": "api.md"
     },
     {
-      "stable_file_id": "192a1f47e356e684",
+      "stable_file_id": "91079949255a448a",
       "file_path": "guide.md"
     },
     {
-      "stable_file_id": "40a0abb55bb78705",
+      "stable_file_id": "57b2b40fcba2e8ed",
       "file_path": "index.md"
     }
   ],
   "symbols": [
     {
-      "stable_symbol_id": "89d36e0ef792968b",
+      "stable_symbol_id": "e35b915f52f45e83",
       "file_path": "api.md",
       "byte_range": [
         0,
@@ -34,7 +72,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "acc8ff4175da4143",
+      "stable_symbol_id": "804fa19ecdd05a81",
       "file_path": "api.md",
       "byte_range": [
         7,
@@ -50,7 +88,7 @@
       "enclosing_scope": "API"
     },
     {
-      "stable_symbol_id": "eaa91483fc520274",
+      "stable_symbol_id": "18070d361bbf917e",
       "file_path": "guide.md",
       "byte_range": [
         0,
@@ -66,7 +104,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "98f395eeb63fd56a",
+      "stable_symbol_id": "617a3753df7f96af",
       "file_path": "guide.md",
       "byte_range": [
         98,
@@ -82,7 +120,7 @@
       "enclosing_scope": "Guide"
     },
     {
-      "stable_symbol_id": "1076c00ebb0a10a8",
+      "stable_symbol_id": "a4f4756c445cfa9c",
       "file_path": "guide.md",
       "byte_range": [
         159,
@@ -98,7 +136,7 @@
       "enclosing_scope": "Guide"
     },
     {
-      "stable_symbol_id": "720816983c8a7fee",
+      "stable_symbol_id": "324648dd1b8e00d2",
       "file_path": "index.md",
       "byte_range": [
         0,
@@ -114,7 +152,7 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "f7f75ff33edd5a0d",
+      "stable_symbol_id": "30cc2b6854ab6306",
       "file_path": "index.md",
       "byte_range": [
         172,
@@ -130,7 +168,7 @@
       "enclosing_scope": "Overview"
     },
     {
-      "stable_symbol_id": "41e20f1df81ccdcd",
+      "stable_symbol_id": "20bb6eac9c665eaa",
       "file_path": "index.md",
       "byte_range": [
         218,
