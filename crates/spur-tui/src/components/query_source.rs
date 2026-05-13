@@ -131,6 +131,13 @@ pub trait QuerySource {
     fn preview_for(&self, _row_idx: usize) -> Option<RetrievalPreview> {
         None
     }
+
+    /// Optional async-update hook. Sources with background work (for example
+    /// snippet loading) can return true when new preview data arrived and the
+    /// picker should be re-rendered.
+    fn poll_updates(&mut self) -> bool {
+        false
+    }
 }
 
 use crate::input_history::InputHistoryEntry;
