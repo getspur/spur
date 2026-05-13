@@ -104,6 +104,36 @@ impl SpurAgentCaps {
         )
     }
 
+    /// Display label for the active model from a config-options snapshot.
+    /// Callers with live session state should pass that fresh snapshot
+    /// instead of the frozen caps copy captured at session init.
+    #[must_use]
+    pub fn model_label_from_config_options(options: &[SessionConfigOption]) -> Option<&str> {
+        let option = options
+            .iter()
+            .find(|option| option.id.0.as_ref() == "model")?;
+
+        let select = match &option.kind {
+            SessionConfigKind::Select(select) => select,
+            _ => return None,
+        };
+        let current = select.current_value.0.as_ref();
+        match &select.options {
+            SessionConfigSelectOptions::Ungrouped(options) => options
+                .iter()
+                .find(|option| option.value.0.as_ref() == current)
+                .map(|option| option.name.as_str())
+                .or(Some(current)),
+            SessionConfigSelectOptions::Grouped(groups) => groups
+                .iter()
+                .flat_map(|group| group.options.iter())
+                .find(|option| option.value.0.as_ref() == current)
+                .map(|option| option.name.as_str())
+                .or(Some(current)),
+            _ => Some(current),
+        }
+    }
+
     /// Display label for the active reasoning effort from a config-options
     /// snapshot. Callers with live session state should pass that fresh
     /// snapshot instead of the frozen caps copy captured at session init.
@@ -248,6 +278,45 @@ mod tests {
         let caps = SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp);
 
         assert_eq!(caps.current_effort_label().as_deref(), Some("Medium"));
+    }
+
+    #[test]
+    fn model_label_from_config_options_returns_display_name_and_falls_back() {
+        let named = vec![SessionConfigOption::select(
+            SessionConfigId::new("model"),
+            "Model",
+            "sonnet",
+            vec![
+                SessionConfigSelectOption::new("sonnet", "Sonnet"),
+                SessionConfigSelectOption::new("opus", "Opus"),
+            ],
+        )];
+        assert_eq!(
+            SpurAgentCaps::model_label_from_config_options(&named),
+            Some("Sonnet")
+        );
+
+        let fallback = vec![SessionConfigOption::select(
+            SessionConfigId::new("model"),
+            "Model",
+            "sonnet",
+            vec![SessionConfigSelectOption::new("opus", "Opus")],
+        )];
+        assert_eq!(
+            SpurAgentCaps::model_label_from_config_options(&fallback),
+            Some("sonnet")
+        );
+
+        let no_model = vec![SessionConfigOption::select(
+            SessionConfigId::new("reasoning_effort"),
+            "Reasoning effort",
+            "medium",
+            vec![SessionConfigSelectOption::new("medium", "Medium")],
+        )];
+        assert_eq!(
+            SpurAgentCaps::model_label_from_config_options(&no_model),
+            None
+        );
     }
 
     #[test]
