@@ -38,6 +38,11 @@ pub struct RetrievalRow {
     /// implementors are responsible for validating against any truncation
     /// they applied before returning.
     pub atoms: Vec<(usize, usize)>,
+    /// Non-selectable rows are rendered as dim informational lines and
+    /// skipped by picker navigation/accept.
+    pub selectable: bool,
+    /// Dim row rendering hint (used for synthetic section headers).
+    pub dimmed: bool,
 }
 
 /// Optional side-pane preview for a retrieval row.
@@ -241,6 +246,8 @@ impl HistoryQuerySource {
             secondary,
             tag,
             atoms,
+            selectable: true,
+            dimmed: false,
         }
     }
 }
@@ -544,6 +551,8 @@ impl QuerySource for MentionQuerySource {
                     secondary: m.secondary.clone().unwrap_or_default(),
                     tag: tag_render,
                     atoms: Vec::new(),
+                    selectable: m.section_header.is_none(),
+                    dimmed: m.section_header.is_some(),
                 }
             })
             .collect();
@@ -720,6 +729,8 @@ impl QuerySource for SlashQuerySource {
                 secondary: r.description.clone(),
                 tag: r.tag.clone(),
                 atoms: Vec::new(),
+                selectable: true,
+                dimmed: false,
             })
             .collect();
         self.last_picked = picked;
@@ -762,6 +773,8 @@ mod tests {
             secondary: String::new(),
             tag: String::new(),
             atoms: vec![(6, 10)],
+            selectable: true,
+            dimmed: false,
         };
         assert_eq!(&r.primary[r.atoms[0].0..r.atoms[0].1], "@foo");
     }

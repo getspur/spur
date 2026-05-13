@@ -112,6 +112,8 @@ impl QuerySource for ThemeQuerySource {
                 },
                 tag: choice.source.to_string(),
                 atoms: Vec::new(),
+                selectable: true,
+                dimmed: false,
             })
             .collect();
         self.last_picked = picked;
