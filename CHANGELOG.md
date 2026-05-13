@@ -164,6 +164,14 @@
   wire-up was also missing in production, so the entire subsystem (62
   tests, bd-cpf.1–7 hardening) was inert. (bd-arch.21)
 
+## v1.1.8 — 2026-05-13
+
+Spur 1.1.8 ships fresh defaults for the agents you actually run and makes two long-standing rough edges disappear: `/model` now feels instant on every agent, and long GitHub fetches stop looking like a hang.
+
+- **Fresh out-of-the-box agent versions.** `spur init` now seeds new repos with `claude-agent-acp 0.33.1` (up from 0.26.0) and `codex-acp 0.14.0` (up from 0.11.1). New users get the latest ACP features and fixes on first run — no manual version-pinning, no stale prompts about deprecated flags. Existing `.spur/config.toml` files are preserved as-is; bump the pinned versions there when you're ready.
+- **`/model` feels instant on every agent.** Some agents (including older Claude Code and Kimi builds) don't emit a `config_option_update` after a model switch, so the status bar used to keep showing the previous model until you reconnected. Spur now applies an optimistic override the moment you pick a model — the label flips immediately and reconciles with the agent's confirmation when it arrives.
+- **GitHub ingest shows live progress.** `spur pm` ingesting a large GitHub repo's issues used to look frozen for minutes on the first run. The PM layer now surfaces per-page progress as fetches stream in, so you can see it working and estimate how much longer it'll take instead of wondering whether to kill it.
+
 ## v1.1.7 — 2026-05-13
 
 Spur 1.1.7 makes everyday agent-switching and navigation feel right. Changing models works everywhere, the picker puts what you actually want at the top, and the code graph is there when you need it without any setup.
