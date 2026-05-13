@@ -381,7 +381,7 @@ fn empty_query_bounds_code_graph_rows() {
         .count();
 
     assert!(
-        code_rows <= 8,
+        code_rows <= 3,
         "empty @ should not flood with code rows, got {code_rows}: {:?}",
         hit_debug(&hits)
     );
