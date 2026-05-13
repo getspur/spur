@@ -213,7 +213,7 @@ pub(crate) fn emit_definitions<'tree>(
                 (
                     kind,
                     capture.node,
-                    definition_name(capture.node, source, captures),
+                    definition_name(kind, capture.node, source, captures),
                 )
             })
         })
@@ -312,10 +312,24 @@ fn definition_kind(
 }
 
 fn definition_name(
+    kind: NodeKind,
     definition_node: Node<'_>,
     source: &str,
     captures: &[CaptureHit<'_>],
 ) -> Option<String> {
+    if kind == NodeKind::Impl {
+        let self_type = contained_capture_text(definition_node, source, captures, "impl.self")
+            .into_iter()
+            .next()?;
+        let trait_type = contained_capture_text(definition_node, source, captures, "impl.trait")
+            .into_iter()
+            .next();
+        return Some(match trait_type {
+            Some(trait_type) => format!("{trait_type} for {self_type}"),
+            None => self_type,
+        });
+    }
+
     contained_capture_text(definition_node, source, captures, "name")
         .into_iter()
         .next()
