@@ -115,8 +115,16 @@ impl ExternalPmSync for GitHubSync {
         let mut issues_done = false;
         let mut prs_done = false;
         let mut watermark = since.unwrap_or_else(Utc::now);
+        let mut page = 0u32;
+
+        tracing::info!(
+            repo = %self.repo,
+            since = ?since,
+            "ingest: starting GraphQL fetch"
+        );
 
         while !(issues_done && prs_done) {
+            page += 1;
             // When one side is done, ask GitHub for zero rows on that
             // connection so the cost stays minimal (spec §7.3 P-1).
             if issues_done {
@@ -172,7 +180,22 @@ impl ExternalPmSync for GitHubSync {
                     vars.pr_cursor = repo.pull_requests.page_info.end_cursor.clone();
                 }
             }
+
+            tracing::info!(
+                page,
+                total_fetched = nodes.len(),
+                issues_done,
+                prs_done,
+                "ingest: page complete"
+            );
         }
+
+        tracing::info!(
+            repo = %self.repo,
+            pages = page,
+            total_fetched = nodes.len(),
+            "ingest: GraphQL fetch done"
+        );
 
         Ok(RemoteDelta {
             nodes,
