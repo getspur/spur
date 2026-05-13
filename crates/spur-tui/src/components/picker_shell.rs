@@ -202,6 +202,14 @@ impl PickerShell {
         self.list_state.select(idx);
     }
 
+    pub fn poll_updates(&mut self) -> bool {
+        if self.source.poll_updates() {
+            self.update_active_preview();
+            return true;
+        }
+        false
+    }
+
     // ── Key handling ───────────────────────────────────────────────────
 
     pub fn handle_key(&mut self, key: KeyEvent) -> PickerAction {

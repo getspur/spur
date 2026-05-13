@@ -211,6 +211,12 @@ impl InputCompletionPort {
         self.picker_shell.is_some()
     }
 
+    pub fn poll_updates(&mut self) -> bool {
+        self.picker_shell
+            .as_mut()
+            .is_some_and(PickerShell::poll_updates)
+    }
+
     pub fn reset(&mut self) {
         self.trigger_detector.reset();
         self.picker_shell = None;
@@ -256,6 +262,14 @@ impl InputCompletionPort {
     #[cfg(test)]
     pub fn picker_row_count_for_test(&self) -> Option<usize> {
         self.picker_shell.as_ref().map(PickerShell::row_count)
+    }
+
+    #[cfg(test)]
+    pub fn open_test_source(
+        &mut self,
+        source: Box<dyn crate::components::query_source::QuerySource>,
+    ) {
+        self.picker_shell = Some(PickerShell::open(source));
     }
 
     fn apply_accept(&mut self, accept: RetrievalAccept, input_bar: &mut InputBar) {
