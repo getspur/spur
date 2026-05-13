@@ -321,6 +321,7 @@ impl Orchestrator {
         brain.config_options = opts.clone();
         self.emit(SpurEvent::now(SpurEventBody::CommandRegistryDirty {
             session: brain.spur_session_id.clone(),
+            caps: brain.spur_agent_caps.clone(),
             config_options: opts,
         }));
     }

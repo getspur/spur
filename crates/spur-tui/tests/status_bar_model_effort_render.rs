@@ -116,7 +116,10 @@ fn session_detail_status_bar_uses_live_effort_after_config_refresh() {
         Vec::new(),
     );
     view.set_spur_agent_caps(Some(caps_with_effort("medium")));
-    view.apply_advertised_commands(&[effort_option("medium")]);
+    view.apply_advertised_commands(
+        Some(&caps_with_effort("medium")),
+        &[effort_option("medium")],
+    );
 
     let initial = render_session_detail(&mut view);
     assert!(
@@ -126,6 +129,7 @@ fn session_detail_status_bar_uses_live_effort_after_config_refresh() {
 
     let event = SpurEvent::now(SpurEventBody::CommandRegistryDirty {
         session,
+        caps: Some(caps_with_effort("high")),
         config_options: vec![effort_option("high")],
     });
     static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
