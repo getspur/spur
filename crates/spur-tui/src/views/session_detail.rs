@@ -189,6 +189,12 @@ pub struct SessionDetailView {
     /// `/effort` slash entries in `command_registry` and the `SlashArg`
     /// picker's choice list via `CompletionEnv.session_config_options`.
     session_config_options: Vec<spur_acp::SessionConfigOption>,
+    /// Optimistic model override set when the user dispatches a `/model`
+    /// switch via `SubmitDecision::SetSessionModel`. Used by agents that
+    /// accept `session/set_model` but don't emit `config_option_update`, so
+    /// `session_config_options` never reflects the new value.
+    /// Always loses to a live `session_config_options[id="model"]` entry.
+    pending_model_override: Option<String>,
 
     /// Wave B/C (M8): cached `SpurAgentCaps` for this session. Populated by
     /// the upstream wiring once `Orchestrator::spur_agent_caps()` returns
@@ -293,6 +299,7 @@ impl SessionDetailView {
             ready_banner: None,
             load_state: LoadState::Ready,
             session_config_options: Vec::new(),
+            pending_model_override: None,
             spur_agent_caps: None,
         }
     }
@@ -379,6 +386,7 @@ impl SessionDetailView {
             ready_banner: None,
             load_state: LoadState::Ready,
             session_config_options: Vec::new(),
+            pending_model_override: None,
             spur_agent_caps: None,
         }
     }
@@ -474,6 +482,7 @@ impl SessionDetailView {
             ready_banner: None,
             load_state: LoadState::Retiring,
             session_config_options: Vec::new(),
+            pending_model_override: None,
             spur_agent_caps: None,
         }
     }
@@ -828,6 +837,17 @@ impl SessionDetailView {
         self.command_registry
             .set_advertised_commands(&handle, entries);
         self.session_config_options = options.to_vec();
+        if options.iter().any(|option| option.id.0.as_ref() == "model") {
+            self.pending_model_override = None;
+        }
+    }
+
+    fn resolved_model_label(&self) -> Option<String> {
+        let caps = self.spur_agent_caps.as_deref();
+        spur_acp::SpurAgentCaps::model_label_from_config_options(&self.session_config_options)
+            .map(str::to_owned)
+            .or_else(|| self.pending_model_override.clone())
+            .or_else(|| caps.and_then(spur_acp::SpurAgentCaps::current_model_label))
     }
 
     /// Cache the agent capabilities for this session. Captured by the
@@ -1590,6 +1610,7 @@ impl SessionDetailView {
                                     if self.is_cleared() {
                                         None
                                     } else {
+                                        self.pending_model_override = Some(value.clone());
                                         Some(Action::SetSessionModel {
                                             session_id: self.session_id.clone(),
                                             value,
@@ -2576,10 +2597,7 @@ impl SessionDetailView {
             })
             .unwrap_or((0, 0));
         let caps = self.spur_agent_caps.as_deref();
-        let model_label =
-            spur_acp::SpurAgentCaps::model_label_from_config_options(&self.session_config_options)
-                .map(str::to_owned)
-                .or_else(|| caps.and_then(spur_acp::SpurAgentCaps::current_model_label));
+        let model_label = self.resolved_model_label();
         let effort_label = spur_acp::SpurAgentCaps::effort_label_from(&self.session_config_options);
         let usage_supported = caps
             .map(spur_acp::SpurAgentCaps::usage_supported)
@@ -4272,6 +4290,49 @@ mod tests {
             brain_session: spur_acp::SessionId("test-brain-session".into()),
             reason: spur_acp::domain::continuation::DropReason::SessionSwap,
         })
+    }
+
+    #[test]
+    fn pending_model_override_overrides_frozen_caps_label_until_config_option_arrives() {
+        use agent_client_protocol::schema::{
+            InitializeResponse, ModelId, NewSessionResponse, ProtocolVersion, SessionConfigId,
+            SessionConfigOption, SessionConfigSelectOption, SessionId, SessionModelState,
+        };
+
+        let mut view = make_view();
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+        let new = NewSessionResponse::new(SessionId::new("session-model-test"))
+            .models(SessionModelState::new(ModelId::new("gpt-5"), vec![]));
+        let caps = spur_acp::SpurAgentCaps::new(&init, &new, spur_acp::AgentKind::CodexAcp);
+        view.set_spur_agent_caps(Some(std::sync::Arc::new(caps)));
+
+        view.pending_model_override = Some("sonnet".to_string());
+        assert_eq!(
+            view.resolved_model_label().as_deref(),
+            Some("sonnet"),
+            "optimistic override should win over frozen caps label when no live model option exists"
+        );
+
+        let options = vec![SessionConfigOption::select(
+            SessionConfigId::new("model"),
+            "Model",
+            "opus",
+            vec![
+                SessionConfigSelectOption::new("sonnet", "Sonnet"),
+                SessionConfigSelectOption::new("opus", "Opus"),
+            ],
+        )];
+        view.apply_advertised_commands(None, &options);
+
+        assert_eq!(
+            view.pending_model_override, None,
+            "model config option update should clear the optimistic override"
+        );
+        assert_eq!(
+            view.resolved_model_label().as_deref(),
+            Some("Opus"),
+            "live config option label should become authoritative once available"
+        );
     }
 
     fn delegation_completed_event(
