@@ -470,6 +470,21 @@ mod brain_retired_tests {
         ))
     }
 
+    fn caps_with_effort() -> std::sync::Arc<spur_acp::SpurAgentCaps> {
+        let init = agent_client_protocol::schema::InitializeResponse::new(
+            agent_client_protocol::schema::ProtocolVersion::LATEST,
+        );
+        let mut new = agent_client_protocol::schema::NewSessionResponse::new(
+            agent_client_protocol::schema::SessionId::new("acp-b1"),
+        );
+        new.config_options = Some(vec![effort_config_option()]);
+        std::sync::Arc::new(spur_acp::SpurAgentCaps::new(
+            &init,
+            &new,
+            spur_acp::AgentKind::CodexAcp,
+        ))
+    }
+
     #[test]
     fn agent_session_ready_installs_caps_on_session_detail() {
         let mut app = App::new_for_tests();
@@ -480,6 +495,7 @@ mod brain_retired_tests {
         }));
         app.handle_spur_event(wrap(SpurEventBody::CommandRegistryDirty {
             session: session.clone(),
+            caps: Some(caps_with_effort()),
             config_options: vec![effort_config_option()],
         }));
 
@@ -493,7 +509,7 @@ mod brain_retired_tests {
             .collect();
         assert!(
             names_before.iter().any(|name| name == "effort"),
-            "precondition: caps=None keeps /effort visible; got {names_before:?}"
+            "precondition: advertised caps include /effort; got {names_before:?}"
         );
 
         app.handle_spur_event(wrap(SpurEventBody::AgentSessionReady {
