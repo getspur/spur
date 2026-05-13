@@ -24,6 +24,98 @@ fn token(theme: &Theme, name: &str) -> Color {
 /// the picker renders single-pane to preserve readability.
 const MIN_PREVIEW_WIDTH: u16 = 100;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PopoverAnchor {
+    Right,
+    Left,
+    Above,
+    Suppressed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PickerLayout {
+    pub picker_rect: Rect,
+    pub popover_rect: Option<Rect>,
+    pub popover_anchor: PopoverAnchor,
+}
+
+pub fn compute_picker_layout(
+    container: Rect,
+    anchor: Rect,
+    picker_size: (u16, u16),
+    popover_size: Option<(u16, u16)>,
+) -> PickerLayout {
+    let (picker_width, picker_height) = picker_size;
+    let picker_x = anchor
+        .x
+        .saturating_add(2)
+        .min(container.x + container.width.saturating_sub(picker_width));
+    let picker_y = anchor.y.saturating_sub(picker_height);
+    let picker_rect = Rect::new(picker_x, picker_y, picker_width, picker_height);
+
+    let Some((popover_width, popover_height)) = popover_size else {
+        return PickerLayout {
+            picker_rect,
+            popover_rect: None,
+            popover_anchor: PopoverAnchor::Suppressed,
+        };
+    };
+
+    let right_x = picker_rect
+        .x
+        .saturating_add(picker_rect.width)
+        .saturating_add(1);
+    let right_fits = right_x.saturating_add(popover_width) <= container.x + container.width;
+    if right_fits {
+        let y = picker_rect
+            .y
+            .min(container.y + container.height.saturating_sub(popover_height));
+        return PickerLayout {
+            picker_rect,
+            popover_rect: Some(Rect::new(right_x, y, popover_width, popover_height)),
+            popover_anchor: PopoverAnchor::Right,
+        };
+    }
+
+    let left_x = picker_rect
+        .x
+        .saturating_sub(popover_width.saturating_add(1));
+    let left_fits = picker_rect.x >= container.x.saturating_add(popover_width.saturating_add(1));
+    if left_fits {
+        let y = picker_rect
+            .y
+            .min(container.y + container.height.saturating_sub(popover_height));
+        return PickerLayout {
+            picker_rect,
+            popover_rect: Some(Rect::new(left_x, y, popover_width, popover_height)),
+            popover_anchor: PopoverAnchor::Left,
+        };
+    }
+
+    let above_y = picker_rect
+        .y
+        .saturating_sub(popover_height.saturating_add(1));
+    let above_fits = picker_rect.y >= container.y.saturating_add(popover_height.saturating_add(1));
+    if above_fits {
+        return PickerLayout {
+            picker_rect,
+            popover_rect: Some(Rect::new(
+                picker_rect.x,
+                above_y,
+                popover_width,
+                popover_height,
+            )),
+            popover_anchor: PopoverAnchor::Above,
+        };
+    }
+
+    PickerLayout {
+        picker_rect,
+        popover_rect: None,
+        popover_anchor: PopoverAnchor::Suppressed,
+    }
+}
+
 /// Result of handling a key event inside the shell.
 #[derive(Debug)]
 pub enum PickerAction {
@@ -248,7 +340,12 @@ impl PickerShell {
             .active_preview
             .as_ref()
             .filter(|_| show_preview)
-            .map(|(_, preview)| preview.lines.len().saturating_add(1).clamp(3, 8) as u16)
+            .map(|(_, preview)| match preview {
+                RetrievalPreview::Text { lines, .. } => {
+                    lines.len().saturating_add(1).clamp(3, 8) as u16
+                }
+                RetrievalPreview::CodeSymbol(_) | RetrievalPreview::CodeFile(_) => 3,
+            })
             .unwrap_or(0);
         let inner_rows = (list_rows + query_rows).max(preview_rows);
         let popup_height = inner_rows + 2; // +2 for block border
@@ -258,12 +355,13 @@ impl PickerShell {
         } else {
             (container.width / 2).clamp(30, container.width)
         };
-        let x = anchor
-            .x
-            .saturating_add(2)
-            .min(container.x + container.width.saturating_sub(popup_width));
-        let y = anchor.y.saturating_sub(popup_height);
-        let popup_area = Rect::new(x, y, popup_width, popup_height);
+        let layout = compute_picker_layout(
+            container,
+            anchor,
+            (popup_width, popup_height),
+            None, // Preserve existing geometry; popover lands in a follow-up task.
+        );
+        let popup_area = layout.picker_rect;
 
         frame.render_widget(Clear, popup_area);
 
@@ -435,14 +533,26 @@ impl PickerShell {
         preview: &RetrievalPreview,
         theme: &Theme,
     ) {
+        let (title, body) = match preview {
+            RetrievalPreview::Text { title, lines } => (title.clone(), lines.clone()),
+            RetrievalPreview::CodeSymbol(_) | RetrievalPreview::CodeFile(_) => {
+                let paragraph = Paragraph::new(Line::raw("<popover stub>")).block(
+                    Block::default().borders(Borders::LEFT).title(Span::styled(
+                        " Preview ",
+                        Style::default().fg(token(theme, "picker.match.fg")),
+                    )),
+                );
+                frame.render_widget(paragraph, area);
+                return;
+            }
+        };
         let block = Block::default().borders(Borders::LEFT).title(Span::styled(
-            format!(" {} ", preview.title),
+            format!(" {} ", title),
             Style::default().fg(token(theme, "picker.match.fg")),
         ));
         let body_rows = area.height.saturating_sub(1) as usize;
         let body_width = area.width.saturating_sub(1) as usize;
-        let lines =
-            truncate_preview_lines_to_fit(preview.lines.clone(), body_rows, body_width, theme);
+        let lines = truncate_preview_lines_to_fit(body, body_rows, body_width, theme);
         let paragraph = Paragraph::new(lines)
             .block(block)
             .wrap(Wrap { trim: false });
@@ -619,7 +729,7 @@ mod tests {
         }
 
         fn preview_for(&self, row_idx: usize) -> Option<RetrievalPreview> {
-            (row_idx == 0).then(|| RetrievalPreview {
+            (row_idx == 0).then(|| RetrievalPreview::Text {
                 title: "bd-1234".to_string(),
                 lines: vec![Line::raw("Preview-only disambiguating title")],
             })
@@ -687,7 +797,7 @@ mod tests {
 
         fn preview_for(&self, row_idx: usize) -> Option<RetrievalPreview> {
             self.count.set(self.count.get() + 1);
-            Some(RetrievalPreview {
+            Some(RetrievalPreview::Text {
                 title: format!("bd-{}", row_idx + 1),
                 lines: vec![Line::raw(format!("preview {}", row_idx + 1))],
             })
@@ -833,7 +943,7 @@ mod tests {
         let lines = (1..=20)
             .map(|n| Line::raw(format!("line-{n:02}")))
             .collect();
-        let preview = RetrievalPreview {
+        let preview = RetrievalPreview::Text {
             title: "bd-1234".to_string(),
             lines,
         };
@@ -883,5 +993,41 @@ mod tests {
         let _ = rendered_shell_text(&mut shell, 120);
         let _ = rendered_shell_text(&mut shell, 120);
         assert_eq!(count.get(), 2);
+    }
+
+    #[test]
+    fn compute_picker_layout_prefers_right_sidecar() {
+        let container = Rect::new(0, 0, 120, 40);
+        let anchor = Rect::new(20, 30, 50, 1);
+        let layout = compute_picker_layout(container, anchor, (60, 10), Some((30, 10)));
+        assert_eq!(layout.popover_anchor, PopoverAnchor::Right);
+        assert_eq!(layout.popover_rect, Some(Rect::new(83, 20, 30, 10)));
+    }
+
+    #[test]
+    fn compute_picker_layout_mirrors_left_at_right_edge() {
+        let container = Rect::new(0, 0, 120, 40);
+        let anchor = Rect::new(90, 30, 30, 1);
+        let layout = compute_picker_layout(container, anchor, (60, 10), Some((30, 10)));
+        assert_eq!(layout.popover_anchor, PopoverAnchor::Left);
+        assert_eq!(layout.popover_rect, Some(Rect::new(29, 20, 30, 10)));
+    }
+
+    #[test]
+    fn compute_picker_layout_suppresses_when_vertical_too_tight() {
+        let container = Rect::new(0, 0, 40, 8);
+        let anchor = Rect::new(1, 7, 10, 1);
+        let layout = compute_picker_layout(container, anchor, (30, 6), Some((25, 4)));
+        assert_eq!(layout.popover_anchor, PopoverAnchor::Suppressed);
+        assert_eq!(layout.popover_rect, None);
+    }
+
+    #[test]
+    fn compute_picker_layout_stacks_above_on_tall_narrow_terminal() {
+        let container = Rect::new(0, 0, 42, 40);
+        let anchor = Rect::new(1, 30, 10, 1);
+        let layout = compute_picker_layout(container, anchor, (30, 8), Some((35, 6)));
+        assert_eq!(layout.popover_anchor, PopoverAnchor::Above);
+        assert_eq!(layout.popover_rect, Some(Rect::new(3, 15, 35, 6)));
     }
 }

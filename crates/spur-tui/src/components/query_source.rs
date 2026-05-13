@@ -9,6 +9,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
+use std::path::Path;
 
 /// Where the popup's query string lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,12 +43,34 @@ pub struct RetrievalRow {
 
 /// Optional side-pane preview for a retrieval row.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RetrievalPreview {
-    /// Title shown in the preview pane header (e.g. the bare issue id).
-    pub title: String,
-    /// Body lines. Each line is already styled by the source. Renderer
-    /// wraps long lines using ratatui's word-aware Paragraph.
-    pub lines: Vec<Line<'static>>,
+pub enum RetrievalPreview {
+    /// Generic text preview rendered by the current picker side pane.
+    Text {
+        /// Title shown in the preview pane header (e.g. the bare issue id).
+        title: String,
+        /// Body lines. Each line is already styled by the source. Renderer
+        /// wraps long lines using ratatui's word-aware Paragraph.
+        lines: Vec<Line<'static>>,
+    },
+    CodeSymbol(CodeSymbolPreview),
+    CodeFile(CodeFilePreview),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeSymbolPreview {
+    pub entity_name: String,
+    pub symbol_kind: String,
+    pub file_path: String,
+    pub line_range: [u32; 2],
+    pub enclosing_scope: Option<String>,
+    pub graph_index_version: String,
+    pub snippet: crate::components::snippet::SnippetState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeFilePreview {
+    pub file_path: String,
+    pub graph_index_version: String,
 }
 
 /// Payload dispatched by the view when the user accepts a row.
@@ -412,7 +435,7 @@ fn issue_preview_for_descriptor(
     lines.push(Line::raw(""));
     lines.push(url_preview_line(&descriptor.url));
 
-    RetrievalPreview {
+    RetrievalPreview::Text {
         title: descriptor.id.clone(),
         lines,
     }
@@ -557,12 +580,62 @@ impl QuerySource for MentionQuerySource {
         use crate::mentions::MentionKind;
 
         let hit = self.last_hits.get(row_idx)?;
-        if hit.kind != MentionKind::Issue {
-            return None;
+        match hit.kind {
+            MentionKind::Issue => hit
+                .issue_preview
+                .as_deref()
+                .map(issue_preview_for_descriptor),
+            MentionKind::CodeSymbol => {
+                let payload = self
+                    .registry
+                    .borrow()
+                    .lookup_code_payload(&hit.uri)?
+                    .clone();
+                let entity_name = payload
+                    .extraction_hints
+                    .entity_name
+                    .clone()
+                    .unwrap_or_else(|| hit.display.clone());
+                let symbol_kind = payload
+                    .extraction_hints
+                    .symbol_kind
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string());
+                let hint_range = payload.extraction_hints.line_range.unwrap_or([1, 1]);
+                let line_range = [
+                    u32::try_from(hint_range[0]).unwrap_or(1),
+                    u32::try_from(hint_range[1]).unwrap_or(1),
+                ];
+                let joined_path = self.cwd.join(&payload.authoritative.file_path);
+                let snippet = crate::components::snippet::read_snippet(
+                    Path::new(&joined_path),
+                    line_range,
+                    12,
+                    65_536,
+                );
+                Some(RetrievalPreview::CodeSymbol(CodeSymbolPreview {
+                    entity_name,
+                    symbol_kind,
+                    file_path: payload.authoritative.file_path,
+                    line_range,
+                    enclosing_scope: payload.display_meta.enclosing_scope,
+                    graph_index_version: payload.display_meta.graph_index_version,
+                    snippet,
+                }))
+            }
+            MentionKind::CodeFile => {
+                let payload = self
+                    .registry
+                    .borrow()
+                    .lookup_code_payload(&hit.uri)?
+                    .clone();
+                Some(RetrievalPreview::CodeFile(CodeFilePreview {
+                    file_path: payload.authoritative.file_path,
+                    graph_index_version: payload.display_meta.graph_index_version,
+                }))
+            }
+            MentionKind::Worker | MentionKind::Directory | MentionKind::File => None,
         }
-        hit.issue_preview
-            .as_deref()
-            .map(issue_preview_for_descriptor)
     }
 }
 
@@ -920,8 +993,10 @@ mod tests {
     use std::rc::Rc;
 
     fn preview_text(preview: &RetrievalPreview) -> String {
-        preview
-            .lines
+        let RetrievalPreview::Text { lines, .. } = preview else {
+            return String::new();
+        };
+        lines
             .iter()
             .map(|line| {
                 line.spans
@@ -1143,7 +1218,10 @@ mod tests {
 
         assert!(src.preview_for(worker_idx).is_none());
         let preview = src.preview_for(issue_idx).expect("issue preview");
-        assert_eq!(preview.title, "bd-42");
+        let RetrievalPreview::Text { title, .. } = &preview else {
+            panic!("expected text preview");
+        };
+        assert_eq!(title, "bd-42");
         let text = preview_text(&preview);
         assert!(text.contains(full_title), "{text}");
         assert!(text.contains("Labels:"), "{text}");
@@ -1159,8 +1237,11 @@ mod tests {
 
         let preview = issue_preview_for_descriptor(&descriptor);
 
-        let labels_line = preview
-            .lines
+        let RetrievalPreview::Text { lines, .. } = &preview else {
+            panic!("expected text preview");
+        };
+
+        let labels_line = lines
             .iter()
             .map(line_text)
             .find(|text| text.starts_with("label-1"))
@@ -1178,8 +1259,11 @@ mod tests {
 
         let preview = issue_preview_for_descriptor(&descriptor);
 
-        let title_line = preview
-            .lines
+        let RetrievalPreview::Text { lines, .. } = &preview else {
+            panic!("expected text preview");
+        };
+
+        let title_line = lines
             .iter()
             .map(line_text)
             .find(|text| text == "first second")
