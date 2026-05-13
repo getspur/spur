@@ -77,6 +77,7 @@ impl MentionSource for IssueMentionSource {
                     &descriptor.status,
                 );
                 MentionEntry {
+                    section_header: None,
                     kind: MentionKind::Issue,
                     uri: format!(
                         "issue://{}/{}",

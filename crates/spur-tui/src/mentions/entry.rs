@@ -16,6 +16,8 @@ pub enum MentionKind {
 
 #[derive(Debug, Clone)]
 pub struct MentionEntry {
+    /// Optional synthetic section header marker (empty-query grouping rows).
+    pub section_header: Option<&'static str>,
     pub kind: MentionKind,
     /// File URI (`file:///abs/...`) or worker URI (`worker://<name>`).
     pub uri: String,
@@ -67,6 +69,7 @@ pub fn entry_for_path(cwd: &Path, abs: &Path) -> Option<MentionEntry> {
     let abs_str = abs.to_str()?;
     let uri = format!("file://{}", abs_str);
     Some(MentionEntry {
+        section_header: None,
         kind,
         uri,
         display,
