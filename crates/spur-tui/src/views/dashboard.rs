@@ -2402,6 +2402,7 @@ impl DashboardView {
     /// Tick + flush batched text. Returns true iff at least one batch was
     /// flushed to the activity log (so the caller can mark the TUI dirty).
     pub fn tick_and_report_flush(&mut self) -> bool {
+        let snippet_updated = self.completion.poll_updates();
         let flushed_paste_burst = matches!(
             self.input_bar.tick(),
             crate::components::input_bar::TickOutcome::FlushedPaste
@@ -2431,7 +2432,7 @@ impl DashboardView {
             .filter(|(_, (_, ts))| now.duration_since(*ts) > threshold)
             .map(|(k, _)| k.clone())
             .collect();
-        let flushed_any = flushed_paste_burst || !expired.is_empty();
+        let flushed_any = snippet_updated || flushed_paste_burst || !expired.is_empty();
 
         for session_id in expired {
             if let Some((text, _)) = self.text_batch.remove(&session_id) {
@@ -2493,6 +2494,71 @@ impl DashboardView {
     #[doc(hidden)]
     pub fn command_registry_for_test(&self) -> &crate::commands::CommandRegistry {
         &self.command_registry
+    }
+
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub fn completion_mut_for_test(
+        &mut self,
+    ) -> &mut crate::components::input_completion::InputCompletionPort {
+        &mut self.completion
+    }
+}
+
+#[cfg(test)]
+mod tick_tests {
+    use super::*;
+    use crate::components::query_source::{
+        QueryMode, QuerySource, RetrievalAccept, RetrievalPreview, RetrievalRow,
+    };
+
+    struct OneShotUpdateSource {
+        pending_update: bool,
+    }
+
+    impl QuerySource for OneShotUpdateSource {
+        fn title(&self) -> &str {
+            "test"
+        }
+
+        fn query_mode(&self) -> QueryMode {
+            QueryMode::ReadFromInputBar
+        }
+
+        fn refresh(&mut self, _query: &str) -> Vec<RetrievalRow> {
+            vec![RetrievalRow {
+                primary: "row".to_string(),
+                secondary: String::new(),
+                tag: String::new(),
+                atoms: Vec::new(),
+                selectable: true,
+                dimmed: false,
+            }]
+        }
+
+        fn accept(&self, _row_idx: usize) -> Option<RetrievalAccept> {
+            None
+        }
+
+        fn preview_for(&self, _row_idx: usize) -> Option<RetrievalPreview> {
+            None
+        }
+
+        fn poll_updates(&mut self) -> bool {
+            std::mem::take(&mut self.pending_update)
+        }
+    }
+
+    #[test]
+    fn tick_and_report_flush_is_true_when_completion_has_async_update() {
+        let mut dash = DashboardView::new();
+        dash.completion_mut_for_test()
+            .open_test_source(Box::new(OneShotUpdateSource {
+                pending_update: true,
+            }));
+
+        assert!(dash.tick_and_report_flush());
+        assert!(!dash.tick_and_report_flush());
     }
 }
 
