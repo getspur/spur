@@ -60,6 +60,8 @@ pub struct MentionRegistry {
     code_payloads: HashMap<String, CodeMentionPayload>,
     code_graph_hint: Option<&'static str>,
     matcher: Matcher,
+    #[cfg(any(test, debug_assertions))]
+    query_call_count: usize,
 }
 
 impl MentionRegistry {
@@ -71,6 +73,8 @@ impl MentionRegistry {
             code_payloads: HashMap::new(),
             code_graph_hint: None,
             matcher: Matcher::new(Config::DEFAULT),
+            #[cfg(any(test, debug_assertions))]
+            query_call_count: 0,
         }
     }
 
@@ -86,6 +90,8 @@ impl MentionRegistry {
             code_payloads: HashMap::new(),
             code_graph_hint: None,
             matcher: Matcher::new(Config::DEFAULT),
+            #[cfg(any(test, debug_assertions))]
+            query_call_count: 0,
         }
     }
 
@@ -199,6 +205,10 @@ impl MentionRegistry {
         query: &str,
         limit: usize,
     ) -> Vec<MentionEntry> {
+        #[cfg(any(test, debug_assertions))]
+        {
+            self.query_call_count += 1;
+        }
         let key = CompletionScopeKey::from(scope);
         let needs_rebuild = match self.cache.get(&key) {
             Some(c) => c.built_at.elapsed() > CACHE_TTL,
@@ -320,6 +330,12 @@ impl MentionRegistry {
             .take(limit)
             .map(|ranked| ranked.entry)
             .collect()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn query_call_count_for_test(&self) -> usize {
+        self.query_call_count
     }
 }
 
@@ -553,6 +569,8 @@ mod tests {
             code_payloads: HashMap::new(),
             code_graph_hint: None,
             matcher: Matcher::new(Config::DEFAULT),
+            #[cfg(any(test, debug_assertions))]
+            query_call_count: 0,
         };
 
         let results = registry.query(CompletionScope::PreSession, Path::new("."), "alice", 10);
@@ -573,6 +591,8 @@ mod tests {
             code_payloads: HashMap::new(),
             code_graph_hint: None,
             matcher: Matcher::new(Config::DEFAULT),
+            #[cfg(any(test, debug_assertions))]
+            query_call_count: 0,
         };
 
         let first = registry.query(CompletionScope::PreSession, Path::new("."), "old", 10);
@@ -598,6 +618,8 @@ mod tests {
             code_payloads: HashMap::new(),
             code_graph_hint: None,
             matcher: Matcher::new(Config::DEFAULT),
+            #[cfg(any(test, debug_assertions))]
+            query_call_count: 0,
         };
 
         let results = registry.query(CompletionScope::PreSession, Path::new("."), "Deploy", 10);
@@ -642,6 +664,8 @@ mod tests {
             code_payloads: HashMap::new(),
             code_graph_hint: None,
             matcher: Matcher::new(Config::DEFAULT),
+            #[cfg(any(test, debug_assertions))]
+            query_call_count: 0,
         }
     }
 
