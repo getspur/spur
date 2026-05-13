@@ -432,6 +432,43 @@ fn petgraph_builder_preserves_typed_fact_counts() {
 }
 
 #[test]
+fn build_skips_files_with_invalid_utf8_and_continues() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("src/good.rs"),
+        b"pub fn good_function() {}\n" as &[u8],
+    )
+    .expect("write good.rs");
+    // Stray 0xFE byte — invalid UTF-8. Mimics the production failure
+    // (docs/research/DEEP_RESEARCH_AGENTFS.md) where a single bad byte
+    // used to abort the whole build.
+    fs::write(
+        root.join("src/bad.rs"),
+        b"pub fn other() {\n    let s = \"\xFE\";\n}\n" as &[u8],
+    )
+    .expect("write bad.rs");
+
+    let (facts, file_counts) = build_facts(root).expect("build must not abort on bad UTF-8");
+
+    assert!(
+        facts.nodes.iter().any(|node| node.label == "good_function"),
+        "good_function should be extracted from valid file"
+    );
+    assert!(
+        !facts.nodes.iter().any(|node| node.label == "other"),
+        "bad.rs should be skipped, not parsed"
+    );
+    assert_eq!(
+        file_counts.get("rust").copied(),
+        Some(2),
+        "discovery counts both files even though one is skipped during read"
+    );
+}
+
+#[test]
 fn artifact_writer_round_trips_through_existing_reader() {
     let root = fixture_root();
     let facts = build_facts(&root).expect("extract fixture").0;
