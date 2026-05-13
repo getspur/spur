@@ -2,12 +2,10 @@ use std::fs;
 use std::path::Path;
 
 use spur_graph::{
-    file_id_from_uri, path_in_worktree, symbol_id_from_uri, validate_file, validate_symbol_bytes,
-    CodeMentionKind, CodeMentionPayload, CodeMentionValidationSpec, FailureReason,
-    GraphFileArtifact, GraphSymbolArtifact, ValidationOutcome,
+    file_id_from_uri, path_in_worktree, validate_file, CodeMentionKind, CodeMentionPayload,
+    CodeMentionValidationSpec, FailureReason, GraphFileArtifact, ValidationOutcome,
 };
 
-pub const PER_MENTION_CAP_BYTES: usize = 8 * 1024;
 pub const CONTEXT_HEADER_CAP_BYTES: usize = 1500;
 pub const PER_PROMPT_CAP_BYTES: usize = 32 * 1024;
 
@@ -47,97 +45,36 @@ pub fn expand(payload: &CodeMentionPayload, worktree_root: &Path) -> ExpandedMen
             }
         }
         CodeMentionValidationSpec::SymbolRange {
-            path,
             line_range,
             byte_range,
-            entity_name,
-            anchor_hash,
+            ..
         } => {
-            let symbol_payload = GraphSymbolArtifact {
-                stable_symbol_id: symbol_id_from_uri(&payload.authoritative.uri),
-                file_path: path.clone(),
-                byte_range: *byte_range,
-                line_range: *line_range,
-                entity_name: entity_name.clone(),
-                symbol_kind: payload
-                    .extraction_hints
-                    .symbol_kind
-                    .clone()
-                    .unwrap_or_else(|| "symbol".to_string()),
-                anchor_hash: anchor_hash.clone(),
-                enclosing_scope: payload.display_meta.enclosing_scope.clone(),
+            let Some(path) = path_in_worktree(worktree_root, &payload.authoritative.file_path)
+            else {
+                return warning_expansion(payload, FailureReason::FileMissing, worktree_root);
             };
-            match read_and_validate_symbol(&symbol_payload, worktree_root) {
-                Ok(validated) => {
-                    let text = symbol_expansion(payload, validated, *line_range);
-                    if text.len() <= PER_MENTION_CAP_BYTES {
-                        ExpandedMention::Body { text }
-                    } else {
-                        warning_expansion(payload, FailureReason::BodyTooLarge, worktree_root)
-                    }
-                }
-                Err(reason) => warning_expansion(payload, reason, worktree_root),
+            let Ok(metadata) = fs::metadata(&path) else {
+                return warning_expansion(payload, FailureReason::FileMissing, worktree_root);
+            };
+            if !metadata.is_file() {
+                return warning_expansion(payload, FailureReason::FileMissing, worktree_root);
             }
+
+            let context_header = fs::read_to_string(&path)
+                .ok()
+                .map(|content| context_header(&content, byte_range[0]))
+                .unwrap_or_default();
+            let text = symbol_expansion(payload, *line_range, &context_header);
+            ExpandedMention::Body { text }
         }
-    }
-}
-
-struct ValidatedSymbolSource {
-    content: String,
-    source: String,
-    byte_range: [usize; 2],
-}
-
-fn read_and_validate_symbol(
-    payload: &GraphSymbolArtifact,
-    worktree_root: &Path,
-) -> Result<ValidatedSymbolSource, FailureReason> {
-    let path =
-        path_in_worktree(worktree_root, &payload.file_path).ok_or(FailureReason::FileMissing)?;
-    let metadata = fs::metadata(&path).map_err(|_| FailureReason::FileMissing)?;
-    if !metadata.is_file() {
-        return Err(FailureReason::FileMissing);
-    }
-
-    let bytes = fs::read(&path).map_err(|_| FailureReason::FileMissing)?;
-    validate_symbol_bytes_for_expansion(payload, &bytes)?;
-    let content = String::from_utf8(bytes).map_err(|_| FailureReason::Utf8Boundary)?;
-    let source = content
-        .get(payload.byte_range[0]..payload.byte_range[1])
-        .ok_or(FailureReason::FileMissing)?
-        .to_string();
-
-    Ok(ValidatedSymbolSource {
-        content,
-        source,
-        byte_range: payload.byte_range,
-    })
-}
-
-fn validate_symbol_bytes_for_expansion(
-    payload: &GraphSymbolArtifact,
-    bytes: &[u8],
-) -> Result<(), FailureReason> {
-    match validate_symbol_bytes(payload, bytes) {
-        Err(FailureReason::RangeOutOfBounds)
-            if payload.byte_range[1] > bytes.len()
-                && payload
-                    .anchor_hash
-                    .parse::<u64>()
-                    .is_ok_and(|hash| hash != 0) =>
-        {
-            Err(FailureReason::FileMissing)
-        }
-        other => other,
     }
 }
 
 fn symbol_expansion(
     payload: &CodeMentionPayload,
-    validated: ValidatedSymbolSource,
     line_range: [usize; 2],
+    context_header: &str,
 ) -> String {
-    let context_header = context_header(&validated.content, validated.byte_range[0]);
     let symbol_kind = payload
         .extraction_hints
         .symbol_kind
@@ -145,7 +82,7 @@ fn symbol_expansion(
         .unwrap_or("symbol");
 
     format!(
-        "MENTION {}\nkind:    symbol:{}\nid:      {}\nfile:    {}\nlines:   {}-{}\ngraph_index_version: {}\n\ncontext_header:\n{}source:\n{}\n\ntopology_available_via_mcp:\n- get_callers(\"{}\")\n- get_callees(\"{}\")\n- get_subgraph(\"{}\", radius=1)\n",
+        "MENTION {}\nkind:    symbol:{}\nid:      {}\nfile:    {}\nlines:   {}-{}\ngraph_index_version: {}\n\ncontext_header:\n{}\ntopology_available_via_mcp:\n- get_callers(\"{}\")\n- get_callees(\"{}\")\n- get_subgraph(\"{}\", radius=1)\n",
         payload.authoritative.display,
         symbol_kind,
         payload.authoritative.uri,
@@ -154,10 +91,9 @@ fn symbol_expansion(
         line_range[1],
         payload.display_meta.graph_index_version,
         context_header,
-        validated.source,
         payload.authoritative.uri,
         payload.authoritative.uri,
-        file_graph_uri(payload),
+        payload.authoritative.uri,
     )
 }
 
