@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use crossterm::event::KeyEvent;
 use ratatui::{layout::Rect, Frame};
@@ -20,7 +21,10 @@ use crate::mentions::{CompletionScope, MentionRegistry};
 pub struct InputCompletionPort {
     trigger_detector: TriggerDetector,
     picker_shell: Option<PickerShell>,
+    pending_mention_query: Option<(Instant, String)>,
 }
+
+const MENTION_QUERY_DEBOUNCE: Duration = Duration::from_millis(30);
 
 pub struct CompletionEnv<'a> {
     pub command_registry: &'a CommandRegistry,
@@ -38,6 +42,7 @@ impl InputCompletionPort {
         Self {
             trigger_detector: TriggerDetector::new(),
             picker_shell: None,
+            pending_mention_query: None,
         }
     }
 
@@ -89,7 +94,11 @@ impl InputCompletionPort {
             TriggerTransition::None => {}
             TriggerTransition::Update { query } => {
                 if let Some(shell) = self.picker_shell.as_mut() {
-                    shell.set_query_from_input_bar(&query);
+                    if shell.should_debounce_input_bar_updates() {
+                        self.pending_mention_query = Some((Instant::now(), query));
+                    } else {
+                        shell.set_query_from_input_bar(&query);
+                    }
                 }
             }
             TriggerTransition::Open { trigger } => {
@@ -165,9 +174,11 @@ impl InputCompletionPort {
                     }
                 };
                 self.picker_shell = Some(shell);
+                self.pending_mention_query = None;
             }
             TriggerTransition::Close => {
                 self.picker_shell = None;
+                self.pending_mention_query = None;
             }
         }
     }
@@ -183,6 +194,7 @@ impl InputCompletionPort {
             PickerAction::Cancel => {
                 self.picker_shell = None;
                 self.trigger_detector.reset();
+                self.pending_mention_query = None;
                 None
             }
             PickerAction::Accept(accept) => {
@@ -190,6 +202,7 @@ impl InputCompletionPort {
                 self.apply_accept(accept, input_bar);
                 self.picker_shell = None;
                 self.trigger_detector.reset();
+                self.pending_mention_query = None;
                 Some(out)
             }
         }
@@ -212,14 +225,18 @@ impl InputCompletionPort {
     }
 
     pub fn poll_updates(&mut self) -> bool {
-        self.picker_shell
+        let flushed = self.flush_pending_query_if_due();
+        let source_updates = self
+            .picker_shell
             .as_mut()
-            .is_some_and(PickerShell::poll_updates)
+            .is_some_and(PickerShell::poll_updates);
+        flushed || source_updates
     }
 
     pub fn reset(&mut self) {
         self.trigger_detector.reset();
         self.picker_shell = None;
+        self.pending_mention_query = None;
     }
 
     pub fn is_trigger_driven(&self) -> bool {
@@ -235,6 +252,7 @@ impl InputCompletionPort {
             history,
         ))));
         self.trigger_detector.reset();
+        self.pending_mention_query = None;
     }
 
     pub fn open_theme_picker(&mut self, active_theme_name: &str) {
@@ -244,6 +262,32 @@ impl InputCompletionPort {
         );
         self.picker_shell = Some(PickerShell::open(Box::new(source)));
         self.trigger_detector.reset();
+        self.pending_mention_query = None;
+    }
+
+    pub fn flush_pending_query_if_due(&mut self) -> bool {
+        self.flush_pending_query_if_due_at(Instant::now())
+    }
+
+    fn flush_pending_query_if_due_at(&mut self, now: Instant) -> bool {
+        let Some((queued_at, query)) = self.pending_mention_query.as_ref() else {
+            return false;
+        };
+        let should_flush = now.duration_since(*queued_at) >= MENTION_QUERY_DEBOUNCE;
+        if !should_flush {
+            return false;
+        }
+        let Some(shell) = self.picker_shell.as_mut() else {
+            self.pending_mention_query = None;
+            return false;
+        };
+        if !shell.should_debounce_input_bar_updates() {
+            self.pending_mention_query = None;
+            return false;
+        }
+        shell.set_query_from_input_bar(query);
+        self.pending_mention_query = None;
+        true
     }
 
     #[cfg(test)]
@@ -265,11 +309,35 @@ impl InputCompletionPort {
     }
 
     #[cfg(test)]
+    pub fn picker_query_for_test(&self) -> Option<String> {
+        self.picker_shell
+            .as_ref()
+            .map(|shell| shell.query().to_string())
+    }
+
+    #[cfg(test)]
     pub fn open_test_source(
         &mut self,
         source: Box<dyn crate::components::query_source::QuerySource>,
     ) {
         self.picker_shell = Some(PickerShell::open(source));
+    }
+
+    #[cfg(test)]
+    pub fn flush_pending_query_if_due_at_for_test(&mut self, now: Instant) -> bool {
+        self.flush_pending_query_if_due_at(now)
+    }
+
+    #[cfg(test)]
+    pub fn set_pending_query_age_for_test(&mut self, age: Duration) {
+        self.set_pending_query_age_at_for_test(Instant::now(), age);
+    }
+
+    #[cfg(test)]
+    pub fn set_pending_query_age_at_for_test(&mut self, now: Instant, age: Duration) {
+        if let Some((queued_at, _)) = self.pending_mention_query.as_mut() {
+            *queued_at = now.checked_sub(age).unwrap_or(now);
+        }
     }
 
     fn apply_accept(&mut self, accept: RetrievalAccept, input_bar: &mut InputBar) {
@@ -406,6 +474,7 @@ fn replace_trigger_token(input_bar: &mut InputBar, prefix_start: usize, replacem
 mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::time::{Duration, Instant};
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -481,6 +550,108 @@ mod tests {
         assert_eq!(input_bar.text(), "@Cargo.toml");
         assert_eq!(input_bar.protected_ranges().len(), 1);
         assert!(!completion.is_active());
+    }
+
+    #[test]
+    fn mention_query_updates_are_debounced_and_flush_latest_query() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("Cargo.toml"), "[package]\nname = \"x\"").unwrap();
+        let command_registry = CommandRegistry::new();
+        let mention_registry = Rc::new(RefCell::new(MentionRegistry::new()));
+        let mut input_bar = InputBar::new();
+        let mut completion = InputCompletionPort::new();
+
+        input_bar.set_text("@".to_string(), 1);
+        completion.dispatch(
+            IntentEvent::TypedChar('@'),
+            &mut input_bar,
+            &env(&command_registry, &mention_registry, tmp.path()),
+        );
+        let base_queries = mention_registry.borrow().query_call_count_for_test();
+
+        for ch in ['a', 'b', 'c', 'd', 'e'] {
+            input_bar.set_text(
+                format!("{}{}", input_bar.text(), ch),
+                input_bar.cursor() + ch.len_utf8(),
+            );
+            completion.dispatch(
+                IntentEvent::TypedChar(ch),
+                &mut input_bar,
+                &env(&command_registry, &mention_registry, tmp.path()),
+            );
+        }
+
+        assert_eq!(
+            mention_registry.borrow().query_call_count_for_test(),
+            base_queries,
+            "rapid query updates should not refresh mention rows until debounce flush"
+        );
+        completion.set_pending_query_age_for_test(Duration::from_millis(31));
+        assert!(
+            completion.poll_updates(),
+            "debounce flush should run on tick"
+        );
+        assert_eq!(
+            mention_registry.borrow().query_call_count_for_test(),
+            base_queries + 1
+        );
+        assert_eq!(
+            completion.picker_query_for_test().as_deref(),
+            Some("abcde"),
+            "the final queued query must win after debounce"
+        );
+    }
+
+    #[test]
+    fn mention_query_flushes_only_after_30ms_quiescence() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("Cargo.toml"), "[package]\nname = \"x\"").unwrap();
+        let command_registry = CommandRegistry::new();
+        let mention_registry = Rc::new(RefCell::new(MentionRegistry::new()));
+        let mut input_bar = InputBar::new();
+        let mut completion = InputCompletionPort::new();
+
+        input_bar.set_text("@".to_string(), 1);
+        completion.dispatch(
+            IntentEvent::TypedChar('@'),
+            &mut input_bar,
+            &env(&command_registry, &mention_registry, tmp.path()),
+        );
+        let base_queries = mention_registry.borrow().query_call_count_for_test();
+
+        for ch in ['a', 'b', 'c'] {
+            input_bar.set_text(
+                format!("{}{}", input_bar.text(), ch),
+                input_bar.cursor() + ch.len_utf8(),
+            );
+            completion.dispatch(
+                IntentEvent::TypedChar(ch),
+                &mut input_bar,
+                &env(&command_registry, &mention_registry, tmp.path()),
+            );
+        }
+
+        let now = Instant::now();
+        completion.set_pending_query_age_at_for_test(now, Duration::from_millis(25));
+        assert!(
+            !completion.flush_pending_query_if_due_at_for_test(now),
+            "debounce must not flush before 30ms idle"
+        );
+        assert_eq!(
+            mention_registry.borrow().query_call_count_for_test(),
+            base_queries
+        );
+
+        completion.set_pending_query_age_at_for_test(now, Duration::from_millis(35));
+        assert!(
+            completion.flush_pending_query_if_due_at_for_test(now),
+            "debounce should flush after 30ms"
+        );
+        assert_eq!(
+            mention_registry.borrow().query_call_count_for_test(),
+            base_queries + 1
+        );
+        assert_eq!(completion.picker_query_for_test().as_deref(), Some("abc"));
     }
 
     #[test]
