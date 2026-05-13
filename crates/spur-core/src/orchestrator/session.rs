@@ -547,6 +547,12 @@ mod session_attach_guard_transfer_tests {
 
     #[tokio::test]
     async fn replace_session_config_options_updates_cache_and_emits_event() {
+        use agent_client_protocol::schema::{
+            InitializeResponse, ModelId, ModelInfo, NewSessionResponse, ProtocolVersion,
+            SessionId as AcpSessionId, SessionModelState,
+        };
+        use spur_acp::SpurAgentCaps;
+
         let tmp = tempfile::TempDir::new().unwrap();
         let mut config = SpurConfig::default();
         config.cost.db_path = tmp.path().join("cost.db").display().to_string();
@@ -560,6 +566,14 @@ mod session_attach_guard_transfer_tests {
             &[("gpt-5", "GPT-5"), ("gpt-5-codex", "GPT-5 Codex")],
         )];
         brain.config_options = initial.clone();
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+        let mut new = NewSessionResponse::new(AcpSessionId::new("acp-session-cache"));
+        new.config_options = Some(initial.clone());
+        brain.spur_agent_caps = Some(std::sync::Arc::new(SpurAgentCaps::new(
+            &init,
+            &new,
+            spur_acp::AgentKind::CodexAcp,
+        )));
 
         // Getter returns the snapshot owned by the brain.
         let read = orchestrator.session_config_options(&brain);
@@ -592,10 +606,12 @@ mod session_attach_guard_transfer_tests {
                 Ok(Ok(ev)) => {
                     if let SpurEventBody::CommandRegistryDirty {
                         session,
+                        caps,
                         config_options,
                     } = ev.body
                     {
                         assert_eq!(session, SessionId("spur-session-cache".to_string()));
+                        assert!(caps.is_some_and(|caps| caps.supports_set_config_option()));
                         assert_eq!(config_options.len(), 2);
                         found = true;
                     }
@@ -608,7 +624,97 @@ mod session_attach_guard_transfer_tests {
             "expected CommandRegistryDirty event after replace_session_config_options"
         );
 
+        // Models-only caps (e.g. gemini/kimi) still emit an event even when
+        // the concrete config_options snapshot is empty.
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+        let models_only = NewSessionResponse::new(AcpSessionId::new("models-only")).models(
+            SessionModelState::new(
+                ModelId::new("gemini-3.1-pro-preview"),
+                vec![ModelInfo::new(
+                    ModelId::new("gemini-3.1-pro-preview"),
+                    "Gemini 3.1 Pro Preview",
+                )],
+            ),
+        );
+        let caps = std::sync::Arc::new(SpurAgentCaps::new(
+            &init,
+            &models_only,
+            spur_acp::AgentKind::Gemini,
+        ));
+        brain.spur_agent_caps = Some(caps.clone());
+        orchestrator.replace_session_config_options(&mut brain, Vec::new());
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut found_models_only = false;
+        while tokio::time::Instant::now() < deadline && !found_models_only {
+            let remaining = deadline - tokio::time::Instant::now();
+            match tokio::time::timeout(remaining, event_rx.recv()).await {
+                Ok(Ok(ev)) => {
+                    if let SpurEventBody::CommandRegistryDirty {
+                        session,
+                        caps,
+                        config_options,
+                    } = ev.body
+                    {
+                        assert_eq!(session, SessionId("spur-session-cache".to_string()));
+                        assert!(caps.is_some_and(|caps| caps.supports_set_model()));
+                        assert!(config_options.is_empty());
+                        found_models_only = true;
+                    }
+                }
+                _ => break,
+            }
+        }
+        assert!(
+            found_models_only,
+            "expected CommandRegistryDirty event for models-only caps"
+        );
+
         // Idempotent abort of the dummy delegation_handle so Drop is clean.
+        brain.delegation_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn replace_session_config_options_emits_none_caps_for_resumed_session() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = SpurConfig::default();
+        config.cost.db_path = tmp.path().join("cost.db").display().to_string();
+        let orchestrator = Orchestrator::new(tmp.path().to_path_buf(), config, None).unwrap();
+        let mut event_rx = orchestrator.event_tx.subscribe();
+
+        let mut brain = fixture_brain_session("spur-session-resumed");
+        brain.spur_agent_caps = None;
+        let next = vec![fixture_select_option(
+            "model",
+            "gpt-5-codex",
+            &[("gpt-5-codex", "GPT-5 Codex"), ("gpt-5", "GPT-5")],
+        )];
+
+        orchestrator.replace_session_config_options(&mut brain, next.clone());
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut found = false;
+        while tokio::time::Instant::now() < deadline && !found {
+            let remaining = deadline - tokio::time::Instant::now();
+            match tokio::time::timeout(remaining, event_rx.recv()).await {
+                Ok(Ok(ev)) => {
+                    if let SpurEventBody::CommandRegistryDirty {
+                        session,
+                        caps,
+                        config_options,
+                    } = ev.body
+                    {
+                        assert_eq!(session, SessionId("spur-session-resumed".to_string()));
+                        assert!(caps.is_none());
+                        assert_eq!(config_options, next);
+                        found = true;
+                    }
+                }
+                _ => break,
+            }
+        }
+        assert!(found, "expected CommandRegistryDirty event with caps=None");
+
         brain.delegation_handle.abort();
     }
 
@@ -1508,12 +1614,17 @@ impl Orchestrator {
             caps: spur_agent_caps.clone(),
         }));
 
-        if !config_options.is_empty() {
+        if !config_options.is_empty()
+            || spur_agent_caps
+                .as_ref()
+                .is_some_and(|caps| caps.supports_set_model())
+        {
             // Surface the initial cache so spur-tui can synthesize
             // advertised slash commands (e.g. /model, /effort) from
             // session creation onward.
             self.emit(SpurEvent::now(SpurEventBody::CommandRegistryDirty {
                 session: session_id.clone(),
+                caps: spur_agent_caps.clone(),
                 config_options: config_options.clone(),
             }));
         }
