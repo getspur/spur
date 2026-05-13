@@ -62,7 +62,7 @@ fn command_registry_dirty_populates_advertised_entry_and_caches_options() {
     );
     let event = SpurEvent::now(SpurEventBody::CommandRegistryDirty {
         session: session.clone(),
-        caps: caps_with_options(vec![model_opt.clone()]),
+        caps: Some(caps_with_options(vec![model_opt.clone()])),
         config_options: vec![model_opt.clone()],
     });
 
@@ -109,7 +109,7 @@ fn command_registry_dirty_for_other_session_is_ignored() {
     let model_opt = select_option("model", "gpt-5", &[("gpt-5", "GPT-5")]);
     let event = SpurEvent::now(SpurEventBody::CommandRegistryDirty {
         session: SessionId::new(),
-        caps: caps_with_options(vec![model_opt.clone()]),
+        caps: Some(caps_with_options(vec![model_opt.clone()])),
         config_options: vec![model_opt],
     });
 
@@ -124,4 +124,42 @@ fn command_registry_dirty_for_other_session_is_ignored() {
         .list()
         .iter()
         .all(|e| !matches!(e.source, CommandSource::Advertised { .. })));
+}
+
+#[test]
+fn command_registry_dirty_with_none_caps_falls_back_to_options_synthesizer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let session = SessionId::new();
+    let mut view = SessionDetailView::new(
+        session.clone(),
+        "codex".into(),
+        "brain".into(),
+        tmp.path().to_path_buf(),
+        spur_tui::test_support::default_agent_config("codex"),
+        Vec::new(),
+    );
+    view.set_spur_agent_caps(None);
+
+    let model_opt = select_option(
+        "model",
+        "gpt-5-codex",
+        &[("gpt-5-codex", "GPT-5 Codex"), ("gpt-5", "GPT-5")],
+    );
+    let event = SpurEvent::now(SpurEventBody::CommandRegistryDirty {
+        session,
+        caps: None,
+        config_options: vec![model_opt],
+    });
+
+    static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
+        std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
+    let ctx = spur_tui::test_support::test_view_ctx(&LINEAGE);
+    view.handle_spur_event(&event, &ctx);
+
+    let has_model = view
+        .command_registry()
+        .list()
+        .iter()
+        .any(|entry| entry.name == "model");
+    assert!(has_model, "expected /model entry from options fallback");
 }
