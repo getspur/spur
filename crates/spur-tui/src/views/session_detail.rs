@@ -813,12 +813,16 @@ impl SessionDetailView {
     /// via `CompletionEnv.session_config_options`.
     pub fn apply_advertised_commands(
         &mut self,
-        caps: &spur_acp::SpurAgentCaps,
+        caps: Option<&spur_acp::SpurAgentCaps>,
         options: &[spur_acp::SessionConfigOption],
     ) {
         let handle = self.agent_handle_for_commands();
-        let entries =
-            crate::commands::advertised::AdvertisedSource::entries_from_caps(&handle, caps);
+        let entries = match caps {
+            Some(caps) => {
+                crate::commands::advertised::AdvertisedSource::entries_from_caps(&handle, caps)
+            }
+            None => crate::commands::advertised::AdvertisedSource::entries(&handle, options),
+        };
         // TODO(adapter-models-picker): synthesized /model entries from models-only caps do not
         // yet provide picker candidates from `SessionModelState.available_models`.
         self.command_registry
@@ -2155,7 +2159,7 @@ impl View for SessionDetailView {
                 if session.0 != self.session_id.0 {
                     return;
                 }
-                self.apply_advertised_commands(caps, config_options);
+                self.apply_advertised_commands(caps.as_deref(), config_options);
             }
 
             // All other event types are not relevant to this session view.
