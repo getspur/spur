@@ -85,7 +85,7 @@ fn empty_at_shows_sectioned_picker() {
     let previous_env = std::env::var_os(CODE_GRAPH_INDEX_ENV);
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    for i in 0..10 {
+    for i in 0..1 {
         std::fs::write(
             tmp.path().join(format!("mentions_v2_file_{i:02}.rs")),
             "// fixture",
@@ -98,29 +98,23 @@ fn empty_at_shows_sectioned_picker() {
         serde_json::json!({
             "header": { "graph_index_version": "mentions-v2" },
             "files": [
-                {"stable_file_id": "code-file-00", "file_path": "src/code_file_00.rs"},
-                {"stable_file_id": "code-file-01", "file_path": "src/code_file_01.rs"},
-                {"stable_file_id": "code-file-02", "file_path": "src/code_file_02.rs"},
-                {"stable_file_id": "code-file-03", "file_path": "src/code_file_03.rs"}
+                {"stable_file_id": "code-file-00", "file_path": "src/code_file_00.rs"}
             ],
             "symbols": [
-                {"stable_symbol_id": "code-symbol-00", "file_path": "src/lib.rs", "byte_range": [0,1], "line_range": [1,1], "entity_name": "CodeSym00", "symbol_kind": "fn", "anchor_hash": "1", "enclosing_scope": "module lib"},
-                {"stable_symbol_id": "code-symbol-01", "file_path": "src/lib.rs", "byte_range": [1,2], "line_range": [2,2], "entity_name": "CodeSym01", "symbol_kind": "fn", "anchor_hash": "2", "enclosing_scope": "module lib"},
-                {"stable_symbol_id": "code-symbol-02", "file_path": "src/lib.rs", "byte_range": [2,3], "line_range": [3,3], "entity_name": "CodeSym02", "symbol_kind": "fn", "anchor_hash": "3", "enclosing_scope": "module lib"},
-                {"stable_symbol_id": "code-symbol-03", "file_path": "src/lib.rs", "byte_range": [3,4], "line_range": [4,4], "entity_name": "CodeSym03", "symbol_kind": "fn", "anchor_hash": "4", "enclosing_scope": "module lib"}
+                {"stable_symbol_id": "code-symbol-00", "file_path": "src/lib.rs", "byte_range": [0,1], "line_range": [1,1], "entity_name": "CodeSym00", "symbol_kind": "fn", "anchor_hash": "1", "enclosing_scope": "module lib"}
             ]
         }),
     );
     std::env::set_var(CODE_GRAPH_INDEX_ENV, &graph_path);
 
-    let workers: Vec<_> = (0..5)
+    let workers: Vec<_> = (0..1)
         .map(|i| WorkerMentionDescriptor {
             name: format!("worker-{i}"),
             description: Some("fixture".into()),
             tier: Some("generalist".into()),
         })
         .collect();
-    let issues: Vec<_> = (0..5)
+    let issues: Vec<_> = (0..1)
         .map(|i| issue_summary(&format!("bd-v2-{i}"), &format!("Mention V2 issue {i}")))
         .collect();
 
@@ -138,9 +132,41 @@ fn empty_at_shows_sectioned_picker() {
     assert!(view.completion_active_for_test());
 
     let rendered = render_text(&mut view, 160, 48);
+    let workers_header = "── Workers ──";
+    let files_header = "── Files ──";
+    let issues_header = "── Issues ──";
+    let code_header = "── Code ──";
     assert!(
-        rendered.contains("Workers"),
-        "picker should render Workers header"
+        rendered.contains(workers_header),
+        "picker should render literal Workers section header; rendered=\n{rendered}"
+    );
+    assert!(
+        rendered.contains(files_header),
+        "picker should render literal Files section header; rendered=\n{rendered}"
+    );
+    assert!(
+        rendered.contains(issues_header),
+        "picker should render literal Issues section header; rendered=\n{rendered}"
+    );
+    assert!(
+        rendered.contains(code_header),
+        "picker should render literal Code section header; rendered=\n{rendered}"
+    );
+    let workers_idx = rendered
+        .find(workers_header)
+        .expect("workers header in rendered picker");
+    let files_idx = rendered
+        .find(files_header)
+        .expect("files header in rendered picker");
+    let issues_idx = rendered
+        .find(issues_header)
+        .expect("issues header in rendered picker");
+    let code_idx = rendered
+        .find(code_header)
+        .expect("code header in rendered picker");
+    assert!(
+        workers_idx < files_idx && files_idx < issues_idx && issues_idx < code_idx,
+        "expected headers in order Workers -> Files -> Issues -> Code; rendered=\n{rendered}"
     );
 
     let sid = SessionId::new();
@@ -203,7 +229,8 @@ fn typed_query_prefers_files_within_window() {
 
     let tmp = tempfile::tempdir().expect("tempdir");
     std::fs::write(tmp.path().join("fooe.rs"), "// foo file fixture").expect("write foo file");
-    std::fs::write(tmp.path().join("a.rs"), "bar notes").expect("write bar file");
+    std::fs::write(tmp.path().join("needle-notes.md"), "needle notes fixture")
+        .expect("write needle file");
 
     let graph_path = write_graph_fixture(
         tmp.path(),
@@ -211,7 +238,7 @@ fn typed_query_prefers_files_within_window() {
             "header": { "graph_index_version": "mentions-v2-ranking" },
             "files": [],
             "symbols": [
-                {"stable_symbol_id": "symbol-bar", "file_path": "src/bar.rs", "byte_range": [0, 18], "line_range": [1, 1], "entity_name": "verySpecificNeedle", "symbol_kind": "struct", "anchor_hash": "999", "enclosing_scope": "module bar"}
+                {"stable_symbol_id": "symbol-needle", "file_path": "src/needle.rs", "byte_range": [0, 6], "line_range": [1, 1], "entity_name": "needle", "symbol_kind": "struct", "anchor_hash": "999", "enclosing_scope": "module needle"}
             ]
         }),
     );
@@ -260,21 +287,19 @@ fn typed_query_prefers_files_within_window() {
             .collect::<Vec<_>>()
     );
 
-    let bar_hits = reg.query(
-        CompletionScope::Session(&sid),
-        tmp.path(),
-        "verySpecificNeedle",
-        20,
-    );
-    let bar_symbol = bar_hits
+    let needle_hits = reg.query(CompletionScope::Session(&sid), tmp.path(), "needle", 20);
+    let needle_symbol = needle_hits
         .iter()
         .position(|h| h.kind == MentionKind::CodeSymbol)
-        .expect("code symbol hit for verySpecificNeedle");
-    let bar_file = bar_hits.iter().position(|h| h.kind == MentionKind::File);
+        .expect("code symbol hit for needle");
+    let needle_file = needle_hits
+        .iter()
+        .position(|h| h.kind == MentionKind::File)
+        .expect("file hit for needle");
     assert!(
-        bar_file.is_none() || bar_symbol < bar_file.expect("file index"),
-        "expected raw score to outrank tier outside window; hits={:?}",
-        bar_hits
+        needle_symbol < needle_file,
+        "expected higher-bucket code symbol to outrank file outside tier window; hits={:?}",
+        needle_hits
             .iter()
             .map(|h| (&h.kind, h.display.as_str(), h.uri.as_str()))
             .collect::<Vec<_>>()
