@@ -317,6 +317,8 @@ mod tests {
                 secondary: "picker_shell.rs:117".to_string(),
                 tag: "code-symbol".to_string(),
                 atoms: Vec::new(),
+                selectable: true,
+                dimmed: false,
             }]
         }
 
