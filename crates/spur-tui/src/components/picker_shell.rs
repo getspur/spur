@@ -6,7 +6,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
     Frame,
 };
 
@@ -20,10 +20,6 @@ use crate::theme::{resolve_token, ColorDepth, Theme};
 pub(crate) fn token(theme: &Theme, name: &str) -> Color {
     resolve_token(theme, name, ColorDepth::Truecolor)
 }
-
-/// Below 100 cols total terminal width, the preview pane is suppressed and
-/// the picker renders single-pane to preserve readability.
-const MIN_PREVIEW_WIDTH: u16 = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PopoverAnchor {
@@ -370,42 +366,18 @@ impl PickerShell {
     pub fn render(&mut self, frame: &mut Frame, anchor: Rect, container: Rect, theme: &Theme) {
         let query_mode_owned = self.source.query_mode() == QueryMode::OwnedByShell;
         self.update_active_preview();
-        let has_issue_preview = matches!(
-            self.active_preview.as_ref(),
-            Some((_, RetrievalPreview::Text { .. }))
-        );
-        let has_code_preview = matches!(
-            self.active_preview.as_ref(),
-            Some((
-                _,
-                RetrievalPreview::CodeSymbol(_) | RetrievalPreview::CodeFile(_)
-            ))
-        );
-        let show_inline_preview = has_issue_preview && container.width >= MIN_PREVIEW_WIDTH;
+        let has_preview = self.active_preview.is_some();
         let list_rows = self.rows.len().clamp(1, 8) as u16;
         let query_rows = if query_mode_owned { 1 } else { 0 };
-        let preview_rows = self
-            .active_preview
-            .as_ref()
-            .filter(|_| show_inline_preview)
-            .map(|(_, preview)| match preview {
-                RetrievalPreview::Text { lines, .. } => {
-                    lines.len().saturating_add(1).clamp(3, 8) as u16
-                }
-                RetrievalPreview::CodeSymbol(_) | RetrievalPreview::CodeFile(_) => 3,
-            })
-            .unwrap_or(0);
-        let inner_rows = (list_rows + query_rows).max(preview_rows);
+        let inner_rows = list_rows + query_rows;
         let popup_height = inner_rows + 2; // +2 for block border
 
-        let popup_width = if show_inline_preview {
-            (container.width.saturating_mul(2) / 3).clamp(80, container.width.saturating_sub(2))
-        } else if has_code_preview {
+        let popup_width = if has_preview {
             (container.width / 2).clamp(40, 60)
         } else {
             (container.width / 2).clamp(30, container.width)
         };
-        let popover_size = if has_code_preview {
+        let popover_size = if has_preview {
             let width = 80u16.min(
                 container
                     .width
@@ -439,22 +411,7 @@ impl PickerShell {
         }
 
         let mut cursor_cell: Option<(u16, u16)> = None;
-        let (list_column, preview_area) = if show_inline_preview {
-            let available = inner.width.saturating_sub(1);
-            let list_width = available / 2;
-            let preview_width = available.saturating_sub(list_width);
-            (
-                Rect::new(inner.x, inner.y, list_width, inner.height),
-                Some(Rect::new(
-                    inner.x.saturating_add(list_width).saturating_add(1),
-                    inner.y,
-                    preview_width,
-                    inner.height,
-                )),
-            )
-        } else {
-            (inner, None)
-        };
+        let list_column = inner;
 
         let list_area = if query_mode_owned {
             // Render query line at top of inner area.
@@ -484,17 +441,13 @@ impl PickerShell {
 
         self.render_rows(frame, list_area, theme);
 
-        if let (Some((_, preview)), Some(area)) = (self.active_preview.as_ref(), preview_area) {
-            self.render_preview(frame, area, preview, theme);
-        }
-
         if let Some((cx, cy)) = cursor_cell {
             if cx < popup_area.x + popup_area.width && cy < popup_area.y + popup_area.height {
                 frame.set_cursor_position((cx, cy));
             }
         }
 
-        if has_code_preview && !matches!(layout.popover_anchor, PopoverAnchor::Suppressed) {
+        if has_preview && !matches!(layout.popover_anchor, PopoverAnchor::Suppressed) {
             if let (Some((_, preview)), Some(popover_rect)) =
                 (self.active_preview.as_ref(), layout.popover_rect)
             {
@@ -596,39 +549,6 @@ impl PickerShell {
             .highlight_style(Style::default().bg(token(theme, "picker.selected.bg")));
         let mut list_state = self.list_state.clone();
         frame.render_stateful_widget(list, list_area, &mut list_state);
-    }
-
-    fn render_preview(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        preview: &RetrievalPreview,
-        theme: &Theme,
-    ) {
-        let (title, body) = match preview {
-            RetrievalPreview::Text { title, lines } => (title.clone(), lines.clone()),
-            RetrievalPreview::CodeSymbol(_) | RetrievalPreview::CodeFile(_) => {
-                let paragraph = Paragraph::new(Line::raw("<popover stub>")).block(
-                    Block::default().borders(Borders::LEFT).title(Span::styled(
-                        " Preview ",
-                        Style::default().fg(token(theme, "picker.match.fg")),
-                    )),
-                );
-                frame.render_widget(paragraph, area);
-                return;
-            }
-        };
-        let block = Block::default().borders(Borders::LEFT).title(Span::styled(
-            format!(" {} ", title),
-            Style::default().fg(token(theme, "picker.match.fg")),
-        ));
-        let body_rows = area.height.saturating_sub(1) as usize;
-        let body_width = area.width.saturating_sub(1) as usize;
-        let lines = truncate_preview_lines_to_fit(body, body_rows, body_width, theme);
-        let paragraph = Paragraph::new(lines)
-            .block(block)
-            .wrap(Wrap { trim: false });
-        frame.render_widget(paragraph, area);
     }
 }
 
@@ -842,33 +762,6 @@ mod tests {
         }
     }
 
-    struct LongPreviewSource;
-
-    impl QuerySource for LongPreviewSource {
-        fn title(&self) -> &str {
-            "Mentions · @"
-        }
-
-        fn query_mode(&self) -> QueryMode {
-            QueryMode::ReadFromInputBar
-        }
-
-        fn refresh(&mut self, _query: &str) -> Vec<RetrievalRow> {
-            vec![RetrievalRow {
-                primary: "bd-1234 Long preview row".to_string(),
-                secondary: String::new(),
-                tag: String::new(),
-                atoms: Vec::new(),
-                selectable: true,
-                dimmed: false,
-            }]
-        }
-
-        fn accept(&self, _row_idx: usize) -> Option<RetrievalAccept> {
-            None
-        }
-    }
-
     struct CountingPreviewSource {
         count: Rc<Cell<usize>>,
     }
@@ -1075,30 +968,43 @@ mod tests {
     fn wide_issue_picker_renders_preview_pane() {
         let mut shell = PickerShell::open(Box::new(PreviewSource));
         let width = 120;
+        let height = 12;
+        let anchor_x = 0;
 
-        let buffer = rendered_shell_buffer_with_anchor_x(&mut shell, width, 12, width / 3);
-        let preview_pos = find_text_start(&buffer, width, 12, "Preview-only disambiguating title")
-            .expect("preview title coordinate");
-        let list_pos =
-            find_text_start(&buffer, width, 12, "Short issue row").expect("list row coordinate");
+        let buffer = rendered_shell_buffer_with_anchor_x(&mut shell, width, height, anchor_x);
+        let preview_pos =
+            find_text_start(&buffer, width, height, "Preview-only disambiguating title")
+                .expect("preview title coordinate");
+        let anchor = Rect::new(anchor_x, height - 1, width.saturating_sub(anchor_x), 1);
+        let container = Rect::new(0, 0, width, height);
+        let layout = compute_picker_layout(container, anchor, (60, 3), Some((57, 10)));
+        let picker_right_edge = layout
+            .picker_rect
+            .x
+            .saturating_add(layout.picker_rect.width)
+            .saturating_sub(1);
 
         assert!(
-            preview_pos.0 > width / 2,
-            "preview x={} should be on right half",
-            preview_pos.0
-        );
-        assert!(
-            list_pos.0 < width / 2,
-            "list x={} should be on left half",
-            list_pos.0
+            preview_pos.0 > picker_right_edge,
+            "preview should render to the right of picker: preview={preview_pos:?} picker={:?}",
+            layout.picker_rect
         );
     }
 
     #[test]
-    fn narrow_issue_picker_suppresses_preview_pane() {
+    fn narrow_issue_picker_renders_preview_with_fallback() {
         let mut shell = PickerShell::open(Box::new(PreviewSource));
 
         let text = rendered_shell_text(&mut shell, 80);
+
+        assert!(text.contains("Preview-only disambiguating title"), "{text}");
+    }
+
+    #[test]
+    fn very_narrow_issue_picker_suppresses_popover() {
+        let mut shell = PickerShell::open(Box::new(PreviewSource));
+
+        let text = rendered_shell_text(&mut shell, 50);
 
         assert!(
             !text.contains("Preview-only disambiguating title"),
@@ -1108,37 +1014,18 @@ mod tests {
 
     #[test]
     fn preview_body_shows_truncation_trailer_when_area_is_short() {
-        let shell = PickerShell::open(Box::new(LongPreviewSource));
         let lines = (1..=20)
             .map(|n| Line::raw(format!("line-{n:02}")))
             .collect();
-        let preview = RetrievalPreview::Text {
-            title: "bd-1234".to_string(),
+        let rendered = truncate_preview_lines_to_fit(
             lines,
-        };
-        let width = 40;
-        let height = 5;
-        let backend = TestBackend::new(width, height);
-        let mut terminal = Terminal::new(backend).unwrap();
-
-        terminal
-            .draw(|f| {
-                shell.render_preview(
-                    f,
-                    Rect::new(0, 0, width, height),
-                    &preview,
-                    crate::theme::fallback_theme(),
-                )
-            })
-            .unwrap();
-
-        let buffer = terminal.backend().buffer();
-        let text = (0..height)
-            .map(|y| {
-                (0..width)
-                    .map(|x| buffer.cell((x, y)).expect("cell").symbol())
-                    .collect::<String>()
-            })
+            4,  // 3 lines + trailer
+            40, // wide enough to avoid wrapping
+            crate::theme::fallback_theme(),
+        );
+        let text = rendered
+            .iter()
+            .map(|line| line.to_string())
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("+17 more"), "{text}");
