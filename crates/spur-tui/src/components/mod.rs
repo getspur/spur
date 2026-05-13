@@ -40,6 +40,7 @@ pub mod react_trace;
 pub mod resume_banner;
 pub mod review_card;
 pub mod session_preview;
+pub mod snippet;
 pub mod spinner;
 pub mod status_bar;
 pub mod theme_query_source;
