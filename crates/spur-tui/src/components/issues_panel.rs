@@ -537,6 +537,31 @@ mod tests {
     }
 
     #[test]
+    fn set_filter_prefers_direct_id_match_over_title_subsequence_match() {
+        let issues = vec![
+            issue_with("bd-d587.3", "plain", "open", &[], None, None),
+            issue_with(
+                "bd-other",
+                "dump 5 logs 87 times 3 quickly",
+                "open",
+                &[],
+                None,
+                None,
+            ),
+        ];
+        let mut panel = IssuesPanel::new();
+
+        panel.set_filter("d587", &issues);
+
+        let matched_ids = panel
+            .display_order
+            .iter()
+            .map(|idx| issues[*idx].id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(matched_ids, vec!["bd-d587.3", "bd-other"]);
+    }
+
+    #[test]
     fn set_filter_preserves_selection_when_row_remains_visible() {
         let issues = vec![
             issue_with("bd-auth-1", "Auth work", "open", &[], None, None),
