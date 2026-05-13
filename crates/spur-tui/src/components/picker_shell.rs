@@ -368,6 +368,10 @@ impl PickerShell {
         self.source.query_mode()
     }
 
+    pub fn should_debounce_input_bar_updates(&self) -> bool {
+        self.source.should_debounce_input_bar_updates()
+    }
+
     // ── Rendering ──────────────────────────────────────────────────────
 
     /// Render above `anchor` (the InputBar's rect), clipped to `container`.
