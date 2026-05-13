@@ -14,6 +14,7 @@ use spur_acp::{GraphEdgeEvent, GraphNodeEvent, SpurEvent};
 
 use crate::action::{Action, IssueAction, ViewId};
 use crate::components::execute_modal::{ExecuteModal, ExecuteModalVariant};
+use crate::components::issue_comments_pane::IssueCommentsPane;
 use crate::components::issue_detail_pane::IssueDetailPane;
 use crate::components::issue_graph_pane::IssueGraphPane;
 use crate::components::issue_utils::{find_plan_id_label, has_label, has_plan_task_label};
@@ -24,23 +25,37 @@ use crate::components::tombstone::Tombstone;
 use super::View;
 
 const TEXT_STATUS_HINT: &str =
-    "[Text] j/k: Nav  v: Graph Mode  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
-const TEXT_STATUS_HINT_COMPACT: &str = "[Text] j/k: Nav  v: Graph  Esc: Close";
+    "[Text] j/k: Nav  v: Graph Mode  c: Comments  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
+const TEXT_STATUS_HINT_COMPACT: &str = "[Text] j/k: Nav  v: Graph  c: Comments  Esc: Close";
 const TEXT_STATUS_HINT_EPIC: &str =
-    "[Text] j/k: Nav  v: Graph Mode  e: Execute Item  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
-const TEXT_STATUS_HINT_EPIC_COMPACT: &str = "[Text] j/k: Nav  e: Execute Item  v: Graph";
+    "[Text] j/k: Nav  v: Graph Mode  c: Comments  e: Execute Item  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
+const TEXT_STATUS_HINT_EPIC_COMPACT: &str =
+    "[Text] j/k: Nav  e: Execute Item  v: Graph  c: Comments";
 const TEXT_STATUS_HINT_PLAN_EPIC: &str =
-    "[Text] j/k: Nav  p: Open Plan  v: Graph Mode  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
-const TEXT_STATUS_HINT_PLAN_EPIC_COMPACT: &str = "[Text] j/k: Nav  p: Plan  v: Graph";
+    "[Text] j/k: Nav  p: Open Plan  v: Graph Mode  c: Comments  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
+const TEXT_STATUS_HINT_PLAN_EPIC_COMPACT: &str = "[Text] j/k: Nav  p: Plan  v: Graph  c: Comments";
 const GRAPH_STATUS_HINT: &str =
-    "[Graph] j/k: Nav  v: Text Mode  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
-const GRAPH_STATUS_HINT_COMPACT: &str = "[Graph] j/k: Nav  v: Text  Esc: Close";
+    "[Graph] j/k: Nav  v: Text Mode  c: Comments  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
+const GRAPH_STATUS_HINT_COMPACT: &str = "[Graph] j/k: Nav  v: Text  c: Comments  Esc: Close";
 const GRAPH_STATUS_HINT_EPIC: &str =
-    "[Graph] j/k: Nav  v: Text Mode  e: Execute Item  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
-const GRAPH_STATUS_HINT_EPIC_COMPACT: &str = "[Graph] j/k: Nav  e: Execute Item  v: Text";
+    "[Graph] j/k: Nav  v: Text Mode  c: Comments  e: Execute Item  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
+const GRAPH_STATUS_HINT_EPIC_COMPACT: &str =
+    "[Graph] j/k: Nav  e: Execute Item  v: Text  c: Comments";
 const GRAPH_STATUS_HINT_PLAN_EPIC: &str =
-    "[Graph] j/k: Nav  p: Open Plan  v: Text Mode  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
-const GRAPH_STATUS_HINT_PLAN_EPIC_COMPACT: &str = "[Graph] j/k: Nav  p: Plan  v: Text";
+    "[Graph] j/k: Nav  p: Open Plan  v: Text Mode  c: Comments  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
+const GRAPH_STATUS_HINT_PLAN_EPIC_COMPACT: &str = "[Graph] j/k: Nav  p: Plan  v: Text  c: Comments";
+const COMMENTS_STATUS_HINT: &str =
+    "[Comments] j/k: Nav  v: Graph/Text  c: Comments  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
+const COMMENTS_STATUS_HINT_COMPACT: &str =
+    "[Comments] j/k: Nav  v: Graph/Text  c: Comments  Esc: Close";
+const COMMENTS_STATUS_HINT_EPIC: &str =
+    "[Comments] j/k: Nav  v: Graph/Text  c: Comments  e: Execute Item  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
+const COMMENTS_STATUS_HINT_EPIC_COMPACT: &str =
+    "[Comments] j/k: Nav  e: Execute Item  v: Graph/Text  c: Comments";
+const COMMENTS_STATUS_HINT_PLAN_EPIC: &str =
+    "[Comments] j/k: Nav  p: Open Plan  v: Graph/Text  c: Comments  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
+const COMMENTS_STATUS_HINT_PLAN_EPIC_COMPACT: &str =
+    "[Comments] j/k: Nav  p: Plan  v: Graph/Text  c: Comments";
 const LIST_STATUS_HINT: &str =
     "[List] j/k: Nav  Enter/o: Open Detail  v: View Graph  W: Work  r: Refresh  q: Quit";
 const LIST_STATUS_HINT_COMPACT: &str = "[List] j/k: Nav  o: Open  W: Work  r: Refresh";
@@ -64,6 +79,7 @@ pub enum IssueFocus {
     Loaded {
         id: String,
         issue: Box<spur_pm::Issue>,
+        comments: Vec<spur_pm::Comment>,
     },
 }
 
@@ -71,6 +87,7 @@ pub enum IssueFocus {
 pub enum DetailMode {
     Text,
     Graph,
+    Comments,
 }
 
 /// Inc 3 (bd-d587.3): caller-supplied intent for `open_external_detail`.
@@ -175,6 +192,7 @@ pub struct IssueBrowserView {
     issues_panel: IssuesPanel,
     filter_mode: bool,
     issue_detail_pane: IssueDetailPane,
+    issue_comments_pane: IssueCommentsPane,
     issue_focus: IssueFocus,
     detail_mode: DetailMode,
     graph_pane: IssueGraphPane,
@@ -224,6 +242,7 @@ impl IssueBrowserView {
             issues_panel: IssuesPanel::new(),
             filter_mode: false,
             issue_detail_pane: IssueDetailPane::new(),
+            issue_comments_pane: IssueCommentsPane::new(),
             issue_focus: IssueFocus::None,
             detail_mode: DetailMode::Text,
             graph_pane: IssueGraphPane::new(),
@@ -363,6 +382,7 @@ impl IssueBrowserView {
         match self.detail_mode {
             DetailMode::Text => self.issue_detail_pane.scroll_up_by(lines),
             DetailMode::Graph => self.graph_pane.scroll_up_by(lines),
+            DetailMode::Comments => self.issue_comments_pane.scroll_up_by(lines),
         }
     }
 
@@ -370,6 +390,7 @@ impl IssueBrowserView {
         match self.detail_mode {
             DetailMode::Text => self.issue_detail_pane.scroll_down_by(lines),
             DetailMode::Graph => self.graph_pane.scroll_down_by(lines),
+            DetailMode::Comments => self.issue_comments_pane.scroll_down_by(lines),
         }
     }
 
@@ -473,7 +494,7 @@ impl IssueBrowserView {
 
         find_plan_id_label(&selected.labels)
             .or_else(|| match &self.issue_focus {
-                IssueFocus::Loaded { id, issue } if id == &selected_id => {
+                IssueFocus::Loaded { id, issue, .. } if id == &selected_id => {
                     find_plan_id_label(&issue.labels)
                 }
                 _ => None,
@@ -602,6 +623,7 @@ impl IssueBrowserView {
                 IssueFocus::Loaded {
                     id: loaded_id,
                     issue: _,
+                    ..
                 },
                 Some(sel),
             ) if loaded_id == &sel => {
@@ -644,6 +666,7 @@ impl IssueBrowserView {
                     self.detail_mode = DetailMode::Text;
                     None
                 }
+                DetailMode::Comments => None,
             },
             IssueFocus::None => {
                 let action =
@@ -762,6 +785,13 @@ impl IssueBrowserView {
                 Some(Action::RefreshIssues)
             }
             KeyCode::Char('v') if key.modifiers.is_empty() => self.toggle_detail_mode(),
+            KeyCode::Char('c')
+                if key.modifiers.is_empty()
+                    && matches!(self.issue_focus, IssueFocus::Loaded { .. }) =>
+            {
+                self.detail_mode = DetailMode::Comments;
+                None
+            }
             KeyCode::Char('p') if key.modifiers.is_empty() => self.open_selected_plan(),
 
             // Navigation
@@ -955,7 +985,11 @@ impl IssueBrowserView {
             IssueFocus::Loading { id } => {
                 IssueDetailPane::render_loading(id, frame, chunks[1]);
             }
-            IssueFocus::Loaded { id, issue } => match self.detail_mode {
+            IssueFocus::Loaded {
+                id,
+                issue,
+                comments,
+            } => match self.detail_mode {
                 DetailMode::Text => {
                     self.issue_detail_pane.render(issue, frame, chunks[1]);
                 }
@@ -974,6 +1008,10 @@ impl IssueBrowserView {
                             chunks[1],
                         );
                     }
+                }
+                DetailMode::Comments => {
+                    self.issue_comments_pane
+                        .render(id, comments, frame, chunks[1]);
                 }
             },
             IssueFocus::None => {
@@ -1020,6 +1058,17 @@ impl IssueBrowserView {
                     }
                     DetailMode::Graph => {
                         Self::hint_override(GRAPH_STATUS_HINT, GRAPH_STATUS_HINT_COMPACT)
+                    }
+                    DetailMode::Comments if has_plan => Self::hint_override(
+                        COMMENTS_STATUS_HINT_PLAN_EPIC,
+                        COMMENTS_STATUS_HINT_PLAN_EPIC_COMPACT,
+                    ),
+                    DetailMode::Comments if has_execute => Self::hint_override(
+                        COMMENTS_STATUS_HINT_EPIC,
+                        COMMENTS_STATUS_HINT_EPIC_COMPACT,
+                    ),
+                    DetailMode::Comments => {
+                        Self::hint_override(COMMENTS_STATUS_HINT, COMMENTS_STATUS_HINT_COMPACT)
                     }
                 })
             }
@@ -1173,6 +1222,7 @@ impl View for IssueBrowserView {
                 if let IssueFocus::Loaded {
                     id: ref focus_id,
                     ref mut issue,
+                    ..
                 } = self.issue_focus
                 {
                     if *focus_id == *id {
@@ -1242,6 +1292,7 @@ impl View for IssueBrowserView {
                         self.issue_focus = IssueFocus::Loaded {
                             id: requested_id.clone(),
                             issue: Box::new(pm_issue),
+                            comments: issue.comments.clone(),
                         };
                         // Inc 3 (bd-d587.3): apply the post-load mode armed
                         // by `open_external_detail(_, FocusGraph)`. Falls back

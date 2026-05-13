@@ -15,6 +15,7 @@ pub mod inline_executor_card;
 pub mod input_bar;
 pub mod input_bar_wrap;
 pub mod input_completion;
+pub mod issue_comments_pane;
 pub mod issue_detail_pane;
 pub mod issue_graph_pane;
 pub mod issue_utils;
