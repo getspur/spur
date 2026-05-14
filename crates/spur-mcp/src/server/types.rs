@@ -1,13 +1,17 @@
 use super::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum BeadsVersion {
     /// The persisted plan version could not be derived or is intentionally
     /// unknown for an ephemeral plan. This is distinct from `AuditSeq(0)`,
     /// which is a real persisted epic with zero audit sentinels.
     Unknown,
-    /// Monotonic audit-sentinel sequence number on the plan epic issue.
+    /// Legacy monotonic audit-sentinel sequence number.
+    /// Kept for backwards compatibility with existing caches/tests.
     AuditSeq(u64),
+    /// Content-addressed token over all `[[spur-audit v1]]` comment IDs
+    /// visible to plan projection (`spur:plan-id:<id>` scope).
+    ContentHash([u8; 32]),
 }
 
 #[derive(Debug, Clone)]
