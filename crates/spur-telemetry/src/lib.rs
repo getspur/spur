@@ -1,3 +1,4 @@
+pub(crate) mod config;
 pub mod error;
 pub mod events;
 pub(crate) mod redact;
