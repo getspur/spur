@@ -2,6 +2,10 @@
 pub enum TelemetryError {
     #[error("telemetry is not initialized")]
     NotInitialized,
+    #[error("telemetry io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("telemetry serialization error: {0}")]
+    SerializeToml(#[from] toml::ser::Error),
     #[error("telemetry request failed: {0}")]
     Http(#[from] reqwest::Error),
     #[error("telemetry request failed with status {0}")]

@@ -1,4 +1,6 @@
-use crate::error::{Result, TelemetryError};
+use crate::error::Result;
+#[cfg(not(telemetry_disabled))]
+use crate::error::TelemetryError;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;

@@ -7226,9 +7226,9 @@ dependencies = [
 name = "spur-telemetry"
 version = "1.1.8"
 dependencies = [
- "anyhow",
  "chrono",
  "dirs",
+ "libc",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
