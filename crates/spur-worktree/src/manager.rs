@@ -1112,6 +1112,13 @@ impl WorktreeManager {
         self.active.len()
     }
 
+    /// Return the active session's branch name without mutating manager state.
+    pub fn branch_for_session(&self, session_id: &SessionId) -> Option<String> {
+        self.active
+            .get(&session_id.to_string())
+            .map(|info| info.branch.clone())
+    }
+
     /// Look up a worktree by session ID.
     fn lookup(&self, session_id: &SessionId) -> Result<&WorktreeInfo> {
         let key = session_id.to_string();
@@ -1958,6 +1965,34 @@ mod finalize_worker_branch_tests {
 
         assert_eq!(outcome.case, FinalizeCase::CommittedDirty);
         assert_eq!(commit_count(&worker_path, &base), "1");
+    }
+}
+
+#[cfg(test)]
+mod branch_for_session_tests {
+    use super::*;
+
+    #[test]
+    fn branch_for_session_returns_registered_branch() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut manager = WorktreeManager::new_for_test(dir.path().to_path_buf());
+        let session = SessionId("worker-session".into());
+        manager.register_for_test(
+            session.clone(),
+            dir.path().join("worker"),
+            "spur/worker/v2/codex/b/w".into(),
+            "abc123".into(),
+            "codex".into(),
+        );
+
+        assert_eq!(
+            manager.branch_for_session(&session),
+            Some("spur/worker/v2/codex/b/w".into())
+        );
+        assert_eq!(
+            manager.branch_for_session(&SessionId("missing".into())),
+            None
+        );
     }
 }
 
