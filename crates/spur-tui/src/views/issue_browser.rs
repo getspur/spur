@@ -1011,7 +1011,8 @@ impl IssueBrowserView {
                 comments,
             } => match self.detail_mode {
                 DetailMode::Text => {
-                    self.issue_detail_pane.render(issue, frame, chunks[1]);
+                    self.issue_detail_pane
+                        .render(issue, comments, frame, chunks[1]);
                 }
                 DetailMode::Graph => {
                     if let Some(error) = self.graph_error_for(id) {
