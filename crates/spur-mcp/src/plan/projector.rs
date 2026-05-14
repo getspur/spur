@@ -1,15 +1,28 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 
 use spur_acp::{BrainSessionId, SessionId};
 
 use super::{PlanState, PlanTask, PlanTaskEntry, PlanTaskStatus};
 use crate::plan::audit_sentinel::{AuditSentinelKind, CompletionState, EpicCompletionOutcome};
+use crate::plan::shadow_projector::{shadow_project_plan_from_beads, TaskAuditLog};
 
 const LEGACY_DELEGATION_ID_PREFIX: &str = "delegation-id:";
 const LEGACY_READY_FOR_REVIEW: &str = "ready-for-review";
 const LEGACY_REVIEW_REJECTED: &str = "review-rejected";
 const MUTATION_ID_PREFIX: &str = "spur:mutation-id:";
 const SUPERSEDED_BY_PREFIX: &str = "spur:superseded-by:";
+const SHADOW_PROJECTOR_ENV: &str = "SPUR_SHADOW_PROJECTOR";
+
+fn shadow_projector_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var(SHADOW_PROJECTOR_ENV).ok().as_deref(),
+            Some("off") | Some("OFF") | Some("0") | Some("false") | Some("FALSE")
+        )
+    })
+}
 
 pub fn sort_projection_comments(mut comments: Vec<spur_pm::Comment>) -> Vec<spur_pm::Comment> {
     comments.sort_by(|left, right| {
@@ -487,6 +500,105 @@ pub fn recompute_open_statuses(tasks: &mut [PlanTaskEntry]) {
     }
 }
 
+fn emit_shadow_projector_mismatch_warnings(
+    plan_id: &str,
+    legacy: &PlanState,
+    shadow: &PlanState,
+    audit_comment_count: usize,
+) {
+    let legacy_by_task: HashMap<&str, &PlanTaskEntry> = legacy
+        .tasks
+        .iter()
+        .map(|entry| (entry.spec.task_id.as_str(), entry))
+        .collect();
+    let shadow_by_task: HashMap<&str, &PlanTaskEntry> = shadow
+        .tasks
+        .iter()
+        .map(|entry| (entry.spec.task_id.as_str(), entry))
+        .collect();
+
+    let mut task_ids: Vec<&str> = legacy_by_task
+        .keys()
+        .copied()
+        .chain(shadow_by_task.keys().copied())
+        .collect();
+    task_ids.sort_unstable();
+    task_ids.dedup();
+
+    let mut differing_task_ids: Vec<String> = Vec::new();
+    let mut differing_fields: Vec<String> = Vec::new();
+    let mut mismatches: Vec<String> = Vec::new();
+
+    for task_id in task_ids {
+        let legacy_entry = legacy_by_task.get(task_id).copied();
+        let shadow_entry = shadow_by_task.get(task_id).copied();
+        let Some((legacy_entry, shadow_entry)) = legacy_entry.zip(shadow_entry) else {
+            differing_task_ids.push(task_id.to_string());
+            differing_fields.push("task_presence".to_string());
+            mismatches.push(format!(
+                "{task_id}.task_presence legacy={:?} shadow={:?}",
+                legacy_entry.map(|_| "present"),
+                shadow_entry.map(|_| "present"),
+            ));
+            continue;
+        };
+
+        let checks = [
+            (
+                "status",
+                format!("{:?}", legacy_entry.status),
+                format!("{:?}", shadow_entry.status),
+            ),
+            (
+                "worker_branch",
+                format!("{:?}", legacy_entry.worker_branch),
+                format!("{:?}", shadow_entry.worker_branch),
+            ),
+            (
+                "dispatched_base_oid",
+                format!("{:?}", legacy_entry.dispatched_base_oid),
+                format!("{:?}", shadow_entry.dispatched_base_oid),
+            ),
+            (
+                "last_delegation_id",
+                format!("{:?}", legacy_entry.last_delegation_id),
+                format!("{:?}", shadow_entry.last_delegation_id),
+            ),
+            (
+                "attempt",
+                legacy_entry.attempt.to_string(),
+                shadow_entry.attempt.to_string(),
+            ),
+        ];
+
+        for (field, legacy_value, shadow_value) in checks {
+            if legacy_value != shadow_value {
+                differing_task_ids.push(task_id.to_string());
+                differing_fields.push(field.to_string());
+                mismatches.push(format!(
+                    "{task_id}.{field} legacy={legacy_value} shadow={shadow_value}"
+                ));
+            }
+        }
+    }
+
+    if !mismatches.is_empty() {
+        differing_task_ids.sort();
+        differing_task_ids.dedup();
+        differing_fields.sort();
+        differing_fields.dedup();
+        tracing::warn!(
+            target: "spur.plan.shadow_projector",
+            plan_id = %plan_id,
+            task_ids = %differing_task_ids.join(","),
+            fields = %differing_fields.join(","),
+            mismatches = ?mismatches,
+            audit_comment_count,
+            "shadow-projector mismatch: legacy projection differs from audit-only fold",
+        );
+    }
+}
+
 pub fn plan_submit_base_snapshot(audits: &[AuditSentinelKind]) -> Option<String> {
     audits.iter().rev().find_map(|audit| {
         if let AuditSentinelKind::PlanSubmit {
@@ -614,7 +726,7 @@ pub async fn project_plan_from_beads(
         .collect();
     let mut entries = Vec::with_capacity(projected_tasks.len());
 
-    for projected_task in projected_tasks {
+    for projected_task in &projected_tasks {
         let (_attempt_count, last_delegation_id) = project_attempt_facts(&projected_task.audits);
         let history = project_attempt_history(&projected_task.audits);
         let completion = latest_completion_facts(&projected_task.audits);
@@ -647,13 +759,13 @@ pub async fn project_plan_from_beads(
 
         entries.push(PlanTaskEntry {
             spec: PlanTask {
-                task_id: projected_task.task_id,
+                task_id: projected_task.task_id.clone(),
                 agent,
                 task: projected_task.issue.body.clone(),
                 depends_on,
                 issue_id: Some(projected_task.issue.id.clone()),
                 issue_title: Some(projected_task.issue.title.clone()),
-                context_files: projected_task.context_files,
+                context_files: projected_task.context_files.clone(),
             },
             status,
             result: None,
@@ -670,7 +782,7 @@ pub async fn project_plan_from_beads(
     let brain_session_id = plan_submit_brain_session_id(&epic_audits)
         .unwrap_or_else(|| BrainSessionId::new(SessionId(format!("persisted-plan:{plan_id}"))));
 
-    Ok(PlanState {
+    let legacy_state = PlanState {
         plan_id: plan_id.to_string(),
         tasks: entries,
         brain_session_id,
@@ -678,7 +790,35 @@ pub async fn project_plan_from_beads(
         base_snapshot_oid: plan_submit_base_snapshot_oid(&epic_audits),
         merge_state: crate::plan::PlanMergeState::NotStarted,
         epic_id: Some(epic.id),
-    })
+    };
+
+    if shadow_projector_enabled() {
+        let shadow_logs: Vec<TaskAuditLog> = legacy_state
+            .tasks
+            .iter()
+            .map(|entry| {
+                let audits = projected_tasks
+                    .iter()
+                    .find(|task| task.task_id == entry.spec.task_id)
+                    .map(|task| task.audits.clone())
+                    .unwrap_or_default();
+                TaskAuditLog {
+                    spec: entry.spec.clone(),
+                    audits,
+                }
+            })
+            .collect();
+        let shadow_state = shadow_project_plan_from_beads(plan_id, &shadow_logs);
+        let audit_comment_count: usize = shadow_logs.iter().map(|task| task.audits.len()).sum();
+        emit_shadow_projector_mismatch_warnings(
+            plan_id,
+            &legacy_state,
+            &shadow_state,
+            audit_comment_count,
+        );
+    }
+
+    Ok(legacy_state)
 }
 
 #[cfg(test)]
