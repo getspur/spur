@@ -557,6 +557,7 @@ impl ImageCache {
                     .display_surface_hit
                     .fetch_add(1, Ordering::Relaxed);
             }
+            Self::touch_display_surface_key(&mut self.display_surface_order, key);
             return surface.clone();
         }
         if self.perf.enabled {
@@ -621,7 +622,7 @@ impl ImageCache {
             self.perf.emit_summary("display_surface_miss");
         }
         self.display_surfaces.insert(key, surface.clone());
-        self.display_surface_order.push_back(key);
+        Self::touch_display_surface_key(&mut self.display_surface_order, key);
         surface
     }
 
@@ -900,6 +901,13 @@ impl ImageCache {
         order.push_back(key);
     }
 
+    fn touch_display_surface_key(order: &mut VecDeque<DisplaySurfaceKey>, key: DisplaySurfaceKey) {
+        if let Some(pos) = order.iter().position(|k| *k == key) {
+            order.remove(pos);
+        }
+        order.push_back(key);
+    }
+
     fn enforce_full_protocol_limit(
         inline: &mut HashMap<ImageCacheKey, CachedProtocol>,
         current: ImageCacheKey,
@@ -987,7 +995,7 @@ fn build_display_surface(
         .clamp(1, target_h)
         .max(1);
 
-    let resized = source.resize_exact(content_w, content_h, FilterType::Lanczos3);
+    let resized = source.resize_exact(content_w, content_h, FilterType::Triangle);
     let mut canvas: DynamicImage =
         ImageBuffer::from_pixel(target_w, target_h, Rgba([0u8, 0, 0, 0])).into();
     let x = ((target_w - content_w) / 2) as i64;
@@ -1198,6 +1206,38 @@ mod tests {
         }
 
         assert_eq!(c.display_surface_len(), MAX_DISPLAY_SURFACES);
+    }
+
+    #[test]
+    fn display_surfaces_use_lru_eviction_with_touch_on_read() {
+        let mut c = ImageCache::new();
+        let img = small_image();
+
+        for id in 0..(MAX_DISPLAY_SURFACES as u64) {
+            c.display_surface(TraceImageId(id), &img, 1, 10, 8, 16, 4);
+        }
+
+        // Touch id=0 so id=1 becomes least-recently-used.
+        c.display_surface(TraceImageId(0), &img, 1, 10, 8, 16, 4);
+        c.display_surface(
+            TraceImageId(MAX_DISPLAY_SURFACES as u64),
+            &img,
+            1,
+            10,
+            8,
+            16,
+            4,
+        );
+
+        assert_eq!(c.display_surface_len(), MAX_DISPLAY_SURFACES);
+        assert!(!c
+            .display_surfaces
+            .keys()
+            .any(|k| matches!(k.source, DisplaySurfaceSource::Trace(TraceImageId(1)))));
+        assert!(c
+            .display_surfaces
+            .keys()
+            .any(|k| matches!(k.source, DisplaySurfaceSource::Trace(TraceImageId(0)))));
     }
 
     #[test]
