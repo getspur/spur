@@ -45,17 +45,17 @@ const GRAPH_STATUS_HINT_PLAN_EPIC: &str =
     "[Graph] j/k: Nav  p: Open Plan  v: Text Mode  c: Comments  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
 const GRAPH_STATUS_HINT_PLAN_EPIC_COMPACT: &str = "[Graph] j/k: Nav  p: Plan  v: Text  c: Comments";
 const COMMENTS_STATUS_HINT: &str =
-    "[Comments] j/k: Nav  v: Graph/Text  c: Comments  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
+    "[Comments] j/k: Nav  f: Filter  r: Next Review  G: Bottom  v: Graph/Text  c: Comments  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
 const COMMENTS_STATUS_HINT_COMPACT: &str =
-    "[Comments] j/k: Nav  v: Graph/Text  c: Comments  Esc: Close";
+    "[Comments] j/k: Nav  f:Filter  r:Review  G:Bottom  v:Graph/Text";
 const COMMENTS_STATUS_HINT_EPIC: &str =
-    "[Comments] j/k: Nav  v: Graph/Text  c: Comments  e: Execute Item  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
+    "[Comments] j/k: Nav  f: Filter  r: Next Review  G: Bottom  v: Graph/Text  c: Comments  e: Execute Item  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
 const COMMENTS_STATUS_HINT_EPIC_COMPACT: &str =
-    "[Comments] j/k: Nav  e: Execute Item  v: Graph/Text  c: Comments";
+    "[Comments] j/k: Nav  f:Filter  r:Review  G:Bottom  e:Execute  v:Graph/Text";
 const COMMENTS_STATUS_HINT_PLAN_EPIC: &str =
-    "[Comments] j/k: Nav  p: Open Plan  v: Graph/Text  c: Comments  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
+    "[Comments] j/k: Nav  f: Filter  r: Next Review  G: Bottom  p: Open Plan  v: Graph/Text  c: Comments  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
 const COMMENTS_STATUS_HINT_PLAN_EPIC_COMPACT: &str =
-    "[Comments] j/k: Nav  p: Plan  v: Graph/Text  c: Comments";
+    "[Comments] j/k: Nav  f:Filter  r:Review  G:Bottom  p:Plan  v:Graph/Text";
 const LIST_STATUS_HINT: &str =
     "[List] j/k: Nav  Enter/o: Open Detail  v: View Graph  W: Work  r: Refresh  q: Quit";
 const LIST_STATUS_HINT_COMPACT: &str = "[List] j/k: Nav  o: Open  W: Work  r: Refresh";
@@ -777,7 +777,21 @@ impl IssueBrowserView {
             KeyCode::Char('q') if key.modifiers.is_empty() => Some(Action::Quit),
             KeyCode::Char('?') if key.modifiers.is_empty() => Some(Action::ShowHelp),
             KeyCode::Char('s') if key.modifiers.is_empty() => Some(Action::RequestSessions),
+            KeyCode::Char('f')
+                if key.modifiers.is_empty()
+                    && matches!(self.issue_focus, IssueFocus::Loaded { .. })
+                    && self.detail_mode == DetailMode::Comments =>
+            {
+                self.issue_comments_pane.cycle_filter();
+                None
+            }
             KeyCode::Char('r') if key.modifiers.is_empty() => {
+                if matches!(self.issue_focus, IssueFocus::Loaded { .. })
+                    && self.detail_mode == DetailMode::Comments
+                {
+                    self.issue_comments_pane.jump_to_next_review();
+                    return None;
+                }
                 self.bump_graph_data_epoch();
                 self.bump_detail_data_epoch();
 
@@ -823,6 +837,12 @@ impl IssueBrowserView {
                 None
             }
             KeyCode::Char('G') if key.modifiers.is_empty() => {
+                if matches!(self.issue_focus, IssueFocus::Loaded { .. })
+                    && self.detail_mode == DetailMode::Comments
+                {
+                    self.issue_comments_pane.jump_to_bottom();
+                    return None;
+                }
                 let count = self.tracked_issues.len();
                 self.issues_panel.select_last(count);
                 self.prefetch_selected_graph();
