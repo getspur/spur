@@ -522,7 +522,7 @@ fn typed_query_cmp(a: &RankedMention, b: &RankedMention, max_rank: u32) -> std::
     bucket_b
         .cmp(&bucket_a)
         .then(tier_rank(&a.entry.kind).cmp(&tier_rank(&b.entry.kind)))
-        .then(stable_tie_key(&a.entry).cmp(&stable_tie_key(&b.entry)))
+        .then(stable_tie_key(&a.entry).cmp(stable_tie_key(&b.entry)))
 }
 
 impl Default for MentionRegistry {
