@@ -853,7 +853,11 @@ impl ImageCache {
         current: ImageCacheKey,
         perf: &PerfStats,
     ) {
-        while inline.keys().filter(|key| key.is_slice()).count() >= MAX_INLINE_SLICE_PROTOCOLS {
+        if inline.contains_key(&current) {
+            return;
+        }
+
+        while order.len() > MAX_INLINE_SLICE_PROTOCOLS {
             let Some(key) = order.pop_front() else {
                 break;
             };
@@ -1165,6 +1169,34 @@ mod tests {
             (MAX_INLINE_SLICE_PROTOCOLS, 0),
             "scrolling should not cache every historical slice"
         );
+    }
+
+    #[test]
+    fn inline_slice_hits_at_capacity_do_not_evict() {
+        let mut c = ImageCache::new();
+        let img = small_image();
+        let p = picker();
+        c.perf.enabled = true;
+
+        for first_row in 0..(MAX_INLINE_SLICE_PROTOCOLS as u16) {
+            c.inline_trace_slice_protocol_mut(TraceImageId(1), &img, 1, first_row, 4, 256, &p);
+        }
+
+        let inline_slice_count =
+            |cache: &ImageCache| cache.inline.iter().filter(|(k, _)| k.is_slice()).count();
+        assert_eq!(inline_slice_count(&c), MAX_INLINE_SLICE_PROTOCOLS);
+
+        for i in 0..200 {
+            let first_row = (i % MAX_INLINE_SLICE_PROTOCOLS) as u16;
+            c.inline_trace_slice_protocol_mut(TraceImageId(1), &img, 1, first_row, 4, 256, &p);
+            assert_eq!(
+                inline_slice_count(&c),
+                MAX_INLINE_SLICE_PROTOCOLS,
+                "slice count should stay at capacity on hit {i}"
+            );
+        }
+
+        assert_eq!(c.perf.evictions_slice.load(Ordering::Relaxed), 0);
     }
 
     #[test]
