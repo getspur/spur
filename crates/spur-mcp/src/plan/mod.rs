@@ -17,6 +17,7 @@ pub mod projector;
 pub mod proposers;
 pub mod reconciler;
 pub mod scope_snapshot;
+pub mod shadow_projector;
 pub mod signal_watcher;
 pub mod signals;
 pub mod snapshot;
