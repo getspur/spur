@@ -843,6 +843,21 @@ impl Orchestrator {
                             let pm_call_started = std::time::Instant::now();
                             match pm.get_issue(&id).await {
                                 Ok(issue) => {
+                                    let mut comments = match pm.advanced() {
+                                        Some(advanced) => match advanced.list_comments(&id).await {
+                                            Ok(comments) => comments,
+                                            Err(error) => {
+                                                tracing::warn!(
+                                                    issue_id = %id,
+                                                    error = %error,
+                                                    "failed to load issue comments; continuing with empty comments"
+                                                );
+                                                Vec::new()
+                                            }
+                                        },
+                                        None => Vec::new(),
+                                    };
+                                    comments.sort_by_key(|comment| comment.created_at);
                                     let pm_get_issue_ms =
                                         pm_call_started.elapsed().as_millis() as u64;
                                     tracing::info!(
@@ -855,7 +870,7 @@ impl Orchestrator {
                                     );
                                     self.funnel.emit(SpurEventBody::IssueDetailFetched {
                                         requested_id: id,
-                                        issue: issue_to_detail_event(&issue),
+                                        issue: issue_to_detail_event(&issue, comments),
                                     });
                                 }
                                 Err(e) => {
@@ -919,6 +934,83 @@ impl Orchestrator {
                                 operation: "UpdateIssue".into(),
                                 error: "No issue tracker configured".into(),
                                 id: None,
+                            });
+                        }
+                    }
+
+                    // ── AddIssueComment ──────────────────────────────────
+                    InteractiveInput::AddIssueComment { issue_id, body } => {
+                        if let Some(pm) = &self.pm_service {
+                            if body.trim().is_empty() {
+                                self.funnel.emit(SpurEventBody::IssueCommandError {
+                                    operation: "AddIssueComment".into(),
+                                    error: "Comment body cannot be empty".into(),
+                                    id: Some(issue_id),
+                                });
+                                continue;
+                            }
+                            match pm.advanced() {
+                                Some(advanced) => {
+                                    match advanced.add_comment(&issue_id, body.trim()).await {
+                                        Ok(_) => match pm.get_issue(&issue_id).await {
+                                            Ok(issue) => {
+                                                let mut comments = match advanced
+                                                    .list_comments(&issue_id)
+                                                    .await
+                                                {
+                                                    Ok(comments) => comments,
+                                                    Err(error) => {
+                                                        tracing::warn!(
+                                                            issue_id = %issue_id,
+                                                            error = %error,
+                                                            "failed to reload comments after add_comment; continuing with empty comments"
+                                                        );
+                                                        Vec::new()
+                                                    }
+                                                };
+                                                comments.sort_by_key(|comment| comment.created_at);
+                                                self.funnel.emit(
+                                                    SpurEventBody::IssueDetailFetched {
+                                                        requested_id: issue_id,
+                                                        issue: issue_to_detail_event(
+                                                            &issue, comments,
+                                                        ),
+                                                    },
+                                                );
+                                            }
+                                            Err(error) => {
+                                                self.funnel.emit(
+                                                    SpurEventBody::IssueCommandError {
+                                                        operation: "AddIssueComment".into(),
+                                                        error: error.to_string(),
+                                                        id: Some(issue_id),
+                                                    },
+                                                );
+                                            }
+                                        },
+                                        Err(error) => {
+                                            self.funnel.emit(SpurEventBody::IssueCommandError {
+                                                operation: "AddIssueComment".into(),
+                                                error: error.to_string(),
+                                                id: Some(issue_id),
+                                            });
+                                        }
+                                    }
+                                }
+                                None => {
+                                    self.funnel.emit(SpurEventBody::IssueCommandError {
+                                        operation: "AddIssueComment".into(),
+                                        error: "Comment write not supported for this issue backend"
+                                            .into(),
+                                        id: Some(issue_id),
+                                    });
+                                }
+                            }
+                        } else {
+                            self.funnel.emit(SpurEventBody::IssueCommandError {
+                                operation: "AddIssueComment".into(),
+                                error: "No issue tracker configured".into(),
+                                id: Some(issue_id),
                             });
                         }
                     }
