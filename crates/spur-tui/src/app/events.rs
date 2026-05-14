@@ -494,7 +494,9 @@ impl App {
         };
         let issue_snapshot_changed = matches!(
             &event.body,
-            SpurEventBody::IssuesLoaded { .. } | SpurEventBody::IssueUpdated { .. }
+            SpurEventBody::IssuesLoaded { .. }
+                | SpurEventBody::IssueUpdated { .. }
+                | SpurEventBody::IssueCreated { .. }
         );
         self.dashboard.handle_spur_event(&event, &ctx);
         if issue_snapshot_changed {
