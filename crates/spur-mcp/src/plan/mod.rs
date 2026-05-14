@@ -17,6 +17,7 @@ pub mod projector;
 pub mod proposers;
 pub mod reconciler;
 pub mod scope_snapshot;
+pub mod shadow_projector;
 pub mod signal_watcher;
 pub mod signals;
 pub mod snapshot;
@@ -535,6 +536,48 @@ impl PlanState {
             .map(|entry| entry.spec.task_id.clone())
             .collect()
     }
+}
+
+fn assert_attempt_history_monotonic(
+    plan_id: &str,
+    task_id: &str,
+    entry: &PlanTaskEntry,
+    site: &str,
+) {
+    let monotonic = entry
+        .history
+        .windows(2)
+        .all(|pair| pair[0].attempt <= pair[1].attempt);
+    assert!(
+        monotonic && entry.history.iter().all(|record| record.attempt <= entry.attempt),
+        "invariant:{site} monotonic attempt history violated (plan_id={}, task_id={}) expected attempt history to be non-decreasing and <= current attempt, got entry.attempt={:?}, history_attempts={:?}",
+        plan_id,
+        task_id,
+        entry.attempt,
+        entry.history.iter().map(|record| record.attempt).collect::<Vec<_>>(),
+    );
+}
+
+fn assert_dispatched_base_oid_for_active_status(
+    plan_id: &str,
+    task_id: &str,
+    entry: &PlanTaskEntry,
+    site: &str,
+) {
+    let requires_base_oid = matches!(
+        entry.status,
+        PlanTaskStatus::Dispatched { .. }
+            | PlanTaskStatus::AwaitingReview { .. }
+            | PlanTaskStatus::Approved { .. }
+    );
+    assert!(
+        !requires_base_oid || entry.dispatched_base_oid.is_some(),
+        "invariant:{site} dispatched_base_oid missing for active status (plan_id={}, task_id={}) expected dispatched_base_oid=Some(_) whenever status is Dispatched/AwaitingReview/Approved, got status={:?}, dispatched_base_oid={:?}",
+        plan_id,
+        task_id,
+        entry.status,
+        entry.dispatched_base_oid,
+    );
 }
 
 /// Returns the most recent delegation id for a task entry, falling back to
@@ -3545,9 +3588,24 @@ pub async fn review_task(
                 .iter_mut()
                 .find(|t| t.spec.task_id == task_id)
                 .unwrap();
+            let pre_approval_worker_branch = entry.worker_branch.clone();
             entry.status = PlanTaskStatus::Approved {
                 summary: summary.clone(),
             };
+            assert!(
+                pre_approval_worker_branch.is_none() || entry.worker_branch == pre_approval_worker_branch,
+                "invariant:review_task approve preserves worker_branch violated (plan_id={}, task_id={}) expected worker_branch to remain populated across AwaitingReview->Approved when it was present, got before={:?}, after={:?}",
+                plan_id,
+                task_id,
+                pre_approval_worker_branch,
+                entry.worker_branch,
+            );
+            assert_dispatched_base_oid_for_active_status(
+                plan_id,
+                task_id,
+                entry,
+                "review_task approve",
+            );
             let issue_id = entry.spec.issue_id.clone();
 
             // Beads sync (non-blocking).
@@ -3577,6 +3635,7 @@ pub async fn review_task(
             entry.status = PlanTaskStatus::Rejected {
                 feedback: feedback.map(String::from),
             };
+            assert_attempt_history_monotonic(plan_id, task_id, entry, "review_task reject");
             let issue_id = entry.spec.issue_id.clone();
 
             if let Some(pm) = pm {
@@ -3619,6 +3678,12 @@ pub async fn review_task(
                     entry.status = PlanTaskStatus::Rejected {
                         feedback: Some(exhausted_fb.clone()),
                     };
+                    assert_attempt_history_monotonic(
+                        plan_id,
+                        task_id,
+                        entry,
+                        "review_task request_changes auto_reject",
+                    );
                     warnings.push(format!(
                         "auto-rejected: MAX_ATTEMPTS ({MAX_ATTEMPTS}) reached"
                     ));
@@ -3704,6 +3769,18 @@ pub async fn review_task(
             entry.result = None;
             entry.worker_branch = None;
             entry.status = PlanTaskStatus::Pending;
+            assert_attempt_history_monotonic(
+                plan_id,
+                task_id,
+                entry,
+                "review_task request_changes",
+            );
+            assert_dispatched_base_oid_for_active_status(
+                plan_id,
+                task_id,
+                entry,
+                "review_task request_changes",
+            );
 
             let issue_id_for_audit = entry.spec.issue_id.clone();
             // Capture before result is reset by the lines above (it's already
@@ -4157,9 +4234,24 @@ fn apply_decision_and_extract(
                 .unwrap();
             let issue_id = entry.spec.issue_id.clone();
             let last_del_id = entry.last_delegation_id.clone();
+            let pre_approval_worker_branch = entry.worker_branch.clone();
             entry.status = PlanTaskStatus::Approved {
                 summary: summary.clone(),
             };
+            assert!(
+                pre_approval_worker_branch.is_none() || entry.worker_branch == pre_approval_worker_branch,
+                "invariant:apply_decision approve preserves worker_branch violated (plan_id={}, task_id={}) expected worker_branch to remain populated across AwaitingReview->Approved when it was present, got before={:?}, after={:?}",
+                plan_id,
+                task_id,
+                pre_approval_worker_branch,
+                entry.worker_branch,
+            );
+            assert_dispatched_base_oid_for_active_status(
+                plan_id,
+                task_id,
+                entry,
+                "apply_decision approve",
+            );
 
             // Stage audit sentinel — emitted outside the lock.
             audit_emits.push(PendingAuditEmit::Approval {
@@ -4199,6 +4291,7 @@ fn apply_decision_and_extract(
             entry.status = PlanTaskStatus::Rejected {
                 feedback: feedback.map(String::from),
             };
+            assert_attempt_history_monotonic(plan_id, task_id, entry, "apply_decision reject");
 
             // Stage audit sentinel — emitted outside the lock.
             audit_emits.push(PendingAuditEmit::Rejection {
@@ -4243,6 +4336,12 @@ fn apply_decision_and_extract(
                     entry.status = PlanTaskStatus::Rejected {
                         feedback: Some(exhausted_fb.clone()),
                     };
+                    assert_attempt_history_monotonic(
+                        plan_id,
+                        task_id,
+                        entry,
+                        "apply_decision request_changes auto_reject",
+                    );
                     warnings.push(format!(
                         "auto-rejected: MAX_ATTEMPTS ({MAX_ATTEMPTS}) reached"
                     ));
@@ -4338,6 +4437,18 @@ fn apply_decision_and_extract(
             entry.result = None;
             entry.worker_branch = None;
             entry.status = PlanTaskStatus::Pending;
+            assert_attempt_history_monotonic(
+                plan_id,
+                task_id,
+                entry,
+                "apply_decision request_changes",
+            );
+            assert_dispatched_base_oid_for_active_status(
+                plan_id,
+                task_id,
+                entry,
+                "apply_decision request_changes",
+            );
 
             let issue_id_for_audit = entry.spec.issue_id.clone();
             let attempt_summary = entry
@@ -4753,9 +4864,17 @@ fn mark_descendants_failed(
                 PlanTaskStatus::Pending | PlanTaskStatus::Ready
             );
             if should_fail {
+                let was_approved = matches!(entry.status, PlanTaskStatus::Approved { .. });
                 entry.status = PlanTaskStatus::Failed {
                     error: format!("upstream '{parent}' rejected"),
                 };
+                assert!(
+                    !was_approved,
+                    "invariant:mark_descendants_failed approved task cascaded to failed violated (plan_id={}, task_id={}) expected rejection cascade to skip already-approved tasks, got prior_status=Approved and new_status={:?}",
+                    state.plan_id,
+                    dep_id,
+                    entry.status,
+                );
                 queue.push_back(dep_id);
             } else {
                 warnings.push(format!(

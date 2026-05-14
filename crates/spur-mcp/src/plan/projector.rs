@@ -1,15 +1,28 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 
 use spur_acp::{BrainSessionId, SessionId};
 
 use super::{PlanState, PlanTask, PlanTaskEntry, PlanTaskStatus};
 use crate::plan::audit_sentinel::{AuditSentinelKind, CompletionState, EpicCompletionOutcome};
+use crate::plan::shadow_projector::{shadow_project_plan_from_beads, TaskAuditLog};
 
 const LEGACY_DELEGATION_ID_PREFIX: &str = "delegation-id:";
 const LEGACY_READY_FOR_REVIEW: &str = "ready-for-review";
 const LEGACY_REVIEW_REJECTED: &str = "review-rejected";
 const MUTATION_ID_PREFIX: &str = "spur:mutation-id:";
 const SUPERSEDED_BY_PREFIX: &str = "spur:superseded-by:";
+const SHADOW_PROJECTOR_ENV: &str = "SPUR_SHADOW_PROJECTOR";
+
+fn shadow_projector_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var(SHADOW_PROJECTOR_ENV).ok().as_deref(),
+            Some("off") | Some("OFF") | Some("0") | Some("false") | Some("FALSE")
+        )
+    })
+}
 
 pub fn sort_projection_comments(mut comments: Vec<spur_pm::Comment>) -> Vec<spur_pm::Comment> {
     comments.sort_by(|left, right| {
@@ -166,6 +179,18 @@ pub fn latest_completion_facts(audits: &[AuditSentinelKind]) -> Option<Completio
         }
     }
 
+    // Failed/Cancelled completions legitimately carry `None` worker_branch
+    // when the worker never started (lease expiry, setup conflict).
+    assert!(
+        latest.as_ref().is_none_or(
+            |(completion_state, worker_branch, _, _, _)| {
+                !matches!(completion_state, CompletionState::AwaitingReview)
+                    || worker_branch.is_some()
+            }
+        ),
+        "invariant:latest_completion_facts worker_branch missing violated expected latest AwaitingReview Completion facts to include worker_branch, got latest={:?}",
+        latest,
+    );
     latest
 }
 
@@ -340,32 +365,21 @@ pub fn project_status_for_issue(
     ready_now: bool,
     closed_status: &str,
 ) -> PlanTaskStatus {
-    if issue.status == closed_status {
-        return project_closed_status(issue, audits);
-    }
-
-    if has_integration_conflict_label(&issue.labels) {
+    let status = if issue.status == closed_status {
+        project_closed_status(issue, audits)
+    } else if has_integration_conflict_label(&issue.labels) {
         let (dep_task_id, files) =
             latest_integration_conflict(audits).unwrap_or_else(|| ("unknown".to_string(), vec![]));
-        return PlanTaskStatus::BlockedOnSetupConflict { dep_task_id, files };
-    }
-
-    if let Some(delegation_id) = issue
+        PlanTaskStatus::BlockedOnSetupConflict { dep_task_id, files }
+    } else if let Some(delegation_id) = issue
         .labels
         .iter()
         .find_map(|label| parse_delegation_id_compat(label))
     {
-        return PlanTaskStatus::Dispatched {
+        PlanTaskStatus::Dispatched {
             delegation_id: delegation_id.to_string(),
-        };
-    }
-
-    // bd-2m2u Phase 2d — `signal:escalated` marks an open issue whose
-    // auto-retry budget (1 attempt) is exhausted and is awaiting a brain
-    // `submit_plan_mutation` decision. The label is cleared by
-    // `submit_plan_mutation` on success, so a present label is authoritative
-    // for the projection.
-    if issue
+        }
+    } else if issue
         .labels
         .iter()
         .any(|label| label.as_str() == crate::plan::mutation_executor::SIGNAL_ESCALATED_LABEL)
@@ -380,20 +394,72 @@ pub fn project_status_for_issue(
                 _ => None,
             })
             .unwrap_or_else(|| "escalated to brain".to_string());
-        return PlanTaskStatus::EscalatedToBrain { last_error };
-    }
-
-    if has_ready_for_review_label_compat(&issue.labels) {
+        PlanTaskStatus::EscalatedToBrain { last_error }
+    } else if has_ready_for_review_label_compat(&issue.labels) {
         let summary =
             latest_completion_facts(audits).and_then(|(_, _, result_summary, _, _)| result_summary);
-        return PlanTaskStatus::AwaitingReview { summary };
-    }
-
-    if ready_now {
+        PlanTaskStatus::AwaitingReview { summary }
+    } else if ready_now {
         PlanTaskStatus::Ready
     } else {
         PlanTaskStatus::Pending
+    };
+
+    // bd-2m2u Phase 2d — `signal:escalated` marks an open issue whose
+    // auto-retry budget (1 attempt) is exhausted and is awaiting a brain
+    // `submit_plan_mutation` decision. The label is cleared by
+    // `submit_plan_mutation` on success, so a present label is authoritative
+    // for the projection.
+    if issue.status == closed_status {
+        let latest_terminal_audit = audits.iter().rev().find_map(|audit| match audit {
+            AuditSentinelKind::Approval { .. } => Some("approval"),
+            AuditSentinelKind::Rejection { .. } => Some("rejection"),
+            AuditSentinelKind::Completion {
+                completion_state: CompletionState::Failed { .. },
+                ..
+            } => Some("completion_failed"),
+            AuditSentinelKind::Completion {
+                completion_state: CompletionState::Cancelled { .. },
+                ..
+            } => Some("completion_cancelled"),
+            _ => None,
+        });
+        let consistent = match latest_terminal_audit {
+            Some("approval") => matches!(status, PlanTaskStatus::Approved { .. }),
+            Some("rejection") => matches!(status, PlanTaskStatus::Rejected { .. }),
+            Some("completion_failed") => matches!(status, PlanTaskStatus::Failed { .. }),
+            Some("completion_cancelled") => matches!(status, PlanTaskStatus::Cancelled { .. }),
+            _ => true,
+        };
+        assert!(
+            consistent,
+            "invariant:project_status_for_issue terminal audit/status mismatch violated (issue_id={}, closed_status={}) expected projected status to match latest terminal audit, got latest_terminal_audit={:?}, status={:?}",
+            issue.id,
+            closed_status,
+            latest_terminal_audit,
+            status,
+        );
     }
+    assert!(
+        !issue
+            .labels
+            .iter()
+            .any(|label| parse_delegation_id_compat(label).is_some())
+            || matches!(status, PlanTaskStatus::Dispatched { .. }),
+        "invariant:project_status_for_issue delegation label/status mismatch violated (issue_id={}, status={:?}) expected Dispatched when delegation label exists, labels={:?}",
+        issue.id,
+        status,
+        issue.labels,
+    );
+    assert!(
+        !has_ready_for_review_label_compat(&issue.labels)
+            || matches!(status, PlanTaskStatus::AwaitingReview { .. } | PlanTaskStatus::Approved { .. }),
+        "invariant:project_status_for_issue ready-for-review label/status mismatch violated (issue_id={}, status={:?}) expected AwaitingReview/Approved when ready-for-review label exists, labels={:?}",
+        issue.id,
+        status,
+        issue.labels,
+    );
+    status
 }
 
 pub fn project_closed_status(
@@ -457,6 +523,25 @@ pub fn project_closed_status(
     }
 }
 
+fn latest_terminal_audit_kind(audits: &[AuditSentinelKind]) -> Option<&'static str> {
+    for audit in audits.iter().rev() {
+        match audit {
+            AuditSentinelKind::Approval { .. } => return Some("approval"),
+            AuditSentinelKind::Rejection { .. } => return Some("rejection"),
+            AuditSentinelKind::Completion {
+                completion_state: CompletionState::Failed,
+                ..
+            } => return Some("completion_failed"),
+            AuditSentinelKind::Completion {
+                completion_state: CompletionState::Cancelled,
+                ..
+            } => return Some("completion_cancelled"),
+            _ => {}
+        }
+    }
+    None
+}
+
 pub fn recompute_open_statuses(tasks: &mut [PlanTaskEntry]) {
     let approved_or_cancelled: HashSet<String> = tasks
         .iter()
@@ -484,6 +569,105 @@ pub fn recompute_open_statuses(tasks: &mut [PlanTaskEntry]) {
                 PlanTaskStatus::Pending
             };
         }
+    }
+}
+
+fn emit_shadow_projector_mismatch_warnings(
+    plan_id: &str,
+    legacy: &PlanState,
+    shadow: &PlanState,
+    audit_comment_count: usize,
+) {
+    let legacy_by_task: HashMap<&str, &PlanTaskEntry> = legacy
+        .tasks
+        .iter()
+        .map(|entry| (entry.spec.task_id.as_str(), entry))
+        .collect();
+    let shadow_by_task: HashMap<&str, &PlanTaskEntry> = shadow
+        .tasks
+        .iter()
+        .map(|entry| (entry.spec.task_id.as_str(), entry))
+        .collect();
+
+    let mut task_ids: Vec<&str> = legacy_by_task
+        .keys()
+        .copied()
+        .chain(shadow_by_task.keys().copied())
+        .collect();
+    task_ids.sort_unstable();
+    task_ids.dedup();
+
+    let mut differing_task_ids: Vec<String> = Vec::new();
+    let mut differing_fields: Vec<String> = Vec::new();
+    let mut mismatches: Vec<String> = Vec::new();
+
+    for task_id in task_ids {
+        let legacy_entry = legacy_by_task.get(task_id).copied();
+        let shadow_entry = shadow_by_task.get(task_id).copied();
+        let Some((legacy_entry, shadow_entry)) = legacy_entry.zip(shadow_entry) else {
+            differing_task_ids.push(task_id.to_string());
+            differing_fields.push("task_presence".to_string());
+            mismatches.push(format!(
+                "{task_id}.task_presence legacy={:?} shadow={:?}",
+                legacy_entry.map(|_| "present"),
+                shadow_entry.map(|_| "present"),
+            ));
+            continue;
+        };
+
+        let checks = [
+            (
+                "status",
+                format!("{:?}", legacy_entry.status),
+                format!("{:?}", shadow_entry.status),
+            ),
+            (
+                "worker_branch",
+                format!("{:?}", legacy_entry.worker_branch),
+                format!("{:?}", shadow_entry.worker_branch),
+            ),
+            (
+                "dispatched_base_oid",
+                format!("{:?}", legacy_entry.dispatched_base_oid),
+                format!("{:?}", shadow_entry.dispatched_base_oid),
+            ),
+            (
+                "last_delegation_id",
+                format!("{:?}", legacy_entry.last_delegation_id),
+                format!("{:?}", shadow_entry.last_delegation_id),
+            ),
+            (
+                "attempt",
+                legacy_entry.attempt.to_string(),
+                shadow_entry.attempt.to_string(),
+            ),
+        ];
+
+        for (field, legacy_value, shadow_value) in checks {
+            if legacy_value != shadow_value {
+                differing_task_ids.push(task_id.to_string());
+                differing_fields.push(field.to_string());
+                mismatches.push(format!(
+                    "{task_id}.{field} legacy={legacy_value} shadow={shadow_value}"
+                ));
+            }
+        }
+    }
+
+    if !mismatches.is_empty() {
+        differing_task_ids.sort();
+        differing_task_ids.dedup();
+        differing_fields.sort();
+        differing_fields.dedup();
+        tracing::warn!(
+            target: "spur.plan.shadow_projector",
+            plan_id = %plan_id,
+            task_ids = %differing_task_ids.join(","),
+            fields = %differing_fields.join(","),
+            mismatches = ?mismatches,
+            audit_comment_count,
+            "shadow-projector mismatch: legacy projection differs from audit-only fold",
+        );
     }
 }
 
@@ -614,7 +798,7 @@ pub async fn project_plan_from_beads(
         .collect();
     let mut entries = Vec::with_capacity(projected_tasks.len());
 
-    for projected_task in projected_tasks {
+    for projected_task in &projected_tasks {
         let (_attempt_count, last_delegation_id) = project_attempt_facts(&projected_task.audits);
         let history = project_attempt_history(&projected_task.audits);
         let completion = latest_completion_facts(&projected_task.audits);
@@ -629,6 +813,9 @@ pub async fn project_plan_from_beads(
             false,
             &closed_status,
         );
+        let latest_completion = latest_completion_facts(&projected_task.audits);
+        let issue_is_closed = projected_task.issue.status == closed_status;
+        let terminal_audit = latest_terminal_audit_kind(&projected_task.audits);
         let attempt = project_entry_attempt(&projected_task.audits, &status);
         let depends_on = projected_task
             .issue
@@ -647,13 +834,13 @@ pub async fn project_plan_from_beads(
 
         entries.push(PlanTaskEntry {
             spec: PlanTask {
-                task_id: projected_task.task_id,
+                task_id: projected_task.task_id.clone(),
                 agent,
                 task: projected_task.issue.body.clone(),
                 depends_on,
                 issue_id: Some(projected_task.issue.id.clone()),
                 issue_title: Some(projected_task.issue.title.clone()),
-                context_files: projected_task.context_files,
+                context_files: projected_task.context_files.clone(),
             },
             status,
             result: None,
@@ -663,6 +850,63 @@ pub async fn project_plan_from_beads(
             last_delegation_id,
             dispatched_base_oid,
         });
+        let entry = entries.last().expect("entry was just pushed");
+        let history_monotonic = entry
+            .history
+            .windows(2)
+            .all(|pair| pair[0].attempt <= pair[1].attempt);
+        assert!(
+            history_monotonic && entry.history.iter().all(|record| record.attempt <= entry.attempt),
+            "invariant:project_plan_from_beads attempt monotonicity violated (plan_id={}, task_id={}) expected history attempts to be non-decreasing and <= current attempt, got current_attempt={:?}, history_attempts={:?}",
+            plan_id,
+            entry.spec.task_id,
+            entry.attempt,
+            entry.history.iter().map(|record| record.attempt).collect::<Vec<_>>(),
+        );
+        assert!(
+            !matches!(entry.status, PlanTaskStatus::Approved { .. } | PlanTaskStatus::AwaitingReview { .. })
+                || latest_completion
+                    .as_ref()
+                    .and_then(|(_, worker_branch, _, _, _)| worker_branch.as_ref())
+                    .is_none()
+                || entry.worker_branch.is_some(),
+            "invariant:project_plan_from_beads worker_branch missing after populated completion violated (plan_id={}, task_id={}) expected worker_branch=Some(_) for Approved/AwaitingReview when latest Completion has worker_branch, got status={:?}, latest_completion={:?}, entry.worker_branch={:?}",
+            plan_id,
+            entry.spec.task_id,
+            entry.status,
+            latest_completion,
+            entry.worker_branch,
+        );
+        assert!(
+            !matches!(entry.status, PlanTaskStatus::AwaitingReview { .. } | PlanTaskStatus::Approved { .. })
+                || entry.dispatched_base_oid.is_some(),
+            "invariant:project_plan_from_beads dispatched_base_oid missing for completion-derived status violated (plan_id={}, task_id={}) expected dispatched_base_oid=Some(_) for AwaitingReview/Approved, got status={:?}, dispatched_base_oid={:?}",
+            plan_id,
+            entry.spec.task_id,
+            entry.status,
+            entry.dispatched_base_oid,
+        );
+        if issue_is_closed {
+            if let Some(terminal_audit) = terminal_audit {
+                let consistent = match terminal_audit {
+                    "approval" => matches!(entry.status, PlanTaskStatus::Approved { .. }),
+                    "rejection" => matches!(entry.status, PlanTaskStatus::Rejected { .. }),
+                    "completion_failed" => matches!(entry.status, PlanTaskStatus::Failed { .. }),
+                    "completion_cancelled" => {
+                        matches!(entry.status, PlanTaskStatus::Cancelled { .. })
+                    }
+                    _ => true,
+                };
+                assert!(
+                    consistent,
+                    "invariant:project_plan_from_beads terminal audit/status mismatch violated (plan_id={}, task_id={}) expected projected status to match latest terminal audit, got latest_terminal_audit={:?}, status={:?}",
+                    plan_id,
+                    entry.spec.task_id,
+                    terminal_audit,
+                    entry.status,
+                );
+            }
+        }
     }
 
     recompute_open_statuses(&mut entries);
@@ -670,7 +914,7 @@ pub async fn project_plan_from_beads(
     let brain_session_id = plan_submit_brain_session_id(&epic_audits)
         .unwrap_or_else(|| BrainSessionId::new(SessionId(format!("persisted-plan:{plan_id}"))));
 
-    Ok(PlanState {
+    let legacy_state = PlanState {
         plan_id: plan_id.to_string(),
         tasks: entries,
         brain_session_id,
@@ -678,7 +922,35 @@ pub async fn project_plan_from_beads(
         base_snapshot_oid: plan_submit_base_snapshot_oid(&epic_audits),
         merge_state: crate::plan::PlanMergeState::NotStarted,
         epic_id: Some(epic.id),
-    })
+    };
+
+    if shadow_projector_enabled() {
+        let shadow_logs: Vec<TaskAuditLog> = legacy_state
+            .tasks
+            .iter()
+            .map(|entry| {
+                let audits = projected_tasks
+                    .iter()
+                    .find(|task| task.task_id == entry.spec.task_id)
+                    .map(|task| task.audits.clone())
+                    .unwrap_or_default();
+                TaskAuditLog {
+                    spec: entry.spec.clone(),
+                    audits,
+                }
+            })
+            .collect();
+        let shadow_state = shadow_project_plan_from_beads(plan_id, &shadow_logs);
+        let audit_comment_count: usize = shadow_logs.iter().map(|task| task.audits.len()).sum();
+        emit_shadow_projector_mismatch_warnings(
+            plan_id,
+            &legacy_state,
+            &shadow_state,
+            audit_comment_count,
+        );
+    }
+
+    Ok(legacy_state)
 }
 
 #[cfg(test)]
