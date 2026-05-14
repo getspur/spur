@@ -1242,6 +1242,11 @@ impl App {
                             message: EXECUTE_EDIT_HINT.to_string(),
                         });
                     }
+                    crate::action::IssueAction::AddComment { issue_id, body } => {
+                        if let Some(ref tx) = self.user_input_tx {
+                            let _ = tx.try_send(UserInput::AddIssueComment { issue_id, body });
+                        }
+                    }
                 }
             }
         }

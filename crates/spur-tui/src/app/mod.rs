@@ -172,6 +172,11 @@ pub enum UserInput {
         id: String,
         update: spur_pm::IssueUpdate,
     },
+    /// Add a new comment to an issue via PM backend.
+    AddIssueComment {
+        issue_id: String,
+        body: String,
+    },
 }
 
 /// Tracks the brain agent's current state for status indicators.
