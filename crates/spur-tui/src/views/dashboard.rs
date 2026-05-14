@@ -2071,8 +2071,46 @@ impl View for DashboardView {
                     .unwrap_or_default();
                 self.activity_log.push(LogEntry {
                     timestamp: Self::now_stamp(),
-                    prefix: "[pm]".to_string(),
+                    prefix: "[pm]".into(),
                     message: format!("Issue {} ({}) updated{}", id, source, status_suffix),
+                    kind: LogEntryKind::Info,
+                });
+            }
+
+            SpurEventBody::IssueCreated { issue } => {
+                let created_issue = spur_pm::IssueSummary {
+                    id: issue.id.clone(),
+                    source: match issue.source.as_str() {
+                        "github" => spur_pm::PmSource::GitHub,
+                        "linear" => spur_pm::PmSource::Linear,
+                        "plane" => spur_pm::PmSource::Plane,
+                        _ => spur_pm::PmSource::Beads,
+                    },
+                    title: issue.title.clone(),
+                    status: issue.status.clone(),
+                    labels: issue.labels.clone(),
+                    url: String::new(),
+                    priority: issue.priority,
+                    issue_type: issue.issue_type.clone(),
+                    assignee: issue.assignee.clone(),
+                    description: issue.description.clone(),
+                };
+                if let Some(existing) = self
+                    .tracked_issues
+                    .iter_mut()
+                    .find(|existing| existing.id == created_issue.id)
+                {
+                    *existing = created_issue;
+                } else {
+                    self.tracked_issues.push(created_issue);
+                }
+                self.tracked_issues
+                    .sort_by(|a, b| a.priority.unwrap_or(99).cmp(&b.priority.unwrap_or(99)));
+                self.refresh_mention_issues();
+                self.activity_log.push(LogEntry {
+                    timestamp: Self::now_stamp(),
+                    prefix: "[pm]".into(),
+                    message: format!("Issue {} ({}) created", issue.id, issue.source),
                     kind: LogEntryKind::Info,
                 });
             }
@@ -2559,6 +2597,112 @@ mod tick_tests {
 
         assert!(dash.tick_and_report_flush());
         assert!(!dash.tick_and_report_flush());
+    }
+}
+
+#[cfg(test)]
+mod issue_created_tests {
+    use super::*;
+    use crate::mentions::{CompletionScope, MentionKind};
+
+    fn summary_event(id: &str, priority: Option<i32>, status: &str) -> spur_acp::IssueSummaryEvent {
+        spur_acp::IssueSummaryEvent {
+            id: id.into(),
+            source: "beads".into(),
+            title: format!("Issue {id}"),
+            status: status.into(),
+            labels: Vec::new(),
+            priority,
+            issue_type: Some("task".into()),
+            assignee: Some("alice".into()),
+            description: Some("desc".into()),
+        }
+    }
+
+    fn issue_summary(id: &str, priority: Option<i32>, status: &str) -> spur_pm::IssueSummary {
+        spur_pm::IssueSummary {
+            id: id.into(),
+            source: spur_pm::PmSource::Beads,
+            title: format!("Issue {id}"),
+            status: status.into(),
+            labels: Vec::new(),
+            url: String::new(),
+            priority,
+            issue_type: Some("task".into()),
+            assignee: Some("alice".into()),
+            description: Some("desc".into()),
+        }
+    }
+
+    #[test]
+    fn issue_created_refreshes_dashboard_mention_registry_for_new_issue() {
+        let mut dash = DashboardView::new();
+        dash.set_issue_snapshot(vec![issue_summary("bd-1", Some(2), "open")]);
+
+        dash.handle_spur_event(
+            &SpurEvent::now(SpurEventBody::IssueCreated {
+                issue: summary_event("bd-2", Some(1), "open"),
+            }),
+            &crate::views::ViewContext::test_ctx(&ExecutorLineage::new()),
+        );
+
+        let sid = spur_acp::SessionId::new();
+        let hits = dash.mention_registry.borrow_mut().query(
+            CompletionScope::Session(&sid),
+            std::env::temp_dir().as_path(),
+            "bd-2",
+            20,
+        );
+        assert!(hits
+            .iter()
+            .any(|hit| { hit.kind == MentionKind::Issue && hit.uri == "issue://beads/bd-2" }));
+    }
+
+    #[test]
+    fn issue_created_appends_sorted_and_upserts_without_duplicates() {
+        let mut dash = DashboardView::new();
+        dash.set_issue_snapshot(vec![
+            issue_summary("bd-1", Some(2), "open"),
+            issue_summary("bd-3", Some(3), "open"),
+        ]);
+
+        let lineage = ExecutorLineage::new();
+        let ctx = crate::views::ViewContext::test_ctx(&lineage);
+        dash.handle_spur_event(
+            &SpurEvent::now(SpurEventBody::IssueCreated {
+                issue: summary_event("bd-2", Some(1), "open"),
+            }),
+            &ctx,
+        );
+        assert_eq!(dash.tracked_issues.len(), 3);
+        assert_eq!(dash.tracked_issues[0].id, "bd-2");
+
+        dash.handle_spur_event(
+            &SpurEvent::now(SpurEventBody::IssueCreated {
+                issue: summary_event("bd-2", Some(0), "closed"),
+            }),
+            &ctx,
+        );
+
+        assert_eq!(dash.tracked_issues.len(), 3);
+        let bd2 = dash
+            .tracked_issues
+            .iter()
+            .find(|i| i.id == "bd-2")
+            .expect("bd-2 should be present");
+        assert_eq!(bd2.status, "closed");
+        assert_eq!(bd2.priority, Some(0));
+
+        let sid = spur_acp::SessionId::new();
+        let hits = dash.mention_registry.borrow_mut().query(
+            CompletionScope::Session(&sid),
+            std::env::temp_dir().as_path(),
+            "bd-2",
+            20,
+        );
+        assert!(hits
+            .iter()
+            .any(|hit| hit.kind == MentionKind::Issue && hit.uri == "issue://beads/bd-2"));
     }
 }
 

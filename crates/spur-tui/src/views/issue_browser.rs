@@ -1359,6 +1359,60 @@ impl View for IssueBrowserView {
                 self.invalidate_graph_cache_entries_containing_issue(id);
             }
 
+            spur_acp::SpurEventBody::IssueCreated { issue } => {
+                let preferred_id = self
+                    .issues_panel
+                    .selected_id(&self.tracked_issues)
+                    .map(String::from);
+                let created_issue = spur_pm::IssueSummary {
+                    id: issue.id.clone(),
+                    source: match issue.source.as_str() {
+                        "github" => spur_pm::PmSource::GitHub,
+                        "linear" => spur_pm::PmSource::Linear,
+                        "plane" => spur_pm::PmSource::Plane,
+                        _ => spur_pm::PmSource::Beads,
+                    },
+                    title: issue.title.clone(),
+                    status: issue.status.clone(),
+                    labels: issue.labels.clone(),
+                    url: String::new(),
+                    priority: issue.priority,
+                    issue_type: issue.issue_type.clone(),
+                    assignee: issue.assignee.clone(),
+                    description: issue.description.clone(),
+                };
+                let created_id = created_issue.id.clone();
+                if let Some(existing) = self
+                    .tracked_issues
+                    .iter_mut()
+                    .find(|existing| existing.id == created_id)
+                {
+                    *existing = created_issue;
+                } else {
+                    self.tracked_issues.push(created_issue);
+                }
+                sort_issues_parent_first(&mut self.tracked_issues);
+
+                if !self.tracked_issues.is_empty() {
+                    let selected = preferred_id
+                        .as_deref()
+                        .is_some_and(|id| self.issues_panel.select_by_id(id, &self.tracked_issues));
+                    if !selected {
+                        self.issues_panel.select_first(self.tracked_issues.len());
+                    }
+                }
+
+                let focused_id = match &self.issue_focus {
+                    IssueFocus::Loading { id } | IssueFocus::Loaded { id, .. } => Some(id.clone()),
+                    IssueFocus::None => None,
+                };
+                if let Some(focus_id) = focused_id {
+                    self.bump_graph_data_epoch();
+                    self.bump_detail_data_epoch();
+                    self.invalidate_graph_cache_entries_containing_issue(&focus_id);
+                }
+            }
+
             spur_acp::SpurEventBody::IssueDetailFetched {
                 requested_id,
                 issue,
@@ -2281,6 +2335,119 @@ mod tests {
         );
 
         assert!(!view.graph_cache.contains_key("bd-root"));
+    }
+
+    #[test]
+    fn issue_created_adds_issue_preserves_selection_and_skips_epoch_bump_without_focus() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.set_issues_for_test(vec![
+            issue("bd-root", "epic", Vec::new()),
+            issue("bd-other", "task", Vec::new()),
+        ]);
+        view.issues_panel.select_next(1, view.tracked_issues.len());
+        let graph_epoch_before = view.graph_data_epoch;
+        let detail_epoch_before = view.detail_data_epoch;
+
+        view.handle_spur_event(
+            &SpurEvent::now(spur_acp::SpurEventBody::IssueCreated {
+                issue: spur_acp::IssueSummaryEvent {
+                    id: "bd-new".into(),
+                    source: "beads".into(),
+                    title: "new issue".into(),
+                    status: "open".into(),
+                    labels: Vec::new(),
+                    priority: Some(1),
+                    issue_type: Some("task".into()),
+                    assignee: None,
+                    description: None,
+                },
+            }),
+            &ctx,
+        );
+
+        assert!(view.tracked_issues.iter().any(|issue| issue.id == "bd-new"));
+        assert_eq!(view.selected_issue_id().as_deref(), Some("bd-other"));
+        assert_eq!(view.graph_data_epoch, graph_epoch_before);
+        assert_eq!(view.detail_data_epoch, detail_epoch_before);
+    }
+
+    #[test]
+    fn issue_created_bumps_epochs_when_focus_is_active() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.set_issues_for_test(vec![
+            issue("bd-root", "epic", Vec::new()),
+            issue("bd-other", "task", Vec::new()),
+        ]);
+        view.issue_focus = IssueFocus::Loaded {
+            id: "bd-root".into(),
+            issue: Box::new(issue_detail("bd-root", "root detail")),
+        };
+        let graph_epoch_before = view.graph_data_epoch;
+        let detail_epoch_before = view.detail_data_epoch;
+
+        view.handle_spur_event(
+            &SpurEvent::now(spur_acp::SpurEventBody::IssueCreated {
+                issue: spur_acp::IssueSummaryEvent {
+                    id: "bd-new".into(),
+                    source: "beads".into(),
+                    title: "new issue".into(),
+                    status: "open".into(),
+                    labels: Vec::new(),
+                    priority: Some(1),
+                    issue_type: Some("task".into()),
+                    assignee: None,
+                    description: None,
+                },
+            }),
+            &ctx,
+        );
+
+        assert_eq!(view.graph_data_epoch, graph_epoch_before.wrapping_add(1));
+        assert_eq!(view.detail_data_epoch, detail_epoch_before.wrapping_add(1));
+    }
+
+    #[test]
+    fn issue_created_upserts_existing_issue_without_duplicates() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.set_issues_for_test(vec![issue("bd-1", "task", vec!["old".to_string()])]);
+        let initial_len = view.tracked_issues.len();
+
+        view.handle_spur_event(
+            &SpurEvent::now(spur_acp::SpurEventBody::IssueCreated {
+                issue: spur_acp::IssueSummaryEvent {
+                    id: "bd-1".into(),
+                    source: "beads".into(),
+                    title: "updated title".into(),
+                    status: "closed".into(),
+                    labels: vec!["new".into()],
+                    priority: Some(0),
+                    issue_type: Some("bug".into()),
+                    assignee: Some("alice".into()),
+                    description: Some("updated description".into()),
+                },
+            }),
+            &ctx,
+        );
+
+        assert_eq!(view.tracked_issues.len(), initial_len);
+        let updated = view
+            .tracked_issues
+            .iter()
+            .find(|issue| issue.id == "bd-1")
+            .expect("issue should still exist");
+        assert_eq!(updated.title, "updated title");
+        assert_eq!(updated.status, "closed");
+        assert_eq!(updated.labels, vec!["new".to_string()]);
+        assert_eq!(updated.priority, Some(0));
+        assert_eq!(updated.issue_type.as_deref(), Some("bug"));
+        assert_eq!(updated.assignee.as_deref(), Some("alice"));
+        assert_eq!(updated.description.as_deref(), Some("updated description"));
     }
 
     #[test]
