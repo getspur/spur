@@ -1306,6 +1306,7 @@ impl View for IssueBrowserView {
                     .collect::<Vec<_>>();
                 sort_issues_parent_first(&mut loaded_issues);
                 self.tracked_issues = loaded_issues;
+                self.issues_panel.set_issues(&self.tracked_issues);
 
                 if !self.tracked_issues.is_empty() {
                     let selected = preferred_id
@@ -1342,14 +1343,7 @@ impl View for IssueBrowserView {
                     }
                 }
                 if !self.issues_panel.filter_query().is_empty() {
-                    let selected_id = self
-                        .issues_panel
-                        .selected_id(&self.tracked_issues)
-                        .map(String::from);
                     self.issues_panel.set_issues(&self.tracked_issues);
-                    if let Some(id) = selected_id.as_deref() {
-                        let _ = self.issues_panel.select_by_id(id, &self.tracked_issues);
-                    }
                 }
                 if let IssueFocus::Loaded {
                     id: ref focus_id,
@@ -1402,6 +1396,7 @@ impl View for IssueBrowserView {
                     self.tracked_issues.push(created_issue);
                 }
                 sort_issues_parent_first(&mut self.tracked_issues);
+                self.issues_panel.set_issues(&self.tracked_issues);
 
                 if !self.tracked_issues.is_empty() {
                     let selected = preferred_id
@@ -2403,6 +2398,125 @@ mod tests {
         );
 
         assert!(!view.issues_panel.select_by_id("bd-A", &view.tracked_issues));
+    }
+
+    #[test]
+    fn issue_created_recomputes_filtered_display_order_when_new_issue_matches_filter() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        let mut issue_a = issue("bd-A", "task", Vec::new());
+        issue_a.status = "open".into();
+        let mut issue_b = issue("bd-B", "task", Vec::new());
+        issue_b.status = "closed".into();
+        view.set_issues_for_test(vec![issue_a, issue_b]);
+        view.issues_panel.set_filter("open", &view.tracked_issues);
+        assert!(view.issues_panel.select_by_id("bd-A", &view.tracked_issues));
+
+        view.handle_spur_event(
+            &SpurEvent::now(spur_acp::SpurEventBody::IssueCreated {
+                issue: spur_acp::IssueSummaryEvent {
+                    id: "bd-C".into(),
+                    source: "beads".into(),
+                    title: "new open issue".into(),
+                    status: "open".into(),
+                    labels: Vec::new(),
+                    priority: Some(0),
+                    issue_type: Some("task".into()),
+                    assignee: None,
+                    description: None,
+                },
+            }),
+            &ctx,
+        );
+
+        assert!(view.issues_panel.select_by_id("bd-C", &view.tracked_issues));
+    }
+
+    #[test]
+    fn issues_loaded_recomputes_filtered_display_order_against_new_issue_list() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        let mut issue_a = issue("bd-A", "task", Vec::new());
+        issue_a.status = "open".into();
+        view.set_issues_for_test(vec![issue_a]);
+        view.issues_panel.set_filter("open", &view.tracked_issues);
+        assert!(view.issues_panel.select_by_id("bd-A", &view.tracked_issues));
+
+        view.handle_spur_event(
+            &SpurEvent::now(spur_acp::SpurEventBody::IssuesLoaded {
+                issues: vec![
+                    spur_acp::IssueSummaryEvent {
+                        id: "bd-Y".into(),
+                        source: "beads".into(),
+                        title: "replacement closed issue".into(),
+                        status: "closed".into(),
+                        labels: Vec::new(),
+                        priority: Some(0),
+                        issue_type: Some("task".into()),
+                        assignee: None,
+                        description: None,
+                    },
+                    spur_acp::IssueSummaryEvent {
+                        id: "bd-X".into(),
+                        source: "beads".into(),
+                        title: "replacement open issue".into(),
+                        status: "open".into(),
+                        labels: Vec::new(),
+                        priority: Some(0),
+                        issue_type: Some("task".into()),
+                        assignee: None,
+                        description: None,
+                    },
+                ],
+            }),
+            &ctx,
+        );
+
+        assert!(view.issues_panel.select_by_id("bd-X", &view.tracked_issues));
+        assert!(!view.issues_panel.select_by_id("bd-Y", &view.tracked_issues));
+    }
+
+    #[test]
+    fn issues_loaded_preserves_empty_filter_state() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.set_issues_for_test(vec![issue("bd-A", "task", Vec::new())]);
+
+        view.handle_spur_event(
+            &SpurEvent::now(spur_acp::SpurEventBody::IssuesLoaded {
+                issues: vec![
+                    spur_acp::IssueSummaryEvent {
+                        id: "bd-X".into(),
+                        source: "beads".into(),
+                        title: "replacement issue x".into(),
+                        status: "open".into(),
+                        labels: Vec::new(),
+                        priority: Some(0),
+                        issue_type: Some("task".into()),
+                        assignee: None,
+                        description: None,
+                    },
+                    spur_acp::IssueSummaryEvent {
+                        id: "bd-Y".into(),
+                        source: "beads".into(),
+                        title: "replacement issue y".into(),
+                        status: "closed".into(),
+                        labels: Vec::new(),
+                        priority: Some(0),
+                        issue_type: Some("task".into()),
+                        assignee: None,
+                        description: None,
+                    },
+                ],
+            }),
+            &ctx,
+        );
+
+        assert!(view.issues_panel.select_by_id("bd-X", &view.tracked_issues));
+        assert!(view.issues_panel.select_by_id("bd-Y", &view.tracked_issues));
     }
 
     #[test]
