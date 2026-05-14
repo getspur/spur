@@ -20,6 +20,10 @@ pub enum IssueAction {
     ExecuteEdit {
         id: String,
     },
+    AddComment {
+        issue_id: String,
+        body: String,
+    },
 }
 
 /// Actions that flow between components and the app controller.

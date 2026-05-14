@@ -120,6 +120,14 @@ impl IssueCommentsPane {
         self.scroll_offset = next.min(u16::MAX as usize) as u16;
     }
 
+    pub fn scroll_offset(&self) -> u16 {
+        self.scroll_offset
+    }
+
+    pub fn set_scroll_offset(&mut self, scroll_offset: u16) {
+        self.scroll_offset = scroll_offset;
+    }
+
     pub fn render(&mut self, id: &str, comments: &[Comment], frame: &mut Frame, area: Rect) {
         let block = Block::bordered()
             .title(format!(" Comments: {} ", id))

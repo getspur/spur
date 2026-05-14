@@ -1266,6 +1266,9 @@ fn tui_input_to_interactive(input: spur_tui::UserInput) -> spur_core::Interactiv
         spur_tui::UserInput::UpdateIssue { id, update } => {
             spur_core::InteractiveInput::UpdateIssue { id, update }
         }
+        spur_tui::UserInput::AddIssueComment { issue_id, body } => {
+            spur_core::InteractiveInput::AddIssueComment { issue_id, body }
+        }
         spur_tui::UserInput::SubmitReview { .. } => {
             unreachable!("review routing is handled before translation")
         }
