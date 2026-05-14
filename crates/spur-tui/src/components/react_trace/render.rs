@@ -437,6 +437,7 @@ fn render_inline_image(
                 let key = crate::components::image_cache::SliceKey::new(
                     id,
                     gen,
+                    rect.width,
                     first_row_within,
                     run_len,
                     total_rows,
@@ -502,6 +503,7 @@ fn render_inline_image(
                 let key = crate::components::image_cache::SliceKey::new(
                     id,
                     stored.image_generation,
+                    rect.width,
                     first_row_within,
                     run_len,
                     total_rows,
