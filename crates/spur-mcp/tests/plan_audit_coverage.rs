@@ -216,7 +216,7 @@ async fn plan_audit_coverage_all_four_sentinels() {
         attempt: 1,
         history: vec![],
         last_delegation_id: Some(delegation_id.clone()),
-        dispatched_base_oid: None,
+        dispatched_base_oid: Some("0000000000000000000000000000000000000001".into()),
     };
     let plan_state = PlanState {
         plan_id: "audit-plan-1".into(),
@@ -683,7 +683,7 @@ async fn reject_closes_issue_and_adds_review_rejected_label() {
         attempt: 1,
         history: vec![],
         last_delegation_id: Some(delegation_id.clone()),
-        dispatched_base_oid: None,
+        dispatched_base_oid: Some("0000000000000000000000000000000000000001".into()),
     };
     let plan_state = PlanState {
         plan_id: "audit-reject-1".into(),
@@ -793,7 +793,7 @@ async fn request_changes_leaves_issue_open_and_not_review_ready() {
             attempt: 1,
             history: vec![],
             last_delegation_id: Some("del-request-001".into()),
-            dispatched_base_oid: None,
+            dispatched_base_oid: Some("0000000000000000000000000000000000000001".into()),
         }],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
         base_snapshot_branch: None,
@@ -880,7 +880,7 @@ async fn request_changes_does_not_emit_dispatch_audit() {
             attempt: 1,
             history: vec![],
             last_delegation_id: Some("del-request-002".into()),
-            dispatched_base_oid: None,
+            dispatched_base_oid: Some("0000000000000000000000000000000000000001".into()),
         }],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
         base_snapshot_branch: None,
@@ -971,7 +971,7 @@ async fn approve_closes_issue_and_clears_ready_for_review() {
             attempt: 1,
             history: vec![],
             last_delegation_id: Some(delegation_id.clone()),
-            dispatched_base_oid: None,
+            dispatched_base_oid: Some("0000000000000000000000000000000000000001".into()),
         }],
         brain_session_id: spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
         base_snapshot_branch: None,

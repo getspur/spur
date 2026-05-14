@@ -238,7 +238,7 @@ fn awaiting_review_plan() -> Arc<AsyncMutex<PlanState>> {
             attempt: 1,
             history: vec![],
             last_delegation_id: Some("del-1".into()),
-            dispatched_base_oid: None,
+            dispatched_base_oid: Some("0000000000000000000000000000000000000001".into()),
         }],
     }))
 }
@@ -418,7 +418,9 @@ async fn server_nonadvisory_review_error_invalidates_active_plan_cache() {
                         completion_state: CompletionState::AwaitingReview,
                         superseded: false,
                         artifact_uri: None,
-                        dispatched_base_oid: None,
+                        dispatched_base_oid: Some(
+                            "0000000000000000000000000000000000000001".into(),
+                        ),
                     },
                 )),
                 ..Default::default()
