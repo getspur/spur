@@ -1080,7 +1080,8 @@ async fn t_v0c_11_startup_reclaim_clears_stale_dispatch_before_redispatch() {
             .list_comments(&task_id)
             .await
             .expect("task comments"),
-    );
+    )
+    .expect("audit projection should succeed");
     let orphan_cleared_idx = audits
         .iter()
         .position(|audit| {

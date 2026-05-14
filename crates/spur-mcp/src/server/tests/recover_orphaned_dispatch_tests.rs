@@ -237,7 +237,8 @@ async fn recover_orphaned_dispatch_promotes_dispatched_task_to_awaiting_review()
         adv.list_comments(&task_issue_id)
             .await
             .expect("list comments"),
-    );
+    )
+    .expect("projection should parse");
     let completion = audits.iter().find_map(|audit| match audit {
         AuditSentinelKind::Completion {
             delegation_id,
@@ -385,7 +386,8 @@ async fn recover_orphaned_dispatch_prefers_dispatched_base_oid_label() {
         adv.list_comments(&fixture.task_issue_id)
             .await
             .expect("list comments"),
-    );
+    )
+    .expect("projection should parse");
     let recovered_base = audits.iter().find_map(|audit| match audit {
         AuditSentinelKind::Completion {
             delegation_id,
