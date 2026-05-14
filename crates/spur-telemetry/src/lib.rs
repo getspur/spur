@@ -2,6 +2,7 @@ pub(crate) mod batch;
 pub(crate) mod client;
 pub(crate) mod config;
 pub(crate) mod consent;
+pub(crate) mod crash;
 pub mod error;
 pub mod events;
 pub(crate) mod ratelimit;
