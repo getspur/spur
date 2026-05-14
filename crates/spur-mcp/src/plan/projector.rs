@@ -22,33 +22,37 @@ pub fn sort_projection_comments(mut comments: Vec<spur_pm::Comment>) -> Vec<spur
 
 pub fn collect_sorted_audits(
     comments: Vec<spur_pm::Comment>,
-) -> Vec<crate::plan::audit_sentinel::AuditSentinelKind> {
+) -> anyhow::Result<Vec<crate::plan::audit_sentinel::AuditSentinelKind>> {
     collect_sorted_audits_for_issue("<unknown>", comments)
 }
 
 pub fn collect_sorted_audits_for_issue(
     issue_id: &str,
     comments: Vec<spur_pm::Comment>,
-) -> Vec<crate::plan::audit_sentinel::AuditSentinelKind> {
-    sort_projection_comments(comments)
-        .into_iter()
-        .filter_map(
-            |comment| match crate::plan::audit_sentinel::parse_comment(&comment.body) {
-                Some(Ok(kind)) => Some(kind),
-                Some(Err(error)) => {
-                    tracing::warn!(
-                        target: "spur.audit.parse_failure",
-                        issue_id = %issue_id,
-                        comment_id = %comment.id,
-                        error = %error,
-                        "audit sentinel parse failed; comment dropped from projection",
-                    );
-                    None
-                }
-                None => None,
-            },
-        )
-        .collect()
+) -> anyhow::Result<Vec<crate::plan::audit_sentinel::AuditSentinelKind>> {
+    let mut audits = Vec::new();
+    for comment in sort_projection_comments(comments) {
+        match crate::plan::audit_sentinel::parse_comment(&comment.body) {
+            Some(Ok(kind)) => audits.push(kind),
+            Some(Err(crate::plan::audit_sentinel::ParseError::Critical { kind, source })) => {
+                return Err(anyhow::anyhow!(
+                    "critical audit sentinel parse failed for issue {issue_id}, comment {} (kind={kind}): {source}",
+                    comment.id
+                ));
+            }
+            Some(Err(error @ crate::plan::audit_sentinel::ParseError::Informational { .. })) => {
+                tracing::warn!(
+                    target: "spur.audit.parse_failure",
+                    issue_id = %issue_id,
+                    comment_id = %comment.id,
+                    error = %error,
+                    "audit sentinel parse failed; comment dropped from projection",
+                );
+            }
+            None => {}
+        }
+    }
+    Ok(audits)
 }
 
 pub fn project_attempt_facts(audits: &[AuditSentinelKind]) -> (u32, Option<String>) {
@@ -577,7 +581,8 @@ pub async fn project_plan_from_beads(
     let adv = pm
         .advanced()
         .ok_or_else(|| anyhow::anyhow!("persisted projector requires beads backend"))?;
-    let epic_audits = collect_sorted_audits_for_issue(&epic.id, adv.list_comments(&epic.id).await?);
+    let epic_audits =
+        collect_sorted_audits_for_issue(&epic.id, adv.list_comments(&epic.id).await?)?;
     let closed_status = pm.closed_status().to_string();
     struct ProjectedTask {
         issue: spur_pm::Issue,
@@ -591,7 +596,7 @@ pub async fn project_plan_from_beads(
         let audits = collect_sorted_audits_for_issue(
             &task_issue.id,
             adv.list_comments(&task_issue.id).await?,
-        );
+        )?;
         let task_spec = latest_task_spec(&audits);
         let (task_id, context_files) =
             task_spec.unwrap_or_else(|| (task_id_for_issue(&task_issue), Vec::new()));
@@ -811,7 +816,7 @@ mod tests {
             },
         ];
 
-        let audits = super::collect_sorted_audits(comments);
+        let audits = super::collect_sorted_audits(comments).expect("projection should parse");
         assert_eq!(audits.len(), 1);
         assert!(matches!(
             audits[0],
@@ -840,6 +845,7 @@ mod tests {
 
         let (audits, warnings) =
             capture_warnings(|| super::collect_sorted_audits_for_issue("bd-task-1", comments));
+        let audits = audits.expect("approval-only parse should succeed");
 
         assert_eq!(audits.len(), 1);
         assert!(matches!(
@@ -914,6 +920,7 @@ mod tests {
 
         let (audits, warnings) =
             capture_warnings(|| super::collect_sorted_audits_for_issue("bd-task-2", comments));
+        let audits = audits.expect("mixed valid+informational parse should succeed");
 
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].target, "spur.audit.parse_failure");
@@ -928,6 +935,67 @@ mod tests {
 
         let kinds: Vec<&str> = audits.iter().map(AuditSentinelKind::kind_str).collect();
         assert_eq!(kinds, vec!["dispatch", "completion", "approval"]);
+    }
+
+    #[test]
+    fn projector_errors_on_corrupt_completion_sentinel() {
+        let comments = vec![
+            comment(
+                "c-1",
+                crate::plan::audit_sentinel::encode_comment(
+                    &crate::plan::audit_sentinel::AuditSentinelKind::Dispatch {
+                        delegation_id: "del-A".into(),
+                        worker: "codex".into(),
+                        attempt: 1,
+                    },
+                ),
+                0,
+            ),
+            comment(
+                "c-2",
+                format!(
+                    "{}\n{{\"kind\":\"completion\",\"delegation_id\":\"del-A\"}}",
+                    crate::plan::audit_sentinel::SENTINEL_PREFIX
+                ),
+                1,
+            ),
+        ];
+
+        let (result, warnings) = capture_warnings(|| {
+            super::collect_sorted_audits_for_issue("bd-task-critical", comments)
+        });
+        let error = result.expect_err("malformed completion sentinel should fail projection");
+        assert!(
+            error
+                .to_string()
+                .contains("critical audit sentinel parse failed"),
+            "unexpected error: {error:#}"
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn projector_errors_on_corrupt_review_feedback_sentinel() {
+        let comments = vec![comment(
+            "c-1",
+            format!(
+                "{}\n{{\"kind\":\"review-feedback\",\"delegation_id\":\"del-A\"}}",
+                crate::plan::audit_sentinel::SENTINEL_PREFIX
+            ),
+            0,
+        )];
+
+        let (result, warnings) = capture_warnings(|| {
+            super::collect_sorted_audits_for_issue("bd-task-critical", comments)
+        });
+        let error = result.expect_err("malformed review-feedback sentinel should fail projection");
+        assert!(
+            error
+                .to_string()
+                .contains("critical audit sentinel parse failed"),
+            "unexpected error: {error:#}"
+        );
+        assert!(warnings.is_empty());
     }
 
     /// Two Dispatch sentinels project as `attempt = 2` (count of dispatches).

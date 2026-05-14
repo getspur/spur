@@ -41,12 +41,27 @@ pub(crate) async fn find_plan_epic(
             .map(|epic| epic.id.clone())
             .collect::<HashSet<_>>();
         let mut canonical_ids = HashSet::new();
+        let mut critical_parse_error_epics = Vec::new();
 
         for epic in &epics {
             match advanced.list_comments(&epic.id).await {
                 Ok(comments) => {
-                    let audits =
-                        crate::plan::projector::collect_sorted_audits_for_issue(&epic.id, comments);
+                    let audits = match crate::plan::projector::collect_sorted_audits_for_issue(
+                        &epic.id, comments,
+                    ) {
+                        Ok(audits) => audits,
+                        Err(error) => {
+                            tracing::warn!(
+                                epic_id = %epic.id,
+                                plan_id = %plan_id,
+                                operation = %operation,
+                                error = %error,
+                                "failed to parse plan-submit audits while resolving duplicate plan epics"
+                            );
+                            critical_parse_error_epics.push(epic.id.clone());
+                            continue;
+                        }
+                    };
                     for audit in audits {
                         if let crate::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
                             plan_id: audit_plan_id,
@@ -92,6 +107,16 @@ pub(crate) async fn find_plan_epic(
             return Err(format!(
                 "{operation}: ambiguous plan lookup for {plan_id}; PlanSubmit audits disagree on canonical epics: {}",
                 ids.join(", ")
+            ));
+        }
+
+        if !critical_parse_error_epics.is_empty() {
+            critical_parse_error_epics.sort();
+            critical_parse_error_epics.dedup();
+            return Err(format!(
+                "{operation}: find_plan_epic: plan_id {plan_id} not found; {} epic(s) had unparseable critical sentinels: [{}]",
+                critical_parse_error_epics.len(),
+                critical_parse_error_epics.join(", ")
             ));
         }
     }
@@ -383,7 +408,7 @@ pub(crate) async fn any_open_epic_lacks_rev1_metadata(
         {
             let comments = adv.list_comments(&epic.id).await?;
             let audits =
-                crate::plan::projector::collect_sorted_audits_for_issue(&epic.id, comments);
+                crate::plan::projector::collect_sorted_audits_for_issue(&epic.id, comments)?;
             let has_rev1_metadata = audits.iter().any(|audit| {
                 matches!(
                     audit,
@@ -417,7 +442,7 @@ pub async fn compensate_mutation_orphans(
     let audits = crate::plan::projector::collect_sorted_audits_for_issue(
         task_id,
         adv.list_comments(task_id).await?,
-    );
+    )?;
 
     for mutation_id in mutation_orphan_ids(&audits) {
         if let Ok(uuid) = uuid::Uuid::parse_str(&mutation_id) {
@@ -510,7 +535,7 @@ pub async fn resolve_dispatch_orphan(
     let audits = crate::plan::projector::collect_sorted_audits_for_issue(
         task_id,
         adv.list_comments(task_id).await?,
-    );
+    )?;
     if audits.iter().any(|audit| matches!(
         audit,
         crate::plan::audit_sentinel::AuditSentinelKind::Completion { delegation_id: did, .. } if did == delegation_id

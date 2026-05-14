@@ -103,7 +103,7 @@ impl Reconciler {
             let audits = crate::plan::projector::collect_sorted_audits_for_issue(
                 &summary.id,
                 adv.list_comments(&summary.id).await?,
-            );
+            )?;
             let (attempt, _) = crate::plan::projector::project_attempt_facts(&audits);
             let orphan_reason = format!("dispatch lease expired at {expires_at} (age {age_secs}s)");
             // Match on `delegation_id` only, ignoring `reason`. Safe because

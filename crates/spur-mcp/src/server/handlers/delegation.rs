@@ -238,7 +238,10 @@ impl McpCallbackServer {
             adv.list_comments(issue_id).await.map_err(|error| {
                 format!("recover_orphaned_dispatch: list_comments({issue_id}) failed: {error}")
             })?,
-        );
+        )
+        .map_err(|error| {
+            format!("recover_orphaned_dispatch: parse comments({issue_id}) failed: {error}")
+        })?;
         if audits.iter().any(|audit| {
             matches!(
                 audit,

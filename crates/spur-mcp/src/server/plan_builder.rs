@@ -198,7 +198,8 @@ pub(crate) async fn read_persisted_plan_bootstrap(
         .list_comments(epic_id)
         .await
         .map_err(|e| format!("failed to load comments for epic '{epic_id}': {e}"))?;
-    let audits = crate::plan::projector::collect_sorted_audits_for_issue(epic_id, comments);
+    let audits = crate::plan::projector::collect_sorted_audits_for_issue(epic_id, comments)
+        .map_err(|e| format!("failed to parse audit sentinels for epic '{epic_id}': {e}"))?;
 
     audits
         .into_iter()
@@ -240,7 +241,8 @@ pub(crate) async fn read_latest_task_completion(
         .list_comments(issue_id)
         .await
         .map_err(|e| format!("failed to load comments for task '{issue_id}': {e}"))?;
-    let audits = crate::plan::projector::collect_sorted_audits_for_issue(issue_id, comments);
+    let audits = crate::plan::projector::collect_sorted_audits_for_issue(issue_id, comments)
+        .map_err(|e| format!("failed to parse audit sentinels for task '{issue_id}': {e}"))?;
 
     Ok(audits.into_iter().rev().find_map(|audit| match audit {
         crate::plan::audit_sentinel::AuditSentinelKind::Completion {
@@ -279,7 +281,8 @@ pub(crate) async fn reconstruct_historical_attempts(
         .list_comments(issue_id)
         .await
         .map_err(|e| format!("failed to load comments for task '{issue_id}': {e}"))?;
-    let audits = crate::plan::projector::collect_sorted_audits_for_issue(issue_id, comments);
+    let audits = crate::plan::projector::collect_sorted_audits_for_issue(issue_id, comments)
+        .map_err(|e| format!("failed to parse audit sentinels for task '{issue_id}': {e}"))?;
 
     let mut attempts_by_delegation: std::collections::HashMap<String, AttemptAccumulator> =
         std::collections::HashMap::new();

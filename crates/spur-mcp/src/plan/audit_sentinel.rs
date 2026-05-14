@@ -352,6 +352,10 @@ impl AuditSentinelKind {
             Self::Unknown => "unknown",
         }
     }
+
+    pub fn is_plan_critical_kind(kind: &str) -> bool {
+        matches!(kind, "completion" | "review-feedback")
+    }
 }
 
 /// Encode a kind as a full sentinel comment body ready for `br comments add`.
@@ -373,9 +377,24 @@ pub fn encode_comment(kind: &AuditSentinelKind) -> String {
 /// sentinel prefix. Returns `Some(Err(_))` if the sentinel is present but
 /// the JSON is malformed or the variant is unknown.
 pub fn parse_comment(body: &str) -> Option<Result<AuditSentinelKind, ParseError>> {
+    #[derive(Deserialize)]
+    struct JustKind {
+        kind: String,
+    }
+
     let rest = body.trim_start().strip_prefix(SENTINEL_PREFIX)?;
     let json = rest.trim_start();
-    let result = serde_json::from_str::<AuditSentinelKind>(json).map_err(ParseError::Json);
+    let result = serde_json::from_str::<AuditSentinelKind>(json).map_err(|source| {
+        let kind = serde_json::from_str::<JustKind>(json)
+            .ok()
+            .map(|parsed| parsed.kind);
+        match kind {
+            Some(kind) if AuditSentinelKind::is_plan_critical_kind(&kind) => {
+                ParseError::Critical { kind, source }
+            }
+            _ => ParseError::Informational { source },
+        }
+    });
     if matches!(result, Ok(AuditSentinelKind::Unknown)) {
         tracing::debug!(
             kind = "unknown",
@@ -388,8 +407,13 @@ pub fn parse_comment(body: &str) -> Option<Result<AuditSentinelKind, ParseError>
 
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
-    #[error("sentinel JSON parse error: {0}")]
-    Json(#[from] serde_json::Error),
+    #[error("critical sentinel JSON parse error (kind={kind}): {source}")]
+    Critical {
+        kind: String,
+        source: serde_json::Error,
+    },
+    #[error("sentinel JSON parse error: {source}")]
+    Informational { source: serde_json::Error },
 }
 
 pub fn count_worker_commits(
@@ -603,7 +627,54 @@ mod tests {
     #[test]
     fn parse_returns_err_for_malformed_sentinel() {
         let body = format!("{SENTINEL_PREFIX}\nnot json");
-        assert!(parse_comment(&body).unwrap().is_err());
+        let err = parse_comment(&body).unwrap().unwrap_err();
+        assert!(matches!(err, ParseError::Informational { .. }));
+    }
+
+    #[test]
+    fn parse_malformed_completion_is_critical_error() {
+        let body =
+            format!("{SENTINEL_PREFIX}\n{{\"kind\":\"completion\",\"delegation_id\":\"del-A\"}}");
+        let err = parse_comment(&body).unwrap().unwrap_err();
+        match err {
+            ParseError::Critical { kind, .. } => assert_eq!(kind, "completion"),
+            other => panic!("expected critical error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_malformed_review_feedback_is_critical_error() {
+        let body = format!(
+            "{SENTINEL_PREFIX}\n{{\"kind\":\"review-feedback\",\"delegation_id\":\"del-A\"}}"
+        );
+        let err = parse_comment(&body).unwrap().unwrap_err();
+        match err {
+            ParseError::Critical { kind, .. } => assert_eq!(kind, "review-feedback"),
+            other => panic!("expected critical error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_malformed_dispatch_is_informational_error() {
+        let body =
+            format!("{SENTINEL_PREFIX}\n{{\"kind\":\"dispatch\",\"delegation_id\":\"del-A\"}}");
+        let err = parse_comment(&body).unwrap().unwrap_err();
+        assert!(matches!(err, ParseError::Informational { .. }));
+    }
+
+    #[test]
+    fn parse_unknown_kind_is_informational_error_when_shape_invalid() {
+        let body =
+            format!("{SENTINEL_PREFIX}\n{{\"kind\":\"future-kind\",\"delegation_id\":\"del-A\"");
+        let err = parse_comment(&body).unwrap().unwrap_err();
+        assert!(matches!(err, ParseError::Informational { .. }));
+    }
+
+    #[test]
+    fn parse_missing_kind_field_is_informational_error() {
+        let body = format!("{SENTINEL_PREFIX}\n{{\"other\":\"value\"}}");
+        let err = parse_comment(&body).unwrap().unwrap_err();
+        assert!(matches!(err, ParseError::Informational { .. }));
     }
 
     #[test]
