@@ -1,12 +1,7 @@
 use std::env;
 
 use crate::config::TelemetryConfig;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tier {
-    One,
-    Two,
-}
+use crate::events::Tier;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventKind {
