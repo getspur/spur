@@ -1341,6 +1341,16 @@ impl View for IssueBrowserView {
                         issue.assignee = Some(a.clone());
                     }
                 }
+                if !self.issues_panel.filter_query().is_empty() {
+                    let selected_id = self
+                        .issues_panel
+                        .selected_id(&self.tracked_issues)
+                        .map(String::from);
+                    self.issues_panel.set_issues(&self.tracked_issues);
+                    if let Some(id) = selected_id.as_deref() {
+                        let _ = self.issues_panel.select_by_id(id, &self.tracked_issues);
+                    }
+                }
                 if let IssueFocus::Loaded {
                     id: ref focus_id,
                     ref mut issue,
@@ -2335,6 +2345,64 @@ mod tests {
         );
 
         assert!(!view.graph_cache.contains_key("bd-root"));
+    }
+
+    #[test]
+    fn issue_updated_recomputes_filtered_display_order_when_status_starts_matching_filter() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        let mut issue_a = issue("bd-A", "task", Vec::new());
+        issue_a.status = "open".into();
+        let mut issue_b = issue("bd-B", "task", Vec::new());
+        issue_b.status = "in_progress".into();
+        let mut issue_c = issue("bd-C", "task", Vec::new());
+        issue_c.status = "closed".into();
+        view.set_issues_for_test(vec![issue_a, issue_b, issue_c]);
+        view.issues_panel
+            .set_filter("in_progress", &view.tracked_issues);
+        assert!(!view.issues_panel.select_by_id("bd-A", &view.tracked_issues));
+
+        view.handle_spur_event(
+            &SpurEvent::now(spur_acp::SpurEventBody::IssueUpdated {
+                source: "beads".into(),
+                id: "bd-A".into(),
+                status: Some("in_progress".into()),
+                assignee: None,
+            }),
+            &ctx,
+        );
+
+        assert!(view.issues_panel.select_by_id("bd-A", &view.tracked_issues));
+    }
+
+    #[test]
+    fn issue_updated_recomputes_filtered_display_order_when_status_stops_matching_filter() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        let mut issue_a = issue("bd-A", "task", Vec::new());
+        issue_a.status = "in_progress".into();
+        let mut issue_b = issue("bd-B", "task", Vec::new());
+        issue_b.status = "open".into();
+        let mut issue_c = issue("bd-C", "task", Vec::new());
+        issue_c.status = "closed".into();
+        view.set_issues_for_test(vec![issue_a, issue_b, issue_c]);
+        view.issues_panel
+            .set_filter("in_progress", &view.tracked_issues);
+        assert!(view.issues_panel.select_by_id("bd-A", &view.tracked_issues));
+
+        view.handle_spur_event(
+            &SpurEvent::now(spur_acp::SpurEventBody::IssueUpdated {
+                source: "beads".into(),
+                id: "bd-A".into(),
+                status: Some("closed".into()),
+                assignee: None,
+            }),
+            &ctx,
+        );
+
+        assert!(!view.issues_panel.select_by_id("bd-A", &view.tracked_issues));
     }
 
     #[test]
