@@ -2704,6 +2704,35 @@ mod issue_created_tests {
             .iter()
             .any(|hit| hit.kind == MentionKind::Issue && hit.uri == "issue://beads/bd-2"));
     }
+
+    #[test]
+    fn issue_updated_refreshes_dashboard_mention_registry_haystack() {
+        let mut dash = DashboardView::new();
+        dash.set_issue_snapshot(vec![issue_summary("bd-1", Some(2), "open")]);
+        let lineage = ExecutorLineage::new();
+        let ctx = crate::views::ViewContext::test_ctx(&lineage);
+
+        dash.handle_spur_event(
+            &SpurEvent::now(SpurEventBody::IssueUpdated {
+                source: "beads".into(),
+                id: "bd-1".into(),
+                status: Some("closed".into()),
+                assignee: Some("alice".into()),
+            }),
+            &ctx,
+        );
+
+        let sid = spur_acp::SessionId::new();
+        let hits = dash.mention_registry.borrow_mut().query(
+            CompletionScope::Session(&sid),
+            std::env::temp_dir().as_path(),
+            "closed",
+            20,
+        );
+        assert!(hits
+            .iter()
+            .any(|hit| hit.kind == MentionKind::Issue && hit.uri == "issue://beads/bd-1"));
+    }
 }
 
 #[cfg(all(test, feature = "analytics"))]
