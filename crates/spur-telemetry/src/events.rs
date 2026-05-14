@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 pub type Props = BTreeMap<&'static str, serde_json::Value>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
     One,
     Two,
