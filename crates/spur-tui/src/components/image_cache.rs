@@ -187,6 +187,7 @@ struct DisplaySurfaceKey {
 pub struct SliceKey {
     source: DisplaySurfaceSource,
     image_generation: u64,
+    pane_w_cols: u16,
     first_row_within: u16,
     run_len: u16,
     total_rows: u16,
@@ -197,6 +198,7 @@ impl SliceKey {
     pub fn new<I>(
         id: I,
         image_generation: u64,
+        pane_w_cols: u16,
         first_row_within: u16,
         run_len: u16,
         total_rows: u16,
@@ -208,6 +210,7 @@ impl SliceKey {
         Self {
             source: id.into(),
             image_generation,
+            pane_w_cols,
             first_row_within,
             run_len,
             total_rows,
@@ -1209,6 +1212,81 @@ mod tests {
         assert_eq!(surface.width(), 80);
         assert_eq!(surface.height(), 64);
         assert_eq!(c.display_surface_len(), 1);
+    }
+
+    #[test]
+    fn cropped_slice_cache_misses_when_pane_width_changes() {
+        let mut c = ImageCache::new();
+        let id = TraceImageId(42);
+        let src = Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(240, 120)));
+        let image_generation = 9;
+        let pane_w_80 = 80;
+        let pane_w_120 = 120;
+        let cell_w_px = 8;
+        let cell_h_px = 16;
+        let first_row_within = 1;
+        let run_len = 2;
+        let total_rows = 10;
+
+        let surface_80 = c.display_surface(
+            id,
+            &src,
+            image_generation,
+            pane_w_80,
+            cell_w_px,
+            cell_h_px,
+            total_rows,
+        );
+        let surface_120 = c.display_surface(
+            id,
+            &src,
+            image_generation,
+            pane_w_120,
+            cell_w_px,
+            cell_h_px,
+            total_rows,
+        );
+        let start_y = (first_row_within as u32).saturating_mul(cell_h_px as u32);
+        let slice_h = (run_len as u32).saturating_mul(cell_h_px as u32);
+        let expected_80_w = surface_80.width();
+        let expected_120_w = surface_120.width();
+
+        let slice_80 = c
+            .get_or_build_cropped_slice(
+                SliceKey::new(
+                    id,
+                    image_generation,
+                    pane_w_80,
+                    first_row_within,
+                    run_len,
+                    total_rows,
+                    cell_h_px,
+                ),
+                || Some(surface_80.crop_imm(0, start_y, surface_80.width(), slice_h)),
+            )
+            .expect("slice for pane width 80");
+        let slice_120 = c
+            .get_or_build_cropped_slice(
+                SliceKey::new(
+                    id,
+                    image_generation,
+                    pane_w_120,
+                    first_row_within,
+                    run_len,
+                    total_rows,
+                    cell_h_px,
+                ),
+                || Some(surface_120.crop_imm(0, start_y, surface_120.width(), slice_h)),
+            )
+            .expect("slice for pane width 120");
+
+        assert!(
+            !Arc::ptr_eq(&slice_80, &slice_120),
+            "resize should build a new cropped slice Arc"
+        );
+        assert_eq!(slice_80.width(), expected_80_w);
+        assert_eq!(slice_120.width(), expected_120_w);
+        assert_ne!(slice_80.width(), slice_120.width());
     }
 
     #[test]
