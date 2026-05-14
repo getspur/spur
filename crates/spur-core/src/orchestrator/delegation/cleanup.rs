@@ -153,14 +153,24 @@ pub(crate) async fn apply_worktree_cleanup(
         }
     } else if should_commit_worker_diff(final_status) {
         // Approved work: remove worktree dir but keep branch for merge.
+        let captured_branch = worktrees.branch_for_session(worker_session);
         let worker_branch = match worktrees.detach_worktree(worker_session).await {
             Ok(branch) => Some(branch),
             Err(e) => {
                 tracing::warn!(error = %e, "detach_worktree failed, falling back to full remove");
                 let _ = worktrees.remove_worktree(worker_session).await;
-                None
+                captured_branch.clone()
             }
         };
+        if let (Some(captured), Some(detached)) = (&captured_branch, &worker_branch) {
+            if captured != detached {
+                tracing::warn!(
+                    captured_branch = %captured,
+                    detached_branch = %detached,
+                    "pre-captured worker branch differs from detach_worktree return"
+                );
+            }
+        }
         WorktreeCleanupOutcome {
             worker_branch,
             normalization_warning: normalize_warning,
@@ -176,7 +186,40 @@ pub(crate) async fn apply_worktree_cleanup(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+    use std::process::Command as StdCommand;
+
+    use super::{apply_worktree_cleanup, WorktreeCleanupContext};
     use super::{normalization_warning, FinalizeCase, FinalizeOutcome};
+    use spur_acp::{BrainSessionId, DelegationStatus, SessionId};
+    use spur_worktree::WorktreeManager;
+    use tempfile::TempDir;
+
+    fn run_git(repo: &Path, args: &[&str]) -> String {
+        let out = StdCommand::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git command should execute");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn init_repo() -> TempDir {
+        let dir = TempDir::new().expect("tempdir");
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "t@t"]);
+        run_git(dir.path(), &["config", "user.name", "t"]);
+        std::fs::write(dir.path().join("README.md"), "base\n").expect("write base file");
+        run_git(dir.path(), &["add", "README.md"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "base"]);
+        dir
+    }
 
     #[test]
     fn squashed_normalization_warning_mentions_intermediate_commit_count() {
@@ -217,5 +260,43 @@ mod tests {
         );
 
         assert_eq!(warning, None);
+    }
+
+    #[tokio::test]
+    async fn approved_cleanup_preserves_branch_when_detach_fails() {
+        let dir = init_repo();
+        let mut worktrees = WorktreeManager::new(dir.path().to_path_buf());
+        let brain = BrainSessionId::new(SessionId("550e8400-e29b-41d4-a716-446655440000".into()));
+        let worker = SessionId("550e8400-e29b-41d4-a716-446655440001".into());
+
+        let info = worktrees
+            .create_worktree_v2(&brain, &worker, "codex", "main")
+            .await
+            .expect("create worktree");
+        let expected_branch = info.branch.clone();
+
+        let git_dir = dir.path().join(".git");
+        let broken_git_dir = dir.path().join(".git.broken");
+        std::fs::rename(&git_dir, &broken_git_dir)
+            .expect("break repo metadata to force detach failure");
+
+        let outcome = apply_worktree_cleanup(
+            &mut worktrees,
+            &worker,
+            &DelegationStatus::Success,
+            WorktreeCleanupContext {
+                agent: "codex",
+                worktree_path: &info.path,
+                bypass_hooks: false,
+                pm_service: None,
+                issue_id: None,
+            },
+        )
+        .await;
+
+        assert_eq!(outcome.worker_branch, Some(expected_branch));
+
+        // Best-effort restore so tempdir cleanup remains straightforward.
+        let _ = std::fs::rename(&broken_git_dir, &git_dir);
     }
 }
