@@ -32,3 +32,4 @@ mod build_worker_info_tests;
 mod clobber_review_tests;
 mod merge_plan_tests;
 mod recover_orphaned_dispatch_tests;
+mod versioned_cache_tests;
