@@ -245,10 +245,22 @@ mod tests {
 
         let spec = sample_spec("T2");
         let shadow = project_shadow_entry(&spec, &audits);
-        let legacy_worker_branch = projector::latest_completion_facts(&audits)
-            .and_then(|(_, worker_branch, _, _, _)| worker_branch);
 
-        assert_eq!(legacy_worker_branch, None);
+        // Post-T0b: the legacy `latest_completion_facts` now asserts that any
+        // `AwaitingReview` Completion carries `worker_branch=Some(_)`. The
+        // bd-334-shaped input here violates that invariant on purpose, so the
+        // legacy projector now panics loudly instead of silently returning a
+        // dropped `worker_branch=None`. Asserting the panic documents that
+        // T0b's loud-fail invariant is in place; the shadow still recovers.
+        let legacy_panicked = std::panic::catch_unwind(|| {
+            projector::latest_completion_facts(&audits);
+        })
+        .is_err();
+        assert!(
+            legacy_panicked,
+            "legacy projector should now panic loudly on bd-334-shaped input (worker_branch=None on AwaitingReview Completion)"
+        );
+
         assert_eq!(
             shadow.worker_branch.as_deref(),
             Some("worker/task-attempt-1")
