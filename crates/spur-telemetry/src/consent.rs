@@ -54,7 +54,7 @@ fn telemetry_env_disables() -> bool {
             let value = value.trim();
             value.is_empty() || value == "0"
         }
-        Err(_) => true,
+        Err(_) => false,
     }
 }
 
@@ -73,6 +73,7 @@ mod tests {
     use super::{is_event_allowed, resolve, Consent, EventKind, Tier};
     use crate::config::TelemetryConfig;
     use std::env;
+    use std::sync::{Mutex, OnceLock};
 
     #[test]
     fn spur_telemetry_zero_disables_all() {
@@ -133,6 +134,23 @@ mod tests {
     }
 
     #[test]
+    fn unset_env_uses_default_on_tier1_config() {
+        with_env(&[("SPUR_TELEMETRY", None), ("CI", None)], || {
+            let cfg = TelemetryConfig {
+                tier1_crash: true,
+                tier1_perf: true,
+                tier2_usage: false,
+                ..TelemetryConfig::default()
+            };
+
+            let consent = resolve(&cfg);
+            assert!(consent.crash);
+            assert!(consent.perf);
+            assert!(!consent.usage);
+        });
+    }
+
+    #[test]
     fn event_allowance_honors_per_subtier_disables() {
         let consent = Consent {
             crash: false,
@@ -159,6 +177,7 @@ mod tests {
     where
         F: FnOnce(),
     {
+        let _guard = env_lock().lock().expect("env test lock");
         let mut old_values = Vec::with_capacity(vars.len());
         for (key, value) in vars {
             old_values.push((
@@ -184,5 +203,10 @@ mod tests {
                 env::remove_var(key);
             }
         }
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
     }
 }
