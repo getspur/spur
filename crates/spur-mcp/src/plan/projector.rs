@@ -166,11 +166,16 @@ pub fn latest_completion_facts(audits: &[AuditSentinelKind]) -> Option<Completio
         }
     }
 
+    // Failed/Cancelled completions legitimately carry `None` worker_branch
+    // when the worker never started (lease expiry, setup conflict).
     assert!(
-        latest
-            .as_ref()
-            .is_none_or(|(_, worker_branch, _, _, _)| worker_branch.is_some()),
-        "invariant:latest_completion_facts worker_branch missing violated expected latest Completion facts to include worker_branch, got latest={:?}",
+        latest.as_ref().is_none_or(
+            |(completion_state, worker_branch, _, _, _)| {
+                !matches!(completion_state, CompletionState::AwaitingReview)
+                    || worker_branch.is_some()
+            }
+        ),
+        "invariant:latest_completion_facts worker_branch missing violated expected latest AwaitingReview Completion facts to include worker_branch, got latest={:?}",
         latest,
     );
     latest
