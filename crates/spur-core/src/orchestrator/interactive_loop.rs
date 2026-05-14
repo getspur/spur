@@ -938,6 +938,83 @@ impl Orchestrator {
                         }
                     }
 
+                    // ── AddIssueComment ──────────────────────────────────
+                    InteractiveInput::AddIssueComment { issue_id, body } => {
+                        if let Some(pm) = &self.pm_service {
+                            if body.trim().is_empty() {
+                                self.funnel.emit(SpurEventBody::IssueCommandError {
+                                    operation: "AddIssueComment".into(),
+                                    error: "Comment body cannot be empty".into(),
+                                    id: Some(issue_id),
+                                });
+                                continue;
+                            }
+                            match pm.advanced() {
+                                Some(advanced) => {
+                                    match advanced.add_comment(&issue_id, body.trim()).await {
+                                        Ok(_) => match pm.get_issue(&issue_id).await {
+                                            Ok(issue) => {
+                                                let mut comments = match advanced
+                                                    .list_comments(&issue_id)
+                                                    .await
+                                                {
+                                                    Ok(comments) => comments,
+                                                    Err(error) => {
+                                                        tracing::warn!(
+                                                            issue_id = %issue_id,
+                                                            error = %error,
+                                                            "failed to reload comments after add_comment; continuing with empty comments"
+                                                        );
+                                                        Vec::new()
+                                                    }
+                                                };
+                                                comments.sort_by_key(|comment| comment.created_at);
+                                                self.funnel.emit(
+                                                    SpurEventBody::IssueDetailFetched {
+                                                        requested_id: issue_id,
+                                                        issue: issue_to_detail_event(
+                                                            &issue, comments,
+                                                        ),
+                                                    },
+                                                );
+                                            }
+                                            Err(error) => {
+                                                self.funnel.emit(
+                                                    SpurEventBody::IssueCommandError {
+                                                        operation: "AddIssueComment".into(),
+                                                        error: error.to_string(),
+                                                        id: Some(issue_id),
+                                                    },
+                                                );
+                                            }
+                                        },
+                                        Err(error) => {
+                                            self.funnel.emit(SpurEventBody::IssueCommandError {
+                                                operation: "AddIssueComment".into(),
+                                                error: error.to_string(),
+                                                id: Some(issue_id),
+                                            });
+                                        }
+                                    }
+                                }
+                                None => {
+                                    self.funnel.emit(SpurEventBody::IssueCommandError {
+                                        operation: "AddIssueComment".into(),
+                                        error: "Comment write not supported for this issue backend"
+                                            .into(),
+                                        id: Some(issue_id),
+                                    });
+                                }
+                            }
+                        } else {
+                            self.funnel.emit(SpurEventBody::IssueCommandError {
+                                operation: "AddIssueComment".into(),
+                                error: "No issue tracker configured".into(),
+                                id: Some(issue_id),
+                            });
+                        }
+                    }
+
                     // ── SubmitReview ──────────────────────────────────────
                     // Intentional no-op: spur-cli routes SubmitReview to the
                     // review_dispatcher_loop task, not to run_interactive.

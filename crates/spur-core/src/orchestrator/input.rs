@@ -107,6 +107,11 @@ pub enum InteractiveInput {
         id: String,
         update: spur_pm::IssueUpdate,
     },
+    /// Add a comment to an issue and re-emit IssueDetailFetched.
+    AddIssueComment {
+        issue_id: String,
+        body: String,
+    },
     /// Detached delegation completion returned to the orchestrator for
     /// scheduled brain re-entry. Never constructed by the TUI. See
     /// `docs/superpowers/specs/2026-04-19-brain-async-continuation-design.md`.
