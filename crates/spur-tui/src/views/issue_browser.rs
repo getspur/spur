@@ -7,13 +7,14 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
 use spur_acp::{GraphEdgeEvent, GraphNodeEvent, SpurEvent};
 
 use crate::action::{Action, IssueAction, ViewId};
 use crate::components::execute_modal::{ExecuteModal, ExecuteModalVariant};
+use crate::components::issue_comments_pane::IssueCommentsPane;
 use crate::components::issue_detail_pane::IssueDetailPane;
 use crate::components::issue_graph_pane::IssueGraphPane;
 use crate::components::issue_utils::{find_plan_id_label, has_label, has_plan_task_label};
@@ -24,23 +25,37 @@ use crate::components::tombstone::Tombstone;
 use super::View;
 
 const TEXT_STATUS_HINT: &str =
-    "[Text] j/k: Nav  v: Graph Mode  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
-const TEXT_STATUS_HINT_COMPACT: &str = "[Text] j/k: Nav  v: Graph  Esc: Close";
+    "[Text] j/k: Nav  v: Graph Mode  c: Comments  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
+const TEXT_STATUS_HINT_COMPACT: &str = "[Text] j/k: Nav  v: Graph  c: Comments  Esc: Close";
 const TEXT_STATUS_HINT_EPIC: &str =
-    "[Text] j/k: Nav  v: Graph Mode  e: Execute Item  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
-const TEXT_STATUS_HINT_EPIC_COMPACT: &str = "[Text] j/k: Nav  e: Execute Item  v: Graph";
+    "[Text] j/k: Nav  v: Graph Mode  c: Comments  e: Execute Item  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
+const TEXT_STATUS_HINT_EPIC_COMPACT: &str =
+    "[Text] j/k: Nav  e: Execute Item  v: Graph  c: Comments";
 const TEXT_STATUS_HINT_PLAN_EPIC: &str =
-    "[Text] j/k: Nav  p: Open Plan  v: Graph Mode  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
-const TEXT_STATUS_HINT_PLAN_EPIC_COMPACT: &str = "[Text] j/k: Nav  p: Plan  v: Graph";
+    "[Text] j/k: Nav  p: Open Plan  v: Graph Mode  c: Comments  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
+const TEXT_STATUS_HINT_PLAN_EPIC_COMPACT: &str = "[Text] j/k: Nav  p: Plan  v: Graph  c: Comments";
 const GRAPH_STATUS_HINT: &str =
-    "[Graph] j/k: Nav  v: Text Mode  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
-const GRAPH_STATUS_HINT_COMPACT: &str = "[Graph] j/k: Nav  v: Text  Esc: Close";
+    "[Graph] j/k: Nav  v: Text Mode  c: Comments  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
+const GRAPH_STATUS_HINT_COMPACT: &str = "[Graph] j/k: Nav  v: Text  c: Comments  Esc: Close";
 const GRAPH_STATUS_HINT_EPIC: &str =
-    "[Graph] j/k: Nav  v: Text Mode  e: Execute Item  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
-const GRAPH_STATUS_HINT_EPIC_COMPACT: &str = "[Graph] j/k: Nav  e: Execute Item  v: Text";
+    "[Graph] j/k: Nav  v: Text Mode  c: Comments  e: Execute Item  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
+const GRAPH_STATUS_HINT_EPIC_COMPACT: &str =
+    "[Graph] j/k: Nav  e: Execute Item  v: Text  c: Comments";
 const GRAPH_STATUS_HINT_PLAN_EPIC: &str =
-    "[Graph] j/k: Nav  p: Open Plan  v: Text Mode  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
-const GRAPH_STATUS_HINT_PLAN_EPIC_COMPACT: &str = "[Graph] j/k: Nav  p: Plan  v: Text";
+    "[Graph] j/k: Nav  p: Open Plan  v: Text Mode  c: Comments  PgUp/PgDn: Scroll  Esc: Close Graph  q: Quit";
+const GRAPH_STATUS_HINT_PLAN_EPIC_COMPACT: &str = "[Graph] j/k: Nav  p: Plan  v: Text  c: Comments";
+const COMMENTS_STATUS_HINT: &str =
+    "[Comments] j/k: Nav  a: Add Comment  f: Filter  r: Next Review  G: Bottom  v: Graph/Text  c: Comments  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
+const COMMENTS_STATUS_HINT_COMPACT: &str =
+    "[Comments] j/k: Nav  a:Add  f:Filter  r:Review  G:Bottom  v:Graph/Text";
+const COMMENTS_STATUS_HINT_EPIC: &str =
+    "[Comments] j/k: Nav  a: Add Comment  f: Filter  r: Next Review  G: Bottom  v: Graph/Text  c: Comments  e: Execute Item  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
+const COMMENTS_STATUS_HINT_EPIC_COMPACT: &str =
+    "[Comments] j/k: Nav  a:Add  f:Filter  r:Review  G:Bottom  e:Execute  v:Graph/Text";
+const COMMENTS_STATUS_HINT_PLAN_EPIC: &str =
+    "[Comments] j/k: Nav  a: Add Comment  f: Filter  r: Next Review  G: Bottom  p: Open Plan  v: Graph/Text  c: Comments  PgUp/PgDn: Scroll  Esc: Close Detail  q: Quit";
+const COMMENTS_STATUS_HINT_PLAN_EPIC_COMPACT: &str =
+    "[Comments] j/k: Nav  a:Add  f:Filter  r:Review  G:Bottom  p:Plan  v:Graph/Text";
 const LIST_STATUS_HINT: &str =
     "[List] j/k: Nav  Enter/o: Open Detail  v: View Graph  W: Work  r: Refresh  q: Quit";
 const LIST_STATUS_HINT_COMPACT: &str = "[List] j/k: Nav  o: Open  W: Work  r: Refresh";
@@ -64,6 +79,7 @@ pub enum IssueFocus {
     Loaded {
         id: String,
         issue: Box<spur_pm::Issue>,
+        comments: Vec<spur_pm::Comment>,
     },
 }
 
@@ -71,6 +87,7 @@ pub enum IssueFocus {
 pub enum DetailMode {
     Text,
     Graph,
+    Comments,
 }
 
 /// Inc 3 (bd-d587.3): caller-supplied intent for `open_external_detail`.
@@ -88,6 +105,13 @@ pub enum OpenMode {
     Default,
     FocusText,
     FocusGraph,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AddCommentModal {
+    issue_id: String,
+    body: String,
+    restore_scroll_offset: u16,
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -175,6 +199,7 @@ pub struct IssueBrowserView {
     issues_panel: IssuesPanel,
     filter_mode: bool,
     issue_detail_pane: IssueDetailPane,
+    issue_comments_pane: IssueCommentsPane,
     issue_focus: IssueFocus,
     detail_mode: DetailMode,
     graph_pane: IssueGraphPane,
@@ -187,6 +212,7 @@ pub struct IssueBrowserView {
     graph_loading: Option<String>,
     graph_error: Option<(String, String)>,
     execute_modal: Option<ExecuteModal>,
+    add_comment_modal: Option<AddCommentModal>,
     /// Inc 3 (bd-d587.3): id to select in the left list once it appears in
     /// `tracked_issues`. Set by `open_external_detail` when the id isn't yet
     /// present; drained on the next `IssuesLoaded` that contains it.
@@ -224,6 +250,7 @@ impl IssueBrowserView {
             issues_panel: IssuesPanel::new(),
             filter_mode: false,
             issue_detail_pane: IssueDetailPane::new(),
+            issue_comments_pane: IssueCommentsPane::new(),
             issue_focus: IssueFocus::None,
             detail_mode: DetailMode::Text,
             graph_pane: IssueGraphPane::new(),
@@ -236,6 +263,7 @@ impl IssueBrowserView {
             graph_loading: None,
             graph_error: None,
             execute_modal: None,
+            add_comment_modal: None,
             pending_select: None,
             post_load_mode: None,
             pending_action: None,
@@ -363,6 +391,7 @@ impl IssueBrowserView {
         match self.detail_mode {
             DetailMode::Text => self.issue_detail_pane.scroll_up_by(lines),
             DetailMode::Graph => self.graph_pane.scroll_up_by(lines),
+            DetailMode::Comments => self.issue_comments_pane.scroll_up_by(lines),
         }
     }
 
@@ -370,6 +399,7 @@ impl IssueBrowserView {
         match self.detail_mode {
             DetailMode::Text => self.issue_detail_pane.scroll_down_by(lines),
             DetailMode::Graph => self.graph_pane.scroll_down_by(lines),
+            DetailMode::Comments => self.issue_comments_pane.scroll_down_by(lines),
         }
     }
 
@@ -473,7 +503,7 @@ impl IssueBrowserView {
 
         find_plan_id_label(&selected.labels)
             .or_else(|| match &self.issue_focus {
-                IssueFocus::Loaded { id, issue } if id == &selected_id => {
+                IssueFocus::Loaded { id, issue, .. } if id == &selected_id => {
                     find_plan_id_label(&issue.labels)
                 }
                 _ => None,
@@ -602,6 +632,7 @@ impl IssueBrowserView {
                 IssueFocus::Loaded {
                     id: loaded_id,
                     issue: _,
+                    ..
                 },
                 Some(sel),
             ) if loaded_id == &sel => {
@@ -644,6 +675,7 @@ impl IssueBrowserView {
                     self.detail_mode = DetailMode::Text;
                     None
                 }
+                DetailMode::Comments => None,
             },
             IssueFocus::None => {
                 let action =
@@ -679,6 +711,19 @@ impl IssueBrowserView {
         None
     }
 
+    fn open_add_comment_modal(&mut self) -> Option<Action> {
+        let issue_id = match (&self.issue_focus, self.detail_mode) {
+            (IssueFocus::Loaded { id, .. }, DetailMode::Comments) => id.clone(),
+            _ => return None,
+        };
+        self.add_comment_modal = Some(AddCommentModal {
+            issue_id,
+            body: String::new(),
+            restore_scroll_offset: self.issue_comments_pane.scroll_offset(),
+        });
+        None
+    }
+
     // ── Key handling ────────────────────────────────────────────────────
 
     fn handle_key_inner(&mut self, key: KeyEvent) -> Option<Action> {
@@ -698,6 +743,51 @@ impl IssueBrowserView {
                 }
                 KeyCode::Esc => {
                     self.execute_modal = None;
+                    None
+                }
+                _ => None,
+            };
+        }
+
+        if let Some(modal) = self.add_comment_modal.as_mut() {
+            return match key.code {
+                KeyCode::Esc => {
+                    let restore_scroll_offset = modal.restore_scroll_offset;
+                    self.add_comment_modal = None;
+                    self.issue_comments_pane
+                        .set_scroll_offset(restore_scroll_offset);
+                    None
+                }
+                KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    let issue_id = modal.issue_id.clone();
+                    let body = modal.body.trim().to_string();
+                    let restore_scroll_offset = modal.restore_scroll_offset;
+                    self.add_comment_modal = None;
+                    self.issue_comments_pane
+                        .set_scroll_offset(restore_scroll_offset);
+                    if body.is_empty() {
+                        return None;
+                    }
+                    Some(Action::Issue(IssueAction::AddComment { issue_id, body }))
+                }
+                KeyCode::Enter => {
+                    if !modal.body.is_empty() {
+                        modal.body.push('\n');
+                    }
+                    None
+                }
+                KeyCode::Backspace => {
+                    modal.body.pop();
+                    None
+                }
+                KeyCode::Char(c)
+                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    modal.body.push(c);
+                    None
+                }
+                KeyCode::Tab if key.modifiers.is_empty() => {
+                    modal.body.push('\t');
                     None
                 }
                 _ => None,
@@ -754,7 +844,21 @@ impl IssueBrowserView {
             KeyCode::Char('q') if key.modifiers.is_empty() => Some(Action::Quit),
             KeyCode::Char('?') if key.modifiers.is_empty() => Some(Action::ShowHelp),
             KeyCode::Char('s') if key.modifiers.is_empty() => Some(Action::RequestSessions),
+            KeyCode::Char('f')
+                if key.modifiers.is_empty()
+                    && matches!(self.issue_focus, IssueFocus::Loaded { .. })
+                    && self.detail_mode == DetailMode::Comments =>
+            {
+                self.issue_comments_pane.cycle_filter();
+                None
+            }
             KeyCode::Char('r') if key.modifiers.is_empty() => {
+                if matches!(self.issue_focus, IssueFocus::Loaded { .. })
+                    && self.detail_mode == DetailMode::Comments
+                {
+                    self.issue_comments_pane.jump_to_next_review();
+                    return None;
+                }
                 self.bump_graph_data_epoch();
                 self.bump_detail_data_epoch();
 
@@ -762,7 +866,21 @@ impl IssueBrowserView {
                 Some(Action::RefreshIssues)
             }
             KeyCode::Char('v') if key.modifiers.is_empty() => self.toggle_detail_mode(),
+            KeyCode::Char('c')
+                if key.modifiers.is_empty()
+                    && matches!(self.issue_focus, IssueFocus::Loaded { .. }) =>
+            {
+                self.detail_mode = DetailMode::Comments;
+                None
+            }
             KeyCode::Char('p') if key.modifiers.is_empty() => self.open_selected_plan(),
+            KeyCode::Char('a')
+                if key.modifiers.is_empty()
+                    && matches!(self.issue_focus, IssueFocus::Loaded { .. })
+                    && self.detail_mode == DetailMode::Comments =>
+            {
+                self.open_add_comment_modal()
+            }
 
             // Navigation
             KeyCode::Char('j') | KeyCode::Down if key.modifiers.is_empty() => {
@@ -793,6 +911,12 @@ impl IssueBrowserView {
                 None
             }
             KeyCode::Char('G') if key.modifiers.is_empty() => {
+                if matches!(self.issue_focus, IssueFocus::Loaded { .. })
+                    && self.detail_mode == DetailMode::Comments
+                {
+                    self.issue_comments_pane.jump_to_bottom();
+                    return None;
+                }
                 let count = self.tracked_issues.len();
                 self.issues_panel.select_last(count);
                 self.prefetch_selected_graph();
@@ -955,9 +1079,14 @@ impl IssueBrowserView {
             IssueFocus::Loading { id } => {
                 IssueDetailPane::render_loading(id, frame, chunks[1]);
             }
-            IssueFocus::Loaded { id, issue } => match self.detail_mode {
+            IssueFocus::Loaded {
+                id,
+                issue,
+                comments,
+            } => match self.detail_mode {
                 DetailMode::Text => {
-                    self.issue_detail_pane.render(issue, frame, chunks[1]);
+                    self.issue_detail_pane
+                        .render(issue, comments, frame, chunks[1]);
                 }
                 DetailMode::Graph => {
                     if let Some(error) = self.graph_error_for(id) {
@@ -974,6 +1103,10 @@ impl IssueBrowserView {
                             chunks[1],
                         );
                     }
+                }
+                DetailMode::Comments => {
+                    self.issue_comments_pane
+                        .render(id, comments, frame, chunks[1]);
                 }
             },
             IssueFocus::None => {
@@ -1020,6 +1153,17 @@ impl IssueBrowserView {
                     }
                     DetailMode::Graph => {
                         Self::hint_override(GRAPH_STATUS_HINT, GRAPH_STATUS_HINT_COMPACT)
+                    }
+                    DetailMode::Comments if has_plan => Self::hint_override(
+                        COMMENTS_STATUS_HINT_PLAN_EPIC,
+                        COMMENTS_STATUS_HINT_PLAN_EPIC_COMPACT,
+                    ),
+                    DetailMode::Comments if has_execute => Self::hint_override(
+                        COMMENTS_STATUS_HINT_EPIC,
+                        COMMENTS_STATUS_HINT_EPIC_COMPACT,
+                    ),
+                    DetailMode::Comments => {
+                        Self::hint_override(COMMENTS_STATUS_HINT, COMMENTS_STATUS_HINT_COMPACT)
                     }
                 })
             }
@@ -1068,6 +1212,33 @@ impl IssueBrowserView {
 
         if let Some(modal) = self.execute_modal.as_ref() {
             modal.render(frame, chunks[1]);
+        }
+        if let Some(modal) = self.add_comment_modal.as_ref() {
+            let popup_width = 72u16.min(chunks[1].width);
+            let popup_height = 14u16.min(chunks[1].height);
+            let popup = Rect {
+                x: chunks[1].x + chunks[1].width.saturating_sub(popup_width) / 2,
+                y: chunks[1].y + chunks[1].height.saturating_sub(popup_height) / 2,
+                width: popup_width,
+                height: popup_height,
+            };
+            frame.render_widget(Clear, popup);
+            let block = Block::default()
+                .title(" Add Comment ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Green));
+            let inner = block.inner(popup);
+            frame.render_widget(block, popup);
+            let input = if modal.body.is_empty() {
+                "_".to_string()
+            } else {
+                format!("{}_", modal.body)
+            };
+            let prompt = format!(
+                "Issue: {}\n\n{}\n\nCtrl+Enter: Submit  Esc: Cancel",
+                modal.issue_id, input
+            );
+            frame.render_widget(Paragraph::new(prompt), inner);
         }
     }
 }
@@ -1173,6 +1344,7 @@ impl View for IssueBrowserView {
                 if let IssueFocus::Loaded {
                     id: ref focus_id,
                     ref mut issue,
+                    ..
                 } = self.issue_focus
                 {
                     if *focus_id == *id {
@@ -1242,6 +1414,7 @@ impl View for IssueBrowserView {
                         self.issue_focus = IssueFocus::Loaded {
                             id: requested_id.clone(),
                             issue: Box::new(pm_issue),
+                            comments: issue.comments.clone(),
                         };
                         // Inc 3 (bd-d587.3): apply the post-load mode armed
                         // by `open_external_detail(_, FocusGraph)`. Falls back
@@ -1399,6 +1572,7 @@ mod tests {
             priority: Some(0),
             issue_type: Some("task".into()),
             blocked_by: Vec::new(),
+            comments: Vec::new(),
             due_at: None,
             created_at: now,
             updated_at: now,
@@ -1526,6 +1700,7 @@ mod tests {
                 "current",
                 "body line 1\nbody line 2\nbody line 3\nbody line 4",
             )),
+            comments: Vec::new(),
         };
         let rendered = rendered_text(&mut view);
         assert!(
@@ -1557,6 +1732,7 @@ mod tests {
         view.issue_focus = IssueFocus::Loaded {
             id: "A".into(),
             issue: Box::new(issue_detail("A", "A body")),
+            comments: Vec::new(),
         };
         view.detail_mode = DetailMode::Graph;
         view.graph_loading = Some("B".into());
@@ -1780,6 +1956,131 @@ mod tests {
     }
 
     #[test]
+    fn a_only_opens_comment_modal_in_comments_mode() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.set_issues_for_test(vec![issue("bd-1", "task", Vec::new())]);
+        view.issue_focus = IssueFocus::Loaded {
+            id: "bd-1".into(),
+            issue: Box::new(issue_detail("bd-1", "body")),
+            comments: Vec::new(),
+        };
+
+        view.detail_mode = DetailMode::Text;
+        let text_action = view.handle_key(key(KeyCode::Char('a')), &ctx);
+        assert!(text_action.is_none());
+        assert!(view.add_comment_modal.is_none());
+
+        view.detail_mode = DetailMode::Comments;
+        let comment_action = view.handle_key(key(KeyCode::Char('a')), &ctx);
+        assert!(comment_action.is_none());
+        assert!(view.add_comment_modal.is_some());
+    }
+
+    #[test]
+    fn add_comment_modal_esc_closes_without_action() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.set_issues_for_test(vec![issue("bd-1", "task", Vec::new())]);
+        view.issue_focus = IssueFocus::Loaded {
+            id: "bd-1".into(),
+            issue: Box::new(issue_detail("bd-1", "body")),
+            comments: Vec::new(),
+        };
+        view.detail_mode = DetailMode::Comments;
+        let _ = view.handle_key(key(KeyCode::Char('a')), &ctx);
+        assert!(view.add_comment_modal.is_some());
+
+        let action = view.handle_key(key(KeyCode::Esc), &ctx);
+
+        assert!(action.is_none());
+        assert!(view.add_comment_modal.is_none());
+    }
+
+    #[test]
+    fn add_comment_modal_ctrl_enter_dispatches_add_comment() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.set_issues_for_test(vec![issue("bd-1", "task", Vec::new())]);
+        view.issue_focus = IssueFocus::Loaded {
+            id: "bd-1".into(),
+            issue: Box::new(issue_detail("bd-1", "body")),
+            comments: Vec::new(),
+        };
+        view.detail_mode = DetailMode::Comments;
+        let _ = view.handle_key(key(KeyCode::Char('a')), &ctx);
+        let _ = view.handle_key(key(KeyCode::Char('h')), &ctx);
+        let _ = view.handle_key(key(KeyCode::Char('i')), &ctx);
+
+        let action = view.handle_key(modified_key(KeyCode::Enter, KeyModifiers::CONTROL), &ctx);
+
+        assert!(matches!(
+            action,
+            Some(Action::Issue(IssueAction::AddComment { ref issue_id, ref body }))
+                if issue_id == "bd-1" && body == "hi"
+        ));
+        assert!(view.add_comment_modal.is_none());
+    }
+
+    #[test]
+    fn add_comment_modal_ctrl_enter_whitespace_body_short_circuits_and_restores_scroll() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.set_issues_for_test(vec![issue("bd-1", "task", Vec::new())]);
+        view.issue_focus = IssueFocus::Loaded {
+            id: "bd-1".into(),
+            issue: Box::new(issue_detail("bd-1", "body")),
+            comments: Vec::new(),
+        };
+        view.detail_mode = DetailMode::Comments;
+        view.issue_comments_pane.set_scroll_offset(7);
+        let _ = view.handle_key(key(KeyCode::Char('a')), &ctx);
+        view.issue_comments_pane.set_scroll_offset(42);
+        let _ = view.handle_key(key(KeyCode::Char(' ')), &ctx);
+        let _ = view.handle_key(key(KeyCode::Char(' ')), &ctx);
+
+        let action = view.handle_key(modified_key(KeyCode::Enter, KeyModifiers::CONTROL), &ctx);
+
+        assert!(action.is_none());
+        assert!(view.add_comment_modal.is_none());
+        assert_eq!(view.issue_comments_pane.scroll_offset(), 7);
+    }
+
+    #[test]
+    fn add_comment_submit_keeps_loaded_focus_and_restores_scroll() {
+        let lineage = ExecutorLineage::new();
+        let ctx = ViewContext::test_ctx(&lineage);
+        let mut view = IssueBrowserView::new();
+        view.set_issues_for_test(vec![issue("bd-1", "task", Vec::new())]);
+        view.issue_focus = IssueFocus::Loaded {
+            id: "bd-1".into(),
+            issue: Box::new(issue_detail("bd-1", "body")),
+            comments: Vec::new(),
+        };
+        view.detail_mode = DetailMode::Comments;
+        view.issue_comments_pane.set_scroll_offset(5);
+        let _ = view.handle_key(key(KeyCode::Char('a')), &ctx);
+        view.issue_comments_pane.set_scroll_offset(29);
+        let _ = view.handle_key(key(KeyCode::Char('h')), &ctx);
+        let _ = view.handle_key(key(KeyCode::Char('i')), &ctx);
+
+        let action = view.handle_key(modified_key(KeyCode::Enter, KeyModifiers::CONTROL), &ctx);
+
+        assert!(matches!(
+            action,
+            Some(Action::Issue(IssueAction::AddComment { ref issue_id, ref body }))
+                if issue_id == "bd-1" && body == "hi"
+        ));
+        assert!(matches!(view.issue_focus, IssueFocus::Loaded { .. }));
+        assert_eq!(view.issue_comments_pane.scroll_offset(), 5);
+        assert!(view.add_comment_modal.is_none());
+    }
+
+    #[test]
     fn update_status_targets_highlighted_row_when_detail_is_loaded_for_another_issue() {
         let mut view = IssueBrowserView::new();
         view.set_issues_for_test(vec![
@@ -1789,6 +2090,7 @@ mod tests {
         view.issue_focus = IssueFocus::Loaded {
             id: "bd-A".into(),
             issue: Box::new(issue_detail("bd-A", "A body")),
+            comments: Vec::new(),
         };
         view.issues_panel.select_next(1, view.tracked_issues.len());
 
@@ -2155,6 +2457,7 @@ mod tests {
         detail_view.issue_focus = IssueFocus::Loaded {
             id: "bd-00".into(),
             issue: Box::new(issue_detail("bd-00", &body)),
+            comments: Vec::new(),
         };
 
         let before = rendered_text(&mut detail_view);

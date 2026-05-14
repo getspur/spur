@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use spur_pm::Issue;
+use spur_pm::{Comment, Issue};
 
 pub struct IssueDetailPane {
     scroll_offset: u16,
@@ -43,7 +43,7 @@ impl IssueDetailPane {
         self.scroll_offset = 0;
     }
 
-    pub fn render(&self, issue: &Issue, frame: &mut Frame, area: Rect) {
+    pub fn render(&self, issue: &Issue, comments: &[Comment], frame: &mut Frame, area: Rect) {
         let block = Block::bordered()
             .title(format!(" Issue: {} ", issue.id))
             .border_style(Style::default().fg(Color::Cyan));
@@ -51,18 +51,35 @@ impl IssueDetailPane {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
+        let show_comments_teaser = !comments.is_empty();
+
         // Split inner: top metadata section, body, footer
-        let chunks = Layout::vertical([
-            Constraint::Length(1), // Title line
-            Constraint::Length(1), // Metadata line 1: status, priority, type, assignee
-            Constraint::Length(1), // Metadata line 2: due date, blocked_by
-            Constraint::Length(1), // Metadata line 3: labels
-            Constraint::Length(1), // Separator
-            Constraint::Min(1),    // Body (scrollable)
-            Constraint::Length(1), // Footer separator
-            Constraint::Length(1), // Action hints
-        ])
-        .split(inner);
+        let chunks = if show_comments_teaser {
+            Layout::vertical([
+                Constraint::Length(1), // Title line
+                Constraint::Length(1), // Metadata line 1: status, priority, type, assignee
+                Constraint::Length(1), // Metadata line 2: due date, blocked_by
+                Constraint::Length(1), // Metadata line 3: labels
+                Constraint::Length(1), // Separator
+                Constraint::Min(1),    // Body (scrollable)
+                Constraint::Length(1), // Footer separator
+                Constraint::Length(1), // Comments teaser
+                Constraint::Length(1), // Action hints
+            ])
+            .split(inner)
+        } else {
+            Layout::vertical([
+                Constraint::Length(1), // Title line
+                Constraint::Length(1), // Metadata line 1: status, priority, type, assignee
+                Constraint::Length(1), // Metadata line 2: due date, blocked_by
+                Constraint::Length(1), // Metadata line 3: labels
+                Constraint::Length(1), // Separator
+                Constraint::Min(1),    // Body (scrollable)
+                Constraint::Length(1), // Footer separator
+                Constraint::Length(1), // Action hints
+            ])
+            .split(inner)
+        };
 
         // ── Title ────────────────────────────────────────────────────────────────
         let title_line = Line::from(Span::styled(
@@ -186,6 +203,22 @@ impl IssueDetailPane {
             chunks[6],
         );
 
+        if show_comments_teaser {
+            let reviews = comments.iter().filter(|c| is_review_comment(c)).count();
+            let teaser_style = Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM);
+            let teaser = Line::from(vec![
+                Span::styled(
+                    format!("{} comments · {} reviews   ", comments.len(), reviews),
+                    teaser_style,
+                ),
+                Span::styled("[c]", teaser_style),
+                Span::styled("omments", teaser_style),
+            ]);
+            frame.render_widget(Paragraph::new(teaser), chunks[7]);
+        }
+
         // ── Action hints ─────────────────────────────────────────────────────────
         let hints = Line::from(vec![
             Span::styled("[o]", Style::default().fg(Color::Green)),
@@ -206,7 +239,8 @@ impl IssueDetailPane {
             Span::styled("[Esc]", Style::default().fg(Color::DarkGray)),
             Span::styled(" back", Style::default().fg(Color::DarkGray)),
         ]);
-        frame.render_widget(Paragraph::new(hints), chunks[7]);
+        let hints_idx = if show_comments_teaser { 8 } else { 7 };
+        frame.render_widget(Paragraph::new(hints), chunks[hints_idx]);
     }
 
     pub fn render_loading(id: &str, frame: &mut Frame, area: Rect) {
@@ -246,4 +280,10 @@ fn status_colored_span(status: &str) -> Span<'static> {
         "closed" => Span::styled("done".to_string(), Style::default().fg(Color::DarkGray)),
         other => Span::styled(other.to_string(), Style::default().fg(Color::White)),
     }
+}
+
+fn is_review_comment(comment: &Comment) -> bool {
+    let actor = comment.actor.to_ascii_lowercase();
+    let body = comment.body.to_ascii_lowercase();
+    actor.contains("review") || body.starts_with("[review]") || body.contains("[[spur-review")
 }
