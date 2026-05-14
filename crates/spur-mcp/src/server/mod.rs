@@ -28,6 +28,7 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, OnceCell};
 use tokio::task::{JoinHandle, JoinSet};
@@ -421,8 +422,7 @@ impl McpCallbackServer {
         self.plan_pending_grace = grace;
     }
 
-    /// Configure PR2 persisted-plan cache serving. Default is off until PR3
-    /// makes task-level durable writes advance the epic audit sequence.
+    /// Configure persisted-plan cache serving.
     pub fn set_versioned_cache_serve(&mut self, enabled: bool) {
         self.versioned_cache_serve = enabled;
     }
@@ -983,20 +983,99 @@ impl McpCallbackServer {
             .list_comments(epic_id)
             .await
             .map_err(|error| format!("list_comments({epic_id}) failed: {error}"))?;
+        let epic_issue = pm
+            .get_issue(epic_id)
+            .await
+            .map_err(|error| format!("get_issue({epic_id}) failed: {error}"))?;
+        let plan_id = epic_issue
+            .labels
+            .iter()
+            .find_map(|label| crate::plan::labels::parse_plan_id(label));
+        let Some(plan_id) = plan_id else {
+            return Ok(BeadsVersion::AuditSeq(
+                crate::plan::projector::sort_projection_comments(comments)
+                    .into_iter()
+                    .filter(|comment| {
+                        comment
+                            .body
+                            .starts_with(crate::plan::audit_sentinel::SENTINEL_PREFIX)
+                    })
+                    .count() as u64,
+            ));
+        };
 
-        // PR2 cache token: the monotonic sequence is the ordinal of audit
-        // sentinel comments on the epic issue after projector ordering.
-        // PR3 advances this epic sequence for every durable task-level plan
-        // write; once landed, `versioned_cache_serve` can be flipped on.
-        let audit_seq = crate::plan::projector::sort_projection_comments(comments)
-            .into_iter()
-            .filter(|comment| {
-                comment
+        // Option B (content-addressed): derive a cache token from the sorted
+        // set of plan-scoped audit comment IDs. This avoids additive-count
+        // collisions across plan restarts and aligns issue discovery with the
+        // projector (scan by `spur:plan-id:<id>` label).
+        let mut summary_by_id = HashMap::new();
+        for status in [
+            Some("open".to_string()),
+            Some("in_progress".to_string()),
+            Some(pm.closed_status().to_string()),
+        ] {
+            for summary in pm
+                .list_issues(IssueFilter {
+                    labels: vec![crate::plan::labels::plan_id(plan_id)],
+                    status,
+                    limit: Some(1_000),
+                    ..Default::default()
+                })
+                .await
+                .map_err(|error| format!("list_issues(plan={plan_id}) failed: {error}"))?
+            {
+                summary_by_id.insert(summary.id.clone(), summary);
+            }
+        }
+        let mut issue_ids: Vec<String> = summary_by_id.into_keys().collect();
+        issue_ids.sort();
+
+        let comments_by_issue = futures::future::try_join_all(issue_ids.iter().map(|issue_id| {
+            let adv = adv;
+            async move {
+                adv.list_comments(issue_id)
+                    .await
+                    .map(|comments| (issue_id.clone(), comments))
+            }
+        }))
+        .await
+        .map_err(|error| format!("list_comments(plan={plan_id}) failed: {error}"))?;
+
+        let mut audit_keys = Vec::new();
+        for (issue_id, comments) in comments_by_issue {
+            for comment in crate::plan::projector::sort_projection_comments(comments) {
+                if !comment
                     .body
                     .starts_with(crate::plan::audit_sentinel::SENTINEL_PREFIX)
-            })
-            .count() as u64;
-        Ok(BeadsVersion::AuditSeq(audit_seq))
+                {
+                    continue;
+                }
+                if let Some(Err(error)) = crate::plan::audit_sentinel::parse_comment(&comment.body)
+                {
+                    tracing::warn!(
+                        %plan_id,
+                        %issue_id,
+                        comment_id = %comment.id,
+                        %error,
+                        "malformed audit sentinel included in beads version hash"
+                    );
+                }
+                audit_keys.push((issue_id.clone(), comment.id));
+            }
+        }
+        audit_keys.sort();
+
+        let mut hasher = Sha256::new();
+        for (issue_id, comment_id) in audit_keys {
+            hasher.update(issue_id.as_bytes());
+            hasher.update([0_u8]);
+            hasher.update(comment_id.as_bytes());
+            hasher.update([0_u8]);
+        }
+        let digest = hasher.finalize();
+        let mut hash = [0_u8; 32];
+        hash.copy_from_slice(&digest);
+        Ok(BeadsVersion::ContentHash(hash))
     }
 
     async fn project_plan_from_beads_with_stable_version(
