@@ -387,6 +387,19 @@ pub(super) async fn annotate_plan_summary_canonical_epics(
             &candidate.summary.epic_id,
             comments,
         );
+        let audits = match audits {
+            Ok(audits) => audits,
+            Err(error) => {
+                // Safe to skip here: this annotation path is non-authoritative summary metadata.
+                warn!(
+                    plan_id = %candidate.summary.plan_id,
+                    epic_id = %candidate.summary.epic_id,
+                    error = %error,
+                    "failed to parse PlanSubmit audit while loading duplicate plan summaries"
+                );
+                continue;
+            }
+        };
         for audit in audits {
             if let spur_mcp::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
                 plan_id,

@@ -258,7 +258,7 @@ impl super::Reconciler {
             let mut audits = crate::plan::projector::collect_sorted_audits_for_issue(
                 &epic.id,
                 adv.list_comments(&epic.id).await?,
-            );
+            )?;
             let has_epic_completion = audits.iter().any(|audit| {
                 matches!(
                     audit,

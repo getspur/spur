@@ -121,14 +121,14 @@ pub async fn apply_mutation(
                         parent_agent
                     );
                 }
-                let parent_context_files = super::projector::latest_task_spec(
-                    &super::projector::collect_sorted_audits_for_issue(
-                        parent,
-                        adv.list_comments(parent)
-                            .await
-                            .with_context(|| format!("list comments for parent issue {parent}"))?,
-                    ),
+                let parent_audits = super::projector::collect_sorted_audits_for_issue(
+                    parent,
+                    adv.list_comments(parent)
+                        .await
+                        .with_context(|| format!("list comments for parent issue {parent}"))?,
                 )
+                .with_context(|| format!("parse comments for parent issue {parent}"))?;
+                let parent_context_files = super::projector::latest_task_spec(&parent_audits)
                 .map(|(_, context_files)| context_files)
                 .unwrap_or_default();
                 let original_downstreams = downstream_issue_ids(pm.as_ref(), parent).await?;
@@ -1223,7 +1223,8 @@ async fn apply_retry_task(
         adv.list_comments(issue_id)
             .await
             .with_context(|| format!("list comments for retry target {issue_id}"))?,
-    );
+    )
+    .with_context(|| format!("parse comments for retry target {issue_id}"))?;
     let (attempt, last_delegation_id) = super::projector::project_attempt_facts(&prior_audits);
     if attempt >= super::MAX_ATTEMPTS {
         return Err(anyhow!(
@@ -1405,7 +1406,8 @@ async fn apply_modify_task_spec(
         adv.list_comments(issue_id)
             .await
             .with_context(|| format!("list comments for modify target {issue_id}"))?,
-    );
+    )
+    .with_context(|| format!("parse comments for modify target {issue_id}"))?;
     let (prior_task_id, prior_context_files) = super::projector::latest_task_spec(&prior_audits)
         .unwrap_or_else(|| (issue_id.to_string(), Vec::new()));
     let context_files: Vec<String> = match input.new_context_files {
@@ -1596,7 +1598,8 @@ async fn apply_insert_task_before(
         adv.list_comments(target_issue_id)
             .await
             .with_context(|| format!("list comments for insert target {target_issue_id}"))?,
-    );
+    )
+    .with_context(|| format!("parse comments for insert target {target_issue_id}"))?;
     let (_attempt, last_delegation_id) = super::projector::project_attempt_facts(&prior_audits);
     adv.add_comment(
         target_issue_id,
