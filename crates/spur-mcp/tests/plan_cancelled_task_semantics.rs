@@ -32,7 +32,7 @@ async fn approve_does_not_enqueue_new_dispatches() {
                 attempt: 1,
                 history: vec![],
                 last_delegation_id: None,
-                dispatched_base_oid: None,
+                dispatched_base_oid: Some("0000000000000000000000000000000000000001".into()),
             },
             PlanTaskEntry {
                 spec: PlanTask {

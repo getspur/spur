@@ -310,7 +310,7 @@ async fn active_plan_cache_converges_when_reconciler_ticks_race_review_task() {
             worker_branch: Some("spur/worker-cache-race".into()),
             result_summary: Some("ready for review".into()),
             artifact_uri: None,
-            dispatched_base_oid: None,
+            dispatched_base_oid: Some("0000000000000000000000000000000000000001".into()),
         }),
     )
     .await
@@ -435,7 +435,7 @@ async fn versioned_cache_stays_stale_when_only_task_audits_advance() {
                 worker_branch: Some("spur/task-only".into()),
                 result_summary: Some("ready".into()),
                 artifact_uri: None,
-                dispatched_base_oid: None,
+                dispatched_base_oid: Some("0000000000000000000000000000000000000001".into()),
             }),
         )
         .await
@@ -749,6 +749,22 @@ async fn t_v0c_6_watcher_uses_projected_plan_state_not_stub_state() {
         .expect("advanced beads surface")
         .add_comment(
             &task_id,
+            &audit_sentinel::encode_comment(&AuditSentinelKind::Completion {
+                delegation_id: "del-plan-6".into(),
+                completion_state: CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some("spur/worker-plan-6".into()),
+                result_summary: None,
+                artifact_uri: None,
+                dispatched_base_oid: Some("0000000000000000000000000000000000000001".into()),
+            }),
+        )
+        .await
+        .expect("seed completion audit");
+    pm.advanced()
+        .expect("advanced beads surface")
+        .add_comment(
+            &task_id,
             &signals::encode_comment(&WorkerSignal::ScopeDrift {
                 signal_id: Uuid::new_v4(),
                 severity: 0.82,
@@ -766,6 +782,15 @@ async fn t_v0c_6_watcher_uses_projected_plan_state_not_stub_state() {
         common::server_builder::pro_feature_gate(),
     );
     watcher.tick_once().await.expect("tick_once");
+    pm.update_issue(
+        &task_id,
+        spur_pm::IssueUpdate {
+            remove_labels: vec![labels::READY_FOR_REVIEW.to_string()],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("clear stale ready-for-review label on superseded parent");
 
     let issue = pm.get_issue(&task_id).await.expect("get issue");
     assert!(issue

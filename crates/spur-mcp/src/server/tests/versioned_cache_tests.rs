@@ -41,6 +41,18 @@ async fn derive_version(
         .expect("derive beads version")
 }
 
+fn advanced_beads<'a>(
+    pm: &'a spur_pm::PmService,
+    feature_gate: &spur_license::FeatureGate,
+) -> &'a dyn spur_pm::BeadsAdvanced {
+    super::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        feature_gate,
+    )
+    .expect("pro gate");
+    pm.advanced().expect("advanced backend")
+}
+
 #[tokio::test]
 async fn derive_beads_version_advances_through_bd334_task_audit_sequence() {
     let dir = init_repo().await;
@@ -58,7 +70,7 @@ async fn derive_beads_version_advances_through_bd334_task_audit_sequence() {
     .await
     .expect("build epic subgraph");
 
-    let adv = pm.advanced().expect("advanced backend");
+    let adv = advanced_beads(pm.as_ref(), feature_gate.as_ref());
     crate::emit_plan_submit_audit(adv, "plan-1", &sg, crate::PlanSubmitAuditContext::default())
         .await;
 
@@ -120,7 +132,7 @@ async fn derive_beads_version_does_not_collide_across_plan_restart_same_plan_id(
     let dir = init_repo().await;
     let (_beads, pm) = super::init_beads_pm(dir.path()).await;
     let feature_gate = super::pro_feature_gate();
-    let adv = pm.advanced().expect("advanced backend");
+    let adv = advanced_beads(pm.as_ref(), feature_gate.as_ref());
 
     let sg1 = crate::build_epic_subgraph(
         pm.as_ref(),
@@ -213,7 +225,7 @@ async fn derive_beads_version_includes_malformed_task_audit_sentinel() {
     .await
     .expect("build epic subgraph");
 
-    let adv = pm.advanced().expect("advanced backend");
+    let adv = advanced_beads(pm.as_ref(), feature_gate.as_ref());
     crate::emit_plan_submit_audit(adv, "plan-1", &sg, crate::PlanSubmitAuditContext::default())
         .await;
     let before = derive_version(pm.as_ref(), feature_gate.as_ref(), &sg.epic_id).await;
