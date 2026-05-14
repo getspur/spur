@@ -12,3 +12,7 @@ rustflags = ["-C", "force-frame-pointers=yes"]
 spur-profile = "build --profile profiling"
 # One-step flamegraph for the main spur binary
 spur-flamegraph = "flamegraph --profile profiling --bin spur"
+
+[env]
+SPUR_TELEMETRY = "0"
+CI = "true"
