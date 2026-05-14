@@ -237,6 +237,31 @@ impl super::Reconciler {
                                 }
                                 _ => child.status.clone(),
                             };
+                            let terminal_status_consistent = match task.status {
+                                crate::plan::PlanTaskStatus::Cancelled { .. }
+                                | crate::plan::PlanTaskStatus::Superseded { .. } => {
+                                    child.status == "cancelled"
+                                }
+                                crate::plan::PlanTaskStatus::Failed { .. } => {
+                                    child.status == "failed"
+                                }
+                                crate::plan::PlanTaskStatus::Rejected { .. } => {
+                                    child.status == "rejected"
+                                }
+                                crate::plan::PlanTaskStatus::Approved { .. } => {
+                                    child.status == closed_status
+                                }
+                                _ => true,
+                            };
+                            assert!(
+                                terminal_status_consistent,
+                                "invariant:reconciler_terminal projected terminal mapping mismatch violated (plan_id={}, issue_id={}) expected child.status to match projected terminal task status, got projected_status={:?}, child_status={:?}, closed_status={:?}",
+                                plan_id,
+                                child.id,
+                                task.status,
+                                child.status,
+                                closed_status,
+                            );
                         }
                     }
                     Err(error) => {
