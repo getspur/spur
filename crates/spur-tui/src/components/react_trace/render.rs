@@ -10,6 +10,12 @@ use ratatui::{
 use ratatui::style::Modifier;
 #[cfg(feature = "markdown")]
 use std::time::Duration;
+#[cfg(feature = "markdown")]
+use std::time::Instant;
+#[cfg(feature = "markdown")]
+use std::{cell::RefCell, thread_local};
+#[cfg(feature = "markdown")]
+use std::{cmp, sync::atomic::AtomicU64, sync::atomic::Ordering};
 
 use crate::components::line_wrap::wrap_line_to_width;
 use crate::theme::{resolve_token, ColorDepth, Theme};
@@ -25,6 +31,90 @@ use crate::components::spinner;
 
 #[cfg(feature = "markdown")]
 const SCROLL_DEBOUNCE: Duration = Duration::from_millis(100);
+#[cfg(feature = "markdown")]
+const PERF_SAMPLE_BATCH: usize = 200;
+#[cfg(feature = "markdown")]
+const PERF_RENDER_SUMMARY_EVERY: u64 = 1000;
+
+#[cfg(feature = "markdown")]
+struct DurationSampler {
+    samples: [u64; PERF_SAMPLE_BATCH],
+    len: usize,
+}
+
+#[cfg(feature = "markdown")]
+impl DurationSampler {
+    fn new() -> Self {
+        Self {
+            samples: [0; PERF_SAMPLE_BATCH],
+            len: 0,
+        }
+    }
+
+    fn observe_and_maybe_flush(&mut self, duration_us: u64) -> Option<(u64, u64)> {
+        self.samples[self.len] = duration_us;
+        self.len += 1;
+        if self.len < PERF_SAMPLE_BATCH {
+            return None;
+        }
+        let mut values = self.samples;
+        values.sort_unstable();
+        let p50 = values[(PERF_SAMPLE_BATCH - 1) / 2];
+        let p95 = values[((PERF_SAMPLE_BATCH - 1) * 95) / 100];
+        self.len = 0;
+        Some((p50, p95))
+    }
+}
+
+#[cfg(feature = "markdown")]
+pub(in crate::components) struct ImagePerf {
+    pub(super) enabled: bool,
+    partial_calls: AtomicU64,
+    partial_scrolling_skips: AtomicU64,
+    partial_drawn: AtomicU64,
+    full_drawn: AtomicU64,
+    crop_calls: AtomicU64,
+    crop_pixels: AtomicU64,
+    render_calls: AtomicU64,
+    crop_sampler: DurationSampler,
+}
+
+#[cfg(feature = "markdown")]
+impl ImagePerf {
+    pub(super) fn new() -> Self {
+        let enabled = std::env::var("SPUR_TUI_IMG_PERF").as_deref() == Ok("1");
+        Self {
+            enabled,
+            partial_calls: AtomicU64::new(0),
+            partial_scrolling_skips: AtomicU64::new(0),
+            partial_drawn: AtomicU64::new(0),
+            full_drawn: AtomicU64::new(0),
+            crop_calls: AtomicU64::new(0),
+            crop_pixels: AtomicU64::new(0),
+            render_calls: AtomicU64::new(0),
+            crop_sampler: DurationSampler::new(),
+        }
+    }
+
+    fn maybe_emit_summary(&self, reason: &str) {
+        tracing::info!(
+            target: "spur_tui::img_perf",
+            reason,
+            partial_calls = self.partial_calls.load(Ordering::Relaxed),
+            partial_scrolling_skips = self.partial_scrolling_skips.load(Ordering::Relaxed),
+            partial_drawn = self.partial_drawn.load(Ordering::Relaxed),
+            full_drawn = self.full_drawn.load(Ordering::Relaxed),
+            crop_calls = self.crop_calls.load(Ordering::Relaxed),
+            crop_pixels = self.crop_pixels.load(Ordering::Relaxed),
+            "inline image perf summary"
+        );
+    }
+}
+
+#[cfg(feature = "markdown")]
+thread_local! {
+    static IMAGE_PERF: RefCell<ImagePerf> = RefCell::new(ImagePerf::new());
+}
 
 /// Cached wrapped body lines for the external pane render path
 /// (DetailPane Stream tab). Independent from the full-render caches.
@@ -286,6 +376,7 @@ fn compute_fence_states(
 /// if the image widget was rendered; false if the caller should fall back
 /// to the multi-row partial card.
 #[cfg(feature = "markdown")]
+#[allow(clippy::too_many_arguments)]
 fn render_inline_image(
     frame: &mut Frame,
     rect: Rect,
@@ -299,6 +390,7 @@ fn render_inline_image(
         crate::components::react_trace::types::TraceImageId,
         crate::components::react_trace::types::TraceImage,
     >,
+    perf: &mut ImagePerf,
 ) -> bool {
     use crate::components::mermaid::MermaidState;
     use ratatui_image::{Resize, StatefulImage};
@@ -308,11 +400,17 @@ fn render_inline_image(
     };
 
     let partial = first_row_within != 0 || run_len != total_rows;
+    if perf.enabled && partial {
+        perf.partial_calls.fetch_add(1, Ordering::Relaxed);
+    }
     let (cell_w_px, cell_h_px) = picker.font_size();
     let cell_w_px = cell_w_px.max(1);
     let cell_h_px = cell_h_px.max(1);
 
     if partial && is_scrolling {
+        if perf.enabled {
+            perf.partial_scrolling_skips.fetch_add(1, Ordering::Relaxed);
+        }
         return false;
     }
 
@@ -337,6 +435,7 @@ fn render_inline_image(
                     cell_h_px,
                     first_row_within,
                     run_len,
+                    perf,
                 ) else {
                     return false;
                 };
@@ -374,6 +473,7 @@ fn render_inline_image(
                     cell_h_px,
                     first_row_within,
                     run_len,
+                    perf,
                 ) else {
                     return false;
                 };
@@ -397,6 +497,13 @@ fn render_inline_image(
             }
         }
     };
+    if perf.enabled {
+        if partial {
+            perf.partial_drawn.fetch_add(1, Ordering::Relaxed);
+        } else {
+            perf.full_drawn.fetch_add(1, Ordering::Relaxed);
+        }
+    }
     let widget = StatefulImage::default().resize(Resize::Fit(None));
     frame.render_stateful_widget(widget, rect, proto);
     true
@@ -408,7 +515,13 @@ pub(crate) fn crop_visible_image_slice(
     cell_h_px: u16,
     first_row_within: u16,
     run_len: u16,
+    perf: &mut ImagePerf,
 ) -> Option<image::DynamicImage> {
+    let t0 = if perf.enabled {
+        Some(Instant::now())
+    } else {
+        None
+    };
     let cell_h_px = cell_h_px.max(1) as u32;
     if run_len == 0 || image.width() == 0 || image.height() == 0 {
         return None;
@@ -424,7 +537,26 @@ pub(crate) fn crop_visible_image_slice(
         return None;
     }
 
-    Some(image.crop_imm(0, start_y, image.width(), slice_height))
+    let out = image.crop_imm(0, start_y, image.width(), slice_height);
+    if let Some(start) = t0 {
+        let duration_us = cmp::min(start.elapsed().as_micros(), u64::MAX as u128) as u64;
+        perf.crop_calls.fetch_add(1, Ordering::Relaxed);
+        perf.crop_pixels.fetch_add(
+            image.width().saturating_mul(slice_height) as u64,
+            Ordering::Relaxed,
+        );
+        if let Some((p50, p95)) = perf.crop_sampler.observe_and_maybe_flush(duration_us) {
+            tracing::info!(
+                target: "spur_tui::img_perf",
+                op = "crop_visible_image_slice",
+                p50_us = p50,
+                p95_us = p95,
+                sample_count = PERF_SAMPLE_BATCH,
+                "crop timing"
+            );
+        }
+    }
+    Some(out)
 }
 
 /// Minimum `run_len` for the multi-line card variant. Below this we fall
@@ -760,6 +892,14 @@ impl ReactTrace {
         let is_scrolling = self
             .last_scroll_at
             .is_some_and(|last_scroll_at| last_scroll_at.elapsed() < SCROLL_DEBOUNCE);
+        if !is_scrolling && self.last_scroll_at.is_some() {
+            IMAGE_PERF.with(|perf| {
+                let perf = perf.borrow();
+                if perf.enabled {
+                    perf.maybe_emit_summary("debounce_expiry");
+                }
+            });
+        }
 
         let fence_gen = ctx.mermaid_registry_version;
 
@@ -913,17 +1053,21 @@ impl ReactTrace {
                         width: inner.width,
                         height: run_len,
                     };
-                    let drew_image = render_inline_image(
-                        frame,
-                        rect,
-                        source,
-                        total_rows,
-                        first_row_within,
-                        run_len,
-                        is_scrolling,
-                        ctx,
-                        &self.inline_images,
-                    );
+                    let drew_image = IMAGE_PERF.with(|perf| {
+                        let mut perf = perf.borrow_mut();
+                        render_inline_image(
+                            frame,
+                            rect,
+                            source,
+                            total_rows,
+                            first_row_within,
+                            run_len,
+                            is_scrolling,
+                            ctx,
+                            &self.inline_images,
+                            &mut perf,
+                        )
+                    });
 
                     if !drew_image {
                         if is_ready_image(source, ctx) {
@@ -959,6 +1103,15 @@ impl ReactTrace {
         }
 
         self.last_surface = crate::components::react_trace::Surface::Full(self.generation);
+        IMAGE_PERF.with(|perf| {
+            let perf = perf.borrow();
+            if perf.enabled {
+                let render_calls = perf.render_calls.fetch_add(1, Ordering::Relaxed) + 1;
+                if render_calls.is_multiple_of(PERF_RENDER_SUMMARY_EVERY) {
+                    perf.maybe_emit_summary("render_periodic");
+                }
+            }
+        });
     }
 }
 
@@ -1671,7 +1824,9 @@ mod image_slice_tests {
     fn partial_image_slice_crops_visible_source_rows() {
         let img = striped_image();
 
-        let cropped = crop_visible_image_slice(&img, 1, 3, 4).expect("slice should exist");
+        let mut perf = ImagePerf::new();
+        let cropped =
+            crop_visible_image_slice(&img, 1, 3, 4, &mut perf).expect("slice should exist");
 
         assert_eq!(cropped.dimensions(), (2, 4));
         assert_eq!(cropped.get_pixel(0, 0), Rgba([60, 0, 0, 255]));
@@ -1682,7 +1837,9 @@ mod image_slice_tests {
     fn partial_image_slice_clamps_to_source_bounds() {
         let img = striped_image();
 
-        let cropped = crop_visible_image_slice(&img, 1, 8, 10).expect("slice should exist");
+        let mut perf = ImagePerf::new();
+        let cropped =
+            crop_visible_image_slice(&img, 1, 8, 10, &mut perf).expect("slice should exist");
 
         assert_eq!(cropped.dimensions(), (2, 2));
         assert_eq!(cropped.get_pixel(0, 0), Rgba([160, 0, 0, 255]));
@@ -1693,7 +1850,9 @@ mod image_slice_tests {
     fn partial_image_slice_uses_cell_aligned_boundaries() {
         let img = striped_image();
 
-        let cropped = crop_visible_image_slice(&img, 2, 1, 2).expect("slice should exist");
+        let mut perf = ImagePerf::new();
+        let cropped =
+            crop_visible_image_slice(&img, 2, 1, 2, &mut perf).expect("slice should exist");
 
         assert_eq!(cropped.dimensions(), (2, 4));
         assert_eq!(cropped.get_pixel(0, 0), Rgba([40, 0, 0, 255]));
