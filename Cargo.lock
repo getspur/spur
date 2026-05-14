@@ -7156,6 +7156,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "spur-telemetry"
+version = "1.1.8"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "spur-tui"
 version = "1.1.8"
 dependencies = [
