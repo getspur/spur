@@ -1415,25 +1415,44 @@ async fn epic_closes_when_scoped_children_terminal() {
         .expect("PmService::try_new failed")
         .expect("expected Some(PmService) — beads dir must exist after br init");
     let pm = Arc::new(pm);
+    let adv = pm.advanced().expect("advanced beads backend");
 
-    pm.update_issue(
-        &task_a_id,
-        spur_pm::IssueUpdate {
-            status: Some(pm.closed_status().to_string()),
-            ..Default::default()
-        },
-    )
-    .await
-    .expect("close task A");
-    pm.update_issue(
-        &task_b_id,
-        spur_pm::IssueUpdate {
-            status: Some(pm.closed_status().to_string()),
-            ..Default::default()
-        },
-    )
-    .await
-    .expect("close task B");
+    for (task_id, delegation_id, worker_branch) in [
+        (&task_a_id, "del-a", "spur/worker-a"),
+        (&task_b_id, "del-b", "spur/worker-b"),
+    ] {
+        adv.add_comment(
+            task_id,
+            &audit_sentinel::encode_comment(&AuditSentinelKind::Completion {
+                delegation_id: delegation_id.into(),
+                completion_state: audit_sentinel::CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some(worker_branch.into()),
+                result_summary: Some("ready for review".into()),
+                artifact_uri: None,
+                dispatched_base_oid: Some("0000000000000000000000000000000000000001".into()),
+            }),
+        )
+        .await
+        .expect("completion audit");
+        adv.add_comment(
+            task_id,
+            &audit_sentinel::encode_comment(&AuditSentinelKind::Approval {
+                delegation_id: delegation_id.into(),
+            }),
+        )
+        .await
+        .expect("approval audit");
+        pm.update_issue(
+            task_id,
+            spur_pm::IssueUpdate {
+                status: Some(pm.closed_status().to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("close task");
+    }
 
     let reconciler = Reconciler::new(
         ReconcilerConfig::default(),
@@ -1522,8 +1541,30 @@ async fn all_approved_epic_emits_plan_ready_to_merge() {
         .expect("PmService::try_new failed")
         .expect("expected Some(PmService) — beads dir must exist after br init");
     let pm = Arc::new(pm);
+    let adv = pm.advanced().expect("advanced beads backend");
 
     for task_id in [&task_a_id, &task_b_id] {
+        let delegation_id = format!("del-{task_id}");
+        adv.add_comment(
+            task_id,
+            &audit_sentinel::encode_comment(&AuditSentinelKind::Completion {
+                delegation_id: delegation_id.clone(),
+                completion_state: audit_sentinel::CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some(format!("spur/worker-{task_id}")),
+                result_summary: Some("ready for review".into()),
+                artifact_uri: None,
+                dispatched_base_oid: Some("0000000000000000000000000000000000000001".into()),
+            }),
+        )
+        .await
+        .expect("completion audit");
+        adv.add_comment(
+            task_id,
+            &audit_sentinel::encode_comment(&AuditSentinelKind::Approval { delegation_id }),
+        )
+        .await
+        .expect("approval audit");
         pm.update_issue(
             task_id,
             spur_pm::IssueUpdate {

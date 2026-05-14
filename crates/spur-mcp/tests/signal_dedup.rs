@@ -106,6 +106,25 @@ async fn build_single_task_plan(pm: &PmService, plan_id: &str) -> String {
         .clone()
 }
 
+async fn seed_completion_with_base_oid(pm: &PmService, task_id: &str) {
+    pm.advanced()
+        .expect("advanced beads surface")
+        .add_comment(
+            task_id,
+            &audit_sentinel::encode_comment(&AuditSentinelKind::Completion {
+                delegation_id: "del-1".into(),
+                completion_state: audit_sentinel::CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some("spur/worker-t1".into()),
+                result_summary: Some("ready for review".into()),
+                artifact_uri: None,
+                dispatched_base_oid: Some("0000000000000000000000000000000000000001".into()),
+            }),
+        )
+        .await
+        .expect("seed completion audit");
+}
+
 struct ProjectedPlanSplitProposer {
     expected_plan_id: String,
 }
@@ -300,6 +319,7 @@ async fn duplicate_signal_comments_with_same_signal_id_commit_once() {
         ],
     )
     .await;
+    seed_completion_with_base_oid(pm.as_ref(), &task_id).await;
 
     let signal = scope_drift_signal(Uuid::new_v4());
     let signal_comment = signals::encode_comment(&signal);
@@ -392,6 +412,7 @@ async fn watcher_projects_real_plan_state_for_scoring() {
         ],
     )
     .await;
+    seed_completion_with_base_oid(pm.as_ref(), &task_id).await;
 
     let signal = scope_drift_signal(Uuid::new_v4());
     pm.advanced()
@@ -437,6 +458,7 @@ async fn watcher_processes_only_one_signal_per_task_per_tick() {
         ],
     )
     .await;
+    seed_completion_with_base_oid(pm.as_ref(), &task_id).await;
 
     let advanced = pm.advanced().expect("advanced beads surface");
     advanced
@@ -497,6 +519,7 @@ async fn watcher_skips_review_rejected_tasks_even_if_signal_label_exists() {
         ],
     )
     .await;
+    seed_completion_with_base_oid(pm.as_ref(), &task_id).await;
 
     let signal = scope_drift_signal(Uuid::new_v4());
     pm.advanced()
@@ -540,6 +563,7 @@ async fn watcher_retries_signal_after_invariant_violation_without_marking_proces
         ],
     )
     .await;
+    seed_completion_with_base_oid(pm.as_ref(), &task_id).await;
 
     let signal = WorkerSignal::ScopeDrift {
         signal_id: Uuid::new_v4(),
@@ -646,6 +670,7 @@ async fn distinct_signal_on_task_with_prior_processed_label_is_not_skipped() {
         ],
     )
     .await;
+    seed_completion_with_base_oid(pm.as_ref(), &task_id).await;
 
     let old_signal_id = Uuid::new_v4();
     pm.update_issue(

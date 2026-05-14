@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 use spur_acp::{BrainSessionId, SessionId};
-use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
+use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind, CompletionState};
 use spur_mcp::plan::{labels, PlanTask};
 use spur_mcp::server::{DetachedContinuationCtx, McpCallbackServer};
 use spur_mcp::tools_list;
@@ -1117,7 +1117,30 @@ async fn build_owned_plan(
 }
 
 async fn close_plan_tasks(pm: &spur_pm::PmService, subgraph: &spur_mcp::EpicSubgraph) {
+    let adv = pm.advanced().expect("advanced beads backend");
     for issue_id in subgraph.task_map.values() {
+        adv.add_comment(
+            issue_id,
+            &audit_sentinel::encode_comment(&AuditSentinelKind::Completion {
+                delegation_id: "del-terminal".into(),
+                completion_state: CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some("spur/worker-terminal".into()),
+                result_summary: None,
+                artifact_uri: None,
+                dispatched_base_oid: Some("0000000000000000000000000000000000000001".into()),
+            }),
+        )
+        .await
+        .expect("seed completion");
+        adv.add_comment(
+            issue_id,
+            &audit_sentinel::encode_comment(&AuditSentinelKind::Approval {
+                delegation_id: "del-terminal".into(),
+            }),
+        )
+        .await
+        .expect("seed approval");
         pm.update_issue(
             issue_id,
             spur_pm::IssueUpdate {

@@ -131,7 +131,37 @@ async fn seed_all_approved_epic(
     label_issue(repo, &epic_id, &labels::plan_owner("brain"));
     label_issue(repo, &epic_id, labels::PLAN_COMPLETE);
 
-    (beads_pm(repo).await, epic_id, task_a_id, task_b_id)
+    let pm = beads_pm(repo).await;
+    let adv = pm.advanced().expect("advanced backend");
+    for (task_id, delegation_id, worker_branch) in [
+        (task_a_id.as_str(), "del-a", "spur/worker-a"),
+        (task_b_id.as_str(), "del-b", "spur/worker-b"),
+    ] {
+        adv.add_comment(
+            task_id,
+            &spur_mcp::plan::audit_sentinel::encode_comment(&AuditSentinelKind::Completion {
+                delegation_id: delegation_id.to_string(),
+                completion_state: spur_mcp::plan::audit_sentinel::CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some(worker_branch.to_string()),
+                result_summary: Some("approved fixture completion".to_string()),
+                artifact_uri: None,
+                dispatched_base_oid: Some("0000000000000000000000000000000000000001".to_string()),
+            }),
+        )
+        .await
+        .expect("completion audit");
+        adv.add_comment(
+            task_id,
+            &spur_mcp::plan::audit_sentinel::encode_comment(&AuditSentinelKind::Approval {
+                delegation_id: delegation_id.to_string(),
+            }),
+        )
+        .await
+        .expect("approval audit");
+    }
+
+    (pm, epic_id, task_a_id, task_b_id)
 }
 
 struct RecordingAutomation {
@@ -512,7 +542,7 @@ async fn t_v0e_1_no_persisted_direct_dispatch() {
             attempt: 1,
             history: vec![],
             last_delegation_id: None,
-            dispatched_base_oid: None,
+            dispatched_base_oid: Some("0000000000000000000000000000000000000001".into()),
         }],
     };
     let plan_arc = Arc::new(tokio::sync::Mutex::new(state));
