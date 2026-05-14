@@ -440,21 +440,26 @@ pub fn project_status_for_issue(
             status,
         );
     }
+    let has_delegation = issue
+        .labels
+        .iter()
+        .any(|label| parse_delegation_id_compat(label).is_some());
+    let has_ready = has_ready_for_review_label_compat(&issue.labels);
+    // Completion audit can land before the atomic label update.
+    // A polling client may race request_changes in that gap.
+    // Reconciler retry-dispatch can then produce transient dual-label overlap.
+    // Enforce single-label invariants only when the other label is absent.
     assert!(
-        !issue
-            .labels
-            .iter()
-            .any(|label| parse_delegation_id_compat(label).is_some())
-            || matches!(status, PlanTaskStatus::Dispatched { .. }),
-        "invariant:project_status_for_issue delegation label/status mismatch violated (issue_id={}, status={:?}) expected Dispatched when delegation label exists, labels={:?}",
+        !(has_delegation && !has_ready) || matches!(status, PlanTaskStatus::Dispatched { .. }),
+        "invariant:project_status_for_issue delegation label/status mismatch violated (issue_id={}, status={:?}) expected Dispatched when delegation-id label present without ready-for-review overlap, labels={:?}",
         issue.id,
         status,
         issue.labels,
     );
     assert!(
-        !has_ready_for_review_label_compat(&issue.labels)
+        !(has_ready && !has_delegation)
             || matches!(status, PlanTaskStatus::AwaitingReview { .. } | PlanTaskStatus::Approved { .. }),
-        "invariant:project_status_for_issue ready-for-review label/status mismatch violated (issue_id={}, status={:?}) expected AwaitingReview/Approved when ready-for-review label exists, labels={:?}",
+        "invariant:project_status_for_issue ready-for-review label/status mismatch violated (issue_id={}, status={:?}) expected AwaitingReview/Approved when ready-for-review label present without delegation-id overlap, labels={:?}",
         issue.id,
         status,
         issue.labels,
