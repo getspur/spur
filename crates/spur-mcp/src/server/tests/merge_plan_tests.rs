@@ -147,7 +147,7 @@ async fn setup_persisted_merge_ready_plan(
             worker_branch: Some("spur/worker-a".into()),
             result_summary: Some("worker branch ready".into()),
             artifact_uri: None,
-            dispatched_base_oid: None,
+            dispatched_base_oid: Some(base_snapshot_oid.clone()),
         }),
     )
     .await
@@ -354,7 +354,7 @@ async fn setup_persisted_retried_plan(plan_id: &str, clear_cache: bool) -> Persi
             worker_branch: Some("spur/worker-a1".into()),
             result_summary: Some("attempt 1 summary".into()),
             artifact_uri: None,
-            dispatched_base_oid: None,
+            dispatched_base_oid: Some(base_snapshot_oid.clone()),
         },
         AuditSentinelKind::Rejection {
             delegation_id: "del-1".into(),
@@ -372,7 +372,7 @@ async fn setup_persisted_retried_plan(plan_id: &str, clear_cache: bool) -> Persi
             worker_branch: Some("spur/worker-a2".into()),
             result_summary: Some("attempt 2 summary".into()),
             artifact_uri: None,
-            dispatched_base_oid: None,
+            dispatched_base_oid: Some(base_snapshot_oid.clone()),
         },
         AuditSentinelKind::Approval {
             delegation_id: "del-2".into(),
@@ -670,7 +670,7 @@ async fn setup_cached_overlay_diff_plan(
                 worker_branch: Some("spur/worker-b".into()),
                 result_summary: Some("bar ready".into()),
                 artifact_uri: None,
-                dispatched_base_oid: use_dispatched_base_oid.then_some(t2_dispatched_base_oid),
+                dispatched_base_oid: Some(t2_dispatched_base_oid),
             },
         ),
     ] {
@@ -718,7 +718,34 @@ async fn setup_cached_overlay_diff_plan(
     )
     .await
     .expect("project persisted plan");
+    let projected = projected;
     server.install_projected_plan(projected, false).await;
+    if !use_dispatched_base_oid {
+        server.set_versioned_cache_serve(true);
+        let _ = server
+            .handle_get_task_diff(
+                Value::Null,
+                json!({
+                    "plan_id": plan_id,
+                    "task_id": "task-a",
+                }),
+            )
+            .await;
+        let cached = server
+            .active_plans
+            .lock()
+            .await
+            .get(plan_id)
+            .cloned()
+            .expect("cached plan after versioned load");
+        let mut state = cached.state.lock().await;
+        let task_b = state
+            .tasks
+            .iter_mut()
+            .find(|entry| entry.spec.task_id == "task-b")
+            .expect("task-b in cached plan");
+        task_b.dispatched_base_oid = None;
+    }
 
     PersistedMergeFixture {
         _dir: dir,
