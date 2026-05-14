@@ -1,6 +1,7 @@
 pub(crate) mod config;
 pub mod error;
 pub mod events;
+pub(crate) mod ratelimit;
 pub(crate) mod redact;
 
 pub use error::{Result, TelemetryError};
