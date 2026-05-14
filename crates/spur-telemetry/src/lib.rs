@@ -1,3 +1,4 @@
+pub(crate) mod batch;
 pub(crate) mod client;
 pub(crate) mod config;
 pub(crate) mod consent;
