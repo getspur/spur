@@ -51,6 +51,7 @@ fn sample_detail(id: &str, title: &str) -> IssueDetailEvent {
         priority: Some(1),
         issue_type: Some("epic".into()),
         blocked_by: vec![],
+        comments: Vec::new(),
         due_at: None,
         created_at: now,
         updated_at: now,
