@@ -166,6 +166,13 @@ pub fn latest_completion_facts(audits: &[AuditSentinelKind]) -> Option<Completio
         }
     }
 
+    assert!(
+        latest
+            .as_ref()
+            .is_none_or(|(_, worker_branch, _, _, _)| worker_branch.is_some()),
+        "invariant:latest_completion_facts worker_branch missing violated expected latest Completion facts to include worker_branch, got latest={:?}",
+        latest,
+    );
     latest
 }
 
@@ -340,32 +347,21 @@ pub fn project_status_for_issue(
     ready_now: bool,
     closed_status: &str,
 ) -> PlanTaskStatus {
-    if issue.status == closed_status {
-        return project_closed_status(issue, audits);
-    }
-
-    if has_integration_conflict_label(&issue.labels) {
+    let status = if issue.status == closed_status {
+        project_closed_status(issue, audits)
+    } else if has_integration_conflict_label(&issue.labels) {
         let (dep_task_id, files) =
             latest_integration_conflict(audits).unwrap_or_else(|| ("unknown".to_string(), vec![]));
-        return PlanTaskStatus::BlockedOnSetupConflict { dep_task_id, files };
-    }
-
-    if let Some(delegation_id) = issue
+        PlanTaskStatus::BlockedOnSetupConflict { dep_task_id, files }
+    } else if let Some(delegation_id) = issue
         .labels
         .iter()
         .find_map(|label| parse_delegation_id_compat(label))
     {
-        return PlanTaskStatus::Dispatched {
+        PlanTaskStatus::Dispatched {
             delegation_id: delegation_id.to_string(),
-        };
-    }
-
-    // bd-2m2u Phase 2d — `signal:escalated` marks an open issue whose
-    // auto-retry budget (1 attempt) is exhausted and is awaiting a brain
-    // `submit_plan_mutation` decision. The label is cleared by
-    // `submit_plan_mutation` on success, so a present label is authoritative
-    // for the projection.
-    if issue
+        }
+    } else if issue
         .labels
         .iter()
         .any(|label| label.as_str() == crate::plan::mutation_executor::SIGNAL_ESCALATED_LABEL)
@@ -380,20 +376,72 @@ pub fn project_status_for_issue(
                 _ => None,
             })
             .unwrap_or_else(|| "escalated to brain".to_string());
-        return PlanTaskStatus::EscalatedToBrain { last_error };
-    }
-
-    if has_ready_for_review_label_compat(&issue.labels) {
+        PlanTaskStatus::EscalatedToBrain { last_error }
+    } else if has_ready_for_review_label_compat(&issue.labels) {
         let summary =
             latest_completion_facts(audits).and_then(|(_, _, result_summary, _, _)| result_summary);
-        return PlanTaskStatus::AwaitingReview { summary };
-    }
-
-    if ready_now {
+        PlanTaskStatus::AwaitingReview { summary }
+    } else if ready_now {
         PlanTaskStatus::Ready
     } else {
         PlanTaskStatus::Pending
+    };
+
+    // bd-2m2u Phase 2d — `signal:escalated` marks an open issue whose
+    // auto-retry budget (1 attempt) is exhausted and is awaiting a brain
+    // `submit_plan_mutation` decision. The label is cleared by
+    // `submit_plan_mutation` on success, so a present label is authoritative
+    // for the projection.
+    if issue.status == closed_status {
+        let latest_terminal_audit = audits.iter().rev().find_map(|audit| match audit {
+            AuditSentinelKind::Approval { .. } => Some("approval"),
+            AuditSentinelKind::Rejection { .. } => Some("rejection"),
+            AuditSentinelKind::Completion {
+                completion_state: CompletionState::Failed { .. },
+                ..
+            } => Some("completion_failed"),
+            AuditSentinelKind::Completion {
+                completion_state: CompletionState::Cancelled { .. },
+                ..
+            } => Some("completion_cancelled"),
+            _ => None,
+        });
+        let consistent = match latest_terminal_audit {
+            Some("approval") => matches!(status, PlanTaskStatus::Approved { .. }),
+            Some("rejection") => matches!(status, PlanTaskStatus::Rejected { .. }),
+            Some("completion_failed") => matches!(status, PlanTaskStatus::Failed { .. }),
+            Some("completion_cancelled") => matches!(status, PlanTaskStatus::Cancelled { .. }),
+            _ => true,
+        };
+        assert!(
+            consistent,
+            "invariant:project_status_for_issue terminal audit/status mismatch violated (issue_id={}, closed_status={}) expected projected status to match latest terminal audit, got latest_terminal_audit={:?}, status={:?}",
+            issue.id,
+            closed_status,
+            latest_terminal_audit,
+            status,
+        );
     }
+    assert!(
+        !issue
+            .labels
+            .iter()
+            .any(|label| parse_delegation_id_compat(label).is_some())
+            || matches!(status, PlanTaskStatus::Dispatched { .. }),
+        "invariant:project_status_for_issue delegation label/status mismatch violated (issue_id={}, status={:?}) expected Dispatched when delegation label exists, labels={:?}",
+        issue.id,
+        status,
+        issue.labels,
+    );
+    assert!(
+        !has_ready_for_review_label_compat(&issue.labels)
+            || matches!(status, PlanTaskStatus::AwaitingReview { .. } | PlanTaskStatus::Approved { .. }),
+        "invariant:project_status_for_issue ready-for-review label/status mismatch violated (issue_id={}, status={:?}) expected AwaitingReview/Approved when ready-for-review label exists, labels={:?}",
+        issue.id,
+        status,
+        issue.labels,
+    );
+    status
 }
 
 pub fn project_closed_status(
@@ -455,6 +503,25 @@ pub fn project_closed_status(
             latest_completion_facts(audits).and_then(|(_, _, result_summary, _, _)| result_summary);
         PlanTaskStatus::Approved { summary }
     }
+}
+
+fn latest_terminal_audit_kind(audits: &[AuditSentinelKind]) -> Option<&'static str> {
+    for audit in audits.iter().rev() {
+        match audit {
+            AuditSentinelKind::Approval { .. } => return Some("approval"),
+            AuditSentinelKind::Rejection { .. } => return Some("rejection"),
+            AuditSentinelKind::Completion {
+                completion_state: CompletionState::Failed,
+                ..
+            } => return Some("completion_failed"),
+            AuditSentinelKind::Completion {
+                completion_state: CompletionState::Cancelled,
+                ..
+            } => return Some("completion_cancelled"),
+            _ => {}
+        }
+    }
+    None
 }
 
 pub fn recompute_open_statuses(tasks: &mut [PlanTaskEntry]) {
@@ -629,6 +696,9 @@ pub async fn project_plan_from_beads(
             false,
             &closed_status,
         );
+        let latest_completion = latest_completion_facts(&projected_task.audits);
+        let issue_is_closed = projected_task.issue.status == closed_status;
+        let terminal_audit = latest_terminal_audit_kind(&projected_task.audits);
         let attempt = project_entry_attempt(&projected_task.audits, &status);
         let depends_on = projected_task
             .issue
@@ -663,6 +733,63 @@ pub async fn project_plan_from_beads(
             last_delegation_id,
             dispatched_base_oid,
         });
+        let entry = entries.last().expect("entry was just pushed");
+        let history_monotonic = entry
+            .history
+            .windows(2)
+            .all(|pair| pair[0].attempt <= pair[1].attempt);
+        assert!(
+            history_monotonic && entry.history.iter().all(|record| record.attempt <= entry.attempt),
+            "invariant:project_plan_from_beads attempt monotonicity violated (plan_id={}, task_id={}) expected history attempts to be non-decreasing and <= current attempt, got current_attempt={:?}, history_attempts={:?}",
+            plan_id,
+            entry.spec.task_id,
+            entry.attempt,
+            entry.history.iter().map(|record| record.attempt).collect::<Vec<_>>(),
+        );
+        assert!(
+            !matches!(entry.status, PlanTaskStatus::Approved { .. } | PlanTaskStatus::AwaitingReview { .. })
+                || latest_completion
+                    .as_ref()
+                    .and_then(|(_, worker_branch, _, _, _)| worker_branch.as_ref())
+                    .is_none()
+                || entry.worker_branch.is_some(),
+            "invariant:project_plan_from_beads worker_branch missing after populated completion violated (plan_id={}, task_id={}) expected worker_branch=Some(_) for Approved/AwaitingReview when latest Completion has worker_branch, got status={:?}, latest_completion={:?}, entry.worker_branch={:?}",
+            plan_id,
+            entry.spec.task_id,
+            entry.status,
+            latest_completion,
+            entry.worker_branch,
+        );
+        assert!(
+            !matches!(entry.status, PlanTaskStatus::AwaitingReview { .. } | PlanTaskStatus::Approved { .. })
+                || entry.dispatched_base_oid.is_some(),
+            "invariant:project_plan_from_beads dispatched_base_oid missing for completion-derived status violated (plan_id={}, task_id={}) expected dispatched_base_oid=Some(_) for AwaitingReview/Approved, got status={:?}, dispatched_base_oid={:?}",
+            plan_id,
+            entry.spec.task_id,
+            entry.status,
+            entry.dispatched_base_oid,
+        );
+        if issue_is_closed {
+            if let Some(terminal_audit) = terminal_audit {
+                let consistent = match terminal_audit {
+                    "approval" => matches!(entry.status, PlanTaskStatus::Approved { .. }),
+                    "rejection" => matches!(entry.status, PlanTaskStatus::Rejected { .. }),
+                    "completion_failed" => matches!(entry.status, PlanTaskStatus::Failed { .. }),
+                    "completion_cancelled" => {
+                        matches!(entry.status, PlanTaskStatus::Cancelled { .. })
+                    }
+                    _ => true,
+                };
+                assert!(
+                    consistent,
+                    "invariant:project_plan_from_beads terminal audit/status mismatch violated (plan_id={}, task_id={}) expected projected status to match latest terminal audit, got latest_terminal_audit={:?}, status={:?}",
+                    plan_id,
+                    entry.spec.task_id,
+                    terminal_audit,
+                    entry.status,
+                );
+            }
+        }
     }
 
     recompute_open_statuses(&mut entries);
