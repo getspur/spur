@@ -2567,6 +2567,7 @@ mod tests {
         view.issue_focus = IssueFocus::Loaded {
             id: "bd-root".into(),
             issue: Box::new(issue_detail("bd-root", "root detail")),
+            comments: Vec::new(),
         };
         let graph_epoch_before = view.graph_data_epoch;
         let detail_epoch_before = view.detail_data_epoch;
