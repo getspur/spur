@@ -299,3 +299,61 @@ The implementation lands when:
 5. Tier 2 events do not fire when Tier 2 consent has not been recorded (verified by the mock-server contract).
 6. `disable crash` removes the panic hook on next launch and does not delete existing crash files (verified by filesystem assertions).
 7. Documentation: README section, `docs/PRIVACY.md`, and updated `--help` output.
+
+---
+
+## Appendix A — Design rationale (responses to first-principles review)
+
+A first-principles + double-loop review of v2 raised three architectural challenges. We considered each and chose to keep v2's posture; the rationale is recorded here so future contributors understand which simplifications were considered and rejected, and on what grounds.
+
+### A.1 Streaming queue vs. end-of-session aggregate POST
+
+**Challenge:** CLI lifecycle is short and finite; a single aggregated POST at `shutdown()` would eliminate `batch.rs`, the mpsc queue, and most of `ratelimit.rs`.
+
+**Decision:** Keep streaming.
+
+**Rationale:**
+- The SPUR TUI is **not** short-lived. Agent sessions routinely run for hours. End-of-session-only POST means crash and perf signal stays locked in-process until graceful exit — and an interactive TUI is precisely the surface where graceful exit is least reliable (SIGINT in the middle of a brain/worker cycle, terminal closed, ssh disconnect).
+- A 15-minute periodic flush solves the TUI case, but at that point the architecture is already a queue+flush task with rate-limiting against bursts — i.e., streaming with a longer interval. The simplification disappears.
+- The bounded mpsc queue is ~50 lines. The token bucket is ~30 lines. The cost of "over-engineering" here is small.
+
+**Accepted residual risk:** abrupt termination (SIGKILL, power loss) drops the in-memory queue. Documented in §7.2.
+
+### A.2 Persistent UUID vs. volatile per-session ID
+
+**Challenge:** A persistent UUID buys retention/DAU/WAU curves but pushes the design into GDPR pseudonymity. Volatile per-session IDs sidestep the privacy framing entirely.
+
+**Decision:** Keep the persistent UUID.
+
+**Rationale:**
+- Retention is an unstated but real goal. "How many installs are still running v0.42 after 30 days?" is a question we expect to ask. Per-session IDs make this unanswerable.
+- The privacy framing is honest (we explicitly call this *pseudonymous* in §2 and in the user-facing PRIVACY.md, not anonymous), and the user-controlled `reset-id` command keeps the rotation cost low.
+- The marginal increase in regulatory surface is small once we accept that `$exception` payloads + `session_started` already carry enough joint entropy to fingerprint within a single session.
+
+**Accepted residual risk:** users sufficiently privacy-sensitive to object to a persistent identifier are expected to opt out entirely (`SPUR_TELEMETRY=0`); the spec must make that path obvious and frictionless. §3.2 and the first-run notice are written with that user in mind.
+
+### A.3 Default-ON crash/perf vs. opt-in everything
+
+**Challenge:** A privacy-conscious developer audience may perceive default-ON as hostile, regardless of legitimate-interest framing.
+
+**Decision:** Keep default-ON for Tier 1.
+
+**Rationale:**
+- Industry precedent supports this for dev tooling (rustup, cargo, gh, Homebrew, VS Code, JetBrains). The pattern is well-established and the audience reaction to "tool ships default-on aggregate telemetry under legitimate interest with prominent opt-out" is normalized.
+- The data has to be statistically useful to justify the engineering investment. Opt-in everything means we only see signal from the subset of users who actively opted in, who are not representative (they are over-indexed on power users / enthusiasts) — exactly the wrong cohort for crash and perf decisions.
+- The mitigations applied: (a) prominent first-run notice on every consent path, (b) one-command disable, (c) env-var disable that respects automation, (d) compile-time disable for source builds, (e) automatic `CI=true` suppression. Together these meet the bar of "informed, frictionless, machine-readable opt-out."
+
+**Accepted residual risk:** a meaningful subset of users will still object to the framing. The crate provides the tools to disable in a single command; if the disable rate exceeds ~10% of active installs we revisit the default in a follow-up RFC.
+
+### A.4 Considered alternatives explicitly rejected
+
+- **Local-first dashboard + weekly opt-in share prompt:** rejected. Interruptive prompts in CLI/TUI flows degrade UX; building a local SQLite stats layer is a separate project larger than the entire telemetry crate; the data still needs to leave the box to inform engineering decisions.
+- **Sidecar process the user can inspect/kill:** rejected. Adds a second binary, a second IPC channel, and a second lifecycle to reason about. The trust gain (user can `kill` the sidecar) is achievable with `SPUR_TELEMETRY=0` at substantially lower complexity.
+- **Self-hosted OTLP collector instead of PostHog:** rejected for v1. Operating a collector + storage tier is a separate engineering project. Revisit if PostHog ever becomes a poor fit (cost, data-residency, vendor risk).
+
+### A.5 Pre-mortem watch list
+
+The first-principles review flagged a most-likely failure mode: community backlash against default-on tracking. Two mitigations going beyond the spec body:
+
+1. **Launch communication.** The release that ships telemetry includes a dedicated blog post and CHANGELOG entry; the message is not buried in release notes.
+2. **Tracked metric: telemetry disable rate.** We instrument the `disable all` and `SPUR_TELEMETRY=0` paths (locally — the disable event itself is the last event sent, then nothing further). If the disable rate exceeds 10% of new installs in the first 60 days post-launch, the default flips to opt-in in the next minor release. This is a non-negotiable trigger, not a discussion.
