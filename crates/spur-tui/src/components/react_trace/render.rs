@@ -71,6 +71,7 @@ pub(in crate::components) struct ImagePerf {
     pub(super) enabled: bool,
     partial_calls: AtomicU64,
     partial_scrolling_skips: AtomicU64,
+    partial_drawn_during_scroll: AtomicU64,
     partial_drawn: AtomicU64,
     full_drawn: AtomicU64,
     crop_calls: AtomicU64,
@@ -87,6 +88,7 @@ impl ImagePerf {
             enabled,
             partial_calls: AtomicU64::new(0),
             partial_scrolling_skips: AtomicU64::new(0),
+            partial_drawn_during_scroll: AtomicU64::new(0),
             partial_drawn: AtomicU64::new(0),
             full_drawn: AtomicU64::new(0),
             crop_calls: AtomicU64::new(0),
@@ -102,6 +104,7 @@ impl ImagePerf {
             reason,
             partial_calls = self.partial_calls.load(Ordering::Relaxed),
             partial_scrolling_skips = self.partial_scrolling_skips.load(Ordering::Relaxed),
+            partial_drawn_during_scroll = self.partial_drawn_during_scroll.load(Ordering::Relaxed),
             partial_drawn = self.partial_drawn.load(Ordering::Relaxed),
             full_drawn = self.full_drawn.load(Ordering::Relaxed),
             crop_calls = self.crop_calls.load(Ordering::Relaxed),
@@ -406,13 +409,14 @@ fn render_inline_image(
     let (cell_w_px, cell_h_px) = picker.font_size();
     let cell_w_px = cell_w_px.max(1);
     let cell_h_px = cell_h_px.max(1);
-
-    if partial && is_scrolling {
-        if perf.enabled {
-            perf.partial_scrolling_skips.fetch_add(1, Ordering::Relaxed);
-        }
-        return false;
-    }
+    let expected_slice_height_px = |surface: &image::DynamicImage| -> u32 {
+        let start_y = (first_row_within as u32)
+            .saturating_mul(cell_h_px as u32)
+            .min(surface.height());
+        (run_len as u32)
+            .saturating_mul(cell_h_px as u32)
+            .min(surface.height().saturating_sub(start_y))
+    };
 
     let proto = match source {
         InlineImageSource::Mermaid(id) => {
@@ -430,16 +434,43 @@ fn render_inline_image(
                 id, &image_arc, gen, rect.width, cell_w_px, cell_h_px, total_rows,
             );
             if partial {
-                let Some(slice) = crop_visible_image_slice(
-                    surface.as_ref(),
-                    cell_h_px,
+                let key = crate::components::image_cache::SliceKey::new(
+                    id,
+                    gen,
                     first_row_within,
                     run_len,
-                    perf,
-                ) else {
+                    total_rows,
+                    cell_h_px,
+                );
+                if is_scrolling
+                    && (!ctx.image_cache.has_cropped_slice(key)
+                        || !ctx.image_cache.has_inline_mermaid_slice_protocol(
+                            id,
+                            gen,
+                            first_row_within,
+                            run_len,
+                            total_rows,
+                            surface.width(),
+                            expected_slice_height_px(surface.as_ref()),
+                        ))
+                {
+                    if perf.enabled {
+                        perf.partial_scrolling_skips.fetch_add(1, Ordering::Relaxed);
+                    }
+                    return false;
+                }
+                let slice = ctx.image_cache.get_or_build_cropped_slice(key, || {
+                    crop_visible_image_slice(
+                        surface.as_ref(),
+                        cell_h_px,
+                        first_row_within,
+                        run_len,
+                        perf,
+                    )
+                });
+                let Some(slice) = slice else {
                     return false;
                 };
-                let slice = std::sync::Arc::new(slice);
                 ctx.image_cache.inline_mermaid_slice_protocol_mut(
                     id,
                     &slice,
@@ -468,16 +499,43 @@ fn render_inline_image(
                 total_rows,
             );
             if partial {
-                let Some(slice) = crop_visible_image_slice(
-                    surface.as_ref(),
-                    cell_h_px,
+                let key = crate::components::image_cache::SliceKey::new(
+                    id,
+                    stored.image_generation,
                     first_row_within,
                     run_len,
-                    perf,
-                ) else {
+                    total_rows,
+                    cell_h_px,
+                );
+                if is_scrolling
+                    && (!ctx.image_cache.has_cropped_slice(key)
+                        || !ctx.image_cache.has_inline_trace_slice_protocol(
+                            id,
+                            stored.image_generation,
+                            first_row_within,
+                            run_len,
+                            total_rows,
+                            surface.width(),
+                            expected_slice_height_px(surface.as_ref()),
+                        ))
+                {
+                    if perf.enabled {
+                        perf.partial_scrolling_skips.fetch_add(1, Ordering::Relaxed);
+                    }
+                    return false;
+                }
+                let slice = ctx.image_cache.get_or_build_cropped_slice(key, || {
+                    crop_visible_image_slice(
+                        surface.as_ref(),
+                        cell_h_px,
+                        first_row_within,
+                        run_len,
+                        perf,
+                    )
+                });
+                let Some(slice) = slice else {
                     return false;
                 };
-                let slice = std::sync::Arc::new(slice);
                 ctx.image_cache.inline_trace_slice_protocol_mut(
                     id,
                     &slice,
@@ -500,6 +558,10 @@ fn render_inline_image(
     if perf.enabled {
         if partial {
             perf.partial_drawn.fetch_add(1, Ordering::Relaxed);
+            if is_scrolling {
+                perf.partial_drawn_during_scroll
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         } else {
             perf.full_drawn.fetch_add(1, Ordering::Relaxed);
         }
