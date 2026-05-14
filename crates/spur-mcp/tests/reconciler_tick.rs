@@ -1998,7 +1998,8 @@ async fn worker_success_after_orphan_clear_is_superseded() {
 
     let audits = spur_mcp::plan::projector::collect_sorted_audits(
         adv.list_comments(&task_id).await.expect("list comments"),
-    );
+    )
+    .expect("audit projection should succeed");
     let latest_completion = audits
         .iter()
         .rev()

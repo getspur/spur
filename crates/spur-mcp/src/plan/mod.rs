@@ -1106,7 +1106,8 @@ pub async fn derive_epic_plan(
                 adv.list_comments(issue_id)
                     .await
                     .map_err(|e| format!("failed to list comments for task '{issue_id}': {e}"))?,
-            );
+            )
+            .map_err(|e| format!("failed to parse audits for task '{issue_id}': {e}"))?;
             if let Some((_, context_files)) = crate::plan::projector::latest_task_spec(&audits) {
                 task.context_files = context_files;
             }
@@ -2410,7 +2411,7 @@ async fn persist_completion_result_with_retry_for_task(
                 let current_audits = crate::plan::projector::collect_sorted_audits_for_issue(
                     issue_id,
                     adv.list_comments(issue_id).await?,
-                );
+                )?;
                 if completion_audit_already_emitted(delegation_id, &current_audits) {
                     return Ok(CompletionPersistenceAction::AlreadyCompleted);
                 }
@@ -2651,7 +2652,7 @@ async fn derive_worker_completion_state(
     let audits = crate::plan::projector::collect_sorted_audits_for_issue(
         issue_id,
         adv.list_comments(issue_id).await?,
-    );
+    )?;
     let state = if completion_is_superseded(delegation_id, &audits) {
         crate::plan::audit_sentinel::CompletionState::Superseded
     } else {
@@ -2682,7 +2683,7 @@ async fn read_audits_if_advanced(
         crate::plan::projector::collect_sorted_audits_for_issue(
             issue_id,
             adv.list_comments(issue_id).await?,
-        ),
+        )?,
     ))
 }
 
@@ -7407,7 +7408,8 @@ mod tests {
             .await
             .expect("list seeded comments");
         let seeded_audits =
-            crate::plan::projector::collect_sorted_audits_for_issue("bd-1", seeded_comments);
+            crate::plan::projector::collect_sorted_audits_for_issue("bd-1", seeded_comments)
+                .expect("seeded comments should parse");
         assert!(
             super::completion_audit_already_emitted("del-A", &seeded_audits),
             "test precondition must expose the seeded completion audit"
