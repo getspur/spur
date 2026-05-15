@@ -20,7 +20,9 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use image::DynamicImage;
 use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
@@ -46,9 +48,93 @@ enum ImageCacheKey {
     },
 }
 
-const MAX_INLINE_SLICE_PROTOCOLS: usize = 32;
+const MAX_CROPPED_SLICES: usize = 128;
+const MAX_INLINE_SLICE_PROTOCOLS: usize = 128;
 const MAX_FULL_IMAGE_PROTOCOLS: usize = 16;
 const MAX_DISPLAY_SURFACES: usize = 16;
+const PERF_SAMPLE_BATCH: usize = 200;
+
+struct DurationSampler {
+    samples: [u64; PERF_SAMPLE_BATCH],
+    len: usize,
+}
+
+impl DurationSampler {
+    fn new() -> Self {
+        Self {
+            samples: [0; PERF_SAMPLE_BATCH],
+            len: 0,
+        }
+    }
+
+    fn observe_and_maybe_flush(&mut self, duration_us: u64) -> Option<(u64, u64)> {
+        self.samples[self.len] = duration_us;
+        self.len += 1;
+        if self.len < PERF_SAMPLE_BATCH {
+            return None;
+        }
+        let mut values = self.samples;
+        values.sort_unstable();
+        let p50 = values[(PERF_SAMPLE_BATCH - 1) / 2];
+        let p95 = values[((PERF_SAMPLE_BATCH - 1) * 95) / 100];
+        self.len = 0;
+        Some((p50, p95))
+    }
+}
+
+struct PerfStats {
+    enabled: bool,
+    slice_hit: AtomicU64,
+    slice_miss: AtomicU64,
+    crop_slice_hit: AtomicU64,
+    crop_slice_miss: AtomicU64,
+    display_surface_hit: AtomicU64,
+    display_surface_miss: AtomicU64,
+    evictions_slice: AtomicU64,
+    evictions_cropped_slice: AtomicU64,
+    evictions_display_surface: AtomicU64,
+    evictions_full: AtomicU64,
+    resize_protocol_sampler: DurationSampler,
+    resize_surface_sampler: DurationSampler,
+}
+
+impl PerfStats {
+    fn new() -> Self {
+        Self {
+            enabled: std::env::var("SPUR_TUI_IMG_PERF").as_deref() == Ok("1"),
+            slice_hit: AtomicU64::new(0),
+            slice_miss: AtomicU64::new(0),
+            crop_slice_hit: AtomicU64::new(0),
+            crop_slice_miss: AtomicU64::new(0),
+            display_surface_hit: AtomicU64::new(0),
+            display_surface_miss: AtomicU64::new(0),
+            evictions_slice: AtomicU64::new(0),
+            evictions_cropped_slice: AtomicU64::new(0),
+            evictions_display_surface: AtomicU64::new(0),
+            evictions_full: AtomicU64::new(0),
+            resize_protocol_sampler: DurationSampler::new(),
+            resize_surface_sampler: DurationSampler::new(),
+        }
+    }
+
+    fn emit_summary(&self, reason: &str) {
+        tracing::info!(
+            target: "spur_tui::img_perf",
+            reason,
+            slice_hit = self.slice_hit.load(Ordering::Relaxed),
+            slice_miss = self.slice_miss.load(Ordering::Relaxed),
+            crop_slice_hit = self.crop_slice_hit.load(Ordering::Relaxed),
+            crop_slice_miss = self.crop_slice_miss.load(Ordering::Relaxed),
+            display_surface_hit = self.display_surface_hit.load(Ordering::Relaxed),
+            display_surface_miss = self.display_surface_miss.load(Ordering::Relaxed),
+            evictions_slice = self.evictions_slice.load(Ordering::Relaxed),
+            evictions_cropped_slice = self.evictions_cropped_slice.load(Ordering::Relaxed),
+            evictions_display_surface = self.evictions_display_surface.load(Ordering::Relaxed),
+            evictions_full = self.evictions_full.load(Ordering::Relaxed),
+            "image cache perf summary"
+        );
+    }
+}
 
 impl ImageCacheKey {
     fn is_slice(self) -> bool {
@@ -97,15 +183,70 @@ struct DisplaySurfaceKey {
     total_rows: u16,
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SliceKey {
+    source: DisplaySurfaceSource,
+    image_generation: u64,
+    pane_w_cols: u16,
+    first_row_within: u16,
+    run_len: u16,
+    total_rows: u16,
+    cell_h_px: u16,
+}
+
+impl SliceKey {
+    pub fn new<I>(
+        id: I,
+        image_generation: u64,
+        pane_w_cols: u16,
+        first_row_within: u16,
+        run_len: u16,
+        total_rows: u16,
+        cell_h_px: u16,
+    ) -> Self
+    where
+        I: Into<DisplaySurfaceSource>,
+    {
+        Self {
+            source: id.into(),
+            image_generation,
+            pane_w_cols,
+            first_row_within,
+            run_len,
+            total_rows,
+            cell_h_px,
+        }
+    }
+}
+
 pub struct ImageCache {
     inline: HashMap<ImageCacheKey, CachedProtocol>,
     overlay: HashMap<ImageCacheKey, CachedProtocol>,
+    slice_protocol_order: VecDeque<ImageCacheKey>,
+    cropped_slices: HashMap<SliceKey, Arc<DynamicImage>>,
+    cropped_slice_order: VecDeque<SliceKey>,
     display_surfaces: HashMap<DisplaySurfaceKey, Arc<DynamicImage>>,
     display_surface_order: VecDeque<DisplaySurfaceKey>,
     /// Cell pixel size the current entries were built against. None ⇔
     /// both maps are empty. Drift triggers a full clear.
     last_cell_size: Option<(u16, u16)>,
+    perf: PerfStats,
+}
+
+impl Default for ImageCache {
+    fn default() -> Self {
+        Self {
+            inline: HashMap::new(),
+            overlay: HashMap::new(),
+            slice_protocol_order: VecDeque::new(),
+            cropped_slices: HashMap::new(),
+            cropped_slice_order: VecDeque::new(),
+            display_surfaces: HashMap::new(),
+            display_surface_order: VecDeque::new(),
+            last_cell_size: None,
+            perf: PerfStats::new(),
+        }
+    }
 }
 
 impl ImageCache {
@@ -127,18 +268,22 @@ impl ImageCache {
         Self::ensure_cell_size(
             &mut self.inline,
             &mut self.overlay,
+            &mut self.slice_protocol_order,
+            &mut self.cropped_slices,
+            &mut self.cropped_slice_order,
             &mut self.display_surfaces,
             &mut self.display_surface_order,
             &mut self.last_cell_size,
             picker,
         );
-        Self::enforce_full_protocol_limit(&mut self.inline, ImageCacheKey::Mermaid(id));
+        Self::enforce_full_protocol_limit(&mut self.inline, ImageCacheKey::Mermaid(id), &self.perf);
         Self::get_or_build(
             &mut self.inline,
             ImageCacheKey::Mermaid(id),
             image,
             image_generation,
             picker,
+            &mut self.perf,
         )
     }
 
@@ -152,21 +297,26 @@ impl ImageCache {
         Self::ensure_cell_size(
             &mut self.inline,
             &mut self.overlay,
+            &mut self.slice_protocol_order,
+            &mut self.cropped_slices,
+            &mut self.cropped_slice_order,
             &mut self.display_surfaces,
             &mut self.display_surface_order,
             &mut self.last_cell_size,
             picker,
         );
-        Self::enforce_full_protocol_limit(&mut self.inline, ImageCacheKey::Trace(id));
+        Self::enforce_full_protocol_limit(&mut self.inline, ImageCacheKey::Trace(id), &self.perf);
         Self::get_or_build(
             &mut self.inline,
             ImageCacheKey::Trace(id),
             image,
             image_generation,
             picker,
+            &mut self.perf,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn inline_mermaid_slice_protocol_mut(
         &mut self,
         id: MermaidId,
@@ -180,6 +330,9 @@ impl ImageCache {
         Self::ensure_cell_size(
             &mut self.inline,
             &mut self.overlay,
+            &mut self.slice_protocol_order,
+            &mut self.cropped_slices,
+            &mut self.cropped_slice_order,
             &mut self.display_surfaces,
             &mut self.display_surface_order,
             &mut self.last_cell_size,
@@ -191,10 +344,24 @@ impl ImageCache {
             run_len,
             total_rows,
         };
-        Self::enforce_inline_slice_limit(&mut self.inline, key);
-        Self::get_or_build(&mut self.inline, key, image, image_generation, picker)
+        Self::touch_slice_protocol_key(&mut self.slice_protocol_order, key);
+        Self::enforce_inline_slice_limit(
+            &mut self.inline,
+            &mut self.slice_protocol_order,
+            key,
+            &self.perf,
+        );
+        Self::get_or_build(
+            &mut self.inline,
+            key,
+            image,
+            image_generation,
+            picker,
+            &mut self.perf,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn inline_trace_slice_protocol_mut(
         &mut self,
         id: TraceImageId,
@@ -208,6 +375,9 @@ impl ImageCache {
         Self::ensure_cell_size(
             &mut self.inline,
             &mut self.overlay,
+            &mut self.slice_protocol_order,
+            &mut self.cropped_slices,
+            &mut self.cropped_slice_order,
             &mut self.display_surfaces,
             &mut self.display_surface_order,
             &mut self.last_cell_size,
@@ -219,8 +389,21 @@ impl ImageCache {
             run_len,
             total_rows,
         };
-        Self::enforce_inline_slice_limit(&mut self.inline, key);
-        Self::get_or_build(&mut self.inline, key, image, image_generation, picker)
+        Self::touch_slice_protocol_key(&mut self.slice_protocol_order, key);
+        Self::enforce_inline_slice_limit(
+            &mut self.inline,
+            &mut self.slice_protocol_order,
+            key,
+            &self.perf,
+        );
+        Self::get_or_build(
+            &mut self.inline,
+            key,
+            image,
+            image_generation,
+            picker,
+            &mut self.perf,
+        )
     }
 
     /// Same shape as `inline_protocol_mut` but for the overlay slot.
@@ -234,18 +417,26 @@ impl ImageCache {
         Self::ensure_cell_size(
             &mut self.inline,
             &mut self.overlay,
+            &mut self.slice_protocol_order,
+            &mut self.cropped_slices,
+            &mut self.cropped_slice_order,
             &mut self.display_surfaces,
             &mut self.display_surface_order,
             &mut self.last_cell_size,
             picker,
         );
-        Self::enforce_full_protocol_limit(&mut self.overlay, ImageCacheKey::Mermaid(id));
+        Self::enforce_full_protocol_limit(
+            &mut self.overlay,
+            ImageCacheKey::Mermaid(id),
+            &self.perf,
+        );
         Self::get_or_build(
             &mut self.overlay,
             ImageCacheKey::Mermaid(id),
             image,
             image_generation,
             picker,
+            &mut self.perf,
         )
     }
 
@@ -254,11 +445,93 @@ impl ImageCache {
     pub fn invalidate_all(&mut self) {
         self.inline.clear();
         self.overlay.clear();
+        self.slice_protocol_order.clear();
+        self.cropped_slices.clear();
+        self.cropped_slice_order.clear();
         self.display_surfaces.clear();
         self.display_surface_order.clear();
         self.last_cell_size = None;
     }
 
+    pub fn get_or_build_cropped_slice<F>(
+        &mut self,
+        key: SliceKey,
+        build: F,
+    ) -> Option<Arc<DynamicImage>>
+    where
+        F: FnOnce() -> Option<DynamicImage>,
+    {
+        if let Some(slice) = self.cropped_slices.get(&key) {
+            if self.perf.enabled {
+                self.perf.crop_slice_hit.fetch_add(1, Ordering::Relaxed);
+            }
+            Self::touch_cropped_slice_key(&mut self.cropped_slice_order, key);
+            return Some(slice.clone());
+        }
+        if self.perf.enabled {
+            self.perf.crop_slice_miss.fetch_add(1, Ordering::Relaxed);
+        }
+        let built = Arc::new(build()?);
+        Self::touch_cropped_slice_key(&mut self.cropped_slice_order, key);
+        Self::enforce_cropped_slice_limit(
+            &mut self.cropped_slices,
+            &mut self.cropped_slice_order,
+            key,
+            &self.perf,
+        );
+        self.cropped_slices.insert(key, built.clone());
+        Some(built)
+    }
+
+    pub fn has_cropped_slice(&mut self, key: SliceKey) -> bool {
+        let hit = self.cropped_slices.contains_key(&key);
+        if hit {
+            Self::touch_cropped_slice_key(&mut self.cropped_slice_order, key);
+        }
+        hit
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn has_inline_mermaid_slice_protocol(
+        &mut self,
+        id: MermaidId,
+        image_generation: u64,
+        first_row_within: u16,
+        run_len: u16,
+        total_rows: u16,
+        surface_w_px: u32,
+        surface_h_px: u32,
+    ) -> bool {
+        let key = ImageCacheKey::MermaidSlice {
+            id,
+            first_row_within,
+            run_len,
+            total_rows,
+        };
+        self.has_inline_slice_protocol(key, image_generation, surface_w_px, surface_h_px)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn has_inline_trace_slice_protocol(
+        &mut self,
+        id: TraceImageId,
+        image_generation: u64,
+        first_row_within: u16,
+        run_len: u16,
+        total_rows: u16,
+        surface_w_px: u32,
+        surface_h_px: u32,
+    ) -> bool {
+        let key = ImageCacheKey::TraceSlice {
+            id,
+            first_row_within,
+            run_len,
+            total_rows,
+        };
+        self.has_inline_slice_protocol(key, image_generation, surface_w_px, surface_h_px)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn display_surface<I>(
         &mut self,
         id: I,
@@ -282,13 +555,50 @@ impl ImageCache {
         };
 
         if let Some(surface) = self.display_surfaces.get(&key) {
+            if self.perf.enabled {
+                self.perf
+                    .display_surface_hit
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            Self::touch_display_surface_key(&mut self.display_surface_order, key);
             return surface.clone();
+        }
+        if self.perf.enabled {
+            self.perf
+                .display_surface_miss
+                .fetch_add(1, Ordering::Relaxed);
+            let miss_reason = if self.display_surfaces.contains_key(&key) {
+                "new_key"
+            } else if self
+                .display_surfaces
+                .keys()
+                .any(|k| k.source == key.source && k.image_generation != key.image_generation)
+            {
+                "generation_drift"
+            } else if self.display_surfaces.keys().any(|k| {
+                k.source == key.source
+                    && (k.pane_w_cols != key.pane_w_cols
+                        || k.cell_w_px != key.cell_w_px
+                        || k.cell_h_px != key.cell_h_px
+                        || k.total_rows != key.total_rows)
+            }) {
+                "size_drift"
+            } else {
+                "new_key"
+            };
+            tracing::debug!(target: "spur_tui::img_perf", miss_reason, "display surface miss");
         }
 
         Self::enforce_display_surface_limit(
             &mut self.display_surfaces,
             &mut self.display_surface_order,
+            &self.perf,
         );
+        let t0 = if self.perf.enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let surface = Arc::new(build_display_surface(
             source.as_ref(),
             pane_w_cols,
@@ -296,8 +606,26 @@ impl ImageCache {
             cell_h_px,
             total_rows,
         ));
+        if let Some(start) = t0 {
+            let duration_us = std::cmp::min(start.elapsed().as_micros(), u64::MAX as u128) as u64;
+            if let Some((p50, p95)) = self
+                .perf
+                .resize_surface_sampler
+                .observe_and_maybe_flush(duration_us)
+            {
+                tracing::info!(
+                    target: "spur_tui::img_perf",
+                    op = "build_display_surface.resize_exact",
+                    p50_us = p50,
+                    p95_us = p95,
+                    sample_count = PERF_SAMPLE_BATCH,
+                    "display surface resize timing"
+                );
+            }
+            self.perf.emit_summary("display_surface_miss");
+        }
         self.display_surfaces.insert(key, surface.clone());
-        self.display_surface_order.push_back(key);
+        Self::touch_display_surface_key(&mut self.display_surface_order, key);
         surface
     }
 
@@ -310,6 +638,13 @@ impl ImageCache {
         self.inline.retain(|key, _| {
             !matches!(key, ImageCacheKey::MermaidSlice { id: slice_id, .. } if *slice_id == id)
         });
+        self.slice_protocol_order.retain(|key| {
+            !matches!(key, ImageCacheKey::MermaidSlice { id: slice_id, .. } if *slice_id == id)
+        });
+        self.cropped_slices
+            .retain(|key, _| key.source != DisplaySurfaceSource::Mermaid(id));
+        self.cropped_slice_order
+            .retain(|key| self.cropped_slices.contains_key(key));
         self.retain_display_surfaces(|key| key.source != DisplaySurfaceSource::Mermaid(id));
     }
 
@@ -319,6 +654,13 @@ impl ImageCache {
         self.inline.retain(|key, _| {
             !matches!(key, ImageCacheKey::TraceSlice { id: slice_id, .. } if *slice_id == id)
         });
+        self.slice_protocol_order.retain(
+            |key| !matches!(key, ImageCacheKey::TraceSlice { id: slice_id, .. } if *slice_id == id),
+        );
+        self.cropped_slices
+            .retain(|key, _| key.source != DisplaySurfaceSource::Trace(id));
+        self.cropped_slice_order
+            .retain(|key| self.cropped_slices.contains_key(key));
         self.retain_display_surfaces(|key| key.source != DisplaySurfaceSource::Trace(id));
     }
 
@@ -326,6 +668,11 @@ impl ImageCache {
     #[cfg(any(test, debug_assertions))]
     pub fn len(&self) -> (usize, usize) {
         (self.inline.len(), self.overlay.len())
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn cropped_slice_len(&self) -> usize {
+        self.cropped_slices.len()
     }
 
     #[cfg(test)]
@@ -342,6 +689,9 @@ impl ImageCache {
             Some(_) => {
                 self.inline.clear();
                 self.overlay.clear();
+                self.slice_protocol_order.clear();
+                self.cropped_slices.clear();
+                self.cropped_slice_order.clear();
                 self.display_surfaces.clear();
                 self.display_surface_order.clear();
                 self.last_cell_size = Some(cur);
@@ -356,6 +706,7 @@ impl ImageCache {
         image: &Arc<DynamicImage>,
         image_generation: u64,
         picker: &Picker,
+        perf: &mut PerfStats,
     ) -> &'a mut StatefulProtocol {
         match map.entry(id) {
             Entry::Occupied(o)
@@ -363,34 +714,120 @@ impl ImageCache {
                     && o.get().surface_w_px == image.width()
                     && o.get().surface_h_px == image.height() =>
             {
+                if perf.enabled && id.is_slice() {
+                    perf.slice_hit.fetch_add(1, Ordering::Relaxed);
+                }
                 &mut o.into_mut().proto
             }
             Entry::Occupied(mut o) => {
+                let miss_reason = if o.get().image_generation != image_generation {
+                    "generation_drift"
+                } else {
+                    "size_drift"
+                };
+                if perf.enabled {
+                    if id.is_slice() {
+                        perf.slice_miss.fetch_add(1, Ordering::Relaxed);
+                    }
+                    tracing::debug!(target: "spur_tui::img_perf", miss_reason, "protocol miss");
+                }
                 // Generation or display-surface drift — stale protocol. Rebuild in place.
+                let t0 = if perf.enabled {
+                    Some(Instant::now())
+                } else {
+                    None
+                };
                 *o.get_mut() = CachedProtocol {
                     proto: picker.new_resize_protocol((**image).clone()),
                     image_generation,
                     surface_w_px: image.width(),
                     surface_h_px: image.height(),
                 };
+                if let Some(start) = t0 {
+                    let duration_us =
+                        std::cmp::min(start.elapsed().as_micros(), u64::MAX as u128) as u64;
+                    if let Some((p50, p95)) = perf
+                        .resize_protocol_sampler
+                        .observe_and_maybe_flush(duration_us)
+                    {
+                        tracing::info!(
+                            target: "spur_tui::img_perf",
+                            op = "new_resize_protocol",
+                            p50_us = p50,
+                            p95_us = p95,
+                            sample_count = PERF_SAMPLE_BATCH,
+                            "protocol rebuild timing"
+                        );
+                    }
+                }
                 &mut o.into_mut().proto
             }
             Entry::Vacant(v) => {
-                &mut v
-                    .insert(CachedProtocol {
-                        proto: picker.new_resize_protocol((**image).clone()),
-                        image_generation,
-                        surface_w_px: image.width(),
-                        surface_h_px: image.height(),
-                    })
-                    .proto
+                if perf.enabled {
+                    if id.is_slice() {
+                        perf.slice_miss.fetch_add(1, Ordering::Relaxed);
+                    }
+                    tracing::debug!(target: "spur_tui::img_perf", miss_reason = "new_key", "protocol miss");
+                }
+                let t0 = if perf.enabled {
+                    Some(Instant::now())
+                } else {
+                    None
+                };
+                let inserted = v.insert(CachedProtocol {
+                    proto: picker.new_resize_protocol((**image).clone()),
+                    image_generation,
+                    surface_w_px: image.width(),
+                    surface_h_px: image.height(),
+                });
+                if let Some(start) = t0 {
+                    let duration_us =
+                        std::cmp::min(start.elapsed().as_micros(), u64::MAX as u128) as u64;
+                    if let Some((p50, p95)) = perf
+                        .resize_protocol_sampler
+                        .observe_and_maybe_flush(duration_us)
+                    {
+                        tracing::info!(
+                            target: "spur_tui::img_perf",
+                            op = "new_resize_protocol",
+                            p50_us = p50,
+                            p95_us = p95,
+                            sample_count = PERF_SAMPLE_BATCH,
+                            "protocol build timing"
+                        );
+                    }
+                }
+                &mut inserted.proto
             }
         }
     }
 
+    fn has_inline_slice_protocol(
+        &mut self,
+        key: ImageCacheKey,
+        image_generation: u64,
+        surface_w_px: u32,
+        surface_h_px: u32,
+    ) -> bool {
+        let Some(cached) = self.inline.get(&key) else {
+            return false;
+        };
+        let hit = cached.image_generation == image_generation
+            && cached.surface_w_px == surface_w_px
+            && cached.surface_h_px == surface_h_px;
+        if hit {
+            Self::touch_slice_protocol_key(&mut self.slice_protocol_order, key);
+        }
+        hit
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn ensure_cell_size(
         inline: &mut HashMap<ImageCacheKey, CachedProtocol>,
         overlay: &mut HashMap<ImageCacheKey, CachedProtocol>,
+        slice_protocol_order: &mut VecDeque<ImageCacheKey>,
+        cropped_slices: &mut HashMap<SliceKey, Arc<DynamicImage>>,
+        cropped_slice_order: &mut VecDeque<SliceKey>,
         display_surfaces: &mut HashMap<DisplaySurfaceKey, Arc<DynamicImage>>,
         display_surface_order: &mut VecDeque<DisplaySurfaceKey>,
         last: &mut Option<(u16, u16)>,
@@ -402,6 +839,9 @@ impl ImageCache {
             Some(_) => {
                 inline.clear();
                 overlay.clear();
+                slice_protocol_order.clear();
+                cropped_slices.clear();
+                cropped_slice_order.clear();
                 display_surfaces.clear();
                 display_surface_order.clear();
                 *last = Some(cur);
@@ -412,33 +852,73 @@ impl ImageCache {
 
     fn enforce_inline_slice_limit(
         inline: &mut HashMap<ImageCacheKey, CachedProtocol>,
+        order: &mut VecDeque<ImageCacheKey>,
         current: ImageCacheKey,
+        perf: &PerfStats,
     ) {
         if inline.contains_key(&current) {
             return;
         }
 
-        let slice_count = inline.keys().filter(|key| key.is_slice()).count();
-        if slice_count < MAX_INLINE_SLICE_PROTOCOLS {
-            return;
-        }
-
-        let remove_count = slice_count + 1 - MAX_INLINE_SLICE_PROTOCOLS;
-        let stale_keys: Vec<_> = inline
-            .keys()
-            .filter(|key| key.is_slice() && **key != current)
-            .copied()
-            .take(remove_count)
-            .collect();
-
-        for key in stale_keys {
+        while order.len() > MAX_INLINE_SLICE_PROTOCOLS {
+            let Some(key) = order.pop_front() else {
+                break;
+            };
+            if key == current || !key.is_slice() {
+                continue;
+            }
             inline.remove(&key);
+            if perf.enabled {
+                perf.evictions_slice.fetch_add(1, Ordering::Relaxed);
+            }
         }
+    }
+
+    fn enforce_cropped_slice_limit(
+        cropped_slices: &mut HashMap<SliceKey, Arc<DynamicImage>>,
+        order: &mut VecDeque<SliceKey>,
+        current: SliceKey,
+        perf: &PerfStats,
+    ) {
+        while cropped_slices.len() >= MAX_CROPPED_SLICES {
+            let Some(key) = order.pop_front() else {
+                break;
+            };
+            if key == current {
+                continue;
+            }
+            cropped_slices.remove(&key);
+            if perf.enabled {
+                perf.evictions_cropped_slice.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    fn touch_slice_protocol_key(order: &mut VecDeque<ImageCacheKey>, key: ImageCacheKey) {
+        if let Some(pos) = order.iter().position(|k| *k == key) {
+            order.remove(pos);
+        }
+        order.push_back(key);
+    }
+
+    fn touch_cropped_slice_key(order: &mut VecDeque<SliceKey>, key: SliceKey) {
+        if let Some(pos) = order.iter().position(|k| *k == key) {
+            order.remove(pos);
+        }
+        order.push_back(key);
+    }
+
+    fn touch_display_surface_key(order: &mut VecDeque<DisplaySurfaceKey>, key: DisplaySurfaceKey) {
+        if let Some(pos) = order.iter().position(|k| *k == key) {
+            order.remove(pos);
+        }
+        order.push_back(key);
     }
 
     fn enforce_full_protocol_limit(
         inline: &mut HashMap<ImageCacheKey, CachedProtocol>,
         current: ImageCacheKey,
+        perf: &PerfStats,
     ) {
         if inline.contains_key(&current) {
             return;
@@ -459,18 +939,26 @@ impl ImageCache {
 
         for key in stale_keys {
             inline.remove(&key);
+            if perf.enabled {
+                perf.evictions_full.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
     fn enforce_display_surface_limit(
         surfaces: &mut HashMap<DisplaySurfaceKey, Arc<DynamicImage>>,
         order: &mut VecDeque<DisplaySurfaceKey>,
+        perf: &PerfStats,
     ) {
         while surfaces.len() >= MAX_DISPLAY_SURFACES {
             let Some(key) = order.pop_front() else {
                 break;
             };
             surfaces.remove(&key);
+            if perf.enabled {
+                perf.evictions_display_surface
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -514,7 +1002,7 @@ fn build_display_surface(
         .clamp(1, target_h)
         .max(1);
 
-    let resized = source.resize_exact(content_w, content_h, FilterType::Lanczos3);
+    let resized = source.resize_exact(content_w, content_h, FilterType::Triangle);
     let mut canvas: DynamicImage =
         ImageBuffer::from_pixel(target_w, target_h, Rgba([0u8, 0, 0, 0])).into();
     let x = ((target_w - content_w) / 2) as i64;
@@ -687,6 +1175,34 @@ mod tests {
     }
 
     #[test]
+    fn inline_slice_hits_at_capacity_do_not_evict() {
+        let mut c = ImageCache::new();
+        let img = small_image();
+        let p = picker();
+        c.perf.enabled = true;
+
+        for first_row in 0..(MAX_INLINE_SLICE_PROTOCOLS as u16) {
+            c.inline_trace_slice_protocol_mut(TraceImageId(1), &img, 1, first_row, 4, 256, &p);
+        }
+
+        let inline_slice_count =
+            |cache: &ImageCache| cache.inline.iter().filter(|(k, _)| k.is_slice()).count();
+        assert_eq!(inline_slice_count(&c), MAX_INLINE_SLICE_PROTOCOLS);
+
+        for i in 0..200 {
+            let first_row = (i % MAX_INLINE_SLICE_PROTOCOLS) as u16;
+            c.inline_trace_slice_protocol_mut(TraceImageId(1), &img, 1, first_row, 4, 256, &p);
+            assert_eq!(
+                inline_slice_count(&c),
+                MAX_INLINE_SLICE_PROTOCOLS,
+                "slice count should stay at capacity on hit {i}"
+            );
+        }
+
+        assert_eq!(c.perf.evictions_slice.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
     fn display_surface_uses_full_render_dimensions() {
         let mut c = ImageCache::new();
         let img = Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(100, 50)));
@@ -696,6 +1212,81 @@ mod tests {
         assert_eq!(surface.width(), 80);
         assert_eq!(surface.height(), 64);
         assert_eq!(c.display_surface_len(), 1);
+    }
+
+    #[test]
+    fn cropped_slice_cache_misses_when_pane_width_changes() {
+        let mut c = ImageCache::new();
+        let id = TraceImageId(42);
+        let src = Arc::new(DynamicImage::ImageRgba8(RgbaImage::new(240, 120)));
+        let image_generation = 9;
+        let pane_w_80 = 80;
+        let pane_w_120 = 120;
+        let cell_w_px = 8;
+        let cell_h_px = 16;
+        let first_row_within = 1;
+        let run_len = 2;
+        let total_rows = 10;
+
+        let surface_80 = c.display_surface(
+            id,
+            &src,
+            image_generation,
+            pane_w_80,
+            cell_w_px,
+            cell_h_px,
+            total_rows,
+        );
+        let surface_120 = c.display_surface(
+            id,
+            &src,
+            image_generation,
+            pane_w_120,
+            cell_w_px,
+            cell_h_px,
+            total_rows,
+        );
+        let start_y = (first_row_within as u32).saturating_mul(cell_h_px as u32);
+        let slice_h = (run_len as u32).saturating_mul(cell_h_px as u32);
+        let expected_80_w = surface_80.width();
+        let expected_120_w = surface_120.width();
+
+        let slice_80 = c
+            .get_or_build_cropped_slice(
+                SliceKey::new(
+                    id,
+                    image_generation,
+                    pane_w_80,
+                    first_row_within,
+                    run_len,
+                    total_rows,
+                    cell_h_px,
+                ),
+                || Some(surface_80.crop_imm(0, start_y, surface_80.width(), slice_h)),
+            )
+            .expect("slice for pane width 80");
+        let slice_120 = c
+            .get_or_build_cropped_slice(
+                SliceKey::new(
+                    id,
+                    image_generation,
+                    pane_w_120,
+                    first_row_within,
+                    run_len,
+                    total_rows,
+                    cell_h_px,
+                ),
+                || Some(surface_120.crop_imm(0, start_y, surface_120.width(), slice_h)),
+            )
+            .expect("slice for pane width 120");
+
+        assert!(
+            !Arc::ptr_eq(&slice_80, &slice_120),
+            "resize should build a new cropped slice Arc"
+        );
+        assert_eq!(slice_80.width(), expected_80_w);
+        assert_eq!(slice_120.width(), expected_120_w);
+        assert_ne!(slice_80.width(), slice_120.width());
     }
 
     #[test]
@@ -725,6 +1316,38 @@ mod tests {
         }
 
         assert_eq!(c.display_surface_len(), MAX_DISPLAY_SURFACES);
+    }
+
+    #[test]
+    fn display_surfaces_use_lru_eviction_with_touch_on_read() {
+        let mut c = ImageCache::new();
+        let img = small_image();
+
+        for id in 0..(MAX_DISPLAY_SURFACES as u64) {
+            c.display_surface(TraceImageId(id), &img, 1, 10, 8, 16, 4);
+        }
+
+        // Touch id=0 so id=1 becomes least-recently-used.
+        c.display_surface(TraceImageId(0), &img, 1, 10, 8, 16, 4);
+        c.display_surface(
+            TraceImageId(MAX_DISPLAY_SURFACES as u64),
+            &img,
+            1,
+            10,
+            8,
+            16,
+            4,
+        );
+
+        assert_eq!(c.display_surface_len(), MAX_DISPLAY_SURFACES);
+        assert!(!c
+            .display_surfaces
+            .keys()
+            .any(|k| matches!(k.source, DisplaySurfaceSource::Trace(TraceImageId(1)))));
+        assert!(c
+            .display_surfaces
+            .keys()
+            .any(|k| matches!(k.source, DisplaySurfaceSource::Trace(TraceImageId(0)))));
     }
 
     #[test]
