@@ -70,7 +70,13 @@ For high-impact actions, SPUR includes explicit confirmation patterns in current
 
 This section should be interpreted as an implementation-scope statement, not a formal sandbox guarantee: SPUR improves operational safety using local isolation and confirmations, but still runs with the effective filesystem/process privileges of the local user account and host environment.
 
-## 5) Supply Chain
+**Compromised-SPUR scenario**: If the SPUR process is compromised, the attacker controls the local orchestrator/launcher path (including which agent binary is invoked, arguments, working directory, and environment), and can spawn subprocesses, read files, and initiate network I/O within the same OS user-permission boundary. This is the local user privilege model, not an SPUR sandbox. Current mitigations are operational: git worktree-based isolation of worker tasks, interactive confirmation gates for high-impact actions, and no root-required SPUR component. SPUR makes no formal sandbox guarantee; defense-in-depth recommendations are to run SPUR under a developer-class user account, avoid CI execution as root, and use workstation EDR coverage.
+
+## 5) Agent Binary Integrity
+
+SPUR resolves and spawns ACP agent binaries from the user's PATH (for example `npx --yes @zed-industries/codex-acp@<version>` in [`crates/spur-acp/src/seed_agents.toml`](../../crates/spur-acp/src/seed_agents.toml)). In v0.1, SPUR does not verify cryptographic signatures, checksums, or provenance attestations for those binaries before launch. Customers requiring stricter supply-chain controls should pre-install pinned, hash-verified agent binaries and configure SPUR to invoke those binaries directly rather than via `npx`. Pinned-hash or sigstore-style attestation is on the roadmap, with no committed v0.1 timeline.
+
+## 6) Supply Chain
 
 SPUR maintains a repository security workflow at [`.github/workflows/security-scans.yml`](../../.github/workflows/security-scans.yml). In its current form, it runs:
 
@@ -82,7 +88,7 @@ Results are exported as CI artifacts for review. This overview does not claim ex
 
 Software bill of materials (SBOM) output can be provided to enterprise buyers on request.
 
-## 6) Vulnerability Reporting
+## 7) Vulnerability Reporting
 
 Report suspected vulnerabilities or security concerns to:
 
