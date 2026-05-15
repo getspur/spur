@@ -15,7 +15,7 @@ pub trait Event {
     fn into_props(self) -> Props;
 }
 
-mod sealed {
+pub(crate) mod sealed {
     pub trait Sealed {}
 }
 
