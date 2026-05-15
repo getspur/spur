@@ -21,6 +21,7 @@ use consent::{is_event_allowed, EventKind};
 use ratelimit::{TokenBucket, EVENTS_PER_MINUTE_CAPACITY, EVENTS_PER_SECOND_REFILL};
 use tokio::runtime::RuntimeFlavor;
 
+pub use crate::config::TelemetryConfig;
 pub use error::{Result, TelemetryError};
 pub use events::{Event, Props, Tier};
 
@@ -43,6 +44,14 @@ struct RuntimeState {
 }
 
 static STATE: OnceLock<RuntimeState> = OnceLock::new();
+
+#[derive(Debug, Clone, Copy)]
+pub enum TelemetryScope {
+    Crash,
+    Perf,
+    Usage,
+    All,
+}
 
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
@@ -190,6 +199,45 @@ fn shutdown_blocking() {
             batch.shutdown(Some(SHUTDOWN_TIMEOUT)).await;
         });
     }
+}
+
+pub fn config_path() -> std::path::PathBuf {
+    config::config_path()
+}
+
+pub fn load_config_or_default() -> TelemetryConfig {
+    config::load_or_default()
+}
+
+pub fn save_config(cfg: &TelemetryConfig) -> Result<()> {
+    config::save_atomic(cfg)
+}
+
+pub fn set_enabled(scope: TelemetryScope, enabled: bool) -> Result<TelemetryConfig> {
+    let mut cfg = config::load_or_default();
+    match scope {
+        TelemetryScope::Crash => cfg.tier1_crash = enabled,
+        TelemetryScope::Perf => cfg.tier1_perf = enabled,
+        TelemetryScope::Usage => cfg.tier2_usage = enabled,
+        TelemetryScope::All => {
+            cfg.tier1_crash = enabled;
+            cfg.tier1_perf = enabled;
+            cfg.tier2_usage = enabled;
+        }
+    }
+    config::save_atomic(&cfg)?;
+    Ok(cfg)
+}
+
+pub fn reset_anonymous_id() -> Result<TelemetryConfig> {
+    let mut cfg = config::load_or_default();
+    cfg.anonymous_id = uuid::Uuid::new_v4();
+    config::save_atomic(&cfg)?;
+    Ok(cfg)
+}
+
+pub fn shutdown_sync() {
+    shutdown_blocking();
 }
 
 #[cfg(unix)]
