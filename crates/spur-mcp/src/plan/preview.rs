@@ -52,6 +52,7 @@ pub async fn preview_overlay(
             .filter_map(|dep| {
                 let dep_task_id = dep.spec.task_id.as_str();
                 let Some(base_oid) = dep.dispatched_base_oid.clone() else {
+                    // T0 invariant guarantees dispatched_base_oid is Some for Approved deps; this is belt-and-suspenders.
                     tracing::warn!(
                         plan_id,
                         task_id,
