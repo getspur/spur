@@ -6,3 +6,4 @@ pub mod graph;
 pub mod init;
 pub mod pm_ingest;
 pub mod profile;
+pub mod telemetry;

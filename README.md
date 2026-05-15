@@ -148,6 +148,13 @@ db_path = "~/.spur/cost.db"
 
 Each agent entry supports delegation descriptors (`good_for`, `avoid_for`, `tier`, `cost_tier`) used by the brain for routing. Run `spur config check` to lint your configuration.
 
+## Telemetry and Privacy
+
+SPUR ships anonymous-identifier-based telemetry: Tier 1 crash diagnostics and performance are default ON, Tier 2 usage is default OFF (opt-in).
+Disable all telemetry in one line: `SPUR_TELEMETRY=0 spur`.
+For persistent disable, run `spur telemetry disable all`.
+Collected fields, retention (90 days), deletion-by-ID steps, and pseudonymity details: [docs/PRIVACY.md](docs/PRIVACY.md).
+
 ## A Day in the Life
 
 **Parallel refactor.** "Refactor error handling across the codebase." Brain submits a 5-task plan → 5 worktrees, 5 workers run in parallel → review cards appear → approve 4, reject 1 with feedback → rejected worker retries with your note → approved branches cherry-picked to staging. Status bar: total cost $2.40.

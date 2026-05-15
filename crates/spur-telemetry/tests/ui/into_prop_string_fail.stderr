@@ -1,0 +1,18 @@
+error[E0277]: the trait bound `String: IntoProp` is not satisfied
+ --> tests/ui/into_prop_string_fail.rs:6:23
+  |
+6 |     require_into_prop(String::from("nope"));
+  |     ----------------- ^^^^^^^^^^^^^^^^^^^^ the trait `IntoProp` is not implemented for `String`
+  |     |
+  |     required by a bound introduced by this call
+  |
+help: the trait `IntoProp` is implemented for `&str`
+ --> src/events.rs
+  |
+  | impl IntoProp for &'static str {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `require_into_prop`
+ --> tests/ui/into_prop_string_fail.rs:3:25
+  |
+3 | fn require_into_prop<T: IntoProp>(_: T) {}
+  |                         ^^^^^^^^ required by this bound in `require_into_prop`
