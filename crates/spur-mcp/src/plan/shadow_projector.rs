@@ -88,7 +88,12 @@ fn project_shadow_entry(spec: &PlanTask, audits: &[AuditSentinelKind]) -> PlanTa
                                 .unwrap_or_else(|| "worker cancelled".to_string()),
                         }
                     }
-                    super::audit_sentinel::CompletionState::Superseded => PlanTaskStatus::Pending,
+                    super::audit_sentinel::CompletionState::Superseded => {
+                        PlanTaskStatus::Superseded {
+                            mutation_id: "unknown".to_string(),
+                            by: Vec::new(),
+                        }
+                    }
                 };
             }
             AuditSentinelKind::Approval { .. } => {
