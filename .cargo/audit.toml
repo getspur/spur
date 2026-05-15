@@ -1,0 +1,2 @@
+# cargo-audit configuration stub.
+# Add `ignore = ["RUSTSEC-YYYY-NNNN"]` entries only after triage and approval.

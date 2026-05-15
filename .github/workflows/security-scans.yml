@@ -1,0 +1,140 @@
+name: Security Scans
+
+on:
+  pull_request:
+  schedule:
+    - cron: "0 9 * * 1"
+
+jobs:
+  cargo-audit:
+    name: cargo-audit (RustSec)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate cargo-audit report
+        run: |
+          set +e
+          cargo install cargo-audit --locked
+          cargo audit > security-scan-cargo-audit-${{ github.run_id }}.txt 2>&1
+          status=$?
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+        id: cargo_audit_report
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-scan-cargo-audit-${{ github.run_id }}.txt
+          path: security-scan-cargo-audit-${{ github.run_id }}.txt
+      - name: Fail if cargo-audit report run failed
+        if: steps.cargo_audit_report.outputs.exit_code != '0'
+        run: exit 1
+
+  cargo-deny:
+    name: cargo-deny (advisories/licenses/bans/sources)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+      - name: Generate cargo-deny report
+        run: |
+          set +e
+          cargo install cargo-deny --locked
+          cargo deny check > security-scan-cargo-deny-${{ github.run_id }}.txt 2>&1
+          status=$?
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+        id: cargo_deny_report
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-scan-cargo-deny-${{ github.run_id }}.txt
+          path: security-scan-cargo-deny-${{ github.run_id }}.txt
+
+  gitleaks-working-tree:
+    name: gitleaks (working tree)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Attempt gitleaks-action
+        uses: gitleaks/gitleaks-action@v2.3.9
+        continue-on-error: true
+        with:
+          args: detect --no-git --redact
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+          GITLEAKS_ENABLE_SUMMARY: "false"
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          VERSION=8.24.3
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" -o gitleaks.tar.gz
+          tar -xzf gitleaks.tar.gz gitleaks
+          sudo mv gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+      - name: Run gitleaks (no git history)
+        run: |
+          set +e
+          gitleaks detect --no-git --redact --report-format json --report-path gitleaks-working-tree.json > security-scan-gitleaks-${{ github.run_id }}.txt 2>&1
+          status=$?
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+        id: gitleaks_working_tree
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-scan-gitleaks-${{ github.run_id }}.txt
+          path: security-scan-gitleaks-${{ github.run_id }}.txt
+      - name: Fail if gitleaks found issues
+        if: steps.gitleaks_working_tree.outputs.exit_code != '0'
+        run: exit 1
+
+  gitleaks-history-baseline:
+    name: gitleaks (full history baseline)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Attempt gitleaks-action
+        uses: gitleaks/gitleaks-action@v2.3.9
+        continue-on-error: true
+        with:
+          args: detect --redact
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+          GITLEAKS_ENABLE_SUMMARY: "false"
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          VERSION=8.24.3
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" -o gitleaks.tar.gz
+          tar -xzf gitleaks.tar.gz gitleaks
+          sudo mv gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+      - name: Run gitleaks on full history (baseline)
+        run: |
+          set +e
+          gitleaks detect --redact --report-format json --report-path gitleaks-history-baseline.json > security-scan-gitleaks-history-${{ github.run_id }}.txt 2>&1
+          status=$?
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+        id: gitleaks_history
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-scan-gitleaks-history-${{ github.run_id }}.txt
+          path: security-scan-gitleaks-history-${{ github.run_id }}.txt
+      - name: Fail if baseline found issues
+        if: steps.gitleaks_history.outputs.exit_code != '0'
+        run: exit 1
