@@ -16,3 +16,4 @@ spur-flamegraph = "flamegraph --profile profiling --bin spur"
 [env]
 SPUR_TELEMETRY = "0"
 CI = "true"
+SPUR_POSTHOG_KEY = "loopback"
