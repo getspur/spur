@@ -2027,6 +2027,15 @@ pub fn dispatch_intent_update(
             "ready-for-review".to_string(),
         ]
         .into_iter()
+        .chain(
+            current_labels
+                .iter()
+                .filter(|label| {
+                    crate::plan::labels::parse_delegation_id(label).is_some()
+                        || label.starts_with("delegation-id:")
+                })
+                .cloned(),
+        )
         .chain(lease_label_removals(current_labels, Some(lease_expires_at)))
         .collect(),
         ..Default::default()
@@ -2090,6 +2099,15 @@ pub fn clear_dispatch_intent_update(
             format!("delegation-id:{delegation_id}"),
         ]
         .into_iter()
+        .chain(
+            current_labels
+                .iter()
+                .filter(|label| {
+                    crate::plan::labels::parse_delegation_id(label).is_some()
+                        || label.starts_with("delegation-id:")
+                })
+                .cloned(),
+        )
         .chain(lease_label_removals(current_labels, None))
         .collect(),
         ..Default::default()
@@ -6299,6 +6317,58 @@ mod tests {
         assert!(update
             .remove_labels
             .contains(&crate::plan::labels::lease_expires_at(1_777_777_777)));
+    }
+
+    #[test]
+    fn dispatch_intent_update_scrubs_stale_delegation_labels() {
+        // bd-d1r-fu-stale-delegation-cleanup: on redispatch the builder must scrub
+        // every existing spur:delegation-id:* AND legacy delegation-id:* label so
+        // the projector's first-label-wins scan cannot pick up a stale ID.
+        let current_labels = vec![
+            crate::plan::labels::delegation_id("old-namespaced"),
+            "delegation-id:legacy-old".to_string(),
+            "signal:scope-drift".to_string(),
+        ];
+        let update = super::dispatch_intent_update("new-id", 1_777_777_777, &current_labels);
+
+        assert!(update
+            .remove_labels
+            .contains(&crate::plan::labels::delegation_id("old-namespaced")));
+        assert!(update
+            .remove_labels
+            .contains(&"delegation-id:legacy-old".to_string()));
+        assert!(!update
+            .remove_labels
+            .contains(&"signal:scope-drift".to_string()));
+        assert!(update
+            .add_labels
+            .contains(&crate::plan::labels::delegation_id("new-id")));
+    }
+
+    #[test]
+    fn clear_dispatch_intent_update_scrubs_stale_delegation_labels() {
+        // bd-d1r-fu-stale-delegation-cleanup: completion paths must also self-heal
+        // stale delegation-id labels accumulated by prior attempts.
+        let current_labels = vec![
+            crate::plan::labels::delegation_id("old-A"),
+            crate::plan::labels::delegation_id("old-B"),
+            "delegation-id:legacy".to_string(),
+            "signal:scope-drift".to_string(),
+        ];
+        let update = super::clear_dispatch_intent_update("current", &current_labels);
+
+        assert!(update
+            .remove_labels
+            .contains(&crate::plan::labels::delegation_id("old-A")));
+        assert!(update
+            .remove_labels
+            .contains(&crate::plan::labels::delegation_id("old-B")));
+        assert!(update
+            .remove_labels
+            .contains(&"delegation-id:legacy".to_string()));
+        assert!(!update
+            .remove_labels
+            .contains(&"signal:scope-drift".to_string()));
     }
 
     #[test]
