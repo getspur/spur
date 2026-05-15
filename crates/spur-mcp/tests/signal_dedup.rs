@@ -111,6 +111,18 @@ async fn seed_completion_with_base_oid(pm: &PmService, task_id: &str) {
         .expect("advanced beads surface")
         .add_comment(
             task_id,
+            &audit_sentinel::encode_comment(&AuditSentinelKind::Dispatch {
+                delegation_id: "del-1".into(),
+                worker: "codex".into(),
+                attempt: 1,
+            }),
+        )
+        .await
+        .expect("seed dispatch audit");
+    pm.advanced()
+        .expect("advanced beads surface")
+        .add_comment(
+            task_id,
             &audit_sentinel::encode_comment(&AuditSentinelKind::Completion {
                 delegation_id: "del-1".into(),
                 completion_state: audit_sentinel::CompletionState::AwaitingReview,

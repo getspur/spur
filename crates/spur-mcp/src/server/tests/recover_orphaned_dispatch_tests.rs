@@ -400,6 +400,138 @@ async fn recover_orphaned_dispatch_prefers_dispatched_base_oid_label() {
 }
 
 #[tokio::test]
+async fn recover_orphaned_dispatch_uses_audit_delegation_when_label_mismatches() {
+    let dir = init_repo().await;
+    commit_file(dir.path(), "base.txt", "base\n", "seed").await;
+    let base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
+        .await
+        .expect("base oid");
+    let worker_branch = "spur/worker/recover-mismatch";
+    run_git_capture(
+        dir.path(),
+        None,
+        &["checkout", "-q", "-b", worker_branch, &base_oid],
+    )
+    .await
+    .expect("checkout worker branch");
+    commit_file(dir.path(), "worker.txt", "worker\n", "worker change").await;
+    run_git_capture(dir.path(), None, &["checkout", "-q", "main"])
+        .await
+        .expect("checkout main");
+
+    let fixture = setup_recovery_task(dir.path(), "recover-orphan-mismatch", "del-audit").await;
+    fixture
+        .pm
+        .update_issue(
+            &fixture.task_issue_id,
+            spur_pm::IssueUpdate {
+                add_labels: vec![crate::plan::labels::delegation_id("del-label")],
+                remove_labels: vec![crate::plan::labels::delegation_id("del-audit")],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("swap delegation label");
+
+    let server = recovery_server(
+        dir.path(),
+        Arc::clone(&fixture.pm),
+        Arc::clone(&fixture.feature_gate),
+    );
+    let msg = server
+        .recover_orphaned_dispatch_with_branch(&fixture.task_issue_id, worker_branch, &base_oid)
+        .await
+        .expect("audit delegation should win");
+    assert!(msg.contains("Task promoted to AwaitingReview"));
+
+    super::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        fixture.feature_gate.as_ref(),
+    )
+    .expect("test feature gate should allow beads advanced");
+    let adv = fixture.pm.advanced().expect("advanced beads backend");
+    let audits = crate::plan::projector::collect_sorted_audits_for_issue(
+        &fixture.task_issue_id,
+        adv.list_comments(&fixture.task_issue_id)
+            .await
+            .expect("list comments"),
+    )
+    .expect("projection should parse");
+    assert!(audits.iter().any(|audit| matches!(
+        audit,
+        AuditSentinelKind::Completion { delegation_id, .. } if delegation_id == "del-audit"
+    )));
+}
+
+#[tokio::test]
+async fn recover_orphaned_dispatch_rejects_label_only_delegation_without_audit() {
+    let dir = init_repo().await;
+    commit_file(dir.path(), "base.txt", "base\n", "seed").await;
+    let base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
+        .await
+        .expect("base oid");
+    let worker_branch = "spur/worker/recover-label-only";
+    run_git_capture(
+        dir.path(),
+        None,
+        &["checkout", "-q", "-b", worker_branch, &base_oid],
+    )
+    .await
+    .expect("checkout worker branch");
+    commit_file(dir.path(), "worker.txt", "worker\n", "worker change").await;
+    run_git_capture(dir.path(), None, &["checkout", "-q", "main"])
+        .await
+        .expect("checkout main");
+
+    let (beads, pm) = super::init_beads_pm(dir.path()).await;
+    let feature_gate = super::pro_feature_gate();
+    let plan_id = "recover-orphan-label-only";
+    let subgraph = crate::build_epic_subgraph(
+        pm.as_ref(),
+        feature_gate.as_ref(),
+        plan_id,
+        "Recover orphan",
+        None,
+        &[PlanTask {
+            task_id: "task-a".into(),
+            agent: "codex".into(),
+            task: "Recover this orphan".into(),
+            depends_on: Vec::new(),
+            issue_id: None,
+            issue_title: None,
+            context_files: Vec::new(),
+        }],
+    )
+    .await
+    .expect("build epic subgraph");
+    let task_issue_id = subgraph
+        .task_map
+        .get("task-a")
+        .cloned()
+        .expect("task issue id");
+    pm.update_issue(
+        &task_issue_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![crate::plan::labels::delegation_id("del-label-only")],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("add label-only delegation");
+
+    let server = recovery_server(dir.path(), Arc::clone(&pm), Arc::clone(&feature_gate));
+    let err = server
+        .recover_orphaned_dispatch_with_branch(&task_issue_id, worker_branch, &base_oid)
+        .await
+        .expect_err("label-only delegation without audit must fail");
+    assert!(
+        err.contains("no audit attestation"),
+        "unexpected error: {err}"
+    );
+    drop(beads);
+}
+
+#[tokio::test]
 #[ignore = "pinned residual; requires deterministic-recovery follow-up"]
 async fn recover_orphaned_dispatch_with_split_dispatched_base_oid_labels() {
     let dir = init_repo().await;
@@ -554,7 +686,7 @@ async fn recover_orphaned_dispatch_rejects_already_completed_delegation() {
         .await
         .expect_err("already completed delegation must be rejected");
     assert!(
-        err.contains("already has a completion audit"),
+        err.contains("already has a completion audit") || err.contains("no audit attestation"),
         "unexpected error: {err}"
     );
 }

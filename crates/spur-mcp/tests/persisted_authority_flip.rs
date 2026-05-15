@@ -749,6 +749,18 @@ async fn t_v0c_6_watcher_uses_projected_plan_state_not_stub_state() {
         .expect("advanced beads surface")
         .add_comment(
             &task_id,
+            &audit_sentinel::encode_comment(&AuditSentinelKind::Dispatch {
+                delegation_id: "del-plan-6".into(),
+                worker: "codex".into(),
+                attempt: 1,
+            }),
+        )
+        .await
+        .expect("seed dispatch audit");
+    pm.advanced()
+        .expect("advanced beads surface")
+        .add_comment(
+            &task_id,
             &audit_sentinel::encode_comment(&AuditSentinelKind::Completion {
                 delegation_id: "del-plan-6".into(),
                 completion_state: CompletionState::AwaitingReview,
@@ -872,6 +884,18 @@ async fn t_v0c_8_orphaned_dispatch_requeues_and_late_completion_is_superseded() 
         ],
     )
     .await;
+    pm.advanced()
+        .expect("advanced")
+        .add_comment(
+            &task_id,
+            &audit_sentinel::encode_comment(&AuditSentinelKind::Dispatch {
+                delegation_id: "del-stale".into(),
+                worker: "codex".into(),
+                attempt: 1,
+            }),
+        )
+        .await
+        .expect("seed dispatch audit");
 
     let cleared = resolve_dispatch_orphan(
         Arc::clone(&pm),
@@ -1038,6 +1062,18 @@ async fn t_v0c_11_startup_reclaim_clears_stale_dispatch_before_redispatch() {
         &[labels::delegation_id(stale_delegation_id)],
     )
     .await;
+    pm.advanced()
+        .expect("advanced beads surface")
+        .add_comment(
+            &task_id,
+            &audit_sentinel::encode_comment(&AuditSentinelKind::Dispatch {
+                delegation_id: stale_delegation_id.into(),
+                worker: "codex".into(),
+                attempt: 1,
+            }),
+        )
+        .await
+        .expect("seed dispatch audit");
 
     let session_id = BrainSessionId::new(SessionId("brain".into()));
     let (mut server, mut channel) = McpCallbackServer::new(
