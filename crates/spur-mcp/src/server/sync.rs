@@ -517,13 +517,12 @@ pub async fn resolve_dispatch_orphan(
     if issue.status != "open" {
         return Ok(false);
     }
-    let Some(delegation_id) = issue.labels.iter().find_map(|label| {
+    let delegation_label = issue.labels.iter().find_map(|label| {
         crate::plan::labels::parse_delegation_id(label)
             .or_else(|| label.strip_prefix("delegation-id:"))
-    }) else {
-        return Ok(false);
-    };
-    if crate::plan::projector::has_ready_for_review_label_compat(&issue.labels) {
+    });
+    let has_ready_label = crate::plan::projector::has_ready_for_review_label_compat(&issue.labels);
+    if delegation_label.is_none() && !has_ready_label {
         return Ok(false);
     }
 
@@ -536,9 +535,42 @@ pub async fn resolve_dispatch_orphan(
         task_id,
         adv.list_comments(task_id).await?,
     )?;
+    let delegation_id = match (
+        crate::plan::projector::current_delegation_from_audits(&audits),
+        delegation_label,
+    ) {
+        (Some(audit_id), Some(label_id)) if audit_id == label_id => audit_id,
+        (Some(audit_id), Some(_)) => {
+            crate::plan::projector::emit_label_audit_drift("delegation-id", "mismatch", task_id);
+            audit_id
+        }
+        (Some(audit_id), None) => {
+            crate::plan::projector::emit_label_audit_drift("delegation-id", "audit_only", task_id);
+            audit_id
+        }
+        (None, Some(_label_id)) => {
+            crate::plan::projector::emit_label_audit_drift("delegation-id", "label_only", task_id);
+            return Ok(false);
+        }
+        (None, None) => return Ok(false),
+    };
+    let awaiting_review_audit = crate::plan::projector::awaiting_review_from_audits(&audits);
+    if has_ready_label && !awaiting_review_audit {
+        crate::plan::projector::emit_label_audit_drift("ready-for-review", "label_only", task_id);
+    }
+    if awaiting_review_audit {
+        if !has_ready_label {
+            crate::plan::projector::emit_label_audit_drift(
+                "ready-for-review",
+                "audit_only",
+                task_id,
+            );
+        }
+        return Ok(false);
+    }
     if audits.iter().any(|audit| matches!(
         audit,
-        crate::plan::audit_sentinel::AuditSentinelKind::Completion { delegation_id: did, .. } if did == delegation_id
+        crate::plan::audit_sentinel::AuditSentinelKind::Completion { delegation_id: did, .. } if did == &delegation_id
     )) {
         return Ok(false);
     }
@@ -547,12 +579,12 @@ pub async fn resolve_dispatch_orphan(
         task_id,
         &crate::plan::audit_sentinel::encode_comment(
             &crate::plan::audit_sentinel::AuditSentinelKind::DispatchOrphanCleared {
-                delegation_id: delegation_id.to_string(),
+                delegation_id: delegation_id.clone(),
                 reason: ORPHAN_CLEAR_REASON_RESTART.into(),
             },
         ),
     )
     .await?;
-    crate::plan::clear_dispatch_intent(pm.as_ref(), task_id, delegation_id).await?;
+    crate::plan::clear_dispatch_intent(pm.as_ref(), task_id, &delegation_id).await?;
     Ok(true)
 }
