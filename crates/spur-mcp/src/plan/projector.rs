@@ -881,36 +881,44 @@ pub fn project_status_for_issue(
     }
     let has_delegation = has_delegation_label;
     let has_ready = has_ready_label;
-    // Completion audit can land before the atomic label update.
-    // A polling client may race request_changes in that gap.
-    // Reconciler retry-dispatch can then produce transient dual-label overlap.
-    // Enforce single-label invariants only when the other label is absent.
-    assert!(
-        !(has_delegation && !has_ready)
-            || matches!(
-                status,
-                PlanTaskStatus::Dispatched { .. }
-                    | PlanTaskStatus::BlockedOnSetupConflict { .. }
-                    | PlanTaskStatus::EscalatedToBrain { .. }
-            ),
-        "invariant:project_status_for_issue delegation label/status mismatch violated (issue_id={}, status={:?}) expected Dispatched/BlockedOnSetupConflict/EscalatedToBrain when delegation-id label present without ready-for-review overlap, labels={:?}",
-        issue.id,
-        status,
-        issue.labels,
-    );
-    assert!(
-        !(has_ready && !has_delegation)
-            || matches!(
-                status,
-                PlanTaskStatus::AwaitingReview { .. }
-                    | PlanTaskStatus::Approved { .. }
-                    | PlanTaskStatus::BlockedOnSetupConflict { .. }
-            ),
-        "invariant:project_status_for_issue ready-for-review label/status mismatch violated (issue_id={}, status={:?}) expected AwaitingReview/Approved/BlockedOnSetupConflict when ready-for-review label present without delegation-id overlap, labels={:?}",
-        issue.id,
-        status,
-        issue.labels,
-    );
+    // Tier-1 cleanup: projection is audit-derived; labels are advisory indexes.
+    // Disagreement is no longer a panic — emit `label_audit_drift` telemetry
+    // and return the audit-derived status. Type B labels (lease, signals) are
+    // out of scope.
+    if has_delegation
+        && !matches!(
+            status,
+            PlanTaskStatus::Dispatched { .. }
+                | PlanTaskStatus::BlockedOnSetupConflict { .. }
+                | PlanTaskStatus::EscalatedToBrain { .. }
+        )
+    {
+        tracing::warn!(
+            target: "spur.metrics.label_audit_drift",
+            issue_id = %issue.id,
+            drift_kind = "delegation_label_status_mismatch",
+            has_ready,
+            status = ?status,
+            "label_audit_drift",
+        );
+    }
+    if has_ready
+        && !matches!(
+            status,
+            PlanTaskStatus::AwaitingReview { .. }
+                | PlanTaskStatus::Approved { .. }
+                | PlanTaskStatus::BlockedOnSetupConflict { .. }
+        )
+    {
+        tracing::warn!(
+            target: "spur.metrics.label_audit_drift",
+            issue_id = %issue.id,
+            drift_kind = "ready_for_review_label_status_mismatch",
+            has_delegation,
+            status = ?status,
+            "label_audit_drift",
+        );
+    }
     status
 }
 

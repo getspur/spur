@@ -635,7 +635,9 @@ flowchart LR
 
 The audit-derivation helpers (built as part of §10.3.2's first sub-PR) are the foundation for all three components. §10.3.1 and §10.3.3 are independent of each other once helpers exist and can be parallelized.
 
-### 10.5 What lands after the cleanup PR
+### 10.5 What lands in the cleanup PR
+
+## Status: shipped 2026-05-15
 
 The cleanup PR is the proof the bug class is retired *for Type A status labels*. **Type B authoritative-ephemera labels are out of scope** — their authority is by-design and the cleanup PR makes no changes to lease or signal paths.
 
