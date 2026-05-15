@@ -12,6 +12,7 @@ use tracing_subscriber::prelude::*;
 
 use commands::auth::AuthCommands;
 use commands::flags::FlagsCommands;
+use commands::telemetry::TelemetryCommands;
 use spur_acp::config::SpurConfig;
 use spur_acp::{BrainSessionId, SessionId};
 use spur_cli::log_writer;
@@ -264,6 +265,11 @@ enum Commands {
     Flags {
         #[command(subcommand)]
         command: FlagsCommands,
+    },
+    /// Manage telemetry configuration and lifecycle.
+    Telemetry {
+        #[command(subcommand)]
+        command: TelemetryCommands,
     },
     /// Build and inspect the code graph index
     Graph {
@@ -791,6 +797,7 @@ async fn run() -> Result<()> {
             }
         },
         Commands::Flags { command } => commands::flags::run(command).await,
+        Commands::Telemetry { command } => commands::telemetry::run(command),
         Commands::Graph { command } => match command {
             GraphCommands::Build {
                 root,
