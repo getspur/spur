@@ -241,9 +241,12 @@ pub fn awaiting_review_from_audits(audits: &[AuditSentinelKind]) -> bool {
             AuditSentinelKind::Approval { delegation_id }
             | AuditSentinelKind::Rejection { delegation_id, .. }
             | AuditSentinelKind::ReviewFeedback { delegation_id, .. }
+            | AuditSentinelKind::RetryRequested { delegation_id, .. }
             | AuditSentinelKind::DispatchOrphanCleared { delegation_id, .. }
-                if delegation_id == current_delegation_id =>
-            {
+            | AuditSentinelKind::EscalationRequested {
+                delegation_id: Some(delegation_id),
+                ..
+            } if delegation_id == current_delegation_id => {
                 return false;
             }
             AuditSentinelKind::Completion {
@@ -300,23 +303,165 @@ pub fn terminal_status_from_audits(audits: &[AuditSentinelKind]) -> Option<Termi
 /// Tier-1 projector inversion consumer: derive supersession fact from durable
 /// audit comments only (`mutation_id` and `by` remain label-only metadata).
 pub fn superseded_from_audits(audits: &[AuditSentinelKind]) -> bool {
-    audits.iter().any(|audit| {
-        matches!(
-            audit,
+    for audit in audits.iter().rev() {
+        match audit {
+            AuditSentinelKind::Approval { .. }
+            | AuditSentinelKind::Rejection { .. }
+            | AuditSentinelKind::Completion {
+                completion_state: CompletionState::Failed | CompletionState::Cancelled,
+                ..
+            }
+            | AuditSentinelKind::Dispatch { .. }
+            | AuditSentinelKind::RetryRequested { .. }
+            | AuditSentinelKind::ReviewFeedback { .. }
+            | AuditSentinelKind::EscalationRequested { .. }
+            | AuditSentinelKind::Completion {
+                completion_state: CompletionState::AwaitingReview,
+                ..
+            } => return false,
             AuditSentinelKind::Completion {
                 completion_state: CompletionState::Superseded,
                 ..
-            }
-        )
-    })
+            } => return true,
+            _ => {}
+        }
+    }
+
+    false
 }
 
 /// Tier-1 index-maintenance reconciler consumer: derive escalation fact from
 /// durable audit comments only.
 pub fn escalated_from_audits(audits: &[AuditSentinelKind]) -> bool {
-    audits
-        .iter()
-        .any(|audit| matches!(audit, AuditSentinelKind::EscalationRequested { .. }))
+    for audit in audits.iter().rev() {
+        match audit {
+            AuditSentinelKind::Approval { .. }
+            | AuditSentinelKind::Rejection { .. }
+            | AuditSentinelKind::Completion { .. }
+            | AuditSentinelKind::Dispatch { .. }
+            | AuditSentinelKind::RetryRequested { .. }
+            | AuditSentinelKind::ReviewFeedback { .. } => return false,
+            AuditSentinelKind::EscalationRequested { .. } => return true,
+            _ => {}
+        }
+    }
+
+    false
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StatusComparison {
+    Exact,
+    PartialMatch {
+        irreducible_fields: Vec<&'static str>,
+    },
+    Mismatch,
+}
+
+fn partial_compare_status(legacy: &PlanTaskStatus, shadow: &PlanTaskStatus) -> StatusComparison {
+    match (legacy, shadow) {
+        (PlanTaskStatus::Pending, PlanTaskStatus::Pending)
+        | (PlanTaskStatus::Ready, PlanTaskStatus::Ready) => StatusComparison::Exact,
+        (
+            PlanTaskStatus::Dispatched {
+                delegation_id: legacy_delegation_id,
+            },
+            PlanTaskStatus::Dispatched {
+                delegation_id: shadow_delegation_id,
+            },
+        ) if legacy_delegation_id == shadow_delegation_id => StatusComparison::Exact,
+        (
+            PlanTaskStatus::AwaitingReview {
+                summary: legacy_summary,
+            },
+            PlanTaskStatus::AwaitingReview {
+                summary: shadow_summary,
+            },
+        ) if legacy_summary == shadow_summary => StatusComparison::Exact,
+        (
+            PlanTaskStatus::Approved {
+                summary: legacy_summary,
+            },
+            PlanTaskStatus::Approved {
+                summary: shadow_summary,
+            },
+        ) if legacy_summary == shadow_summary => StatusComparison::Exact,
+        (
+            PlanTaskStatus::Rejected {
+                feedback: legacy_feedback,
+            },
+            PlanTaskStatus::Rejected {
+                feedback: shadow_feedback,
+            },
+        ) if legacy_feedback == shadow_feedback => StatusComparison::Exact,
+        (
+            PlanTaskStatus::Failed {
+                error: legacy_error,
+            },
+            PlanTaskStatus::Failed {
+                error: shadow_error,
+            },
+        ) if legacy_error == shadow_error => StatusComparison::Exact,
+        (
+            PlanTaskStatus::Cancelled {
+                reason: legacy_reason,
+            },
+            PlanTaskStatus::Cancelled {
+                reason: shadow_reason,
+            },
+        ) if legacy_reason == shadow_reason => StatusComparison::Exact,
+        (
+            PlanTaskStatus::Superseded {
+                mutation_id: legacy_mutation_id,
+                by: legacy_by,
+            },
+            PlanTaskStatus::Superseded {
+                mutation_id: shadow_mutation_id,
+                by: shadow_by,
+            },
+        ) => {
+            let mut irreducible_fields = Vec::new();
+
+            if shadow_mutation_id == "unknown" && !legacy_mutation_id.is_empty() {
+                irreducible_fields.push("mutation_id");
+            } else if shadow_mutation_id != legacy_mutation_id {
+                return StatusComparison::Mismatch;
+            }
+
+            if shadow_by.is_empty() && !legacy_by.is_empty() {
+                irreducible_fields.push("by");
+            } else if shadow_by != legacy_by {
+                return StatusComparison::Mismatch;
+            }
+
+            if irreducible_fields.is_empty() {
+                StatusComparison::Exact
+            } else {
+                StatusComparison::PartialMatch { irreducible_fields }
+            }
+        }
+        (
+            PlanTaskStatus::BlockedOnSetupConflict {
+                dep_task_id: legacy_dep_task_id,
+                files: legacy_files,
+            },
+            PlanTaskStatus::BlockedOnSetupConflict {
+                dep_task_id: shadow_dep_task_id,
+                files: shadow_files,
+            },
+        ) if legacy_dep_task_id == shadow_dep_task_id && legacy_files == shadow_files => {
+            StatusComparison::Exact
+        }
+        (
+            PlanTaskStatus::EscalatedToBrain {
+                last_error: legacy_last_error,
+            },
+            PlanTaskStatus::EscalatedToBrain {
+                last_error: shadow_last_error,
+            },
+        ) if legacy_last_error == shadow_last_error => StatusComparison::Exact,
+        _ => StatusComparison::Mismatch,
+    }
 }
 
 pub fn latest_task_spec(audits: &[AuditSentinelKind]) -> Option<(String, Vec<String>)> {
@@ -735,12 +880,20 @@ fn emit_shadow_projector_mismatch_warnings(
             continue;
         };
 
+        match partial_compare_status(&legacy_entry.status, &shadow_entry.status) {
+            StatusComparison::Exact => {}
+            StatusComparison::PartialMatch { .. } => {}
+            StatusComparison::Mismatch => {
+                differing_task_ids.push(task_id.to_string());
+                differing_fields.push("status".to_string());
+                mismatches.push(format!(
+                    "{task_id}.status legacy={:?} shadow={:?}",
+                    legacy_entry.status, shadow_entry.status
+                ));
+            }
+        }
+
         let checks = [
-            (
-                "status",
-                format!("{:?}", legacy_entry.status),
-                format!("{:?}", shadow_entry.status),
-            ),
             (
                 "worker_branch",
                 format!("{:?}", legacy_entry.worker_branch),
@@ -764,15 +917,6 @@ fn emit_shadow_projector_mismatch_warnings(
         ];
 
         for (field, legacy_value, shadow_value) in checks {
-            // Shadow projector cannot reconstruct `Superseded { mutation_id, by }` from
-            // audits alone (mutation_id and by live only on labels). Skip the status
-            // field comparison for legacy-Superseded tasks; preserve all other field
-            // comparisons so audit-fold integrity proof for worker_branch / attempt /
-            // dispatched_base_oid / last_delegation_id remains.
-            if field == "status" && matches!(legacy_entry.status, PlanTaskStatus::Superseded { .. })
-            {
-                continue;
-            }
             if legacy_value != shadow_value {
                 differing_task_ids.push(task_id.to_string());
                 differing_fields.push(field.to_string());
@@ -1890,7 +2034,47 @@ mod tests {
     }
 
     #[test]
-    fn shadow_projector_suppresses_superseded_status_mismatch_only() {
+    fn partial_compare_status_exact_match() {
+        let legacy = PlanTaskStatus::Approved {
+            summary: Some("ok".into()),
+        };
+        let shadow = PlanTaskStatus::Approved {
+            summary: Some("ok".into()),
+        };
+        assert!(matches!(
+            super::partial_compare_status(&legacy, &shadow),
+            super::StatusComparison::Exact
+        ));
+    }
+
+    #[test]
+    fn partial_compare_status_superseded_label_only_partial_match() {
+        let legacy = PlanTaskStatus::Superseded {
+            mutation_id: "m-1".into(),
+            by: vec!["t1a".into()],
+        };
+        let shadow = PlanTaskStatus::Superseded {
+            mutation_id: "unknown".into(),
+            by: Vec::new(),
+        };
+        assert!(matches!(
+            super::partial_compare_status(&legacy, &shadow),
+            super::StatusComparison::PartialMatch { .. }
+        ));
+    }
+
+    #[test]
+    fn partial_compare_status_mismatch() {
+        let legacy = PlanTaskStatus::Approved { summary: None };
+        let shadow = PlanTaskStatus::Rejected { feedback: None };
+        assert!(matches!(
+            super::partial_compare_status(&legacy, &shadow),
+            super::StatusComparison::Mismatch
+        ));
+    }
+
+    #[test]
+    fn shadow_projector_suppresses_superseded_status_partial_match_only() {
         let legacy = PlanState {
             plan_id: "plan-1".into(),
             tasks: vec![PlanTaskEntry {
@@ -1925,7 +2109,10 @@ mod tests {
             plan_id: legacy.plan_id.clone(),
             tasks: vec![PlanTaskEntry {
                 spec: legacy.tasks[0].spec.clone(),
-                status: PlanTaskStatus::Pending,
+                status: PlanTaskStatus::Superseded {
+                    mutation_id: "unknown".into(),
+                    by: Vec::new(),
+                },
                 result: None,
                 worker_branch: Some("spur/worker-b".into()),
                 attempt: legacy.tasks[0].attempt,
@@ -1969,6 +2156,128 @@ mod tests {
                 .is_some_and(|mismatches| !mismatches.contains("t1.status")),
             "status mismatch should be suppressed for legacy Superseded tasks, got {warning:?}"
         );
+    }
+
+    #[test]
+    fn superseded_from_audits_uses_latest_terminal_state() {
+        let audits = vec![
+            AuditSentinelKind::Completion {
+                delegation_id: "del-A".into(),
+                completion_state: CompletionState::Superseded,
+                superseded: true,
+                worker_branch: None,
+                result_summary: None,
+                artifact_uri: None,
+                dispatched_base_oid: None,
+            },
+            AuditSentinelKind::Approval {
+                delegation_id: "del-A".into(),
+            },
+        ];
+        assert!(!super::superseded_from_audits(&audits));
+    }
+
+    #[test]
+    fn superseded_from_audits_dispatch_then_awaiting_review_overwrites_superseded() {
+        let audits = vec![
+            AuditSentinelKind::Completion {
+                delegation_id: "del-A".into(),
+                completion_state: CompletionState::Superseded,
+                superseded: true,
+                worker_branch: None,
+                result_summary: None,
+                artifact_uri: None,
+                dispatched_base_oid: None,
+            },
+            AuditSentinelKind::Dispatch {
+                delegation_id: "del-B".into(),
+                worker: "codex".into(),
+                attempt: 2,
+            },
+            AuditSentinelKind::Completion {
+                delegation_id: "del-B".into(),
+                completion_state: CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some("spur/worker-b".into()),
+                result_summary: Some("ready".into()),
+                artifact_uri: None,
+                dispatched_base_oid: None,
+            },
+        ];
+        assert!(!super::superseded_from_audits(&audits));
+    }
+
+    #[test]
+    fn escalated_from_audits_uses_latest_terminal_state() {
+        let audits = vec![
+            AuditSentinelKind::EscalationRequested {
+                plan_id: "P1".to_string(),
+                task_id: "T1".to_string(),
+                attempt: 1,
+                last_error: "err".to_string(),
+                worker_branch: None,
+                delegation_id: Some("del-A".into()),
+            },
+            AuditSentinelKind::Completion {
+                delegation_id: "del-A".into(),
+                completion_state: CompletionState::Cancelled,
+                superseded: false,
+                worker_branch: None,
+                result_summary: None,
+                artifact_uri: None,
+                dispatched_base_oid: None,
+            },
+        ];
+        assert!(!super::escalated_from_audits(&audits));
+    }
+
+    #[test]
+    fn escalated_from_audits_dispatch_after_escalation_clears_flag() {
+        let audits = vec![
+            AuditSentinelKind::EscalationRequested {
+                plan_id: "P1".to_string(),
+                task_id: "T1".to_string(),
+                attempt: 1,
+                last_error: "err".to_string(),
+                worker_branch: None,
+                delegation_id: Some("del-A".into()),
+            },
+            AuditSentinelKind::Dispatch {
+                delegation_id: "del-A".into(),
+                worker: "codex".into(),
+                attempt: 2,
+            },
+        ];
+        assert!(!super::escalated_from_audits(&audits));
+    }
+
+    #[test]
+    fn awaiting_review_from_audits_escalation_for_current_delegation_clears_flag() {
+        let audits = vec![
+            AuditSentinelKind::Dispatch {
+                delegation_id: "del-A".into(),
+                worker: "codex".into(),
+                attempt: 1,
+            },
+            AuditSentinelKind::Completion {
+                delegation_id: "del-A".into(),
+                completion_state: CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some("spur/worker-a".into()),
+                result_summary: Some("ready".into()),
+                artifact_uri: None,
+                dispatched_base_oid: None,
+            },
+            AuditSentinelKind::EscalationRequested {
+                plan_id: "P1".to_string(),
+                task_id: "T1".to_string(),
+                attempt: 1,
+                last_error: "needs brain".to_string(),
+                worker_branch: Some("spur/worker-a".into()),
+                delegation_id: Some("del-A".into()),
+            },
+        ];
+        assert!(!super::awaiting_review_from_audits(&audits));
     }
 
     #[test]
@@ -2192,6 +2501,74 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn partial_compare_status_from_same_audit_stream_is_never_mismatch(
+            terminal_state in prop_oneof![
+                Just(AuditSentinelKind::Approval { delegation_id: "del-a".into() }),
+                Just(AuditSentinelKind::Rejection { delegation_id: "del-a".into(), feedback: "needs changes".into() }),
+                Just(AuditSentinelKind::Completion {
+                    delegation_id: "del-a".into(),
+                    completion_state: CompletionState::Failed,
+                    superseded: false,
+                    worker_branch: None,
+                    result_summary: Some("failed".into()),
+                    artifact_uri: None,
+                    dispatched_base_oid: None,
+                }),
+                Just(AuditSentinelKind::Completion {
+                    delegation_id: "del-a".into(),
+                    completion_state: CompletionState::Cancelled,
+                    superseded: false,
+                    worker_branch: None,
+                    result_summary: Some("cancelled".into()),
+                    artifact_uri: None,
+                    dispatched_base_oid: None,
+                }),
+                Just(AuditSentinelKind::Completion {
+                    delegation_id: "del-a".into(),
+                    completion_state: CompletionState::Superseded,
+                    superseded: true,
+                    worker_branch: None,
+                    result_summary: None,
+                    artifact_uri: None,
+                    dispatched_base_oid: None,
+                }),
+            ]
+        ) {
+            let legacy_status = match &terminal_state {
+                AuditSentinelKind::Approval { .. } => PlanTaskStatus::Approved { summary: None },
+                AuditSentinelKind::Rejection { feedback, .. } => PlanTaskStatus::Rejected { feedback: Some(feedback.clone()) },
+                AuditSentinelKind::Completion { completion_state: CompletionState::Failed, .. } => {
+                    PlanTaskStatus::Failed { error: "worker failed".into() }
+                }
+                AuditSentinelKind::Completion { completion_state: CompletionState::Cancelled, .. } => {
+                    PlanTaskStatus::Cancelled { reason: "worker cancelled".into() }
+                }
+                AuditSentinelKind::Completion { completion_state: CompletionState::Superseded, .. } => {
+                    PlanTaskStatus::Superseded {
+                        mutation_id: "m-1".into(),
+                        by: vec!["t1a".into()],
+                    }
+                }
+                _ => unreachable!("terminal_state strategy only emits terminal audits"),
+            };
+            let shadow_status = match &terminal_state {
+                AuditSentinelKind::Completion { completion_state: CompletionState::Superseded, .. } => {
+                    PlanTaskStatus::Superseded {
+                        mutation_id: "unknown".into(),
+                        by: Vec::new(),
+                    }
+                }
+                _ => legacy_status.clone(),
+            };
+            prop_assert!(
+                !matches!(
+                    super::partial_compare_status(&legacy_status, &shadow_status),
+                    super::StatusComparison::Mismatch
+                )
+            );
+        }
+
         #[test]
         fn current_delegation_from_audits_monotonicity_prefix_consistent(
             audits in proptest::collection::vec(arb_audit_kind(), 0..64)
