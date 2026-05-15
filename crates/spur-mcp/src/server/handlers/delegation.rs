@@ -216,7 +216,7 @@ impl McpCallbackServer {
 
         if crate::plan::projector::has_ready_for_review_label_compat(&issue.labels) {
             return Err(format!(
-                "recover_orphaned_dispatch: issue {issue_id} already has ready-for-review label"
+                "recover_orphaned_dispatch: issue {issue_id} is already awaiting review (ready-for-review label present)"
             ));
         }
         let dispatched_base_oid = issue
