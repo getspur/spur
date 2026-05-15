@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use spur_acp::{
     BrainSessionId, DelegationResult, DelegationStatus, SessionId, SpurEvent, SpurEventBody,
 };
+use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind, CompletionState};
 use spur_mcp::plan::reconciler::{Reconciler, ReconcilerConfig, ReconcilerDispatchCtx};
 use spur_mcp::server::{DetachedContinuationCtx, McpCallbackServer};
 use spur_mcp::McpEventSink;
@@ -193,11 +194,28 @@ async fn persisted_plan_snapshot_carries_owner_brain_session_id() {
 }
 
 #[tokio::test]
-#[ignore = "TODO bd-d1r-fu-snapshot-events: dispatched_base_oid not threaded through review_task/reconciler dispatch→snapshot path"]
 async fn review_task_emits_refreshed_plan_snapshot() {
     let fixture = PersistedFixture::new().await;
     let (plan_id, task_map) = fixture.submit_persisted_plan().await;
     let issue_id = task_map.get("t1").expect("task id mapped");
+    fixture
+        .pm
+        .advanced()
+        .expect("advanced backend")
+        .add_comment(
+            issue_id,
+            &audit_sentinel::encode_comment(&AuditSentinelKind::Completion {
+                delegation_id: "del-test-review".to_string(),
+                completion_state: CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some("test-branch".to_string()),
+                result_summary: Some("ready".to_string()),
+                artifact_uri: None,
+                dispatched_base_oid: Some("0000000000000000000000000000000000000001".to_string()),
+            }),
+        )
+        .await
+        .expect("seed completion audit sentinel");
 
     fixture
         .pm
@@ -333,7 +351,6 @@ async fn recover_persisted_plans_skips_unowned_legacy_plan() {
 }
 
 #[tokio::test]
-#[ignore = "TODO bd-d1r-fu-snapshot-events: dispatched_base_oid not threaded through review_task/reconciler dispatch→snapshot path"]
 async fn reconciler_dispatch_and_completion_emit_refreshed_snapshots() {
     let fixture = PersistedFixture::new().await;
     let (plan_id, task_map) = fixture.submit_persisted_plan().await;
@@ -384,9 +401,9 @@ async fn reconciler_dispatch_and_completion_emit_refreshed_snapshots() {
         );
     }
 
-    request
-        .respond_to
-        .send(DelegationResult {
+    spur_mcp::plan::test_util::mock_worker_completion(
+        request,
+        DelegationResult {
             status: DelegationStatus::Success,
             diff: None,
             diff_summary: None,
@@ -394,8 +411,10 @@ async fn reconciler_dispatch_and_completion_emit_refreshed_snapshots() {
             estimated_cost_usd: 0.0,
             worker_branch: Some("spur/worker-t1".into()),
             artifact: None,
-        })
-        .expect("send delegation result");
+        },
+        "0000000000000000000000000000000000000001",
+    )
+    .expect("send delegation result");
 
     tracker.close();
     tracker.wait().await;
