@@ -126,7 +126,8 @@ pub fn telemetry_active() -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) fn emit<E: Event>(event: E) {
+#[doc(hidden)]
+pub fn emit<E: Event>(event: E) {
     let Some(state) = STATE.get() else {
         return;
     };
