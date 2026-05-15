@@ -7,6 +7,7 @@ pub mod error;
 pub mod events;
 pub(crate) mod ratelimit;
 pub(crate) mod redact;
+pub mod tier1_events;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
