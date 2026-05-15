@@ -6994,6 +6994,7 @@ dependencies = [
  "spur-interactive",
  "spur-license",
  "spur-pm",
+ "spur-telemetry",
  "spur-tui",
  "spur-worktree",
  "tempfile",
@@ -7002,6 +7003,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
