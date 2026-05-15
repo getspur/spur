@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use async_trait::async_trait;
 use chrono::Utc;
+use spur_acp::DelegationResult;
 use tokio::sync::Mutex;
 
 /// In-memory beads-compatible PM fixture for plan/substrate tests.
@@ -393,4 +394,20 @@ fn dedupe(labels: Vec<String>) -> Vec<String> {
         .into_iter()
         .filter(|label| seen.insert(label.clone()))
         .collect()
+}
+
+pub fn mock_worker_completion(
+    request: crate::DelegationRequest,
+    result: DelegationResult,
+    base_oid: &str,
+) -> anyhow::Result<()> {
+    if let Some(tx) = &request.dispatched_base_oid_tx {
+        tx.send(Some(base_oid.to_string()))
+            .map_err(|error| anyhow::anyhow!("send dispatched_base_oid: {error}"))?;
+    }
+    request
+        .respond_to
+        .send(result)
+        .map_err(|error| anyhow::anyhow!("send delegation result: {error:?}"))?;
+    Ok(())
 }
