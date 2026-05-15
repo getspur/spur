@@ -8287,3 +8287,4 @@ mod tests {
         );
     }
 }
+mod projector_conflict_test;
