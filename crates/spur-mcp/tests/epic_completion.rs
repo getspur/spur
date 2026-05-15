@@ -522,7 +522,6 @@ async fn mock_pm_reconciler_plan_completed_counts_cancelled_and_suppresses_ready
 }
 
 #[tokio::test]
-#[ignore = "TODO bd-d1r-fu-mock-reconciler: dispatched_base_oid not threaded through MockPm dispatch→completion audit path"]
 async fn mock_pm_reconciler_success_completion_fires_awaiting_review_continuation() {
     let pm = spur_mcp::plan::test_util::MockPm::new().arc();
     let plan_id = "P-mock-awaiting-review-continuation";
@@ -550,9 +549,9 @@ async fn mock_pm_reconciler_success_completion_fires_awaiting_review_continuatio
         .expect("dispatch should arrive")
         .expect("dispatch request");
     assert_eq!(request.issue_id.as_deref(), Some(task_issue.as_str()));
-    request
-        .respond_to
-        .send(spur_acp::DelegationResult {
+    spur_mcp::plan::test_util::mock_worker_completion(
+        request,
+        spur_acp::DelegationResult {
             status: spur_acp::DelegationStatus::Success,
             diff: None,
             diff_summary: None,
@@ -560,8 +559,10 @@ async fn mock_pm_reconciler_success_completion_fires_awaiting_review_continuatio
             estimated_cost_usd: 0.0,
             worker_branch: Some("spur/worker-A".into()),
             artifact: None,
-        })
-        .expect("send success");
+        },
+        "0000000000000000000000000000000000000001",
+    )
+    .expect("send success");
 
     let continuation = tokio::time::timeout(Duration::from_secs(2), continuation_rx.recv())
         .await
@@ -947,7 +948,6 @@ async fn t_v0d_2_all_approved_epic_still_yields_plan_ready_to_merge() {
 }
 
 #[tokio::test]
-#[ignore = "TODO bd-d1r-fu-mock-reconciler: dispatched_base_oid not threaded through MockPm dispatch→completion audit path"]
 async fn three_task_plan_drops_plan_outcomes_on_epic_close_but_retains_global_ring() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
@@ -1054,9 +1054,9 @@ async fn three_task_plan_drops_plan_outcomes_on_epic_close_but_retains_global_ri
     }
 
     for request in requests {
-        request
-            .respond_to
-            .send(spur_acp::DelegationResult {
+        spur_mcp::plan::test_util::mock_worker_completion(
+            request,
+            spur_acp::DelegationResult {
                 status: spur_acp::DelegationStatus::Success,
                 diff: None,
                 diff_summary: None,
@@ -1064,8 +1064,10 @@ async fn three_task_plan_drops_plan_outcomes_on_epic_close_but_retains_global_ri
                 estimated_cost_usd: 0.0,
                 worker_branch: Some("spur/worker-prune-test".into()),
                 artifact: None,
-            })
-            .expect("send worker result");
+            },
+            "0000000000000000000000000000000000000001",
+        )
+        .expect("send worker result");
     }
     task_tracker.close();
     tokio::time::timeout(COMPLETION_TASK_TIMEOUT, task_tracker.wait())
