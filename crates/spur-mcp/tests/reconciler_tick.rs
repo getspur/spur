@@ -2214,6 +2214,159 @@ async fn tick_once_clears_dispatch_label_when_send_fails() {
         .labels
         .iter()
         .any(|label| label.starts_with("spur:delegation-id:")));
+    let sentinels = collect_sentinels(&run_br_json(dir.path(), &["comments", "list", &task_id]));
+    assert!(sentinels.iter().any(|audit| matches!(
+        audit,
+        AuditSentinelKind::DispatchOrphanCleared {
+            delegation_id,
+            reason,
+        } if reason.contains("dispatch send failed")
+            && !delegation_id.is_empty()
+    )));
+}
+
+#[tokio::test]
+async fn tick_once_index_hygiene_converges_completion_without_label_write() {
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected beads pm");
+    let pm = Arc::new(pm);
+    let adv = pm.advanced().expect("advanced beads");
+
+    let task_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Crash Between Completion And Label Write",
+            "--priority",
+            "2",
+        ],
+    ));
+    label_issue(dir.path(), &task_id, &labels::delegation_id("del-crash"));
+    adv.add_comment(
+        &task_id,
+        &audit_sentinel::encode_comment(&AuditSentinelKind::Dispatch {
+            delegation_id: "del-crash".to_string(),
+            worker: "codex".to_string(),
+            attempt: 1,
+        }),
+    )
+    .await
+    .expect("add dispatch audit");
+    adv.add_comment(
+        &task_id,
+        &audit_sentinel::encode_comment(&AuditSentinelKind::Completion {
+            delegation_id: "del-crash".to_string(),
+            completion_state: audit_sentinel::CompletionState::AwaitingReview,
+            superseded: false,
+            worker_branch: Some("spur/worker-del-crash".to_string()),
+            result_summary: Some("done".to_string()),
+            artifact_uri: None,
+            dispatched_base_oid: None,
+        }),
+    )
+    .await
+    .expect("add completion audit");
+
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        None,
+        None,
+        common::server_builder::pro_feature_gate(),
+    );
+    let did_work = reconciler.tick_once().await.expect("tick_once");
+    assert!(did_work);
+
+    let issue = pm.get_issue(&task_id).await.expect("get issue");
+    assert!(issue
+        .labels
+        .iter()
+        .any(|label| label == labels::READY_FOR_REVIEW));
+    assert!(!issue
+        .labels
+        .iter()
+        .any(|label| label.starts_with("spur:delegation-id:")));
+}
+
+#[tokio::test]
+async fn tick_once_index_hygiene_is_idempotent_and_preserves_type_b_labels() {
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+
+    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+        .await
+        .expect("PmService::try_new failed")
+        .expect("expected beads pm");
+    let pm = Arc::new(pm);
+    let adv = pm.advanced().expect("advanced beads");
+
+    let task_id = parse_id_from_create(&run_br_json(
+        dir.path(),
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Index Hygiene Idempotence",
+            "--priority",
+            "2",
+        ],
+    ));
+    label_issue(dir.path(), &task_id, "signal:scope-drift");
+    label_issue(
+        dir.path(),
+        &task_id,
+        &labels::lease_expires_at(4_102_444_800),
+    );
+    label_issue(dir.path(), &task_id, &labels::delegation_id("del-stale"));
+    adv.add_comment(
+        &task_id,
+        &audit_sentinel::encode_comment(&AuditSentinelKind::Dispatch {
+            delegation_id: "del-current".to_string(),
+            worker: "codex".to_string(),
+            attempt: 1,
+        }),
+    )
+    .await
+    .expect("add dispatch audit");
+
+    let reconciler = Reconciler::new(
+        ReconcilerConfig::default(),
+        Arc::clone(&pm),
+        Arc::new(Notify::new()),
+        None,
+        None,
+        common::server_builder::pro_feature_gate(),
+    );
+    assert!(reconciler.tick_once().await.expect("tick_once first"));
+    assert!(!reconciler.tick_once().await.expect("tick_once second"));
+
+    let issue = pm.get_issue(&task_id).await.expect("get issue");
+    assert!(issue
+        .labels
+        .iter()
+        .any(|label| label == "signal:scope-drift"));
+    assert!(issue
+        .labels
+        .iter()
+        .any(|label| label == &labels::lease_expires_at(4_102_444_800)));
+    assert!(!issue
+        .labels
+        .iter()
+        .any(|label| label == &labels::delegation_id("del-stale")));
+    assert!(issue
+        .labels
+        .iter()
+        .any(|label| label == &labels::delegation_id("del-current")));
 }
 
 #[tokio::test]
