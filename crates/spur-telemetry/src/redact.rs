@@ -180,6 +180,52 @@ pub fn payload_hash(msg: &str, anonymous_id: &str) -> String {
         .collect::<String>()
 }
 
+pub fn sha256_prefix(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    let digest = hasher.finalize();
+    digest[..4]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()
+}
+
+pub fn classify_server(server_name: &str) -> crate::tier2_events::McpServerName {
+    match server_name.trim().to_ascii_lowercase().as_str() {
+        "github" => crate::tier2_events::McpServerName::Github,
+        "posthog" => crate::tier2_events::McpServerName::Posthog,
+        "spur-mcp" => crate::tier2_events::McpServerName::SpurMcp,
+        "stitch" => crate::tier2_events::McpServerName::Stitch,
+        "playwright" => crate::tier2_events::McpServerName::Playwright,
+        "context7" => crate::tier2_events::McpServerName::Context7,
+        "firebase" => crate::tier2_events::McpServerName::Firebase,
+        "sequential-thinking" => crate::tier2_events::McpServerName::SequentialThinking,
+        _ => crate::tier2_events::McpServerName::Custom(
+            crate::tier2_events::HashedShort::from_sha256_prefix(server_name),
+        ),
+    }
+}
+
+pub fn classify_tool(server_name: &str, tool_name: &str) -> crate::tier2_events::McpToolName {
+    let server = classify_server(server_name);
+    if matches!(server, crate::tier2_events::McpServerName::Custom(_)) {
+        return crate::tier2_events::McpToolName::Custom(
+            crate::tier2_events::HashedShort::from_sha256_prefix(tool_name),
+        );
+    }
+
+    match tool_name.trim() {
+        "submit_plan" => crate::tier2_events::McpToolName::SubmitPlan,
+        "dispatch_task" => crate::tier2_events::McpToolName::DispatchTask,
+        "review_task" => crate::tier2_events::McpToolName::ReviewTask,
+        "get_task_diff" => crate::tier2_events::McpToolName::GetTaskDiff,
+        "list_tools" => crate::tier2_events::McpToolName::ListTools,
+        _ => crate::tier2_events::McpToolName::Custom(
+            crate::tier2_events::HashedShort::from_sha256_prefix(tool_name),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,5 +296,42 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(a.len(), 8);
+    }
+
+    #[test]
+    fn sha256_prefix_is_deterministic() {
+        let a = sha256_prefix("sample");
+        let b = sha256_prefix("sample");
+        let c = sha256_prefix("different");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(a.len(), 8);
+    }
+
+    #[test]
+    fn classify_server_uses_allowlist_or_hash() {
+        let known = classify_server("github");
+        let unknown = classify_server("internal-private-server");
+
+        assert!(matches!(known, crate::tier2_events::McpServerName::Github));
+        assert!(matches!(
+            unknown,
+            crate::tier2_events::McpServerName::Custom(_)
+        ));
+    }
+
+    #[test]
+    fn classify_tool_is_symmetric_with_server_policy() {
+        let hashed_on_unknown_server = classify_tool("private-mcp", "submit_plan");
+        let allowlisted_on_known_server = classify_tool("github", "submit_plan");
+
+        assert!(matches!(
+            hashed_on_unknown_server,
+            crate::tier2_events::McpToolName::Custom(_)
+        ));
+        assert!(matches!(
+            allowlisted_on_known_server,
+            crate::tier2_events::McpToolName::SubmitPlan
+        ));
     }
 }
