@@ -1,2 +1,21 @@
 # cargo-audit configuration stub.
 # Add `ignore = ["RUSTSEC-YYYY-NNNN"]` entries only after triage and approval.
+[advisories]
+ignore = [
+  # RUSTSEC-2023-0071: no patched release exists in rsa 0.9.x; we are blocked by jsonwebtoken/octocrab and will move when upstream supports a fixed line.
+  "RUSTSEC-2023-0071",
+  # RUSTSEC-2025-0056: transitive via compression stack; replacing adler with adler2 requires upstream crate migrations and lockstep workspace updates.
+  "RUSTSEC-2025-0056",
+  # RUSTSEC-2025-0141: bincode v1 is declared complete/unmaintained and replacing it requires protocol/storage format migration across SPUR components.
+  "RUSTSEC-2025-0141",
+  # RUSTSEC-2024-0436: paste is proc-macro build-time only in our dependency graph and migration requires upstream crates to adopt maintained alternatives.
+  "RUSTSEC-2024-0436",
+  # RUSTSEC-2024-0320: yaml-rust is transitive and switching to yaml-rust2 depends on upstream parser crates we do not control in this change scope.
+  "RUSTSEC-2024-0320",
+  # RUSTSEC-2025-0067: libyml unsoundness is inherited through serde_yml and is blocked on replacing that stack with a maintained YAML implementation.
+  "RUSTSEC-2025-0067",
+  # RUSTSEC-2026-0002: fixing lru requires a major bump to >=0.16.3 with API compatibility risk, deferred to a dedicated upgrade task.
+  "RUSTSEC-2026-0002",
+  # RUSTSEC-2025-0068: serde_yml is transitive and archived; replacement requires coordinated migration to maintained serde YAML forks.
+  "RUSTSEC-2025-0068",
+]
