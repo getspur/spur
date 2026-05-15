@@ -32,6 +32,7 @@ spur-tui = { workspace = true }
 spur-interactive = { workspace = true }
 spur-bot = { workspace = true }
 spur-worktree = { workspace = true }
+spur-telemetry = { path = "../spur-telemetry" }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
@@ -56,3 +57,4 @@ tokio = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 assert_cmd = "2"
+uuid = { workspace = true }
