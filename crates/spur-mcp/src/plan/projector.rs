@@ -886,16 +886,27 @@ pub fn project_status_for_issue(
     // Reconciler retry-dispatch can then produce transient dual-label overlap.
     // Enforce single-label invariants only when the other label is absent.
     assert!(
-        !(has_delegation && !has_ready) || matches!(status, PlanTaskStatus::Dispatched { .. }),
-        "invariant:project_status_for_issue delegation label/status mismatch violated (issue_id={}, status={:?}) expected Dispatched when delegation-id label present without ready-for-review overlap, labels={:?}",
+        !(has_delegation && !has_ready)
+            || matches!(
+                status,
+                PlanTaskStatus::Dispatched { .. }
+                    | PlanTaskStatus::BlockedOnSetupConflict { .. }
+                    | PlanTaskStatus::EscalatedToBrain { .. }
+            ),
+        "invariant:project_status_for_issue delegation label/status mismatch violated (issue_id={}, status={:?}) expected Dispatched/BlockedOnSetupConflict/EscalatedToBrain when delegation-id label present without ready-for-review overlap, labels={:?}",
         issue.id,
         status,
         issue.labels,
     );
     assert!(
         !(has_ready && !has_delegation)
-            || matches!(status, PlanTaskStatus::AwaitingReview { .. } | PlanTaskStatus::Approved { .. }),
-        "invariant:project_status_for_issue ready-for-review label/status mismatch violated (issue_id={}, status={:?}) expected AwaitingReview/Approved when ready-for-review label present without delegation-id overlap, labels={:?}",
+            || matches!(
+                status,
+                PlanTaskStatus::AwaitingReview { .. }
+                    | PlanTaskStatus::Approved { .. }
+                    | PlanTaskStatus::BlockedOnSetupConflict { .. }
+            ),
+        "invariant:project_status_for_issue ready-for-review label/status mismatch violated (issue_id={}, status={:?}) expected AwaitingReview/Approved/BlockedOnSetupConflict when ready-for-review label present without delegation-id overlap, labels={:?}",
         issue.id,
         status,
         issue.labels,
@@ -2468,6 +2479,50 @@ mod tests {
                     .get("direction")
                     .is_some_and(|direction| direction.contains("label_only"))
         }));
+    }
+
+    #[test]
+    fn open_task_stale_delegation_label_with_escalation_label_projects_escalated_without_panic() {
+        let issue = issue(
+            "bd-2",
+            "open",
+            vec![
+                crate::plan::labels::delegation_id("del-stale"),
+                crate::plan::mutation_executor::SIGNAL_ESCALATED_LABEL.to_string(),
+            ],
+            Vec::new(),
+        );
+        let (status, _) =
+            capture_warnings(|| super::project_status_for_issue(&issue, &[], true, "closed"));
+        assert!(matches!(status, PlanTaskStatus::EscalatedToBrain { .. }));
+    }
+
+    #[test]
+    fn open_task_awaiting_review_with_conflict_label_projects_blocked_without_panic() {
+        let issue = issue(
+            "bd-2",
+            "open",
+            vec![
+                crate::plan::labels::READY_FOR_REVIEW.to_string(),
+                crate::plan::labels::SIGNAL_LABEL_INTEGRATION_CONFLICT.to_string(),
+            ],
+            Vec::new(),
+        );
+        let audits = vec![AuditSentinelKind::Completion {
+            delegation_id: "del-legacy".into(),
+            completion_state: CompletionState::AwaitingReview,
+            superseded: false,
+            worker_branch: Some("spur/worker-legacy".into()),
+            result_summary: Some("waiting for review".into()),
+            artifact_uri: None,
+            dispatched_base_oid: None,
+        }];
+        let (status, _) =
+            capture_warnings(|| super::project_status_for_issue(&issue, &audits, true, "closed"));
+        assert!(matches!(
+            status,
+            PlanTaskStatus::BlockedOnSetupConflict { .. }
+        ));
     }
 
     #[test]
