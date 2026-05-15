@@ -2083,8 +2083,12 @@ pub fn dispatch_send_failure_update(
     current_labels: &[String],
 ) -> spur_pm::IssueUpdate {
     let mut update = clear_dispatch_intent_update(delegation_id, current_labels);
-    update.comment =
-        Some("Dispatch send failed before worker ownership was established.".to_string());
+    update.comment = Some(crate::plan::audit_sentinel::encode_comment(
+        &crate::plan::audit_sentinel::AuditSentinelKind::DispatchOrphanCleared {
+            delegation_id: delegation_id.to_string(),
+            reason: "dispatch send failed before worker ownership was established".to_string(),
+        },
+    ));
     update
 }
 
@@ -6281,10 +6285,22 @@ mod tests {
         assert!(update
             .remove_labels
             .contains(&crate::plan::labels::lease_expires_at(1_777_777_777)));
-        assert_eq!(
-            update.comment.as_deref(),
-            Some("Dispatch send failed before worker ownership was established.")
-        );
+        let parsed = crate::plan::audit_sentinel::parse_comment(
+            update
+                .comment
+                .as_deref()
+                .expect("dispatch failure audit comment"),
+        )
+        .expect("audit prefix")
+        .expect("valid audit comment");
+        assert!(matches!(
+            parsed,
+            crate::plan::audit_sentinel::AuditSentinelKind::DispatchOrphanCleared {
+                delegation_id,
+                reason,
+            } if delegation_id == "del-A"
+                && reason.contains("dispatch send failed")
+        ));
     }
 
     #[test]

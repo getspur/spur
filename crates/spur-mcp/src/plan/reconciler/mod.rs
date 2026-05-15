@@ -116,6 +116,18 @@ fn task_id_from_labels_or_issue(labels: &[String], issue_id: &str) -> String {
         .unwrap_or_else(|| issue_id.to_string())
 }
 
+fn delegation_label_value(label: &str) -> Option<&str> {
+    crate::plan::labels::parse_delegation_id(label).or_else(|| label.strip_prefix("delegation-id:"))
+}
+
+fn is_ready_for_review_label(label: &str) -> bool {
+    label == crate::plan::labels::READY_FOR_REVIEW || label == "ready-for-review"
+}
+
+fn is_review_rejected_label(label: &str) -> bool {
+    label == crate::plan::labels::REVIEW_REJECTED || label == "review-rejected"
+}
+
 fn unresolved_blocker_issue_ids(
     projected: &crate::plan::PlanState,
     task: &crate::plan::PlanTaskEntry,
@@ -662,6 +674,7 @@ impl Reconciler {
             if !ready_ids.is_empty() {
                 self.record_no_dispatch_context(ready_ids.len()).await;
             }
+            did_work |= self.run_index_hygiene_sweep().await?;
             return Ok(did_work || !ready_ids.is_empty());
         };
 
@@ -1143,7 +1156,175 @@ impl Reconciler {
             did_work = true;
         }
 
+        did_work |= self.run_index_hygiene_sweep().await?;
+
         Ok(did_work)
+    }
+
+    async fn run_index_hygiene_sweep(&self) -> anyhow::Result<bool> {
+        crate::server::require_feature(
+            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+            self.feature_gate.as_ref(),
+        )
+        .map_err(|error| anyhow::anyhow!(crate::server::feature_error_message(error)))?;
+        let Some(adv) = self.pm.advanced() else {
+            return Ok(false);
+        };
+        let open_issues = self
+            .pm
+            .list_issues(spur_pm::IssueFilter {
+                status: Some("open".to_string()),
+                ..Default::default()
+            })
+            .await?;
+        let mut did_work = false;
+        for issue in open_issues {
+            let comments = adv.list_comments(&issue.id).await?;
+            let audits =
+                crate::plan::projector::collect_sorted_audits_for_issue(&issue.id, comments)?;
+            did_work |= self.index_hygiene_sweep(&issue, &audits).await?;
+        }
+        Ok(did_work)
+    }
+
+    async fn index_hygiene_sweep(
+        &self,
+        issue: &spur_pm::IssueSummary,
+        audits: &[crate::plan::audit_sentinel::AuditSentinelKind],
+    ) -> anyhow::Result<bool> {
+        if audits.is_empty() {
+            return Ok(false);
+        }
+        let terminal = crate::plan::projector::terminal_status_from_audits(audits);
+        let expected_delegation = if terminal.is_some() {
+            None
+        } else {
+            crate::plan::projector::current_delegation_from_audits(audits)
+        };
+        let expected_ready_for_review =
+            terminal.is_none() && crate::plan::projector::awaiting_review_from_audits(audits);
+        let expected_review_rejected = matches!(
+            terminal,
+            Some(crate::plan::projector::TerminalAuditKind::Rejection)
+        );
+
+        let mut add_labels = Vec::new();
+        let mut remove_labels = Vec::new();
+
+        let existing_delegations = issue
+            .labels
+            .iter()
+            .filter_map(|label| delegation_label_value(label))
+            .collect::<Vec<_>>();
+        match expected_delegation.as_deref() {
+            Some(expected) => {
+                let has_expected = existing_delegations.contains(&expected);
+                if !has_expected {
+                    let direction = if existing_delegations.is_empty() {
+                        "missing"
+                    } else {
+                        "mismatched"
+                    };
+                    tracing::info!(label_kind = "delegation_id", direction, "label_index_drift");
+                    add_labels.push(crate::plan::labels::delegation_id(expected));
+                }
+                for label in &issue.labels {
+                    if let Some(existing) = delegation_label_value(label) {
+                        if existing != expected {
+                            tracing::info!(
+                                label_kind = "delegation_id",
+                                direction = "mismatched",
+                                "label_index_drift"
+                            );
+                            remove_labels.push(label.clone());
+                        }
+                    }
+                }
+            }
+            None => {
+                for label in &issue.labels {
+                    if delegation_label_value(label).is_some() {
+                        tracing::info!(
+                            label_kind = "delegation_id",
+                            direction = "stale",
+                            "label_index_drift"
+                        );
+                        remove_labels.push(label.clone());
+                    }
+                }
+            }
+        }
+
+        let has_ready_for_review = issue
+            .labels
+            .iter()
+            .any(|label| is_ready_for_review_label(label));
+        if expected_ready_for_review && !has_ready_for_review {
+            tracing::info!(
+                label_kind = "ready_for_review",
+                direction = "missing",
+                "label_index_drift"
+            );
+            add_labels.push(crate::plan::labels::READY_FOR_REVIEW.to_string());
+        }
+        if !expected_ready_for_review {
+            for label in &issue.labels {
+                if is_ready_for_review_label(label) {
+                    tracing::info!(
+                        label_kind = "ready_for_review",
+                        direction = "stale",
+                        "label_index_drift"
+                    );
+                    remove_labels.push(label.clone());
+                }
+            }
+        }
+
+        let has_review_rejected = issue
+            .labels
+            .iter()
+            .any(|label| is_review_rejected_label(label));
+        if expected_review_rejected && !has_review_rejected {
+            tracing::info!(
+                label_kind = "review_rejected",
+                direction = "missing",
+                "label_index_drift"
+            );
+            add_labels.push(crate::plan::labels::REVIEW_REJECTED.to_string());
+        }
+        if !expected_review_rejected {
+            for label in &issue.labels {
+                if is_review_rejected_label(label) {
+                    tracing::info!(
+                        label_kind = "review_rejected",
+                        direction = "stale",
+                        "label_index_drift"
+                    );
+                    remove_labels.push(label.clone());
+                }
+            }
+        }
+
+        add_labels.sort();
+        add_labels.dedup();
+        remove_labels.sort();
+        remove_labels.dedup();
+
+        if add_labels.is_empty() && remove_labels.is_empty() {
+            return Ok(false);
+        }
+
+        self.pm
+            .update_issue(
+                &issue.id,
+                spur_pm::IssueUpdate {
+                    add_labels,
+                    remove_labels,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        Ok(true)
     }
 }
 
