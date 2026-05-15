@@ -311,7 +311,7 @@ async fn mutation_op_modify_task_spec_emits_extended_taskspec_audit() {
         .expect("extended TaskSpec audit must be emitted");
     assert_eq!(extended.0.as_deref(), Some("rewritten task"));
     assert_eq!(extended.1.as_deref(), Some("claude-code-acp"));
-    assert_eq!(extended.2.as_ref().map(Vec::as_slice), Some(&[][..]));
+    assert_eq!(extended.2.as_deref(), Some(&[][..]));
     assert_eq!(extended.3, vec!["docs/spec.md".to_string()]);
 }
 

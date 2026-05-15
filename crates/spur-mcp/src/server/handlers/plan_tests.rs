@@ -450,7 +450,7 @@ mod plan_truncate_and_restart_tests {
             .filter(|issue| {
                 issue.issue_type.as_deref() == Some("task")
                     && issue.labels.iter().any(|label| {
-                        crate::plan::labels::parse_plan_id(label).as_deref() == Some(new_plan_id)
+                        crate::plan::labels::parse_plan_id(label) == Some(new_plan_id)
                     })
             })
             .collect::<Vec<_>>();
