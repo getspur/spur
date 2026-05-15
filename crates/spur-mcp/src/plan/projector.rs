@@ -294,6 +294,11 @@ pub fn terminal_status_from_audits(audits: &[AuditSentinelKind]) -> Option<Termi
             | AuditSentinelKind::RetryRequested { .. }
             | AuditSentinelKind::ReviewFeedback { .. }
             | AuditSentinelKind::DispatchOrphanCleared { .. } => return None,
+            AuditSentinelKind::Signal { kind, .. }
+                if kind == "integration-conflict" || kind == "integration_conflict" =>
+            {
+                return None;
+            }
             _ => {}
         }
     }
@@ -629,31 +634,184 @@ fn superseded_status(issue: &spur_pm::Issue) -> Option<PlanTaskStatus> {
     }
 }
 
+fn emit_label_audit_drift(label_kind: &'static str, direction: &'static str, issue_id: &str) {
+    tracing::warn!(
+        target: "spur.plan.projector",
+        metric = "label_audit_drift",
+        label_kind,
+        direction,
+        issue_id = %issue_id,
+        "label_audit_drift",
+    );
+}
+
 pub fn project_status_for_issue(
     issue: &spur_pm::Issue,
     audits: &[AuditSentinelKind],
     ready_now: bool,
     closed_status: &str,
 ) -> PlanTaskStatus {
-    let status = if issue.status == closed_status {
-        project_closed_status(issue, audits)
-    } else if has_integration_conflict_label(&issue.labels) {
-        let (dep_task_id, files) =
-            latest_integration_conflict(audits).unwrap_or_else(|| ("unknown".to_string(), vec![]));
-        PlanTaskStatus::BlockedOnSetupConflict { dep_task_id, files }
-    } else if let Some(delegation_id) = issue
+    let delegation_label = issue
         .labels
         .iter()
-        .find_map(|label| parse_delegation_id_compat(label))
-    {
-        PlanTaskStatus::Dispatched {
-            delegation_id: delegation_id.to_string(),
+        .find_map(|label| parse_delegation_id_compat(label));
+    let has_ready_label = has_ready_for_review_label_compat(&issue.labels);
+    let has_delegation_label = delegation_label.is_some();
+    let integration_conflict_labeled = has_integration_conflict_label(&issue.labels);
+    let status = if issue.status == closed_status {
+        project_closed_status(issue, audits)
+    } else if let Some(kind) = terminal_status_from_audits(audits).filter(|kind| {
+        !(integration_conflict_labeled
+            && matches!(
+                kind,
+                TerminalAuditKind::CompletionFailed | TerminalAuditKind::CompletionCancelled
+            ))
+    }) {
+        match kind {
+            TerminalAuditKind::Approval => {
+                if let Some(label_id) = delegation_label.filter(|_| !has_ready_label) {
+                    emit_label_audit_drift(
+                        "delegation-id",
+                        "terminal_audit_suppressed_by_label",
+                        &issue.id,
+                    );
+                    PlanTaskStatus::Dispatched {
+                        delegation_id: label_id.to_string(),
+                    }
+                } else {
+                    let summary = latest_completion_facts(audits)
+                        .and_then(|(_, _, result_summary, _, _)| result_summary);
+                    PlanTaskStatus::Approved { summary }
+                }
+            }
+            TerminalAuditKind::Rejection => {
+                if has_ready_label && !has_delegation_label {
+                    emit_label_audit_drift(
+                        "ready-for-review",
+                        "terminal_audit_suppressed_by_label",
+                        &issue.id,
+                    );
+                    let summary = latest_completion_facts(audits)
+                        .and_then(|(_, _, result_summary, _, _)| result_summary);
+                    PlanTaskStatus::AwaitingReview { summary }
+                } else if let Some(label_id) = delegation_label.filter(|_| !has_ready_label) {
+                    emit_label_audit_drift(
+                        "delegation-id",
+                        "terminal_audit_suppressed_by_label",
+                        &issue.id,
+                    );
+                    PlanTaskStatus::Dispatched {
+                        delegation_id: label_id.to_string(),
+                    }
+                } else {
+                    let feedback = audits.iter().rev().find_map(|audit| match audit {
+                        AuditSentinelKind::Rejection { feedback, .. } => Some(feedback.clone()),
+                        _ => None,
+                    });
+                    PlanTaskStatus::Rejected { feedback }
+                }
+            }
+            TerminalAuditKind::CompletionFailed => {
+                if has_ready_label && !has_delegation_label {
+                    emit_label_audit_drift(
+                        "ready-for-review",
+                        "terminal_audit_suppressed_by_label",
+                        &issue.id,
+                    );
+                    let summary = latest_completion_facts(audits)
+                        .and_then(|(_, _, result_summary, _, _)| result_summary);
+                    PlanTaskStatus::AwaitingReview { summary }
+                } else if let Some(label_id) = delegation_label.filter(|_| !has_ready_label) {
+                    emit_label_audit_drift(
+                        "delegation-id",
+                        "terminal_audit_suppressed_by_label",
+                        &issue.id,
+                    );
+                    PlanTaskStatus::Dispatched {
+                        delegation_id: label_id.to_string(),
+                    }
+                } else {
+                    let error = latest_completion_facts(audits)
+                        .and_then(|(state, _, result_summary, _, _)| {
+                            (state == CompletionState::Failed).then_some(result_summary)
+                        })
+                        .flatten()
+                        .unwrap_or_else(|| "worker failed".to_string());
+                    PlanTaskStatus::Failed { error }
+                }
+            }
+            TerminalAuditKind::CompletionCancelled => {
+                if has_ready_label && !has_delegation_label {
+                    emit_label_audit_drift(
+                        "ready-for-review",
+                        "terminal_audit_suppressed_by_label",
+                        &issue.id,
+                    );
+                    let summary = latest_completion_facts(audits)
+                        .and_then(|(_, _, result_summary, _, _)| result_summary);
+                    PlanTaskStatus::AwaitingReview { summary }
+                } else if let Some(label_id) = delegation_label.filter(|_| !has_ready_label) {
+                    emit_label_audit_drift(
+                        "delegation-id",
+                        "terminal_audit_suppressed_by_label",
+                        &issue.id,
+                    );
+                    PlanTaskStatus::Dispatched {
+                        delegation_id: label_id.to_string(),
+                    }
+                } else {
+                    let reason = latest_completion_facts(audits)
+                        .and_then(|(state, _, result_summary, _, _)| {
+                            (state == CompletionState::Cancelled).then_some(result_summary)
+                        })
+                        .flatten()
+                        .unwrap_or_else(|| "worker cancelled".to_string());
+                    PlanTaskStatus::Cancelled { reason }
+                }
+            }
+        }
+    } else if let Some(delegation_id) = current_delegation_from_audits(audits) {
+        if integration_conflict_labeled {
+            let (dep_task_id, files) = latest_integration_conflict(audits)
+                .unwrap_or_else(|| ("unknown".to_string(), vec![]));
+            PlanTaskStatus::BlockedOnSetupConflict { dep_task_id, files }
+        } else {
+            match delegation_label {
+                Some(label_id) if label_id == delegation_id => {}
+                Some(_) => emit_label_audit_drift("delegation-id", "mismatch", &issue.id),
+                None => emit_label_audit_drift("delegation-id", "audit_only", &issue.id),
+            }
+            PlanTaskStatus::Dispatched { delegation_id }
+        }
+    } else if awaiting_review_from_audits(audits) {
+        if has_integration_conflict_label(&issue.labels) {
+            let (dep_task_id, files) = latest_integration_conflict(audits)
+                .unwrap_or_else(|| ("unknown".to_string(), vec![]));
+            PlanTaskStatus::BlockedOnSetupConflict { dep_task_id, files }
+        } else {
+            if !has_ready_label {
+                emit_label_audit_drift("ready-for-review", "audit_only", &issue.id);
+            }
+            // Transitional workaround until t1-cleanup tightens invariants and
+            // removes this branch.
+            // if delegation label is still present but ready label has not landed yet,
+            // keep status Dispatched for this poll.
+            if let Some(delegation_id) = delegation_label.filter(|_| !has_ready_label) {
+                PlanTaskStatus::Dispatched {
+                    delegation_id: delegation_id.to_string(),
+                }
+            } else {
+                let summary = latest_completion_facts(audits)
+                    .and_then(|(_, _, result_summary, _, _)| result_summary);
+                PlanTaskStatus::AwaitingReview { summary }
+            }
         }
     } else if issue
         .labels
         .iter()
         .any(|label| label.as_str() == crate::plan::mutation_executor::SIGNAL_ESCALATED_LABEL)
     {
+        emit_label_audit_drift("signal:escalated", "label_only", &issue.id);
         let last_error = audits
             .iter()
             .rev()
@@ -665,7 +823,18 @@ pub fn project_status_for_issue(
             })
             .unwrap_or_else(|| "escalated to brain".to_string());
         PlanTaskStatus::EscalatedToBrain { last_error }
-    } else if has_ready_for_review_label_compat(&issue.labels) {
+    } else if integration_conflict_labeled {
+        emit_label_audit_drift("signal:integration-conflict", "label_only", &issue.id);
+        let (dep_task_id, files) =
+            latest_integration_conflict(audits).unwrap_or_else(|| ("unknown".to_string(), vec![]));
+        PlanTaskStatus::BlockedOnSetupConflict { dep_task_id, files }
+    } else if let Some(delegation_id) = delegation_label {
+        emit_label_audit_drift("delegation-id", "label_only", &issue.id);
+        PlanTaskStatus::Dispatched {
+            delegation_id: delegation_id.to_string(),
+        }
+    } else if has_ready_label {
+        emit_label_audit_drift("ready-for-review", "label_only", &issue.id);
         let summary =
             latest_completion_facts(audits).and_then(|(_, _, result_summary, _, _)| result_summary);
         PlanTaskStatus::AwaitingReview { summary }
@@ -710,11 +879,8 @@ pub fn project_status_for_issue(
             status,
         );
     }
-    let has_delegation = issue
-        .labels
-        .iter()
-        .any(|label| parse_delegation_id_compat(label).is_some());
-    let has_ready = has_ready_for_review_label_compat(&issue.labels);
+    let has_delegation = has_delegation_label;
+    let has_ready = has_ready_label;
     // Completion audit can land before the atomic label update.
     // A polling client may race request_changes in that gap.
     // Reconciler retry-dispatch can then produce transient dual-label overlap.
@@ -1852,6 +2018,483 @@ mod tests {
         assert!(
             matches!(status, PlanTaskStatus::AwaitingReview { summary } if summary.as_deref() == Some("looks good"))
         );
+    }
+
+    #[test]
+    fn open_task_with_terminal_audit_projects_terminal_status() {
+        let issue = issue("bd-2", "open", Vec::new(), Vec::new());
+        let audits = vec![AuditSentinelKind::Approval {
+            delegation_id: "del-A".into(),
+        }];
+
+        let status = super::project_status_for_issue(&issue, &audits, true, "closed");
+        assert!(matches!(status, PlanTaskStatus::Approved { .. }));
+    }
+
+    #[test]
+    fn open_task_audit_dispatched_with_delegation_label_drift_projects_dispatched_and_emits_counter(
+    ) {
+        let issue = issue(
+            "bd-2",
+            "open",
+            vec![crate::plan::labels::delegation_id("del-B")],
+            Vec::new(),
+        );
+        let audits = vec![AuditSentinelKind::Dispatch {
+            delegation_id: "del-A".into(),
+            worker: "codex".into(),
+            attempt: 1,
+        }];
+
+        let (status, warnings) =
+            capture_warnings(|| super::project_status_for_issue(&issue, &audits, true, "closed"));
+        assert!(
+            matches!(status, PlanTaskStatus::Dispatched { delegation_id } if delegation_id == "del-A")
+        );
+        assert!(warnings.iter().any(|warning| {
+            warning.target == "spur.plan.projector"
+                && warning
+                    .fields
+                    .get("metric")
+                    .is_some_and(|metric| metric.contains("label_audit_drift"))
+                && warning
+                    .fields
+                    .get("label_kind")
+                    .is_some_and(|label_kind| label_kind.contains("delegation-id"))
+                && warning
+                    .fields
+                    .get("direction")
+                    .is_some_and(|direction| direction.contains("mismatch"))
+        }));
+    }
+
+    #[test]
+    fn open_task_awaiting_review_without_ready_label_projects_awaiting_review_and_emits_counter() {
+        let issue = issue("bd-2", "open", Vec::new(), Vec::new());
+        let audits = vec![
+            AuditSentinelKind::Dispatch {
+                delegation_id: "del-A".into(),
+                worker: "codex".into(),
+                attempt: 1,
+            },
+            AuditSentinelKind::Completion {
+                delegation_id: "del-A".into(),
+                completion_state: CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some("feat/task".into()),
+                result_summary: Some("looks good".into()),
+                artifact_uri: None,
+                dispatched_base_oid: None,
+            },
+        ];
+
+        let (status, warnings) =
+            capture_warnings(|| super::project_status_for_issue(&issue, &audits, true, "closed"));
+        assert!(
+            matches!(status, PlanTaskStatus::AwaitingReview { summary } if summary.as_deref() == Some("looks good"))
+        );
+        assert!(warnings.iter().any(|warning| {
+            warning.target == "spur.plan.projector"
+                && warning
+                    .fields
+                    .get("metric")
+                    .is_some_and(|metric| metric.contains("label_audit_drift"))
+                && warning
+                    .fields
+                    .get("label_kind")
+                    .is_some_and(|label_kind| label_kind.contains("ready-for-review"))
+                && warning
+                    .fields
+                    .get("direction")
+                    .is_some_and(|direction| direction.contains("audit_only"))
+        }));
+    }
+
+    #[test]
+    fn open_task_awaiting_review_with_ready_label_does_not_emit_drift_counter() {
+        let issue = issue(
+            "bd-2",
+            "open",
+            vec![crate::plan::labels::READY_FOR_REVIEW.to_string()],
+            Vec::new(),
+        );
+        let audits = vec![
+            AuditSentinelKind::Dispatch {
+                delegation_id: "del-A".into(),
+                worker: "codex".into(),
+                attempt: 1,
+            },
+            AuditSentinelKind::Completion {
+                delegation_id: "del-A".into(),
+                completion_state: CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some("feat/task".into()),
+                result_summary: Some("looks good".into()),
+                artifact_uri: None,
+                dispatched_base_oid: None,
+            },
+        ];
+
+        let (status, warnings) =
+            capture_warnings(|| super::project_status_for_issue(&issue, &audits, true, "closed"));
+        assert!(matches!(status, PlanTaskStatus::AwaitingReview { .. }));
+        assert!(!warnings.iter().any(|warning| {
+            warning.target == "spur.plan.projector"
+                && warning
+                    .fields
+                    .get("metric")
+                    .is_some_and(|metric| metric.contains("label_audit_drift"))
+        }));
+    }
+
+    #[test]
+    fn open_task_terminal_failed_with_delegation_label_projects_dispatched_for_assert_safety() {
+        let issue = issue(
+            "bd-2",
+            "open",
+            vec![crate::plan::labels::delegation_id("del-A")],
+            Vec::new(),
+        );
+        let audits = vec![AuditSentinelKind::Completion {
+            delegation_id: "del-A".into(),
+            completion_state: CompletionState::Failed,
+            superseded: false,
+            worker_branch: None,
+            result_summary: Some("worker failed".into()),
+            artifact_uri: None,
+            dispatched_base_oid: None,
+        }];
+
+        let status = super::project_status_for_issue(&issue, &audits, true, "closed");
+        assert!(
+            matches!(status, PlanTaskStatus::Dispatched { delegation_id } if delegation_id == "del-A")
+        );
+    }
+
+    #[test]
+    fn open_task_terminal_approval_with_delegation_label_projects_dispatched_for_assert_safety() {
+        let issue = issue(
+            "bd-2",
+            "open",
+            vec![crate::plan::labels::delegation_id("del-A")],
+            Vec::new(),
+        );
+        let audits = vec![AuditSentinelKind::Approval {
+            delegation_id: "del-A".into(),
+        }];
+
+        let status = super::project_status_for_issue(&issue, &audits, true, "closed");
+        assert!(
+            matches!(status, PlanTaskStatus::Dispatched { delegation_id } if delegation_id == "del-A")
+        );
+    }
+
+    #[test]
+    fn open_task_terminal_failed_with_ready_label_projects_awaiting_review_for_assert_safety() {
+        let issue = issue(
+            "bd-2",
+            "open",
+            vec![crate::plan::labels::READY_FOR_REVIEW.to_string()],
+            Vec::new(),
+        );
+        let audits = vec![AuditSentinelKind::Completion {
+            delegation_id: "del-A".into(),
+            completion_state: CompletionState::Failed,
+            superseded: false,
+            worker_branch: Some("feat/task".into()),
+            result_summary: Some("worker failed".into()),
+            artifact_uri: None,
+            dispatched_base_oid: None,
+        }];
+
+        let status = super::project_status_for_issue(&issue, &audits, true, "closed");
+        assert!(
+            matches!(status, PlanTaskStatus::AwaitingReview { summary } if summary.as_deref() == Some("worker failed"))
+        );
+    }
+
+    #[test]
+    fn open_task_terminal_cancelled_with_ready_label_projects_awaiting_review_for_assert_safety() {
+        let issue = issue(
+            "bd-2",
+            "open",
+            vec![crate::plan::labels::READY_FOR_REVIEW.to_string()],
+            Vec::new(),
+        );
+        let audits = vec![AuditSentinelKind::Completion {
+            delegation_id: "del-A".into(),
+            completion_state: CompletionState::Cancelled,
+            superseded: false,
+            worker_branch: Some("feat/task".into()),
+            result_summary: Some("worker cancelled".into()),
+            artifact_uri: None,
+            dispatched_base_oid: None,
+        }];
+
+        let status = super::project_status_for_issue(&issue, &audits, true, "closed");
+        assert!(
+            matches!(status, PlanTaskStatus::AwaitingReview { summary } if summary.as_deref() == Some("worker cancelled"))
+        );
+    }
+
+    #[test]
+    fn open_task_terminal_rejection_with_ready_label_projects_awaiting_review_for_assert_safety() {
+        let issue = issue(
+            "bd-2",
+            "open",
+            vec![crate::plan::labels::READY_FOR_REVIEW.to_string()],
+            Vec::new(),
+        );
+        let audits = vec![
+            AuditSentinelKind::Completion {
+                delegation_id: "del-A".into(),
+                completion_state: CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some("feat/task".into()),
+                result_summary: Some("looks good".into()),
+                artifact_uri: None,
+                dispatched_base_oid: None,
+            },
+            AuditSentinelKind::Rejection {
+                delegation_id: "del-A".into(),
+                feedback: "needs retry".into(),
+            },
+        ];
+
+        let status = super::project_status_for_issue(&issue, &audits, true, "closed");
+        assert!(
+            matches!(status, PlanTaskStatus::AwaitingReview { summary } if summary.as_deref() == Some("looks good"))
+        );
+    }
+
+    #[test]
+    fn open_task_terminal_approval_with_delegation_label_emits_suppressed_drift_counter() {
+        let issue = issue(
+            "bd-2",
+            "open",
+            vec![crate::plan::labels::delegation_id("del-A")],
+            Vec::new(),
+        );
+        let audits = vec![AuditSentinelKind::Approval {
+            delegation_id: "del-A".into(),
+        }];
+
+        let (_, warnings) =
+            capture_warnings(|| super::project_status_for_issue(&issue, &audits, true, "closed"));
+        assert!(warnings.iter().any(|warning| {
+            warning.target == "spur.plan.projector"
+                && warning
+                    .fields
+                    .get("metric")
+                    .is_some_and(|metric| metric.contains("label_audit_drift"))
+                && warning
+                    .fields
+                    .get("label_kind")
+                    .is_some_and(|label_kind| label_kind.contains("delegation-id"))
+                && warning.fields.get("direction").is_some_and(|direction| {
+                    direction.contains("terminal_audit_suppressed_by_label")
+                })
+        }));
+    }
+
+    #[test]
+    fn open_task_terminal_failed_with_ready_label_emits_suppressed_drift_counter() {
+        let issue = issue(
+            "bd-2",
+            "open",
+            vec![crate::plan::labels::READY_FOR_REVIEW.to_string()],
+            Vec::new(),
+        );
+        let audits = vec![AuditSentinelKind::Completion {
+            delegation_id: "del-A".into(),
+            completion_state: CompletionState::Failed,
+            superseded: false,
+            worker_branch: Some("feat/task".into()),
+            result_summary: Some("worker failed".into()),
+            artifact_uri: None,
+            dispatched_base_oid: None,
+        }];
+
+        let (_, warnings) =
+            capture_warnings(|| super::project_status_for_issue(&issue, &audits, true, "closed"));
+        assert!(warnings.iter().any(|warning| {
+            warning.target == "spur.plan.projector"
+                && warning
+                    .fields
+                    .get("metric")
+                    .is_some_and(|metric| metric.contains("label_audit_drift"))
+                && warning
+                    .fields
+                    .get("label_kind")
+                    .is_some_and(|label_kind| label_kind.contains("ready-for-review"))
+                && warning.fields.get("direction").is_some_and(|direction| {
+                    direction.contains("terminal_audit_suppressed_by_label")
+                })
+        }));
+    }
+
+    #[test]
+    fn open_task_terminal_cancelled_with_ready_label_emits_suppressed_drift_counter() {
+        let issue = issue(
+            "bd-2",
+            "open",
+            vec![crate::plan::labels::READY_FOR_REVIEW.to_string()],
+            Vec::new(),
+        );
+        let audits = vec![AuditSentinelKind::Completion {
+            delegation_id: "del-A".into(),
+            completion_state: CompletionState::Cancelled,
+            superseded: false,
+            worker_branch: Some("feat/task".into()),
+            result_summary: Some("worker cancelled".into()),
+            artifact_uri: None,
+            dispatched_base_oid: None,
+        }];
+
+        let (_, warnings) =
+            capture_warnings(|| super::project_status_for_issue(&issue, &audits, true, "closed"));
+        assert!(warnings.iter().any(|warning| {
+            warning.target == "spur.plan.projector"
+                && warning
+                    .fields
+                    .get("metric")
+                    .is_some_and(|metric| metric.contains("label_audit_drift"))
+                && warning
+                    .fields
+                    .get("label_kind")
+                    .is_some_and(|label_kind| label_kind.contains("ready-for-review"))
+                && warning.fields.get("direction").is_some_and(|direction| {
+                    direction.contains("terminal_audit_suppressed_by_label")
+                })
+        }));
+    }
+
+    #[test]
+    fn open_task_label_only_delegation_emits_drift_counter() {
+        let issue = issue(
+            "bd-2",
+            "open",
+            vec![crate::plan::labels::delegation_id("del-A")],
+            Vec::new(),
+        );
+        let (status, warnings) =
+            capture_warnings(|| super::project_status_for_issue(&issue, &[], true, "closed"));
+        assert!(
+            matches!(status, PlanTaskStatus::Dispatched { delegation_id } if delegation_id == "del-A")
+        );
+        assert!(warnings.iter().any(|warning| {
+            warning.target == "spur.plan.projector"
+                && warning
+                    .fields
+                    .get("label_kind")
+                    .is_some_and(|label_kind| label_kind.contains("delegation-id"))
+                && warning
+                    .fields
+                    .get("direction")
+                    .is_some_and(|direction| direction.contains("label_only"))
+        }));
+    }
+
+    #[test]
+    fn open_task_label_only_ready_for_review_emits_drift_counter() {
+        let issue = issue(
+            "bd-2",
+            "open",
+            vec![crate::plan::labels::READY_FOR_REVIEW.to_string()],
+            Vec::new(),
+        );
+        let (status, warnings) =
+            capture_warnings(|| super::project_status_for_issue(&issue, &[], true, "closed"));
+        assert!(matches!(status, PlanTaskStatus::AwaitingReview { .. }));
+        assert!(warnings.iter().any(|warning| {
+            warning.target == "spur.plan.projector"
+                && warning
+                    .fields
+                    .get("label_kind")
+                    .is_some_and(|label_kind| label_kind.contains("ready-for-review"))
+                && warning
+                    .fields
+                    .get("direction")
+                    .is_some_and(|direction| direction.contains("label_only"))
+        }));
+    }
+
+    #[test]
+    fn open_task_label_only_escalated_emits_drift_counter() {
+        let issue = issue(
+            "bd-2",
+            "open",
+            vec![crate::plan::mutation_executor::SIGNAL_ESCALATED_LABEL.to_string()],
+            Vec::new(),
+        );
+        let (status, warnings) =
+            capture_warnings(|| super::project_status_for_issue(&issue, &[], true, "closed"));
+        assert!(matches!(status, PlanTaskStatus::EscalatedToBrain { .. }));
+        assert!(warnings.iter().any(|warning| {
+            warning.target == "spur.plan.projector"
+                && warning
+                    .fields
+                    .get("label_kind")
+                    .is_some_and(|label_kind| label_kind.contains("signal:escalated"))
+                && warning
+                    .fields
+                    .get("direction")
+                    .is_some_and(|direction| direction.contains("label_only"))
+        }));
+    }
+
+    #[test]
+    fn open_task_label_only_integration_conflict_emits_drift_counter() {
+        let issue = issue(
+            "bd-2",
+            "open",
+            vec![crate::plan::labels::SIGNAL_LABEL_INTEGRATION_CONFLICT.to_string()],
+            Vec::new(),
+        );
+        let (status, warnings) =
+            capture_warnings(|| super::project_status_for_issue(&issue, &[], true, "closed"));
+        assert!(matches!(
+            status,
+            PlanTaskStatus::BlockedOnSetupConflict { .. }
+        ));
+        assert!(warnings.iter().any(|warning| {
+            warning.target == "spur.plan.projector"
+                && warning
+                    .fields
+                    .get("label_kind")
+                    .is_some_and(|label_kind| label_kind.contains("signal:integration-conflict"))
+                && warning
+                    .fields
+                    .get("direction")
+                    .is_some_and(|direction| direction.contains("label_only"))
+        }));
+    }
+
+    #[test]
+    fn open_task_audit_dispatched_with_matching_delegation_label_does_not_emit_drift_counter() {
+        let issue = issue(
+            "bd-2",
+            "open",
+            vec![crate::plan::labels::delegation_id("del-A")],
+            Vec::new(),
+        );
+        let audits = vec![AuditSentinelKind::Dispatch {
+            delegation_id: "del-A".into(),
+            worker: "codex".into(),
+            attempt: 1,
+        }];
+        let (status, warnings) =
+            capture_warnings(|| super::project_status_for_issue(&issue, &audits, true, "closed"));
+        assert!(
+            matches!(status, PlanTaskStatus::Dispatched { delegation_id } if delegation_id == "del-A")
+        );
+        assert!(!warnings.iter().any(|warning| {
+            warning.target == "spur.plan.projector"
+                && warning
+                    .fields
+                    .get("metric")
+                    .is_some_and(|metric| metric.contains("label_audit_drift"))
+        }));
     }
 
     #[test]
