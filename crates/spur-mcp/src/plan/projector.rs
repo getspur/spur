@@ -156,6 +156,14 @@ pub type CompletionFacts = (
     Option<String>,
 );
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalAuditKind {
+    Approval,
+    Rejection,
+    CompletionFailed,
+    CompletionCancelled,
+}
+
 pub fn latest_completion_facts(audits: &[AuditSentinelKind]) -> Option<CompletionFacts> {
     let mut latest = None;
 
@@ -192,6 +200,107 @@ pub fn latest_completion_facts(audits: &[AuditSentinelKind]) -> Option<Completio
         latest,
     );
     latest
+}
+
+/// Tier-1 projector inversion consumer: derive the currently active delegation
+/// from durable audit comments only.
+pub fn current_delegation_from_audits(audits: &[AuditSentinelKind]) -> Option<String> {
+    let mut pending: Vec<String> = Vec::new();
+    for audit in audits {
+        match audit {
+            AuditSentinelKind::Dispatch { delegation_id, .. } => {
+                pending.push(delegation_id.clone());
+            }
+            AuditSentinelKind::Completion { delegation_id, .. } => {
+                if let Some(index) = pending.iter().position(|id| id == delegation_id) {
+                    pending.remove(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    pending.last().cloned()
+}
+
+/// Tier-1 index-maintenance reconciler consumer: derive whether the current
+/// attempt is awaiting review from durable audit comments only.
+pub fn awaiting_review_from_audits(audits: &[AuditSentinelKind]) -> bool {
+    let Some(current_delegation_id) = audits.iter().rev().find_map(|audit| match audit {
+        AuditSentinelKind::Dispatch { delegation_id, .. } => Some(delegation_id.as_str()),
+        _ => None,
+    }) else {
+        return false;
+    };
+
+    for audit in audits.iter().rev() {
+        match audit {
+            AuditSentinelKind::Approval { delegation_id }
+            | AuditSentinelKind::Rejection { delegation_id, .. }
+            | AuditSentinelKind::ReviewFeedback { delegation_id, .. }
+                if delegation_id == current_delegation_id =>
+            {
+                return false;
+            }
+            AuditSentinelKind::Completion {
+                delegation_id,
+                completion_state: CompletionState::AwaitingReview,
+                ..
+            } if delegation_id == current_delegation_id => return true,
+            AuditSentinelKind::Completion { delegation_id, .. }
+                if delegation_id == current_delegation_id =>
+            {
+                return false;
+            }
+            AuditSentinelKind::Dispatch { delegation_id, .. }
+                if delegation_id == current_delegation_id =>
+            {
+                return false;
+            }
+            _ => {}
+        }
+    }
+
+    false
+}
+
+/// Tier-1 shadow comparator consumer: derive the latest terminal audit kind
+/// from durable audit comments only.
+pub fn terminal_status_from_audits(audits: &[AuditSentinelKind]) -> Option<TerminalAuditKind> {
+    audits.iter().rev().find_map(|audit| match audit {
+        AuditSentinelKind::Approval { .. } => Some(TerminalAuditKind::Approval),
+        AuditSentinelKind::Rejection { .. } => Some(TerminalAuditKind::Rejection),
+        AuditSentinelKind::Completion {
+            completion_state: CompletionState::Failed,
+            ..
+        } => Some(TerminalAuditKind::CompletionFailed),
+        AuditSentinelKind::Completion {
+            completion_state: CompletionState::Cancelled,
+            ..
+        } => Some(TerminalAuditKind::CompletionCancelled),
+        _ => None,
+    })
+}
+
+/// Tier-1 projector inversion consumer: derive supersession fact from durable
+/// audit comments only (`mutation_id` and `by` remain label-only metadata).
+pub fn superseded_from_audits(audits: &[AuditSentinelKind]) -> bool {
+    audits.iter().any(|audit| {
+        matches!(
+            audit,
+            AuditSentinelKind::Completion {
+                completion_state: CompletionState::Superseded,
+                ..
+            }
+        )
+    })
+}
+
+/// Tier-1 index-maintenance reconciler consumer: derive escalation fact from
+/// durable audit comments only.
+pub fn escalated_from_audits(audits: &[AuditSentinelKind]) -> bool {
+    audits
+        .iter()
+        .any(|audit| matches!(audit, AuditSentinelKind::EscalationRequested { .. }))
 }
 
 pub fn latest_task_spec(audits: &[AuditSentinelKind]) -> Option<(String, Vec<String>)> {
@@ -529,22 +638,12 @@ pub fn project_closed_status(
 }
 
 fn latest_terminal_audit_kind(audits: &[AuditSentinelKind]) -> Option<&'static str> {
-    for audit in audits.iter().rev() {
-        match audit {
-            AuditSentinelKind::Approval { .. } => return Some("approval"),
-            AuditSentinelKind::Rejection { .. } => return Some("rejection"),
-            AuditSentinelKind::Completion {
-                completion_state: CompletionState::Failed,
-                ..
-            } => return Some("completion_failed"),
-            AuditSentinelKind::Completion {
-                completion_state: CompletionState::Cancelled,
-                ..
-            } => return Some("completion_cancelled"),
-            _ => {}
-        }
-    }
-    None
+    terminal_status_from_audits(audits).map(|kind| match kind {
+        TerminalAuditKind::Approval => "approval",
+        TerminalAuditKind::Rejection => "rejection",
+        TerminalAuditKind::CompletionFailed => "completion_failed",
+        TerminalAuditKind::CompletionCancelled => "completion_cancelled",
+    })
 }
 
 pub fn recompute_open_statuses(tasks: &mut [PlanTaskEntry]) {
@@ -970,6 +1069,7 @@ pub async fn project_plan_from_beads(
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
+    use proptest::prelude::*;
     use spur_pm::Comment;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -977,7 +1077,7 @@ mod tests {
 
     use super::{
         AuditSentinelKind, BrainSessionId, CompletionState, PlanState, PlanTask, PlanTaskEntry,
-        PlanTaskStatus, SessionId,
+        PlanTaskStatus, SessionId, TerminalAuditKind,
     };
     use crate::plan::audit_sentinel::EpicCompletionOutcome;
     use crate::plan::PlanMergeState;
@@ -1949,5 +2049,204 @@ mod tests {
             super::epic_completion_outcome_summary(&audits, "P1", "bd-epic-1"),
             Some("Terminal with failures")
         );
+    }
+
+    fn arb_delegation_id() -> impl Strategy<Value = String> {
+        proptest::string::string_regex("del-[a-z0-9]{1,8}").expect("valid regex")
+    }
+
+    fn arb_worker_branch() -> impl Strategy<Value = String> {
+        proptest::string::string_regex("spur/worker-[a-z0-9]{1,8}").expect("valid regex")
+    }
+
+    fn arb_audit_kind() -> impl Strategy<Value = AuditSentinelKind> {
+        let dispatch = (arb_delegation_id(), 1u32..=5u32).prop_map(|(delegation_id, attempt)| {
+            AuditSentinelKind::Dispatch {
+                delegation_id,
+                worker: "codex".to_string(),
+                attempt,
+            }
+        });
+        let completion = (
+            arb_delegation_id(),
+            prop_oneof![
+                Just(CompletionState::AwaitingReview),
+                Just(CompletionState::Failed),
+                Just(CompletionState::Cancelled),
+                Just(CompletionState::Superseded),
+            ],
+            proptest::option::of(arb_worker_branch()),
+        )
+            .prop_map(|(delegation_id, completion_state, worker_branch)| {
+                AuditSentinelKind::Completion {
+                    delegation_id,
+                    completion_state,
+                    superseded: matches!(completion_state, CompletionState::Superseded),
+                    worker_branch,
+                    result_summary: None,
+                    artifact_uri: None,
+                    dispatched_base_oid: None,
+                }
+            });
+        let approval = arb_delegation_id()
+            .prop_map(|delegation_id| AuditSentinelKind::Approval { delegation_id });
+        let rejection =
+            arb_delegation_id().prop_map(|delegation_id| AuditSentinelKind::Rejection {
+                delegation_id,
+                feedback: "needs changes".to_string(),
+            });
+        let review_feedback =
+            (arb_delegation_id(), 1u32..=5u32).prop_map(|(delegation_id, attempt)| {
+                AuditSentinelKind::ReviewFeedback {
+                    delegation_id,
+                    attempt,
+                    feedback: "feedback".to_string(),
+                    worker_branch: None,
+                    summary: None,
+                    reuse_prior_worktree: None,
+                }
+            });
+        let escalation =
+            arb_delegation_id().prop_map(|delegation_id| AuditSentinelKind::EscalationRequested {
+                plan_id: "P1".to_string(),
+                task_id: "T1".to_string(),
+                attempt: 1,
+                last_error: "err".to_string(),
+                worker_branch: None,
+                delegation_id: Some(delegation_id),
+            });
+        let noise = Just(AuditSentinelKind::TaskTransition {
+            plan_id: "P1".to_string(),
+            task_id: "T1".to_string(),
+            from_status: "pending".to_string(),
+            to_status: "ready".to_string(),
+        });
+
+        prop_oneof![
+            dispatch,
+            completion,
+            approval,
+            rejection,
+            review_feedback,
+            escalation,
+            noise
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn current_delegation_from_audits_monotonicity_prefix_consistent(
+            audits in proptest::collection::vec(arb_audit_kind(), 0..64)
+        ) {
+            for i in 0..=audits.len() {
+                let prefix = &audits[..i];
+                let replayed = prefix.to_vec();
+                prop_assert_eq!(
+                    super::current_delegation_from_audits(prefix),
+                    super::current_delegation_from_audits(&replayed)
+                );
+            }
+        }
+
+        #[test]
+        fn current_delegation_from_audits_idempotent(
+            audits in proptest::collection::vec(arb_audit_kind(), 0..64)
+        ) {
+            let one = super::current_delegation_from_audits(&audits);
+            let two = super::current_delegation_from_audits(&audits);
+            prop_assert_eq!(one, two);
+        }
+
+        #[test]
+        fn awaiting_review_from_audits_monotonicity_prefix_consistent(
+            audits in proptest::collection::vec(arb_audit_kind(), 0..64)
+        ) {
+            for i in 0..=audits.len() {
+                let prefix = &audits[..i];
+                let replayed = prefix.to_vec();
+                prop_assert_eq!(
+                    super::awaiting_review_from_audits(prefix),
+                    super::awaiting_review_from_audits(&replayed)
+                );
+            }
+        }
+
+        #[test]
+        fn awaiting_review_from_audits_idempotent(
+            audits in proptest::collection::vec(arb_audit_kind(), 0..64)
+        ) {
+            let one = super::awaiting_review_from_audits(&audits);
+            let two = super::awaiting_review_from_audits(&audits);
+            prop_assert_eq!(one, two);
+        }
+
+        #[test]
+        fn terminal_status_from_audits_monotonicity_prefix_consistent(
+            audits in proptest::collection::vec(arb_audit_kind(), 0..64)
+        ) {
+            for i in 0..=audits.len() {
+                let prefix = &audits[..i];
+                let replayed = prefix.to_vec();
+                prop_assert_eq!(
+                    super::terminal_status_from_audits(prefix),
+                    super::terminal_status_from_audits(&replayed)
+                );
+            }
+        }
+
+        #[test]
+        fn terminal_status_from_audits_idempotent(
+            audits in proptest::collection::vec(arb_audit_kind(), 0..64)
+        ) {
+            let one: Option<TerminalAuditKind> = super::terminal_status_from_audits(&audits);
+            let two: Option<TerminalAuditKind> = super::terminal_status_from_audits(&audits);
+            prop_assert_eq!(one, two);
+        }
+
+        #[test]
+        fn superseded_from_audits_monotonicity_prefix_consistent(
+            audits in proptest::collection::vec(arb_audit_kind(), 0..64)
+        ) {
+            for i in 0..=audits.len() {
+                let prefix = &audits[..i];
+                let replayed = prefix.to_vec();
+                prop_assert_eq!(
+                    super::superseded_from_audits(prefix),
+                    super::superseded_from_audits(&replayed)
+                );
+            }
+        }
+
+        #[test]
+        fn superseded_from_audits_idempotent(
+            audits in proptest::collection::vec(arb_audit_kind(), 0..64)
+        ) {
+            let one = super::superseded_from_audits(&audits);
+            let two = super::superseded_from_audits(&audits);
+            prop_assert_eq!(one, two);
+        }
+
+        #[test]
+        fn escalated_from_audits_monotonicity_prefix_consistent(
+            audits in proptest::collection::vec(arb_audit_kind(), 0..64)
+        ) {
+            for i in 0..=audits.len() {
+                let prefix = &audits[..i];
+                let replayed = prefix.to_vec();
+                prop_assert_eq!(
+                    super::escalated_from_audits(prefix),
+                    super::escalated_from_audits(&replayed)
+                );
+            }
+        }
+
+        #[test]
+        fn escalated_from_audits_idempotent(
+            audits in proptest::collection::vec(arb_audit_kind(), 0..64)
+        ) {
+            let one = super::escalated_from_audits(&audits);
+            let two = super::escalated_from_audits(&audits);
+            prop_assert_eq!(one, two);
+        }
     }
 }
