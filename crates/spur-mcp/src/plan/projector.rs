@@ -649,6 +649,15 @@ fn emit_shadow_projector_mismatch_warnings(
         ];
 
         for (field, legacy_value, shadow_value) in checks {
+            // Shadow projector cannot reconstruct `Superseded { mutation_id, by }` from
+            // audits alone (mutation_id and by live only on labels). Skip the status
+            // field comparison for legacy-Superseded tasks; preserve all other field
+            // comparisons so audit-fold integrity proof for worker_branch / attempt /
+            // dispatched_base_oid / last_delegation_id remains.
+            if field == "status" && matches!(legacy_entry.status, PlanTaskStatus::Superseded { .. })
+            {
+                continue;
+            }
             if legacy_value != shadow_value {
                 differing_task_ids.push(task_id.to_string());
                 differing_fields.push(field.to_string());
@@ -966,8 +975,12 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tracing::field::{Field, Visit};
 
-    use super::{AuditSentinelKind, CompletionState, PlanTask, PlanTaskEntry, PlanTaskStatus};
+    use super::{
+        AuditSentinelKind, BrainSessionId, CompletionState, PlanState, PlanTask, PlanTaskEntry,
+        PlanTaskStatus, SessionId,
+    };
     use crate::plan::audit_sentinel::EpicCompletionOutcome;
+    use crate::plan::PlanMergeState;
 
     #[derive(Debug, Clone)]
     struct CapturedWarning {
@@ -1758,6 +1771,88 @@ mod tests {
 
         super::recompute_open_statuses(&mut tasks);
         assert!(matches!(tasks[1].status, PlanTaskStatus::Ready));
+    }
+
+    #[test]
+    fn shadow_projector_suppresses_superseded_status_mismatch_only() {
+        let legacy = PlanState {
+            plan_id: "plan-1".into(),
+            tasks: vec![PlanTaskEntry {
+                spec: PlanTask {
+                    task_id: "t1".into(),
+                    agent: "codex".into(),
+                    task: "task".into(),
+                    depends_on: Vec::new(),
+                    issue_id: Some("bd-1".into()),
+                    issue_title: Some("Task".into()),
+                    context_files: Vec::new(),
+                },
+                status: PlanTaskStatus::Superseded {
+                    mutation_id: "m-1".into(),
+                    by: vec!["t1a".into()],
+                },
+                result: None,
+                worker_branch: Some("spur/worker-a".into()),
+                attempt: 2,
+                history: Vec::new(),
+                last_delegation_id: Some("del-1".into()),
+                dispatched_base_oid: Some("base-1".into()),
+            }],
+            brain_session_id: BrainSessionId::new(SessionId("brain-1".into())),
+            base_snapshot_branch: None,
+            base_snapshot_oid: None,
+            merge_state: PlanMergeState::NotStarted,
+            epic_id: Some("bd-epic".into()),
+        };
+
+        let shadow = PlanState {
+            plan_id: legacy.plan_id.clone(),
+            tasks: vec![PlanTaskEntry {
+                spec: legacy.tasks[0].spec.clone(),
+                status: PlanTaskStatus::Pending,
+                result: None,
+                worker_branch: Some("spur/worker-b".into()),
+                attempt: legacy.tasks[0].attempt,
+                history: legacy.tasks[0].history.clone(),
+                last_delegation_id: legacy.tasks[0].last_delegation_id.clone(),
+                dispatched_base_oid: legacy.tasks[0].dispatched_base_oid.clone(),
+            }],
+            brain_session_id: legacy.brain_session_id.clone(),
+            base_snapshot_branch: legacy.base_snapshot_branch.clone(),
+            base_snapshot_oid: legacy.base_snapshot_oid.clone(),
+            merge_state: PlanMergeState::NotStarted,
+            epic_id: legacy.epic_id.clone(),
+        };
+
+        let (_, warnings) = capture_warnings(|| {
+            super::emit_shadow_projector_mismatch_warnings("plan-1", &legacy, &shadow, 1)
+        });
+
+        assert_eq!(
+            warnings.len(),
+            1,
+            "worker_branch mismatch should still warn"
+        );
+        let warning = &warnings[0];
+        assert_eq!(warning.target, "spur.plan.shadow_projector");
+        assert_eq!(
+            warning.fields.get("fields").map(String::as_str),
+            Some("worker_branch")
+        );
+        assert!(
+            warning
+                .fields
+                .get("mismatches")
+                .is_some_and(|mismatches| mismatches.contains("t1.worker_branch")),
+            "expected worker_branch mismatch detail, got {warning:?}"
+        );
+        assert!(
+            warning
+                .fields
+                .get("mismatches")
+                .is_some_and(|mismatches| !mismatches.contains("t1.status")),
+            "status mismatch should be suppressed for legacy Superseded tasks, got {warning:?}"
+        );
     }
 
     #[test]
