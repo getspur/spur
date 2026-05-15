@@ -8287,4 +8287,5 @@ mod tests {
         );
     }
 }
+#[cfg(test)]
 mod projector_conflict_test;

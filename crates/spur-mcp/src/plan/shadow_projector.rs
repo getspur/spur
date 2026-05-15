@@ -9,7 +9,7 @@ use spur_acp::{BrainSessionId, SessionId};
 
 use super::{
     audit_sentinel::AuditSentinelKind, projector, PlanMergeState, PlanState, PlanTask,
-    PlanTaskEntry, PlanTaskStatus,
+    PlanTaskEntry,
 };
 
 #[derive(Debug, Clone)]
@@ -40,98 +40,30 @@ fn project_shadow_entry(spec: &PlanTask, audits: &[AuditSentinelKind]) -> PlanTa
     let (attempt_count, mut last_delegation_id) = projector::project_attempt_facts(audits);
     let history = projector::project_attempt_history(audits);
 
-    let mut status = PlanTaskStatus::Pending;
     let mut worker_branch = None;
-    let mut summary = None;
     let mut dispatched_base_oid = None;
 
     for audit in audits {
         match audit {
             AuditSentinelKind::Dispatch { delegation_id, .. } => {
-                status = PlanTaskStatus::Dispatched {
-                    delegation_id: delegation_id.clone(),
-                };
                 last_delegation_id = Some(delegation_id.clone());
             }
             AuditSentinelKind::Completion {
-                completion_state,
                 worker_branch: wb,
-                result_summary,
                 dispatched_base_oid: dbo,
                 ..
             } => {
                 if let Some(branch) = wb.clone() {
                     worker_branch = Some(branch);
                 }
-                if let Some(s) = result_summary.clone() {
-                    summary = Some(s);
-                }
                 if let Some(base_oid) = dbo.clone() {
                     dispatched_base_oid = Some(base_oid);
                 }
-
-                status = match completion_state {
-                    super::audit_sentinel::CompletionState::AwaitingReview => {
-                        PlanTaskStatus::AwaitingReview {
-                            summary: summary.clone(),
-                        }
-                    }
-                    super::audit_sentinel::CompletionState::Failed => PlanTaskStatus::Failed {
-                        error: summary
-                            .clone()
-                            .unwrap_or_else(|| "worker failed".to_string()),
-                    },
-                    super::audit_sentinel::CompletionState::Cancelled => {
-                        PlanTaskStatus::Cancelled {
-                            reason: summary
-                                .clone()
-                                .unwrap_or_else(|| "worker cancelled".to_string()),
-                        }
-                    }
-                    super::audit_sentinel::CompletionState::Superseded => {
-                        PlanTaskStatus::Superseded {
-                            mutation_id: "unknown".to_string(),
-                            by: Vec::new(),
-                        }
-                    }
-                };
-            }
-            AuditSentinelKind::Approval { .. } => {
-                status = PlanTaskStatus::Approved {
-                    summary: summary.clone(),
-                };
-            }
-            AuditSentinelKind::Rejection { feedback, .. } => {
-                status = PlanTaskStatus::Rejected {
-                    feedback: Some(feedback.clone()),
-                };
-            }
-            AuditSentinelKind::ReviewFeedback { .. } | AuditSentinelKind::RetryRequested { .. } => {
-                status = PlanTaskStatus::Pending;
-            }
-            AuditSentinelKind::EscalationRequested { last_error, .. } => {
-                status = PlanTaskStatus::EscalatedToBrain {
-                    last_error: last_error.clone(),
-                };
-            }
-            AuditSentinelKind::Signal { kind, reason, .. }
-                if kind == "integration-conflict" || kind == "integration_conflict" =>
-            {
-                #[derive(serde::Deserialize)]
-                struct IntegrationConflictReason {
-                    dep_task_id: String,
-                    #[serde(default)]
-                    files: Vec<String>,
-                }
-                let (dep_task_id, files) =
-                    serde_json::from_str::<IntegrationConflictReason>(reason)
-                        .map(|parsed| (parsed.dep_task_id, parsed.files))
-                        .unwrap_or_else(|_| ("unknown".to_string(), Vec::new()));
-                status = PlanTaskStatus::BlockedOnSetupConflict { dep_task_id, files };
             }
             _ => {}
         }
     }
+    let status = projector::project_status_from_audits(audits);
 
     let attempt = projector::project_entry_attempt(audits, &status).max(attempt_count);
 
@@ -151,6 +83,7 @@ fn project_shadow_entry(spec: &PlanTask, audits: &[AuditSentinelKind]) -> PlanTa
 mod tests {
     use super::*;
     use crate::plan::audit_sentinel::{AuditSentinelKind, CompletionState};
+    use crate::plan::PlanTaskStatus;
 
     fn sample_spec(task_id: &str) -> PlanTask {
         PlanTask {
