@@ -323,6 +323,7 @@ fn sample_issue_detail_event(id: &str, title: &str, status: &str, body: &str) ->
         priority: Some(1),
         issue_type: Some("bug".into()),
         blocked_by: vec!["blocked-by-1".into()],
+        comments: Vec::new(),
         due_at: None,
         created_at: now,
         updated_at: now,
